@@ -5,15 +5,28 @@
 #import <objc/message.h>
 #import "ProjectXLogging.h"
 
-static NSString * const kPXConfigCacheValidityTimestampKey = @"PXConfigCacheValidityTimestamp";
-static const NSTimeInterval kPXConfigCacheDuration = 300.0; // 5 minutes cache
+// Immutable Snapshot Model
+@interface PXConfigSnapshot : NSObject
+@property (nonatomic, strong, readonly) NSDictionary *deviceIdsCache;
+@property (nonatomic, assign, readonly) BOOL isDeviceModelSpoofingEnabled;
+
+- (instancetype)initWithDeviceIds:(NSDictionary *)deviceIds
+                       appEnabled:(BOOL)appEnabled;
+@end
+
+@implementation PXConfigSnapshot
+- (instancetype)initWithDeviceIds:(NSDictionary *)deviceIds
+                       appEnabled:(BOOL)appEnabled {
+    if (self = [super init]) {
+        _deviceIdsCache = [deviceIds copy] ?: @{};
+        _isDeviceModelSpoofingEnabled = appEnabled;
+    }
+    return self;
+}
+@end
 
 @interface PXConfigProvider ()
-
-@property (nonatomic, strong) NSDictionary *deviceIdsCache;
-
-@property (nonatomic, strong) NSDate *lastCacheTime;
-@property (nonatomic, strong) NSLock *cacheLock;
+@property (atomic, strong) PXConfigSnapshot *currentSnapshot;
 @end
 
 @implementation PXConfigProvider
@@ -30,7 +43,7 @@ static const NSTimeInterval kPXConfigCacheDuration = 300.0; // 5 minutes cache
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _cacheLock = [[NSLock alloc] init];
+        // Initial load
         [self reloadConfig];
 
         // Listen to potential Darwin notifications to reload
@@ -50,126 +63,74 @@ static void reloadConfigCallback(CFNotificationCenterRef center, void *observer,
 }
 
 - (void)reloadConfig {
-    [self.cacheLock lock];
     @try {
         NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
         NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
         NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
         NSString *profileId = centralInfo[@"ProfileId"];
 
+        NSDictionary *deviceIds = @{};
         if (profileId.length > 0) {
             NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
             NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            self.deviceIdsCache = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: @{};
-        } else {
-            self.deviceIdsCache = @{};
+            deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: @{};
         }
 
+        // Calculate app enablement at reload time
+        BOOL shouldSpoof = NO;
+        NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (currentBundleID) {
+            if (NSClassFromString(@"IdentifierManager")) {
+                id manager = [NSClassFromString(@"IdentifierManager") performSelector:@selector(sharedManager)];
+                if (manager) {
+                    BOOL isAppEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isApplicationEnabled:), currentBundleID);
+                    BOOL isIdEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"DeviceModel");
+                    if (isAppEnabled && isIdEnabled) {
+                        shouldSpoof = YES;
+                    }
+                }
+            }
+        }
 
-
-        self.lastCacheTime = [NSDate date];
+        // Atomic swap
+        self.currentSnapshot = [[PXConfigSnapshot alloc] initWithDeviceIds:deviceIds appEnabled:shouldSpoof];
     } @catch (NSException *e) {
         PXLog(@"[PXConfigProvider] Error reloading config: %@", e);
-    } @finally {
-        [self.cacheLock unlock];
-    }
-}
-
-- (void)checkAndRefreshCacheIfNeeded {
-    [self.cacheLock lock];
-    NSDate *lastTime = self.lastCacheTime;
-    BOOL needsReload = (!lastTime || [[NSDate date] timeIntervalSinceDate:lastTime] > kPXConfigCacheDuration);
-    [self.cacheLock unlock];
-
-    if (needsReload) {
-        // Double-checked locking to prevent multiple threads from reloading concurrently
-        [self.cacheLock lock];
-        lastTime = self.lastCacheTime;
-        if (!lastTime || [[NSDate date] timeIntervalSinceDate:lastTime] > kPXConfigCacheDuration) {
-            [self.cacheLock unlock];
-            [self reloadConfig];
-        } else {
-            [self.cacheLock unlock];
-        }
     }
 }
 
 - (NSString *)spoofedDeviceModel {
-    [self checkAndRefreshCacheIfNeeded];
-    [self.cacheLock lock];
-    NSString *model = [self.deviceIdsCache[@"DeviceModel"] isKindOfClass:[NSString class]] ? self.deviceIdsCache[@"DeviceModel"] : nil;
-    [self.cacheLock unlock];
-    return model;
+    PXConfigSnapshot *snap = self.currentSnapshot;
+    NSString *model = snap.deviceIdsCache[@"DeviceModel"];
+    // Fail-Closed Fallback
+    return [model isKindOfClass:[NSString class]] && model.length > 0 ? model : @"iPhone14,5"; // Default safe fallback
 }
 
 - (NSString *)spoofedGPUFamily {
-    [self checkAndRefreshCacheIfNeeded];
-    [self.cacheLock lock];
-    NSString *gpu = [self.deviceIdsCache[@"GPUFamily"] isKindOfClass:[NSString class]] ? self.deviceIdsCache[@"GPUFamily"] : nil;
-    if (!gpu) {
-        gpu = [self.deviceIdsCache[@"WebGLRenderer"] isKindOfClass:[NSString class]] ? self.deviceIdsCache[@"WebGLRenderer"] : nil;
+    PXConfigSnapshot *snap = self.currentSnapshot;
+    NSString *gpu = snap.deviceIdsCache[@"GPUFamily"];
+    if (![gpu isKindOfClass:[NSString class]] || gpu.length == 0) {
+        gpu = snap.deviceIdsCache[@"WebGLRenderer"];
     }
-    [self.cacheLock unlock];
-    return gpu;
+    // Fail-Closed Fallback
+    return [gpu isKindOfClass:[NSString class]] && gpu.length > 0 ? gpu : @"Apple A15 GPU";
 }
 
 - (NSString *)spoofedIDFA {
-    // IDFA might be in a separate file depending on your app's architecture,
-    // but if it's centralized or easily read from the profile path, do it here.
-    return nil; // Implement if necessary based on your current setup.
+    // Implement fail-closed behavior when properly integrated
+    return @"00000000-0000-0000-0000-000000000000";
 }
 
 - (NSString *)spoofedIDFV {
-    return nil; // Implement if necessary based on your current setup.
+    return @"00000000-0000-0000-0000-000000000000";
 }
 
 - (NSString *)spoofedBootTime {
-    return nil; // Implement if necessary based on your current setup.
+    return nil;
 }
 
 - (BOOL)isDeviceModelSpoofingEnabledForCurrentProcess {
-    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!currentBundleID) return NO;
-
-    // Add cache to avoid perf regression on sysctl
-    static NSMutableDictionary *cachedBundleDecisions = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    });
-
-    [self.cacheLock lock];
-    NSNumber *cachedDecision = cachedBundleDecisions[currentBundleID];
-    NSDate *decisionTimestamp = cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]];
-    if (cachedDecision && decisionTimestamp &&
-        [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kPXConfigCacheDuration) {
-        [self.cacheLock unlock];
-        return [cachedDecision boolValue];
-    }
-    [self.cacheLock unlock];
-
-    BOOL shouldSpoof = NO;
-    @try {
-        if (NSClassFromString(@"IdentifierManager")) {
-            id manager = [NSClassFromString(@"IdentifierManager") performSelector:@selector(sharedManager)];
-            if (manager) {
-                BOOL isAppEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isApplicationEnabled:), currentBundleID);
-                BOOL isIdEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"DeviceModel");
-                if (isAppEnabled && isIdEnabled) {
-                    shouldSpoof = YES;
-                }
-            }
-        }
-    } @catch (__unused NSException *exception) {
-        shouldSpoof = NO;
-    }
-
-    [self.cacheLock lock];
-    cachedBundleDecisions[currentBundleID] = @(shouldSpoof);
-    cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    [self.cacheLock unlock];
-
-    return shouldSpoof;
+    return self.currentSnapshot.isDeviceModelSpoofingEnabled;
 }
 
 - (void)dealloc {

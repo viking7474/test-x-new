@@ -18,7 +18,7 @@ Kế thừa kiến trúc của `PXConfigProvider` đã được giới thiệu, 
   - `carrier_details.plist` / `network.plist` (Mạng viễn thông)
   - `settings.plist` (Các cờ bật/tắt tính năng theo profile)
   - `advertising_id.plist`, `vendor_id.plist`, v.v.
-- Thiết kế cơ chế khóa an toàn (`NSLock`) cho toàn bộ thuộc tính hoặc dùng cờ nguyên tử (Atomic).
+- Sử dụng cơ chế **Immutable Snapshot + Atomic Swap** thay vì dùng `NSLock` bao toàn bộ getter để tránh lock contention. Khi reload, đọc plist vào object tạm, copy thành immutable snapshot, rồi swap con trỏ để các hook đọc thẳng từ RAM không cần lock.
 - Xử lý đồng bộ (Sync) tức thời thông qua `Darwin Notification Center`: Khi ứng dụng WeaponX đổi profile hoặc save cấu hình, nó sẽ post notification để `PXConfigProvider` reload dữ liệu vào RAM, đảm bảo các hooks lập tức sử dụng data mới mà không cần khởi động lại.
 
 ### 2.2. Xây dựng Interface Truy cập Siêu nhẹ (C-API: `PXConfigProviderC.h`)
@@ -35,14 +35,38 @@ Kế thừa kiến trúc của `PXConfigProvider` đã được giới thiệu, 
 - Gọi hàm từ `PXConfigProvider` thay thế.
 - Tận dụng biến toàn cục cache ngắn hạn trong mỗi file `.x` nếu cần, nhưng phụ thuộc chính vào `PXConfigProvider`.
 
+
+### 2.4. Chính sách Fail-Closed (Bắt buộc)
+- Tuyệt đối không fallback về dữ liệu thật của máy nếu không đọc được config.
+- Cung cấp dữ liệu fallback an toàn (Safe Default Fake Value) tại PXConfigProvider:
+  - UUID thiếu → trả UUID fake ổn định.
+  - BSSID thiếu → trả BSSID fake mặc định.
+  - Model thiếu → trả model mặc định.
+
+### 2.5. Cập nhật phía ứng dụng (WeaponX App)
+- Đảm bảo cơ chế Atomic Write: Ghi cấu hình vào file tạm (temp file), sau đó rename đè lên file chính thức.
+- Chỉ gọi Post Darwin Notification khi toàn bộ các file (settings, device_ids, wifi_info...) đã ghi và đóng hoàn tất.
+
 ## 3. Lợi ích Đạt được
-1. **Zero I/O bottleneck:** Dữ liệu được đọc hoàn toàn từ RAM thay vì ổ cứng mỗi lần hệ thống bị hook.
-2. **Nhanh chóng & Đồng nhất:** Một thay đổi ở ứng dụng WeaponX sẽ phản ánh đồng thời lập tức trên toàn bộ các hooks thông qua cơ chế Cache Reloading.
+1. **Zero I/O trong hot path của hook:** Dữ liệu được đọc hoàn toàn từ RAM thay vì ổ cứng mỗi lần hệ thống bị hook.
+2. **Nhanh chóng & Đồng nhất:** Các process đang chạy sẽ reload gần như ngay khi nhận Darwin notification. Các process chưa chạy sẽ load config mới khi được inject.
 3. **Mã nguồn sạch (Clean Code):** Gỡ bỏ hàng trăm dòng code xử lý file/path bị lặp lại, tập trung vào `PXConfigProvider.m`.
 
-## 4. Các Bước Thực thi Kế tiếp (Roadmap)
-1. **Bước 1:** Định nghĩa và bổ sung đầy đủ thuộc tính vào `PXConfigProvider.h` và `PXConfigProviderC.h`.
-2. **Bước 2:** Cập nhật `PXConfigProvider.m` để load tất cả các `.plist` cần thiết.
-3. **Bước 3:** Refactor `UUIDHooks.x` và `WiFiHook.x` (đây là 2 file chịu tải I/O nặng nhất).
-4. **Bước 4:** Xử lý refactor hàng loạt cho các file hooks còn lại.
-5. **Bước 5:** Biên dịch (Build) qua theos và kiểm tra chức năng.
+## 4. Roadmap Thực thi Tái cấu trúc
+**Phase 0: Audit và đo lường**
+- Lập bảng liệt kê các file hook, file plist liên quan, tần suất gọi, và trạng thái fallback hiện tại (xem xét nguy cơ leak).
+
+**Phase 1: Xây dựng PXConfigProvider Snapshot**
+- Tạo nền tảng `PXConfigProvider.h/m/C.h` sử dụng Immutable Snapshot và Atomic Swap.
+
+**Phase 2: Hook Hot Path (Ưu tiên Cao)**
+- Refactor các file I/O nặng nhất trước: `UUIDHooks.x`, `WiFiHook.x`, `NetworkConnectionTypeHooks.x`, `IOSVersionHooks.x`, `UserDefaultsHooks.x`.
+
+**Phase 3: Refactor nhóm còn lại**
+- Cập nhật các hooks ít gọi hơn: `ThemeHooks.x`, `PasteboardHooks.x`, `StorageHooks.x`, `MissingSpoofHooks.x`, `DomainBlockingHooks.x`.
+
+**Phase 4: Sửa WeaponX write path (Ứng dụng chính)**
+- Áp dụng Atomic write cho quá trình ghi Profile Plist và gom nhóm Darwin notification.
+
+**Phase 5: Kiểm thử Toàn diện**
+- Test cold start, đổi profile in background, test độ trễ Facebook/TikTok, fail-closed khi thiếu file.
