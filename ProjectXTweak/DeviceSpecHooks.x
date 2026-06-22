@@ -68,7 +68,7 @@ static void logMemoryHook(NSString *apiName);
 static NSString *getCurrentBundleID(void);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
-static BOOL isSpoofingEnabled(void);
+
 static NSDictionary *getDeviceSpecs(void);
 static float getFreeMemoryPercentage(void);
 static void getConsistentMemoryStats(unsigned long long totalMemory, 
@@ -450,7 +450,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGRect)bounds {
     CGRect originalBounds = %orig;
     
-    if (!isSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    if (!PXIsDeviceModelSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalBounds;
     }
     
@@ -510,7 +510,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGRect)nativeBounds {
     CGRect originalNativeBounds = %orig;
     
-    if (!isSpoofingEnabled() || !PXDisplayPixelMetricsSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    if (!PXIsDeviceModelSpoofingEnabled() || !PXDisplayPixelMetricsSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalNativeBounds;
     }
     
@@ -551,7 +551,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGFloat)scale {
     CGFloat originalScale = %orig;
     
-    if (!isSpoofingEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    if (!PXIsDeviceModelSpoofingEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalScale;
     }
     
@@ -580,7 +580,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (UIScreenMode *)currentMode {
     UIScreenMode *originalMode = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalMode;
     }
     
@@ -600,7 +600,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (unsigned long long)physicalMemory {
     unsigned long long originalMemory = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalMemory;
     }
     
@@ -645,7 +645,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (unsigned long long)availableMemory {
     unsigned long long originalAvailableMemory = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalAvailableMemory;
     }
     
@@ -682,7 +682,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSUInteger)processorCount {
     NSUInteger originalCount = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalCount;
     }
     
@@ -712,7 +712,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSString *)machineHardwareName {
     NSString *originalName = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalName;
     }
     
@@ -757,7 +757,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
         return;
     }
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return;
     }
     
@@ -806,7 +806,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (id)getParameter:(unsigned)pname {
     id original = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return original;
     }
     
@@ -872,7 +872,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSString *)name {
     NSString *originalName = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalName;
     }
     
@@ -900,7 +900,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSString *)familyName {
     NSString *originalFamilyName = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return originalFamilyName;
     }
     
@@ -934,7 +934,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGFloat)nativeScale {
     CGFloat original = %orig;
 
-    if (!isSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    if (!PXIsDeviceModelSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return original;
     }
 
@@ -952,7 +952,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     CGFloat originalScale = %orig;
     
     // Avoid spoofing screen density in Safari/Auth stack; it can desync page layout/touch logic.
-    if (!isSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    if (!PXIsDeviceModelSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalScale;
     }
     
@@ -1017,7 +1017,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
         return;
     }
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return;
     }
     
@@ -1061,7 +1061,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
         return;
     }
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return;
     }
     
@@ -1095,7 +1095,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 - (unsigned int)max_cpus {
     unsigned int original = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return original;
     }
     
@@ -1240,7 +1240,7 @@ static float getFreeMemoryPercentage(void) {
     float defaultFreePercentage = 0.35; // 35% free
     
     // Check if spoofing is enabled
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return defaultFreePercentage;
     }
     
@@ -1315,7 +1315,7 @@ static NXArchInfo* hook_nx_get_local_arch_info() {
     
     NXArchInfo* original = orig_nx_get_local_arch_info();
     
-    if (!isSpoofingEnabled()) {
+    if (!PXIsDeviceModelSpoofingEnabled()) {
         return original;
     }
     
@@ -1393,7 +1393,7 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
     kern_return_t result = orig_host_statistics64(host, flavor, info, count);
     
     // Check if we should modify the result
-    if (result != KERN_SUCCESS || !info || !isSpoofingEnabled()) {
+    if (result != KERN_SUCCESS || !info || !PXIsDeviceModelSpoofingEnabled()) {
         return result;
     }
     
@@ -1554,7 +1554,7 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     }
 
     // Return original result if conditions not met for the remaining spec/memory spoofing
-    if (result != 0 || !name || !oldlenp || !isSpoofingEnabled() || !oldp || *oldlenp == 0) {
+    if (result != 0 || !name || !oldlenp || !PXIsDeviceModelSpoofingEnabled() || !oldp || *oldlenp == 0) {
         return result;
     }
     
@@ -1991,7 +1991,7 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     }
     
     // Log any unhandled successful sysctl queries for debugging
-    if (result == 0 && isSpoofingEnabled()) {
+    if (result == 0 && PXIsDeviceModelSpoofingEnabled()) {
         static NSMutableSet *loggedIgnoredKeys = nil;
         static dispatch_once_t onceToken;
         dispatch_once(&onceToken, ^{

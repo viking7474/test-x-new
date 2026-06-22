@@ -11,7 +11,7 @@ static const NSTimeInterval kPXConfigCacheDuration = 300.0; // 5 minutes cache
 @interface PXConfigProvider ()
 
 @property (nonatomic, strong) NSDictionary *deviceIdsCache;
-@property (nonatomic, strong) NSDictionary *globalScopeCache;
+
 @property (nonatomic, strong) NSDate *lastCacheTime;
 @property (nonatomic, strong) NSLock *cacheLock;
 @end
@@ -65,16 +65,7 @@ static void reloadConfigCallback(CFNotificationCenterRef center, void *observer,
             self.deviceIdsCache = @{};
         }
 
-        // Global scope
-        NSArray *paths = @[@"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"];
-        for (NSString *p in paths) {
-            NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:p];
-            if (plist) {
-                self.globalScopeCache = plist;
-                break;
-            }
-        }
+
 
         self.lastCacheTime = [NSDate date];
     } @catch (NSException *e) {
@@ -87,10 +78,19 @@ static void reloadConfigCallback(CFNotificationCenterRef center, void *observer,
 - (void)checkAndRefreshCacheIfNeeded {
     [self.cacheLock lock];
     NSDate *lastTime = self.lastCacheTime;
+    BOOL needsReload = (!lastTime || [[NSDate date] timeIntervalSinceDate:lastTime] > kPXConfigCacheDuration);
     [self.cacheLock unlock];
 
-    if (!lastTime || [[NSDate date] timeIntervalSinceDate:lastTime] > kPXConfigCacheDuration) {
-        [self reloadConfig];
+    if (needsReload) {
+        // Double-checked locking to prevent multiple threads from reloading concurrently
+        [self.cacheLock lock];
+        lastTime = self.lastCacheTime;
+        if (!lastTime || [[NSDate date] timeIntervalSinceDate:lastTime] > kPXConfigCacheDuration) {
+            [self.cacheLock unlock];
+            [self reloadConfig];
+        } else {
+            [self.cacheLock unlock];
+        }
     }
 }
 
