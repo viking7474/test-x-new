@@ -7,10 +7,9 @@
 #import "ProjectXLogging.h"
 
 #import "PXScope.h"
+#import "PXConfigProviderC.h"
 
 // Helper declarations
-static BOOL isSpoofingEnabled(void);
-static NSString* getSpoofedDeviceModel(void);
 
 // Device Resolution Database
 // Format: ModelID -> @{ @"width": @W, @"height": @H, @"scale": @S }
@@ -77,93 +76,14 @@ static NSDictionary* getSpecsForModel(NSString *model) {
 }
 
 // Reuse helper from DeviceModelHooks.x (simplified duplication for safety)
-static NSString* getSpoofedModel() {
-    // Try to get from property first if feasible, but here we can just read from file directly 
-    // to avoid cross-file dependency issues if symbols aren't exported.
-    // For simplicity, let's try to get it from profile directly.
-    @try {
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        NSString *profileId = centralInfo[@"ProfileId"];
-        
-        if (profileId) {
-            NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-            return deviceIds[@"DeviceModel"];
-        }
-    } @catch (NSException *e) {}
-    return nil;
-}
 
-static BOOL isSpoofingGlobalEnabled() {
-    // Implement minimal check or reuse existing logic
-    // This is a simplified check.
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID) return NO;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([bundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-        return NO;
-    }
-    // Tie to global device spoofing toggle.
-    return PXDeviceSpoofingEnabled();
-    // Ideally this should use the centralized `isDeviceModelSpoofingEnabled` but that requires linking or exposing it.
-    // We'll rely on the fact that if we get a spoofed model, we should probably use it.
-}
 
 
 // --- Metal GPU Name Hook ---
 
 // Helper to get GPU name from Chip
-static BOOL isInScopedAppsList_Missing(void) {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID.length) return NO;
-        NSArray *paths = @[@"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"];
-        NSDictionary *plist = nil;
-        for (NSString *p in paths) {
-            plist = [NSDictionary dictionaryWithContentsOfFile:p];
-            if (plist) break;
-        }
-        NSDictionary *scopedApps = [plist isKindOfClass:[NSDictionary class]] ? plist[@"ScopedApps"] : nil;
-        NSDictionary *entry = [scopedApps isKindOfClass:[NSDictionary class]] ? scopedApps[bundleID] : nil;
-        return [entry isKindOfClass:[NSDictionary class]] ? [entry[@"enabled"] boolValue] : NO;
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
-}
 
-static BOOL shouldSpoofForCurrentProcess_Missing(void) {
-    if (!PXDeviceSpoofingEnabled()) return NO;
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bid.length) return NO;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([bid hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, proc))) {
-        return NO;
-    }
-    return isInScopedAppsList_Missing() || PXAllowUnscopedSafariStack();
-}
 
-static NSString *getSpoofedGPUFamily(void) {
-    @try {
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        NSString *profileId = centralInfo[@"ProfileId"];
-        if (!profileId.length) return nil;
-        NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-        NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-        NSString *gpuFamily = [deviceIds[@"GPUFamily"] isKindOfClass:[NSString class]] ? deviceIds[@"GPUFamily"] : nil;
-        if (gpuFamily.length) return gpuFamily;
-        NSString *webgl = [deviceIds[@"WebGLRenderer"] isKindOfClass:[NSString class]] ? deviceIds[@"WebGLRenderer"] : nil;
-        return webgl.length ? webgl : nil;
-    } @catch (__unused NSException *e) {
-        return nil;
-    }
-}
 
 // Hook MTLDevice name
 // Since the concrete class of the device is private (e.g. AGXG13Device), we can't %hook it easily by name at compile time.
@@ -171,8 +91,8 @@ static NSString *getSpoofedGPUFamily(void) {
 
 static NSString *(*orig_MTLDevice_name)(id, SEL);
 static NSString *hook_MTLDevice_name(id self, SEL _cmd) {
-    if (shouldSpoofForCurrentProcess_Missing()) {
-        NSString *gpuName = getSpoofedGPUFamily();
+    if (PXIsDeviceModelSpoofingEnabled()) {
+        NSString *gpuName = PXGetSpoofedGPUFamily();
         if (gpuName.length) {
             return gpuName;
         }

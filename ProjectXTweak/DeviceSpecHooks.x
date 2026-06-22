@@ -18,6 +18,7 @@
 #import <mach-o/arch.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import "IOSVersionInfo.h"
+#import "PXConfigProviderC.h"
 
 #import "PXScope.h"
 
@@ -68,7 +69,6 @@ static NSString *getCurrentBundleID(void);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
 static BOOL isSpoofingEnabled(void);
-static NSString *getSpoofedDeviceModel(void);
 static NSDictionary *getDeviceSpecs(void);
 static float getFreeMemoryPercentage(void);
 static void getConsistentMemoryStats(unsigned long long totalMemory, 
@@ -273,51 +273,6 @@ static BOOL isSpoofingEnabled(void) {
 }
 
 // Get the device model from profile
-static NSString *getSpoofedDeviceModel() {
-    @try {
-        // Try multiple methods to get the model value
-        NSString *deviceModel = nil;
-
-        // METHOD 0: Prefer IdentifierManager for consistency with other hooks
-        if (NSClassFromString(@"IdentifierManager")) {
-            IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-            if (manager) {
-                NSString *m = [manager currentValueForIdentifier:@"DeviceModel"];
-                if (m.length > 0) {
-                    deviceModel = m;
-                }
-            }
-        }
-        
-        // METHOD 1: Try direct access from profile plist (device_ids.plist)
-        if (!deviceModel.length) {
-            NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-
-            NSString *profileId = centralInfo[@"ProfileId"];
-            if (profileId) {
-                // Build path to identity directory
-                NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                deviceModel = deviceIds[@"DeviceModel"];
-            }
-        }
-        
-        // METHOD 2: Use DeviceModelManager as fallback (do not generate here)
-        if (!deviceModel.length && NSClassFromString(@"DeviceModelManager")) {
-            DeviceModelManager *deviceManager = [NSClassFromString(@"DeviceModelManager") sharedManager];
-            deviceModel = [deviceManager currentDeviceModel];
-        }
-        
-        return deviceModel;
-    } @catch (NSException *exception) {
-        PXLog(@"[DeviceSpec] Exception getting spoofed device model: %@", exception);
-        return nil;
-    }
-}
 
 // Get all device specifications for the current spoofed model
 static NSDictionary *getDeviceSpecs() {
@@ -397,7 +352,7 @@ static NSDictionary *getDeviceSpecs() {
         
         // METHOD 2: Fallback to DeviceModelManager
         // Get the current spoofed device model
-        NSString *deviceModel = getSpoofedDeviceModel();
+        NSString *deviceModel = PXGetSpoofedDeviceModel();
         if (!deviceModel.length) {
             return nil;
         }
@@ -1982,7 +1937,7 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     }
     else if (strcmp(name, "hw.machine") == 0) {
         // Machine name - should return the device model like "iPhone10,1"
-        NSString *deviceModel = getSpoofedDeviceModel();
+        NSString *deviceModel = PXGetSpoofedDeviceModel();
         if (deviceModel && deviceModel.length > 0) {
             const char *machineStr = [deviceModel UTF8String];
             if (machineStr && *oldlenp > 0) {

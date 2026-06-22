@@ -31,11 +31,12 @@ Thành phần trung tâm quản lý việc tạo, lưu trữ và cung cấp các
   - Thời gian hoạt động (Uptime/BootTime): `common/UptimeManager.m`
 
 ## 2. Công cụ Hooking và Can thiệp Hệ thống (System Hooking Engine)
-Hệ thống can thiệp API hệ thống tại runtime sử dụng Substrate/ElleKit.
+Hệ thống can thiệp API hệ thống tại runtime sử dụng Substrate/ElleKit. Các hook được đồng bộ cấu hình qua một nguồn duy nhất để tránh việc đọc file I/O trùng lặp.
 
 - **Hạ tầng Hooking cốt lõi (Kiến trúc quan trọng):**
   - `ProjectXTweak/MethodSwizzler.m` (và `.h`)
   - `ProjectXTweak/PXScope.m` (và `.h`)
+  - `ProjectXTweak/PXConfigProvider.m` (và `PXConfigProviderC.h`): **Quản lý đồng bộ và Cache cấu hình spoofing duy nhất** (tránh I/O liên tục ở tầng Tweak).
   - `ProjectXTweak/HookOwnership.h` (Quản lý trạng thái quyền sở hữu hook)
   - `ProjectXTweak/MobileGestalt.h`
   - `ProjectXTweak/AAA_TestCtor.m` (Mô-đun kiểm tra cơ chế khởi tạo +load/constructor)
