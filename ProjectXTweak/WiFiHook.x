@@ -13,18 +13,10 @@
 #import <ifaddrs.h>
 #import <net/if.h>
 #import "MethodSwizzler.h"
+#import "PXConfigProviderC.h"
 
 #import "PXScope.h"
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
 
 // Forward declarations for private API methods
 @interface NWPath (WeaponXPrivate)
@@ -304,33 +296,13 @@ static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceNa
             return originalDict;
         }
         
-        // Try to use cached info first
-        if (cachedWifiInfo && cachedWifiInfo[@"ssid"] && cachedWifiInfo[@"bssid"]) {
-            NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
-            spoofedInfo[@"SSID"] = cachedWifiInfo[@"ssid"];
-            spoofedInfo[@"BSSID"] = cachedWifiInfo[@"bssid"];
-            spoofedInfo[@"NetworkType"] = cachedWifiInfo[@"networkType"] ?: @"Infrastructure";
-            
-            return CFBridgingRetain(spoofedInfo);
-        }
+        // Use PXConfigProvider
+        NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
+        spoofedInfo[@"SSID"] = PXGetSpoofedWiFiSSID();
+        spoofedInfo[@"BSSID"] = PXGetSpoofedWiFiBSSID();
+        spoofedInfo[@"NetworkType"] = @"Infrastructure";
         
-        // Get WiFi info from profile
-        NSDictionary *wifiInfo = getProfileWiFiInfo();
-        if (wifiInfo && wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
-            // Update cache
-            if (!cachedWifiInfo) {
-                cachedWifiInfo = [NSMutableDictionary dictionary];
-            }
-            [cachedWifiInfo setDictionary:wifiInfo];
-            
-            // Create spoofed dictionary
-            NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
-            spoofedInfo[@"SSID"] = wifiInfo[@"ssid"];
-            spoofedInfo[@"BSSID"] = wifiInfo[@"bssid"];
-            spoofedInfo[@"NetworkType"] = wifiInfo[@"networkType"] ?: @"Infrastructure";
-            
-            return CFBridgingRetain(spoofedInfo);
-        }
+        return CFBridgingRetain(spoofedInfo);
     } @catch (NSException *exception) {
         // Silent exception handling
     }
@@ -419,22 +391,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
         return [self weaponx_SSID]; // Call original
     }
     
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"ssid"]) {
-        return cachedWifiInfo[@"ssid"];
-    }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"ssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return wifiInfo[@"ssid"];
-    }
+    return PXGetSpoofedWiFiSSID();
     
     // Call original as fallback
     return [self weaponx_SSID];
@@ -447,22 +404,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
         return [self weaponx_BSSID]; // Call original
     }
     
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"bssid"]) {
-        return cachedWifiInfo[@"bssid"];
-    }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"bssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return wifiInfo[@"bssid"];
-    }
+    return PXGetSpoofedWiFiBSSID();
     
     // Call original as fallback
     return [self weaponx_BSSID];
@@ -519,22 +461,7 @@ static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
         return orig_WiFiNetworkGetSSID(network);
     }
     
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"ssid"]) {
-        return (__bridge CFStringRef)cachedWifiInfo[@"ssid"];
-    }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"ssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return (__bridge CFStringRef)wifiInfo[@"ssid"];
-    }
+    return (__bridge CFStringRef)PXGetSpoofedWiFiSSID();
     
     // Call original as fallback
     return orig_WiFiNetworkGetSSID(network);
@@ -548,22 +475,7 @@ static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network) {
         return orig_WiFiNetworkGetBSSID(network);
     }
     
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"bssid"]) {
-        return (__bridge CFStringRef)cachedWifiInfo[@"bssid"];
-    }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"bssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return (__bridge CFStringRef)wifiInfo[@"bssid"];
-    }
+    return (__bridge CFStringRef)PXGetSpoofedWiFiBSSID();
     
     // Call original as fallback
     return orig_WiFiNetworkGetBSSID(network);
@@ -695,11 +607,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
         return %orig;
     }
     
-    // Return spoofed SSID if available
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"ssid"]) {
-        return wifiInfo[@"ssid"];
-    }
+    return PXGetSpoofedWiFiSSID();
     
     // Fallback to original if no spoofed data
     return %orig;
@@ -712,11 +620,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
         return %orig;
     }
     
-    // Return spoofed BSSID if available
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"bssid"]) {
-        return wifiInfo[@"bssid"];
-    }
+    return PXGetSpoofedWiFiBSSID();
     
     // Fallback to original if no spoofed data
     return %orig;

@@ -22,4 +22,15 @@
 // Convenience boolean checks if you want centralized global toggles
 - (BOOL)isDeviceModelSpoofingEnabledForCurrentProcess;
 
+- (NSString *)spoofedSystemBootUUID;
+- (NSString *)spoofedDyldCacheUUID;
+- (BOOL)isSystemBootUUIDSpoofingEnabledForCurrentProcess;
+- (BOOL)isDyldCacheUUIDSpoofingEnabledForCurrentProcess;
+
+// WiFi Spoofing properties
+- (NSString *)spoofedWiFiBSSID;
+- (NSString *)spoofedWiFiSSID;
+- (BOOL)isWiFiSpoofingEnabledForCurrentProcess;
+
+
 @end

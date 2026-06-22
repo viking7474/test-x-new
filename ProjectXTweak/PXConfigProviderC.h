@@ -11,6 +11,12 @@ NSString *PXGetSpoofedDeviceModel(void);
 NSString *PXGetSpoofedGPUFamily(void);
 BOOL PXIsDeviceModelSpoofingEnabled(void);
 
+NSString *PXGetSpoofedSystemBootUUID(void);
+NSString *PXGetSpoofedDyldCacheUUID(void);
+BOOL PXIsSystemBootUUIDSpoofingEnabled(void);
+BOOL PXIsDyldCacheUUIDSpoofingEnabled(void);
+
+
 #ifdef __cplusplus
 }
 #endif

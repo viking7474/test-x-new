@@ -8,18 +8,34 @@
 // Immutable Snapshot Model
 @interface PXConfigSnapshot : NSObject
 @property (nonatomic, strong, readonly) NSDictionary *deviceIdsCache;
+@property (nonatomic, strong, readonly) NSDictionary *wifiInfoCache;
 @property (nonatomic, assign, readonly) BOOL isDeviceModelSpoofingEnabled;
+@property (nonatomic, assign, readonly) BOOL isSystemBootUUIDSpoofingEnabled;
+@property (nonatomic, assign, readonly) BOOL isDyldCacheUUIDSpoofingEnabled;
+@property (nonatomic, assign, readonly) BOOL isWiFiSpoofingEnabled;
 
 - (instancetype)initWithDeviceIds:(NSDictionary *)deviceIds
-                       appEnabled:(BOOL)appEnabled;
+                         wifiInfo:(NSDictionary *)wifiInfo
+                 deviceModelEnabled:(BOOL)deviceModelEnabled
+            systemBootUUIDEnabled:(BOOL)systemBootUUIDEnabled
+             dyldCacheUUIDEnabled:(BOOL)dyldCacheUUIDEnabled
+                      wifiEnabled:(BOOL)wifiEnabled;
 @end
 
 @implementation PXConfigSnapshot
 - (instancetype)initWithDeviceIds:(NSDictionary *)deviceIds
-                       appEnabled:(BOOL)appEnabled {
+                         wifiInfo:(NSDictionary *)wifiInfo
+                 deviceModelEnabled:(BOOL)deviceModelEnabled
+            systemBootUUIDEnabled:(BOOL)systemBootUUIDEnabled
+             dyldCacheUUIDEnabled:(BOOL)dyldCacheUUIDEnabled
+                      wifiEnabled:(BOOL)wifiEnabled {
     if (self = [super init]) {
         _deviceIdsCache = [deviceIds copy] ?: @{};
-        _isDeviceModelSpoofingEnabled = appEnabled;
+        _wifiInfoCache = [wifiInfo copy] ?: @{};
+        _isDeviceModelSpoofingEnabled = deviceModelEnabled;
+        _isSystemBootUUIDSpoofingEnabled = systemBootUUIDEnabled;
+        _isDyldCacheUUIDSpoofingEnabled = dyldCacheUUIDEnabled;
+        _isWiFiSpoofingEnabled = wifiEnabled;
     }
     return self;
 }
@@ -53,6 +69,21 @@
                                         CFSTR("com.hydra.projectx.config_changed"),
                                         NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+
+        // Backward compatibility until Phase 4 is complete
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (__bridge const void *)(self),
+                                        reloadConfigCallback,
+                                        CFSTR("com.hydra.projectx.settings_changed"),
+                                        NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (__bridge const void *)(self),
+                                        reloadConfigCallback,
+                                        CFSTR("com.hydra.projectx.toggleWifiSpoof"),
+                                        NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
     }
     return self;
 }
@@ -69,31 +100,46 @@ static void reloadConfigCallback(CFNotificationCenterRef center, void *observer,
         NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
         NSString *profileId = centralInfo[@"ProfileId"];
 
+
         NSDictionary *deviceIds = @{};
+        NSDictionary *wifiInfo = @{};
         if (profileId.length > 0) {
             NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
+
             NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
             deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: @{};
+
+            NSString *wifiPath = [identityDir stringByAppendingPathComponent:@"wifi_info.plist"];
+            wifiInfo = [NSDictionary dictionaryWithContentsOfFile:wifiPath] ?: @{};
         }
 
-        // Calculate app enablement at reload time
-        BOOL shouldSpoof = NO;
+        BOOL shouldSpoofModel = NO;
+        BOOL shouldSpoofBootUUID = NO;
+        BOOL shouldSpoofDyldUUID = NO;
+        BOOL shouldSpoofWiFi = NO;
+
         NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (currentBundleID) {
-            if (NSClassFromString(@"IdentifierManager")) {
-                id manager = [NSClassFromString(@"IdentifierManager") performSelector:@selector(sharedManager)];
-                if (manager) {
-                    BOOL isAppEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isApplicationEnabled:), currentBundleID);
-                    BOOL isIdEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"DeviceModel");
-                    if (isAppEnabled && isIdEnabled) {
-                        shouldSpoof = YES;
-                    }
+        if (currentBundleID && NSClassFromString(@"IdentifierManager")) {
+            id manager = [NSClassFromString(@"IdentifierManager") performSelector:@selector(sharedManager)];
+            if (manager) {
+                BOOL isAppEnabled = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isApplicationEnabled:), currentBundleID);
+                if (isAppEnabled) {
+                    shouldSpoofModel = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"DeviceModel");
+                    shouldSpoofBootUUID = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"SystemBootUUID");
+                    shouldSpoofDyldUUID = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"DyldCacheUUID");
+                    shouldSpoofWiFi = ((BOOL(*)(id, SEL, id))objc_msgSend)(manager, @selector(isIdentifierEnabled:), @"WiFi");
                 }
             }
         }
 
         // Atomic swap
-        self.currentSnapshot = [[PXConfigSnapshot alloc] initWithDeviceIds:deviceIds appEnabled:shouldSpoof];
+        self.currentSnapshot = [[PXConfigSnapshot alloc] initWithDeviceIds:deviceIds
+                                                                  wifiInfo:wifiInfo
+                                                        deviceModelEnabled:shouldSpoofModel
+                                                     systemBootUUIDEnabled:shouldSpoofBootUUID
+                                                      dyldCacheUUIDEnabled:shouldSpoofDyldUUID
+                                                               wifiEnabled:shouldSpoofWiFi];
+
     } @catch (NSException *e) {
         PXLog(@"[PXConfigProvider] Error reloading config: %@", e);
     }
@@ -133,8 +179,47 @@ static void reloadConfigCallback(CFNotificationCenterRef center, void *observer,
     return self.currentSnapshot.isDeviceModelSpoofingEnabled;
 }
 
+
+- (NSString *)spoofedSystemBootUUID {
+    PXConfigSnapshot *snap = self.currentSnapshot;
+    NSString *uuid = snap.deviceIdsCache[@"SystemBootUUID"];
+    return [uuid isKindOfClass:[NSString class]] && uuid.length > 0 ? uuid : @"00000000-0000-0000-0000-000000000000";
+}
+
+- (NSString *)spoofedDyldCacheUUID {
+    PXConfigSnapshot *snap = self.currentSnapshot;
+    NSString *uuid = snap.deviceIdsCache[@"DyldCacheUUID"];
+    return [uuid isKindOfClass:[NSString class]] && uuid.length > 0 ? uuid : @"00000000-0000-0000-0000-000000000000";
+}
+
+- (BOOL)isSystemBootUUIDSpoofingEnabledForCurrentProcess {
+    return self.currentSnapshot.isSystemBootUUIDSpoofingEnabled;
+}
+
+- (BOOL)isDyldCacheUUIDSpoofingEnabledForCurrentProcess {
+    return self.currentSnapshot.isDyldCacheUUIDSpoofingEnabled;
+}
+
+- (NSString *)spoofedWiFiBSSID {
+    PXConfigSnapshot *snap = self.currentSnapshot;
+    NSString *bssid = snap.wifiInfoCache[@"BSSID"];
+    return [bssid isKindOfClass:[NSString class]] && bssid.length > 0 ? bssid : @"00:00:00:00:00:00";
+}
+
+- (NSString *)spoofedWiFiSSID {
+    PXConfigSnapshot *snap = self.currentSnapshot;
+    NSString *ssid = snap.wifiInfoCache[@"SSID"];
+    return [ssid isKindOfClass:[NSString class]] && ssid.length > 0 ? ssid : @"Apple Network";
+}
+
+- (BOOL)isWiFiSpoofingEnabledForCurrentProcess {
+    return self.currentSnapshot.isWiFiSpoofingEnabled;
+}
+
 - (void)dealloc {
     CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge const void *)(self), CFSTR("com.hydra.projectx.config_changed"), NULL);
+    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge const void *)(self), CFSTR("com.hydra.projectx.settings_changed"), NULL);
+    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge const void *)(self), CFSTR("com.hydra.projectx.toggleWifiSpoof"), NULL);
 }
 
 @end
@@ -150,3 +235,12 @@ NSString *PXGetSpoofedGPUFamily(void) {
 BOOL PXIsDeviceModelSpoofingEnabled(void) {
     return [[PXConfigProvider sharedProvider] isDeviceModelSpoofingEnabledForCurrentProcess];
 }
+
+NSString *PXGetSpoofedSystemBootUUID(void) { return [[PXConfigProvider sharedProvider] spoofedSystemBootUUID]; }
+NSString *PXGetSpoofedDyldCacheUUID(void) { return [[PXConfigProvider sharedProvider] spoofedDyldCacheUUID]; }
+BOOL PXIsSystemBootUUIDSpoofingEnabled(void) { return [[PXConfigProvider sharedProvider] isSystemBootUUIDSpoofingEnabledForCurrentProcess]; }
+BOOL PXIsDyldCacheUUIDSpoofingEnabled(void) { return [[PXConfigProvider sharedProvider] isDyldCacheUUIDSpoofingEnabledForCurrentProcess]; }
+
+NSString *PXGetSpoofedWiFiBSSID(void) { return [[PXConfigProvider sharedProvider] spoofedWiFiBSSID]; }
+NSString *PXGetSpoofedWiFiSSID(void) { return [[PXConfigProvider sharedProvider] spoofedWiFiSSID]; }
+BOOL PXIsWiFiSpoofingEnabled(void) { return [[PXConfigProvider sharedProvider] isWiFiSpoofingEnabledForCurrentProcess]; }
