@@ -48,6 +48,7 @@
 - (void)clearSystemLogs:(NSString *)bundleID;
 - (void)clearDeviceDatabase:(NSString *)bundleID;
 - (void)clearInstallationLogs:(NSString *)bundleID;
+- (NSArray *)optimized_findExtensionContainers:(NSString *)bundleID dataDirs:(NSArray *)dataDirs rootlessDataDirs:(NSArray *)rootlessDataDirs bundleDirs:(NSArray *)bundleDirs rootlessBundleDirs:(NSArray *)rootlessBundleDirs;
 
 #pragma mark - Network & Carrier Cleaning
 - (void)clearNetworkConfigurations:(NSString *)bundleID;
