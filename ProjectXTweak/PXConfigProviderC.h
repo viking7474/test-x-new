@@ -15,6 +15,10 @@ NSString *PXGetSpoofedSystemBootUUID(void);
 NSString *PXGetSpoofedDyldCacheUUID(void);
 BOOL PXIsSystemBootUUIDSpoofingEnabled(void);
 BOOL PXIsDyldCacheUUIDSpoofingEnabled(void);
+NSString *PXGetSpoofedWiFiSSID(void);
+NSString *PXGetSpoofedWiFiBSSID(void);
+BOOL PXIsWiFiSpoofingEnabled(void);
+
 
 
 #ifdef __cplusplus
