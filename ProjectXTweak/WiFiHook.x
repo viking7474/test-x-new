@@ -67,12 +67,6 @@ static WiFiNetworkRef (*orig_WiFiDeviceClientCopyCurrentNetwork)(WiFiDeviceClien
 static CFStringRef (*orig_WiFiNetworkGetSSID)(WiFiNetworkRef network);
 static CFStringRef (*orig_WiFiNetworkGetBSSID)(WiFiNetworkRef network);
 
-// Cache of WiFi info from the most recent successful lookup
-static NSMutableDictionary *cachedWifiInfo = nil;
-static NSString *cachedProfileId = nil;
-static NSDate *cacheTimestamp = nil;
-static NSMutableDictionary *cachedBundleDecisions = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes in seconds
 
 // Forward declarations
 static NSString *getCurrentBundleID(void);
@@ -81,45 +75,13 @@ static BOOL isInScopedAppsList(void);
 
 #pragma mark - Profile Detection Helpers
 
-// Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
     if (!bundleID) return NO;
-
-    // Allow unscoped spoofing for Safari/Auth stack when enabled.
-    if (PXAllowUnscopedSafariStack()) {
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (PXAllowUnscopedSafariStack() || (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
         return YES;
     }
-    
-    // Check cache first
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
-    // Skip spoofing for system apps, except Safari/Auth stack when enabled.
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([bundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-        cachedBundleDecisions[bundleID] = @NO;
-        cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        return NO;
-    }
-    
-    // Check if the current app is a scoped app (or is Safari/Auth stack and enabled)
-    BOOL isScoped = isInScopedAppsList() || PXAllowUnscopedSafariStack();
-    
-    // Cache the decision
-    cachedBundleDecisions[bundleID] = @(isScoped);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    
-    return isScoped;
+    return PXIsWiFiSpoofingEnabled();
 }
 
 // Helper function to directly get current profile ID from plist
@@ -313,70 +275,25 @@ static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceNa
 
 // Implementation of NEHotspotHelper dictionaryWithScanResult: hook
 static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
-    // Call original first
     id originalResult = nil;
     if (orig_dictionaryWithScanResult) {
         originalResult = orig_dictionaryWithScanResult(self, _cmd, arg1);
     }
     
-    @try {
-        // Get bundle ID for scope checking
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        // Check if we should spoof
-        if (!shouldSpoofForBundle(bundleID)) {
-            return originalResult;
-        }
-        
-        // Ensure we have a valid dictionary to work with
-        if (!originalResult || ![originalResult isKindOfClass:[NSDictionary class]]) {
-            return originalResult;
-        }
-        
-        // Create mutable copy for modification
-        NSMutableDictionary *modifiedResult = [NSMutableDictionary dictionaryWithDictionary:originalResult];
-        
-        // Try to use cached info first
-        if (cachedWifiInfo && cachedWifiInfo[@"ssid"] && cachedWifiInfo[@"bssid"]) {
-            modifiedResult[@"SSID"] = cachedWifiInfo[@"ssid"];
-            modifiedResult[@"BSSID"] = cachedWifiInfo[@"bssid"];
-            
-            // Add WiFi standard information if available from cached info
-            if (cachedWifiInfo[@"wifiStandard"]) {
-                NSString *standard = cachedWifiInfo[@"wifiStandard"];
-                if ([standard containsString:@"ax"]) {
-                    modifiedResult[@"WifiStandard"] = @6; // 802.11ax
-                } else if ([standard containsString:@"ac"]) {
-                    modifiedResult[@"WifiStandard"] = @5; // 802.11ac
-                } else if ([standard containsString:@"n"]) {
-                    modifiedResult[@"WifiStandard"] = @4; // 802.11n
-                }
-            }
-            
-            return modifiedResult;
-        }
-        
-        // Get WiFi info from profile
-        NSDictionary *wifiInfo = getProfileWiFiInfo();
-        if (wifiInfo && wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
-            // Update cache
-            if (!cachedWifiInfo) {
-                cachedWifiInfo = [NSMutableDictionary dictionary];
-            }
-            [cachedWifiInfo setDictionary:wifiInfo];
-            
-            // Modify result
-            modifiedResult[@"SSID"] = wifiInfo[@"ssid"];
-            modifiedResult[@"BSSID"] = wifiInfo[@"bssid"];
-            
-            return modifiedResult;
-        }
-    } @catch (NSException *exception) {
-        // Silent exception handling
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!shouldSpoofForBundle(bundleID)) {
+        return originalResult;
     }
     
-    // Return original if spoofing failed
-    return originalResult;
+    if (!originalResult || ![originalResult isKindOfClass:[NSDictionary class]]) {
+        return originalResult;
+    }
+
+    NSMutableDictionary *modifiedResult = [NSMutableDictionary dictionaryWithDictionary:originalResult];
+    modifiedResult[@"SSID"] = PXGetSpoofedWiFiSSID();
+    modifiedResult[@"BSSID"] = PXGetSpoofedWiFiBSSID();
+
+    return modifiedResult;
 }
 
 #pragma mark - Swizzle Implementations for NEHotspotNetwork
@@ -576,20 +493,6 @@ static void initializeHooks(void) {
 
 #pragma mark - Notification Handlers
 
-static void settingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    NSString *notificationName = (__bridge NSString *)name;
-    PXLog(@"[WeaponX] Received settings notification: %@", notificationName);
-    
-    // Clear cached info to force refresh
-    if (cachedWifiInfo) {
-        [cachedWifiInfo removeAllObjects];
-    }
-    
-    // Also reset profile ID cache to ensure we get the latest
-    cachedProfileId = nil;
-    cacheTimestamp = nil;
-}
-
 #pragma mark - NWPathMonitor Hooks (Network Framework)
 
 // Hook for NWPath methods
@@ -609,8 +512,6 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
     
     return PXGetSpoofedWiFiSSID();
     
-    // Fallback to original if no spoofed data
-    return %orig;
 }
 
 - (id)_getBSSID {
@@ -622,8 +523,6 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
     
     return PXGetSpoofedWiFiBSSID();
     
-    // Fallback to original if no spoofed data
-    return %orig;
 }
 
 - (NSInteger)quality {
@@ -677,101 +576,27 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 %ctor {
     @autoreleasepool {
         @try {
-            PXLog(@"[WiFiHook] Initializing WiFi hooks");
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (!bundleID) return;
             
-            // Get the bundle ID for scope checking
-            NSString *bundleID = getCurrentBundleID();
-            
-            // Skip if we can't get bundle ID
-            if (!bundleID || [bundleID length] == 0) {
-                return;
-            }
-            
-            // Skip if this is a system process (except Safari/Auth stack when enabled)
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if ([bundleID hasPrefix:@"com.apple."] &&
-                !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-                PXLog(@"[WiFiHook] Not hooking system process: %@", bundleID);
+            if ([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
                 return;
             }
             
-            // Skip our own apps
-            if ([bundleID isEqualToString:@"com.hydra.projectx"] || 
-                [bundleID isEqualToString:@"com.hydra.weaponx"]) {
-                PXLog(@"[WiFiHook] Not hooking own app: %@", bundleID);
+            if (!PXIsWiFiSpoofingEnabled()) {
                 return;
             }
             
-            // Only install hooks if this app is scoped, OR if Safari/Auth stack spoof is enabled.
-            if (!isInScopedAppsList() && !PXAllowUnscopedSafariStack()) {
-                // App is NOT scoped - no hooks, no interference, no crashes
-                PXLog(@"[WiFiHook] App %@ is not scoped, skipping hook installation", bundleID);
-                return;
-            }
-            
-            PXLog(@"[WiFiHook] App %@ is scoped, setting up WiFi hooks", bundleID);
-            
-            // Initialize cache dictionaries
-            cachedBundleDecisions = [NSMutableDictionary dictionary];
-            
-            // Initialize hooks
             initializeHooks();
-            
-            // Initialize Objective-C hooks for scoped apps only
             %init;
-            
-            // Register for settings change notifications
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                NULL,
-                settingsChanged,
-                CFSTR("com.hydra.projectx.settings.changed"),
-                NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately
-            );
-            
-            // Also register for WiFi-specific toggle notifications
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                NULL,
-                settingsChanged,
-                CFSTR("com.hydra.projectx.toggleWifiSpoof"),
-                NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately
-            );
-            
-            // Register for profile change notifications
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                NULL,
-                settingsChanged,
-                CFSTR("com.hydra.projectx.profileChanged"),
-                NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately
-            );
-            
-            PXLog(@"[WiFiHook] WiFi hooks successfully initialized for scoped app: %@", bundleID);
-            
         } @catch (NSException *e) {
-            PXLog(@"[WiFiHook] ❌ Exception in constructor: %@", e);
+            PXLog(@"[WeaponX] ❌ Error in WiFi constructor: %@", e);
         }
     }
 }
 
-#pragma mark - Scoped Apps Helper Functions
 
-// Get the current bundle ID
-static NSString *getCurrentBundleID(void) {
-    @try {
-        NSBundle *mainBundle = [NSBundle mainBundle];
-        if (!mainBundle) {
-            return nil;
-        }
-        return [mainBundle bundleIdentifier];
-    } @catch (NSException *e) {
-        return nil;
-    }
-}
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
