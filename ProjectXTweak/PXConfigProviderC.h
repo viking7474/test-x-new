@@ -8,6 +8,13 @@ extern "C" {
 #endif
 
 NSString *PXGetSpoofedDeviceModel(void);
+NSString *PXGetSpoofedBoardID(void);
+NSString *PXGetSpoofedHwModel(void);
+NSString *PXGetSpoofedDeviceName(void);
+NSString *PXGetSpoofedIOSBuild(void);
+NSString *PXGetSpoofedDarwin(void);
+NSString *PXGetSpoofedKernelVersion(void);
+NSDictionary *PXGetSpoofedSpecs(void);
 NSString *PXGetSpoofedGPUFamily(void);
 BOOL PXIsDeviceModelSpoofingEnabled(void);
 

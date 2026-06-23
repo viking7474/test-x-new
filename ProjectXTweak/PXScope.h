@@ -1,5 +1,9 @@
 #import <Foundation/Foundation.h>
 
+// Darwin notification constants
+#define PX_NOTIFICATION_CONFIG_CHANGED CFSTR("com.hydra.projectx.config.changed")
+#define PX_NOTIFICATION_SCOPE_CHANGED CFSTR("com.hydra.projectx.scope.changed")
+
 // Centralized scope helpers for ProjectXTweak.
 // Goal: keep spoofing decisions consistent across modules, especially for Safari/Auth stack.
 

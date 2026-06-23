@@ -13,6 +13,13 @@
 - (void)reloadConfig;
 
 // Common device spoofing properties
+- (NSString *)spoofedBoardID;
+- (NSString *)spoofedHwModel;
+- (NSString *)spoofedDeviceName;
+- (NSString *)spoofedIOSBuild;
+- (NSString *)spoofedDarwin;
+- (NSString *)spoofedKernelVersion;
+- (NSDictionary *)spoofedSpecs;
 - (NSString *)spoofedDeviceModel;
 - (NSString *)spoofedGPUFamily;
 - (NSString *)spoofedIDFA;

@@ -9,6 +9,7 @@ FINALPACKAGE=0
 # The extension needs to be manually added in Xcode after installing this package
 # See /NotificationServiceExtension/README.md for integration instructions
 
+export THEOS=/opt/theos
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = ProjectX
@@ -80,9 +81,9 @@ WeaponXKeychainBridge_FRAMEWORKS = Foundation Security CoreFoundation
 WeaponXKeychainBridge_LDFLAGS = -lobjc -Wl,-ObjC -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
 
 # Include makefiles
-include $(THEOS_MAKE_PATH)/application.mk
-include $(THEOS_MAKE_PATH)/tweak.mk
-include $(THEOS_MAKE_PATH)/tool.mk
+include $(THEOS)/makefiles/application.mk
+include $(THEOS)/makefiles/tweak.mk
+include $(THEOS)/makefiles/tool.mk
 
 # Custom rule to ensure our scripts are included in the package
 internal-stage::

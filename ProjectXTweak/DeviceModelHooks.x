@@ -59,98 +59,12 @@ static NSDate *cacheTimestamp = nil;
 
 // Get the spoofed board ID (based on the spoofed device model)
 static NSString* getSpoofedBoardID() {
-    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!currentBundleID) return nil;
-    
-    @try {
-        // Get the device model first
-        NSString *deviceModel = PXGetSpoofedDeviceModel();
-        if (!deviceModel.length) {
-            return nil;
-        }
-        
-        // METHOD 1: Try to get from device_ids.plist directly
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        NSString *profileId = centralInfo[@"ProfileId"];
-        
-        if (profileId) {
-            NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-            
-            NSString *boardID = deviceIds[@"BoardID"];
-            if (boardID.length > 0) {
-                PXLog(@"[model] Found board ID %@ directly in device_ids.plist", boardID);
-                return boardID;
-            }
-        }
-        
-        // METHOD 2: Use DeviceModelManager to look up the board ID for this model
-        if (NSClassFromString(@"DeviceModelManager")) {
-            DeviceModelManager *deviceManager = [NSClassFromString(@"DeviceModelManager") sharedManager];
-            NSString *boardID = [deviceManager boardIDForModel:deviceModel];
-            
-            if (boardID.length > 0 && ![boardID isEqualToString:@"Unknown"]) {
-                PXLog(@"[model] Using board ID %@ from DeviceModelManager for model %@", boardID, deviceModel);
-                return boardID;
-            }
-        }
-        
-        return nil;
-    } @catch (NSException *exception) {
-        PXLog(@"[model] Exception getting spoofed board ID: %@", exception);
-        return nil;
-    }
+    return PXGetSpoofedBoardID();
 }
 
 // Get the spoofed hardware model (hw.model) based on the spoofed device model
 static NSString* getSpoofedHWModel() {
-    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!currentBundleID) return nil;
-    
-    @try {
-        // Get the device model first
-        NSString *deviceModel = PXGetSpoofedDeviceModel();
-        if (!deviceModel.length) {
-            return nil;
-        }
-        
-        // METHOD 1: Try to get from device_ids.plist directly
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        NSString *profileId = centralInfo[@"ProfileId"];
-        
-        if (profileId) {
-            NSString *identityDir = [profilesPath stringByAppendingPathComponent:profileId];
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-            
-            NSString *hwModel = deviceIds[@"HwModel"];
-            if (hwModel.length > 0) {
-                PXLog(@"[model] Found hw.model %@ directly in device_ids.plist", hwModel);
-                return hwModel;
-            }
-        }
-        
-        // METHOD 2: Use DeviceModelManager to look up the hwModel for this device
-        if (NSClassFromString(@"DeviceModelManager")) {
-            DeviceModelManager *deviceManager = [NSClassFromString(@"DeviceModelManager") sharedManager];
-            NSString *hwModel = [deviceManager hwModelForModel:deviceModel];
-            
-            if (hwModel.length > 0 && ![hwModel isEqualToString:@"Unknown"]) {
-                PXLog(@"[model] Using hw.model %@ from DeviceModelManager for model %@", hwModel, deviceModel);
-                return hwModel;
-            }
-        }
-        
-        return nil;
-    } @catch (NSException *exception) {
-        PXLog(@"[model] Exception getting spoofed hw.model: %@", exception);
-        return nil;
-    }
+    return PXGetSpoofedHwModel();
 }
 
 #pragma mark - Hook Implementations
@@ -403,18 +317,10 @@ static int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
             if (NSClassFromString(@"IdentifierManager")) {
                 IdentifierManager *mgr = [NSClassFromString(@"IdentifierManager") sharedManager];
                 if (mgr && [mgr isApplicationEnabled:bundleID] && [mgr isIdentifierEnabled:@"IOSVersion"]) {
-                    NSString *identityDir = [mgr profileIdentityPath];
-                    NSDictionary *deviceIds = identityDir.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
-                    NSDictionary *current = nil;
-                    id versionClass = NSClassFromString(@"IOSVersionInfo");
-                    id versionMgr = versionClass ? [versionClass performSelector:@selector(sharedManager)] : nil;
-                    if (versionMgr && [versionMgr respondsToSelector:@selector(currentIOSVersionInfo)]) {
-                        current = [versionMgr performSelector:@selector(currentIOSVersionInfo)];
-                    }
                     NSString *val = nil;
-                    if (isKernOSVersion) val = deviceIds[@"IOSBuild"] ?: current[@"build"];
-                    else if (isKernOSRelease) val = deviceIds[@"Darwin"] ?: current[@"darwin"];
-                    else val = deviceIds[@"KernelVersion"] ?: current[@"kernel_version"];
+                    if (isKernOSVersion) val = PXGetSpoofedIOSBuild();
+                    else if (isKernOSRelease) val = PXGetSpoofedDarwin();
+                    else val = PXGetSpoofedKernelVersion();
 
                     if (val.length > 0) {
                         return PXWriteSysctlCStringLocal([val UTF8String], oldp, oldlenp);
@@ -651,30 +557,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
     if (PXIsDeviceModelSpoofingEnabled()) {
         // For privacy, we often want to spoof the device name to a generic one
         // or a custom name if configured
-        NSString *spoofedName = nil;
-        
-        // Try to get custom name from profile
-        // Using existing helper if available or implementing a basic lookup
-        @try {
-            // Re-use logic to find profile settings
-            NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-            NSString *profileId = centralInfo[@"ProfileId"];
-            
-            if (profileId) {
-                NSString *identityDir = [profilesPath stringByAppendingPathComponent:profileId];
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                
-                spoofedName = deviceIds[@"DeviceName"];
-            }
-        } @catch (NSException *e) {}
-        
-        // Fallback to generic name if no custom name set
-        if (!spoofedName || spoofedName.length == 0) {
-            spoofedName = @"iPhone";
-        }
+        NSString *spoofedName = PXGetSpoofedDeviceName();
         
         PXLog(@"[model] Spoofing UIDevice name from %@ to %@ for app: %@", 
               originalName, spoofedName, bundleID);
@@ -788,29 +671,7 @@ static void logDeviceModelAccess(const char* method, NSString* bundleID) {
             return;
         }
         
-        // Check if this app is even enabled for spoofing before initializing hooks
-        IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-        if (!manager || ![manager isApplicationEnabled:currentBundleID]) {
-            PXLog(@"[model] App %@ is not enabled for spoofing, not initializing hooks", currentBundleID);
-            return;
-        }
-        
-        // Use our optimized check function for determining if this app should be hooked
-        if (!PXIsDeviceModelSpoofingEnabled()) {
-            PXLog(@"[model] Device model spoofing not enabled for app %@, not initializing hooks", currentBundleID);
-            return;
-        } else {
-            PXLog(@"[model] Device model spoofing is enabled for app %@", currentBundleID);
-        }
-        
-        // Test if we can retrieve a spoofed model before proceeding
-        NSString *testModel = PXGetSpoofedDeviceModel();
-        if (!testModel) {
-            PXLog(@"[model] WARNING: Could not retrieve spoofed model, not initializing hooks");
-            return;
-        }
-        
-        PXLog(@"[model] Successfully retrieved spoofed model: %@", testModel);
+        // Hooks will decide whether to spoof at runtime using PXIsDeviceModelSpoofingEnabled()
 
         // Owner (ProjectXTweak/Tweak.x) handles sysctl/uname/IOKit.
         PXLog(@"[model] Skipping uname/sysctl/IOKit hooks (owner handles these)");

@@ -98,96 +98,18 @@ static NSString *getCurrentBundleID(void) {
 }
 
 // Load scoped apps from the plist file
-static NSDictionary *loadScopedApps(void) {
-    @try {
-        // Check if cache is valid
-        if (scopedAppsCache && scopedAppsCacheTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        // Initialize cache if needed
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        // Try each possible path for the scoped apps file
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            // Don't log this error too frequently to avoid spam
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) { // 5 minutes
-                PXLog(@"[DeviceSpec] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Load the plist file safely
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Get the scoped apps dictionary
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Copy the scoped apps to our cache
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
-}
 
-// Check if the current app is in the scoped apps list
+
+// Removed old loadScopedApps/isInScopedAppsList. Replaced by PXDeviceSpoofingEnabled/PXIsSafariStackProcess.
 static BOOL isInScopedAppsList(void) {
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        
-        // Check if this bundle ID is in the scoped apps dictionary
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        
-        // Check if the app is enabled
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-        
-    } @catch (NSException *e) {
+    if (!PXDeviceSpoofingEnabled()) return NO;
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bundleID) return NO;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if ([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
         return NO;
     }
+    return YES;
 }
 
 // Check if device model spoofing is enabled for the current app with caching
@@ -197,111 +119,28 @@ static BOOL isInScopedAppsList(void) {
 
 // Get all device specifications for the current spoofed model
 static NSDictionary *getDeviceSpecs() {
-    // Initialize cache if needed
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        deviceSpecsCache = [NSMutableDictionary dictionary];
-    });
-    
-    // Check if specs are already cached
-    @synchronized(deviceSpecsCache) {
-        NSDictionary *cachedSpecs = deviceSpecsCache[@"specs"];
-        if (cachedSpecs && [[NSDate date] timeIntervalSinceDate:cacheTimestamp] < kCacheValidityDuration) {
-            return cachedSpecs;
-        }
+    // METHOD 1: Try to get specs directly from central config provider
+    NSDictionary *specs = PXGetSpoofedSpecs();
+    if (specs && specs[@"value"]) {
+        return specs;
     }
     
     @try {
-        // METHOD 1: Try to get specs directly from device_ids.plist
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        
-        NSString *profileId = centralInfo[@"ProfileId"];
-        if (profileId) {
-            NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+        // METHOD 2: Fallback to DeviceModelManager
+        NSString *deviceModel = PXGetSpoofedDeviceModel();
+        if (deviceModel && NSClassFromString(@"DeviceModelManager")) {
+            DeviceModelManager *manager = [NSClassFromString(@"DeviceModelManager") sharedManager];
+            NSDictionary *specs = [manager specsForModel:deviceModel];
             
-            if (deviceIds && deviceIds[@"DeviceModel"]) {
-                // Reconstruct specs from device_ids.plist
-                NSMutableDictionary *specs = [NSMutableDictionary dictionary];
-                specs[@"value"] = deviceIds[@"DeviceModel"];
-                specs[@"name"] = deviceIds[@"DeviceModelName"] ?: @"Unknown";
-                specs[@"screenResolution"] = deviceIds[@"ScreenResolution"] ?: @"Unknown";
-                specs[@"viewportResolution"] = deviceIds[@"ViewportResolution"] ?: @"Unknown";
-                specs[@"devicePixelRatio"] = deviceIds[@"DevicePixelRatio"] ?: @(0);
-                specs[@"screenDensity"] = deviceIds[@"ScreenDensityPPI"] ?: @(0);
-                specs[@"cpuArchitecture"] = deviceIds[@"CPUArchitecture"] ?: @"Unknown";
-                specs[@"deviceMemory"] = deviceIds[@"DeviceMemory"] ?: @(0);
-                specs[@"gpuFamily"] = deviceIds[@"GPUFamily"] ?: @"Unknown";
-                specs[@"cpuCoreCount"] = deviceIds[@"CPUCoreCount"] ?: @(0);
-                specs[@"metalFeatureSet"] = deviceIds[@"MetalFeatureSet"] ?: @"Unknown";
-                
-                // Add board/hardware identifiers (used by apps like AIDA)
-                if (deviceIds[@"BoardID"]) {
-                    specs[@"boardID"] = deviceIds[@"BoardID"];
-                }
-                if (deviceIds[@"HwModel"]) {
-                    specs[@"hwModel"] = deviceIds[@"HwModel"];
-                } else if (deviceIds[@"BoardID"]) {
-                    specs[@"hwModel"] = deviceIds[@"BoardID"]; // Best-effort fallback
-                }
-
-                // Reconstruct webGLInfo
-                NSMutableDictionary *webGLInfo = [NSMutableDictionary dictionary];
-                webGLInfo[@"webglVendor"] = deviceIds[@"WebGLVendor"] ?: @"Apple";
-                webGLInfo[@"webglRenderer"] = deviceIds[@"WebGLRenderer"] ?: @"Apple GPU";
-                webGLInfo[@"unmaskedVendor"] = @"Apple Inc.";
-                webGLInfo[@"unmaskedRenderer"] = deviceIds[@"GPUFamily"] ?: @"Apple GPU";
-                webGLInfo[@"webglVersion"] = @"WebGL 2.0";
-                webGLInfo[@"maxTextureSize"] = @(16384);
-                webGLInfo[@"maxRenderBufferSize"] = @(16384);
-                specs[@"webGLInfo"] = webGLInfo;
-                
-                PXLog(@"[DeviceSpec] Reconstructed device specs from device_ids.plist");
-                
-                // Cache the specifications
-                @synchronized(deviceSpecsCache) {
-                    deviceSpecsCache[@"specs"] = specs;
-                    cacheTimestamp = [NSDate date];
-                }
-                
+            if (specs) {
                 return specs;
             }
         }
-        
-        // METHOD 2: Fallback to DeviceModelManager
-        // Get the current spoofed device model
-        NSString *deviceModel = PXGetSpoofedDeviceModel();
-        if (!deviceModel.length) {
-            return nil;
-        }
-        
-        // Get the specifications from DeviceModelManager
-        DeviceModelManager *deviceManager = [NSClassFromString(@"DeviceModelManager") sharedManager];
-        if (!deviceManager) {
-            PXLog(@"[DeviceSpec] WARNING: DeviceModelManager not available");
-            return nil;
-        }
-        
-        NSDictionary *specs = [deviceManager deviceSpecificationsForModel:deviceModel];
-        if (!specs) {
-            PXLog(@"[DeviceSpec] WARNING: No specifications found for device model: %@", deviceModel);
-            return nil;
-        }
-        
-        // Cache the specifications
-        @synchronized(deviceSpecsCache) {
-            deviceSpecsCache[@"specs"] = specs;
-            cacheTimestamp = [NSDate date];
-        }
-        
-        return specs;
-    } @catch (NSException *exception) {
-        PXLog(@"[DeviceSpec] Exception getting device specifications: %@", exception);
-        return nil;
+    } @catch (NSException *e) {
+        PXLog(@"[DeviceSpec] Error getting device specs: %@", e);
     }
+
+    return nil;
 }
 
 // Parse resolution string (e.g., "2556x1179") into CGSize
@@ -1092,12 +931,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 CFNotificationSuspensionBehaviorDeliverImmediately
             );
             
-            // Only install hooks if app is scoped, OR if Safari/Auth stack spoof is enabled.
-            if (!isInScopedAppsList() && !PXAllowUnscopedSafariStack()) {
-                // App is NOT scoped - no hooks, no interference, no crashes
-                PXLog(@"[DeviceSpec] App %@ is not scoped, skipping hook installation", currentBundleID);
-                return;
-            }
+            // Hook conditions will be checked at runtime by the hooks themselves
             
             PXLog(@"[DeviceSpec] App %@ is scoped, installing device specification hooks", currentBundleID);
             
@@ -1430,17 +1264,14 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
             IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
             if (manager && bundleID && [manager isApplicationEnabled:bundleID] && [manager isIdentifierEnabled:@"IOSVersion"]) {
-                NSString *identityDir = [manager profileIdentityPath];
-                NSDictionary *deviceIds = identityDir.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
-                NSDictionary *current = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
                 NSString *value = nil;
 
                 if (strcmp(name, "kern.osversion") == 0) {
-                    value = deviceIds[@"IOSBuild"] ?: current[@"build"];
+                    value = PXGetSpoofedIOSBuild();
                 } else if (strcmp(name, "kern.osrelease") == 0) {
-                    value = deviceIds[@"Darwin"] ?: current[@"darwin"];
+                    value = PXGetSpoofedDarwin();
                 } else if (strcmp(name, "kern.version") == 0) {
-                    value = deviceIds[@"KernelVersion"] ?: current[@"kernel_version"];
+                    value = PXGetSpoofedKernelVersion();
                 }
 
                 if (value.length > 0) {

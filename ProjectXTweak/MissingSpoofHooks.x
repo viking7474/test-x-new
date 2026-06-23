@@ -80,25 +80,7 @@ static NSDictionary* getSpecsForModel(NSString *model) {
 
 
 
-static BOOL isInScopedAppsList_Missing(void) {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID.length) return NO;
-        NSArray *paths = @[@"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"];
-        NSDictionary *plist = nil;
-        for (NSString *p in paths) {
-            plist = [NSDictionary dictionaryWithContentsOfFile:p];
-            if (plist) break;
-        }
-        NSDictionary *scopedApps = [plist isKindOfClass:[NSDictionary class]] ? plist[@"ScopedApps"] : nil;
-        NSDictionary *entry = [scopedApps isKindOfClass:[NSDictionary class]] ? scopedApps[bundleID] : nil;
-        return [entry isKindOfClass:[NSDictionary class]] ? [entry[@"enabled"] boolValue] : NO;
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
-}
+
 
 static BOOL shouldSpoofForCurrentProcess_Missing(void) {
     if (!PXDeviceSpoofingEnabled()) return NO;
@@ -108,7 +90,7 @@ static BOOL shouldSpoofForCurrentProcess_Missing(void) {
     if ([bid hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, proc))) {
         return NO;
     }
-    return isInScopedAppsList_Missing() || PXAllowUnscopedSafariStack();
+    return YES;
 }
 
 // --- Metal GPU Name Hook ---

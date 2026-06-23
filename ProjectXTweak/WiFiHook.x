@@ -64,26 +64,30 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 #pragma mark - Core Hook Functions
 
 static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    id originalResult = nil;
+    CFDictionaryRef originalCF = NULL;
     if (orig_CNCopyCurrentNetworkInfo) {
-        originalResult = (__bridge id)orig_CNCopyCurrentNetworkInfo(interfaceName);
+        originalCF = orig_CNCopyCurrentNetworkInfo(interfaceName);
     }
     
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
-        return (__bridge_retained CFDictionaryRef)originalResult;
+        return originalCF;
     }
     
+    NSDictionary *originalResult = CFBridgingRelease(originalCF);
     NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
-    if (originalResult && [originalResult isKindOfClass:[NSDictionary class]]) {
+    if ([originalResult isKindOfClass:[NSDictionary class]]) {
         [spoofedInfo addEntriesFromDictionary:originalResult];
     }
     
-    spoofedInfo[@"SSID"] = PXGetSpoofedWiFiSSID();
-    spoofedInfo[@"BSSID"] = PXGetSpoofedWiFiBSSID();
+    NSString *ssid = PXGetSpoofedWiFiSSID();
+    NSString *bssid = PXGetSpoofedWiFiBSSID();
+
+    spoofedInfo[@"SSID"] = ssid ?: @"Apple Network";
+    spoofedInfo[@"BSSID"] = bssid ?: @"00:00:00:00:00:00";
     spoofedInfo[@"SSIDDATA"] = [spoofedInfo[@"SSID"] dataUsingEncoding:NSUTF8StringEncoding];
     
-    return (__bridge_retained CFDictionaryRef)spoofedInfo;
+    return CFBridgingRetain(spoofedInfo);
 }
 
 static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
@@ -271,11 +275,14 @@ static void initializeHooks(void) {
             if (!bundleID) return;
             
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if ([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
+
+            // Skip hooking our own apps
+            if ([bundleID isEqualToString:@"com.hydra.projectx"] || [bundleID isEqualToString:@"com.hydra.weaponx"]) {
                 return;
             }
             
-            if (!PXIsWiFiSpoofingEnabled()) {
+            // Skip hooking Apple services unless Safari Stack is explicitly allowed
+            if ([bundleID hasPrefix:@"com.apple."] && !(PXAllowUnscopedSafariStack() || (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc)))) {
                 return;
             }
             
