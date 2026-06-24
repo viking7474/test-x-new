@@ -3070,7 +3070,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     NSArray *rootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
     NSArray *bundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
     NSArray *rootlessBundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
-    NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:dataDirs rootlessDataDirs:rootlessDataDirs bundleDirs:bundleDirs rootlessDirs:rootlessBundleDirs];
+    NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:dataDirs rootlessDataDirs:rootlessDataDirs bundleDirs:bundleDirs rootlessBundleDirs:rootlessBundleDirs];
     for (NSDictionary *extInfo in extensionContainers) {
         NSString *extDataUUID = extInfo[@"dataUUID"];
         if (!extDataUUID.length) continue;
@@ -3631,7 +3631,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *containerBundleID = metadata[@"MCMMetadataIdentifier"];
         if (containerBundleID && [containerBundleID hasPrefix:bundleID] && ![containerBundleID isEqualToString:bundleID]) {
             // Find bundle UUID for extension
-            NSString *extBundleUUID = [self optimized_findBundleContainerUUID:containerBundleID inDirectories:bundleDirs rootlessDirs:rootlessBundleDirs];
+            NSString *extBundleUUID = [self optimized_findBundleContainerUUID:containerBundleID inDirectories:bundleDirs rootlessBundleDirs:rootlessBundleDirs];
             @synchronized(extensionInfo) {
                 [extensionInfo addObject:@{ @"bundleID": containerBundleID, @"dataUUID": uuid, @"bundleUUID": extBundleUUID ?: @"", @"type": @"extension" }];
             }
@@ -3644,7 +3644,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
         NSString *containerBundleID = metadata[@"MCMMetadataIdentifier"];
         if (containerBundleID && [containerBundleID hasPrefix:bundleID] && ![containerBundleID isEqualToString:bundleID]) {
-            NSString *extBundleUUID = [self optimized_findBundleContainerUUID:containerBundleID inDirectories:bundleDirs rootlessDirs:rootlessBundleDirs];
+            NSString *extBundleUUID = [self optimized_findBundleContainerUUID:containerBundleID inDirectories:bundleDirs rootlessBundleDirs:rootlessBundleDirs];
             @synchronized(extensionInfo) {
                 [extensionInfo addObject:@{ @"bundleID": containerBundleID, @"dataUUID": uuid, @"bundleUUID": extBundleUUID ?: @"", @"type": @"extension", @"rootless": @YES }];
             }
