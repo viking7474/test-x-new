@@ -4941,9 +4941,15 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"SELECTION CENTER"]];
     UIView *selectionCard = [self dashboardGroupCard];
     UIStackView *selectionStack = (UIStackView *)[selectionCard viewWithTag:7001];
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:[UIColor systemIndigoColor] valueLabel:&_resetSelectionValueLabel selector:@selector(selectResetAppsTapped)]];
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"externaldrive.fill.badge.icloud" color:[UIColor systemPinkColor] valueLabel:&_rrsSelectionValueLabel selector:@selector(selectRRSAppsTapped)]];
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"face.smiling.inverse" color:[UIColor systemGrayColor] valueLabel:&_fakeSelectionValueLabel selector:@selector(selectFakeTapped)]];
+    UILabel *resetSelectionLabel = nil;
+    UILabel *rrsSelectionLabel = nil;
+    UILabel *fakeSelectionLabel = nil;
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:[UIColor systemIndigoColor] valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"externaldrive.fill.badge.icloud" color:[UIColor systemPinkColor] valueLabel:&rrsSelectionLabel selector:@selector(selectRRSAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"face.smiling.inverse" color:[UIColor systemGrayColor] valueLabel:&fakeSelectionLabel selector:@selector(selectFakeTapped)]];
+    self.resetSelectionValueLabel = resetSelectionLabel;
+    self.rrsSelectionValueLabel = rrsSelectionLabel;
+    self.fakeSelectionValueLabel = fakeSelectionLabel;
     [self.mainStackView addArrangedSubview:selectionCard];
 
     [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"MANAGEMENT"]];
@@ -5051,7 +5057,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return button;
 }
 
-- (UIView *)dashboardSelectionRowWithTitle:(NSString *)title icon:(NSString *)icon color:(UIColor *)color valueLabel:(UILabel **)outLabel selector:(SEL)selector {
+- (UIView *)dashboardSelectionRowWithTitle:(NSString *)title icon:(NSString *)icon color:(UIColor *)color valueLabel:(UILabel * __strong *)outLabel selector:(SEL)selector {
     UIView *row = [self dashboardPlainRowWithTitle:title value:nil selector:selector];
     UIStackView *stack = (UIStackView *)row.subviews.firstObject;
     UIImageView *iconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:icon]];
