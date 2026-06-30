@@ -523,7 +523,8 @@ static BOOL isUUIDKey(NSString *key) {
                 NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
                 isInsideHook = NO;
                 PXLog(@"[WeaponX] 🔍 Intercepting and spoofing UUID being saved to UserDefaults for key '%@'", defaultName);
-                return %orig(spoofedUUID, defaultName);
+                %orig(spoofedUUID, defaultName);
+                return;
             }
             
             // If setting a dictionary or array, process it to replace UUIDs
@@ -531,7 +532,8 @@ static BOOL isUUIDKey(NSString *key) {
                 isInsideHook = YES;
                 id processedValue = processDictionaryValues(value);
                 isInsideHook = NO;
-                return %orig(processedValue, defaultName);
+                %orig(processedValue, defaultName);
+                return;
             }
         }
     } @catch (NSException *exception) {
@@ -539,7 +541,7 @@ static BOOL isUUIDKey(NSString *key) {
         PXLog(@"[WeaponX] ⚠️ Exception in setObject:forKey: hook: %@", exception);
     }
     
-    return %orig;
+    %orig;
 }
 
 // String-specific setter
@@ -554,14 +556,15 @@ static BOOL isUUIDKey(NSString *key) {
             NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
             isInsideHook = NO;
             PXLog(@"[WeaponX] 🔍 Intercepting and spoofing UUID string being saved to UserDefaults for key '%@'", defaultName);
-            return %orig(spoofedUUID, defaultName);
+            %orig(spoofedUUID, defaultName);
+            return;
         }
     } @catch (NSException *exception) {
         isInsideHook = NO;
         PXLog(@"[WeaponX] ⚠️ Exception in setString:forKey: hook: %@", exception);
     }
     
-    return %orig;
+    %orig;
 }
 
 // Dictionary-specific setter
@@ -576,14 +579,15 @@ static BOOL isUUIDKey(NSString *key) {
             isInsideHook = YES;
             NSDictionary *processedDict = processDictionaryValues(value);
             isInsideHook = NO;
-            return %orig(processedDict, defaultName);
+            %orig(processedDict, defaultName);
+            return;
         }
     } @catch (NSException *exception) {
         isInsideHook = NO;
         PXLog(@"[WeaponX] ⚠️ Exception in setDictionary:forKey: hook: %@", exception);
     }
     
-    return %orig;
+    %orig;
 }
 
 // Data-specific setter - SAFE VERSION
@@ -609,7 +613,8 @@ static BOOL isUUIDKey(NSString *key) {
                 [uuid getUUIDBytes:uuidBytes];
                 NSData *spoofedData = [NSData dataWithBytes:uuidBytes length:16];
                 PXLog(@"[WeaponX] 🔍 Spoofing UUID bytes being saved for key '%@'", defaultName);
-                return %orig(spoofedData, defaultName);
+                %orig(spoofedData, defaultName);
+                return;
             }
         }
     } @catch (NSException *exception) {
@@ -617,7 +622,7 @@ static BOOL isUUIDKey(NSString *key) {
         PXLog(@"[WeaponX] ⚠️ Exception in setData:forKey: hook: %@", exception);
     }
     
-    return %orig;
+    %orig;
 }
 
 %end
