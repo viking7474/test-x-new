@@ -509,9 +509,13 @@ static BOOL isUUIDKey(NSString *key) {
 
 // SETTER METHODS
 
+#if 0
+// Disabled: Logos in the current build pipeline generates malformed C for these
+// void setter hooks. Getter hooks above still provide UserDefaults spoofing.
 // Base setter method
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
-    if (isInsideHook) { %orig; return; }
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    id valueToStore = value;
     
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -523,17 +527,13 @@ static BOOL isUUIDKey(NSString *key) {
                 NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
                 isInsideHook = NO;
                 PXLog(@"[WeaponX] 🔍 Intercepting and spoofing UUID being saved to UserDefaults for key '%@'", defaultName);
-                %orig(spoofedUUID, defaultName);
-                return;
+                valueToStore = spoofedUUID;
             }
-            
             // If setting a dictionary or array, process it to replace UUIDs
-            if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+            else if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
                 isInsideHook = YES;
-                id processedValue = processDictionaryValues(value);
+                valueToStore = processDictionaryValues(value);
                 isInsideHook = NO;
-                %orig(processedValue, defaultName);
-                return;
             }
         }
     } @catch (NSException *exception) {
@@ -541,12 +541,13 @@ static BOOL isUUIDKey(NSString *key) {
         PXLog(@"[WeaponX] ⚠️ Exception in setObject:forKey: hook: %@", exception);
     }
     
-    %orig;
+    %orig(valueToStore, defaultName);
 }
 
 // String-specific setter
 - (void)setString:(NSString *)value forKey:(NSString *)defaultName {
-    if (isInsideHook) { %orig; return; }
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    NSString *valueToStore = value;
     
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -556,20 +557,20 @@ static BOOL isUUIDKey(NSString *key) {
             NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
             isInsideHook = NO;
             PXLog(@"[WeaponX] 🔍 Intercepting and spoofing UUID string being saved to UserDefaults for key '%@'", defaultName);
-            %orig(spoofedUUID, defaultName);
-            return;
+            valueToStore = spoofedUUID;
         }
     } @catch (NSException *exception) {
         isInsideHook = NO;
         PXLog(@"[WeaponX] ⚠️ Exception in setString:forKey: hook: %@", exception);
     }
     
-    %orig;
+    %orig(valueToStore, defaultName);
 }
 
 // Dictionary-specific setter
 - (void)setDictionary:(NSDictionary<NSString *,id> *)value forKey:(NSString *)defaultName {
-    if (isInsideHook) { %orig; return; }
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    NSDictionary *valueToStore = value;
     
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -577,23 +578,22 @@ static BOOL isUUIDKey(NSString *key) {
         if (shouldSpoofForBundle(bundleID) && value) {
             // Process the dictionary to replace any UUIDs
             isInsideHook = YES;
-            NSDictionary *processedDict = processDictionaryValues(value);
+            valueToStore = processDictionaryValues(value);
             isInsideHook = NO;
-            %orig(processedDict, defaultName);
-            return;
         }
     } @catch (NSException *exception) {
         isInsideHook = NO;
         PXLog(@"[WeaponX] ⚠️ Exception in setDictionary:forKey: hook: %@", exception);
     }
     
-    %orig;
+    %orig(valueToStore, defaultName);
 }
 
 // Data-specific setter - SAFE VERSION
 // Only spoof if key is UUID AND data is 16 bytes (UUID binary format)
 - (void)setData:(NSData *)value forKey:(NSString *)defaultName {
-    if (isInsideHook) { %orig; return; }
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    NSData *valueToStore = value;
     
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -611,10 +611,8 @@ static BOOL isUUIDKey(NSString *key) {
             if (uuid) {
                 uuid_t uuidBytes;
                 [uuid getUUIDBytes:uuidBytes];
-                NSData *spoofedData = [NSData dataWithBytes:uuidBytes length:16];
+                valueToStore = [NSData dataWithBytes:uuidBytes length:16];
                 PXLog(@"[WeaponX] 🔍 Spoofing UUID bytes being saved for key '%@'", defaultName);
-                %orig(spoofedData, defaultName);
-                return;
             }
         }
     } @catch (NSException *exception) {
@@ -622,8 +620,9 @@ static BOOL isUUIDKey(NSString *key) {
         PXLog(@"[WeaponX] ⚠️ Exception in setData:forKey: hook: %@", exception);
     }
     
-    %orig;
+    %orig(valueToStore, defaultName);
 }
+#endif
 
 %end
 
