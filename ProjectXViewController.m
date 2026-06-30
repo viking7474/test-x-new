@@ -15,6 +15,7 @@
 #import "StorageManager.h"
 #import "BatteryManager.h"
 #import "AppDataBackupRestoreViewController.h"
+#import "AppDataBackupManager.h"
 #import "ToolViewController.h"
 #import <UIKit/UIKit.h>
 #import "ProgressHUDView.h"
@@ -28,6 +29,12 @@ static NSString *PXKeychainWipeEnabledKey(NSString *bundleID);
 static NSString *PXKeychainWipeGroupsKey(NSString *bundleID);
 
 static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.projectx.keychainGroupsSaved";
+static NSString * const PXDashboardResetAppsKey = @"PXDashboardResetApps";
+static NSString * const PXDashboardRRSAppsKey = @"PXDashboardRRSApps";
+static NSString * const PXDashboardFakeOptionsKey = @"PXDashboardFakeOptions";
+static NSString * const PXDashboardFakePreviewKey = @"PXDashboardFakePreview";
+static NSString * const PXDashboardRestoreOrderKey = @"PXDashboardRestoreOrder";
+static NSString * const PXDashboardRestoreIndexKeyPrefix = @"PXDashboardRestoreIndex_";
 
 static UIImage *PXDrawCircleIcon(BOOL drawX, BOOL drawMinus) {
     CGSize size = CGSizeMake(24, 24);
@@ -177,6 +184,18 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 @property (nonatomic, assign) BOOL showAdvancedIdentifiers;
 @property (nonatomic, strong) UIButton *showAdvancedButton;
 @property (nonatomic, strong) NSMutableArray *advancedIdentifierViews;
+
+@property (nonatomic, strong) NSMutableArray<NSString *> *selectedResetAppIDs;
+@property (nonatomic, strong) NSMutableArray<NSString *> *selectedRRSAppIDs;
+@property (nonatomic, strong) NSMutableSet<NSString *> *selectionDraftAppIDs;
+@property (nonatomic, copy) NSString *selectionPickerMode;
+@property (nonatomic, strong) UILabel *resetSelectionValueLabel;
+@property (nonatomic, strong) UILabel *rrsSelectionValueLabel;
+@property (nonatomic, strong) UILabel *fakeSelectionValueLabel;
+@property (nonatomic, strong) UITextField *rrsNoteTextField;
+@property (nonatomic, strong) NSDictionary *nextFakeOptions;
+@property (nonatomic, strong) NSDictionary *nextFakePreview;
+@property (nonatomic, copy) NSString *rrsRestoreOrder;
 
 // Modify setupUI method to add a "Show Advanced" button and initially hide the advanced identifier sections
 - (void)setupUI;
@@ -349,6 +368,12 @@ static UIImage *PXRemoveFromScopeIcon(void) {
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ (v%@)", app[@"bundleID"], app[@"version"]];
         cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
         cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+        if (self.selectionPickerMode.length) {
+            NSString *bundleID = app[@"bundleID"];
+            cell.accessoryType = [self.selectionDraftAppIDs containsObject:bundleID] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+        } else {
+            cell.accessoryType = UITableViewCellAccessoryNone;
+        }
         
         return cell;
     } else if (tableView == self.versionsTableView) {
@@ -717,6 +742,15 @@ static UIImage *PXRemoveFromScopeIcon(void) {
         // Handle installed apps selection
         NSDictionary *selectedApp = self.filteredApps[indexPath.row];
         NSString *bundleID = selectedApp[@"bundleID"];
+        if (self.selectionPickerMode.length) {
+            if ([self.selectionDraftAppIDs containsObject:bundleID]) {
+                [self.selectionDraftAppIDs removeObject:bundleID];
+            } else if (bundleID.length) {
+                [self.selectionDraftAppIDs addObject:bundleID];
+            }
+            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+            return;
+        }
         
         if (bundleID) {
             // Add the app to scope
@@ -1006,6 +1040,9 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 #pragma mark - UI Setup
 
 - (void)setupUI {
+    [self setupDashboardUI];
+    return;
+
     // Setup scroll view with refresh control
     self.scrollView = [[UIScrollView alloc] init];
     self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4824,6 +4861,543 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             }
         }];
     }
+}
+
+#pragma mark - Dashboard UI
+
+- (NSArray<NSDictionary *> *)pxSupportedFakeModels {
+    return @[
+        @{ @"name": @"iPhone X", @"id": @"iPhone10,3" },
+        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8" },
+        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2" },
+        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1" },
+        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3" },
+        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2" },
+        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3" },
+        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5" },
+        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2" },
+        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7" },
+        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2" },
+        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4" },
+        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1" },
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2" }
+    ];
+}
+
+- (NSArray<NSString *> *)pxSupportedIOSVersions {
+    return @[ @"13.0", @"13.7", @"14.0", @"14.8", @"15.0", @"15.7", @"16.0", @"16.3.1" ];
+}
+
+- (void)setupDashboardUI {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    self.selectedResetAppIDs = [[defaults objectForKey:PXDashboardResetAppsKey] mutableCopy] ?: [NSMutableArray array];
+    self.selectedRRSAppIDs = [[defaults objectForKey:PXDashboardRRSAppsKey] mutableCopy] ?: [NSMutableArray array];
+    self.nextFakeOptions = [defaults objectForKey:PXDashboardFakeOptionsKey] ?: @{};
+    self.nextFakePreview = [defaults objectForKey:PXDashboardFakePreviewKey];
+    self.rrsRestoreOrder = [defaults stringForKey:PXDashboardRestoreOrderKey] ?: @"oldestFirst";
+
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.title = @"Project X";
+
+    self.scrollView = [[UIScrollView alloc] init];
+    self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scrollView.showsVerticalScrollIndicator = NO;
+    [self.view addSubview:self.scrollView];
+
+    self.mainStackView = [[UIStackView alloc] init];
+    self.mainStackView.axis = UILayoutConstraintAxisVertical;
+    self.mainStackView.spacing = 16;
+    self.mainStackView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.scrollView addSubview:self.mainStackView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.scrollView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.mainStackView.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant:18],
+        [self.mainStackView.leadingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.leadingAnchor constant:18],
+        [self.mainStackView.trailingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.trailingAnchor constant:-18],
+        [self.mainStackView.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-24],
+        [self.mainStackView.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-36]
+    ]];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = @"Project X";
+    titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
+    titleLabel.textAlignment = NSTextAlignmentCenter;
+    [self.mainStackView addArrangedSubview:titleLabel];
+
+    [self.mainStackView addArrangedSubview:[self dashboardStatusCard]];
+
+    UIStackView *actions = [[UIStackView alloc] init];
+    actions.axis = UILayoutConstraintAxisHorizontal;
+    actions.spacing = 12;
+    actions.distribution = UIStackViewDistributionFillEqually;
+    [actions addArrangedSubview:[self dashboardActionCardWithTitle:@"Lưu RRS" subtitle:@"+ Reset Data" color:[UIColor systemBlueColor] icon:@"checkmark.rectangle" selector:@selector(saveRRSThenResetTapped)]];
+    [actions addArrangedSubview:[self dashboardActionCardWithTitle:@"Reset Data" subtitle:@"System Clean" color:[UIColor systemRedColor] icon:@"arrow.clockwise" selector:@selector(resetDataTapped)]];
+    [self.mainStackView addArrangedSubview:actions];
+
+    [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"SELECTION CENTER"]];
+    UIView *selectionCard = [self dashboardGroupCard];
+    UIStackView *selectionStack = (UIStackView *)[selectionCard viewWithTag:7001];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:[UIColor systemIndigoColor] valueLabel:&_resetSelectionValueLabel selector:@selector(selectResetAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"externaldrive.fill.badge.icloud" color:[UIColor systemPinkColor] valueLabel:&_rrsSelectionValueLabel selector:@selector(selectRRSAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"face.smiling.inverse" color:[UIColor systemGrayColor] valueLabel:&_fakeSelectionValueLabel selector:@selector(selectFakeTapped)]];
+    [self.mainStackView addArrangedSubview:selectionCard];
+
+    [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"MANAGEMENT"]];
+    UIView *managementCard = [self dashboardGroupCard];
+    UIStackView *managementStack = (UIStackView *)[managementCard viewWithTag:7001];
+    [managementStack addArrangedSubview:[self dashboardPlainRowWithTitle:@"Quản lý RRS" value:nil selector:@selector(manageRRSTapped)]];
+    [managementStack addArrangedSubview:[self dashboardPlainRowWithTitle:@"Restore nhanh" value:@"⚡" selector:@selector(quickRestoreTapped)]];
+    [self.mainStackView addArrangedSubview:managementCard];
+
+    self.rrsNoteTextField = [[UITextField alloc] init];
+    self.rrsNoteTextField.placeholder = @"Ghi chú khi lưu RRS";
+    self.rrsNoteTextField.borderStyle = UITextBorderStyleNone;
+    self.rrsNoteTextField.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    self.rrsNoteTextField.layer.cornerRadius = 10;
+    self.rrsNoteTextField.font = [UIFont systemFontOfSize:15];
+    self.rrsNoteTextField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
+    self.rrsNoteTextField.leftViewMode = UITextFieldViewModeAlways;
+    [self.rrsNoteTextField.heightAnchor constraintEqualToConstant:44].active = YES;
+    [self.mainStackView addArrangedSubview:self.rrsNoteTextField];
+
+    [self refreshDashboardSelectionLabels];
+}
+
+- (UIView *)dashboardStatusCard {
+    UIView *card = [self dashboardRoundedCard];
+    UIStackView *row = [[UIStackView alloc] init];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 10;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:row];
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"iphone"]];
+    icon.tintColor = [UIColor systemBlueColor];
+    [icon.widthAnchor constraintEqualToConstant:28].active = YES;
+    [icon.heightAnchor constraintEqualToConstant:28].active = YES;
+    [row addArrangedSubview:icon];
+    UILabel *label = [[UILabel alloc] init];
+    NSString *model = [self.manager currentValueForIdentifier:@"DeviceModel"] ?: @"Unknown";
+    NSString *ios = [self.manager currentValueForIdentifier:@"IOSVersion"] ?: @"Unknown";
+    label.text = [NSString stringWithFormat:@"DEVICE STATUS\n%@, %@", ios, model];
+    label.numberOfLines = 2;
+    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [row addArrangedSubview:label];
+    UILabel *state = [[UILabel alloc] init];
+    state.text = @"Connected";
+    state.font = [UIFont systemFontOfSize:12];
+    [row addArrangedSubview:state];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [row.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [row.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [row.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14]
+    ]];
+    return card;
+}
+
+- (UIView *)dashboardRoundedCard {
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    card.layer.cornerRadius = 12;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    return card;
+}
+
+- (UIView *)dashboardGroupCard {
+    UIView *card = [self dashboardRoundedCard];
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.tag = 7001;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 0;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor]
+    ]];
+    return card;
+}
+
+- (UILabel *)dashboardSectionLabel:(NSString *)text {
+    UILabel *label = [[UILabel alloc] init];
+    label.text = text;
+    label.textColor = [UIColor secondaryLabelColor];
+    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    return label;
+}
+
+- (UIButton *)dashboardActionCardWithTitle:(NSString *)title subtitle:(NSString *)subtitle color:(UIColor *)color icon:(NSString *)icon selector:(SEL)selector {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    BOOL filled = [title containsString:@"Lưu"];
+    button.backgroundColor = [color colorWithAlphaComponent:filled ? 1.0 : 0.08];
+    button.layer.cornerRadius = 12;
+    button.tintColor = filled ? [UIColor whiteColor] : color;
+    [button.heightAnchor constraintEqualToConstant:108].active = YES;
+    [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
+    NSString *full = [NSString stringWithFormat:@"%@\n%@", title, subtitle];
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:full attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightBold], NSForegroundColorAttributeName: button.tintColor}];
+    [attr addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:11 weight:UIFontWeightRegular] range:[full rangeOfString:subtitle]];
+    [button setAttributedTitle:attr forState:UIControlStateNormal];
+    button.titleLabel.numberOfLines = 2;
+    button.titleLabel.textAlignment = NSTextAlignmentCenter;
+    if (@available(iOS 13.0, *)) [button setImage:[UIImage systemImageNamed:icon] forState:UIControlStateNormal];
+    return button;
+}
+
+- (UIView *)dashboardSelectionRowWithTitle:(NSString *)title icon:(NSString *)icon color:(UIColor *)color valueLabel:(UILabel **)outLabel selector:(SEL)selector {
+    UIView *row = [self dashboardPlainRowWithTitle:title value:nil selector:selector];
+    UIStackView *stack = (UIStackView *)row.subviews.firstObject;
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:icon]];
+    iconView.tintColor = color;
+    iconView.backgroundColor = [color colorWithAlphaComponent:0.14];
+    iconView.layer.cornerRadius = 6;
+    iconView.contentMode = UIViewContentModeCenter;
+    [iconView.widthAnchor constraintEqualToConstant:28].active = YES;
+    [iconView.heightAnchor constraintEqualToConstant:28].active = YES;
+    [stack insertArrangedSubview:iconView atIndex:0];
+    UILabel *value = [[UILabel alloc] init];
+    value.font = [UIFont systemFontOfSize:13];
+    value.textColor = [UIColor secondaryLabelColor];
+    [stack insertArrangedSubview:value atIndex:2];
+    if (outLabel) *outLabel = value;
+    return row;
+}
+
+- (UIView *)dashboardPlainRowWithTitle:(NSString *)title value:(NSString *)value selector:(SEL)selector {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 10;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:stack];
+    UILabel *label = [[UILabel alloc] init];
+    label.text = title;
+    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    [stack addArrangedSubview:label];
+    [label setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    UILabel *right = [[UILabel alloc] init];
+    right.text = value ?: @"›";
+    right.font = [UIFont systemFontOfSize:18];
+    right.textColor = [UIColor tertiaryLabelColor];
+    [stack addArrangedSubview:right];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:row.topAnchor constant:8],
+        [stack.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:14],
+        [stack.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-14],
+        [stack.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-8]
+    ]];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:selector];
+    [row addGestureRecognizer:tap];
+    row.userInteractionEnabled = YES;
+    return row;
+}
+
+- (NSString *)displayNameForBundleID:(NSString *)bundleID {
+    NSDictionary *info = [self.manager getApplicationInfo:bundleID];
+    return info[@"name"] ?: bundleID;
+}
+
+- (void)refreshDashboardSelectionLabels {
+    self.resetSelectionValueLabel.text = self.selectedResetAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedResetAppIDs.count] : @"None";
+    self.rrsSelectionValueLabel.text = self.selectedRRSAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedRRSAppIDs.count] : @"None";
+    NSString *fakeText = @"Random";
+    NSString *model = self.nextFakePreview[@"DeviceModel"];
+    if (model.length) fakeText = model;
+    self.fakeSelectionValueLabel.text = fakeText;
+}
+
+- (void)persistDashboardSelections {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:self.selectedResetAppIDs ?: @[] forKey:PXDashboardResetAppsKey];
+    [defaults setObject:self.selectedRRSAppIDs ?: @[] forKey:PXDashboardRRSAppsKey];
+    if (self.nextFakeOptions) [defaults setObject:self.nextFakeOptions forKey:PXDashboardFakeOptionsKey];
+    if (self.nextFakePreview) [defaults setObject:self.nextFakePreview forKey:PXDashboardFakePreviewKey];
+    else [defaults removeObjectForKey:PXDashboardFakePreviewKey];
+    [defaults setObject:self.rrsRestoreOrder ?: @"oldestFirst" forKey:PXDashboardRestoreOrderKey];
+    [defaults synchronize];
+}
+
+- (void)selectResetAppsTapped { [self presentDashboardAppPickerWithMode:@"reset"]; }
+- (void)selectRRSAppsTapped { [self presentDashboardAppPickerWithMode:@"rrs"]; }
+
+- (void)presentDashboardAppPickerWithMode:(NSString *)mode {
+    self.selectionPickerMode = mode;
+    NSArray *source = [mode isEqualToString:@"reset"] ? self.selectedResetAppIDs : self.selectedRRSAppIDs;
+    self.selectionDraftAppIDs = [NSMutableSet setWithArray:source ?: @[]];
+
+    UIViewController *picker = [[UIViewController alloc] init];
+    picker.title = [mode isEqualToString:@"reset"] ? @"Chọn App RESET" : @"Chọn App lưu RRS";
+    picker.view.backgroundColor = [UIColor systemBackgroundColor];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:picker];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    picker.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(cancelDashboardAppPicker)];
+    picker.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(doneDashboardAppPicker)];
+
+    self.appSearchBar = [[UISearchBar alloc] init];
+    self.appSearchBar.delegate = self;
+    self.appSearchBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [picker.view addSubview:self.appSearchBar];
+    self.installedAppsTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.installedAppsTableView.delegate = self;
+    self.installedAppsTableView.dataSource = self;
+    self.installedAppsTableView.translatesAutoresizingMaskIntoConstraints = NO;
+    [picker.view addSubview:self.installedAppsTableView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.appSearchBar.topAnchor constraintEqualToAnchor:picker.view.safeAreaLayoutGuide.topAnchor],
+        [self.appSearchBar.leadingAnchor constraintEqualToAnchor:picker.view.leadingAnchor],
+        [self.appSearchBar.trailingAnchor constraintEqualToAnchor:picker.view.trailingAnchor],
+        [self.installedAppsTableView.topAnchor constraintEqualToAnchor:self.appSearchBar.bottomAnchor],
+        [self.installedAppsTableView.leadingAnchor constraintEqualToAnchor:picker.view.leadingAnchor],
+        [self.installedAppsTableView.trailingAnchor constraintEqualToAnchor:picker.view.trailingAnchor],
+        [self.installedAppsTableView.bottomAnchor constraintEqualToAnchor:picker.view.bottomAnchor]
+    ]];
+    [self loadInstalledApps];
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)cancelDashboardAppPicker {
+    self.selectionPickerMode = nil;
+    self.selectionDraftAppIDs = nil;
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)doneDashboardAppPicker {
+    NSArray *selected = [[self.selectionDraftAppIDs allObjects] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    if ([self.selectionPickerMode isEqualToString:@"reset"]) self.selectedResetAppIDs = [selected mutableCopy];
+    else if ([self.selectionPickerMode isEqualToString:@"rrs"]) self.selectedRRSAppIDs = [selected mutableCopy];
+    self.selectionPickerMode = nil;
+    self.selectionDraftAppIDs = nil;
+    [self persistDashboardSelections];
+    [self refreshDashboardSelectionLabels];
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)selectFakeTapped {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Chọn Fake" message:@"Cấu hình fake info cho profile tiếp theo" preferredStyle:UIAlertControllerStyleAlert];
+    NSArray *models = [self pxSupportedFakeModels];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"iOS min (vd 13.0), để trống = random"; tf.text = self.nextFakeOptions[@"iosMin"] ?: @""; }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"iOS max (vd 16.3.1), để trống = random"; tf.text = self.nextFakeOptions[@"iosMax"] ?: @""; }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Model min index 1-14, trống = random"; tf.keyboardType = UIKeyboardTypeNumberPad; tf.text = self.nextFakeOptions[@"modelMinIndex"] ?: @""; }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Model max index 1-14, trống = random"; tf.keyboardType = UIKeyboardTypeNumberPad; tf.text = self.nextFakeOptions[@"modelMaxIndex"] ?: @""; }];
+    NSMutableString *msg = [NSMutableString stringWithString:@"Model index:\n"];
+    [models enumerateObjectsUsingBlock:^(NSDictionary *m, NSUInteger idx, BOOL *stop) {
+        [msg appendFormat:@"%lu. %@ (%@)\n", (unsigned long)idx + 1, m[@"name"], m[@"id"]];
+    }];
+    alert.message = msg;
+    __weak typeof(self) weakSelf = self;
+    UIAlertAction *save = [UIAlertAction actionWithTitle:@"Lưu option" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        weakSelf.nextFakePreview = nil;
+        weakSelf.nextFakeOptions = @{
+            @"iosMin": alert.textFields[0].text ?: @"",
+            @"iosMax": alert.textFields[1].text ?: @"",
+            @"modelMinIndex": alert.textFields[2].text ?: @"",
+            @"modelMaxIndex": alert.textFields[3].text ?: @""
+        };
+        [weakSelf persistDashboardSelections];
+        [weakSelf refreshDashboardSelectionLabels];
+    }];
+    UIAlertAction *random = [UIAlertAction actionWithTitle:@"Random" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        weakSelf.nextFakeOptions = @{
+            @"iosMin": alert.textFields[0].text ?: @"",
+            @"iosMax": alert.textFields[1].text ?: @"",
+            @"modelMinIndex": alert.textFields[2].text ?: @"",
+            @"modelMaxIndex": alert.textFields[3].text ?: @""
+        };
+        weakSelf.nextFakePreview = [weakSelf generateFakePreviewFromOptions:weakSelf.nextFakeOptions];
+        [weakSelf persistDashboardSelections];
+        [weakSelf refreshDashboardSelectionLabels];
+    }];
+    [alert addAction:save];
+    [alert addAction:random];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options {
+    NSArray *models = [self pxSupportedFakeModels];
+    NSInteger minIdx = [options[@"modelMinIndex"] integerValue];
+    NSInteger maxIdx = [options[@"modelMaxIndex"] integerValue];
+    if (minIdx <= 0) minIdx = 1;
+    if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
+    if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
+    NSInteger picked = minIdx - 1 + arc4random_uniform((uint32_t)(maxIdx - minIdx + 1));
+    NSDictionary *model = models[(NSUInteger)picked];
+    return @{ @"DeviceModel": model[@"id"] ?: @"", @"DeviceModelName": model[@"name"] ?: @"" };
+}
+
+- (void)saveRRSThenResetTapped {
+    if (!self.selectedRRSAppIDs.count) { [self showDashboardMessage:@"Thiếu app lưu RRS" message:@"Hãy chọn ít nhất một app trong Chọn App lưu RRS."]; return; }
+    [self showProgressHUDWithTitle:@"Lưu RRS..."];
+    [self backupApps:self.selectedRRSAppIDs index:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings) {
+        [self performResetAndPrepareNextProfileWithWarnings:warnings];
+    }];
+}
+
+- (void)resetDataTapped {
+    [self showProgressHUDWithTitle:@"Reset Data..."];
+    [self performResetAndPrepareNextProfileWithWarnings:@[]];
+}
+
+- (void)performResetAndPrepareNextProfileWithWarnings:(NSArray<NSString *> *)warnings {
+    if (!self.selectedResetAppIDs.count) {
+        [self hideProgressHUD];
+        [self showDashboardMessage:@"Thiếu app reset" message:@"Hãy chọn ít nhất một app trong Chọn App RESET!."];
+        return;
+    }
+    [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] completion:^(NSArray<NSString *> *allWarnings) {
+        [self createNextProfileAndRandomizeWithWarnings:allWarnings];
+    }];
+}
+
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings))completion {
+    if (index >= apps.count) { completion(warnings); return; }
+    NSString *bundleID = apps[index];
+    NSString *name = [self displayNameForBundleID:bundleID];
+    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Backup %@", name]];
+    PXBackupOptions options = PXBackupOptionIncludeAppGroups | PXBackupOptionIncludePreferences;
+    [[AppDataBackupManager shared] createBackupForBundleID:bundleID appName:name options:options completion:^(PXBackupResult *result, NSError *error) {
+        if (error) [warnings addObject:[NSString stringWithFormat:@"Backup %@: %@", name, error.localizedDescription ?: @"failed"]];
+        if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+        [self backupApps:apps index:index + 1 warnings:warnings completion:completion];
+    }];
+}
+
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings))completion {
+    if (index >= apps.count) { completion(warnings); return; }
+    NSString *bundleID = apps[index];
+    NSString *name = [self displayNameForBundleID:bundleID];
+    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Clear %@", name]];
+    [[AppDataCleaner sharedManager] clearDataForBundleID:bundleID completion:^(BOOL success, NSError *error) {
+        if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", name, error.localizedDescription ?: @"failed"]];
+        [self clearApps:apps index:index + 1 warnings:warnings completion:completion];
+    }];
+}
+
+- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
+    ProfileManager *pm = [ProfileManager sharedManager];
+    NSString *profileName = [NSString stringWithFormat:@"Auto %@", [pm generateProfileID]];
+    Profile *newProfile = [[Profile alloc] initWithName:profileName shortDescription:@"Auto-created after Reset Data" iconName:@"person.crop.circle.badge.plus"];
+    [pm createProfile:newProfile completion:^(BOOL success, NSError *error) {
+        if (!success) {
+            [self hideProgressHUD];
+            [self showError:error];
+            return;
+        }
+        [pm switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError *switchError) {
+            if (!switchSuccess) {
+                [self hideProgressHUD];
+                [self showError:switchError];
+                return;
+            }
+            NSDictionary *preview = self.nextFakePreview ?: [self generateFakePreviewFromOptions:self.nextFakeOptions ?: @{}];
+            NSString *model = preview[@"DeviceModel"];
+            if (model.length) {
+                [self.manager setCustomDeviceModel:model];
+            }
+            [self.manager generateIOSVersion];
+            [self.manager regenerateAllEnabledIdentifiers];
+            self.nextFakePreview = nil;
+            [self persistDashboardSelections];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self hideProgressHUD];
+                [self refreshDashboardSelectionLabels];
+                NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", newProfile.profileId, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+                [self showDashboardMessage:@"Hoàn tất" message:msg];
+            });
+        }];
+    }];
+}
+
+- (NSString *)currentProfileRestoreIndexKey {
+    NSString *pid = [ProfileManager sharedManager].currentProfile.profileId ?: @"default";
+    return [PXDashboardRestoreIndexKeyPrefix stringByAppendingString:pid];
+}
+
+- (NSArray<NSString *> *)orderedBackupsForQuickRestoreBundleID:(NSString **)outBundleID appName:(NSString **)outAppName {
+    NSString *bundleID = self.selectedRRSAppIDs.firstObject ?: self.selectedResetAppIDs.firstObject;
+    if (!bundleID.length) return @[];
+    if (outBundleID) *outBundleID = bundleID;
+    if (outAppName) *outAppName = [self displayNameForBundleID:bundleID];
+    NSArray *backups = [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:bundleID];
+    if ([self.rrsRestoreOrder isEqualToString:@"newestFirst"]) return backups;
+    return [[backups reverseObjectEnumerator] allObjects];
+}
+
+- (void)quickRestoreTapped {
+    NSArray<NSString *> *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
+    if (!apps.count) { [self showDashboardMessage:@"Thiếu app" message:@"Hãy chọn app trong Chọn App lưu RRS trước khi Restore nhanh."]; return; }
+    NSInteger idx = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
+
+    NSMutableDictionary<NSString *, NSArray<NSString *> *> *backupMap = [NSMutableDictionary dictionary];
+    for (NSString *bundleID in apps) {
+        NSArray *backups = [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:bundleID];
+        if (![self.rrsRestoreOrder isEqualToString:@"newestFirst"]) {
+            backups = [[backups reverseObjectEnumerator] allObjects];
+        }
+        if (idx >= (NSInteger)backups.count) {
+            [self showDashboardMessage:@"Đã hết backup" message:[NSString stringWithFormat:@"%@ không còn backup ở vị trí %ld.", [self displayNameForBundleID:bundleID], (long)idx + 1]];
+            return;
+        }
+        backupMap[bundleID] = backups;
+    }
+
+    [self showProgressHUDWithTitle:@"Restore nhanh..."];
+    [self restoreQuickApps:apps backupMap:backupMap index:0 restoreIndex:idx warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self hideProgressHUD];
+            [[NSUserDefaults standardUserDefaults] setInteger:idx + 1 forKey:[self currentProfileRestoreIndexKey]];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            NSString *msg = [NSString stringWithFormat:@"Đã restore lượt %ld cho %lu app.%@", (long)idx + 1, (unsigned long)apps.count, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+            [self showDashboardMessage:@"Restore xong" message:msg];
+        });
+    }];
+}
+
+- (void)restoreQuickApps:(NSArray<NSString *> *)apps
+               backupMap:(NSDictionary<NSString *, NSArray<NSString *> *> *)backupMap
+                   index:(NSUInteger)index
+            restoreIndex:(NSInteger)restoreIndex
+                warnings:(NSMutableArray<NSString *> *)warnings
+              completion:(void (^)(NSArray<NSString *> *warnings))completion {
+    if (index >= apps.count) { completion(warnings); return; }
+    NSString *bundleID = apps[index];
+    NSString *appName = [self displayNameForBundleID:bundleID];
+    NSArray *backups = backupMap[bundleID];
+    NSString *dir = backups[(NSUInteger)restoreIndex];
+    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Restore %@", appName]];
+    [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *error) {
+        if (error) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", appName, error.localizedDescription ?: @"failed"]];
+        if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+        [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
+    }];
+}
+
+- (void)manageRRSTapped {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Quản lý RRS" message:@"Cấu hình Restore nhanh" preferredStyle:UIAlertControllerStyleActionSheet];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cũ nhất -> mới nhất" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { self.rrsRestoreOrder = @"oldestFirst"; [self persistDashboardSelections]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Mới nhất -> cũ nhất" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { self.rrsRestoreOrder = @"newestFirst"; [self persistDashboardSelections]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Reset vị trí Restore nhanh" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) { [[NSUserDefaults standardUserDefaults] setInteger:0 forKey:[self currentProfileRestoreIndexKey]]; [[NSUserDefaults standardUserDefaults] synchronize]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) { alert.popoverPresentationController.sourceView = self.view; alert.popoverPresentationController.sourceRect = self.view.bounds; }
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showDashboardMessage:(NSString *)title message:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 #pragma mark - More Options Button Action
