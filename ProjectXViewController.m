@@ -327,13 +327,14 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 }
 
 - (void)configureCheckboxCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
-    cell.textLabel.text = title;
-    cell.accessoryType = [self boolOption:key defaultValue:defaultValue] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    BOOL checked = [self boolOption:key defaultValue:defaultValue];
+    cell.textLabel.text = [NSString stringWithFormat:@"%@ %@", checked ? @"☑" : @"☐", title];
+    cell.accessoryType = UITableViewCellAccessoryNone;
 }
 
 - (void)configureRangeCell:(UITableViewCell *)cell text:(NSString *)text {
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(64, 8, UIScreen.mainScreen.bounds.size.width - 96, 36)];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor systemBlueColor];
@@ -343,6 +344,12 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     label.layer.cornerRadius = 4;
     label.clipsToBounds = YES;
     [cell.contentView addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8],
+        [label.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:64],
+        [label.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-24],
+        [label.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8]
+    ]];
 }
 
 - (NSString *)iosRangeText {
@@ -539,10 +546,12 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 }
 
 - (void)setupFooter {
-    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 74)];
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    if (width <= 0) width = 320;
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 74)];
+    footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.frame = CGRectMake(24, 12, UIScreen.mainScreen.bounds.size.width - 48, 48);
-    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
     button.backgroundColor = [UIColor systemBlueColor];
     button.tintColor = [UIColor whiteColor];
     button.layer.cornerRadius = 12;
@@ -550,6 +559,12 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     [button setTitle:@"Random" forState:UIControlStateNormal];
     [button addTarget:self action:@selector(randomTapped) forControlEvents:UIControlEventTouchUpInside];
     [footer addSubview:button];
+    [NSLayoutConstraint activateConstraints:@[
+        [button.topAnchor constraintEqualToAnchor:footer.topAnchor constant:12],
+        [button.leadingAnchor constraintEqualToAnchor:footer.leadingAnchor constant:16],
+        [button.trailingAnchor constraintEqualToAnchor:footer.trailingAnchor constant:-16],
+        [button.heightAnchor constraintEqualToConstant:48]
+    ]];
     self.tableView.tableFooterView = footer;
 }
 
