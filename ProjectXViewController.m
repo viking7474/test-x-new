@@ -5935,13 +5935,33 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (void)doneDashboardAppPicker {
     NSArray *selected = [[self.selectionDraftAppIDs allObjects] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
-    if ([self.selectionPickerMode isEqualToString:@"reset"]) self.selectedResetAppIDs = [selected mutableCopy];
+    if ([self.selectionPickerMode isEqualToString:@"reset"]) {
+        self.selectedResetAppIDs = [selected mutableCopy];
+        [self syncHookScopeToResetApps];
+    }
     else if ([self.selectionPickerMode isEqualToString:@"rrs"]) self.selectedRRSAppIDs = [selected mutableCopy];
     self.selectionPickerMode = nil;
     self.selectionDraftAppIDs = nil;
     [self persistDashboardSelections];
     [self refreshDashboardSelectionLabels];
     [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)syncHookScopeToResetApps {
+    NSSet<NSString *> *resetSet = [NSSet setWithArray:self.selectedResetAppIDs ?: @[]];
+    NSDictionary *scopedApps = [self.manager getApplicationInfo:nil] ?: @{};
+    for (NSString *bundleID in scopedApps.allKeys) {
+        if (![resetSet containsObject:bundleID]) {
+            [self.manager removeApplicationFromScope:bundleID];
+        }
+    }
+    for (NSString *bundleID in resetSet) {
+        if (![self.manager getApplicationInfo:bundleID]) {
+            [self.manager addApplicationToScope:bundleID];
+        }
+        [self.manager setApplication:bundleID enabled:YES];
+    }
+    [self.manager saveScopedApps];
 }
 
 - (void)selectFakeTapped {
@@ -5956,7 +5976,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [weakSelf refreshDashboardSelectionLabels];
     };
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:nav animated:YES completion:nil];
 }
 
