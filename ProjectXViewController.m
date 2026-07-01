@@ -36,6 +36,7 @@ static NSString * const PXDashboardFakeOptionsKey = @"PXDashboardFakeOptions";
 static NSString * const PXDashboardFakePreviewKey = @"PXDashboardFakePreview";
 static NSString * const PXDashboardRestoreOrderKey = @"PXDashboardRestoreOrder";
 static NSString * const PXDashboardRestoreIndexKeyPrefix = @"PXDashboardRestoreIndex_";
+static NSString * const PXDashboardRestoreEndKeyPrefix = @"PXDashboardRestoreEnd_";
 
 static UIImage *PXDrawCircleIcon(BOOL drawX, BOOL drawMinus) {
     CGSize size = CGSizeMake(24, 24);
@@ -565,6 +566,142 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 
 - (void)doneTapped { if (self.onDone) self.onDone(self.options ?: @{}, self.preview ?: @{}); [self dismissViewControllerAnimated:YES completion:nil]; }
 - (void)cancelTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+@end
+
+@interface PXRRSManagerViewController : UITableViewController <UISearchBarDelegate>
+@property (nonatomic, copy) NSArray<NSDictionary *> *entries;
+@property (nonatomic, strong) NSMutableSet<NSString *> *selectedDirs;
+@property (nonatomic, copy) NSString *filterText;
+@property (nonatomic, assign) NSInteger nextIndex;
+@property (nonatomic, copy) void (^onDelete)(NSArray<NSString *> *dirs);
+@property (nonatomic, copy) void (^onSaveAndRestore)(NSString *backupDir);
+@property (nonatomic, copy) void (^onSequence)(void);
+@property (nonatomic, copy) NSArray<NSDictionary *> *(^onReload)(void);
+@end
+
+@implementation PXRRSManagerViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = [NSString stringWithFormat:@"%lu RRS", (unsigned long)self.entries.count];
+    self.selectedDirs = [NSMutableSet set];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView.delegate = self;
+    self.tableView.dataSource = self;
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.left"] style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)];
+    [self setupHeaderFooter];
+}
+
+- (void)setupHeaderFooter {
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 58)];
+    UIStackView *row = [[UIStackView alloc] initWithFrame:CGRectMake(14, 8, UIScreen.mainScreen.bounds.size.width - 28, 44)];
+    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 8;
+    UIButton *selectAll = [UIButton buttonWithType:UIButtonTypeSystem];
+    [selectAll setImage:[UIImage systemImageNamed:@"square"] forState:UIControlStateNormal];
+    [selectAll addTarget:self action:@selector(selectAllTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [selectAll.widthAnchor constraintEqualToConstant:40].active = YES;
+    UISearchBar *search = [[UISearchBar alloc] init];
+    search.placeholder = @"Lọc RRS";
+    search.delegate = self;
+    UIButton *delete = [UIButton buttonWithType:UIButtonTypeSystem];
+    [delete setTitle:@"Xóa" forState:UIControlStateNormal];
+    delete.backgroundColor = [UIColor systemBlueColor];
+    delete.tintColor = [UIColor whiteColor];
+    delete.layer.cornerRadius = 8;
+    delete.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+    [delete.widthAnchor constraintEqualToConstant:54].active = YES;
+    [delete addTarget:self action:@selector(deleteTapped) forControlEvents:UIControlEventTouchUpInside];
+    [row addArrangedSubview:selectAll];
+    [row addArrangedSubview:search];
+    [row addArrangedSubview:delete];
+    [header addSubview:row];
+    self.tableView.tableHeaderView = header;
+
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 112)];
+    UILabel *next = [[UILabel alloc] initWithFrame:CGRectMake(18, 8, 220, 18)];
+    next.text = @"NEXT:";
+    next.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    [footer addSubview:next];
+    UILabel *value = [[UILabel alloc] initWithFrame:CGRectMake(18, 30, 96, 34)];
+    value.textAlignment = NSTextAlignmentCenter;
+    value.text = [NSString stringWithFormat:@"%ld", (long)self.nextIndex + 1];
+    value.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+    value.layer.borderColor = [UIColor systemBlueColor].CGColor;
+    value.layer.borderWidth = 0.6;
+    value.layer.cornerRadius = 7;
+    value.clipsToBounds = YES;
+    [footer addSubview:value];
+    UIButton *saveRestore = [UIButton buttonWithType:UIButtonTypeSystem];
+    saveRestore.frame = CGRectMake(18, 74, 170, 30);
+    [saveRestore setTitle:@"Lưu RRS & Restore" forState:UIControlStateNormal];
+    saveRestore.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+    [saveRestore addTarget:self action:@selector(saveRestoreTapped) forControlEvents:UIControlEventTouchUpInside];
+    [footer addSubview:saveRestore];
+    UIButton *sequence = [UIButton buttonWithType:UIButtonTypeSystem];
+    sequence.frame = CGRectMake(200, 74, 160, 30);
+    [sequence setTitle:@"Trình tự restore" forState:UIControlStateNormal];
+    sequence.titleLabel.font = [UIFont systemFontOfSize:14];
+    [sequence addTarget:self action:@selector(sequenceTapped) forControlEvents:UIControlEventTouchUpInside];
+    [footer addSubview:sequence];
+    self.tableView.tableFooterView = footer;
+}
+
+- (NSArray<NSDictionary *> *)visibleEntries {
+    if (!self.filterText.length) return self.entries ?: @[];
+    NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, NSDictionary *bindings) {
+        NSString *hay = [NSString stringWithFormat:@"%@ %@ %@ %@", e[@"note"] ?: @"", e[@"checksum"] ?: @"", e[@"ip"] ?: @"", e[@"appName"] ?: @""];
+        return [hay rangeOfString:self.filterText options:NSCaseInsensitiveSearch].location != NSNotFound;
+    }];
+    return [self.entries filteredArrayUsingPredicate:p];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return [self visibleEntries].count; }
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath { return 112; }
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    NSDictionary *e = [self visibleEntries][(NSUInteger)indexPath.row];
+    BOOL selected = [self.selectedDirs containsObject:e[@"dir"] ?: @""];
+    cell.textLabel.text = [NSString stringWithFormat:@"%@  %ld", selected ? @"☑" : @"☐", (long)indexPath.row + 1];
+    cell.textLabel.font = [UIFont systemFontOfSize:13];
+    cell.detailTextLabel.numberOfLines = 5;
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"%@\n%@\nip reset: %@\n%@\n%@", e[@"note"] ?: @"", e[@"checksum"] ?: @"", e[@"ip"] ?: @"", e[@"backupDate"] ?: @"", e[@"restoreDate"] ?: @"(null)"];
+    UILabel *right = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 135, 80)];
+    right.numberOfLines = 4;
+    right.textAlignment = NSTextAlignmentRight;
+    right.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    right.textColor = [UIColor systemBlueColor];
+    right.text = [NSString stringWithFormat:@"%@\n%@", e[@"size"] ?: @"", e[@"appName"] ?: @""];
+    cell.accessoryView = right;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary *e = [self visibleEntries][(NSUInteger)indexPath.row];
+    NSString *dir = e[@"dir"];
+    if ([self.selectedDirs containsObject:dir]) [self.selectedDirs removeObject:dir]; else [self.selectedDirs addObject:dir];
+    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText { self.filterText = searchText; [self.tableView reloadData]; }
+- (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)selectAllTapped:(UIButton *)sender { if (self.selectedDirs.count == [self visibleEntries].count) [self.selectedDirs removeAllObjects]; else for (NSDictionary *e in [self visibleEntries]) [self.selectedDirs addObject:e[@"dir"]]; [self.tableView reloadData]; }
+- (void)deleteTapped { if (self.onDelete) self.onDelete(self.selectedDirs.allObjects); if (self.onReload) self.entries = self.onReload(); [self.selectedDirs removeAllObjects]; self.title = [NSString stringWithFormat:@"%lu RRS", (unsigned long)self.entries.count]; [self.tableView reloadData]; }
+- (void)saveRestoreTapped {
+    NSDictionary *target = nil;
+    if (self.selectedDirs.count) {
+        for (NSDictionary *e in [self visibleEntries]) {
+            if ([self.selectedDirs containsObject:e[@"dir"]]) { target = e; break; }
+        }
+    } else if ([self visibleEntries].count > self.nextIndex) {
+        target = [self visibleEntries][(NSUInteger)self.nextIndex];
+    }
+    if (self.onSaveAndRestore) self.onSaveAndRestore(target[@"dir"]);
+}
+- (void)sequenceTapped { if (self.onSequence) self.onSequence(); }
 
 @end
 
@@ -5553,6 +5690,47 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return info[@"name"] ?: bundleID;
 }
 
+- (NSDateFormatter *)rrsDateFormatter {
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.locale = [NSLocale currentLocale];
+    fmt.dateFormat = @"dd MMMM yyyy\nHH:mm:ss";
+    return fmt;
+}
+
+- (NSString *)rrsShortDateString:(NSDate *)date {
+    NSDateFormatter *fmt = [self rrsDateFormatter];
+    return [fmt stringFromDate:date ?: [NSDate date]];
+}
+
+- (NSString *)rrsFallbackNoteForBundleID:(NSString *)bundleID appName:(NSString *)appName date:(NSDate *)date {
+    NSString *profileName = [ProfileManager sharedManager].currentProfile.name ?: @"Profile";
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"dd-MM HH:mm";
+    return [NSString stringWithFormat:@"%@ + %@ + %@", profileName, appName ?: bundleID ?: @"App", [fmt stringFromDate:date ?: [NSDate date]]];
+}
+
+- (void)updateRRSManifestAtBackupDirectory:(NSString *)backupDir bundleID:(NSString *)bundleID appName:(NSString *)appName note:(NSString *)note {
+    NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
+    NSMutableDictionary *manifest = [NSMutableDictionary dictionaryWithContentsOfFile:manifestPath];
+    if (!manifest) return;
+    NSDate *now = [NSDate date];
+    NSString *trimmed = [note stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    manifest[@"rrsNote"] = trimmed.length ? trimmed : [self rrsFallbackNoteForBundleID:bundleID appName:appName date:now];
+    manifest[@"backupIPAddress"] = [NetworkManager getCurrentLocalIPAddress] ?: @"";
+    if (!manifest[@"restoreAt"]) manifest[@"restoreAt"] = @"";
+    if (!manifest[@"restoreCount"]) manifest[@"restoreCount"] = @0;
+    [manifest writeToFile:manifestPath atomically:YES];
+}
+
+- (void)markRRSManifestRestoredAtBackupDirectory:(NSString *)backupDir {
+    NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
+    NSMutableDictionary *manifest = [NSMutableDictionary dictionaryWithContentsOfFile:manifestPath];
+    if (!manifest) return;
+    manifest[@"restoreAt"] = [NSDate date];
+    manifest[@"restoreCount"] = @([manifest[@"restoreCount"] integerValue] + 1);
+    [manifest writeToFile:manifestPath atomically:YES];
+}
+
 - (void)refreshDashboardSelectionLabels {
     self.resetSelectionValueLabel.text = self.selectedResetAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedResetAppIDs.count] : @"None";
     self.rrsSelectionValueLabel.text = self.selectedRRSAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedRRSAppIDs.count] : @"None";
@@ -5807,6 +5985,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     PXBackupOptions options = PXBackupOptionIncludeAppGroups | PXBackupOptionIncludePreferences;
     [[AppDataBackupManager shared] createBackupForBundleID:bundleID appName:name options:options completion:^(PXBackupResult *result, NSError *error) {
         if (error) [warnings addObject:[NSString stringWithFormat:@"Backup %@: %@", name, error.localizedDescription ?: @"failed"]];
+        if (result.backupDirectory.length) [self updateRRSManifestAtBackupDirectory:result.backupDirectory bundleID:bundleID appName:name note:self.rrsNoteTextField.text ?: @""];
         if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
         [self backupApps:apps index:index + 1 warnings:warnings completion:completion];
     }];
@@ -5859,6 +6038,53 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return [PXDashboardRestoreIndexKeyPrefix stringByAppendingString:pid];
 }
 
+- (NSString *)currentProfileRestoreEndKey {
+    NSString *pid = [ProfileManager sharedManager].currentProfile.profileId ?: @"default";
+    return [PXDashboardRestoreEndKeyPrefix stringByAppendingString:pid];
+}
+
+- (NSString *)rrsFormattedSize:(NSNumber *)bytes {
+    double value = bytes.doubleValue;
+    if (value < 1024.0) return [NSString stringWithFormat:@"%.0f B", value];
+    value /= 1024.0;
+    if (value < 1024.0) return [NSString stringWithFormat:@"%.0f KB", value];
+    value /= 1024.0;
+    return [NSString stringWithFormat:@"%.1f MB", value];
+}
+
+- (NSArray<NSDictionary *> *)rrsEntries {
+    NSMutableArray *entries = [NSMutableArray array];
+    NSArray *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
+    for (NSString *bundleID in apps) {
+        NSArray *dirs = [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:bundleID];
+        if (![self.rrsRestoreOrder isEqualToString:@"newestFirst"]) dirs = [[dirs reverseObjectEnumerator] allObjects];
+        for (NSString *dir in dirs) {
+            NSError *err = nil;
+            NSDictionary *m = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:&err];
+            if (!m) continue;
+            NSDate *created = [m[@"createdAt"] isKindOfClass:[NSDate class]] ? m[@"createdAt"] : nil;
+            id restored = m[@"restoreAt"];
+            NSString *restoreText = @"(null)";
+            if ([restored isKindOfClass:[NSDate class]]) restoreText = [self rrsShortDateString:restored];
+            else if ([restored isKindOfClass:[NSString class]] && [restored length]) restoreText = restored;
+            NSString *checksum = m[@"archiveChecksum"] ?: @"";
+            if (checksum.length > 24) checksum = [checksum substringToIndex:24];
+            [entries addObject:@{
+                @"dir": dir,
+                @"bundleID": m[@"bundleID"] ?: bundleID,
+                @"appName": m[@"appName"] ?: [self displayNameForBundleID:bundleID],
+                @"note": m[@"rrsNote"] ?: [self rrsFallbackNoteForBundleID:bundleID appName:m[@"appName"] date:created],
+                @"checksum": checksum,
+                @"ip": m[@"backupIPAddress"] ?: @"",
+                @"size": [self rrsFormattedSize:m[@"totalSize"] ?: @0],
+                @"backupDate": [self rrsShortDateString:created],
+                @"restoreDate": restoreText
+            }];
+        }
+    }
+    return entries;
+}
+
 - (NSArray<NSString *> *)orderedBackupsForQuickRestoreBundleID:(NSString **)outBundleID appName:(NSString **)outAppName {
     NSString *bundleID = self.selectedRRSAppIDs.firstObject ?: self.selectedResetAppIDs.firstObject;
     if (!bundleID.length) return @[];
@@ -5873,12 +6099,17 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSArray<NSString *> *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
     if (!apps.count) { [self showDashboardMessage:@"Thiếu app" message:@"Hãy chọn app trong Chọn App lưu RRS trước khi Restore nhanh."]; return; }
     NSInteger idx = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
+    NSInteger end = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreEndKey]];
 
     NSMutableDictionary<NSString *, NSArray<NSString *> *> *backupMap = [NSMutableDictionary dictionary];
     for (NSString *bundleID in apps) {
         NSArray *backups = [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:bundleID];
         if (![self.rrsRestoreOrder isEqualToString:@"newestFirst"]) {
             backups = [[backups reverseObjectEnumerator] allObjects];
+        }
+        if (end > 0 && idx >= end) {
+            [self showDashboardMessage:@"Đã hết backup" message:[NSString stringWithFormat:@"Đã restore hết đến vị trí %ld.", (long)end]];
+            return;
         }
         if (idx >= (NSInteger)backups.count) {
             [self showDashboardMessage:@"Đã hết backup" message:[NSString stringWithFormat:@"%@ không còn backup ở vị trí %ld.", [self displayNameForBundleID:bundleID], (long)idx + 1]];
@@ -5910,21 +6141,93 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSString *appName = [self displayNameForBundleID:bundleID];
     NSArray *backups = backupMap[bundleID];
     NSString *dir = backups[(NSUInteger)restoreIndex];
-    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Restore %@", appName]];
-    [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *error) {
-        if (error) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", appName, error.localizedDescription ?: @"failed"]];
-        if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-        [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
+    NSDictionary *manifest = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:nil];
+    NSString *manifestBundleID = manifest[@"bundleID"] ?: bundleID;
+    NSString *manifestAppName = manifest[@"appName"] ?: appName;
+    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Clear %@", manifestAppName]];
+    [[AppDataCleaner sharedManager] clearDataForBundleID:manifestBundleID completion:^(BOOL clearSuccess, NSError *clearError) {
+        if (!clearSuccess) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", manifestAppName, clearError.localizedDescription ?: @"failed"]];
+        [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Restore %@", manifestAppName]];
+        [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:manifestBundleID appName:manifestAppName completion:^(PXRestoreResult *result, NSError *error) {
+            if (error) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", manifestAppName, error.localizedDescription ?: @"failed"]];
+            if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+            [self markRRSManifestRestoredAtBackupDirectory:dir];
+            [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
+        }];
     }];
 }
 
 - (void)manageRRSTapped {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Quản lý RRS" message:@"Cấu hình Restore nhanh" preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cũ nhất -> mới nhất" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { self.rrsRestoreOrder = @"oldestFirst"; [self persistDashboardSelections]; }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Mới nhất -> cũ nhất" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { self.rrsRestoreOrder = @"newestFirst"; [self persistDashboardSelections]; }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Reset vị trí Restore nhanh" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) { [[NSUserDefaults standardUserDefaults] setInteger:0 forKey:[self currentProfileRestoreIndexKey]]; [[NSUserDefaults standardUserDefaults] synchronize]; }]];
+    PXRRSManagerViewController *vc = [[PXRRSManagerViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    vc.entries = [self rrsEntries];
+    vc.nextIndex = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
+    __weak typeof(self) weakSelf = self;
+    vc.onReload = ^NSArray<NSDictionary *> *{ return [weakSelf rrsEntries]; };
+    vc.onDelete = ^(NSArray<NSString *> *dirs) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *dir in dirs) [fm removeItemAtPath:dir error:nil];
+    };
+    vc.onSaveAndRestore = ^(NSString *backupDir) {
+        if (!backupDir.length) { [weakSelf showDashboardMessage:@"Thiếu RRS" message:@"Không tìm thấy file RRS để restore."]; return; }
+        [weakSelf saveCurrentRRSThenRestoreBackupDirectory:backupDir];
+    };
+    vc.onSequence = ^{ [weakSelf presentRRSSequenceModal]; };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)saveCurrentRRSThenRestoreBackupDirectory:(NSString *)backupDir {
+    NSArray *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
+    if (!apps.count) { [self showDashboardMessage:@"Thiếu app" message:@"Hãy chọn app lưu RRS hoặc app reset trước."]; return; }
+    [self showProgressHUDWithTitle:@"Lưu RRS..."];
+    [self backupApps:apps index:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings) {
+        [self restoreBackupDirectoryAfterClearingManifestApp:backupDir warnings:[warnings mutableCopy]];
+    }];
+}
+
+- (void)restoreBackupDirectoryAfterClearingManifestApp:(NSString *)backupDir warnings:(NSMutableArray<NSString *> *)warnings {
+    NSError *manifestError = nil;
+    NSDictionary *manifest = [[AppDataBackupManager shared] readManifestAtBackupDirectory:backupDir error:&manifestError];
+    NSString *bundleID = manifest[@"bundleID"];
+    NSString *appName = manifest[@"appName"] ?: [self displayNameForBundleID:bundleID];
+    if (!bundleID.length) {
+        [self hideProgressHUD];
+        [self showDashboardMessage:@"RRS lỗi" message:@"Không đọc được app trong manifest backup."];
+        return;
+    }
+    [self updateProgress:0.4 detail:[NSString stringWithFormat:@"Clear %@", appName]];
+    [[AppDataCleaner sharedManager] clearDataForBundleID:bundleID completion:^(BOOL success, NSError *error) {
+        if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", appName, error.localizedDescription ?: @"failed"]];
+        [self updateProgress:0.7 detail:[NSString stringWithFormat:@"Restore %@", appName]];
+        [[AppDataBackupManager shared] restoreBackupAtDirectory:backupDir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *restoreError) {
+            if (restoreError) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", appName, restoreError.localizedDescription ?: @"failed"]];
+            if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+            [self markRRSManifestRestoredAtBackupDirectory:backupDir];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self hideProgressHUD];
+                NSString *msg = [NSString stringWithFormat:@"Đã restore %@.%@", appName, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+                [self showDashboardMessage:@"Restore xong" message:msg];
+            });
+        }];
+    }];
+}
+
+- (void)presentRRSSequenceModal {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Trình tự restore" message:@"Chọn thứ tự hoặc nhập begin/end" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"begin (trống = next)"; tf.keyboardType = UIKeyboardTypeNumberPad; }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"end (trống = cuối)"; tf.keyboardType = UIKeyboardTypeNumberPad; }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Từ đầu đến cuối" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { self.rrsRestoreOrder = @"oldestFirst"; [[NSUserDefaults standardUserDefaults] setInteger:0 forKey:[self currentProfileRestoreIndexKey]]; [[NSUserDefaults standardUserDefaults] removeObjectForKey:[self currentProfileRestoreEndKey]]; [self persistDashboardSelections]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Ngược lại" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { self.rrsRestoreOrder = @"newestFirst"; [[NSUserDefaults standardUserDefaults] setInteger:0 forKey:[self currentProfileRestoreIndexKey]]; [[NSUserDefaults standardUserDefaults] removeObjectForKey:[self currentProfileRestoreEndKey]]; [self persistDashboardSelections]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Theo số thứ tự" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        NSInteger begin = [alert.textFields[0].text integerValue];
+        NSInteger end = [alert.textFields[1].text integerValue];
+        if (begin > 0) [[NSUserDefaults standardUserDefaults] setInteger:begin - 1 forKey:[self currentProfileRestoreIndexKey]];
+        if (end > 0) [[NSUserDefaults standardUserDefaults] setInteger:end forKey:[self currentProfileRestoreEndKey]];
+        else [[NSUserDefaults standardUserDefaults] removeObjectForKey:[self currentProfileRestoreEndKey]];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) { alert.popoverPresentationController.sourceView = self.view; alert.popoverPresentationController.sourceRect = self.view.bounds; }
     [self presentViewController:alert animated:YES completion:nil];
 }
 
