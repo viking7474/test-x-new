@@ -3,6 +3,7 @@
 #import <substrate.h>
 #import "BatteryManager.h"
 #import "IdentifierManager.h"
+#import "PXScope.h"
 
 // Path to scoped apps plist
 static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
@@ -99,20 +100,8 @@ static BOOL isInScopedAppsList(void) {
 // Helper: should spoof battery for this bundle (with cache)
 static BOOL shouldSpoofBatteryForBundle(NSString *bundleID) {
     if (!bundleID) return NO;
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        if (cachedDecision && decisionTimestamp &&
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    BOOL isScoped = isInScopedAppsList();
-    cachedBundleDecisions[bundleID] = @(isScoped);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    return isScoped;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
 }
 
 // Helper to check if battery spoofing is enabled for this app/profile
@@ -217,4 +206,4 @@ static NSInteger hook_batteryState(UIDevice *self, SEL _cmd) {
             MSHookMessageEx(deviceClass, @selector(batteryState), (IMP)hook_batteryState, (IMP *)&orig_batteryState);
         }
     }
-} 
+}

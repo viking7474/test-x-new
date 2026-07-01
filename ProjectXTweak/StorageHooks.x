@@ -296,55 +296,12 @@ static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize) {
 // Helper function to check if storage spoofing should be applied
 // This centralizes the bundleID checks to avoid repeating them in every hook
 static BOOL shouldApplyStorageSpoofing() {
-    static NSMutableDictionary *cachedDecisions = nil;
-    static NSTimeInterval lastCleanupTime = 0;
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes in seconds
-    
-    // Initialize cache if needed
-    if (!cachedDecisions) {
-        cachedDecisions = [NSMutableDictionary dictionary];
-    }
-    
-    // Clean cache every 5 minutes to prevent memory growth
-    if (now - lastCleanupTime > kCacheValidityDuration) {
-        [cachedDecisions removeAllObjects];
-        lastCleanupTime = now;
-    }
-    
-    // Get current bundle ID
     NSString *currentBundleID = getCurrentBundleID();
     if (!currentBundleID || [currentBundleID length] == 0) {
         return NO;
     }
-    
-    // Check if we have a cached decision for this bundle ID with a valid timestamp
-    NSNumber *cachedDecision = cachedDecisions[currentBundleID];
-    NSDate *decisionTimestamp = cachedDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]];
-        
-    if (cachedDecision && decisionTimestamp && 
-        [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-        return [cachedDecision boolValue];
-    }
-    
-    // Exclude system processes and critical system apps, except Safari/Auth stack when enabled.
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([currentBundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc))) {
-        
-        // Cache the negative decision with timestamp
-        cachedDecisions[currentBundleID] = @NO;
-        cachedDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        return NO;
-    }
-    
-    // Exclude our own apps
-    if ([currentBundleID isEqualToString:@"com.hydra.projectx"] || 
-        [currentBundleID isEqualToString:@"com.hydra.weaponx"]) {
-        cachedDecisions[currentBundleID] = @NO;
-        cachedDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        return NO;
-    }
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
     
     // Additional blacklist for known problematic apps
     NSArray *problematicApps = @[
@@ -362,20 +319,9 @@ static BOOL shouldApplyStorageSpoofing() {
     ];
     
     if ([problematicApps containsObject:currentBundleID]) {
-        // Cache the negative decision with timestamp
-        cachedDecisions[currentBundleID] = @NO;
-        cachedDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
         return NO;
     }
-    
-    // Check if the current app is a scoped app
-    BOOL isScoped = isInScopedAppsList();
-    
-    // Cache the decision with timestamp
-    cachedDecisions[currentBundleID] = @(isScoped);
-    cachedDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    
-    return isScoped;
+    return YES;
 }
 
 // Function to get storage values with universal compatibility
@@ -1005,17 +951,8 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                 return;
             }
 
-            // Don't hook system processes, except Safari/Auth stack when enabled.
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if ([currentBundleID hasPrefix:@"com.apple."] &&
-                !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc))) {
-                PXLog(@"[StorageHooks] Not hooking system process: %@", currentBundleID);
-                return;
-            }
-            
-            // Only install hooks if app is scoped, OR if Safari/Auth stack spoof is enabled.
-            if (!isInScopedAppsList() && !PXAllowUnscopedSafariStack()) {
-                // App is NOT scoped - no hooks, no interference, no crashes
+            if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
                 PXLog(@"[StorageHooks] App %@ is not scoped, skipping hook installation", currentBundleID);
                 return;
             }

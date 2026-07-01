@@ -472,8 +472,10 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
 %ctor {
     @autoreleasepool {
         PXLog(@"[CanvasFingerprint] Initializing Canvas Fingerprint Protection hooks");
-        BOOL allowSafari = PXAllowUnscopedSafariStack() && (isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled() || PXDisplayWebScreenSpoofEnabled());
-        if (!isInScopedAppsList() && !allowSafari) {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        PXScopeOptions options = (isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled() || PXDisplayWebScreenSpoofEnabled()) ? PXScopeOptionAllowSafariAuthStack : PXScopeOptionNone;
+        if (!PXProcessIsAllowedForSpoofing(bundleID, proc, options)) {
             PXLog(@"[CanvasFingerprint] App is not scoped, skipping hook installation");
             return;
         }

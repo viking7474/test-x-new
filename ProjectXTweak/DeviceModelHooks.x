@@ -4,6 +4,7 @@
 #import "ProfileManager.h"
 #import "ProjectXLogging.h"
 #import "HookOwnership.h"
+#import "PXScope.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <sys/utsname.h>
@@ -53,40 +54,19 @@ static BOOL isDeviceModelSpoofingEnabled() {
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!currentBundleID) return NO;
     
-    // Initialize cache if needed
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    });
-    
-    // Check cache first
-    @synchronized(cachedBundleDecisions) {
-        NSNumber *cachedDecision = cachedBundleDecisions[currentBundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
     // Single source of truth: IdentifierManager settings + scope.
     BOOL shouldSpoof = NO;
     @try {
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
         if (NSClassFromString(@"IdentifierManager")) {
             IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-            if (manager && [manager isApplicationEnabled:currentBundleID] && [manager isIdentifierEnabled:@"DeviceModel"]) {
+            if (manager && [manager isIdentifierEnabled:@"DeviceModel"]) {
                 shouldSpoof = YES;
             }
         }
     } @catch (__unused NSException *exception) {
         shouldSpoof = NO;
-    }
-    
-    // Cache the decision
-    @synchronized(cachedBundleDecisions) {
-        cachedBundleDecisions[currentBundleID] = @(shouldSpoof);
-        cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
     }
     
     return shouldSpoof;
@@ -520,7 +500,8 @@ static int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
         @try {
             if (NSClassFromString(@"IdentifierManager")) {
                 IdentifierManager *mgr = [NSClassFromString(@"IdentifierManager") sharedManager];
-                if (mgr && [mgr isApplicationEnabled:bundleID] && [mgr isIdentifierEnabled:@"IOSVersion"]) {
+                NSString *proc = [NSProcessInfo processInfo].processName;
+                if (mgr && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack) && [mgr isIdentifierEnabled:@"IOSVersion"]) {
                     NSString *identityDir = [mgr profileIdentityPath];
                     NSDictionary *deviceIds = identityDir.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
                     NSDictionary *current = nil;
@@ -898,17 +879,9 @@ static void logDeviceModelAccess(const char* method, NSString* bundleID) {
             return;
         }
         
-        // Don't hook system processes
-        if ([currentBundleID hasPrefix:@"com.apple."] || 
-            [currentBundleID isEqualToString:@"com.hydra.projectx"] || 
-            [currentBundleID isEqualToString:@"com.hydra.weaponx"]) {
-            PXLog(@"[model] Not hooking system process: %@", currentBundleID);
-            return;
-        }
-        
-        // Check if this app is even enabled for spoofing before initializing hooks
         IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-        if (!manager || ![manager isApplicationEnabled:currentBundleID]) {
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!manager || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             PXLog(@"[model] App %@ is not enabled for spoofing, not initializing hooks", currentBundleID);
             return;
         }

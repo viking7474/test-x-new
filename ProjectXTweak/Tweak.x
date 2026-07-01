@@ -343,7 +343,8 @@ static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
             if (%c(IdentifierManager)) {
                 IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
                 NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-                if (manager && bundleID && [manager isApplicationEnabled:bundleID]) {
+                NSString *proc = [NSProcessInfo processInfo].processName;
+                if (manager && bundleID && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
                     NSString *profileId = nil;
                     NSNumber *gen = nil;
                     NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
@@ -457,7 +458,8 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
 
             IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            if (!manager || !bundleID || ![manager isApplicationEnabled:bundleID] || ![manager isIdentifierEnabled:@"IOSVersion"]) {
+            NSString *proc = [NSProcessInfo processInfo].processName;
+            if (!manager || !bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack) || ![manager isIdentifierEnabled:@"IOSVersion"]) {
                 return original;
             }
 
@@ -540,9 +542,10 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     }
     
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-    if (!manager || ![manager isApplicationEnabled:bundleID]) {
-         px_sysctlbyname_in_hook = NO;
-         return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!manager || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+          px_sysctlbyname_in_hook = NO;
+          return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
     }
 
     NSString *profileId = nil;
@@ -701,7 +704,8 @@ static int uname_hook(struct utsname *buf) {
         if (!%c(IdentifierManager)) return ret;
         IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!manager || !bundleID || ![manager isApplicationEnabled:bundleID]) return ret;
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!manager || !bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return ret;
         
         if ([manager isIdentifierEnabled:@"DeviceModel"]) {
             NSString *profileId = nil;
@@ -743,9 +747,8 @@ static int uname_hook(struct utsname *buf) {
     
     PXLog(@"MGCopyAnswer requested for property: %@ by app: %@", propertyString, currentBundleID);
     
-    // Allow spoofing for Safari/Auth stack when enabled.
-    BOOL safariAllowed = PXAllowUnscopedSafariStack();
-    if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
         return %orig;
     }
 
@@ -892,9 +895,7 @@ static int uname_hook(struct utsname *buf) {
     PXLog(@"IDFA requested by app: %@", currentBundleID);
 
     NSString *proc = [NSProcessInfo processInfo].processName;
-    BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-
-    if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
         PXLog(@"App not in scope or disabled, passing through original IDFA");
         return %orig;
     }
@@ -932,11 +933,7 @@ static int uname_hook(struct utsname *buf) {
             return originalIdentifier;
         }
         NSString *proc = [NSProcessInfo processInfo].processName;
-        BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-        if ([currentBundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-            return originalIdentifier;
-        }
-        if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return originalIdentifier;
         }
         
@@ -990,11 +987,7 @@ static int uname_hook(struct utsname *buf) {
             return originalName;
         }
         NSString *proc = [NSProcessInfo processInfo].processName;
-        BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-        if ([currentBundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-            return originalName;
-        }
-        if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return originalName;
         }
         
@@ -1033,9 +1026,7 @@ static int uname_hook(struct utsname *buf) {
     PXLog(@"ubiquityIdentityToken requested by app: %@", currentBundleID);
 
     NSString *proc = [NSProcessInfo processInfo].processName;
-    BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-
-    if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
         PXLog(@"App not in scope or disabled, passing through original ubiquityIdentityToken");
         return %orig;
     }
@@ -1068,9 +1059,7 @@ static int uname_hook(struct utsname *buf) {
     PXLog(@"NSHost currentHost requested by app: %@", currentBundleID);
 
     NSString *proc = [NSProcessInfo processInfo].processName;
-    BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-
-    if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
         PXLog(@"App not in scope, returning original host info");
         return originalHost;
     }
@@ -1102,11 +1091,7 @@ static int uname_hook(struct utsname *buf) {
             return originalName;
         }
         NSString *proc = [NSProcessInfo processInfo].processName;
-        BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-        if ([currentBundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-            return originalName;
-        }
-        if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return originalName;
         }
         
@@ -1150,11 +1135,7 @@ static int uname_hook(struct utsname *buf) {
             return original;
         }
         NSString *proc = [NSProcessInfo processInfo].processName;
-        BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-        if ([currentBundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-            return original;
-        }
-        if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return original;
         }
         
@@ -1188,11 +1169,7 @@ static int uname_hook(struct utsname *buf) {
             return original;
         }
         NSString *proc = [NSProcessInfo processInfo].processName;
-        BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-        if ([currentBundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-            return original;
-        }
-        if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return original;
         }
         
@@ -1227,11 +1204,7 @@ static int uname_hook(struct utsname *buf) {
             return original;
         }
         NSString *proc = [NSProcessInfo processInfo].processName;
-        BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc));
-        if ([currentBundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-            return original;
-        }
-        if (!safariAllowed && ![manager isApplicationEnabled:currentBundleID]) {
+        if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return original;
         }
         
@@ -1382,6 +1355,12 @@ static int uname_hook(struct utsname *buf) {
 %end // End ScreenshotModifier group
 
 // Define hook group for location spoofing
+static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSString *bundleID) {
+    if (!manager || ![manager isSpoofingEnabled] || !bundleID.length) return NO;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
+}
+
 %group LocationSpoofing
 
 // Hook CLLocationManager to intercept location updates
@@ -1415,7 +1394,7 @@ static int uname_hook(struct utsname *buf) {
                     
                     if (manager && bundleID) {
                         BOOL isSpoofingEnabled = [manager isSpoofingEnabled];
-                        BOOL shouldSpoofApp = [manager shouldSpoofApp:bundleID];
+                        BOOL shouldSpoofApp = PXLocationManagerShouldSpoof(manager, bundleID);
                         
                         if (isSpoofingEnabled && shouldSpoofApp) {
                             double lat = [manager getSpoofedLatitude];
@@ -1449,7 +1428,7 @@ static int uname_hook(struct utsname *buf) {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         
         // Only proceed if this is an app we're monitoring
-        if (bundleID && manager && [manager isSpoofingEnabled] && [manager shouldSpoofApp:bundleID]) {
+        if (PXLocationManagerShouldSpoof(manager, bundleID)) {
             // Ensure high accuracy for our spoofed locations
             PXLog(@"[WeaponX] App %@ requested accuracy %.1f, ensuring best accuracy for spoofing", 
                   bundleID, accuracy);
@@ -1563,7 +1542,7 @@ static int uname_hook(struct utsname *buf) {
         }
         
         // Check if we should spoof this app
-        if (![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             threadDictionary[kRecursionGuardKey] = nil;
             return originalCoordinate;
         }
@@ -1637,7 +1616,7 @@ static int uname_hook(struct utsname *buf) {
     
     // Get the current bundle ID
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID || ![spoofManager shouldSpoofApp:bundleID]) {
+    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
         %orig;
         return;
     }
@@ -1697,7 +1676,7 @@ static int uname_hook(struct utsname *buf) {
     
         // Get the current bundle ID
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID || ![spoofManager shouldSpoofApp:bundleID]) {
+    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
             %orig;
             return;
         }
@@ -1915,7 +1894,7 @@ static int uname_hook(struct utsname *buf) {
     LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
-    if (manager && [manager isSpoofingEnabled] && bundleID && [manager shouldSpoofApp:bundleID]) {
+    if (PXLocationManagerShouldSpoof(manager, bundleID)) {
         // Return a reasonable speed value (walking pace)
         return 1.5;
     }
@@ -1927,7 +1906,7 @@ static int uname_hook(struct utsname *buf) {
     LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
-    if (manager && [manager isSpoofingEnabled] && bundleID && [manager shouldSpoofApp:bundleID]) {
+    if (PXLocationManagerShouldSpoof(manager, bundleID)) {
         // Return a fixed direction (North = 0 degrees)
         return 0.0;
     }
@@ -1951,7 +1930,7 @@ static int uname_hook(struct utsname *buf) {
     LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
-    if (!spoofManager || !bundleID || ![spoofManager isSpoofingEnabled] || ![spoofManager shouldSpoofApp:bundleID]) {
+    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
         %orig;
         return;
     }
@@ -1980,7 +1959,7 @@ static int uname_hook(struct utsname *buf) {
     LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
-    if (!spoofManager || !bundleID || ![spoofManager isSpoofingEnabled] || ![spoofManager shouldSpoofApp:bundleID]) {
+    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
         %orig;
         return;
     }
@@ -2008,7 +1987,7 @@ static int uname_hook(struct utsname *buf) {
     LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
-    if (!spoofManager || !bundleID || ![spoofManager isSpoofingEnabled] || ![spoofManager shouldSpoofApp:bundleID]) {
+    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
         %orig;
         return;
     }
@@ -2037,7 +2016,7 @@ static int uname_hook(struct utsname *buf) {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
-        if (!manager || !bundleID || ![manager isSpoofingEnabled] || ![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             return originalUserLocation;
         }
         
@@ -2071,7 +2050,7 @@ static int uname_hook(struct utsname *buf) {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
-        if (!manager || !bundleID || ![manager isSpoofingEnabled] || ![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             return originalCoordinate;
         }
         
@@ -2113,7 +2092,7 @@ static int uname_hook(struct utsname *buf) {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
-        if (!manager || !bundleID || ![manager isSpoofingEnabled] || ![manager shouldSpoofApp:bundleID] || !location || !completionHandler) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID) || !location || !completionHandler) {
             %orig;
             return;
         }
@@ -2145,7 +2124,7 @@ static int uname_hook(struct utsname *buf) {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
-        if (!manager || !bundleID || ![manager isSpoofingEnabled] || ![manager shouldSpoofApp:bundleID] || !addressString || !completionHandler) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID) || !addressString || !completionHandler) {
             %orig;
             return;
         }
@@ -2194,7 +2173,7 @@ static int uname_hook(struct utsname *buf) {
         
         // Get the current bundle ID
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID || ![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             return %orig;
         }
         
@@ -2256,7 +2235,7 @@ static int uname_hook(struct utsname *buf) {
         
         // Get the current bundle ID
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID || ![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             return %orig;
         }
         
@@ -2326,7 +2305,7 @@ static int uname_hook(struct utsname *buf) {
         
         // Get the current bundle ID
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID || ![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             return %orig;
         }
         
@@ -2390,7 +2369,7 @@ static int uname_hook(struct utsname *buf) {
         
         // Get the current bundle ID
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID || ![manager shouldSpoofApp:bundleID]) {
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
             %orig;
             return;
         }
@@ -2563,7 +2542,8 @@ static int getifaddrs_hook(struct ifaddrs **ifap) {
         }
         
         IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-        if (!manager || ![manager isApplicationEnabled:currentBundleID]) {
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!manager || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionNone)) {
             return result; // Skip if app is not in scoped list
         }
         
@@ -2601,7 +2581,8 @@ static int gethostname_hook(char *name, size_t namelen) {
     }
     
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-    if (!manager || ![manager isApplicationEnabled:currentBundleID]) {
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!manager || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionNone)) {
         return result; // Skip if app is not in scoped list
     }
     
@@ -2633,7 +2614,8 @@ static void antiDetectionCallback(void) {
     }
     
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-    if (!manager || ![manager isApplicationEnabled:currentBundleID]) {
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!manager || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionNone)) {
         return; // Skip if app is not in scoped list
     }
     
@@ -2649,14 +2631,7 @@ static CFTypeRef (*orig_IORegistryEntrySearchCFProperty)(io_registry_entry_t ent
 static BOOL PXIOKitShouldSpoof(IdentifierManager *manager, NSString *bundleID) {
     if (!manager || !bundleID.length) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
-    BOOL safariAllowed = (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc));
-    if ([bundleID hasPrefix:@"com.apple."] && !safariAllowed) {
-        return NO;
-    }
-    if (!safariAllowed && ![manager isApplicationEnabled:bundleID]) {
-        return NO;
-    }
-    return YES;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
 static CFTypeRef PXIOKitCreateReplacementMatchingOriginal(CFTypeRef original, NSString *value) {
@@ -3251,7 +3226,8 @@ static char* hook_GSSystemGetSerialNo(void) {
         return serialStr;
     }
     
-    if (![manager isApplicationEnabled:currentBundleID]) {
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
         PXLog(@"App not in scope or disabled, passing through original serial number");
         return orig_GSSystemGetSerialNo();
     }
@@ -3301,7 +3277,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     if (currentBundleID) {
         IdentifierManager *mgr = [%c(IdentifierManager) sharedManager];
         if (mgr) {
-            BOOL enabled = [mgr isApplicationEnabled:currentBundleID];
+            BOOL enabled = PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack);
             PXLog(@"[WeaponX] 🔍 App Enabled Check: %@ -> %@", currentBundleID, enabled ? @"YES" : @"NO");
             
             if (enabled) {
@@ -3506,7 +3482,8 @@ static char* hook_GSSystemGetSerialNo(void) {
             }
             
             IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-            if (!manager || ![manager isApplicationEnabled:bundleID]) {
+            NSString *proc = [NSProcessInfo processInfo].processName;
+            if (!manager || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)) {
                 PXLog(@"App %@ not in scoped list, skipping anti-jailbreak protection", bundleID);
                 return;
             }

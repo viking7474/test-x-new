@@ -194,79 +194,37 @@ static BOOL isInScopedAppsList(void) {
 static BOOL isSpoofingEnabled(void) {
     NSString *currentBundleID = getCurrentBundleID();
     if (!currentBundleID) return NO;
-    
-    // Initialize cache if needed
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    });
-    
-    // Check cache first
-    @synchronized(cachedBundleDecisions) {
-        NSNumber *cachedDecision = cachedBundleDecisions[currentBundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
-    // Exclude system processes, except Safari/Auth stack when enabled.
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([currentBundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc))) {
-        @synchronized(cachedBundleDecisions) {
-            cachedBundleDecisions[currentBundleID] = @NO;
-            cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        }
-        return NO;
-    }
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
     
     // Check if the current app is a scoped app AND if device model spoofing is enabled
     BOOL shouldSpoof = NO;
     @try {
-        // First check if this app is in the scoped apps list (or is Safari/Auth stack and enabled)
-        BOOL isScoped = isInScopedAppsList() || PXAllowUnscopedSafariStack();
-        if (!isScoped) {
-            shouldSpoof = NO;
-        } else {
-            // Now check if device model spoofing is specifically enabled
-            BOOL managerCheckPassed = NO;
-            if (NSClassFromString(@"IdentifierManager")) {
-                IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-                if (manager && [manager isIdentifierEnabled:@"DeviceModel"]) {
-                    shouldSpoof = YES;
-                    managerCheckPassed = YES;
-                }
+        BOOL managerCheckPassed = NO;
+        if (NSClassFromString(@"IdentifierManager")) {
+            IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
+            if (manager && [manager isIdentifierEnabled:@"DeviceModel"]) {
+                shouldSpoof = YES;
+                managerCheckPassed = YES;
             }
-            
-            // If manager check failed (or class missing), try profile settings directly
-            if (!managerCheckPassed) {
-                // Try to get profile settings directly from file
-                NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-                NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-                NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-                
-                NSString *profileId = centralInfo[@"ProfileId"];
-                if (profileId) {
-                    NSString *profileSettingsPath = [profilesPath stringByAppendingPathComponent:[profileId stringByAppendingPathComponent:@"settings.plist"]];
-                    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:profileSettingsPath];
-                    if (settings && settings[@"deviceModelEnabled"]) {
-                        shouldSpoof = [settings[@"deviceModelEnabled"] boolValue];
-                    }
+        }
+
+        if (!managerCheckPassed) {
+            NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
+            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
+            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
+            NSString *profileId = centralInfo[@"ProfileId"];
+            if (profileId) {
+                NSString *profileSettingsPath = [profilesPath stringByAppendingPathComponent:[profileId stringByAppendingPathComponent:@"settings.plist"]];
+                NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:profileSettingsPath];
+                if (settings && settings[@"deviceModelEnabled"]) {
+                    shouldSpoof = [settings[@"deviceModelEnabled"] boolValue];
                 }
             }
         }
     } @catch (NSException *exception) {
         PXLog(@"[DeviceSpec] Exception checking if device model spoofing is enabled: %@", exception);
         shouldSpoof = NO;
-    }
-    
-    // Cache the decision
-    @synchronized(cachedBundleDecisions) {
-        cachedBundleDecisions[currentBundleID] = @(shouldSpoof);
-        cachedBundleDecisions[[currentBundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
     }
     
     return shouldSpoof;
@@ -459,7 +417,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     // In FullSpoof test mode we override this to intentionally stress web flows.
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     NSString *procName = [[NSProcessInfo processInfo] processName];
-    if (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, procName) && !PXFullSpoofTestModeEnabled()) {
+    if (PXProcessIsAllowedForSpoofing(bid, procName, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, procName) && !PXFullSpoofTestModeEnabled()) {
         hasCheckedProcess = YES;
         cachedDecision = NO;
         return NO;
@@ -798,7 +756,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     // These hooks can break complex login flows (e.g. Google sign-in) in SafariViewService.
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXFullSpoofTestModeEnabled() && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, proc)) {
+    if (!PXFullSpoofTestModeEnabled() && PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, proc)) {
         return;
     }
     
@@ -1058,7 +1016,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
     // Web compatibility: avoid JS property overrides in Safari/Auth stack.
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXFullSpoofTestModeEnabled() && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, proc)) {
+    if (!PXFullSpoofTestModeEnabled() && PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, proc)) {
         return;
     }
     
@@ -1102,7 +1060,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
     // Web compatibility: avoid JS property overrides in Safari/Auth stack.
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXFullSpoofTestModeEnabled() && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, proc)) {
+    if (!PXFullSpoofTestModeEnabled() && PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, proc)) {
         return;
     }
     
@@ -1185,11 +1143,9 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 return;
             }
 
-            // Don't hook system processes, except Safari/Auth stack when enabled.
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if ([currentBundleID hasPrefix:@"com.apple."] &&
-                !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(currentBundleID, proc))) {
-                PXLog(@"[DeviceSpec] Not hooking system process: %@", currentBundleID);
+            if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+                PXLog(@"[DeviceSpec] App %@ is not scoped, skipping hook installation", currentBundleID);
                 return;
             }
             
@@ -1215,13 +1171,6 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately
             );
-            
-            // Only install hooks if app is scoped, OR if Safari/Auth stack spoof is enabled.
-            if (!isInScopedAppsList() && !PXAllowUnscopedSafariStack()) {
-                // App is NOT scoped - no hooks, no interference, no crashes
-                PXLog(@"[DeviceSpec] App %@ is not scoped, skipping hook installation", currentBundleID);
-                return;
-            }
             
             PXLog(@"[DeviceSpec] App %@ is scoped, installing device specification hooks", currentBundleID);
             
@@ -1553,7 +1502,8 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         @try {
             IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            if (manager && bundleID && [manager isApplicationEnabled:bundleID] && [manager isIdentifierEnabled:@"IOSVersion"]) {
+            NSString *proc = [NSProcessInfo processInfo].processName;
+            if (manager && bundleID && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack) && [manager isIdentifierEnabled:@"IOSVersion"]) {
                 NSString *identityDir = [manager profileIdentityPath];
                 NSDictionary *deviceIds = identityDir.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
                 NSDictionary *current = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];

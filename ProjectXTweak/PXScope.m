@@ -80,6 +80,7 @@ static BOOL gCachedDisplayWebScreenEnabled = YES;
 static BOOL gCacheValid = NO;
 static NSDictionary *gScopedAppsCache = nil;
 static uint64_t gScopeGeneration = 1;
+static NSMutableDictionary *gDecisionLogTimes = nil;
 
 void PXInvalidateScopeDecisionCache(void) {
     gCacheValid = NO;
@@ -240,9 +241,21 @@ BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
 }
 
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
-    if (PXBundleIsStrictlyScopedForSpoofing(bundleID)) return YES;
-    if ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName)) return YES;
-    return NO;
+    BOOL strict = PXBundleIsStrictlyScopedForSpoofing(bundleID);
+    BOOL safari = ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
+    BOOL allowed = strict || safari;
+
+    if (!gDecisionLogTimes) gDecisionLogTimes = [NSMutableDictionary dictionary];
+    NSString *key = [NSString stringWithFormat:@"%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", (unsigned long)options, allowed];
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSNumber *last = gDecisionLogTimes[key];
+    if (!last || now - [last doubleValue] > 5.0) {
+        gDecisionLogTimes[key] = @(now);
+        NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ strict=%d safari=%d options=%lu allowed=%d gen=%llu",
+              bundleID, processName, strict, safari, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+    }
+
+    return allowed;
 }
 
 BOOL PXAllowUnscopedSafariStack(void) {

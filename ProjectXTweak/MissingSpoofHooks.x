@@ -97,19 +97,10 @@ static NSString* getSpoofedModel() {
 }
 
 static BOOL isSpoofingGlobalEnabled() {
-    // Implement minimal check or reuse existing logic
-    // This is a simplified check.
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([bundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-        return NO;
-    }
-    // Tie to global device spoofing toggle.
-    return PXDeviceSpoofingEnabled();
-    // Ideally this should use the centralized `isDeviceModelSpoofingEnabled` but that requires linking or exposing it.
-    // We'll rely on the fact that if we get a spoofed model, we should probably use it.
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
 
@@ -137,14 +128,10 @@ static BOOL isInScopedAppsList_Missing(void) {
 }
 
 static BOOL shouldSpoofForCurrentProcess_Missing(void) {
-    if (!PXDeviceSpoofingEnabled()) return NO;
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     if (!bid.length) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([bid hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bid, proc))) {
-        return NO;
-    }
-    return isInScopedAppsList_Missing() || PXAllowUnscopedSafariStack();
+    return PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
 static NSString *getSpoofedGPUFamily(void) {

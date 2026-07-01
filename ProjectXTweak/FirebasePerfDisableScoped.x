@@ -12,24 +12,8 @@
 static BOOL PXIsInProjectXScope(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return NO;
-
-    // Respect Safari/Auth stack allowance when spoofing is enabled.
-    if (PXAllowUnscopedSafariStack()) return YES;
-
-    Class mgrCls = NSClassFromString(@"IdentifierManager");
-    if (!mgrCls) return NO;
-
-    SEL sharedSel = NSSelectorFromString(@"sharedManager");
-    if (![mgrCls respondsToSelector:sharedSel]) return NO;
-
-    id mgr = ((id (*)(id, SEL))objc_msgSend)(mgrCls, sharedSel);
-    if (!mgr) return NO;
-
-    SEL enabledSel = NSSelectorFromString(@"isApplicationEnabled:");
-    if (![mgr respondsToSelector:enabledSel]) return NO;
-
-    BOOL enabled = ((BOOL (*)(id, SEL, id))objc_msgSend)(mgr, enabledSel, bundleID);
-    return enabled;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
 static void PXDisableFIRPerformance(void) {

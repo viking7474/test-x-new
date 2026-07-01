@@ -169,47 +169,11 @@ static BOOL isInScopedAppsList(void) {
 
 // Check if boot time spoofing should be applied for the current app
 static BOOL shouldSpoofBootTimeForApp(void) {
-    static NSMutableDictionary *bundleDecisionCache = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        bundleDecisionCache = [NSMutableDictionary dictionary];
-    });
-    
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID) return NO;
-        
-        // Check cache first
-        NSString *cacheKey = bundleID;
-        NSString *timestampKey = [bundleID stringByAppendingString:@"_timestamp"];
-        NSNumber *cachedDecision = bundleDecisionCache[cacheKey];
-        NSDate *decisionTimestamp = bundleDecisionCache[timestampKey];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < 300.0) { // 5 minute cache
-            return [cachedDecision boolValue];
-        }
-        
-        // Exclude system processes, except Safari/Auth stack when enabled.
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) ||
-            [bundleID isEqualToString:@"com.hydra.projectx"] ||
-            [bundleID hasPrefix:@"com.saurik."] ||
-            [bundleID hasPrefix:@"org.coolstar."] ||
-            [bundleID hasPrefix:@"com.ex.substitute"]) {
-            bundleDecisionCache[cacheKey] = @NO;
-            bundleDecisionCache[timestampKey] = [NSDate date];
-            return NO;
-        }
-        
-        // Check if the current app is a scoped app (or is Safari/Auth stack and enabled)
-        BOOL isScoped = isInScopedAppsList() || PXAllowUnscopedSafariStack();
-        
-        // Cache the decision
-        bundleDecisionCache[cacheKey] = @(isScoped);
-        bundleDecisionCache[timestampKey] = [NSDate date];
-        
-        return isScoped;
+        return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         
     } @catch (NSException *e) {
         return NO;
@@ -370,27 +334,13 @@ int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *new
                     id mgr = mgrClass ? [mgrClass performSelector:@selector(sharedManager)] : nil;
                     NSString *bundleID = getCurrentBundleID();
 
-                    SEL selIsAppEnabled = @selector(isApplicationEnabled:);
                     SEL selIsIdEnabled = @selector(isIdentifierEnabled:);
                     SEL selProfilePath = @selector(profileIdentityPath);
 
-                    BOOL appEnabled = NO;
+                    NSString *proc = [NSProcessInfo processInfo].processName;
+                    BOOL appEnabled = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
                     BOOL iosEnabled = NO;
                     NSString *identityDir = nil;
-
-                    if (mgr && bundleID && [mgr respondsToSelector:selIsAppEnabled]) {
-                        // BOOL return
-                        NSMethodSignature *sig = [mgr methodSignatureForSelector:selIsAppEnabled];
-                        if (sig) {
-                            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                            [inv setTarget:mgr];
-                            [inv setSelector:selIsAppEnabled];
-                            NSString *arg = bundleID;
-                            [inv setArgument:&arg atIndex:2];
-                            [inv invoke];
-                            [inv getReturnValue:&appEnabled];
-                        }
-                    }
 
                     if (mgr && [mgr respondsToSelector:selIsIdEnabled]) {
                         NSMethodSignature *sig = [mgr methodSignatureForSelector:selIsIdEnabled];
@@ -602,16 +552,8 @@ static void installSystemCallHooks(void) {
                 return;
             }
             
-            // Skip system processes, except Safari/Auth stack when enabled
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if ([bundleID hasPrefix:@"com.apple."] &&
-                !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-                return;
-            }
-            
-            // Only install hooks if this app is scoped, OR if Safari/Auth stack spoof is enabled.
-            if (!isInScopedAppsList() && !PXAllowUnscopedSafariStack()) {
-                // App is NOT scoped - no hooks, no interference, no crashes
+            if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
                 return;
             }
             

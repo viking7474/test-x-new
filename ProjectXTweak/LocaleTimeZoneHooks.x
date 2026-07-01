@@ -26,10 +26,9 @@ static BOOL LTZIsInScopedAppsList(void) {
 }
 
 static BOOL LTZShouldApply(void) {
-    if (!PXDeviceSpoofingEnabled()) return NO;
-    // Allow unscoped spoofing for Safari/Auth stack when enabled.
-    if (PXAllowUnscopedSafariStack()) return YES;
-    return LTZIsInScopedAppsList();
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
 static NSDictionary *LTZSecuritySettings(void) {

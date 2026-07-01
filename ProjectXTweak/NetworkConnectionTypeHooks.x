@@ -1214,9 +1214,9 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         
         PXLog(@"[NetworkHook] Initializing network connection type hooks");
         
-        // Check if the current app is a scoped app (or Safari/Auth stack when enabled)
         NSString *bundleID = getCurrentBundleID();
-        BOOL isScoped = isInScopedAppsList() || PXAllowUnscopedSafariStack();
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        BOOL isScoped = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         
         PXLog(@"[NetworkHook] Current app: %@, is scoped: %@", 
               bundleID ?: @"(unknown)", isScoped ? @"YES" : @"NO");

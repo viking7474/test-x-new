@@ -23,6 +23,7 @@
 #import <sys/syscall.h>
 #import <sys/mount.h>
 #import <sys/statvfs.h>
+#import "PXScope.h"
 #import <sys/sysctl.h>
 #if __has_include(<sys/user.h>)
 #import <sys/user.h>
@@ -276,17 +277,8 @@ static BOOL PXJBShouldBypassCached(void) {
         // Debug: log blocked operations (default OFF)
         gJBDebugLoggingEnabled = [securitySettings boolForKey:@"jbBypassDebugLoggingEnabled"]; 
 
-        Class mgrCls = NSClassFromString(@"IdentifierManager");
-        if (!mgrCls || ![mgrCls respondsToSelector:@selector(sharedManager)]) {
-            gJBEnabled = NO;
-            return gJBEnabled;
-        }
-        IdentifierManager *mgr = [mgrCls performSelector:@selector(sharedManager)];
-        if (!mgr || ![mgr respondsToSelector:@selector(isApplicationEnabled:)]) {
-            gJBEnabled = NO;
-            return gJBEnabled;
-        }
-        gJBEnabled = [mgr isApplicationEnabled:bundleID];
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        gJBEnabled = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
         return gJBEnabled;
     }
 }
