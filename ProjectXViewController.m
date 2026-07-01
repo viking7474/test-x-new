@@ -18,6 +18,7 @@
 #import "AppDataBackupManager.h"
 #import "ToolViewController.h"
 #import "NetworkManager.h"
+#import "PXPaths.h"
 #import <UIKit/UIKit.h>
 #import "ProgressHUDView.h"
 #import <spawn.h>
@@ -37,6 +38,11 @@ static NSString * const PXDashboardFakePreviewKey = @"PXDashboardFakePreview";
 static NSString * const PXDashboardRestoreOrderKey = @"PXDashboardRestoreOrder";
 static NSString * const PXDashboardRestoreIndexKeyPrefix = @"PXDashboardRestoreIndex_";
 static NSString * const PXDashboardRestoreEndKeyPrefix = @"PXDashboardRestoreEnd_";
+
+static UITableViewStyle PXCompatibleInsetGroupedStyle(void) {
+    if (@available(iOS 13.0, *)) return UITableViewStyleInsetGrouped;
+    return UITableViewStyleGrouped;
+}
 
 static UIImage *PXDrawCircleIcon(BOOL drawX, BOOL drawMinus) {
     CGSize size = CGSizeMake(24, 24);
@@ -285,7 +291,7 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Chon Fake";
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
@@ -586,7 +592,7 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     [super viewDidLoad];
     self.title = [NSString stringWithFormat:@"%lu RRS", (unsigned long)self.entries.count];
     self.selectedDirs = [NSMutableSet set];
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.left"] style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)];
@@ -726,7 +732,7 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"INFO FAKE";
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(doneTapped)];
@@ -5795,7 +5801,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)infoFakeTapped {
-    PXFakeInfoViewController *vc = [[PXFakeInfoViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    PXFakeInfoViewController *vc = [[PXFakeInfoViewController alloc] initWithStyle:PXCompatibleInsetGroupedStyle()];
     vc.preview = self.nextFakePreview ?: @{};
     __weak typeof(self) weakSelf = self;
     vc.onRandom = ^NSDictionary *(void) {
@@ -5829,7 +5835,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.appSearchBar.delegate = self;
     self.appSearchBar.translatesAutoresizingMaskIntoConstraints = NO;
     [picker.view addSubview:self.appSearchBar];
-    self.installedAppsTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.installedAppsTableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.installedAppsTableView.delegate = self;
     self.installedAppsTableView.dataSource = self;
     self.installedAppsTableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5866,7 +5872,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (void)selectFakeTapped {
     __weak typeof(self) weakSelf = self;
-    PXFakeSelectionViewController *vc = [[PXFakeSelectionViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    PXFakeSelectionViewController *vc = [[PXFakeSelectionViewController alloc] initWithStyle:PXCompatibleInsetGroupedStyle()];
     vc.options = self.nextFakeOptions ?: @{};
     vc.preview = self.nextFakePreview ?: @{};
     vc.onDone = ^(NSDictionary *options, NSDictionary *preview) {
@@ -6223,7 +6229,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)manageRRSTapped {
-    PXRRSManagerViewController *vc = [[PXRRSManagerViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    PXRRSManagerViewController *vc = [[PXRRSManagerViewController alloc] initWithStyle:PXCompatibleInsetGroupedStyle()];
     vc.entries = [self rrsEntries];
     vc.nextIndex = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
     __weak typeof(self) weakSelf = self;
