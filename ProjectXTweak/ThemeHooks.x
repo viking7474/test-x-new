@@ -152,36 +152,7 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
     if (PXIsSafariStackProcess(bundleID, proc)) {
         return NO;  // Don't spoof theme for Safari - causes invisible text
     }
-    
-    // Check cache first
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
-    // Skip spoofing for system apps, except Safari/Auth stack when enabled.
-    if ([bundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-        cachedBundleDecisions[bundleID] = @NO;
-        cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        return NO;
-    }
-    
-    // Check if the current app is a scoped app (or is Safari/Auth stack and enabled)
-    BOOL isScoped = isInScopedAppsList() || PXAllowUnscopedSafariStack();
-    
-    // Cache the decision
-    cachedBundleDecisions[bundleID] = @(isScoped);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    
-    return isScoped;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
 }
 
 // Helper function to get theme value from profile
@@ -478,13 +449,7 @@ static void themeSettingsChanged(CFNotificationCenterRef center, void *observer,
             // Don't hook system processes - including Safari (theme spoofing causes text issues)
             // Note: We deliberately skip Safari for theme hooks even if Safari Spoofing is enabled, 
             // because theme spoofing causes invisible text in WebKit forms (Dark mode text on Light mode background).
-            if ([bundleID hasPrefix:@"com.apple."]) {
-                PXLog(@"[ThemeHooks] Not hooking system process: %@", bundleID);
-                return;
-            }
-            
-            // Only install hooks if this app is scoped
-            if (!isInScopedAppsList()) {
+            if (!PXProcessIsAllowedForSpoofing(bundleID, [NSProcessInfo processInfo].processName, PXScopeOptionNone)) {
                 PXLog(@"[ThemeHooks] App %@ is not scoped, skipping hook installation", bundleID);
                 return;
             }

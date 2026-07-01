@@ -157,60 +157,7 @@ static BOOL isInScopedAppsList(void) {
 // Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
     if (!bundleID) return NO;
-
-    // Allow unscoped spoofing for Safari/Auth stack when enabled.
-    if (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, [NSProcessInfo processInfo].processName)) {
-        return YES;
-    }
-    
-    // Skip system apps, the tweak itself, and system processes - more comprehensive filtering
-    if (([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, [NSProcessInfo processInfo].processName))) ||
-        [bundleID isEqualToString:@"com.hydra.projectx"] ||
-        [bundleID containsString:@"springboard"] ||
-        [bundleID containsString:@"backboardd"] ||
-        [bundleID containsString:@"mediaserverd"] ||
-        [bundleID containsString:@"searchd"] ||
-        [bundleID containsString:@"assertiond"] ||
-        [bundleID containsString:@"useractivityd"] ||
-        [bundleID containsString:@"apsd"] ||
-        [bundleID containsString:@"identityservicesd"] ||
-        [bundleID containsString:@"coreduetd"] ||
-        [bundleID containsString:@"sharingd"] ||
-        [bundleID containsString:@"mobiletimerd"] ||
-        ([bundleID containsString:@"system"] && [bundleID containsString:@"daemon"])) {
-        return NO;
-    }
-    
-    // Get the executable path to check if it's a system binary
-    NSString *executablePath = [[NSBundle mainBundle] executablePath];
-    if (executablePath && 
-        ([executablePath hasPrefix:@"/usr/"] || 
-         [executablePath hasPrefix:@"/bin/"] || 
-         [executablePath hasPrefix:@"/sbin/"])) {
-        return NO;
-    }
-    
-    // Check cache first
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
-    // Check if the current app is a scoped app
-    BOOL isScoped = isInScopedAppsList();
-    
-    // Cache the decision
-    cachedBundleDecisions[bundleID] = @(isScoped);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    
-    return isScoped;
+    return PXProcessIsAllowedForSpoofing(bundleID, [NSProcessInfo processInfo].processName, PXScopeOptionAllowSafariAuthStack);
 }
 
 // Add function to get spoofed Pasteboard UUID from manager
@@ -810,7 +757,7 @@ static BOOL hasPasteboardContentChanged(NSString *bundleID, UIPasteboard *pasteb
         // Skip for system processes
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (!bundleID || ([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc)))) {
+        if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return;
         }
         

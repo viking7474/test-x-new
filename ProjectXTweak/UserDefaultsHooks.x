@@ -15,7 +15,6 @@ static id processDictionaryValues(id object);
 
 // Global variables to track state
 static NSMutableDictionary *cachedBundleDecisions = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes 
 
 // Recursion guard to prevent infinite loops when getSpoofedUserDefaultsUUID accesses NSUserDefaults
 static __thread BOOL isInsideHook = NO; 
@@ -31,50 +30,11 @@ static void clearCacheCallback(CFNotificationCenterRef center, void *observer, C
 // Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
     if (!bundleID) return NO;
-
-    // Allow unscoped spoofing for Safari/Auth stack when enabled.
-    if (PXAllowUnscopedSafariStack()) {
-        return YES;
-    }
-    
-    // Skip for system apps and the tweak itself
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if (([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) ||
-        [bundleID isEqualToString:@"com.hydra.projectx"]) {
-        return NO;
-    }
-    
-    // Check cache first
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
-    // Get IdentifierManager to check if we should spoof
-    if (!NSClassFromString(@"IdentifierManager")) {
-        cachedBundleDecisions[bundleID] = @NO;
-        cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        return NO;
-    }
-    
+    if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
+    if (!NSClassFromString(@"IdentifierManager")) return NO;
     IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-    
-    // Check if this app is enabled for spoofing and UserDefaults UUID features are enabled
-    BOOL shouldSpoof = [manager isApplicationEnabled:bundleID] && 
-                       [manager isIdentifierEnabled:@"UserDefaultsUUID"];
-    
-    // Cache the decision
-    cachedBundleDecisions[bundleID] = @(shouldSpoof);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    
-    return shouldSpoof;
+    return [manager isIdentifierEnabled:@"UserDefaultsUUID"];
 }
 
 // Add function to get spoofed UserDefaults UUID from manager
@@ -633,7 +593,7 @@ static BOOL isUUIDKey(NSString *key) {
         // Skip for system processes
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (!bundleID || ([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc)))) {
+        if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return;
         }
         

@@ -1,4 +1,10 @@
 #import <Foundation/Foundation.h>
+#include <stdint.h>
+
+typedef NS_OPTIONS(NSUInteger, PXScopeOptions) {
+    PXScopeOptionNone = 0,
+    PXScopeOptionAllowSafariAuthStack = 1 << 0,
+};
 
 // Centralized scope helpers for ProjectXTweak.
 // Goal: keep spoofing decisions consistent across modules, especially for Safari/Auth stack.
@@ -21,3 +27,7 @@ BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName);
 BOOL PXAllowUnscopedSafariStack(void);
 
 BOOL PXScopeIsReadingSecuritySettings(void);
+BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID);
+BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options);
+void PXInvalidateScopeDecisionCache(void);
+uint64_t PXScopeGeneration(void);

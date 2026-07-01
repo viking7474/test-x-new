@@ -25,8 +25,12 @@ static NSTimeInterval kCacheValidityDuration = 600.0; // 10 minutes for better p
 static dispatch_queue_t cacheQueue = nil; // Queue for thread-safe access to cache
 static BOOL isInitialized = NO;
 
+static BOOL isSystemBootUUIDEnabled(void);
+static BOOL isDyldCacheUUIDEnabled(void);
+
 // Callback function for notifications that clear the cache
 static void clearCacheCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    if (!cacheQueue) return;
     // Clear cached decisions using the dispatch queue for thread safety
     dispatch_async(cacheQueue, ^{
         if (cachedBundleDecisions) {
@@ -39,185 +43,13 @@ static void clearCacheCallback(CFNotificationCenterRef center, void *observer, C
 // Update the shouldSpoofForBundle function to directly check settings files
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
     if (!bundleID) return NO;
-
-    // Allow unscoped spoofing for Safari/Auth stack when enabled.
-    if (PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, [NSProcessInfo processInfo].processName)) {
-        return YES;
-    }
-    
-    // Skip system apps, the tweak itself, and system processes - more comprehensive filtering
-    if (([bundleID hasPrefix:@"com.apple."] && !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, [NSProcessInfo processInfo].processName))) ||
-        [bundleID isEqualToString:@"com.hydra.projectx"] ||
-        [bundleID containsString:@"springboard"] ||
-        [bundleID containsString:@"backboardd"] ||
-        [bundleID containsString:@"mediaserverd"] ||
-        [bundleID containsString:@"searchd"] ||
-        [bundleID containsString:@"assertiond"] ||
-        [bundleID containsString:@"useractivityd"] ||
-        [bundleID containsString:@"apsd"] ||
-        [bundleID containsString:@"identityservicesd"] ||
-        [bundleID containsString:@"coreduetd"] ||
-        [bundleID containsString:@"sharingd"] ||
-        [bundleID containsString:@"mobiletimerd"] ||
-        ([bundleID containsString:@"system"] && [bundleID containsString:@"daemon"])) {
-        return NO;
-    }
-    
-    // Get the executable path to check if it's a system binary
-    // Safari/Auth stack is allowed even if it resides under system paths.
-    NSString *executablePath = [[NSBundle mainBundle] executablePath];
-    if (executablePath &&
-        ([executablePath hasPrefix:@"/usr/"] ||
-         [executablePath hasPrefix:@"/bin/"] ||
-         [executablePath hasPrefix:@"/sbin/"])) {
-        return NO;
-    }
-    
-    // Initialize the cache queue if needed
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cacheQueue = dispatch_queue_create("com.hydra.projectx.uuidcache", DISPATCH_QUEUE_SERIAL);
-        isInitialized = YES;
-    });
-    
-    // Check if for some reason initialization failed
-    if (!isInitialized || !cacheQueue) {
-        return NO;
-    }
-    
-    // Use sync block for thread-safe access to the cache
-    __block BOOL shouldSpoof = NO;
-    __block BOOL foundInCache = NO;
-    
-    dispatch_sync(cacheQueue, ^{
-        // Ensure the cache dictionary exists
-        if (!cachedBundleDecisions) {
-            cachedBundleDecisions = [NSMutableDictionary dictionary];
-        }
-        
-        // Check cache first
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            shouldSpoof = [cachedDecision boolValue];
-            foundInCache = YES;
-        }
-    });
-    
-    // If found in cache, return immediately
-    if (foundInCache) {
-        return shouldSpoof;
-    }
-    
-    // Not found in cache, need to compute the value safely
-    @try {
-        // Check if this app is enabled by directly reading the settings file
-        // First check if the app is in the scoped apps list (enabled in the tweak)
-        BOOL isAppEnabled = NO;
-        
-        // Try rootless path first for settings
-        NSArray *preferencesLocations = @[
-            @"/var/mobile/Library/Preferences",
-            @"/private/var/mobile/Library/Preferences",
-            @"/var/mobile/Library/Preferences"
-        ];
-        
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *scopedAppsFilePath = nil;
-        
-        // Try to find the global_scope.plist file
-        for (NSString *prefsPath in preferencesLocations) {
-            NSString *testPath = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
-            if ([fileManager fileExistsAtPath:testPath]) {
-                scopedAppsFilePath = testPath;
-                break;
-            }
-        }
-        
-        if (scopedAppsFilePath) {
-            NSDictionary *scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFilePath];
-            NSDictionary *scopedApps = scopedAppsDict[@"ScopedApps"];
-            
-            if (scopedApps && scopedApps[bundleID]) {
-                isAppEnabled = [scopedApps[bundleID][@"enabled"] boolValue];
-                PXLog(@"[WeaponX] 🔍 App %@ found in scoped apps, enabled: %@", bundleID, isAppEnabled ? @"YES" : @"NO");
-            } else {
-                PXLog(@"[WeaponX] 🔍 App %@ not found in scoped apps list", bundleID);
-            }
-        } else {
-            PXLog(@"[WeaponX] ⚠️ Could not find global_scope.plist file");
-        }
-        
-        // If the app is not enabled, no need to check further
-        if (!isAppEnabled) {
-            dispatch_sync(cacheQueue, ^{
-                cachedBundleDecisions[bundleID] = @NO;
-                cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-            });
-            return NO;
-        }
-        
-        // Now check if the UUID features are enabled by reading settings
-        BOOL systemBootUUIDEnabled = NO;
-        BOOL dyldCacheUUIDEnabled = NO;
-        
-        // Try to find the settings.plist file
-        NSString *settingsFilePath = nil;
-        for (NSString *prefsPath in preferencesLocations) {
-            NSString *testPath = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.settings.plist"];
-            if ([fileManager fileExistsAtPath:testPath]) {
-                settingsFilePath = testPath;
-                break;
-            }
-        }
-        
-        if (settingsFilePath) {
-            NSDictionary *settingsDict = [NSDictionary dictionaryWithContentsOfFile:settingsFilePath];
-            NSDictionary *enabledIdentifiers = settingsDict[@"EnabledIdentifiers"];
-            
-            if (enabledIdentifiers) {
-                systemBootUUIDEnabled = [enabledIdentifiers[@"SystemBootUUID"] boolValue];
-                dyldCacheUUIDEnabled = [enabledIdentifiers[@"DyldCacheUUID"] boolValue];
-                
-                PXLog(@"[WeaponX] 🔍 Checking SystemBootUUID - Enabled: %@", systemBootUUIDEnabled ? @"YES" : @"NO");
-                PXLog(@"[WeaponX] 🔍 Checking DyldCacheUUID - Enabled: %@", dyldCacheUUIDEnabled ? @"YES" : @"NO");
-            }
-        } else {
-            PXLog(@"[WeaponX] ⚠️ Could not find settings.plist file");
-        }
-        
-        // Only spoof if app is enabled AND at least one UUID feature is enabled
-        shouldSpoof = isAppEnabled && (systemBootUUIDEnabled || dyldCacheUUIDEnabled);
-        
-        if (shouldSpoof) {
-            PXLog(@"[WeaponX] ✅ UUID spoofing enabled for %@", bundleID);
-        } else {
-            PXLog(@"[WeaponX] ℹ️ UUID features not enabled, skipping hooks for %@", bundleID);
-        }
-        
-        // Cache the decision
-        dispatch_sync(cacheQueue, ^{
-            cachedBundleDecisions[bundleID] = @(shouldSpoof);
-            cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        });
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in shouldSpoofForBundle: %@", exception);
-        shouldSpoof = NO;
-        
-        // Cache the negative decision to avoid repeated exceptions
-        dispatch_sync(cacheQueue, ^{
-            cachedBundleDecisions[bundleID] = @NO;
-            cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        });
-    }
-    
-    return shouldSpoof;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
+    return isSystemBootUUIDEnabled() || isDyldCacheUUIDEnabled();
 }
 
 // Direct check for SystemBootUUID being enabled
-static BOOL isSystemBootUUIDEnabled() {
+static BOOL isSystemBootUUIDEnabled(void) {
     // Check settings file directly
     NSArray *preferencesLocations = @[
         @"/var/mobile/Library/Preferences",
@@ -246,7 +78,7 @@ static BOOL isSystemBootUUIDEnabled() {
 }
 
 // Direct check for DyldCacheUUID being enabled
-static BOOL isDyldCacheUUIDEnabled() {
+static BOOL isDyldCacheUUIDEnabled(void) {
     // Check settings file directly
     NSArray *preferencesLocations = @[
         @"/var/mobile/Library/Preferences",
@@ -1104,17 +936,13 @@ static void setupAdditionalSystemUUIDHooks() {
             NSString *executablePath = [[NSBundle mainBundle] executablePath];
             NSString *processName = [executablePath lastPathComponent];
             
-            // Skip for critical system processes to prevent crashes
-            // Allow Safari/Auth stack when enabled.
-            BOOL safariAllowed = (bundleID && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
-            if (!bundleID || 
-                (!safariAllowed && [bundleID hasPrefix:@"com.apple."]) || 
+            BOOL scopeAllowed = bundleID && PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack);
+            if (!bundleID || !scopeAllowed ||
                 [processName isEqualToString:@"SpringBoard"] ||
                 [processName isEqualToString:@"backboardd"] ||
                 [processName isEqualToString:@"assertiond"] ||
                 [processName isEqualToString:@"useractivityd"] ||
                 [processName isEqualToString:@"apsd"] ||
-                (!safariAllowed && [processName hasPrefix:@"com.apple."]) ||
                 [processName containsString:@"daemon"] ||
                 [processName containsString:@"assistant"] ||
                 [processName containsString:@"locationd"] ||

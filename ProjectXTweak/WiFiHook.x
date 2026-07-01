@@ -92,42 +92,8 @@ static BOOL isInScopedAppsList(void);
 // Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
     if (!bundleID) return NO;
-
-    // Allow unscoped spoofing for Safari/Auth stack when enabled.
-    if (PXAllowUnscopedSafariStack()) {
-        return YES;
-    }
-    
-    // Check cache first
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
-    
-    // Skip spoofing for system apps, except Safari/Auth stack when enabled.
     NSString *proc = [NSProcessInfo processInfo].processName;
-    if ([bundleID hasPrefix:@"com.apple."] &&
-        !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
-        cachedBundleDecisions[bundleID] = @NO;
-        cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-        return NO;
-    }
-    
-    // Check if the current app is a scoped app (or is Safari/Auth stack and enabled)
-    BOOL isScoped = isInScopedAppsList() || PXAllowUnscopedSafariStack();
-    
-    // Cache the decision
-    cachedBundleDecisions[bundleID] = @(isScoped);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
-    
-    return isScoped;
+    return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
 // Helper function to directly get current profile ID from plist
@@ -785,8 +751,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
             
             // Skip if this is a system process (except Safari/Auth stack when enabled)
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if ([bundleID hasPrefix:@"com.apple."] &&
-                !(PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, proc))) {
+            if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
                 PXLog(@"[WiFiHook] Not hooking system process: %@", bundleID);
                 return;
             }
@@ -795,13 +760,6 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
             if ([bundleID isEqualToString:@"com.hydra.projectx"] || 
                 [bundleID isEqualToString:@"com.hydra.weaponx"]) {
                 PXLog(@"[WiFiHook] Not hooking own app: %@", bundleID);
-                return;
-            }
-            
-            // Only install hooks if this app is scoped, OR if Safari/Auth stack spoof is enabled.
-            if (!isInScopedAppsList() && !PXAllowUnscopedSafariStack()) {
-                // App is NOT scoped - no hooks, no interference, no crashes
-                PXLog(@"[WiFiHook] App %@ is not scoped, skipping hook installation", bundleID);
                 return;
             }
             
