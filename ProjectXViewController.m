@@ -193,6 +193,7 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 @property (nonatomic, strong) UILabel *resetSelectionValueLabel;
 @property (nonatomic, strong) UILabel *rrsSelectionValueLabel;
 @property (nonatomic, strong) UILabel *fakeSelectionValueLabel;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UILabel *> *fakeInfoValueLabels;
 @property (nonatomic, strong) UITextField *rrsNoteTextField;
 @property (nonatomic, strong) NSDictionary *nextFakeOptions;
 @property (nonatomic, strong) NSDictionary *nextFakePreview;
@@ -218,6 +219,25 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 @end
 
 @implementation PXFakeSelectionViewController
+
+- (NSMutableDictionary *)mutableOptions {
+    NSMutableDictionary *dict = [self.options mutableCopy] ?: [NSMutableDictionary dictionary];
+    if (!dict[@"fakeIOSVersionEnabled"]) dict[@"fakeIOSVersionEnabled"] = @(YES);
+    if (!dict[@"fakeModelEnabled"]) dict[@"fakeModelEnabled"] = @(YES);
+    return dict;
+}
+
+- (BOOL)boolOption:(NSString *)key defaultValue:(BOOL)defaultValue {
+    id value = self.options[key];
+    return value ? [value boolValue] : defaultValue;
+}
+
+- (void)setBoolOption:(NSString *)key value:(BOOL)value {
+    NSMutableDictionary *dict = [self mutableOptions];
+    dict[key] = @(value);
+    self.options = dict;
+    [self.tableView reloadData];
+}
 
 - (NSArray<NSDictionary *> *)models {
     return @[
@@ -263,70 +283,137 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Chọn Fake";
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.title = @"Fake iOS version & model";
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.tableView.delegate = self;
+    self.tableView.dataSource = self;
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleDone target:self action:@selector(doneTapped)];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(cancelTapped)];
-    if (!self.options) self.options = @{};
+    self.options = [self mutableOptions];
     if (!self.preview) self.preview = @{};
-    [self setupRandomFooter];
 }
 
-- (void)setupRandomFooter {
-    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 74)];
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.frame = CGRectMake(24, 12, UIScreen.mainScreen.bounds.size.width - 48, 50);
-    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    button.backgroundColor = [UIColor systemBlueColor];
-    button.tintColor = [UIColor whiteColor];
-    button.layer.cornerRadius = 14;
-    [button setTitle:@"Random Fake Info" forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-    [button addTarget:self action:@selector(randomTapped) forControlEvents:UIControlEventTouchUpInside];
-    [footer addSubview:button];
-    self.tableView.tableFooterView = footer;
-}
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 4 : 4; }
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section { return section == 0 ? @"THÔNG TIN PHẦN CỨNG" : @"THÔNG SỐ MẠNG & ĐỊNH DANH"; }
-
-- (NSString *)titleForIndexPath:(NSIndexPath *)indexPath {
-    NSArray *titles = indexPath.section == 0 ?
-        @[ @"Tên thiết bị (Device Name)", @"Model", @"Phiên bản (iOS Version)", @"Quốc gia (Country)" ] :
-        @[ @"Nhà mạng (Carrier)", @"Kiểu máy (Model Number)", @"Số Seri (Serial Number)", @"Địa chỉ MAC (MAC Address)" ];
-    return titles[(NSUInteger)indexPath.row];
-}
-
-- (NSString *)valueForIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == 0 && indexPath.row == 0) return self.preview[@"DeviceName"] ?: @"Random";
-    if (indexPath.section == 0 && indexPath.row == 1) return self.preview[@"DeviceModelName"] ?: @"Random";
-    if (indexPath.section == 0 && indexPath.row == 2) return self.preview[@"IOSVersion"] ?: @"Random";
-    if (indexPath.section == 0 && indexPath.row == 3) return self.preview[@"CountryName"] ?: @"Random";
-    if (indexPath.section == 1 && indexPath.row == 0) return self.preview[@"CarrierName"] ?: @"Random";
-    if (indexPath.section == 1 && indexPath.row == 1) return self.preview[@"ModelNumber"] ?: @"Auto";
-    if (indexPath.section == 1 && indexPath.row == 2) return self.preview[@"SerialNumber"] ?: @"Auto";
-    return self.preview[@"MACAddress"] ?: @"Auto";
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 10; }
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.row == 1 || indexPath.row == 3) return 72;
+    if (indexPath.row == 7) return 72;
+    return 58;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"FakeCell"];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"FakeCell"];
-    cell.textLabel.text = [self titleForIndexPath:indexPath];
-    cell.detailTextLabel.text = [self valueForIndexPath:indexPath];
-    cell.detailTextLabel.textColor = [UIColor labelColor];
-    cell.accessoryType = ((indexPath.section == 0) || (indexPath.section == 1 && indexPath.row == 0)) ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.backgroundColor = [UIColor systemBackgroundColor];
+    cell.textLabel.font = [UIFont systemFontOfSize:(indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8) ? 22 : 25 weight:UIFontWeightRegular];
+    cell.textLabel.textColor = (indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8) ? [UIColor systemTealColor] : [UIColor systemBlueColor];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:22];
+    cell.detailTextLabel.textColor = [UIColor systemOrangeColor];
+    cell.indentationWidth = 40;
+    if (indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8 || indexPath.row == 9) cell.indentationLevel = 1;
+
+    if (indexPath.row == 0) [self configureCheckboxCell:cell title:@"1. Fake iOS Version" key:@"fakeIOSVersionEnabled" defaultValue:YES];
+    else if (indexPath.row == 1) [self configureRangeCell:cell text:[self iosRangeText]];
+    else if (indexPath.row == 2) [self configureCheckboxCell:cell title:@"2. Fake Model" key:@"fakeModelEnabled" defaultValue:YES];
+    else if (indexPath.row == 3) [self configureRangeCell:cell text:[self modelRangeText]];
+    else if (indexPath.row == 4) [self configureCheckboxCell:cell title:@"2.1 Fake Screen Size" key:@"fakeScreenSizeEnabled" defaultValue:NO];
+    else if (indexPath.row == 5) [self configureCheckboxCell:cell title:@"2.2 Fake Full Screen" key:@"fakeFullScreenEnabled" defaultValue:NO];
+    else if (indexPath.row == 6) [self configureCheckboxCell:cell title:@"3. Fake Name" key:@"fakeNameEnabled" defaultValue:NO];
+    else if (indexPath.row == 7) { [self configureCheckboxCell:cell title:@"4. Check IP Address" key:@"checkIPEnabled" defaultValue:NO]; cell.detailTextLabel.text = [NSString stringWithFormat:@"Chọn server: %@", self.options[@"ipServer"] ?: @"ip-api.com"]; }
+    else if (indexPath.row == 8) [self configureCheckboxCell:cell title:@"4.1 Fake GPS Location" key:@"fakeGPSEnabled" defaultValue:NO];
+    else { cell.textLabel.text = @"○ Ngẫu nhiên theo ip address"; cell.textLabel.textColor = [UIColor systemTealColor]; cell.accessoryType = [self boolOption:@"gpsRandomByIPEnabled" defaultValue:NO] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone; }
     return cell;
+}
+
+- (void)configureCheckboxCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
+    cell.textLabel.text = title;
+    cell.accessoryType = [self boolOption:key defaultValue:defaultValue] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+}
+
+- (void)configureRangeCell:(UITableViewCell *)cell text:(NSString *)text {
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(80, 8, UIScreen.mainScreen.bounds.size.width - 120, 48)];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    label.text = text;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = [UIColor systemOrangeColor];
+    label.font = [UIFont systemFontOfSize:25];
+    label.layer.borderColor = [UIColor systemOrangeColor].CGColor;
+    label.layer.borderWidth = 1.0;
+    label.layer.cornerRadius = 4;
+    label.clipsToBounds = YES;
+    [cell.contentView addSubview:label];
+}
+
+- (NSString *)iosRangeText {
+    NSString *min = self.options[@"iosMin"];
+    NSString *max = self.options[@"iosMax"];
+    if (!min.length && !max.length) return @"Random iOS version";
+    return [NSString stringWithFormat:@"Từ %@ đến %@", min.length ? min : @"Random", max.length ? max : @"Random"];
+}
+
+- (NSString *)modelRangeText {
+    NSInteger minIdx = [self.options[@"modelMinIndex"] integerValue];
+    NSInteger maxIdx = [self.options[@"modelMaxIndex"] integerValue];
+    NSArray *models = [self models];
+    if (minIdx <= 0 && maxIdx <= 0) return @"Random iPhone model";
+    if (minIdx <= 0) minIdx = 1;
+    if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
+    NSDictionary *minModel = models[(NSUInteger)minIdx - 1];
+    NSDictionary *maxModel = models[(NSUInteger)maxIdx - 1];
+    return [NSString stringWithFormat:@"Từ %ld %@ đến %ld %@", (long)minIdx, minModel[@"name"], (long)maxIdx, maxModel[@"name"]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == 1 && indexPath.row > 0) return;
-    if (indexPath.section == 0 && indexPath.row == 0) { [self randomDeviceNameOnly]; return; }
-    if (indexPath.section == 0 && indexPath.row == 1) { [self showModelPicker]; return; }
-    if (indexPath.section == 0 && indexPath.row == 2) { [self showStringPickerWithTitle:@"iOS Version" values:[self iosVersions] key:@"IOSVersion"]; return; }
-    if (indexPath.section == 0 && indexPath.row == 3) { [self showCountryPicker]; return; }
-    if (indexPath.section == 1 && indexPath.row == 0) { [self showCarrierPicker]; return; }
+    NSArray *toggleKeys = @[ @"fakeIOSVersionEnabled", @"", @"fakeModelEnabled", @"", @"fakeScreenSizeEnabled", @"fakeFullScreenEnabled", @"fakeNameEnabled", @"checkIPEnabled", @"fakeGPSEnabled", @"gpsRandomByIPEnabled" ];
+    if (indexPath.row == 1) { [self showRangePickerWithTitle:@"Fake iOS Version" values:[self iosVersions] minKey:@"iosMin" maxKey:@"iosMax" labels:nil]; return; }
+    if (indexPath.row == 3) {
+        NSMutableArray *labels = [NSMutableArray array];
+        for (NSUInteger i = 0; i < [self models].count; i++) [labels addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)i + 1, [self models][i][@"name"]]];
+        [self showRangePickerWithTitle:@"Fake Model" values:labels minKey:@"modelMinIndex" maxKey:@"modelMaxIndex" labels:labels];
+        return;
+    }
+    NSString *key = toggleKeys[(NSUInteger)indexPath.row];
+    if (key.length) [self setBoolOption:key value:![self boolOption:key defaultValue:(indexPath.row == 0 || indexPath.row == 2)]];
+}
+
+- (void)showRangePickerWithTitle:(NSString *)title values:(NSArray<NSString *> *)values minKey:(NSString *)minKey maxKey:(NSString *)maxKey labels:(NSArray<NSString *> *)labels {
+    UIViewController *content = [[UIViewController alloc] init];
+    content.preferredContentSize = CGSizeMake(300, 190);
+    UIPickerView *picker = [[UIPickerView alloc] initWithFrame:CGRectMake(0, 0, 300, 190)];
+    picker.dataSource = (id<UIPickerViewDataSource>)self;
+    picker.delegate = (id<UIPickerViewDelegate>)self;
+    picker.tag = [minKey isEqualToString:@"iosMin"] ? 8101 : 8102;
+    objc_setAssociatedObject(picker, @"PXValues", values, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [content.view addSubview:picker];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert setValue:content forKey:@"contentViewController"];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        NSInteger first = [picker selectedRowInComponent:0];
+        NSInteger second = [picker selectedRowInComponent:1];
+        if (first > second) { NSInteger t = first; first = second; second = t; }
+        NSMutableDictionary *dict = [self mutableOptions];
+        if ([minKey isEqualToString:@"modelMinIndex"]) { dict[minKey] = [NSString stringWithFormat:@"%ld", (long)first + 1]; dict[maxKey] = [NSString stringWithFormat:@"%ld", (long)second + 1]; }
+        else { dict[minKey] = values[(NSUInteger)first]; dict[maxKey] = values[(NSUInteger)second]; }
+        self.options = dict;
+        [self.tableView reloadData];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)pickerView { return 2; }
+
+- (NSInteger)pickerView:(UIPickerView *)pickerView numberOfRowsInComponent:(NSInteger)component {
+    NSArray *values = objc_getAssociatedObject(pickerView, @"PXValues");
+    return values.count;
+}
+
+- (NSString *)pickerView:(UIPickerView *)pickerView titleForRow:(NSInteger)row forComponent:(NSInteger)component {
+    NSArray *values = objc_getAssociatedObject(pickerView, @"PXValues");
+    if (row < 0 || row >= (NSInteger)values.count) return @"";
+    return values[(NSUInteger)row];
 }
 
 - (void)showModelPicker {
@@ -5138,12 +5225,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [self.mainStackView.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-36]
     ]];
 
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"Project X";
-    titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
-    titleLabel.textAlignment = NSTextAlignmentCenter;
-    [self.mainStackView addArrangedSubview:titleLabel];
-
     [self.mainStackView addArrangedSubview:[self dashboardStatusCard]];
 
     UIStackView *actions = [[UIStackView alloc] init];
@@ -5167,6 +5248,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.rrsSelectionValueLabel = rrsSelectionLabel;
     self.fakeSelectionValueLabel = fakeSelectionLabel;
     [self.mainStackView addArrangedSubview:selectionCard];
+
+    [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"INFO FAKE"]];
+    [self.mainStackView addArrangedSubview:[self dashboardFakeInfoCard]];
 
     [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"MANAGEMENT"]];
     UIView *managementCard = [self dashboardGroupCard];
@@ -5245,6 +5329,79 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor]
     ]];
     return card;
+}
+
+- (UIView *)dashboardFakeInfoCard {
+    UIView *card = [self dashboardRoundedCard];
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 0;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    self.fakeInfoValueLabels = [NSMutableDictionary dictionary];
+    NSArray *rows = @[
+        @[ @"Device Name", @"DeviceName" ],
+        @[ @"Model", @"DeviceModel" ],
+        @[ @"iOS Version", @"IOSVersion" ],
+        @[ @"Country", @"CountryName" ],
+        @[ @"Carrier", @"CarrierName" ],
+        @[ @"Model Number", @"ModelNumber" ],
+        @[ @"Serial Number", @"SerialNumber" ],
+        @[ @"MAC Address", @"MACAddress" ]
+    ];
+    for (NSArray *row in rows) {
+        UILabel *valueLabel = nil;
+        [stack addArrangedSubview:[self dashboardInfoRowWithTitle:row[0] key:row[1] valueLabel:&valueLabel]];
+        self.fakeInfoValueLabels[row[1]] = valueLabel;
+    }
+    UIButton *random = [UIButton buttonWithType:UIButtonTypeSystem];
+    random.backgroundColor = [UIColor systemBlueColor];
+    random.tintColor = [UIColor whiteColor];
+    random.layer.cornerRadius = 12;
+    random.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    [random setTitle:@"Random" forState:UIControlStateNormal];
+    [random addTarget:self action:@selector(randomFakeInfoTapped) forControlEvents:UIControlEventTouchUpInside];
+    [random.heightAnchor constraintEqualToConstant:46].active = YES;
+    UIView *buttonWrap = [[UIView alloc] init];
+    buttonWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    random.translatesAutoresizingMaskIntoConstraints = NO;
+    [buttonWrap addSubview:random];
+    [NSLayoutConstraint activateConstraints:@[
+        [random.topAnchor constraintEqualToAnchor:buttonWrap.topAnchor constant:10],
+        [random.leadingAnchor constraintEqualToAnchor:buttonWrap.leadingAnchor constant:14],
+        [random.trailingAnchor constraintEqualToAnchor:buttonWrap.trailingAnchor constant:-14],
+        [random.bottomAnchor constraintEqualToAnchor:buttonWrap.bottomAnchor constant:-14]
+    ]];
+    [stack addArrangedSubview:buttonWrap];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:4],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor]
+    ]];
+    return card;
+}
+
+- (UIView *)dashboardInfoRowWithTitle:(NSString *)title key:(NSString *)key valueLabel:(UILabel **)valueLabel {
+    UIStackView *row = [[UIStackView alloc] init];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 12;
+    row.layoutMargins = UIEdgeInsetsMake(8, 14, 8, 14);
+    row.layoutMarginsRelativeArrangement = YES;
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    titleLabel.textColor = [UIColor secondaryLabelColor];
+    [row addArrangedSubview:titleLabel];
+    UILabel *value = [[UILabel alloc] init];
+    value.textAlignment = NSTextAlignmentRight;
+    value.numberOfLines = 2;
+    value.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    value.textColor = [UIColor labelColor];
+    [row addArrangedSubview:value];
+    if (valueLabel) *valueLabel = value;
+    return row;
 }
 
 - (UILabel *)dashboardSectionLabel:(NSString *)text {
@@ -5332,12 +5489,35 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (void)refreshDashboardSelectionLabels {
     self.resetSelectionValueLabel.text = self.selectedResetAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedResetAppIDs.count] : @"None";
     self.rrsSelectionValueLabel.text = self.selectedRRSAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedRRSAppIDs.count] : @"None";
-    NSString *fakeText = @"Random";
+    NSString *fakeText = @"Options";
     NSString *modelName = self.nextFakePreview[@"DeviceModelName"];
     NSString *model = self.nextFakePreview[@"DeviceModel"];
     if (modelName.length && model.length) fakeText = [NSString stringWithFormat:@"%@ (%@)", modelName, model];
     else if (model.length) fakeText = model;
     self.fakeSelectionValueLabel.text = fakeText;
+    [self refreshFakeInfoLabels];
+}
+
+- (void)refreshFakeInfoLabels {
+    NSDictionary *preview = self.nextFakePreview ?: @{};
+    NSDictionary *displayKeys = @{
+        @"DeviceName": @"DeviceName",
+        @"DeviceModel": @"DeviceModel",
+        @"IOSVersion": @"IOSVersion",
+        @"CountryName": @"CountryName",
+        @"CarrierName": @"CarrierName",
+        @"ModelNumber": @"ModelNumber",
+        @"SerialNumber": @"SerialNumber",
+        @"MACAddress": @"MACAddress"
+    };
+    [displayKeys enumerateKeysAndObjectsUsingBlock:^(NSString *labelKey, NSString *previewKey, BOOL *stop) {
+        UILabel *label = self.fakeInfoValueLabels[labelKey];
+        NSString *value = preview[previewKey];
+        if ([labelKey isEqualToString:@"DeviceModel"] && [preview[@"DeviceModelName"] length] && [preview[@"DeviceModel"] length]) {
+            value = [NSString stringWithFormat:@"%@ (%@)", preview[@"DeviceModelName"], preview[@"DeviceModel"]];
+        }
+        label.text = value.length ? value : @"Random";
+    }];
 }
 
 - (void)persistDashboardSelections {
@@ -5353,6 +5533,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (void)selectResetAppsTapped { [self presentDashboardAppPickerWithMode:@"reset"]; }
 - (void)selectRRSAppsTapped { [self presentDashboardAppPickerWithMode:@"rrs"]; }
+
+- (void)randomFakeInfoTapped {
+    self.nextFakePreview = [self generateFakePreviewFromOptions:self.nextFakeOptions ?: @{}];
+    [self persistDashboardSelections];
+    [self refreshDashboardSelectionLabels];
+}
 
 - (void)presentDashboardAppPickerWithMode:(NSString *)mode {
     self.selectionPickerMode = mode;
@@ -5413,7 +5599,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     vc.preview = self.nextFakePreview ?: @{};
     vc.onDone = ^(NSDictionary *options, NSDictionary *preview) {
         weakSelf.nextFakeOptions = options ?: @{};
-        weakSelf.nextFakePreview = preview.count ? preview : nil;
+        weakSelf.nextFakePreview = nil;
         [weakSelf persistDashboardSelections];
         [weakSelf refreshDashboardSelectionLabels];
     };
@@ -5423,6 +5609,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options {
+    BOOL fakeIOS = options[@"fakeIOSVersionEnabled"] ? [options[@"fakeIOSVersionEnabled"] boolValue] : YES;
+    BOOL fakeModel = options[@"fakeModelEnabled"] ? [options[@"fakeModelEnabled"] boolValue] : YES;
+    BOOL fakeName = options[@"fakeNameEnabled"] ? [options[@"fakeNameEnabled"] boolValue] : NO;
     NSArray *models = [self pxSupportedFakeModels];
     NSInteger minIdx = [options[@"modelMinIndex"] integerValue];
     NSInteger maxIdx = [options[@"modelMaxIndex"] integerValue];
@@ -5431,7 +5620,16 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
     NSInteger picked = minIdx - 1 + arc4random_uniform((uint32_t)(maxIdx - minIdx + 1));
     NSDictionary *model = models[(NSUInteger)picked];
-    NSArray *iosVersions = [self pxSupportedIOSVersions];
+    NSArray *allIOSVersions = [self pxSupportedIOSVersions];
+    NSMutableArray *iosVersions = [NSMutableArray array];
+    NSString *iosMin = options[@"iosMin"];
+    NSString *iosMax = options[@"iosMax"];
+    for (NSString *version in allIOSVersions) {
+        BOOL aboveMin = !iosMin.length || [version compare:iosMin options:NSNumericSearch] != NSOrderedAscending;
+        BOOL belowMax = !iosMax.length || [version compare:iosMax options:NSNumericSearch] != NSOrderedDescending;
+        if (aboveMin && belowMax) [iosVersions addObject:version];
+    }
+    if (!iosVersions.count) [iosVersions addObjectsFromArray:allIOSVersions];
     NSArray *countries = @[
         @{ @"name": @"United States", @"code": @"us" },
         @{ @"name": @"Việt Nam", @"code": @"vn" },
@@ -5441,20 +5639,22 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSDictionary *country = countries[arc4random_uniform((uint32_t)countries.count)];
     NSArray *carriers = [self pxCarriersForCountry:country[@"code"]];
     NSDictionary *carrier = carriers.count ? carriers[arc4random_uniform((uint32_t)carriers.count)] : @{};
-    return @{
-        @"DeviceName": [self pxRandomDeviceName],
-        @"DeviceModel": model[@"id"] ?: @"",
-        @"DeviceModelName": model[@"name"] ?: @"",
-        @"IOSVersion": iosVersions[arc4random_uniform((uint32_t)iosVersions.count)] ?: @"",
-        @"CountryName": country[@"name"] ?: @"",
-        @"CountryCode": country[@"code"] ?: @"",
-        @"CarrierName": carrier[@"name"] ?: @"",
-        @"CarrierMCC": carrier[@"mcc"] ?: @"",
-        @"CarrierMNC": carrier[@"mnc"] ?: @"",
-        @"ModelNumber": model[@"modelNumber"] ?: @"",
-        @"SerialNumber": [self pxRandomSerial],
-        @"MACAddress": [self pxRandomMAC]
-    };
+    NSMutableDictionary *preview = [NSMutableDictionary dictionary];
+    if (fakeName) preview[@"DeviceName"] = [self pxRandomDeviceName];
+    if (fakeModel) {
+        preview[@"DeviceModel"] = model[@"id"] ?: @"";
+        preview[@"DeviceModelName"] = model[@"name"] ?: @"";
+        preview[@"ModelNumber"] = model[@"modelNumber"] ?: @"";
+    }
+    if (fakeIOS) preview[@"IOSVersion"] = iosVersions[arc4random_uniform((uint32_t)iosVersions.count)] ?: @"";
+    preview[@"CountryName"] = country[@"name"] ?: @"";
+    preview[@"CountryCode"] = country[@"code"] ?: @"";
+    preview[@"CarrierName"] = carrier[@"name"] ?: @"";
+    preview[@"CarrierMCC"] = carrier[@"mcc"] ?: @"";
+    preview[@"CarrierMNC"] = carrier[@"mnc"] ?: @"";
+    preview[@"SerialNumber"] = [self pxRandomSerial];
+    preview[@"MACAddress"] = [self pxRandomMAC];
+    return preview;
 }
 
 - (NSArray *)pxCarriersForCountry:(NSString *)code {
