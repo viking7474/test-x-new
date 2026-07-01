@@ -594,9 +594,12 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 }
 
 - (void)setupHeaderFooter {
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 58)];
-    UIStackView *row = [[UIStackView alloc] initWithFrame:CGRectMake(14, 8, UIScreen.mainScreen.bounds.size.width - 28, 44)];
-    row.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    if (width <= 0) width = CGRectGetWidth(UIScreen.mainScreen.bounds);
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 58)];
+    header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    UIStackView *row = [[UIStackView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
     row.axis = UILayoutConstraintAxisHorizontal;
     row.spacing = 8;
     UIButton *selectAll = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -618,9 +621,16 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     [row addArrangedSubview:search];
     [row addArrangedSubview:delete];
     [header addSubview:row];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:header.topAnchor constant:8],
+        [row.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:14],
+        [row.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-14],
+        [row.heightAnchor constraintEqualToConstant:44]
+    ]];
     self.tableView.tableHeaderView = header;
 
-    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 112)];
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 112)];
+    footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UILabel *next = [[UILabel alloc] initWithFrame:CGRectMake(18, 8, 220, 18)];
     next.text = @"NEXT:";
     next.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
@@ -6046,6 +6056,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self refreshDashboardSelectionLabels];
                 NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", newProfile.profileId, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
                 [self showDashboardMessage:@"Hoàn tất" message:msg];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [self killEnabledAppsAndRespring];
+                });
             });
         }];
     }];
@@ -6070,16 +6083,51 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return [NSString stringWithFormat:@"%.1f MB", value];
 }
 
+- (NSArray<NSString *> *)allRRSBackupDirectories {
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *roots = [NSMutableArray array];
+    NSString *profilesRoot = PXProfilesPath();
+    NSArray *profiles = [fm contentsOfDirectoryAtPath:profilesRoot error:nil];
+    for (NSString *profile in profiles) {
+        NSString *root = [[profilesRoot stringByAppendingPathComponent:profile] stringByAppendingPathComponent:@"backups"];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:root isDirectory:&isDir] && isDir) [roots addObject:root];
+    }
+    NSString *legacyRoot = [PXWeaponXBasePath() stringByAppendingPathComponent:@"Backups"];
+    BOOL legacyIsDir = NO;
+    if ([fm fileExistsAtPath:legacyRoot isDirectory:&legacyIsDir] && legacyIsDir) [roots addObject:legacyRoot];
+
+    for (NSString *root in roots) {
+        NSArray *bundleDirs = [fm contentsOfDirectoryAtPath:root error:nil];
+        for (NSString *bundle in bundleDirs) {
+            NSString *bundlePath = [root stringByAppendingPathComponent:bundle];
+            BOOL bundleIsDir = NO;
+            if (![fm fileExistsAtPath:bundlePath isDirectory:&bundleIsDir] || !bundleIsDir) continue;
+            NSArray *items = [fm contentsOfDirectoryAtPath:bundlePath error:nil];
+            for (NSString *item in items) {
+                NSString *dir = [bundlePath stringByAppendingPathComponent:item];
+                BOOL itemIsDir = NO;
+                if ([fm fileExistsAtPath:dir isDirectory:&itemIsDir] && itemIsDir && [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"manifest.plist"]]) {
+                    [dirs addObject:dir];
+                }
+            }
+        }
+    }
+    [dirs sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        if ([self.rrsRestoreOrder isEqualToString:@"newestFirst"]) return [b.lastPathComponent compare:a.lastPathComponent];
+        return [a.lastPathComponent compare:b.lastPathComponent];
+    }];
+    return dirs;
+}
+
 - (NSArray<NSDictionary *> *)rrsEntries {
     NSMutableArray *entries = [NSMutableArray array];
-    NSArray *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
-    for (NSString *bundleID in apps) {
-        NSArray *dirs = [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:bundleID];
-        if (![self.rrsRestoreOrder isEqualToString:@"newestFirst"]) dirs = [[dirs reverseObjectEnumerator] allObjects];
-        for (NSString *dir in dirs) {
+    for (NSString *dir in [self allRRSBackupDirectories]) {
             NSError *err = nil;
             NSDictionary *m = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:&err];
             if (!m) continue;
+            NSString *bundleID = m[@"bundleID"] ?: dir.stringByDeletingLastPathComponent.lastPathComponent;
             NSDate *created = [m[@"createdAt"] isKindOfClass:[NSDate class]] ? m[@"createdAt"] : nil;
             id restored = m[@"restoreAt"];
             NSString *restoreText = @"(null)";
@@ -6098,7 +6146,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 @"backupDate": [self rrsShortDateString:created],
                 @"restoreDate": restoreText
             }];
-        }
     }
     return entries;
 }
