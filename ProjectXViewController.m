@@ -193,7 +193,7 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 @property (nonatomic, strong) UILabel *resetSelectionValueLabel;
 @property (nonatomic, strong) UILabel *rrsSelectionValueLabel;
 @property (nonatomic, strong) UILabel *fakeSelectionValueLabel;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, UILabel *> *fakeInfoValueLabels;
+@property (nonatomic, strong) UILabel *fakeInfoSelectionValueLabel;
 @property (nonatomic, strong) UITextField *rrsNoteTextField;
 @property (nonatomic, strong) NSDictionary *nextFakeOptions;
 @property (nonatomic, strong) NSDictionary *nextFakePreview;
@@ -297,20 +297,20 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 10; }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.row == 1 || indexPath.row == 3) return 72;
-    if (indexPath.row == 7) return 72;
-    return 58;
+    if (indexPath.row == 1 || indexPath.row == 3) return 52;
+    if (indexPath.row == 7) return 54;
+    return 44;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.backgroundColor = [UIColor systemBackgroundColor];
-    cell.textLabel.font = [UIFont systemFontOfSize:(indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8) ? 22 : 25 weight:UIFontWeightRegular];
-    cell.textLabel.textColor = (indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8) ? [UIColor systemTealColor] : [UIColor systemBlueColor];
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:22];
-    cell.detailTextLabel.textColor = [UIColor systemOrangeColor];
-    cell.indentationWidth = 40;
+    cell.textLabel.font = [UIFont systemFontOfSize:(indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8 || indexPath.row == 9) ? 15 : 16 weight:UIFontWeightRegular];
+    cell.textLabel.textColor = [UIColor systemBlueColor];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:14];
+    cell.detailTextLabel.textColor = [UIColor systemBlueColor];
+    cell.indentationWidth = 24;
     if (indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8 || indexPath.row == 9) cell.indentationLevel = 1;
 
     if (indexPath.row == 0) [self configureCheckboxCell:cell title:@"1. Fake iOS Version" key:@"fakeIOSVersionEnabled" defaultValue:YES];
@@ -332,13 +332,13 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 }
 
 - (void)configureRangeCell:(UITableViewCell *)cell text:(NSString *)text {
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(80, 8, UIScreen.mainScreen.bounds.size.width - 120, 48)];
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(64, 8, UIScreen.mainScreen.bounds.size.width - 96, 36)];
     label.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     label.text = text;
     label.textAlignment = NSTextAlignmentCenter;
-    label.textColor = [UIColor systemOrangeColor];
-    label.font = [UIFont systemFontOfSize:25];
-    label.layer.borderColor = [UIColor systemOrangeColor].CGColor;
+    label.textColor = [UIColor systemBlueColor];
+    label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    label.layer.borderColor = [UIColor systemBlueColor].CGColor;
     label.layer.borderWidth = 1.0;
     label.layer.cornerRadius = 4;
     label.clipsToBounds = YES;
@@ -389,6 +389,13 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     [content.view addSubview:picker];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
     [alert setValue:content forKey:@"contentViewController"];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Random" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        NSMutableDictionary *dict = [self mutableOptions];
+        [dict removeObjectForKey:minKey];
+        [dict removeObjectForKey:maxKey];
+        self.options = dict;
+        [self.tableView reloadData];
+    }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Done" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         NSInteger first = [picker selectedRowInComponent:0];
         NSInteger second = [picker selectedRowInComponent:1];
@@ -510,6 +517,83 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 
 - (void)doneTapped { if (self.onDone) self.onDone(self.options ?: @{}, self.preview ?: @{}); [self dismissViewControllerAnimated:YES completion:nil]; }
 - (void)cancelTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+@end
+
+@interface PXFakeInfoViewController : UITableViewController
+@property (nonatomic, copy) NSDictionary *preview;
+@property (nonatomic, copy) NSDictionary *(^onRandom)(void);
+@property (nonatomic, copy) void (^onClose)(void);
+@end
+
+@implementation PXFakeInfoViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"INFO FAKE";
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView.delegate = self;
+    self.tableView.dataSource = self;
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(doneTapped)];
+    [self setupFooter];
+}
+
+- (void)setupFooter {
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 74)];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.frame = CGRectMake(24, 12, UIScreen.mainScreen.bounds.size.width - 48, 48);
+    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    button.backgroundColor = [UIColor systemBlueColor];
+    button.tintColor = [UIColor whiteColor];
+    button.layer.cornerRadius = 12;
+    button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    [button setTitle:@"Random" forState:UIControlStateNormal];
+    [button addTarget:self action:@selector(randomTapped) forControlEvents:UIControlEventTouchUpInside];
+    [footer addSubview:button];
+    self.tableView.tableFooterView = footer;
+}
+
+- (NSArray<NSArray<NSString *> *> *)rows {
+    return @[
+        @[ @"Device Name", @"DeviceName" ],
+        @[ @"Model", @"DeviceModel" ],
+        @[ @"iOS Version", @"IOSVersion" ],
+        @[ @"Country", @"CountryName" ],
+        @[ @"Carrier", @"CarrierName" ],
+        @[ @"Model Number", @"ModelNumber" ],
+        @[ @"Serial Number", @"SerialNumber" ],
+        @[ @"MAC Address", @"MACAddress" ]
+    ];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return [self rows].count; }
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"FakeInfoCell"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"FakeInfoCell"];
+    NSArray *row = [self rows][(NSUInteger)indexPath.row];
+    NSString *key = row[1];
+    NSString *value = self.preview[key];
+    if ([key isEqualToString:@"DeviceModel"] && [self.preview[@"DeviceModelName"] length] && [self.preview[@"DeviceModel"] length]) {
+        value = [NSString stringWithFormat:@"%@ (%@)", self.preview[@"DeviceModelName"], self.preview[@"DeviceModel"]];
+    }
+    cell.textLabel.text = row[0];
+    cell.detailTextLabel.text = value.length ? value : @"Random";
+    cell.detailTextLabel.numberOfLines = 2;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+}
+
+- (void)randomTapped {
+    if (self.onRandom) self.preview = self.onRandom() ?: @{};
+    [self.tableView reloadData];
+}
+
+- (void)doneTapped {
+    if (self.onClose) self.onClose();
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
 
 @end
 
@@ -5241,16 +5325,16 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UILabel *resetSelectionLabel = nil;
     UILabel *rrsSelectionLabel = nil;
     UILabel *fakeSelectionLabel = nil;
+    UILabel *fakeInfoSelectionLabel = nil;
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:[UIColor systemIndigoColor] valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"externaldrive.fill.badge.icloud" color:[UIColor systemPinkColor] valueLabel:&rrsSelectionLabel selector:@selector(selectRRSAppsTapped)]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"face.smiling.inverse" color:[UIColor systemGrayColor] valueLabel:&fakeSelectionLabel selector:@selector(selectFakeTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"INFO FAKE" icon:@"info.circle.fill" color:[UIColor systemBlueColor] valueLabel:&fakeInfoSelectionLabel selector:@selector(infoFakeTapped)]];
     self.resetSelectionValueLabel = resetSelectionLabel;
     self.rrsSelectionValueLabel = rrsSelectionLabel;
     self.fakeSelectionValueLabel = fakeSelectionLabel;
+    self.fakeInfoSelectionValueLabel = fakeInfoSelectionLabel;
     [self.mainStackView addArrangedSubview:selectionCard];
-
-    [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"INFO FAKE"]];
-    [self.mainStackView addArrangedSubview:[self dashboardFakeInfoCard]];
 
     [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"MANAGEMENT"]];
     UIView *managementCard = [self dashboardGroupCard];
@@ -5329,79 +5413,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor]
     ]];
     return card;
-}
-
-- (UIView *)dashboardFakeInfoCard {
-    UIView *card = [self dashboardRoundedCard];
-    UIStackView *stack = [[UIStackView alloc] init];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 0;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:stack];
-    self.fakeInfoValueLabels = [NSMutableDictionary dictionary];
-    NSArray *rows = @[
-        @[ @"Device Name", @"DeviceName" ],
-        @[ @"Model", @"DeviceModel" ],
-        @[ @"iOS Version", @"IOSVersion" ],
-        @[ @"Country", @"CountryName" ],
-        @[ @"Carrier", @"CarrierName" ],
-        @[ @"Model Number", @"ModelNumber" ],
-        @[ @"Serial Number", @"SerialNumber" ],
-        @[ @"MAC Address", @"MACAddress" ]
-    ];
-    for (NSArray *row in rows) {
-        UILabel *valueLabel = nil;
-        [stack addArrangedSubview:[self dashboardInfoRowWithTitle:row[0] key:row[1] valueLabel:&valueLabel]];
-        self.fakeInfoValueLabels[row[1]] = valueLabel;
-    }
-    UIButton *random = [UIButton buttonWithType:UIButtonTypeSystem];
-    random.backgroundColor = [UIColor systemBlueColor];
-    random.tintColor = [UIColor whiteColor];
-    random.layer.cornerRadius = 12;
-    random.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
-    [random setTitle:@"Random" forState:UIControlStateNormal];
-    [random addTarget:self action:@selector(randomFakeInfoTapped) forControlEvents:UIControlEventTouchUpInside];
-    [random.heightAnchor constraintEqualToConstant:46].active = YES;
-    UIView *buttonWrap = [[UIView alloc] init];
-    buttonWrap.translatesAutoresizingMaskIntoConstraints = NO;
-    random.translatesAutoresizingMaskIntoConstraints = NO;
-    [buttonWrap addSubview:random];
-    [NSLayoutConstraint activateConstraints:@[
-        [random.topAnchor constraintEqualToAnchor:buttonWrap.topAnchor constant:10],
-        [random.leadingAnchor constraintEqualToAnchor:buttonWrap.leadingAnchor constant:14],
-        [random.trailingAnchor constraintEqualToAnchor:buttonWrap.trailingAnchor constant:-14],
-        [random.bottomAnchor constraintEqualToAnchor:buttonWrap.bottomAnchor constant:-14]
-    ]];
-    [stack addArrangedSubview:buttonWrap];
-    [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:4],
-        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
-        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
-        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor]
-    ]];
-    return card;
-}
-
-- (UIView *)dashboardInfoRowWithTitle:(NSString *)title key:(NSString *)key valueLabel:(UILabel **)valueLabel {
-    UIStackView *row = [[UIStackView alloc] init];
-    row.axis = UILayoutConstraintAxisHorizontal;
-    row.alignment = UIStackViewAlignmentCenter;
-    row.spacing = 12;
-    row.layoutMargins = UIEdgeInsetsMake(8, 14, 8, 14);
-    row.layoutMarginsRelativeArrangement = YES;
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = title;
-    titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-    titleLabel.textColor = [UIColor secondaryLabelColor];
-    [row addArrangedSubview:titleLabel];
-    UILabel *value = [[UILabel alloc] init];
-    value.textAlignment = NSTextAlignmentRight;
-    value.numberOfLines = 2;
-    value.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    value.textColor = [UIColor labelColor];
-    [row addArrangedSubview:value];
-    if (valueLabel) *valueLabel = value;
-    return row;
 }
 
 - (UILabel *)dashboardSectionLabel:(NSString *)text {
@@ -5495,29 +5506,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (modelName.length && model.length) fakeText = [NSString stringWithFormat:@"%@ (%@)", modelName, model];
     else if (model.length) fakeText = model;
     self.fakeSelectionValueLabel.text = fakeText;
-    [self refreshFakeInfoLabels];
-}
-
-- (void)refreshFakeInfoLabels {
-    NSDictionary *preview = self.nextFakePreview ?: @{};
-    NSDictionary *displayKeys = @{
-        @"DeviceName": @"DeviceName",
-        @"DeviceModel": @"DeviceModel",
-        @"IOSVersion": @"IOSVersion",
-        @"CountryName": @"CountryName",
-        @"CarrierName": @"CarrierName",
-        @"ModelNumber": @"ModelNumber",
-        @"SerialNumber": @"SerialNumber",
-        @"MACAddress": @"MACAddress"
-    };
-    [displayKeys enumerateKeysAndObjectsUsingBlock:^(NSString *labelKey, NSString *previewKey, BOOL *stop) {
-        UILabel *label = self.fakeInfoValueLabels[labelKey];
-        NSString *value = preview[previewKey];
-        if ([labelKey isEqualToString:@"DeviceModel"] && [preview[@"DeviceModelName"] length] && [preview[@"DeviceModel"] length]) {
-            value = [NSString stringWithFormat:@"%@ (%@)", preview[@"DeviceModelName"], preview[@"DeviceModel"]];
-        }
-        label.text = value.length ? value : @"Random";
-    }];
+    NSString *infoText = @"Random";
+    if (modelName.length && model.length) infoText = [NSString stringWithFormat:@"%@ (%@)", modelName, model];
+    else if (self.nextFakePreview[@"IOSVersion"]) infoText = self.nextFakePreview[@"IOSVersion"];
+    self.fakeInfoSelectionValueLabel.text = infoText;
 }
 
 - (void)persistDashboardSelections {
@@ -5538,6 +5530,24 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.nextFakePreview = [self generateFakePreviewFromOptions:self.nextFakeOptions ?: @{}];
     [self persistDashboardSelections];
     [self refreshDashboardSelectionLabels];
+}
+
+- (void)infoFakeTapped {
+    PXFakeInfoViewController *vc = [[PXFakeInfoViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    vc.preview = self.nextFakePreview ?: @{};
+    __weak typeof(self) weakSelf = self;
+    vc.onRandom = ^NSDictionary *(void) {
+        weakSelf.nextFakePreview = [weakSelf generateFakePreviewFromOptions:weakSelf.nextFakeOptions ?: @{}];
+        [weakSelf persistDashboardSelections];
+        [weakSelf refreshDashboardSelectionLabels];
+        return weakSelf.nextFakePreview ?: @{};
+    };
+    vc.onClose = ^{
+        [weakSelf refreshDashboardSelectionLabels];
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)presentDashboardAppPickerWithMode:(NSString *)mode {
