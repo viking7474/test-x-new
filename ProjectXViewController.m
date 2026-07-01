@@ -6366,6 +6366,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self hideProgressHUD];
                 NSString *msg = [NSString stringWithFormat:@"Đã restore %@.%@", appName, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
                 [self showDashboardMessage:@"Restore xong" message:msg];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [self killEnabledAppsAndRespring];
+                });
             });
         }];
     }];
