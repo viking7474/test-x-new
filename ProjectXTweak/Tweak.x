@@ -82,6 +82,9 @@ static NSMutableSet *gMissingLogSeen = nil;
 // Security settings helpers
 static id PXReadSecuritySettingObject(NSString *key) {
     if (!key.length) return nil;
+    CFPropertyListRef pref = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.weaponx.securitySettings"));
+    if (pref) return CFBridgingRelease(pref);
+
     NSArray<NSString *> *paths = @[
         @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
         @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
@@ -92,8 +95,7 @@ static id PXReadSecuritySettingObject(NSString *key) {
             return dict[key];
         }
     }
-    NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    return [securitySettings objectForKey:key];
+    return nil;
 }
 
 static BOOL PXReadSecuritySettingBool(NSString *key) {

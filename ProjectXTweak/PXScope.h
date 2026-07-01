@@ -19,3 +19,5 @@ BOOL PXDisplayWebScreenSpoofEnabled(void);
 
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName);
 BOOL PXAllowUnscopedSafariStack(void);
+
+BOOL PXScopeIsReadingSecuritySettings(void);

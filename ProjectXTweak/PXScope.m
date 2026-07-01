@@ -1,8 +1,26 @@
 #import "PXScope.h"
 #import <CoreFoundation/CoreFoundation.h>
 
+static __thread BOOL gPXReadingSecuritySettings = NO;
+
+BOOL PXScopeIsReadingSecuritySettings(void) {
+    return gPXReadingSecuritySettings;
+}
+
 static id PXReadSecuritySettingObject(NSString *key) {
     if (!key.length) return nil;
+    gPXReadingSecuritySettings = YES;
+    id result = nil;
+
+    CFStringRef cfKey = (__bridge CFStringRef)key;
+    CFStringRef appID = CFSTR("com.weaponx.securitySettings");
+    CFPropertyListRef pref = CFPreferencesCopyAppValue(cfKey, appID);
+    if (pref) {
+        result = CFBridgingRelease(pref);
+        gPXReadingSecuritySettings = NO;
+        return result;
+    }
+
     NSArray<NSString *> *paths = @[
         @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
         @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
@@ -10,15 +28,27 @@ static id PXReadSecuritySettingObject(NSString *key) {
     for (NSString *path in paths) {
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
         if ([dict isKindOfClass:[NSDictionary class]] && dict[key] != nil) {
-            return dict[key];
+            result = dict[key];
+            break;
         }
     }
-    NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    return [securitySettings objectForKey:key];
+    gPXReadingSecuritySettings = NO;
+    return result;
 }
 
 static BOOL PXReadSecuritySettingHasKey(NSString *key) {
     if (!key.length) return NO;
+    gPXReadingSecuritySettings = YES;
+
+    CFStringRef cfKey = (__bridge CFStringRef)key;
+    CFStringRef appID = CFSTR("com.weaponx.securitySettings");
+    CFPropertyListRef pref = CFPreferencesCopyAppValue(cfKey, appID);
+    if (pref) {
+        CFRelease(pref);
+        gPXReadingSecuritySettings = NO;
+        return YES;
+    }
+
     NSArray<NSString *> *paths = @[
         @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
         @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
@@ -26,11 +56,12 @@ static BOOL PXReadSecuritySettingHasKey(NSString *key) {
     for (NSString *path in paths) {
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
         if ([dict isKindOfClass:[NSDictionary class]] && dict[key] != nil) {
+            gPXReadingSecuritySettings = NO;
             return YES;
         }
     }
-    NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    return ([securitySettings objectForKey:key] != nil);
+    gPXReadingSecuritySettings = NO;
+    return NO;
 }
 
 static BOOL PXReadSecuritySettingBool(NSString *key) {

@@ -268,7 +268,7 @@ static BOOL isUUIDKey(NSString *key) {
 // Always get original value first, only spoof if value is actually UUID-like
 - (id)objectForKey:(NSString *)defaultName {
     // Recursion guard
-    if (isInsideHook) {
+    if (isInsideHook || PXScopeIsReadingSecuritySettings()) {
         return %orig;
     }
     
