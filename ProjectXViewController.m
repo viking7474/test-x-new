@@ -17,6 +17,7 @@
 #import "AppDataBackupRestoreViewController.h"
 #import "AppDataBackupManager.h"
 #import "ToolViewController.h"
+#import "NetworkManager.h"
 #import <UIKit/UIKit.h>
 #import "ProgressHUDView.h"
 #import <spawn.h>
@@ -208,6 +209,221 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 
 // Handle toggle of advanced identifiers
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
+@end
+
+@interface PXFakeSelectionViewController : UITableViewController
+@property (nonatomic, copy) NSDictionary *options;
+@property (nonatomic, copy) NSDictionary *preview;
+@property (nonatomic, copy) void (^onDone)(NSDictionary *options, NSDictionary *preview);
+@end
+
+@implementation PXFakeSelectionViewController
+
+- (NSArray<NSDictionary *> *)models {
+    return @[
+        @{ @"name": @"iPhone X", @"id": @"iPhone10,3", @"modelNumber": @"MQA52LL/A" },
+        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8", @"modelNumber": @"MRY42LL/A" },
+        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2", @"modelNumber": @"MT9E2LL/A" },
+        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1", @"modelNumber": @"MWKM2LL/A" },
+        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3", @"modelNumber": @"MWC22LL/A" },
+        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2", @"modelNumber": @"MGJ53LL/A" },
+        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3", @"modelNumber": @"MGMK3LL/A" },
+        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5", @"modelNumber": @"MLPF3LL/A" },
+        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2", @"modelNumber": @"MLTP3LL/A" },
+        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7", @"modelNumber": @"MPVN3LL/A" },
+        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"modelNumber": @"MQ0E3LL/A" },
+        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"modelNumber": @"MTP63LL/A" },
+        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"modelNumber": @"MTV13LL/A" },
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"modelNumber": @"MU693LL/A" }
+    ];
+}
+
+- (NSArray<NSString *> *)iosVersions { return @[ @"13.7", @"14.8", @"15.4.1", @"15.7", @"16.0", @"16.3.1" ]; }
+
+- (NSArray<NSDictionary *> *)countries {
+    return @[
+        @{ @"name": @"United States", @"code": @"us" },
+        @{ @"name": @"Việt Nam", @"code": @"vn" },
+        @{ @"name": @"Canada", @"code": @"ca" },
+        @{ @"name": @"India", @"code": @"in" }
+    ];
+}
+
+- (NSArray<NSDictionary *> *)carriersForCountry:(NSString *)code {
+    if ([code isEqualToString:@"vn"]) {
+        return @[
+            @{ @"name": @"Viettel", @"mcc": @"452", @"mnc": @"04" },
+            @{ @"name": @"VinaPhone", @"mcc": @"452", @"mnc": @"02" },
+            @{ @"name": @"MobiFone", @"mcc": @"452", @"mnc": @"01" },
+            @{ @"name": @"Vietnamobile", @"mcc": @"452", @"mnc": @"05" }
+        ];
+    }
+    return [NetworkManager getCarriersForCountry:code ?: @"us"];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Chọn Fake";
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleDone target:self action:@selector(doneTapped)];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(cancelTapped)];
+    if (!self.options) self.options = @{};
+    if (!self.preview) self.preview = @{};
+    [self setupRandomFooter];
+}
+
+- (void)setupRandomFooter {
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 74)];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.frame = CGRectMake(24, 12, UIScreen.mainScreen.bounds.size.width - 48, 50);
+    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    button.backgroundColor = [UIColor systemBlueColor];
+    button.tintColor = [UIColor whiteColor];
+    button.layer.cornerRadius = 14;
+    [button setTitle:@"Random Fake Info" forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    [button addTarget:self action:@selector(randomTapped) forControlEvents:UIControlEventTouchUpInside];
+    [footer addSubview:button];
+    self.tableView.tableFooterView = footer;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 4 : 4; }
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section { return section == 0 ? @"THÔNG TIN PHẦN CỨNG" : @"THÔNG SỐ MẠNG & ĐỊNH DANH"; }
+
+- (NSString *)titleForIndexPath:(NSIndexPath *)indexPath {
+    NSArray *titles = indexPath.section == 0 ?
+        @[ @"Tên thiết bị (Device Name)", @"Model", @"Phiên bản (iOS Version)", @"Quốc gia (Country)" ] :
+        @[ @"Nhà mạng (Carrier)", @"Kiểu máy (Model Number)", @"Số Seri (Serial Number)", @"Địa chỉ MAC (MAC Address)" ];
+    return titles[(NSUInteger)indexPath.row];
+}
+
+- (NSString *)valueForIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == 0 && indexPath.row == 0) return self.preview[@"DeviceName"] ?: @"Random";
+    if (indexPath.section == 0 && indexPath.row == 1) return self.preview[@"DeviceModelName"] ?: @"Random";
+    if (indexPath.section == 0 && indexPath.row == 2) return self.preview[@"IOSVersion"] ?: @"Random";
+    if (indexPath.section == 0 && indexPath.row == 3) return self.preview[@"CountryName"] ?: @"Random";
+    if (indexPath.section == 1 && indexPath.row == 0) return self.preview[@"CarrierName"] ?: @"Random";
+    if (indexPath.section == 1 && indexPath.row == 1) return self.preview[@"ModelNumber"] ?: @"Auto";
+    if (indexPath.section == 1 && indexPath.row == 2) return self.preview[@"SerialNumber"] ?: @"Auto";
+    return self.preview[@"MACAddress"] ?: @"Auto";
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"FakeCell"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"FakeCell"];
+    cell.textLabel.text = [self titleForIndexPath:indexPath];
+    cell.detailTextLabel.text = [self valueForIndexPath:indexPath];
+    cell.detailTextLabel.textColor = [UIColor labelColor];
+    cell.accessoryType = ((indexPath.section == 0) || (indexPath.section == 1 && indexPath.row == 0)) ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 1 && indexPath.row > 0) return;
+    if (indexPath.section == 0 && indexPath.row == 0) { [self randomDeviceNameOnly]; return; }
+    if (indexPath.section == 0 && indexPath.row == 1) { [self showModelPicker]; return; }
+    if (indexPath.section == 0 && indexPath.row == 2) { [self showStringPickerWithTitle:@"iOS Version" values:[self iosVersions] key:@"IOSVersion"]; return; }
+    if (indexPath.section == 0 && indexPath.row == 3) { [self showCountryPicker]; return; }
+    if (indexPath.section == 1 && indexPath.row == 0) { [self showCarrierPicker]; return; }
+}
+
+- (void)showModelPicker {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Model" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSDictionary *m in [self models]) {
+        NSString *title = [NSString stringWithFormat:@"%@ (%@)", m[@"name"], m[@"id"]];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { [self setModel:m]; }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet];
+}
+
+- (void)showStringPickerWithTitle:(NSString *)title values:(NSArray<NSString *> *)values key:(NSString *)key {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSString *v in values) {
+        [sheet addAction:[UIAlertAction actionWithTitle:v style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary]; p[key] = v; self.preview = p; [self.tableView reloadData]; }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet];
+}
+
+- (void)showCountryPicker {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Country" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSDictionary *c in [self countries]) {
+        [sheet addAction:[UIAlertAction actionWithTitle:c[@"name"] style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary];
+            p[@"CountryName"] = c[@"name"]; p[@"CountryCode"] = c[@"code"]; [p removeObjectForKey:@"CarrierName"]; self.preview = p; [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet];
+}
+
+- (void)showCarrierPicker {
+    NSString *countryCode = self.preview[@"CountryCode"] ?: @"us";
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Carrier" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSDictionary *carrier in [self carriersForCountry:countryCode]) {
+        [sheet addAction:[UIAlertAction actionWithTitle:carrier[@"name"] style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary];
+            p[@"CarrierName"] = carrier[@"name"]; p[@"CarrierMCC"] = carrier[@"mcc"]; p[@"CarrierMNC"] = carrier[@"mnc"]; self.preview = p; [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet];
+}
+
+- (void)presentActionSheet:(UIAlertController *)sheet {
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) { sheet.popoverPresentationController.sourceView = self.view; sheet.popoverPresentationController.sourceRect = self.view.bounds; }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)setModel:(NSDictionary *)m {
+    NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary];
+    p[@"DeviceModel"] = m[@"id"]; p[@"DeviceModelName"] = m[@"name"]; p[@"ModelNumber"] = m[@"modelNumber"];
+    self.preview = p;
+    [self.tableView reloadData];
+}
+
+- (NSString *)randomSerial {
+    NSArray *prefixes = @[ @"C02", @"FVF", @"DLXJ", @"GG78", @"HC79" ];
+    NSString *prefix = prefixes[arc4random_uniform((uint32_t)prefixes.count)];
+    NSString *chars = @"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    NSMutableString *s = [prefix mutableCopy];
+    for (int i = 0; i < 8; i++) [s appendFormat:@"%C", [chars characterAtIndex:arc4random_uniform((uint32_t)chars.length)]];
+    return s;
+}
+
+- (NSString *)randomMAC { return [NSString stringWithFormat:@"02:%02X:%02X:%02X:%02X:%02X", arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)]; }
+- (NSString *)randomDeviceName { NSArray *names = @[ @"Stitch", @"Alex", @"Minh", @"Henry", @"Emma", @"Liam" ]; return [NSString stringWithFormat:@"iPhone của %@", names[arc4random_uniform((uint32_t)names.count)]]; }
+- (void)randomDeviceNameOnly { NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary]; p[@"DeviceName"] = [self randomDeviceName]; self.preview = p; [self.tableView reloadData]; }
+
+- (void)randomTapped {
+    NSDictionary *model = [self models][arc4random_uniform((uint32_t)[self models].count)];
+    NSDictionary *country = [self countries][arc4random_uniform((uint32_t)[self countries].count)];
+    NSArray *carriers = [self carriersForCountry:country[@"code"]];
+    NSDictionary *carrier = carriers.count ? carriers[arc4random_uniform((uint32_t)carriers.count)] : @{};
+    NSString *ios = [self iosVersions][arc4random_uniform((uint32_t)[self iosVersions].count)];
+    self.preview = @{
+        @"DeviceName": [self randomDeviceName],
+        @"DeviceModel": model[@"id"] ?: @"",
+        @"DeviceModelName": model[@"name"] ?: @"",
+        @"IOSVersion": ios,
+        @"CountryName": country[@"name"] ?: @"",
+        @"CountryCode": country[@"code"] ?: @"",
+        @"CarrierName": carrier[@"name"] ?: @"",
+        @"CarrierMCC": carrier[@"mcc"] ?: @"",
+        @"CarrierMNC": carrier[@"mnc"] ?: @"",
+        @"ModelNumber": model[@"modelNumber"] ?: @"",
+        @"SerialNumber": [self randomSerial],
+        @"MACAddress": [self randomMAC]
+    };
+    [self.tableView reloadData];
+}
+
+- (void)doneTapped { if (self.onDone) self.onDone(self.options ?: @{}, self.preview ?: @{}); [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)cancelTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+
 @end
 
 @implementation ProjectXViewController
@@ -4867,20 +5083,20 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (NSArray<NSDictionary *> *)pxSupportedFakeModels {
     return @[
-        @{ @"name": @"iPhone X", @"id": @"iPhone10,3" },
-        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8" },
-        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2" },
-        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1" },
-        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3" },
-        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2" },
-        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3" },
-        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5" },
-        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2" },
-        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7" },
-        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2" },
-        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4" },
-        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1" },
-        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2" }
+        @{ @"name": @"iPhone X", @"id": @"iPhone10,3", @"modelNumber": @"MQA52LL/A" },
+        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8", @"modelNumber": @"MRY42LL/A" },
+        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2", @"modelNumber": @"MT9E2LL/A" },
+        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1", @"modelNumber": @"MWKM2LL/A" },
+        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3", @"modelNumber": @"MWC22LL/A" },
+        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2", @"modelNumber": @"MGJ53LL/A" },
+        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3", @"modelNumber": @"MGMK3LL/A" },
+        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5", @"modelNumber": @"MLPF3LL/A" },
+        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2", @"modelNumber": @"MLTP3LL/A" },
+        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7", @"modelNumber": @"MPVN3LL/A" },
+        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"modelNumber": @"MQ0E3LL/A" },
+        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"modelNumber": @"MTP63LL/A" },
+        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"modelNumber": @"MTV13LL/A" },
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"modelNumber": @"MU693LL/A" }
     ];
 }
 
@@ -5117,8 +5333,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.resetSelectionValueLabel.text = self.selectedResetAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedResetAppIDs.count] : @"None";
     self.rrsSelectionValueLabel.text = self.selectedRRSAppIDs.count ? [NSString stringWithFormat:@"đã chọn %lu app", (unsigned long)self.selectedRRSAppIDs.count] : @"None";
     NSString *fakeText = @"Random";
+    NSString *modelName = self.nextFakePreview[@"DeviceModelName"];
     NSString *model = self.nextFakePreview[@"DeviceModel"];
-    if (model.length) fakeText = model;
+    if (modelName.length && model.length) fakeText = [NSString stringWithFormat:@"%@ (%@)", modelName, model];
+    else if (model.length) fakeText = model;
     self.fakeSelectionValueLabel.text = fakeText;
 }
 
@@ -5189,44 +5407,19 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)selectFakeTapped {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Chọn Fake" message:@"Cấu hình fake info cho profile tiếp theo" preferredStyle:UIAlertControllerStyleAlert];
-    NSArray *models = [self pxSupportedFakeModels];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"iOS min (vd 13.0), để trống = random"; tf.text = self.nextFakeOptions[@"iosMin"] ?: @""; }];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"iOS max (vd 16.3.1), để trống = random"; tf.text = self.nextFakeOptions[@"iosMax"] ?: @""; }];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Model min index 1-14, trống = random"; tf.keyboardType = UIKeyboardTypeNumberPad; tf.text = self.nextFakeOptions[@"modelMinIndex"] ?: @""; }];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Model max index 1-14, trống = random"; tf.keyboardType = UIKeyboardTypeNumberPad; tf.text = self.nextFakeOptions[@"modelMaxIndex"] ?: @""; }];
-    NSMutableString *msg = [NSMutableString stringWithString:@"Model index:\n"];
-    [models enumerateObjectsUsingBlock:^(NSDictionary *m, NSUInteger idx, BOOL *stop) {
-        [msg appendFormat:@"%lu. %@ (%@)\n", (unsigned long)idx + 1, m[@"name"], m[@"id"]];
-    }];
-    alert.message = msg;
     __weak typeof(self) weakSelf = self;
-    UIAlertAction *save = [UIAlertAction actionWithTitle:@"Lưu option" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        weakSelf.nextFakePreview = nil;
-        weakSelf.nextFakeOptions = @{
-            @"iosMin": alert.textFields[0].text ?: @"",
-            @"iosMax": alert.textFields[1].text ?: @"",
-            @"modelMinIndex": alert.textFields[2].text ?: @"",
-            @"modelMaxIndex": alert.textFields[3].text ?: @""
-        };
+    PXFakeSelectionViewController *vc = [[PXFakeSelectionViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    vc.options = self.nextFakeOptions ?: @{};
+    vc.preview = self.nextFakePreview ?: @{};
+    vc.onDone = ^(NSDictionary *options, NSDictionary *preview) {
+        weakSelf.nextFakeOptions = options ?: @{};
+        weakSelf.nextFakePreview = preview.count ? preview : nil;
         [weakSelf persistDashboardSelections];
         [weakSelf refreshDashboardSelectionLabels];
-    }];
-    UIAlertAction *random = [UIAlertAction actionWithTitle:@"Random" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        weakSelf.nextFakeOptions = @{
-            @"iosMin": alert.textFields[0].text ?: @"",
-            @"iosMax": alert.textFields[1].text ?: @"",
-            @"modelMinIndex": alert.textFields[2].text ?: @"",
-            @"modelMaxIndex": alert.textFields[3].text ?: @""
-        };
-        weakSelf.nextFakePreview = [weakSelf generateFakePreviewFromOptions:weakSelf.nextFakeOptions];
-        [weakSelf persistDashboardSelections];
-        [weakSelf refreshDashboardSelectionLabels];
-    }];
-    [alert addAction:save];
-    [alert addAction:random];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options {
@@ -5238,7 +5431,82 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
     NSInteger picked = minIdx - 1 + arc4random_uniform((uint32_t)(maxIdx - minIdx + 1));
     NSDictionary *model = models[(NSUInteger)picked];
-    return @{ @"DeviceModel": model[@"id"] ?: @"", @"DeviceModelName": model[@"name"] ?: @"" };
+    NSArray *iosVersions = [self pxSupportedIOSVersions];
+    NSArray *countries = @[
+        @{ @"name": @"United States", @"code": @"us" },
+        @{ @"name": @"Việt Nam", @"code": @"vn" },
+        @{ @"name": @"Canada", @"code": @"ca" },
+        @{ @"name": @"India", @"code": @"in" }
+    ];
+    NSDictionary *country = countries[arc4random_uniform((uint32_t)countries.count)];
+    NSArray *carriers = [self pxCarriersForCountry:country[@"code"]];
+    NSDictionary *carrier = carriers.count ? carriers[arc4random_uniform((uint32_t)carriers.count)] : @{};
+    return @{
+        @"DeviceName": [self pxRandomDeviceName],
+        @"DeviceModel": model[@"id"] ?: @"",
+        @"DeviceModelName": model[@"name"] ?: @"",
+        @"IOSVersion": iosVersions[arc4random_uniform((uint32_t)iosVersions.count)] ?: @"",
+        @"CountryName": country[@"name"] ?: @"",
+        @"CountryCode": country[@"code"] ?: @"",
+        @"CarrierName": carrier[@"name"] ?: @"",
+        @"CarrierMCC": carrier[@"mcc"] ?: @"",
+        @"CarrierMNC": carrier[@"mnc"] ?: @"",
+        @"ModelNumber": model[@"modelNumber"] ?: @"",
+        @"SerialNumber": [self pxRandomSerial],
+        @"MACAddress": [self pxRandomMAC]
+    };
+}
+
+- (NSArray *)pxCarriersForCountry:(NSString *)code {
+    if ([code isEqualToString:@"vn"]) {
+        return @[
+            @{ @"name": @"Viettel", @"mcc": @"452", @"mnc": @"04" },
+            @{ @"name": @"VinaPhone", @"mcc": @"452", @"mnc": @"02" },
+            @{ @"name": @"MobiFone", @"mcc": @"452", @"mnc": @"01" },
+            @{ @"name": @"Vietnamobile", @"mcc": @"452", @"mnc": @"05" }
+        ];
+    }
+    return [NetworkManager getCarriersForCountry:code ?: @"us"];
+}
+
+- (NSString *)pxRandomDeviceName {
+    NSArray *names = @[ @"Stitch", @"Alex", @"Minh", @"Henry", @"Emma", @"Liam" ];
+    return [NSString stringWithFormat:@"iPhone của %@", names[arc4random_uniform((uint32_t)names.count)]];
+}
+
+- (NSString *)pxRandomSerial {
+    NSArray *prefixes = @[ @"C02", @"FVF", @"DLXJ", @"GG78", @"HC79" ];
+    NSString *chars = @"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    NSMutableString *serial = [prefixes[arc4random_uniform((uint32_t)prefixes.count)] mutableCopy];
+    for (int i = 0; i < 8; i++) [serial appendFormat:@"%C", [chars characterAtIndex:arc4random_uniform((uint32_t)chars.length)]];
+    return serial;
+}
+
+- (NSString *)pxRandomMAC {
+    return [NSString stringWithFormat:@"02:%02X:%02X:%02X:%02X:%02X", arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
+}
+
+- (void)applyFakePreviewToCurrentProfile:(NSDictionary *)preview {
+    if (!preview.count) return;
+    NSString *model = preview[@"DeviceModel"];
+    if (model.length) [self.manager setCustomDeviceModel:model];
+    NSString *deviceName = preview[@"DeviceName"];
+    if (deviceName.length) [self.manager setCustomDeviceName:deviceName];
+    NSString *serial = preview[@"SerialNumber"];
+    if (serial.length) [self.manager setCustomSerialNumber:serial];
+
+    NSString *identityDir = [self.manager profileIdentityPath];
+    if (!identityDir.length) return;
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
+    NSArray *keys = @[ @"DeviceName", @"DeviceModel", @"DeviceModelName", @"IOSVersion", @"IOSBuild", @"CountryCode", @"CountryName", @"CarrierName", @"CarrierMCC", @"CarrierMNC", @"ModelNumber", @"SerialNumber", @"MACAddress" ];
+    for (NSString *key in keys) {
+        NSString *value = preview[key];
+        if ([value isKindOfClass:[NSString class]] && value.length) deviceIds[key] = value;
+    }
+    NSString *mac = preview[@"MACAddress"];
+    if (mac.length) deviceIds[@"WiFiAddress"] = mac;
+    [deviceIds writeToFile:deviceIdsPath atomically:YES];
 }
 
 - (void)saveRRSThenResetTapped {
@@ -5305,13 +5573,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self showError:switchError];
                 return;
             }
-            NSDictionary *preview = self.nextFakePreview ?: [self generateFakePreviewFromOptions:self.nextFakeOptions ?: @{}];
-            NSString *model = preview[@"DeviceModel"];
-            if (model.length) {
-                [self.manager setCustomDeviceModel:model];
-            }
-            [self.manager generateIOSVersion];
             [self.manager regenerateAllEnabledIdentifiers];
+            NSDictionary *preview = self.nextFakePreview ?: [self generateFakePreviewFromOptions:self.nextFakeOptions ?: @{}];
+            [self applyFakePreviewToCurrentProfile:preview];
             self.nextFakePreview = nil;
             [self persistDashboardSelections];
             dispatch_async(dispatch_get_main_queue(), ^{

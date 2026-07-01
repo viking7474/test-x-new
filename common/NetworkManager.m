@@ -24,10 +24,21 @@
         return [self getIndiaCarriers];
     } else if ([countryCode.lowercaseString isEqualToString:@"ca"]) {
         return [self getCanadaCarriers];
+    } else if ([countryCode.lowercaseString isEqualToString:@"vn"]) {
+        return [self getVietnamCarriers];
     }
     
     // Return US carriers as default
     return [self getUSCarriers];
+}
+
++ (NSArray *)getVietnamCarriers {
+    return @[
+        @{@"name": @"Viettel", @"mcc": @"452", @"mnc": @"04"},
+        @{@"name": @"VinaPhone", @"mcc": @"452", @"mnc": @"02"},
+        @{@"name": @"MobiFone", @"mcc": @"452", @"mnc": @"01"},
+        @{@"name": @"Vietnamobile", @"mcc": @"452", @"mnc": @"05"}
+    ];
 }
 
 + (NSDictionary *)getRandomCarrierForCountry:(NSString *)countryCode {
