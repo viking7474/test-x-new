@@ -4349,6 +4349,20 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 }
 
 - (void)updateProfileIndicator {
+    if (!self.isViewLoaded) return;
+    if (!self.profileIndicatorView || !self.profileIndicatorView.superview) {
+        self.profileIndicatorView = [[UIView alloc] init];
+        self.profileIndicatorView.translatesAutoresizingMaskIntoConstraints = NO;
+        self.profileIndicatorView.backgroundColor = [UIColor clearColor];
+        [self.view addSubview:self.profileIndicatorView];
+        [NSLayoutConstraint activateConstraints:@[
+            [self.profileIndicatorView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:-8],
+            [self.profileIndicatorView.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+            [self.profileIndicatorView.widthAnchor constraintEqualToConstant:30],
+            [self.profileIndicatorView.heightAnchor constraintEqualToConstant:260]
+        ]];
+    }
+
     // Clear existing content
     for (UIView *subview in self.profileIndicatorView.subviews) {
         [subview removeFromSuperview];
@@ -4379,6 +4393,8 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 }
 
 - (void)updateIndicatorWithName:(NSString *)name iconName:(NSString *)iconName profileId:(NSString *)profileId {
+    if (!self.profileIndicatorView) return;
+
     // Create a single label that combines all elements with the exact format requested
     UILabel *profileIndicatorLabel = [[UILabel alloc] init];
     profileIndicatorLabel.text = [NSString stringWithFormat:@"←------------------ Profile Num: %@ -----------------→", profileId];
@@ -4395,7 +4411,9 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     // Center the rotated label in the indicator view
     [NSLayoutConstraint activateConstraints:@[
         [profileIndicatorLabel.centerXAnchor constraintEqualToAnchor:self.profileIndicatorView.centerXAnchor],
-        [profileIndicatorLabel.centerYAnchor constraintEqualToAnchor:self.profileIndicatorView.centerYAnchor]
+        [profileIndicatorLabel.centerYAnchor constraintEqualToAnchor:self.profileIndicatorView.centerYAnchor],
+        [profileIndicatorLabel.widthAnchor constraintEqualToAnchor:self.profileIndicatorView.heightAnchor],
+        [profileIndicatorLabel.heightAnchor constraintEqualToAnchor:self.profileIndicatorView.widthAnchor]
     ]];
 }
 
