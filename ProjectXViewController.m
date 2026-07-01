@@ -283,52 +283,73 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Fake iOS version & model";
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.title = @"Chon Fake";
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleDone target:self action:@selector(doneTapped)];
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(cancelTapped)];
+    UIImage *backImage = [UIImage systemImageNamed:@"chevron.left"];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithImage:backImage style:UIBarButtonItemStylePlain target:self action:@selector(cancelTapped)];
     self.options = [self mutableOptions];
     if (!self.preview) self.preview = @{};
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 1; }
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 10; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 7 : 4; }
+- (NSInteger)fakeRowForIndexPath:(NSIndexPath *)indexPath { return indexPath.section == 0 ? indexPath.row : indexPath.row + 7; }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.row == 1 || indexPath.row == 3) return 52;
-    if (indexPath.row == 7) return 54;
+    NSInteger row = [self fakeRowForIndexPath:indexPath];
+    if (row == 1 || row == 3) return 52;
+    if (row == 8) return 34;
     return 44;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSInteger row = [self fakeRowForIndexPath:indexPath];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.backgroundColor = [UIColor systemBackgroundColor];
-    cell.textLabel.font = [UIFont systemFontOfSize:(indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8 || indexPath.row == 9) ? 15 : 16 weight:UIFontWeightRegular];
-    cell.textLabel.textColor = [UIColor systemBlueColor];
+    cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    cell.textLabel.font = [UIFont systemFontOfSize:(row == 4 || row == 5 || row == 9) ? 14 : 15 weight:UIFontWeightSemibold];
+    cell.textLabel.textColor = [UIColor labelColor];
     cell.detailTextLabel.font = [UIFont systemFontOfSize:14];
     cell.detailTextLabel.textColor = [UIColor systemBlueColor];
     cell.indentationWidth = 24;
-    if (indexPath.row == 4 || indexPath.row == 5 || indexPath.row == 8 || indexPath.row == 9) cell.indentationLevel = 1;
+    if (row == 4 || row == 5 || row == 9) cell.indentationLevel = 1;
 
-    if (indexPath.row == 0) [self configureCheckboxCell:cell title:@"1. Fake iOS Version" key:@"fakeIOSVersionEnabled" defaultValue:YES];
-    else if (indexPath.row == 1) [self configureRangeCell:cell text:[self iosRangeText]];
-    else if (indexPath.row == 2) [self configureCheckboxCell:cell title:@"2. Fake Model" key:@"fakeModelEnabled" defaultValue:YES];
-    else if (indexPath.row == 3) [self configureRangeCell:cell text:[self modelRangeText]];
-    else if (indexPath.row == 4) [self configureCheckboxCell:cell title:@"2.1 Fake Screen Size" key:@"fakeScreenSizeEnabled" defaultValue:NO];
-    else if (indexPath.row == 5) [self configureCheckboxCell:cell title:@"2.2 Fake Full Screen" key:@"fakeFullScreenEnabled" defaultValue:NO];
-    else if (indexPath.row == 6) [self configureCheckboxCell:cell title:@"3. Fake Name" key:@"fakeNameEnabled" defaultValue:NO];
-    else if (indexPath.row == 7) { [self configureCheckboxCell:cell title:@"4. Check IP Address" key:@"checkIPEnabled" defaultValue:NO]; cell.detailTextLabel.text = [NSString stringWithFormat:@"Chọn server: %@", self.options[@"ipServer"] ?: @"ip-api.com"]; }
-    else if (indexPath.row == 8) [self configureCheckboxCell:cell title:@"4.1 Fake GPS Location" key:@"fakeGPSEnabled" defaultValue:NO];
-    else { cell.textLabel.text = @"○ Ngẫu nhiên theo ip address"; cell.textLabel.textColor = [UIColor systemTealColor]; cell.accessoryType = [self boolOption:@"gpsRandomByIPEnabled" defaultValue:NO] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone; }
+    if (row == 0) [self configureCheckboxCell:cell title:@"1. Fake iOS Version" key:@"fakeIOSVersionEnabled" defaultValue:YES];
+    else if (row == 1) [self configureRangeCell:cell text:[self iosRangeText]];
+    else if (row == 2) [self configureCheckboxCell:cell title:@"2. Fake Model" key:@"fakeModelEnabled" defaultValue:YES];
+    else if (row == 3) [self configureRangeCell:cell text:[self modelRangeText]];
+    else if (row == 4) [self configureCheckboxCell:cell title:@"2.1 Fake Screen Size" key:@"fakeScreenSizeEnabled" defaultValue:NO];
+    else if (row == 5) [self configureCheckboxCell:cell title:@"2.2 Fake Full Screen" key:@"fakeFullScreenEnabled" defaultValue:NO];
+    else if (row == 6) [self configureCheckboxCell:cell title:@"3. Fake Name" key:@"fakeNameEnabled" defaultValue:NO];
+    else if (row == 7) [self configureCheckboxCell:cell title:@"4. Check IP Address" key:@"checkIPEnabled" defaultValue:NO];
+    else if (row == 8) { cell.textLabel.text = [NSString stringWithFormat:@"🌐 Chọn server: %@", self.options[@"ipServer"] ?: @"ip-api.com"]; cell.textLabel.textColor = [UIColor systemBlueColor]; cell.textLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium]; }
+    else if (row == 9) [self configureCheckboxCell:cell title:@"5. Fake GPS Location" key:@"fakeGPSEnabled" defaultValue:NO];
+    else [self configureRadioCell:cell title:@"Ngẫu nhiên theo ip address" key:@"gpsRandomByIPEnabled" defaultValue:NO];
     return cell;
 }
 
 - (void)configureCheckboxCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
     BOOL checked = [self boolOption:key defaultValue:defaultValue];
-    cell.textLabel.text = [NSString stringWithFormat:@"%@ %@", checked ? @"☑" : @"☐", title];
+    UIImage *image = [UIImage systemImageNamed:checked ? @"checkmark.square.fill" : @"square"];
+    cell.imageView.image = image;
+    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : [UIColor systemGray3Color];
+    cell.textLabel.text = title;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+}
+
+- (void)configureRadioCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
+    BOOL checked = [self boolOption:key defaultValue:defaultValue];
+    UIImage *image = [UIImage systemImageNamed:checked ? @"largecircle.fill.circle" : @"circle"];
+    cell.imageView.image = image;
+    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : [UIColor systemGray3Color];
+    cell.textLabel.text = title;
+    cell.textLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
+    cell.textLabel.textColor = [UIColor secondaryLabelColor];
+    cell.indentationLevel = 1;
     cell.accessoryType = UITableViewCellAccessoryNone;
 }
 
@@ -339,16 +360,25 @@ static UIImage *PXRemoveFromScopeIcon(void) {
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor systemBlueColor];
     label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    label.layer.borderColor = [UIColor systemBlueColor].CGColor;
+    label.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
+    label.layer.borderColor = [UIColor separatorColor].CGColor;
     label.layer.borderWidth = 1.0;
-    label.layer.cornerRadius = 4;
+    label.layer.cornerRadius = 7;
     label.clipsToBounds = YES;
     [cell.contentView addSubview:label];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.tintColor = [UIColor systemBlueColor];
+    [cell.contentView addSubview:chevron];
     [NSLayoutConstraint activateConstraints:@[
         [label.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8],
-        [label.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:64],
-        [label.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-24],
-        [label.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8]
+        [label.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:46],
+        [label.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [label.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+        [chevron.centerYAnchor constraintEqualToAnchor:label.centerYAnchor],
+        [chevron.trailingAnchor constraintEqualToAnchor:label.trailingAnchor constant:-14],
+        [chevron.widthAnchor constraintEqualToConstant:12],
+        [chevron.heightAnchor constraintEqualToConstant:12]
     ]];
 }
 
@@ -373,16 +403,27 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    NSArray *toggleKeys = @[ @"fakeIOSVersionEnabled", @"", @"fakeModelEnabled", @"", @"fakeScreenSizeEnabled", @"fakeFullScreenEnabled", @"fakeNameEnabled", @"checkIPEnabled", @"fakeGPSEnabled", @"gpsRandomByIPEnabled" ];
-    if (indexPath.row == 1) { [self showRangePickerWithTitle:@"Fake iOS Version" values:[self iosVersions] minKey:@"iosMin" maxKey:@"iosMax" labels:nil]; return; }
-    if (indexPath.row == 3) {
+    NSInteger row = [self fakeRowForIndexPath:indexPath];
+    NSDictionary *toggleKeys = @{
+        @0: @"fakeIOSVersionEnabled",
+        @2: @"fakeModelEnabled",
+        @4: @"fakeScreenSizeEnabled",
+        @5: @"fakeFullScreenEnabled",
+        @6: @"fakeNameEnabled",
+        @7: @"checkIPEnabled",
+        @9: @"fakeGPSEnabled",
+        @10: @"gpsRandomByIPEnabled"
+    };
+    if (row == 1) { [self showRangePickerWithTitle:@"Fake iOS Version" values:[self iosVersions] minKey:@"iosMin" maxKey:@"iosMax" labels:nil]; return; }
+    if (row == 3) {
         NSMutableArray *labels = [NSMutableArray array];
         for (NSUInteger i = 0; i < [self models].count; i++) [labels addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)i + 1, [self models][i][@"name"]]];
         [self showRangePickerWithTitle:@"Fake Model" values:labels minKey:@"modelMinIndex" maxKey:@"modelMaxIndex" labels:labels];
         return;
     }
-    NSString *key = toggleKeys[(NSUInteger)indexPath.row];
-    if (key.length) [self setBoolOption:key value:![self boolOption:key defaultValue:(indexPath.row == 0 || indexPath.row == 2)]];
+    if (row == 8) return;
+    NSString *key = toggleKeys[@(row)];
+    if (key.length) [self setBoolOption:key value:![self boolOption:key defaultValue:(row == 0 || row == 2)]];
 }
 
 - (void)showRangePickerWithTitle:(NSString *)title values:(NSArray<NSString *> *)values minKey:(NSString *)minKey maxKey:(NSString *)maxKey labels:(NSArray<NSString *> *)labels {
@@ -5561,7 +5602,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [weakSelf refreshDashboardSelectionLabels];
     };
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
     [self presentViewController:nav animated:YES completion:nil];
 }
 
