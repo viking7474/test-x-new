@@ -14,6 +14,7 @@
 #import <dispatch/dispatch.h>
 
 #import "PXScope.h"
+#import "PXFileDebug.h"
 
 #import "AppVersionHooks.h"
 
@@ -1589,6 +1590,11 @@ CFDictionaryRef replaced_CFCopySystemVersionDictionary(void) {
 
 // Hook sysctlbyname to spoof iOS kernel version information
 int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static int loggedCount = 0;
+    if (name && loggedCount < 30) {
+        loggedCount++;
+        PXFileDebugAIDA64Log("[IOSVersion.sysctlbyname] key=%s oldp=%d oldlenp=%d", name, oldp ? 1 : 0, oldlenp ? 1 : 0);
+    }
     // Store last call time and cached result for the common kernel version calls
     static uint64_t lastOsVersionCallTime = 0;
     static char cachedBuildStr[32] = {0}; // Cache the build string
@@ -2007,6 +2013,7 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 
 %ctor {
     @autoreleasepool {
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] enter");
         // Get the bundle ID for scope checking
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
@@ -2018,7 +2025,9 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         IOSVERSION_LOG(@"Initializing iOS Version Hooks for %@...", bundleID);
         
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+        BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] scope allowed=%d bundle=%s", allowed, bundleID.UTF8String ?: "<nil>");
+        if (!allowed) {
             // App is NOT scoped - no hooks, no interference, no crashes
             IOSVERSION_LOG(@"App %@ is not scoped, skipping iOS version hook installation", bundleID);
             return;
@@ -2065,7 +2074,9 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         IOSVERSION_LOG(@"Setting up ElleKit hooks for build number spoofing");
         
         // Hook CoreFoundation version dictionary function
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] before dlopen CoreFoundation");
         void *cfFramework = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] after dlopen CoreFoundation handle=%d", cfFramework ? 1 : 0);
         if (cfFramework) {
             // Try several possible symbol names for CFCopySystemVersionDictionary
             const char *symbolNames[] = {
@@ -2084,7 +2095,9 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
             }
             
             if (cfCopySystemVersionDictionaryPtr) {
+                PXFileDebugAIDA64Log("[IOSVersion.ctor] before hook CFCopySystemVersionDictionary");
                 MSHookFunction(cfCopySystemVersionDictionaryPtr, (void *)replaced_CFCopySystemVersionDictionary, (void **)&original_CFCopySystemVersionDictionary);
+                PXFileDebugAIDA64Log("[IOSVersion.ctor] after hook CFCopySystemVersionDictionary");
                 IOSVERSION_LOG(@"Successfully hooked CFCopySystemVersionDictionary");
             } else {
                 // If we can't find the symbol, create a stub implementation
@@ -2112,7 +2125,9 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
             }
             
             if (cfBundleGetValueForInfoDictionaryKeyPtr) {
+                PXFileDebugAIDA64Log("[IOSVersion.ctor] before hook CFBundleGetValueForInfoDictionaryKey");
                 MSHookFunction(cfBundleGetValueForInfoDictionaryKeyPtr, (void *)replaced_CFBundleGetValueForInfoDictionaryKey, (void **)&original_CFBundleGetValueForInfoDictionaryKey);
+                PXFileDebugAIDA64Log("[IOSVersion.ctor] after hook CFBundleGetValueForInfoDictionaryKey");
                 IOSVERSION_LOG(@"Successfully hooked CFBundleGetValueForInfoDictionaryKey");
             } else {
                 // If we can't find the symbol, create a stub implementation
@@ -2127,12 +2142,16 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         }
         
         // Hook sysctlbyname for kernel version checks
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] before dlopen libSystem.B");
         void *libSystemHandle = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] after dlopen libSystem.B handle=%d", libSystemHandle ? 1 : 0);
         if (libSystemHandle) {
             void *sysctlbynamePtr = dlsym(libSystemHandle, "sysctlbyname");
             if (sysctlbynamePtr) {
                 if (!gOwnerSysctlBynameInstalled) {
+                    PXFileDebugAIDA64Log("[IOSVersion.ctor] before hook sysctlbyname");
                     MSHookFunction(sysctlbynamePtr, (void *)hooked_sysctlbyname, (void **)&original_sysctlbyname);
+                    PXFileDebugAIDA64Log("[IOSVersion.ctor] after hook sysctlbyname");
                     IOSVERSION_LOG(@"Hooked sysctlbyname");
                 } else {
                     IOSVERSION_LOG(@"Skipping sysctlbyname hook (owner already installed)");
@@ -2184,9 +2203,12 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         }
         
         // Initialize Objective-C hooks for scoped apps only
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] before %%init");
         %init;
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] after %%init");
         
         IOSVERSION_LOG(@"iOS Version Hooks successfully initialized for scoped app: %@", bundleID);
+        PXFileDebugAIDA64Log("[IOSVersion.ctor] exit");
     }
 }
 

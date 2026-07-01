@@ -20,6 +20,7 @@
 #import "IOSVersionInfo.h"
 
 #import "PXScope.h"
+#import "PXFileDebug.h"
 
 // Define the swap usage structure if it's not available
 #ifndef HAVE_XSW_USAGE
@@ -1128,6 +1129,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 %ctor {
     @autoreleasepool {
         @try {
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] enter");
             PXLog(@"[DeviceSpec] Initializing device specifications spoofing hooks");
             
             NSString *currentBundleID = getCurrentBundleID();
@@ -1144,7 +1146,9 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
             }
 
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+            BOOL allowed = PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack);
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] scope allowed=%d bundle=%s", allowed, currentBundleID.UTF8String ?: "<nil>");
+            if (!allowed) {
                 PXLog(@"[DeviceSpec] App %@ is not scoped, skipping hook installation", currentBundleID);
                 return;
             }
@@ -1175,13 +1179,17 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
             PXLog(@"[DeviceSpec] App %@ is scoped, installing device specification hooks", currentBundleID);
             
             // Initialize memory hook function pointers for scoped apps only
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] before dlopen libSystem");
             void *libSystem = dlopen("/usr/lib/libSystem.dylib", RTLD_NOW);
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] after dlopen libSystem handle=%d", libSystem ? 1 : 0);
             if (libSystem) {
                 // Hook sysctlbyname for memory-related calls
                 orig_sysctlbyname = dlsym(libSystem, "sysctlbyname");
                 if (orig_sysctlbyname) {
                     if (!gOwnerSysctlBynameInstalled) {
+                        PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook sysctlbyname");
                         MSHookFunction(orig_sysctlbyname, (void *)hook_sysctlbyname, (void **)&orig_sysctlbyname);
+                        PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook sysctlbyname");
                         PXLog(@"[DeviceSpec] Successfully hooked sysctlbyname for memory spoofing");
                     } else {
                         PXLog(@"[DeviceSpec] Skipping sysctlbyname hook (owner already installed)");
@@ -1191,26 +1199,35 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 // Hook host_statistics64 for VM stats spoofing
                 orig_host_statistics64 = dlsym(libSystem, "host_statistics64");
                 if (orig_host_statistics64) {
+                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook host_statistics64");
                     MSHookFunction(orig_host_statistics64, (void *)hook_host_statistics64, (void **)&orig_host_statistics64);
+                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook host_statistics64");
                     PXLog(@"[DeviceSpec] Successfully hooked host_statistics64 for memory stats spoofing");
                 }
                 
                 // Hook NXGetLocalArchInfo for CPU architecture spoofing
                 orig_nx_get_local_arch_info = dlsym(libSystem, "NXGetLocalArchInfo");
                 if (orig_nx_get_local_arch_info) {
+                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook NXGetLocalArchInfo");
                     MSHookFunction(orig_nx_get_local_arch_info, (void *)hook_nx_get_local_arch_info, (void **)&orig_nx_get_local_arch_info);
+                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook NXGetLocalArchInfo");
                     PXLog(@"[DeviceSpec] Successfully hooked NXGetLocalArchInfo for CPU architecture spoofing");
                 }
                 
                 dlclose(libSystem);
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] after dlclose libSystem");
             }
             
             // Initialize Objective-C hooks for scoped apps only
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] before %%init");
             %init();
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] after %%init");
             
             PXLog(@"[DeviceSpec] Device specification hooks successfully initialized for scoped app: %@", currentBundleID);
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] exit");
             
         } @catch (NSException *e) {
+            PXFileDebugAIDA64Log("[DeviceSpec.ctor] exception=%s", e.description.UTF8String ?: "<nil>");
             PXLog(@"[DeviceSpec] ❌ Exception in constructor: %@", e);
         }
     }
@@ -1493,6 +1510,11 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
 
 // Sysctlbyname hook for memory-related calls
 static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static int loggedCount = 0;
+    if (name && loggedCount < 40) {
+        loggedCount++;
+        PXFileDebugAIDA64Log("[DeviceSpec.sysctlbyname] key=%s oldp=%d oldlenp=%d", name, oldp ? 1 : 0, oldlenp ? 1 : 0);
+    }
     // Always call original function first to ensure proper behavior
     int result = orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
 

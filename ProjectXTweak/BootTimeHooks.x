@@ -14,6 +14,7 @@
 #import <objc/runtime.h>
 
 #import "PXScope.h"
+#import "PXFileDebug.h"
 
 // Define the boot time structure for sysctl calls
 struct timeval_boot {
@@ -314,6 +315,11 @@ static BOOL isBootTimeOrUptimeEnabled(void) {
 
 // Hook sysctl() for KERN_BOOTTIME queries - ONLY method that App Store apps commonly use
 int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static BOOL logged = NO;
+    if (!logged) {
+        logged = YES;
+        PXFileDebugAIDA64Log("[BootTime.sysctl] first namelen=%u key0=%d key1=%d", namelen, name ? name[0] : -1, (name && namelen > 1) ? name[1] : -1);
+    }
     // CRITICAL: Recursion guard - if we're already inside hook, pass through to original
     if (isInsideHook) {
         if (orig_sysctl) {
@@ -433,6 +439,11 @@ int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *new
 
 // Hook sysctlbyname() for "kern.boottime" queries - ONLY method that App Store apps commonly use
 int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static int loggedCount = 0;
+    if (name && loggedCount < 20) {
+        loggedCount++;
+        PXFileDebugAIDA64Log("[BootTime.sysctlbyname] key=%s", name);
+    }
     // CRITICAL: Recursion guard - if we're already inside hook, pass through to original
     if (isInsideHook) {
         if (orig_sysctlbyname) {
@@ -498,7 +509,9 @@ static NSTimeInterval hook_systemUptime(NSProcessInfo *self, SEL _cmd) {
 // Install system call hooks ONLY for scoped apps
 static void installSystemCallHooks(void) {
     @try {
+        PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] enter");
         if (hooksInstalled) {
+            PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] already installed");
             return; // Already installed
         }
         
@@ -509,14 +522,18 @@ static void installSystemCallHooks(void) {
             // Hook sysctl
             void *sysctlPtr = dlsym(RTLD_DEFAULT, "sysctl");
             if (sysctlPtr) {
+                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] before hook sysctl owner=%d", gOwnerSysctlInstalled);
                 MSHookFunction(sysctlPtr, (void *)hook_sysctl, (void **)&orig_sysctl);
+                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] after hook sysctl");
                 hookingSuccess = YES;
             }
             
             // Hook sysctlbyname
             void *sysctlbynamePtr = dlsym(RTLD_DEFAULT, "sysctlbyname");
             if (sysctlbynamePtr) {
+                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] before hook sysctlbyname owner=%d", gOwnerSysctlBynameInstalled);
                 MSHookFunction(sysctlbynamePtr, (void *)hook_sysctlbyname, (void **)&orig_sysctlbyname);
+                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] after hook sysctlbyname");
                 hookingSuccess = YES;
             }
         }
@@ -525,6 +542,7 @@ static void installSystemCallHooks(void) {
             hooksInstalled = YES;
             NSString *bundleID = getCurrentBundleID();
             PXLog(@"[BootTimeHooks] ✅ System call hooks installed for scoped app: %@", bundleID);
+            PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] success");
             // Add systemUptime hook for NSProcessInfo
             Class procInfoClass = objc_getClass("NSProcessInfo");
             if (procInfoClass) {
@@ -545,6 +563,7 @@ static void installSystemCallHooks(void) {
 %ctor {
     @autoreleasepool {
         @try {
+            PXFileDebugAIDA64Log("[BootTime.ctor] enter");
             NSString *bundleID = getCurrentBundleID();
             
             // Skip if we can't get bundle ID
@@ -553,7 +572,9 @@ static void installSystemCallHooks(void) {
             }
             
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+            BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
+            PXFileDebugAIDA64Log("[BootTime.ctor] scope allowed=%d bundle=%s", allowed, bundleID.UTF8String ?: "<nil>");
+            if (!allowed) {
                 return;
             }
             
@@ -561,8 +582,10 @@ static void installSystemCallHooks(void) {
             
             // Install the minimal system call hooks that App Store apps actually use immediately
             installSystemCallHooks();
+            PXFileDebugAIDA64Log("[BootTime.ctor] exit");
             
         } @catch (NSException *e) {
+            PXFileDebugAIDA64Log("[BootTime.ctor] exception=%s", e.description.UTF8String ?: "<nil>");
             // Silent failure to prevent crashes
         }
     }

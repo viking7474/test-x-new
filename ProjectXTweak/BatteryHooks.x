@@ -4,6 +4,7 @@
 #import "BatteryManager.h"
 #import "IdentifierManager.h"
 #import "PXScope.h"
+#import "PXFileDebug.h"
 
 // Path to scoped apps plist
 static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
@@ -200,10 +201,16 @@ static NSInteger hook_batteryState(UIDevice *self, SEL _cmd) {
 
 %ctor {
     @autoreleasepool {
+        PXFileDebugAIDA64Log("[Battery.ctor] enter");
         Class deviceClass = objc_getClass("UIDevice");
         if (deviceClass) {
+            PXFileDebugAIDA64Log("[Battery.ctor] before hook batteryLevel");
             MSHookMessageEx(deviceClass, @selector(batteryLevel), (IMP)hook_batteryLevel, (IMP *)&orig_batteryLevel);
+            PXFileDebugAIDA64Log("[Battery.ctor] after hook batteryLevel");
+            PXFileDebugAIDA64Log("[Battery.ctor] before hook batteryState");
             MSHookMessageEx(deviceClass, @selector(batteryState), (IMP)hook_batteryState, (IMP *)&orig_batteryState);
+            PXFileDebugAIDA64Log("[Battery.ctor] after hook batteryState");
         }
+        PXFileDebugAIDA64Log("[Battery.ctor] exit");
     }
 }

@@ -13,6 +13,7 @@
 #import <mach-o/dyld.h>
 
 #import "PXScope.h"
+#import "PXFileDebug.h"
 
 // Constants for proper size calculations - use only marketing units (1000-based)
 #define BYTES_PER_KB (1000ULL)
@@ -936,6 +937,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 %ctor {
     @autoreleasepool {
         @try {
+            PXFileDebugAIDA64Log("[Storage.ctor] enter");
             PXLog(@"[StorageHooks] Initializing storage hooks");
             
             NSString *currentBundleID = getCurrentBundleID();
@@ -952,7 +954,9 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             }
 
             NSString *proc = [NSProcessInfo processInfo].processName;
-            if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+            BOOL allowed = PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack);
+            PXFileDebugAIDA64Log("[Storage.ctor] scope allowed=%d bundle=%s", allowed, currentBundleID.UTF8String ?: "<nil>");
+            if (!allowed) {
                 PXLog(@"[StorageHooks] App %@ is not scoped, skipping hook installation", currentBundleID);
                 return;
             }
@@ -960,48 +964,63 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             PXLog(@"[StorageHooks] App %@ is scoped, setting up storage hooks", currentBundleID);
             
             // Hook statfs
+            PXFileDebugAIDA64Log("[Storage.ctor] before dlopen self");
             void *handle = dlopen(NULL, RTLD_GLOBAL);
+            PXFileDebugAIDA64Log("[Storage.ctor] after dlopen self handle=%d", handle ? 1 : 0);
             
             if (handle) {
                 orig_statfs = dlsym(handle, "statfs");
                 if (orig_statfs) {
+                    PXFileDebugAIDA64Log("[Storage.ctor] before hook statfs");
                     MSHookFunction((void *)orig_statfs, (void *)replaced_statfs, (void **)&orig_statfs);
+                    PXFileDebugAIDA64Log("[Storage.ctor] after hook statfs");
                     PXLog(@"[StorageHooks] Hooked statfs successfully");
                 }
                 
                 // Hook statfs64 (if available)
                 orig_statfs64 = dlsym(handle, "statfs64");
                 if (orig_statfs64) {
+                    PXFileDebugAIDA64Log("[Storage.ctor] before hook statfs64");
                     MSHookFunction((void *)orig_statfs64, (void *)replaced_statfs64, (void **)&orig_statfs64);
+                    PXFileDebugAIDA64Log("[Storage.ctor] after hook statfs64");
                     PXLog(@"[StorageHooks] Hooked statfs64 successfully");
                 }
                 
                 // Hook getfsstat
                 orig_getfsstat = dlsym(handle, "getfsstat");
                 if (orig_getfsstat) {
+                    PXFileDebugAIDA64Log("[Storage.ctor] before hook getfsstat");
                     MSHookFunction((void *)orig_getfsstat, (void *)replaced_getfsstat, (void **)&orig_getfsstat);
+                    PXFileDebugAIDA64Log("[Storage.ctor] after hook getfsstat");
                     PXLog(@"[StorageHooks] Hooked getfsstat successfully");
                 }
                 
                 // Hook getfsstat64 (if available)
                 orig_getfsstat64 = dlsym(handle, "getfsstat64");
                 if (orig_getfsstat64) {
+                    PXFileDebugAIDA64Log("[Storage.ctor] before hook getfsstat64");
                     MSHookFunction((void *)orig_getfsstat64, (void *)replaced_getfsstat64, (void **)&orig_getfsstat64);
+                    PXFileDebugAIDA64Log("[Storage.ctor] after hook getfsstat64");
                     PXLog(@"[StorageHooks] Hooked getfsstat64 successfully");
                 }
                 
                 dlclose(handle);
+                PXFileDebugAIDA64Log("[Storage.ctor] after dlclose self");
             }
             
             // Hook IOKit functions
+            PXFileDebugAIDA64Log("[Storage.ctor] before dlopen IOKit");
             void *ioKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+            PXFileDebugAIDA64Log("[Storage.ctor] after dlopen IOKit handle=%d", ioKitHandle ? 1 : 0);
             if (ioKitHandle) {
                 // Get the function pointer for IORegistryEntryCreateCFProperty
                 void *ioRegEntryCreateCFPropertyPtr = dlsym(ioKitHandle, "IORegistryEntryCreateCFProperty");
                 
                 if (ioRegEntryCreateCFPropertyPtr) {
                     if (!gOwnerIOKitInstalled) {
+                        PXFileDebugAIDA64Log("[Storage.ctor] before hook IORegistryEntryCreateCFProperty");
                         MSHookFunction(ioRegEntryCreateCFPropertyPtr, (void *)replaced_IORegistryEntryCreateCFProperty, (void **)&orig_IORegistryEntryCreateCFProperty);
+                        PXFileDebugAIDA64Log("[Storage.ctor] after hook IORegistryEntryCreateCFProperty");
                         PXLog(@"[StorageHooks] Hooked IORegistryEntryCreateCFProperty successfully");
                     } else {
                         PXLog(@"[StorageHooks] Skipping IORegistryEntryCreateCFProperty hook (owner already installed)");
@@ -1009,14 +1028,19 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                 }
                 
                 dlclose(ioKitHandle);
+                PXFileDebugAIDA64Log("[Storage.ctor] after dlclose IOKit");
             }
             
             // Initialize Objective-C hooks for scoped apps only
+            PXFileDebugAIDA64Log("[Storage.ctor] before %%init");
             %init;
+            PXFileDebugAIDA64Log("[Storage.ctor] after %%init");
             
             PXLog(@"[StorageHooks] Storage hooks successfully initialized for scoped app: %@", currentBundleID);
+            PXFileDebugAIDA64Log("[Storage.ctor] exit");
             
         } @catch (NSException *e) {
+            PXFileDebugAIDA64Log("[Storage.ctor] exception=%s", e.description.UTF8String ?: "<nil>");
             PXLog(@"[StorageHooks] ❌ Exception in constructor: %@", e);
         }
     }

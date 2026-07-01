@@ -6,6 +6,7 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 
 #import "PXScope.h"
+#import "PXFileDebug.h"
 
 // Cache for bundle decisions
 static NSMutableDictionary *cachedBundleDecisions = nil;
@@ -471,11 +472,14 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
 
 %ctor {
     @autoreleasepool {
+        PXFileDebugAIDA64Log("[Canvas.ctor] enter");
         PXLog(@"[CanvasFingerprint] Initializing Canvas Fingerprint Protection hooks");
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
         PXScopeOptions options = (isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled() || PXDisplayWebScreenSpoofEnabled()) ? PXScopeOptionAllowSafariAuthStack : PXScopeOptionNone;
-        if (!PXProcessIsAllowedForSpoofing(bundleID, proc, options)) {
+        BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, options);
+        PXFileDebugAIDA64Log("[Canvas.ctor] scope allowed=%d options=%lu bundle=%s", allowed, (unsigned long)options, bundleID.UTF8String ?: "<nil>");
+        if (!allowed) {
             PXLog(@"[CanvasFingerprint] App is not scoped, skipping hook installation");
             return;
         }
@@ -541,6 +545,8 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
             CFNotificationSuspensionBehaviorDeliverImmediately
         );
         // Initialize hooks
+        PXFileDebugAIDA64Log("[Canvas.ctor] before %%init");
         %init();
+        PXFileDebugAIDA64Log("[Canvas.ctor] after %%init exit");
     }
-} 
+}

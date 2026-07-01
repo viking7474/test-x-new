@@ -24,6 +24,7 @@
 #import <sys/mount.h>
 #import <sys/statvfs.h>
 #import "PXScope.h"
+#import "PXFileDebug.h"
 #import <sys/sysctl.h>
 #if __has_include(<sys/user.h>)
 #import <sys/user.h>
@@ -279,6 +280,7 @@ static BOOL PXJBShouldBypassCached(void) {
 
         NSString *proc = [NSProcessInfo processInfo].processName;
         gJBEnabled = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
+        PXFileDebugAIDA64Log("[JailbreakBypass] decision enabled=%d bundle=%s", gJBEnabled, bundleID.UTF8String ?: "<nil>");
         return gJBEnabled;
     }
 }

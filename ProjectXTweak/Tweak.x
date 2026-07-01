@@ -32,6 +32,7 @@
 #import "IOSVersionInfo.h"
 #import "HookOwnership.h"
 #import "PXScope.h"
+#import "PXFileDebug.h"
 #import <CoreFoundation/CoreFoundation.h>
 // Forward declarations for classes we need to hook
 @interface SBScreenshotManager : NSObject
@@ -333,6 +334,11 @@ static int PXWriteSysctlCStringLocal(const char *value, void *outBuf, size_t *ou
 
 // Hook for sysctl array - handles both Kernel and Hardware queries
 static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static BOOL logged = NO;
+    if (!logged) {
+        logged = YES;
+        PXFileDebugAIDA64Log("[Tweak.sysctl] first namelen=%u key0=%d key1=%d", namelen, name ? name[0] : -1, (name && namelen > 1) ? name[1] : -1);
+    }
     if (!sysctl_orig) return -1;
     if (!name || namelen < 2) {
         return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
@@ -523,6 +529,11 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static int loggedCount = 0;
+    if (name && loggedCount < 20) {
+        loggedCount++;
+        PXFileDebugAIDA64Log("[Tweak.sysctlbyname] key=%s oldp=%d oldlenp=%d", name, oldp ? 1 : 0, oldlenp ? 1 : 0);
+    }
     if (!sysctlbyname_orig) return -1;
     if (px_sysctlbyname_in_hook) return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
     if (!name) { errno = EINVAL; return -1; }
@@ -734,6 +745,12 @@ static int uname_hook(struct utsname *buf) {
 
 // MGCopyAnswer hook for various system identifiers
 %hookf(CFTypeRef, MGCopyAnswer, CFStringRef property) {
+    static int loggedCount = 0;
+    if (property && loggedCount < 30) {
+        loggedCount++;
+        NSString *p = (__bridge NSString *)property;
+        PXFileDebugAIDA64Log("[Tweak.MGCopyAnswer] property=%s", p.UTF8String ?: "<nil>");
+    }
     if (!%c(IdentifierManager)) {
         return %orig;
     }
@@ -2706,6 +2723,12 @@ static CFTypeRef PXIOKitPatchCompatibleValue(CFTypeRef original, NSString *hwMod
 }
 
 static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    static int loggedCount = 0;
+    if (key && loggedCount < 30) {
+        loggedCount++;
+        NSString *k = (__bridge NSString *)key;
+        PXFileDebugAIDA64Log("[Tweak.IORegistryEntryCreateCFProperty] key=%s", k.UTF8String ?: "<nil>");
+    }
     // Null checks to prevent crashes
     if (!entry || !key) {
         return NULL;
@@ -2912,6 +2935,11 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
 }
 
 static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options) {
+    static BOOL logged = NO;
+    if (!logged) {
+        logged = YES;
+        PXFileDebugAIDA64Log("[Tweak.IORegistryEntryCreateCFProperties] first entry=%u", entry);
+    }
     if (!orig_IORegistryEntryCreateCFProperties) {
         return kIOReturnError;
     }
@@ -3078,6 +3106,12 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
 }
 
 static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    static int loggedCount = 0;
+    if (key && loggedCount < 30) {
+        loggedCount++;
+        NSString *k = (__bridge NSString *)key;
+        PXFileDebugAIDA64Log("[Tweak.IORegistryEntrySearchCFProperty] key=%s plane=%s", k.UTF8String ?: "<nil>", plane ?: "<nil>");
+    }
     if (!orig_IORegistryEntrySearchCFProperty || !entry || !key) {
         return NULL;
     }
@@ -3250,6 +3284,7 @@ static char* hook_GSSystemGetSerialNo(void) {
 
 // Constructor
 %ctor {
+    PXFileDebugAIDA64Log("[Tweak.ctor] enter");
     // VERIFICATION: Create flag file FIRST - before anything else that might crash
     [@"ctor_entry" writeToFile:@"/tmp/weaponx_ctor_started.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     
@@ -3264,20 +3299,27 @@ static char* hook_GSSystemGetSerialNo(void) {
     NSLog(@"[WeaponX-DEBUG] ========================================");
     
     // Add at beginning of ctor
+    PXFileDebugAIDA64Log("[Tweak.ctor] before setupHookingEnvironment");
     setupHookingEnvironment();
+    PXFileDebugAIDA64Log("[Tweak.ctor] after setupHookingEnvironment");
 
     // Install shims for weakly-linked selectors to prevent crashes
+    PXFileDebugAIDA64Log("[Tweak.ctor] before PXInstallCompatibilityShims");
     PXInstallCompatibilityShims();
+    PXFileDebugAIDA64Log("[Tweak.ctor] after PXInstallCompatibilityShims");
     
     PXLog(@"ProjectX tweak initializing...");
     
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    PXFileDebugAIDA64Log("[Tweak.ctor] bundle=%s proc=%s", currentBundleID.UTF8String ?: "<nil>", currentProcessName.UTF8String ?: "<nil>");
     PXLog(@"[WeaponX] 💉 Tweak injected into process: %@ (BundleID: %@)", [NSProcessInfo processInfo].processName, currentBundleID);
     
     if (currentBundleID) {
+        PXFileDebugAIDA64Log("[Tweak.ctor] before IdentifierManager/scope decision");
         IdentifierManager *mgr = [%c(IdentifierManager) sharedManager];
         if (mgr) {
             BOOL enabled = PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack);
+            PXFileDebugAIDA64Log("[Tweak.ctor] after scope decision enabled=%d", enabled);
             PXLog(@"[WeaponX] 🔍 App Enabled Check: %@ -> %@", currentBundleID, enabled ? @"YES" : @"NO");
             
             if (enabled) {
@@ -3352,7 +3394,9 @@ static char* hook_GSSystemGetSerialNo(void) {
     void *sysctlbynameSymbol = dlsym(libSystemHandle, "sysctlbyname");
     if (sysctlbynameSymbol) {
         PXLog(@"Using ElleKit to hook sysctlbyname for system information protection");
+        PXFileDebugAIDA64Log("[Tweak.ctor] before hook sysctlbyname");
         MSHookFunction(sysctlbynameSymbol, (void *)sysctlbyname_hook, (void **)&sysctlbyname_orig);
+        PXFileDebugAIDA64Log("[Tweak.ctor] after hook sysctlbyname");
         gOwnerSysctlBynameInstalled = YES;
     }
 
@@ -3360,7 +3404,9 @@ static char* hook_GSSystemGetSerialNo(void) {
             void *sysctlSym = dlsym(libSystemHandle, "sysctl");
             if (sysctlSym) {
                 PXLog(@"Hooking sysctl for iOS version/build spoofing");
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook sysctl");
                 MSHookFunction(sysctlSym, (void *)sysctl_hook, (void **)&sysctl_orig);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook sysctl");
                 gOwnerSysctlInstalled = YES;
             }
 
@@ -3383,7 +3429,9 @@ static char* hook_GSSystemGetSerialNo(void) {
     [securitySettings synchronize]; // Force synchronization to get the latest settings
     
     // Initialize our hook group
+    PXFileDebugAIDA64Log("[Tweak.ctor] before init Identifiers");
     %init(Identifiers);
+    PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
     gOwnerMGInstalled = YES;
     
     // Initialize screenshot modification hooks if we're in SpringBoard
@@ -3514,7 +3562,9 @@ static char* hook_GSSystemGetSerialNo(void) {
     }
     
     // Hook IOKit for serial number spoofing
+    PXFileDebugAIDA64Log("[Tweak.ctor] before dlopen IOKit");
     void *IOKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+    PXFileDebugAIDA64Log("[Tweak.ctor] after dlopen IOKit handle=%d", IOKitHandle ? 1 : 0);
     if (IOKitHandle) {
         BOOL didHookIOKit = NO;
 
@@ -3525,8 +3575,10 @@ static char* hook_GSSystemGetSerialNo(void) {
         if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
             if (IORegEntryCreateCFPropertyPtr) {
                 PXLog(@"Hooking IORegistryEntryCreateCFProperty (owner IOKit)");
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook IORegistryEntryCreateCFProperty");
                 MSHookFunction(IORegEntryCreateCFPropertyPtr, (void *)hook_IORegistryEntryCreateCFProperty,
                                (void **)&orig_IORegistryEntryCreateCFProperty);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook IORegistryEntryCreateCFProperty");
                 didHookIOKit = YES;
             } else {
                 PXLog(@"[WeaponX] ⚠️ IORegistryEntryCreateCFProperty symbol not found");
@@ -3534,8 +3586,10 @@ static char* hook_GSSystemGetSerialNo(void) {
 
             if (IORegEntryCreateCFPropertiesPtr) {
                 PXLog(@"Hooking IORegistryEntryCreateCFProperties (owner IOKit)");
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook IORegistryEntryCreateCFProperties");
                 MSHookFunction(IORegEntryCreateCFPropertiesPtr, (void *)hook_IORegistryEntryCreateCFProperties,
                                (void **)&orig_IORegistryEntryCreateCFProperties);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook IORegistryEntryCreateCFProperties");
                 didHookIOKit = YES;
             } else {
                 PXLog(@"[WeaponX] ⚠️ IORegistryEntryCreateCFProperties symbol not found");
@@ -3543,8 +3597,10 @@ static char* hook_GSSystemGetSerialNo(void) {
 
             if (IORegEntrySearchCFPropertyPtr) {
                 PXLog(@"Hooking IORegistryEntrySearchCFProperty (owner IOKit)");
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook IORegistryEntrySearchCFProperty");
                 MSHookFunction(IORegEntrySearchCFPropertyPtr, (void *)hook_IORegistryEntrySearchCFProperty,
                                (void **)&orig_IORegistryEntrySearchCFProperty);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook IORegistryEntrySearchCFProperty");
                 didHookIOKit = YES;
             } else {
                 PXLog(@"[WeaponX] ⚠️ IORegistryEntrySearchCFProperty symbol not found");
@@ -3557,9 +3613,11 @@ static char* hook_GSSystemGetSerialNo(void) {
             gOwnerIOKitInstalled = YES;
         }
         dlclose(IOKitHandle);
+        PXFileDebugAIDA64Log("[Tweak.ctor] after dlclose IOKit didHook=%d", didHookIOKit);
     }
     
     // Hook GSSystemGetSerialNo for serial number access through GS framework
+    PXFileDebugAIDA64Log("[Tweak.ctor] before GS hook block");
     void *GSHandle = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW);
     if (GSHandle) {
         void *GSSystemGetSerialNoPtr = dlsym(GSHandle, "GSSystemGetSerialNo");
@@ -3575,20 +3633,25 @@ static char* hook_GSSystemGetSerialNo(void) {
         }
         dlclose(GSHandle);
     }
+    PXFileDebugAIDA64Log("[Tweak.ctor] after GS hook block");
     
     // Hook sysctlbyname for device identifier spoofing via sysctl
+    PXFileDebugAIDA64Log("[Tweak.ctor] before dlopen libc");
     void *libcHandle = dlopen("/usr/lib/libc.dylib", RTLD_NOW);
     if (!libcHandle) {
         // Try alternative path
         libcHandle = dlopen("/usr/lib/system/libsystem_c.dylib", RTLD_NOW);
     }
     if (libcHandle) {
+        PXFileDebugAIDA64Log("[Tweak.ctor] after dlopen libc handle=1");
         void *sysctlbynamePtr = dlsym(libcHandle, "sysctlbyname");
         if (sysctlbynamePtr) {
             PXLog(@"[WeaponX] 🔧 Hooking sysctlbyname for device identifier spoofing");
             if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook libc sysctlbyname");
                 MSHookFunction(sysctlbynamePtr, (void *)sysctlbyname_hook, 
                               (void **)&sysctlbyname_orig);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook libc sysctlbyname");
                 PXLog(@"[WeaponX] ✅ sysctlbyname hook registered successfully");
                 gOwnerSysctlBynameInstalled = YES;
             } else {
@@ -3602,7 +3665,9 @@ static char* hook_GSSystemGetSerialNo(void) {
         if (sysctlPtr) {
             PXLog(@"[WeaponX] 🔧 Hooking sysctl for iOS version/build spoofing");
             if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook libc sysctl");
                 MSHookFunction(sysctlPtr, (void *)sysctl_hook, (void **)&sysctl_orig);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook libc sysctl");
                 gOwnerSysctlInstalled = YES;
             }
         }
@@ -3611,35 +3676,48 @@ static char* hook_GSSystemGetSerialNo(void) {
         if (unamePtr) {
             PXLog(@"[WeaponX] 🔧 Hooking uname for device model spoofing");
             if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook uname");
                 MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook uname");
                 PXLog(@"[WeaponX] ✅ uname hook registered successfully");
                 gOwnerUnameInstalled = YES;
             }
         }
         dlclose(libcHandle);
+        PXFileDebugAIDA64Log("[Tweak.ctor] after dlclose libc");
     } else {
         PXLog(@"[WeaponX] ⚠️ Failed to open libc for sysctlbyname hooking");
+        PXFileDebugAIDA64Log("[Tweak.ctor] failed dlopen libc");
     }
 
     // Also try to hook CFCopySystemVersionDictionary via CoreFoundation
+    PXFileDebugAIDA64Log("[Tweak.ctor] before CF hook block");
     void *cfHandle = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
     if (cfHandle) {
         void *cfSym = dlsym(cfHandle, "CFCopySystemVersionDictionary");
         if (cfSym) {
             PXLog(@"[WeaponX] 🔧 Hooking CFCopySystemVersionDictionary via CoreFoundation");
             if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+                PXFileDebugAIDA64Log("[Tweak.ctor] before hook CFCopySystemVersionDictionary");
                 MSHookFunction(cfSym, (void *)CFCopySystemVersionDictionary_hook, (void **)&CFCopySystemVersionDictionary_orig);
+                PXFileDebugAIDA64Log("[Tweak.ctor] after hook CFCopySystemVersionDictionary");
                 gOwnerCFSystemInstalled = YES;
             }
         }
         dlclose(cfHandle);
     }
+    PXFileDebugAIDA64Log("[Tweak.ctor] after CF hook block");
     
     // Initialize the location spoofing hooks
+    PXFileDebugAIDA64Log("[Tweak.ctor] before init LocationSpoofing");
     %init(LocationSpoofing);
+    PXFileDebugAIDA64Log("[Tweak.ctor] after init LocationSpoofing");
     
     // Initialize sensor data spoofing hooks
+    PXFileDebugAIDA64Log("[Tweak.ctor] before init SensorSpoofing");
     %init(SensorSpoofing);
+    PXFileDebugAIDA64Log("[Tweak.ctor] after init SensorSpoofing");
     
     PXLog(@"[WeaponX] Location and sensor spoofing hooks initialized");
+    PXFileDebugAIDA64Log("[Tweak.ctor] exit");
 }

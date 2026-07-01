@@ -5,6 +5,7 @@
 #import "ProjectXLogging.h"
 #import "HookOwnership.h"
 #import "PXScope.h"
+#import "PXFileDebug.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <sys/utsname.h>
@@ -869,6 +870,7 @@ static void logDeviceModelAccess(const char* method, NSString* bundleID) {
 
 %ctor {
     @autoreleasepool {
+        PXFileDebugAIDA64Log("[DeviceModel.ctor] enter");
         PXLog(@"[model] Initializing device model spoofing hooks");
         
         // CRITICAL SAFETY CHECK: Only initialize hooks if we can get a valid bundle ID
@@ -881,7 +883,9 @@ static void logDeviceModelAccess(const char* method, NSString* bundleID) {
         
         IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (!manager || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+        BOOL allowed = PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack);
+        PXFileDebugAIDA64Log("[DeviceModel.ctor] scope allowed=%d bundle=%s", allowed, currentBundleID.UTF8String ?: "<nil>");
+        if (!manager || !allowed) {
             PXLog(@"[model] App %@ is not enabled for spoofing, not initializing hooks", currentBundleID);
             return;
         }
@@ -905,6 +909,7 @@ static void logDeviceModelAccess(const char* method, NSString* bundleID) {
 
         // Owner (ProjectXTweak/Tweak.x) handles sysctl/uname/IOKit.
         PXLog(@"[model] Skipping uname/sysctl/IOKit hooks (owner handles these)");
+        PXFileDebugAIDA64Log("[DeviceModel.ctor] exit owner handles hooks");
         return;
     }
 }
