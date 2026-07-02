@@ -5,6 +5,10 @@
 #import <signal.h>
 #import "../ProjectXTweak/PXFileDebug.h"
 
+__attribute__((constructor(101))) static void WXKeychainBridgeEarlyLoadMarker(void) {
+    PXFileDebugLoadMarker("WeaponXKeychainBridge.early");
+}
+
 static NSString *WXSafeBundle(NSString *bundleID) {
     if (!bundleID.length) return @"unknown";
     NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
@@ -415,6 +419,10 @@ __attribute__((constructor)) static void WXKeychainBridgeInit(void) {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
         PXFileDebugAIDA64Log("[KeychainBridge.ctor] bundle=%s", bundleID.UTF8String ?: "<nil>");
         if (!bundleID.length) return;
+        if ([bundleID hasPrefix:@"com.apple."]) {
+            PXFileDebugAIDA64Log("[KeychainBridge.ctor] skip system bundle=%s", bundleID.UTF8String ?: "<nil>");
+            return;
+        }
         NSString *safe = WXSafeBundle(bundleID);
 
         NSString *notifyName = [NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safe];

@@ -34,6 +34,11 @@
 #import "PXScope.h"
 #import "PXFileDebug.h"
 #import <CoreFoundation/CoreFoundation.h>
+
+__attribute__((constructor(101))) static void PXProjectXTweakEarlyLoadMarker(void) {
+    PXFileDebugLoadMarker("ProjectXTweak.early");
+}
+
 // Forward declarations for classes we need to hook
 @interface SBScreenshotManager : NSObject
 - (void)saveScreenshotsWithCompletion:(id)completion;
@@ -3444,8 +3449,8 @@ static char* hook_GSSystemGetSerialNo(void) {
     // Initialize screenshot modification hooks if we're in SpringBoard
     NSString *processName = [NSProcessInfo processInfo].processName;
     if ([processName isEqualToString:@"SpringBoard"]) {
-        PXLog(@"Initializing screenshot hooks in SpringBoard");
-        %init(ScreenshotModifier);
+        PXLog(@"Skipping screenshot hooks in SpringBoard while spoof hooks are scope-gated");
+        PXFileDebugAIDA64Log("[Tweak.ctor] skip ScreenshotModifier in SpringBoard");
         
         // Initialize profile indicator immediately
         dispatch_async(dispatch_get_main_queue(), ^{
