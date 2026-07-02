@@ -954,6 +954,10 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             }
 
             NSString *proc = [NSProcessInfo processInfo].processName;
+            if (PXIsWebKitHelperProcess(currentBundleID, proc)) {
+                PXFileDebugAIDA64Log("[Storage.ctor] skip WebKit helper bundle=%s", currentBundleID.UTF8String ?: "<nil>");
+                return;
+            }
             BOOL allowed = PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack);
             PXFileDebugAIDA64Log("[Storage.ctor] scope allowed=%d bundle=%s", allowed, currentBundleID.UTF8String ?: "<nil>");
             if (!allowed) {

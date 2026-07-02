@@ -6,7 +6,7 @@
 	<dict>
 		<key>Bundles</key>
 		<array>
-			<string>com.finalwire.aida64</string>
+			<string>com.hydra.projectx.no-injection-placeholder</string>
 		</array>
 		<key>Mode</key>
 		<string>Any</string>

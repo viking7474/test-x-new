@@ -935,6 +935,10 @@ static void setupAdditionalSystemUUIDHooks() {
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
             NSString *executablePath = [[NSBundle mainBundle] executablePath];
             NSString *processName = [executablePath lastPathComponent];
+            if (PXIsWebKitHelperProcess(bundleID, processName)) {
+                PXLog(@"[WeaponX] 🚫 Skipping UUID hooks for WebKit helper: %@", processName);
+                return;
+            }
             
             BOOL scopeAllowed = bundleID && PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack);
             if (!bundleID || !scopeAllowed ||

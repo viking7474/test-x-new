@@ -23,6 +23,8 @@ BOOL PXDisplayUIScaleSpoofEnabled(void);
 BOOL PXDisplayPixelMetricsSpoofEnabled(void);
 BOOL PXDisplayWebScreenSpoofEnabled(void);
 
+BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName);
+BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName);
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName);
 BOOL PXAllowUnscopedSafariStack(void);
 

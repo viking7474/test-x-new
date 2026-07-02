@@ -205,6 +205,44 @@ BOOL PXDisplayWebScreenSpoofEnabled(void) {
     return gCachedDisplayWebScreenEnabled;
 }
 
+BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName) {
+    static NSSet<NSString *> *criticalNames = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        criticalNames = [NSSet setWithArray:@[
+            @"SpringBoard",
+            @"backboardd",
+            @"runningboardd",
+            @"assertiond",
+            @"launchd",
+            @"installd",
+            @"mobile_installation_proxy",
+            @"securityd",
+            @"mediaserverd",
+            @"commcenter",
+            @"aggregated"
+        ]];
+    });
+    if ([processName isKindOfClass:[NSString class]] && [criticalNames containsObject:processName]) return YES;
+    if ([bundleID isEqualToString:@"com.apple.springboard"]) return YES;
+    return NO;
+}
+
+BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
+    if ([bundleID isEqualToString:@"com.apple.SafariViewService"]) return YES;
+    if ([bundleID hasPrefix:@"com.apple.WebKit"]) return YES;
+    if ([processName isKindOfClass:[NSString class]]) {
+        if ([processName containsString:@"SafariViewService"] ||
+            [processName containsString:@"WebContent"] ||
+            [processName containsString:@"Networking"] ||
+            [processName containsString:@"GPU"] ||
+            [processName containsString:@"WebKit"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName) {
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
     if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) return YES;
@@ -234,13 +272,16 @@ BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
     if (!PXDeviceSpoofingEnabled()) return NO;
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
     if ([bundleID isEqualToString:@"com.hydra.projectx"] || [bundleID isEqualToString:@"com.hydra.weaponx"]) return NO;
-    if ([bundleID hasPrefix:@"com.apple."]) return NO;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (PXIsCriticalSystemProcess(bundleID, proc)) return NO;
+    if (PXIsWebKitHelperProcess(bundleID, proc)) return NO;
     NSDictionary *scoped = PXLoadScopedApps();
     NSDictionary *entry = [scoped[bundleID] isKindOfClass:[NSDictionary class]] ? scoped[bundleID] : nil;
     return [entry[@"enabled"] boolValue];
 }
 
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
+    if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
     BOOL strict = PXBundleIsStrictlyScopedForSpoofing(bundleID);
     BOOL safari = ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
     BOOL allowed = strict || safari;

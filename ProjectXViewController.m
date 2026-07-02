@@ -104,6 +104,140 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 @property (nonatomic, readonly) NSString *buildVersionString;  // Add this line to get build number
 @end
 
+static NSArray<NSString *> *PXDefaultWebKitHelperBundleIDs(void) {
+    return @[
+        @"com.apple.SafariViewService",
+        @"com.apple.WebKit.WebContent",
+        @"com.apple.WebKit.Networking",
+        @"com.apple.WebKit.GPU"
+    ];
+}
+
+static BOOL PXBundleIDIsProjectXApp(NSString *bundleID) {
+    return [bundleID isEqualToString:@"com.hydra.projectx"] || [bundleID isEqualToString:@"com.hydra.weaponx"];
+}
+
+static NSString *PXProxyBundleID(id proxy) {
+    if ([proxy respondsToSelector:@selector(bundleIdentifier)]) {
+        NSString *bid = [proxy performSelector:@selector(bundleIdentifier)];
+        if ([bid isKindOfClass:[NSString class]] && bid.length) return bid;
+    }
+    if ([proxy respondsToSelector:@selector(applicationIdentifier)]) {
+        NSString *bid = [proxy performSelector:@selector(applicationIdentifier)];
+        if ([bid isKindOfClass:[NSString class]] && bid.length) return bid;
+    }
+    return nil;
+}
+
+static NSURL *PXProxyBundleURL(id proxy) {
+    NSArray<NSString *> *selectors = @[@"bundleURL", @"bundleContainerURL", @"resourcesDirectoryURL"];
+    for (NSString *selectorName in selectors) {
+        SEL sel = NSSelectorFromString(selectorName);
+        if (![proxy respondsToSelector:sel]) continue;
+        id value = [proxy performSelector:sel];
+        if ([value isKindOfClass:[NSURL class]]) return value;
+        if ([value isKindOfClass:[NSString class]]) return [NSURL fileURLWithPath:value];
+    }
+    return nil;
+}
+
+static id PXApplicationProxyForBundleID(NSString *bundleID) {
+    if (!bundleID.length) return nil;
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    id workspace = [workspaceClass respondsToSelector:@selector(defaultWorkspace)] ? [workspaceClass performSelector:@selector(defaultWorkspace)] : nil;
+    NSArray *apps = [workspace respondsToSelector:@selector(allInstalledApplications)] ? [workspace allInstalledApplications] : nil;
+    for (id proxy in apps) {
+        NSString *candidate = PXProxyBundleID(proxy);
+        if ([candidate isEqualToString:bundleID]) return proxy;
+    }
+    return nil;
+}
+
+static NSArray<NSString *> *PXEnumerateAppAndExtensionBundleIDs(NSString *mainBundleID) {
+    if (!mainBundleID.length || PXBundleIDIsProjectXApp(mainBundleID)) return @[];
+    NSMutableOrderedSet<NSString *> *bundleIDs = [NSMutableOrderedSet orderedSetWithObject:mainBundleID];
+    id proxy = PXApplicationProxyForBundleID(mainBundleID);
+    NSURL *bundleURL = PXProxyBundleURL(proxy);
+    NSString *bundlePath = bundleURL.path;
+    if (!bundlePath.length) return bundleIDs.array;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![bundlePath.pathExtension.lowercaseString isEqualToString:@"app"]) {
+        NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:bundlePath error:nil];
+        for (NSString *child in children) {
+            if ([child.pathExtension.lowercaseString isEqualToString:@"app"]) {
+                bundlePath = [bundlePath stringByAppendingPathComponent:child];
+                break;
+            }
+        }
+    }
+
+    for (NSString *dirName in @[@"PlugIns", @"Plugins"]) {
+        NSString *pluginsPath = [bundlePath stringByAppendingPathComponent:dirName];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:pluginsPath isDirectory:&isDir] || !isDir) continue;
+        NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:pluginsPath error:nil];
+        for (NSString *child in children) {
+            if (![child.pathExtension.lowercaseString isEqualToString:@"appex"]) continue;
+            NSString *infoPath = [[pluginsPath stringByAppendingPathComponent:child] stringByAppendingPathComponent:@"Info.plist"];
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+            NSString *extensionBundleID = [info[@"CFBundleIdentifier"] isKindOfClass:[NSString class]] ? info[@"CFBundleIdentifier"] : nil;
+            if (extensionBundleID.length && !PXBundleIDIsProjectXApp(extensionBundleID)) {
+                [bundleIDs addObject:extensionBundleID];
+            }
+        }
+    }
+    return bundleIDs.array;
+}
+
+static NSArray<NSString *> *PXExpandedResetBundleIDs(NSArray<NSString *> *mainBundleIDs) {
+    NSMutableOrderedSet<NSString *> *expanded = [NSMutableOrderedSet orderedSet];
+    for (NSString *bundleID in mainBundleIDs) {
+        [expanded addObjectsFromArray:PXEnumerateAppAndExtensionBundleIDs(bundleID)];
+    }
+    if (expanded.count > 0) {
+        [expanded addObjectsFromArray:PXDefaultWebKitHelperBundleIDs()];
+    }
+    return expanded.array;
+}
+
+static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
+    NSArray<NSString *> *validBundles = bundleIDs ?: @[];
+    NSMutableArray<NSString *> *bridgeBundles = [NSMutableArray array];
+    for (NSString *bundleID in validBundles) {
+        if (![bundleID hasPrefix:@"com.apple."]) {
+            [bridgeBundles addObject:bundleID];
+        }
+    }
+    NSDictionary *tweakPlist = @{
+        @"Filter": @{
+            @"Bundles": validBundles,
+            @"Mode": @"Any"
+        }
+    };
+    NSDictionary *bridgePlist = @{
+        @"Filter": @{
+            @"Bundles": bridgeBundles,
+            @"Mode": @"Any"
+        }
+    };
+    NSArray<NSString *> *dirs = @[
+        @"/Library/MobileSubstrate/DynamicLibraries",
+        @"/var/jb/Library/MobileSubstrate/DynamicLibraries"
+    ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *dir in dirs) {
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) continue;
+        NSString *tweakPath = [dir stringByAppendingPathComponent:@"ProjectXTweak.plist"];
+        NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
+        [tweakPlist writeToFile:tweakPath atomically:YES];
+        [bridgePlist writeToFile:bridgePath atomically:YES];
+        [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:tweakPath error:nil];
+        [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:bridgePath error:nil];
+    }
+}
+
 @interface ProjectXViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
 @property (nonatomic, strong) ProgressHUDView *progressHUD;
 @property (nonatomic, strong) UIScrollView *scrollView;
@@ -4974,13 +5108,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (void)addApplicationWithExtensionsToScope:(NSString *)bundleID {
 
     if (!bundleID) return;
-    
-    // Get the app proxy
-    LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-    if (!appProxy) return;
-    
-    // Add the app with extensions to scope
-    [[IdentifierManager sharedManager] addApplicationWithExtensionsToScope:bundleID];
+    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(@[bundleID]);
+    for (NSString *expandedID in expandedBundles) {
+        [[IdentifierManager sharedManager] addApplicationToScope:expandedID];
+        [[IdentifierManager sharedManager] setApplication:expandedID enabled:YES];
+    }
+    [[IdentifierManager sharedManager] saveScopedApps];
+    PXWriteSubstrateFilterPlists(expandedBundles);
     
     // Show success message
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Success"
@@ -5031,8 +5165,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSString *bundleID = self.appSwitches.allKeys[index];
     if (!bundleID) return;
     
-    // Add the app with extensions
-    [self.manager addApplicationWithExtensionsToScope:bundleID];
+    // Add the app with exact extensions and default WebKit helpers
+    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(@[bundleID]);
+    for (NSString *expandedID in expandedBundles) {
+        [self.manager addApplicationToScope:expandedID];
+        [self.manager setApplication:expandedID enabled:YES];
+    }
+    [self.manager saveScopedApps];
+    PXWriteSubstrateFilterPlists(expandedBundles);
     
     // Check for errors
     if ([self.manager lastError]) {
@@ -5656,6 +5796,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self.mainStackView addArrangedSubview:self.rrsNoteTextField];
 
     [self refreshDashboardSelectionLabels];
+    [self syncHookScopeToResetApps];
 }
 
 - (UIView *)dashboardStatusCard {
@@ -5948,7 +6089,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)syncHookScopeToResetApps {
-    NSSet<NSString *> *resetSet = [NSSet setWithArray:self.selectedResetAppIDs ?: @[]];
+    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(self.selectedResetAppIDs ?: @[]);
+    NSSet<NSString *> *resetSet = [NSSet setWithArray:expandedBundles];
     NSDictionary *scopedApps = [self.manager getApplicationInfo:nil] ?: @{};
     for (NSString *bundleID in scopedApps.allKeys) {
         if (![resetSet containsObject:bundleID]) {
@@ -5956,12 +6098,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         }
     }
     for (NSString *bundleID in resetSet) {
-        if (![self.manager getApplicationInfo:bundleID]) {
-            [self.manager addApplicationToScope:bundleID];
-        }
+        [self.manager addApplicationToScope:bundleID];
         [self.manager setApplication:bundleID enabled:YES];
     }
     [self.manager saveScopedApps];
+    PXWriteSubstrateFilterPlists(expandedBundles);
 }
 
 - (void)selectFakeTapped {

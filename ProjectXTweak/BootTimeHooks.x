@@ -573,6 +573,10 @@ static void installSystemCallHooks(void) {
             }
             
             NSString *proc = [NSProcessInfo processInfo].processName;
+            if (PXIsWebKitHelperProcess(bundleID, proc)) {
+                PXFileDebugAIDA64Log("[BootTime.ctor] skip WebKit helper bundle=%s", bundleID.UTF8String ?: "<nil>");
+                return;
+            }
             BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
             PXFileDebugAIDA64Log("[BootTime.ctor] scope allowed=%d bundle=%s", allowed, bundleID.UTF8String ?: "<nil>");
             if (!allowed) {

@@ -1968,24 +1968,20 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     
     // Get app info using LSApplicationProxy
     LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-    if (!appProxy) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
-                                       code:3002 
-                                   userInfo:@{NSLocalizedDescriptionKey: @"Application not found"}];
-        return;
-    }
     
     NSMutableDictionary *appInfo = [NSMutableDictionary dictionary];
     appInfo[@"name"] = appProxy.localizedName ?: bundleID;
-    appInfo[@"version"] = appProxy.shortVersionString ?: @"App Not Found";
+    appInfo[@"version"] = appProxy.shortVersionString ?: (appProxy ? @"Unknown" : @"Helper/Extension");
     NSString *buildVersion = nil;
-    id proxy = (id)appProxy;
-    if ([proxy respondsToSelector:@selector(bundleVersion)]) {
-        buildVersion = [proxy performSelector:@selector(bundleVersion)];
-    } else if ([proxy respondsToSelector:@selector(valueForKey:)]) {
-        buildVersion = [proxy valueForKey:@"bundleVersion"];
-        if (!buildVersion) {
-            buildVersion = [proxy valueForKey:@"CFBundleVersion"];
+    if (appProxy) {
+        id proxy = (id)appProxy;
+        if ([proxy respondsToSelector:@selector(bundleVersion)]) {
+            buildVersion = [proxy performSelector:@selector(bundleVersion)];
+        } else if ([proxy respondsToSelector:@selector(valueForKey:)]) {
+            buildVersion = [proxy valueForKey:@"bundleVersion"];
+            if (!buildVersion) {
+                buildVersion = [proxy valueForKey:@"CFBundleVersion"];
+            }
         }
     }
     appInfo[@"build"] = buildVersion ?: @"Unknown";  // Add build number
@@ -2418,23 +2414,8 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     if (!bundleID || [bundleID isEqualToString:@"com.hydra.projectx"]) {
         return;
     }
-    
-    // First add the main app
     [self addApplicationToScope:bundleID];
-    
-    // Create a more specific extension pattern
-    // Instead of just using first component, use the main app's bundle ID as base
-    NSString *extensionPattern = [NSString stringWithFormat:@"%@.*", bundleID];
-    
-    // Store the extension pattern in the app's info
-    NSMutableDictionary *appInfo = [self.scopedApps[bundleID] mutableCopy];
-    if (appInfo) {
-        appInfo[@"extensionPattern"] = extensionPattern;
-        self.scopedApps[bundleID] = appInfo;
-        [self saveScopedApps];
-        
-        PXLog(@"[WeaponX] Added extension pattern: %@ for app: %@", extensionPattern, bundleID);
-    }
+    PXLog(@"[WeaponX] Added app to scope without wildcard extension pattern: %@", bundleID);
 }
 
 - (BOOL)isBundleIDMatch:(NSString *)targetBundleID withPattern:(NSString *)patternBundleID {

@@ -751,6 +751,10 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
             
             // Skip if this is a system process (except Safari/Auth stack when enabled)
             NSString *proc = [NSProcessInfo processInfo].processName;
+            if (PXIsWebKitHelperProcess(bundleID, proc)) {
+                PXLog(@"[WiFiHook] Not hooking WebKit helper: %@", bundleID);
+                return;
+            }
             if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
                 PXLog(@"[WiFiHook] Not hooking system process: %@", bundleID);
                 return;

@@ -593,6 +593,9 @@ static BOOL isUUIDKey(NSString *key) {
         // Skip for system processes
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
+        if (PXIsWebKitHelperProcess(bundleID, proc)) {
+            return;
+        }
         if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
             return;
         }

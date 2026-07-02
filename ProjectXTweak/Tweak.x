@@ -3318,6 +3318,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     BOOL shouldInstallSpoofHooks = NO;
+    BOOL isWebKitHelper = PXIsWebKitHelperProcess(currentBundleID, currentProcessName);
     PXFileDebugAIDA64Log("[Tweak.ctor] bundle=%s proc=%s", currentBundleID.UTF8String ?: "<nil>", currentProcessName.UTF8String ?: "<nil>");
     PXLog(@"[WeaponX] 💉 Tweak injected into process: %@ (BundleID: %@)", [NSProcessInfo processInfo].processName, currentBundleID);
     
@@ -3326,7 +3327,7 @@ static char* hook_GSSystemGetSerialNo(void) {
         IdentifierManager *mgr = [%c(IdentifierManager) sharedManager];
         if (mgr) {
             BOOL enabled = PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack);
-            shouldInstallSpoofHooks = enabled;
+            shouldInstallSpoofHooks = enabled && !isWebKitHelper;
             PXFileDebugAIDA64Log("[Tweak.ctor] after scope decision enabled=%d", enabled);
             PXLog(@"[WeaponX] 🔍 App Enabled Check: %@ -> %@", currentBundleID, enabled ? @"YES" : @"NO");
             
@@ -3486,7 +3487,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     }
 
     if (!shouldInstallSpoofHooks) {
-        PXFileDebugAIDA64Log("[Tweak.ctor] exit skip spoof hooks allowed=0");
+        PXFileDebugAIDA64Log("[Tweak.ctor] exit skip native spoof hooks allowed=%d webkit=%d", PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack), isWebKitHelper);
         return;
     }
     
