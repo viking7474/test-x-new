@@ -3,6 +3,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
 #import <signal.h>
+#import "../ProjectXTweak/PXFileDebug.h"
 
 static NSString *WXSafeBundle(NSString *bundleID) {
     if (!bundleID.length) return @"unknown";
@@ -409,7 +410,10 @@ static void WXNotifyCallback(CFNotificationCenterRef center, void *observer, CFS
 
 __attribute__((constructor)) static void WXKeychainBridgeInit(void) {
     @autoreleasepool {
+        PXFileDebugLoadMarker("WeaponXKeychainBridge.ctor");
+        PXFileDebugAIDA64Log("[KeychainBridge.ctor] enter");
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        PXFileDebugAIDA64Log("[KeychainBridge.ctor] bundle=%s", bundleID.UTF8String ?: "<nil>");
         if (!bundleID.length) return;
         NSString *safe = WXSafeBundle(bundleID);
 
@@ -420,8 +424,11 @@ __attribute__((constructor)) static void WXKeychainBridgeInit(void) {
                                         (__bridge CFStringRef)notifyName,
                                         NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+        PXFileDebugAIDA64Log("[KeychainBridge.ctor] after add observer notify=%s", notifyName.UTF8String ?: "<nil>");
 
         // Process immediately if a request already exists.
+        PXFileDebugAIDA64Log("[KeychainBridge.ctor] before process request");
         WXProcessRequestForCurrentApp();
+        PXFileDebugAIDA64Log("[KeychainBridge.ctor] exit");
     }
 }

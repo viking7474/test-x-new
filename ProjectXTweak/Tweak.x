@@ -3284,6 +3284,7 @@ static char* hook_GSSystemGetSerialNo(void) {
 
 // Constructor
 %ctor {
+    PXFileDebugLoadMarker("ProjectXTweak.Tweak.ctor");
     PXFileDebugAIDA64Log("[Tweak.ctor] enter");
     // VERIFICATION: Create flag file FIRST - before anything else that might crash
     [@"ctor_entry" writeToFile:@"/tmp/weaponx_ctor_started.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
