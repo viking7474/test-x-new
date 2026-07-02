@@ -201,6 +201,21 @@ static NSArray<NSString *> *PXExpandedResetBundleIDs(NSArray<NSString *> *mainBu
     return expanded.array;
 }
 
+static NSArray<NSString *> *PXEnabledScopeBundleIDs(void) {
+    NSDictionary *scopePlist = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+    NSDictionary *scopedApps = [scopePlist[@"ScopedApps"] isKindOfClass:[NSDictionary class]] ? scopePlist[@"ScopedApps"] : nil;
+    NSMutableArray<NSString *> *bundleIDs = [NSMutableArray array];
+    [scopedApps enumerateKeysAndObjectsUsingBlock:^(NSString *bundleID, NSDictionary *entry, BOOL *stop) {
+        (void)stop;
+        if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return;
+        if (PXBundleIDIsProjectXApp(bundleID)) return;
+        if ([bundleID hasPrefix:@"com.apple.WebKit"] || [bundleID isEqualToString:@"com.apple.SafariViewService"]) return;
+        if ([entry isKindOfClass:[NSDictionary class]] && ![entry[@"enabled"] boolValue]) return;
+        [bundleIDs addObject:bundleID];
+    }];
+    return bundleIDs;
+}
+
 static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
     NSArray<NSString *> *validBundles = bundleIDs ?: @[];
     NSMutableArray<NSString *> *bridgeBundles = [NSMutableArray array];
@@ -226,16 +241,29 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries"
     ];
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableDictionary *debug = [@{
+        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"bundles": validBundles,
+        @"bridgeBundles": bridgeBundles
+    } mutableCopy];
     for (NSString *dir in dirs) {
         BOOL isDir = NO;
-        if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) continue;
+        if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
+            debug[[NSString stringWithFormat:@"%@ exists", dir]] = @NO;
+            continue;
+        }
         NSString *tweakPath = [dir stringByAppendingPathComponent:@"ProjectXTweak.plist"];
         NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
-        [tweakPlist writeToFile:tweakPath atomically:YES];
-        [bridgePlist writeToFile:bridgePath atomically:YES];
+        BOOL wroteTweak = [tweakPlist writeToFile:tweakPath atomically:YES];
+        BOOL wroteBridge = [bridgePlist writeToFile:bridgePath atomically:YES];
+        debug[tweakPath] = @(wroteTweak);
+        debug[bridgePath] = @(wroteBridge);
         [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:tweakPath error:nil];
         [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:bridgePath error:nil];
     }
+    NSString *debugDir = @"/var/mobile/Library/ProjectX";
+    [fm createDirectoryAtPath:debugDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
+    [debug writeToFile:[debugDir stringByAppendingPathComponent:@"filter_sync_debug.plist"] atomically:YES];
 }
 
 @interface ProjectXViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
@@ -5796,7 +5824,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self.mainStackView addArrangedSubview:self.rrsNoteTextField];
 
     [self refreshDashboardSelectionLabels];
-    [self syncHookScopeToResetApps];
+    NSArray<NSString *> *filterSource = self.selectedResetAppIDs.count ? self.selectedResetAppIDs : PXEnabledScopeBundleIDs();
+    PXWriteSubstrateFilterPlists(PXExpandedResetBundleIDs(filterSource));
 }
 
 - (UIView *)dashboardStatusCard {
