@@ -1,10 +1,14 @@
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <spawn.h>
 #import <sys/sysctl.h>
 #import <sys/stat.h>
 #import <fcntl.h>
 #import <unistd.h>
 #import <os/log.h>
+#import <errno.h>
+#import <notify.h>
+#import <string.h>
 
 // Constants
 static const int kCheckInterval = 5; // Check every 5 seconds
@@ -13,6 +17,7 @@ static NSString *kProjectXPath = nil; // Will be initialized in init
 static NSString *ROOT_PREFIX = nil; // Will be set based on environment
 static os_log_t weaponx_log = NULL;
 static BOOL debugMode = NO;
+static NSString * const kProjectXFilterChangedNotification = @"com.hydra.projectx.filterPlistChanged";
 
 // Forward declarations
 extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -25,7 +30,14 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 @property (nonatomic, strong) NSTimer *monitorTimer;
 @property (nonatomic, strong) NSMutableDictionary *processInfo;
 @property (nonatomic, strong) NSMutableArray *protectedProcesses;
+- (void)syncProjectXFilterPlists;
 @end
+
+static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)name; (void)object; (void)userInfo;
+    WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
+    [daemon syncProjectXFilterPlists];
+}
 
 @implementation WeaponXDaemon
 
@@ -70,6 +82,13 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 
 - (void)startDaemon {
     [self log:@"WeaponXDaemon starting..." withType:OS_LOG_TYPE_INFO];
+
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                    (__bridge const void *)(self),
+                                    PXFilterChangedCallback,
+                                    (__bridge CFStringRef)kProjectXFilterChangedNotification,
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
     
     // Schedule monitoring timer
     self.monitorTimer = [NSTimer scheduledTimerWithTimeInterval:kCheckInterval
@@ -90,6 +109,7 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 
 - (void)checkProcesses {
     [self log:@"Checking processes..." withType:OS_LOG_TYPE_DEBUG];
+    [self syncProjectXFilterPlists];
     
     // Get all running processes
     int numberOfProcesses = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
@@ -155,6 +175,151 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
     
     // Update state file
     [self updateStateFile];
+}
+
+- (void)syncProjectXFilterPlists {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *stagingDir = @"/var/mobile/Library/ProjectX/filter_plists";
+    NSString *targetDir = [self substrateDynamicLibrariesDir];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:stagingDir isDirectory:&isDir] || !isDir) return;
+    if (![fm fileExistsAtPath:targetDir isDirectory:&isDir] || !isDir) {
+        NSError *mkErr = nil;
+        [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:&mkErr];
+        if (mkErr) {
+            [self log:[NSString stringWithFormat:@"Filter sync failed to create target dir: %@", mkErr.localizedDescription] withType:OS_LOG_TYPE_ERROR];
+            return;
+        }
+    }
+
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    result[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+    result[@"targetDir"] = targetDir ?: @"";
+    for (NSString *name in @[@"ProjectXTweak.plist", @"WeaponXKeychainBridge.plist"]) {
+        NSString *src = [stagingDir stringByAppendingPathComponent:name];
+        NSString *dst = [targetDir stringByAppendingPathComponent:name];
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:src];
+        NSString *invalidReason = nil;
+        NSArray *bundles = nil;
+        if (![self filterPlistIsValid:plist bundles:&bundles reason:&invalidReason]) {
+            result[name] = @{
+                @"status": @"invalid",
+                @"reason": invalidReason ?: @"unknown",
+                @"src": src,
+                @"dst": dst
+            };
+            continue;
+        }
+        NSDictionary *syncResult = [self atomicInstallPlistFromPath:src toPath:dst bundles:bundles];
+        result[name] = syncResult ?: @{@"status": @"unknown"};
+        if ([syncResult[@"status"] isEqualToString:@"renamed"]) {
+            [self log:[NSString stringWithFormat:@"Synced filter plist %@ (%lu bundles)", name, (unsigned long)bundles.count] withType:OS_LOG_TYPE_INFO];
+        } else {
+            [self log:[NSString stringWithFormat:@"Filter sync failed for %@: %@", name, syncResult[@"status"] ?: @"unknown"] withType:OS_LOG_TYPE_ERROR];
+        }
+    }
+    NSString *debugPath = @"/var/mobile/Library/ProjectX/filter_daemon_debug.plist";
+    [result writeToFile:debugPath atomically:YES];
+    chmod([debugPath fileSystemRepresentation], 0644);
+    chown([debugPath fileSystemRepresentation], 501, 501);
+}
+
+- (NSString *)substrateDynamicLibrariesDir {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *path in @[@"/Library/MobileSubstrate/DynamicLibraries", @"/var/jb/Library/MobileSubstrate/DynamicLibraries"]) {
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:path isDirectory:&isDir] && isDir) return path;
+    }
+    return @"/Library/MobileSubstrate/DynamicLibraries";
+}
+
+- (BOOL)filterPlistIsValid:(NSDictionary *)plist bundles:(NSArray **)outBundles reason:(NSString **)reason {
+    if (![plist isKindOfClass:[NSDictionary class]]) {
+        if (reason) *reason = @"plist-not-dictionary";
+        return NO;
+    }
+    NSDictionary *filter = [plist[@"Filter"] isKindOfClass:[NSDictionary class]] ? plist[@"Filter"] : nil;
+    if (!filter) {
+        if (reason) *reason = @"missing-Filter";
+        return NO;
+    }
+    NSString *mode = [filter[@"Mode"] isKindOfClass:[NSString class]] ? filter[@"Mode"] : nil;
+    if (mode.length && ![mode isEqualToString:@"Any"]) {
+        if (reason) *reason = @"invalid-Mode";
+        return NO;
+    }
+    NSArray *bundles = [filter[@"Bundles"] isKindOfClass:[NSArray class]] ? filter[@"Bundles"] : nil;
+    if (!bundles.count) {
+        if (reason) *reason = @"empty-Bundles";
+        return NO;
+    }
+    for (id obj in bundles) {
+        if (![obj isKindOfClass:[NSString class]] || ![(NSString *)obj length]) {
+            if (reason) *reason = @"invalid-bundle-item";
+            return NO;
+        }
+        NSString *bundleID = (NSString *)obj;
+        if ([bundleID isEqualToString:@"com.apple.UIKit"]) {
+            if (reason) *reason = @"blocked-com.apple.UIKit";
+            return NO;
+        }
+        if ([bundleID containsString:@"*"]) {
+            if (reason) *reason = @"wildcard-not-allowed";
+            return NO;
+        }
+        if ([bundleID isEqualToString:@"com.hydra.projectx.no-injection-placeholder"] && bundles.count > 1) {
+            if (reason) *reason = @"placeholder-with-real-bundles";
+            return NO;
+        }
+    }
+    if (outBundles) *outBundles = bundles;
+    return YES;
+}
+
+- (NSDictionary *)atomicInstallPlistFromPath:(NSString *)src toPath:(NSString *)dst bundles:(NSArray *)bundles {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *tmp = [dst stringByAppendingFormat:@".tmp.%d", getpid()];
+    [fm removeItemAtPath:tmp error:nil];
+
+    NSError *copyErr = nil;
+    if (![fm copyItemAtPath:src toPath:tmp error:&copyErr]) {
+        return @{
+            @"status": @"copy-to-tmp-failed",
+            @"reason": copyErr.localizedDescription ?: @"unknown",
+            @"src": src ?: @"",
+            @"dst": dst ?: @"",
+            @"tmp": tmp ?: @"",
+            @"bundleCount": @(bundles.count),
+            @"bundles": bundles ?: @[]
+        };
+    }
+
+    chmod([tmp fileSystemRepresentation], 0644);
+    chown([tmp fileSystemRepresentation], 0, 0);
+
+    if (rename([tmp fileSystemRepresentation], [dst fileSystemRepresentation]) != 0) {
+        int errNo = errno;
+        [fm removeItemAtPath:tmp error:nil];
+        return @{
+            @"status": @"rename-failed",
+            @"errno": @(errNo),
+            @"reason": [NSString stringWithUTF8String:strerror(errNo)] ?: @"unknown",
+            @"src": src ?: @"",
+            @"dst": dst ?: @"",
+            @"tmp": tmp ?: @"",
+            @"bundleCount": @(bundles.count),
+            @"bundles": bundles ?: @[]
+        };
+    }
+
+    return @{
+        @"status": @"renamed",
+        @"src": src ?: @"",
+        @"dst": dst ?: @"",
+        @"tmp": tmp ?: @"",
+        @"bundleCount": @(bundles.count),
+        @"bundles": bundles ?: @[]
+    };
 }
 
 - (void)startProcess:(NSString *)processName {
@@ -305,4 +470,4 @@ int main(int argc, char *argv[]) {
         [daemon startDaemon];
     }
     return 0;
-} 
+}

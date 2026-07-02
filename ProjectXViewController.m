@@ -25,6 +25,7 @@
 #import <sys/wait.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import "common/UIButton+SafeConfiguration.h"
 
 @interface NSTask : NSObject
@@ -296,12 +297,18 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
         if (!wroteTweak && wroteTmpTweak) {
             int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpTweakPath), PXShellQuote(tweakPath), PXShellQuote(tweakPath)]);
             debug[[tweakPath stringByAppendingString:@" shellStatus"]] = @(status);
-            wroteTweak = [[NSDictionary dictionaryWithContentsOfFile:tweakPath][@"Filter"] isKindOfClass:[NSDictionary class]];
+            NSDictionary *installedPlist = [NSDictionary dictionaryWithContentsOfFile:tweakPath];
+            NSDictionary *installedFilter = [installedPlist[@"Filter"] isKindOfClass:[NSDictionary class]] ? installedPlist[@"Filter"] : nil;
+            NSArray *installedBundles = [installedFilter[@"Bundles"] isKindOfClass:[NSArray class]] ? installedFilter[@"Bundles"] : nil;
+            wroteTweak = [installedBundles isEqualToArray:validBundles];
         }
         if (!wroteBridge && wroteTmpBridge) {
             int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpBridgePath), PXShellQuote(bridgePath), PXShellQuote(bridgePath)]);
             debug[[bridgePath stringByAppendingString:@" shellStatus"]] = @(status);
-            wroteBridge = [[NSDictionary dictionaryWithContentsOfFile:bridgePath][@"Filter"] isKindOfClass:[NSDictionary class]];
+            NSDictionary *installedPlist = [NSDictionary dictionaryWithContentsOfFile:bridgePath];
+            NSDictionary *installedFilter = [installedPlist[@"Filter"] isKindOfClass:[NSDictionary class]] ? installedPlist[@"Filter"] : nil;
+            NSArray *installedBundles = [installedFilter[@"Bundles"] isKindOfClass:[NSArray class]] ? installedFilter[@"Bundles"] : nil;
+            wroteBridge = [installedBundles isEqualToArray:bridgeBundles];
         }
         debug[tweakPath] = @(wroteTweak);
         debug[bridgePath] = @(wroteBridge);
@@ -311,6 +318,11 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
     NSString *debugDir = @"/var/mobile/Library/ProjectX";
     [fm createDirectoryAtPath:debugDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
     [debug writeToFile:[debugDir stringByAppendingPathComponent:@"filter_sync_debug.plist"] atomically:YES];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.projectx.filterPlistChanged"),
+                                         NULL,
+                                         NULL,
+                                         true);
 }
 
 @interface ProjectXViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
