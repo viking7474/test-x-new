@@ -3451,6 +3451,9 @@ static char* hook_GSSystemGetSerialNo(void) {
     if ([processName isEqualToString:@"SpringBoard"]) {
         PXLog(@"Skipping screenshot hooks in SpringBoard while spoof hooks are scope-gated");
         PXFileDebugAIDA64Log("[Tweak.ctor] skip ScreenshotModifier in SpringBoard");
+        if (0) {
+            %init(ScreenshotModifier);
+        }
         
         // Initialize profile indicator immediately
         dispatch_async(dispatch_get_main_queue(), ^{
