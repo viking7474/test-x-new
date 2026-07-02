@@ -27,6 +27,14 @@
 #import <objc/runtime.h>
 #import "common/UIButton+SafeConfiguration.h"
 
+@interface NSTask : NSObject
+@property (nonatomic, copy) NSString *launchPath;
+@property (nonatomic, copy) NSArray<NSString *> *arguments;
+@property (nonatomic, readonly) int terminationStatus;
+- (void)launch;
+- (void)waitUntilExit;
+@end
+
 static NSString *PXKeychainWipeEnabledKey(NSString *bundleID);
 static NSString *PXKeychainWipeGroupsKey(NSString *bundleID);
 
@@ -201,6 +209,25 @@ static NSArray<NSString *> *PXExpandedResetBundleIDs(NSArray<NSString *> *mainBu
     return expanded.array;
 }
 
+static NSString *PXShellQuote(NSString *s) {
+    if (![s isKindOfClass:[NSString class]]) return @"''";
+    return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+}
+
+static int PXRunShellCommand(NSString *command) {
+    if (!command.length) return -1;
+    NSTask *task = [[NSTask alloc] init];
+    task.launchPath = @"/bin/sh";
+    task.arguments = @[@"-c", command];
+    @try {
+        [task launch];
+        [task waitUntilExit];
+        return task.terminationStatus;
+    } @catch (__unused NSException *exception) {
+        return -1;
+    }
+}
+
 static NSArray<NSString *> *PXEnabledScopeBundleIDs(void) {
     NSDictionary *scopePlist = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
     NSDictionary *scopedApps = [scopePlist[@"ScopedApps"] isKindOfClass:[NSDictionary class]] ? scopePlist[@"ScopedApps"] : nil;
@@ -241,10 +268,20 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries"
     ];
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *stagingDir = @"/var/mobile/Library/ProjectX/filter_plists";
+    [fm createDirectoryAtPath:stagingDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
+    NSString *tmpTweakPath = [stagingDir stringByAppendingPathComponent:@"ProjectXTweak.plist"];
+    NSString *tmpBridgePath = [stagingDir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
+    BOOL wroteTmpTweak = [tweakPlist writeToFile:tmpTweakPath atomically:YES];
+    BOOL wroteTmpBridge = [bridgePlist writeToFile:tmpBridgePath atomically:YES];
     NSMutableDictionary *debug = [@{
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
         @"bundles": validBundles,
-        @"bridgeBundles": bridgeBundles
+        @"bridgeBundles": bridgeBundles,
+        @"tmpTweakPath": tmpTweakPath,
+        @"tmpBridgePath": tmpBridgePath,
+        @"wroteTmpTweak": @(wroteTmpTweak),
+        @"wroteTmpBridge": @(wroteTmpBridge)
     } mutableCopy];
     for (NSString *dir in dirs) {
         BOOL isDir = NO;
@@ -256,6 +293,16 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
         NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
         BOOL wroteTweak = [tweakPlist writeToFile:tweakPath atomically:YES];
         BOOL wroteBridge = [bridgePlist writeToFile:bridgePath atomically:YES];
+        if (!wroteTweak && wroteTmpTweak) {
+            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpTweakPath), PXShellQuote(tweakPath), PXShellQuote(tweakPath)]);
+            debug[[tweakPath stringByAppendingString:@" shellStatus"]] = @(status);
+            wroteTweak = [[NSDictionary dictionaryWithContentsOfFile:tweakPath][@"Filter"] isKindOfClass:[NSDictionary class]];
+        }
+        if (!wroteBridge && wroteTmpBridge) {
+            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpBridgePath), PXShellQuote(bridgePath), PXShellQuote(bridgePath)]);
+            debug[[bridgePath stringByAppendingString:@" shellStatus"]] = @(status);
+            wroteBridge = [[NSDictionary dictionaryWithContentsOfFile:bridgePath][@"Filter"] isKindOfClass:[NSDictionary class]];
+        }
         debug[tweakPath] = @(wroteTweak);
         debug[bridgePath] = @(wroteBridge);
         [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:tweakPath error:nil];
