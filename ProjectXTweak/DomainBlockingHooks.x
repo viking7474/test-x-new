@@ -10,6 +10,7 @@
 #import <WebKit/WebKit.h>
 #import <SafariServices/SafariServices.h>
 #import "ProjectXLogging.h"
+#import "PXScope.h"
 
 // Path to scoped apps plist
 static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
@@ -668,9 +669,10 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
         
         // Get bundle ID once for all checks
         NSString *bundleID = getCurrentBundleID();
+        NSString *proc = [NSProcessInfo processInfo].processName;
         NSLog(@"[DomainBlocking] Current bundle ID: %@", bundleID);
         
-        BOOL isScoped = isInScopedAppsList();
+        BOOL isScoped = bundleID && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         NSLog(@"[DomainBlocking] Is scoped app: %@", isScoped ? @"YES" : @"NO");
         
         if (!bundleID || !isScoped) {
@@ -710,4 +712,4 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
         // Initialize CFNetwork hooks for this scoped app
         %init(ScopedApps);
     }
-} 
+}

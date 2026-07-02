@@ -202,6 +202,12 @@ static NSInteger hook_batteryState(UIDevice *self, SEL _cmd) {
 %ctor {
     @autoreleasepool {
         PXFileDebugAIDA64Log("[Battery.ctor] enter");
+        NSString *bundleID = getCurrentBundleID();
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)) {
+            PXFileDebugAIDA64Log("[Battery.ctor] skip allowed=0 bundle=%s proc=%s", bundleID.UTF8String ?: "<nil>", proc.UTF8String ?: "<nil>");
+            return;
+        }
         Class deviceClass = objc_getClass("UIDevice");
         if (deviceClass) {
             PXFileDebugAIDA64Log("[Battery.ctor] before hook batteryLevel");

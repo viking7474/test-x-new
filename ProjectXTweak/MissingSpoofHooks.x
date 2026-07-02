@@ -196,6 +196,12 @@ static id new_MTLCreateSystemDefaultDevice(void) {
 %ctor {
     @autoreleasepool {
         PXLog(@"[MissingHooks] Init");
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+            PXLog(@"[MissingHooks] Not scoped for %@, skipping", bundleID);
+            return;
+        }
         // Hook Metal Create function
         void *mtlCreate = dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
         if (mtlCreate) {

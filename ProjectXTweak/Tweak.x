@@ -3312,6 +3312,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     PXLog(@"ProjectX tweak initializing...");
     
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    BOOL shouldInstallSpoofHooks = NO;
     PXFileDebugAIDA64Log("[Tweak.ctor] bundle=%s proc=%s", currentBundleID.UTF8String ?: "<nil>", currentProcessName.UTF8String ?: "<nil>");
     PXLog(@"[WeaponX] 💉 Tweak injected into process: %@ (BundleID: %@)", [NSProcessInfo processInfo].processName, currentBundleID);
     
@@ -3320,6 +3321,7 @@ static char* hook_GSSystemGetSerialNo(void) {
         IdentifierManager *mgr = [%c(IdentifierManager) sharedManager];
         if (mgr) {
             BOOL enabled = PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack);
+            shouldInstallSpoofHooks = enabled;
             PXFileDebugAIDA64Log("[Tweak.ctor] after scope decision enabled=%d", enabled);
             PXLog(@"[WeaponX] 🔍 App Enabled Check: %@ -> %@", currentBundleID, enabled ? @"YES" : @"NO");
             
@@ -3366,7 +3368,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     
     // Detect which hook system is being used
     NSString *hookSystem = @"Unknown";
-    if (dlsym(RTLD_DEFAULT, "EKMethodsEqual")) {
+    if (shouldInstallSpoofHooks && dlsym(RTLD_DEFAULT, "EKMethodsEqual")) {
         hookSystem = @"ElleKit";
         
         // ElleKit-specific function hooking for lower-level identifiers
@@ -3413,7 +3415,7 @@ static char* hook_GSSystemGetSerialNo(void) {
 
             dlclose(libSystemHandle);
         }
-    } else if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+    } else if (shouldInstallSpoofHooks && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
         hookSystem = @"MobileSubstrate";
     }
     
@@ -3430,10 +3432,14 @@ static char* hook_GSSystemGetSerialNo(void) {
     [securitySettings synchronize]; // Force synchronization to get the latest settings
     
     // Initialize our hook group
-    PXFileDebugAIDA64Log("[Tweak.ctor] before init Identifiers");
-    %init(Identifiers);
-    PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
-    gOwnerMGInstalled = YES;
+    if (shouldInstallSpoofHooks) {
+        PXFileDebugAIDA64Log("[Tweak.ctor] before init Identifiers");
+        %init(Identifiers);
+        PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
+        gOwnerMGInstalled = YES;
+    } else {
+        PXFileDebugAIDA64Log("[Tweak.ctor] skip init Identifiers allowed=0");
+    }
     
     // Initialize screenshot modification hooks if we're in SpringBoard
     NSString *processName = [NSProcessInfo processInfo].processName;
@@ -3469,6 +3475,11 @@ static char* hook_GSSystemGetSerialNo(void) {
             // so we don't need to register them here. This ensures clean separation of concerns.
             PXLog(@"ProfileIndicator: Initialization complete, waiting for real-time updates");
         });
+    }
+
+    if (!shouldInstallSpoofHooks) {
+        PXFileDebugAIDA64Log("[Tweak.ctor] exit skip spoof hooks allowed=0");
+        return;
     }
     
     // Use ElleKit's memory protection modification for direct memory patching

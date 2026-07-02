@@ -3405,8 +3405,14 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
 %ctor {
     @autoreleasepool {
-        // Install C hooks unconditionally; gate inside hooks for scoped apps.
         if (PXJBIsCriticalProcess()) return;
+
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)) {
+            PXFileDebugAIDA64Log("[JailbreakBypass.ctor] skip allowed=0 bundle=%s proc=%s", bundleID.UTF8String ?: "<nil>", proc.UTF8String ?: "<nil>");
+            return;
+        }
 
         // Install-time toggles (take effect after app relaunch).
         NSUserDefaults *ss = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
