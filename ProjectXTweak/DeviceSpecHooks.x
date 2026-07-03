@@ -1146,6 +1146,10 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
             }
 
             NSString *proc = [NSProcessInfo processInfo].processName;
+            if (PXIsWebKitHelperProcess(currentBundleID, proc)) {
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] skip WebKit helper bundle=%s", currentBundleID.UTF8String ?: "<nil>");
+                return;
+            }
             BOOL allowed = PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack);
             PXFileDebugAIDA64Log("[DeviceSpec.ctor] scope allowed=%d bundle=%s", allowed, currentBundleID.UTF8String ?: "<nil>");
             if (!allowed) {

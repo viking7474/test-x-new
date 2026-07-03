@@ -3319,6 +3319,9 @@ static char* hook_GSSystemGetSerialNo(void) {
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     BOOL shouldInstallSpoofHooks = NO;
     BOOL isWebKitHelper = PXIsWebKitHelperProcess(currentBundleID, currentProcessName);
+    if (isWebKitHelper) {
+        PXFileDebugWebKitTrace(@"ProjectXTweak.Tweak.ctor");
+    }
     PXFileDebugAIDA64Log("[Tweak.ctor] bundle=%s proc=%s", currentBundleID.UTF8String ?: "<nil>", currentProcessName.UTF8String ?: "<nil>");
     PXLog(@"[WeaponX] 💉 Tweak injected into process: %@ (BundleID: %@)", [NSProcessInfo processInfo].processName, currentBundleID);
     

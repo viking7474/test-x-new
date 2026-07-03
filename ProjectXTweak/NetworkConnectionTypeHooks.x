@@ -1216,6 +1216,10 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
         
         NSString *bundleID = getCurrentBundleID();
         NSString *proc = [NSProcessInfo processInfo].processName;
+        if (PXIsWebKitHelperProcess(bundleID, proc)) {
+            PXLog(@"[NetworkHook] Skipping WebKit helper: %@", bundleID);
+            return;
+        }
         BOOL isScoped = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         
         PXLog(@"[NetworkHook] Current app: %@, is scoped: %@", 

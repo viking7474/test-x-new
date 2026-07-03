@@ -70,8 +70,84 @@ static inline BOOL PXFileDebugAIDA64Enabled(void) {
     return enabled == 1;
 }
 
+static inline BOOL PXFileDebugWebKitTraceEnabled(void) {
+    if (access("/tmp/px_debug_all", F_OK) == 0 || access("/tmp/px_debug_webkit", F_OK) == 0) return YES;
+    @autoreleasepool {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *processName = [NSProcessInfo processInfo].processName;
+        if ([bundleID isEqualToString:@"com.apple.SafariViewService"] ||
+            [bundleID hasPrefix:@"com.apple.WebKit"] ||
+            [processName containsString:@"SafariViewService"] ||
+            [processName containsString:@"WebContent"] ||
+            [processName containsString:@"Networking"] ||
+            [processName containsString:@"GPU"] ||
+            [processName containsString:@"WebKit"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static inline void PXFileDebugWebKitTrace(NSString *component) {
+    if (!PXFileDebugWebKitTraceEnabled()) return;
+    @autoreleasepool {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        NSString *processName = [NSProcessInfo processInfo].processName ?: @"";
+        NSString *exe = [[NSBundle mainBundle] executablePath] ?: @"";
+        NSString *home = NSHomeDirectory() ?: @"";
+        NSArray *args = [NSProcessInfo processInfo].arguments ?: @[];
+        NSDictionary *env = [NSProcessInfo processInfo].environment ?: @{};
+        NSArray *interestingEnvKeys = @[
+            @"XPC_SERVICE_NAME",
+            @"APP_SANDBOX_CONTAINER_ID",
+            @"HOME",
+            @"TMPDIR",
+            @"CFFIXED_USER_HOME",
+            @"__CF_USER_TEXT_ENCODING",
+            @"_LSServer_ClientBundleIdentifier",
+            @"LSBundleIdentifier",
+            @"NSBundleMainBundleIdentifier"
+        ];
+        NSMutableDictionary *envOut = [NSMutableDictionary dictionary];
+        for (NSString *key in interestingEnvKeys) {
+            NSString *value = env[key];
+            if ([value isKindOfClass:[NSString class]] && value.length) envOut[key] = value;
+        }
+
+        NSDictionary *metadata = nil;
+        NSString *metadataPath = [home stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+        if (metadataPath.length) {
+            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+            if ([dict isKindOfClass:[NSDictionary class]]) {
+                metadata = dict;
+            }
+        }
+        NSDictionary *record = @{
+            @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+            @"pid": @(getpid()),
+            @"component": component ?: @"",
+            @"bundleID": bundleID,
+            @"processName": processName,
+            @"executablePath": exe,
+            @"home": home,
+            @"arguments": args,
+            @"environment": envOut,
+            @"containerMetadata": metadata ?: @{}
+        };
+        mkdir("/var/mobile/Library/ProjectX", 0755);
+        NSString *path = @"/var/mobile/Library/ProjectX/webkit_trace.log";
+        NSString *line = [[record description] stringByAppendingString:@"\n---\n"];
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        int fd = open(path.UTF8String, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) fd = open("/tmp/webkit_trace.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) return;
+        write(fd, data.bytes, data.length);
+        close(fd);
+    }
+}
+
 static inline void PXFileDebugLoadMarker(const char *component) {
-    if (access("/tmp/px_debug_all", F_OK) != 0 && !PXFileDebugAIDA64Enabled()) return;
+    if (access("/tmp/px_debug_all", F_OK) != 0 && !PXFileDebugAIDA64Enabled() && !PXFileDebugWebKitTraceEnabled()) return;
     const char *prog = getprogname() ?: "<nil>";
     char exePath[512] = {0};
     uint32_t exeSize = sizeof(exePath);

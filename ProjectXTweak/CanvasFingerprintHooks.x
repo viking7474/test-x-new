@@ -476,6 +476,9 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
         PXLog(@"[CanvasFingerprint] Initializing Canvas Fingerprint Protection hooks");
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
+        if (PXIsWebKitHelperProcess(bundleID, proc)) {
+            PXFileDebugWebKitTrace(@"Canvas.ctor");
+        }
         PXScopeOptions options = (isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled() || PXDisplayWebScreenSpoofEnabled()) ? PXScopeOptionAllowSafariAuthStack : PXScopeOptionNone;
         BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, options);
         PXFileDebugAIDA64Log("[Canvas.ctor] scope allowed=%d options=%lu bundle=%s", allowed, (unsigned long)options, bundleID.UTF8String ?: "<nil>");
