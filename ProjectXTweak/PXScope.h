@@ -25,6 +25,8 @@ BOOL PXDisplayWebScreenSpoofEnabled(void);
 
 BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName);
 BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName);
+NSString *PXWebKitHostBundleIdentifier(void);
+BOOL PXWebKitHostIsScopedForSpoofing(void);
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName);
 BOOL PXAllowUnscopedSafariStack(void);
 

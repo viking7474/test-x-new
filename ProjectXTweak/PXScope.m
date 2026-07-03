@@ -114,6 +114,13 @@ static NSDictionary *PXLoadScopedApps(void) {
     return gScopedAppsCache;
 }
 
+static BOOL PXScopedBundleEnabled(NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
+    NSDictionary *scoped = PXLoadScopedApps();
+    NSDictionary *entry = [scoped[bundleID] isKindOfClass:[NSDictionary class]] ? scoped[bundleID] : nil;
+    return [entry[@"enabled"] boolValue];
+}
+
 static void PXScopeNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
     PXInvalidateScopeCache();
@@ -243,6 +250,37 @@ BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
     return NO;
 }
 
+NSString *PXWebKitHostBundleIdentifier(void) {
+    static NSString *cachedHost = nil;
+    if (cachedHost.length) return cachedHost;
+
+    NSArray<NSString *> *homeCandidates = @[
+        NSHomeDirectory() ?: @"",
+        [[[NSProcessInfo processInfo] environment][@"HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"HOME"] : @"",
+        [[[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] : @""
+    ];
+    for (NSString *home in homeCandidates) {
+        if (![home isKindOfClass:[NSString class]] || !home.length) continue;
+        NSString *metadataPath = [home stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+        NSString *identifier = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
+        if (identifier.length) {
+            cachedHost = [identifier copy];
+            return cachedHost;
+        }
+    }
+    return nil;
+}
+
+BOOL PXWebKitHostIsScopedForSpoofing(void) {
+    if (!PXDeviceSpoofingEnabled()) return NO;
+    NSString *host = PXWebKitHostBundleIdentifier();
+    if (!host.length) return NO;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (PXIsCriticalSystemProcess(host, proc)) return NO;
+    return PXScopedBundleEnabled(host);
+}
+
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName) {
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
     if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) return YES;
@@ -275,25 +313,26 @@ BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (PXIsCriticalSystemProcess(bundleID, proc)) return NO;
     if (PXIsWebKitHelperProcess(bundleID, proc)) return NO;
-    NSDictionary *scoped = PXLoadScopedApps();
-    NSDictionary *entry = [scoped[bundleID] isKindOfClass:[NSDictionary class]] ? scoped[bundleID] : nil;
-    return [entry[@"enabled"] boolValue];
+    return PXScopedBundleEnabled(bundleID);
 }
 
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
     if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
+    BOOL webKitHelper = PXIsWebKitHelperProcess(bundleID, processName);
+    NSString *webKitHost = webKitHelper ? PXWebKitHostBundleIdentifier() : nil;
+    BOOL webKitHostScoped = webKitHelper && ((options & PXScopeOptionAllowSafariAuthStack) != 0) && PXSafariStackSpoofEnabled() && PXWebKitHostIsScopedForSpoofing();
     BOOL strict = PXBundleIsStrictlyScopedForSpoofing(bundleID);
-    BOOL safari = ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
-    BOOL allowed = strict || safari;
+    BOOL safari = !webKitHelper && ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
+    BOOL allowed = strict || safari || webKitHostScoped;
 
     if (!gDecisionLogTimes) gDecisionLogTimes = [NSMutableDictionary dictionary];
-    NSString *key = [NSString stringWithFormat:@"%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", (unsigned long)options, allowed];
+    NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", webKitHost ?: @"", (unsigned long)options, allowed];
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     NSNumber *last = gDecisionLogTimes[key];
     if (!last || now - [last doubleValue] > 5.0) {
         gDecisionLogTimes[key] = @(now);
-        NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ strict=%d safari=%d options=%lu allowed=%d gen=%llu",
-              bundleID, processName, strict, safari, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+        NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
+              bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
     }
 
     return allowed;
