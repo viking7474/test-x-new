@@ -1,5 +1,12 @@
 #import "PXScope.h"
 #import <CoreFoundation/CoreFoundation.h>
+#import <fcntl.h>
+#import <stdarg.h>
+#import <stdio.h>
+#import <sys/stat.h>
+#import <sys/time.h>
+#import <time.h>
+#import <unistd.h>
 
 static __thread BOOL gPXReadingSecuritySettings = NO;
 
@@ -81,6 +88,44 @@ static BOOL gCacheValid = NO;
 static NSDictionary *gScopedAppsCache = nil;
 static uint64_t gScopeGeneration = 1;
 static NSMutableDictionary *gDecisionLogTimes = nil;
+
+static BOOL PXScopeFileDebugEnabled(void) {
+    return access("/tmp/px_debug_scope", F_OK) == 0 || access("/tmp/px_debug_all", F_OK) == 0;
+}
+
+static BOOL PXScopeFileDebugVerboseEnabled(void) {
+    return access("/tmp/px_debug_scope_verbose", F_OK) == 0;
+}
+
+static void PXScopeFileLog(NSString *format, ...) {
+    if (!PXScopeFileDebugEnabled() || !format.length) return;
+
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    if (!message.length) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm tmv;
+    localtime_r(&tv.tv_sec, &tmv);
+
+    char prefix[96];
+    int prefixLen = snprintf(prefix, sizeof(prefix), "%02d:%02d:%02d.%03d pid=%d ",
+                             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(tv.tv_usec / 1000), getpid());
+    if (prefixLen < 0) return;
+    if (prefixLen > (int)sizeof(prefix)) prefixLen = (int)sizeof(prefix);
+
+    mkdir("/var/mobile/Library/ProjectX", 0755);
+    int fd = open("/var/mobile/Library/ProjectX/scope_decision.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) fd = open("/tmp/scope_decision.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    write(fd, prefix, (size_t)prefixLen);
+    NSData *data = [[message stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    if (data.length) write(fd, data.bytes, data.length);
+    close(fd);
+}
 
 void PXInvalidateScopeDecisionCache(void) {
     gCacheValid = NO;
@@ -329,10 +374,15 @@ BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PX
     NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", webKitHost ?: @"", (unsigned long)options, allowed];
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     NSNumber *last = gDecisionLogTimes[key];
-    if (!last || now - [last doubleValue] > 5.0) {
+    BOOL verboseFile = PXScopeFileDebugVerboseEnabled();
+    if (!last || now - [last doubleValue] > 5.0 || verboseFile) {
         gDecisionLogTimes[key] = @(now);
-        NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
-              bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+        if (!verboseFile || !last || now - [last doubleValue] > 5.0) {
+            NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
+                  bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+        }
+        PXScopeFileLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
+                       bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
     }
 
     return allowed;

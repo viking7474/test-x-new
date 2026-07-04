@@ -137,3 +137,39 @@ cat /Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist
 ```
 
 After filter changes, respring so Substrate reloads the updated filter.
+
+## Scope Decision File Logging
+
+Unified logs can miss early or short-lived helper-process messages. Scope decisions can be logged directly to file with flag files:
+
+```sh
+touch /tmp/px_debug_scope
+rm -f /var/mobile/Library/ProjectX/scope_decision.log /tmp/scope_decision.log
+```
+
+Read logs:
+
+```sh
+cat /var/mobile/Library/ProjectX/scope_decision.log
+cat /tmp/scope_decision.log
+```
+
+Disable scope file logging:
+
+```sh
+rm -f /tmp/px_debug_scope
+```
+
+By default, repeated identical scope decisions are throttled. For full verbose logging, enable:
+
+```sh
+touch /tmp/px_debug_scope_verbose
+```
+
+Disable verbose mode:
+
+```sh
+rm -f /tmp/px_debug_scope_verbose
+```
+
+`/tmp/px_debug_all` also enables scope file logging.
