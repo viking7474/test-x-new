@@ -173,3 +173,12 @@ rm -f /tmp/px_debug_scope_verbose
 ```
 
 `/tmp/px_debug_all` also enables scope file logging.
+
+Do not leave verbose scope logging enabled while testing performance-sensitive apps like Safari or Chrome. Verbose mode writes every scope decision to disk and can make older browser builds load slowly. Prefer this sequence for normal tests:
+
+```sh
+rm -f /tmp/px_debug_scope_verbose /tmp/px_debug_all
+touch /tmp/px_debug_scope
+```
+
+Use verbose only for short captures, then disable it immediately.
