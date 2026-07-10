@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 // #import "ellekit/ellekit.h" // Removed for rootful - using Substrate
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 #import "ProjectXLogging.h"
 #import <mach-o/dyld.h>
@@ -143,6 +144,74 @@ static void PXCompatShimBarAppearanceClass(Class cls) {
                                (IMP)PXCompatGetCompactScrollEdgeAppearance, "@@:");
 }
 
+// WKWebView iOS 14+ APIs — apps call these after spoofing systemVersion ≥ 14 on real iOS 12/13.
+typedef void (^PXWKJSCompletion)(id result, NSError *error);
+
+static void PXCompatWKEvaluateJavaScriptInWorld(id self, SEL _cmd,
+                                                NSString *javaScriptString,
+                                                id frame,
+                                                id contentWorld,
+                                                PXWKJSCompletion completionHandler) {
+    (void)_cmd; (void)frame; (void)contentWorld;
+    // Fall back to the long-standing evaluateJavaScript:completionHandler: API (iOS 8+).
+    SEL legacy = @selector(evaluateJavaScript:completionHandler:);
+    if ([self respondsToSelector:legacy] && [javaScriptString isKindOfClass:[NSString class]]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        // Signature: - (void)evaluateJavaScript:(NSString *) completionHandler:(void(^)(id, NSError *))
+        void (*msg)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+        msg(self, legacy, javaScriptString, completionHandler);
+#pragma clang diagnostic pop
+        return;
+    }
+    if (completionHandler) {
+        NSError *err = [NSError errorWithDomain:@"com.hydra.projectx.compat"
+                                           code:14
+                                       userInfo:@{NSLocalizedDescriptionKey:
+                                           @"evaluateJavaScript:inFrame:inContentWorld: unavailable; no legacy fallback"}];
+        completionHandler(nil, err);
+    }
+}
+
+static void PXCompatWKCallAsyncJavaScript(id self, SEL _cmd,
+                                          NSString *javaScriptString,
+                                          NSDictionary *arguments,
+                                          id frame,
+                                          id contentWorld,
+                                          PXWKJSCompletion completionHandler) {
+    (void)_cmd; (void)arguments; (void)frame; (void)contentWorld;
+    // Best-effort: run the script via legacy evaluateJavaScript (args/world ignored on old OS).
+    SEL legacy = @selector(evaluateJavaScript:completionHandler:);
+    if ([self respondsToSelector:legacy] && [javaScriptString isKindOfClass:[NSString class]]) {
+        void (*msg)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
+        msg(self, legacy, javaScriptString, completionHandler);
+        return;
+    }
+    if (completionHandler) {
+        NSError *err = [NSError errorWithDomain:@"com.hydra.projectx.compat"
+                                           code:14
+                                       userInfo:@{NSLocalizedDescriptionKey:
+                                           @"callAsyncJavaScript: unavailable on this iOS version"}];
+        completionHandler(nil, err);
+    }
+}
+
+static void PXCompatShimWKWebView(void) {
+    // Ensure WebKit is loaded so WKWebView class exists before we add methods.
+    dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_LAZY);
+    Class wk = objc_getClass("WKWebView");
+    if (!wk) return;
+
+    // -[WKWebView callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:] (iOS 14+)
+    SEL callAsync = NSSelectorFromString(@"callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:");
+    // Encoding: void, id, SEL, id, id, id, id, block
+    PXCompatAddMethodIfMissing(wk, callAsync, (IMP)PXCompatWKCallAsyncJavaScript, "v@:@@@@@?");
+
+    // -[WKWebView evaluateJavaScript:inFrame:inContentWorld:completionHandler:] (iOS 14+)
+    SEL evalWorld = NSSelectorFromString(@"evaluateJavaScript:inFrame:inContentWorld:completionHandler:");
+    PXCompatAddMethodIfMissing(wk, evalWorld, (IMP)PXCompatWKEvaluateJavaScriptInWorld, "v@:@@@@?");
+}
+
 static void PXInstallCompatibilityShims(void) {
     @autoreleasepool {
         // Some apps call selectors that may not exist on all iOS builds.
@@ -185,6 +254,10 @@ static void PXInstallCompatibilityShims(void) {
             PXCompatAddMethodIfMissing(navItem, @selector(compactScrollEdgeAppearance),
                                        (IMP)PXCompatGetCompactScrollEdgeAppearance, "@@:");
         }
+
+        // Crash: -[WKWebView callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:]
+        // on real iOS < 14 while spoofed version is 14+.
+        PXCompatShimWKWebView();
 
         // Quiet unused-function warnings if optimizer is aggressive
         (void)PXCompatReturnNil;
