@@ -207,26 +207,21 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
     snap.loadedAt = now;
 
     @try {
-        // Prefer BatteryManager when available (same profile source)
-        Class batteryManagerClass = NSClassFromString(@"BatteryManager");
-        id shared = (batteryManagerClass && [batteryManagerClass respondsToSelector:@selector(sharedManager)])
-            ? [batteryManagerClass sharedManager] : nil;
-
+        // Prefer BatteryManager when available (same profile source).
+        // Cast to BatteryManager* so the compiler does not confuse -[BatteryManager batteryLevel]
+        // (NSString *) with -[UIDevice batteryLevel] (float).
+        BatteryManager *shared = [BatteryManager sharedManager];
         if (shared) {
-            if ([shared respondsToSelector:@selector(batteryLevel)]) {
-                NSString *level = [shared batteryLevel];
-                if ([level isKindOfClass:[NSString class]]) {
-                    float v = [level floatValue];
-                    if (v >= 0.01f && v <= 1.0f) {
-                        snap.level = v;
-                        snap.hasLevel = YES;
-                    }
+            NSString *level = [shared batteryLevel];
+            if ([level isKindOfClass:[NSString class]]) {
+                float v = [level floatValue];
+                if (v >= 0.01f && v <= 1.0f) {
+                    snap.level = v;
+                    snap.hasLevel = YES;
                 }
             }
-            if ([shared respondsToSelector:@selector(lowPowerModeEnabled)]) {
-                snap.lowPowerMode = [shared lowPowerModeEnabled] ? YES : NO;
-                snap.hasLPM = YES;
-            }
+            snap.lowPowerMode = [shared lowPowerModeEnabled] ? YES : NO;
+            snap.hasLPM = YES;
         }
 
         // Fallback / fill gaps from battery_info.plist (single read)
