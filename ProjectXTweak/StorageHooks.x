@@ -980,23 +980,24 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
             static dispatch_once_t storageProvOnce;
             dispatch_once(&storageProvOnce, ^{
-                [coord registerStatfsProvider:@"storage.statfs" priority:PXNativeHookPriorityNetworkStorage post:^(const char *path, struct statfs *buf, int *inoutResult) {
-                    if (!inoutResult || *inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                // Nullability must match PXNativeHookCoordinator typedefs (NS_ASSUME_NONNULL).
+                [coord registerStatfsProvider:@"storage.statfs" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, struct statfs * _Nonnull buf, int * _Nonnull inoutResult) {
+                    if (*inoutResult != 0 || !shouldApplyStorageSpoofing()) return;
                     if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
                                  strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
                         modifyStatfsWithSpoofedValues(buf);
                     }
                 }];
-                [coord registerStatfs64Provider:@"storage.statfs64" priority:PXNativeHookPriorityNetworkStorage post:^(const char *path, struct statfs64 *buf, int *inoutResult) {
-                    if (!inoutResult || *inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                [coord registerStatfs64Provider:@"storage.statfs64" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, struct statfs64 * _Nonnull buf, int * _Nonnull inoutResult) {
+                    if (*inoutResult != 0 || !shouldApplyStorageSpoofing()) return;
                     if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
                                  strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
                         modifyStatfs64WithSpoofedValues(buf);
                     }
                 }];
-                [coord registerGetfsstatProvider:@"storage.getfsstat" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs *buf, int bufsize, int flags, int *inoutResult) {
+                [coord registerGetfsstatProvider:@"storage.getfsstat" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
                     (void)bufsize; (void)flags;
-                    if (!inoutResult || *inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    if (*inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
                     for (int i = 0; i < *inoutResult; i++) {
                         const char *mountPoint = buf[i].f_mntonname;
                         if (mountPoint && mountPoint[0] &&
@@ -1005,9 +1006,9 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                         }
                     }
                 }];
-                [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs64 *buf, int bufsize, int flags, int *inoutResult) {
+                [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs64 * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
                     (void)bufsize; (void)flags;
-                    if (!inoutResult || *inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    if (*inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
                     for (int i = 0; i < *inoutResult; i++) {
                         const char *mountPoint = buf[i].f_mntonname;
                         if (mountPoint && mountPoint[0] &&

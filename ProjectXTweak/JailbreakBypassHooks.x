@@ -3570,8 +3570,8 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 orig_statfs = [coord originalForSymbol:kPXNativeSymbolStatfs];
                 static dispatch_once_t jbStatfsOnce;
                 dispatch_once(&jbStatfsOnce, ^{
-                    [coord registerStatfsProvider:@"jb.statfs.sanitize" priority:PXNativeHookPriorityJailbreakSanitize post:^(const char *path, struct statfs *buf, int *inoutResult) {
-                        if (!inoutResult || *inoutResult != 0 || !buf) return;
+                    [coord registerStatfsProvider:@"jb.statfs.sanitize" priority:PXNativeHookPriorityJailbreakSanitize post:^(const char * _Nullable path, struct statfs * _Nonnull buf, int * _Nonnull inoutResult) {
+                        if (*inoutResult != 0) return;
                         if (PXJBStatfsBypassEnabled() && PXJBIsSensitiveMountPath(path)) {
                             PXJBNormalizeStatfs(buf);
                         }
