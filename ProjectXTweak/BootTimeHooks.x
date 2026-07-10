@@ -523,13 +523,22 @@ static void installSystemCallHooks(void) {
         orig_sysctlbyname = [coord originalForSymbol:kPXNativeSymbolSysctlByname];
 
         // Priority Identity, provider ID sorts before "tweak.*" so boot-time keys win when handled.
+        // CRITICAL: UptimeManager.generate* calls sysctl(KERN_BOOTTIME) to sample the real
+        // boot time. Providers MUST return NO while isInsideHook so the coordinator runs the
+        // original and we never recurse: provider → UptimeManager → sysctl → provider...
         [coord registerSysctlProvider:@"boottime.sysctl" priority:PXNativeHookPriorityIdentity pre:^BOOL(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
             (void)newp; (void)newlen;
+            if (isInsideHook) return NO; // pass through to original (and later providers)
             if (!(namelen >= 2 && name && name[0] == CTL_KERN && name[1] == KERN_BOOTTIME)) return NO;
             if (!shouldSpoofBootTimeForApp() || !isBootTimeOrUptimeEnabled()) return NO;
+
             isInsideHook = YES;
-            updateCachedBootTimeValues();
-            isInsideHook = NO;
+            @try {
+                updateCachedBootTimeValues();
+            } @finally {
+                isInsideHook = NO;
+            }
+
             if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
                 struct timeval boottime;
                 boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
@@ -539,16 +548,28 @@ static void installSystemCallHooks(void) {
                 if (outResult) *outResult = 0;
                 return YES;
             }
+            // Two-call sizing
+            if (!oldp && oldlenp && cachedBootTime) {
+                *oldlenp = sizeof(struct timeval);
+                if (outResult) *outResult = 0;
+                return YES;
+            }
             return NO;
         } post:nil];
 
         [coord registerSysctlBynameProvider:@"boottime.sysctlbyname" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
             (void)newp; (void)newlen;
+            if (isInsideHook) return NO;
             if (!name || strcmp(name, "kern.boottime") != 0) return NO;
             if (!shouldSpoofBootTimeForApp() || !isBootTimeOrUptimeEnabled()) return NO;
+
             isInsideHook = YES;
-            updateCachedBootTimeValues();
-            isInsideHook = NO;
+            @try {
+                updateCachedBootTimeValues();
+            } @finally {
+                isInsideHook = NO;
+            }
+
             if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
                 struct timeval boottime;
                 boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
