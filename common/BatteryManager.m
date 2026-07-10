@@ -31,16 +31,22 @@ static BatteryManager *sharedManager = nil;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // Initialize with actual device battery level as default
-        _currentBatteryLevel = [NSString stringWithFormat:@"%.2f", [[UIDevice currentDevice] batteryLevel]];
+        // Do NOT call -[UIDevice batteryLevel] here.
+        // ProjectXTweak hooks UIDevice.batteryLevel → BatteryManager.sharedManager →
+        // re-enters this init under dispatch_once and SIGTRAPs (once deadlock).
+        _currentBatteryLevel = @"0.75";
         _currentLowPowerMode = NO; // Profile default
         _lowPowerModeLoaded = NO;
-        
-        // Enable battery monitoring to ensure we can get the battery level
-        [[UIDevice currentDevice] setBatteryMonitoringEnabled:YES];
-        
-        // Load saved battery info
+
+        // Load saved profile/global battery info first (no UIDevice dependency).
         [self loadBatteryInfoFromDisk];
+
+        // Enable monitoring after load; any later real-device reads go through hooks safely
+        // only once the singleton is fully published.
+        @try {
+            [[UIDevice currentDevice] setBatteryMonitoringEnabled:YES];
+        } @catch (__unused NSException *e) {
+        }
     }
     return self;
 }

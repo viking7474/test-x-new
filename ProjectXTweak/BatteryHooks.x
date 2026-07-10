@@ -34,6 +34,10 @@ static const NSTimeInterval kBatterySnapTTL = 2.0;
 static BOOL gHavePostedLPM = NO;
 static BOOL gLastPostedLPM = NO;
 
+// Prevent: hook_batteryLevel → sharedManager → init → UIDevice.batteryLevel → hook again
+// (dispatch_once reentrancy → SIGTRAP).
+static __thread int gPXBatterySnapshotDepth = 0;
+
 // Helper: get current bundle ID
 static NSString *getCurrentBundleID(void) {
     @try {
@@ -197,41 +201,52 @@ static NSString *PXProfileBatteryInfoPath(void) {
 }
 
 // Load level + LPM from the same profile snapshot (TTL cache).
+// Prefer disk first so we never need BatteryManager while UIDevice hooks are active
+// and the singleton is still initializing.
 static PXBatterySnapshot PXGetBatterySnapshot(void) {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (gBatterySnap.loadedAt > 0 && (now - gBatterySnap.loadedAt) < kBatterySnapTTL) {
         return gBatterySnap;
     }
 
+    // Re-entrant call (e.g. UIDevice.batteryLevel during BatteryManager init): 
+    // return last snapshot or empty — never touch sharedManager again.
+    if (gPXBatterySnapshotDepth > 0) {
+        return gBatterySnap;
+    }
+
+    gPXBatterySnapshotDepth++;
+
     PXBatterySnapshot snap = {0};
     snap.loadedAt = now;
 
     @try {
-        // Prefer BatteryManager when available (same profile source).
-        // Cast to BatteryManager* so the compiler does not confuse -[BatteryManager batteryLevel]
-        // (NSString *) with -[UIDevice batteryLevel] (float).
-        BatteryManager *shared = [BatteryManager sharedManager];
-        if (shared) {
-            NSString *level = [shared batteryLevel];
-            if ([level isKindOfClass:[NSString class]]) {
-                float v = [level floatValue];
+        // 1) Profile battery_info.plist (no ObjC singleton / no UIDevice)
+        NSString *path = PXProfileBatteryInfoPath();
+        NSDictionary *batteryInfo = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+        if ([batteryInfo isKindOfClass:[NSDictionary class]]) {
+            id levelObj = batteryInfo[@"BatteryLevel"];
+            if ([levelObj isKindOfClass:[NSString class]] || [levelObj isKindOfClass:[NSNumber class]]) {
+                float v = [levelObj floatValue];
                 if (v >= 0.01f && v <= 1.0f) {
                     snap.level = v;
                     snap.hasLevel = YES;
                 }
             }
-            snap.lowPowerMode = [shared lowPowerModeEnabled] ? YES : NO;
-            snap.hasLPM = YES;
+            if (batteryInfo[@"LowPowerMode"] != nil) {
+                snap.lowPowerMode = [batteryInfo[@"LowPowerMode"] boolValue];
+                snap.hasLPM = YES;
+            }
         }
 
-        // Fallback / fill gaps from battery_info.plist (single read)
+        // 2) Optional BatteryManager fill — only if not already complete.
+        // Skip if sharedManager is mid-init (dispatch_once not finished).
         if (!snap.hasLevel || !snap.hasLPM) {
-            NSString *path = PXProfileBatteryInfoPath();
-            NSDictionary *batteryInfo = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
-            if ([batteryInfo isKindOfClass:[NSDictionary class]]) {
+            BatteryManager *shared = [BatteryManager sharedManager];
+            if (shared) {
                 if (!snap.hasLevel) {
-                    NSString *level = batteryInfo[@"BatteryLevel"];
-                    if ([level isKindOfClass:[NSString class]] || [level isKindOfClass:[NSNumber class]]) {
+                    NSString *level = [shared batteryLevel];
+                    if ([level isKindOfClass:[NSString class]]) {
                         float v = [level floatValue];
                         if (v >= 0.01f && v <= 1.0f) {
                             snap.level = v;
@@ -239,14 +254,13 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
                         }
                     }
                 }
-                if (!snap.hasLPM && batteryInfo[@"LowPowerMode"] != nil) {
-                    snap.lowPowerMode = [batteryInfo[@"LowPowerMode"] boolValue];
+                if (!snap.hasLPM) {
+                    snap.lowPowerMode = [shared lowPowerModeEnabled] ? YES : NO;
                     snap.hasLPM = YES;
                 }
             }
         }
 
-        // Default LPM when Battery is enabled but key missing
         if (!snap.hasLPM) {
             snap.lowPowerMode = NO;
             snap.hasLPM = YES;
@@ -255,6 +269,7 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
     }
 
     gBatterySnap = snap;
+    gPXBatterySnapshotDepth--;
     return snap;
 }
 
@@ -308,13 +323,17 @@ static void batterySettingsChanged(CFNotificationCenterRef center,
 // Hook for -[UIDevice batteryLevel]
 static float (*orig_batteryLevel)(UIDevice *, SEL);
 static float hook_batteryLevel(UIDevice *self, SEL _cmd) {
+    // If snapshot load re-enters (BatteryManager init), always pass through original.
+    if (gPXBatterySnapshotDepth > 0) {
+        return orig_batteryLevel ? orig_batteryLevel(self, _cmd) : -1.0f;
+    }
     if (isBatterySpoofingEnabled()) {
         PXBatterySnapshot snap = PXGetBatterySnapshot();
         if (snap.hasLevel) {
             return snap.level;
         }
     }
-    float realValue = orig_batteryLevel(self, _cmd);
+    float realValue = orig_batteryLevel ? orig_batteryLevel(self, _cmd) : -1.0f;
     return realValue;
 }
 
@@ -331,6 +350,9 @@ static NSInteger hook_batteryState(UIDevice *self, SEL _cmd) {
 // Hook for -[NSProcessInfo isLowPowerModeEnabled]
 static BOOL (*orig_isLowPowerModeEnabled)(NSProcessInfo *, SEL);
 static BOOL hook_isLowPowerModeEnabled(NSProcessInfo *self, SEL _cmd) {
+    if (gPXBatterySnapshotDepth > 0) {
+        return orig_isLowPowerModeEnabled ? orig_isLowPowerModeEnabled(self, _cmd) : NO;
+    }
     if (isBatterySpoofingEnabled()) {
         PXBatterySnapshot snap = PXGetBatterySnapshot();
         if (snap.hasLPM) {
@@ -383,7 +405,8 @@ static BOOL hook_isLowPowerModeEnabled(NSProcessInfo *self, SEL _cmd) {
                                         CFSTR("com.hydra.projectx.battery.updated"), NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        // Seed LPM observation baseline without posting on first load
+        // Seed LPM observation baseline without posting on first load.
+        // Prefer plist-only path (PXGetBatterySnapshot) — safe under installed UIDevice hooks.
         if (isBatterySpoofingEnabled()) {
             PXBatterySnapshot snap = PXGetBatterySnapshot();
             if (snap.hasLPM) {
