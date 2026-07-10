@@ -74,7 +74,7 @@ typedef BOOL (^PXCNCopyNetworkInfoPreBlock)(CFStringRef interfaceName, CFDiction
 typedef void (^PXCNCopyNetworkInfoPostBlock)(CFStringRef interfaceName, CFDictionaryRef *inoutResult);
 
 // --- gethostuuid ---
-typedef BOOL (^PXGethostuuidPreBlock)(uuid_t uuid, const struct timespec * _Nullable wait, int *outResult);
+typedef BOOL (^PXGethostuuidPreBlock)(uuid_t _Nonnull uuid, const struct timespec * _Nullable wait, int * _Nonnull outResult);
 
 @interface PXNativeHookCoordinator : NSObject
 

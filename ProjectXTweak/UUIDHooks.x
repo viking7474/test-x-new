@@ -579,7 +579,7 @@ static const struct dyld_all_image_infos* replaced_dyld_get_all_image_infos(void
 static void PXUUIDRegisterNativeProviders(void) {
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
 
-    [coord registerGethostuuidProvider:@"uuid.gethostuuid" priority:PXNativeHookPriorityIdentity pre:^BOOL(uuid_t uuid, const struct timespec *wait, int *outResult) {
+    [coord registerGethostuuidProvider:@"uuid.gethostuuid" priority:PXNativeHookPriorityIdentity pre:^BOOL(uuid_t _Nonnull uuid, const struct timespec * _Nullable wait, int * _Nonnull outResult) {
         (void)wait;
         @try {
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];

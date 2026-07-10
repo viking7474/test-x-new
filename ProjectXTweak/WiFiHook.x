@@ -589,38 +589,40 @@ static void initializeHooks(void) {
     // Install MobileWiFi framework hooks
     void *mobileWiFiLib = dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW);
     if (mobileWiFiLib) {
+        void *symbol = NULL;
+
         // Hook WiFiManagerClientCreate
         symbol = dlsym(mobileWiFiLib, "WiFiManagerClientCreate");
         if (symbol) {
-            MSHookFunction(symbol, 
-                  (void *)replaced_WiFiManagerClientCreate, 
+            MSHookFunction(symbol,
+                  (void *)replaced_WiFiManagerClientCreate,
                   (void **)&orig_WiFiManagerClientCreate);
         }
-        
+
         // Hook WiFiDeviceClientCopyCurrentNetwork
         symbol = dlsym(mobileWiFiLib, "WiFiDeviceClientCopyCurrentNetwork");
         if (symbol) {
-            MSHookFunction(symbol, 
-                  (void *)replaced_WiFiDeviceClientCopyCurrentNetwork, 
+            MSHookFunction(symbol,
+                  (void *)replaced_WiFiDeviceClientCopyCurrentNetwork,
                   (void **)&orig_WiFiDeviceClientCopyCurrentNetwork);
         }
-        
+
         // Hook WiFiNetworkGetSSID
         symbol = dlsym(mobileWiFiLib, "WiFiNetworkGetSSID");
         if (symbol) {
-            MSHookFunction(symbol, 
-                  (void *)replaced_WiFiNetworkGetSSID, 
+            MSHookFunction(symbol,
+                  (void *)replaced_WiFiNetworkGetSSID,
                   (void **)&orig_WiFiNetworkGetSSID);
         }
-        
+
         // Hook WiFiNetworkGetBSSID
         symbol = dlsym(mobileWiFiLib, "WiFiNetworkGetBSSID");
         if (symbol) {
-            MSHookFunction(symbol, 
-                  (void *)replaced_WiFiNetworkGetBSSID, 
+            MSHookFunction(symbol,
+                  (void *)replaced_WiFiNetworkGetBSSID,
                   (void **)&orig_WiFiNetworkGetBSSID);
         }
-        
+
         dlclose(mobileWiFiLib);
     }
 }
