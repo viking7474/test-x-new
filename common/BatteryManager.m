@@ -5,10 +5,13 @@
 // Define file paths
 #define BATTERY_PLIST_PATH @"/var/mobile/Library/Preferences/com.weaponx.battery.plist"
 #define kBatteryLevelKey @"BatteryLevel"
+#define kLowPowerModeKey @"LowPowerMode"
 #define kLastUpdatedKey @"LastUpdated"
 
 @interface BatteryManager ()
 @property (nonatomic, strong) NSString *currentBatteryLevel;
+@property (nonatomic, assign) BOOL currentLowPowerMode;
+@property (nonatomic, assign) BOOL lowPowerModeLoaded;
 @property (nonatomic, strong) NSError *error;
 @end
 
@@ -30,6 +33,8 @@ static BatteryManager *sharedManager = nil;
     if (self) {
         // Initialize with actual device battery level as default
         _currentBatteryLevel = [NSString stringWithFormat:@"%.2f", [[UIDevice currentDevice] batteryLevel]];
+        _currentLowPowerMode = NO; // Profile default
+        _lowPowerModeLoaded = NO;
         
         // Enable battery monitoring to ensure we can get the battery level
         [[UIDevice currentDevice] setBatteryMonitoringEnabled:YES];
@@ -111,27 +116,60 @@ static BatteryManager *sharedManager = nil;
     // Update our storage
     _currentBatteryLevel = levelStr;
     
-    // Save the change
+    // Save the change (preserves current LPM)
     [self saveBatteryInfoToDisk];
     
     return levelStr;
 }
 
-// Generate comprehensive battery info for UI display
+#pragma mark - Low Power Mode
+
+- (BOOL)lowPowerModeEnabled {
+    [self loadBatteryInfoFromDisk];
+    return _currentLowPowerMode;
+}
+
+- (void)setLowPowerModeEnabled:(BOOL)enabled {
+    _currentLowPowerMode = enabled;
+    _lowPowerModeLoaded = YES;
+    [self saveBatteryInfoToDisk];
+    
+    PXLog(@"[WeaponX] 🔋 Low Power Mode set to: %@", enabled ? @"YES" : @"NO");
+    
+    // Notify listeners about the change
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BatteryInfoUpdated"
+                                                        object:self
+                                                      userInfo:@{
+                                                          kBatteryLevelKey: _currentBatteryLevel ?: @"0.75",
+                                                          kLowPowerModeKey: @(enabled)
+                                                      }];
+    
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.hydra.projectx.battery.updated"),
+        NULL,
+        NULL,
+        YES
+    );
+}
+
+// Generate comprehensive battery info for UI display.
+// Keeps the current Low Power Mode value; does NOT randomize it.
 - (NSDictionary *)generateBatteryInfo {
-    // Generate battery level first
+    // Generate battery level first (this updates _currentBatteryLevel and saves)
     NSString *batteryLevel = [self randomizeBatteryLevel];
     
-    // Store the values
+    // Store the values — preserve existing LPM (default NO if never set)
     _currentBatteryLevel = batteryLevel;
     
-    // Create a dictionary with all battery info
+    // Create a dictionary with all battery info, including preserved LPM
     NSDictionary *batteryInfo = @{
         @"BatteryLevel": batteryLevel,
         @"BatteryPercentage": @((int)([batteryLevel floatValue] * 100)),
+        kLowPowerModeKey: @(_currentLowPowerMode),
     };
     
-    // Save to disk
+    // Save to disk (includes LPM)
     [self saveBatteryInfoToDisk];
     
     // Notify listeners about the change
@@ -175,30 +213,68 @@ static BatteryManager *sharedManager = nil;
         return nil;
     }
     
-    // Use the profile ID to build the path to the identity directory
-    NSString *identityDir = [PXProfilesPath() stringByAppendingPathComponent:profileId];
+    // Align with IdentifierManager: <profiles>/<id>/identity/battery_info.plist
+    NSString *profileDir = [PXProfilesPath() stringByAppendingPathComponent:profileId];
+    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
     
-    // Return the path to the battery_info.plist in this profile
+    // Ensure identity directory exists
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:identityDir]) {
+        [fm createDirectoryAtPath:identityDir
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:nil];
+    }
+    
+    // Return the path to the battery_info.plist in this profile's identity dir
     return [identityDir stringByAppendingPathComponent:@"battery_info.plist"];
 }
 
 // Load battery values from disk
 - (void)loadBatteryInfoFromDisk {
-    // First try to load from profile-specific plist
+    NSDictionary *batteryInfo = nil;
+    
+    // First try identity/battery_info.plist (canonical)
     NSString *profileBatteryPath = [self batteryInfoPathForCurrentProfile];
     if (profileBatteryPath) {
-        NSDictionary *batteryInfo = [NSDictionary dictionaryWithContentsOfFile:profileBatteryPath];
-        if (batteryInfo && batteryInfo[kBatteryLevelKey]) {
-            _currentBatteryLevel = batteryInfo[kBatteryLevelKey];
-            return;
+        batteryInfo = [NSDictionary dictionaryWithContentsOfFile:profileBatteryPath];
+        
+        // Legacy fallback: <profile>/battery_info.plist (pre-identity path)
+        if (!batteryInfo) {
+            NSString *identityDir = [profileBatteryPath stringByDeletingLastPathComponent];
+            NSString *profileDir = [identityDir stringByDeletingLastPathComponent];
+            NSString *legacyPath = [profileDir stringByAppendingPathComponent:@"battery_info.plist"];
+            batteryInfo = [NSDictionary dictionaryWithContentsOfFile:legacyPath];
         }
     }
     
+    if (batteryInfo) {
+        if (batteryInfo[kBatteryLevelKey]) {
+            _currentBatteryLevel = batteryInfo[kBatteryLevelKey];
+        }
+        // LowPowerMode: present key → use it; missing → default NO
+        if (batteryInfo[kLowPowerModeKey] != nil) {
+            _currentLowPowerMode = [batteryInfo[kLowPowerModeKey] boolValue];
+        } else {
+            _currentLowPowerMode = NO;
+        }
+        _lowPowerModeLoaded = YES;
+        return;
+    }
+    
     // If profile-specific load failed, try global plist
-    NSDictionary *batteryInfo = [NSDictionary dictionaryWithContentsOfFile:BATTERY_PLIST_PATH];
+    batteryInfo = [NSDictionary dictionaryWithContentsOfFile:BATTERY_PLIST_PATH];
     if (batteryInfo) {
         // Extract the values we need
         _currentBatteryLevel = batteryInfo[kBatteryLevelKey] ?: _currentBatteryLevel;
+        if (batteryInfo[kLowPowerModeKey] != nil) {
+            _currentLowPowerMode = [batteryInfo[kLowPowerModeKey] boolValue];
+            _lowPowerModeLoaded = YES;
+        } else if (!_lowPowerModeLoaded) {
+            _currentLowPowerMode = NO;
+        }
+    } else if (!_lowPowerModeLoaded) {
+        _currentLowPowerMode = NO;
     }
 }
 
@@ -213,6 +289,7 @@ static BatteryManager *sharedManager = nil;
         // First save to the global battery plist
         NSMutableDictionary *batteryInfo = [NSMutableDictionary dictionary];
         batteryInfo[kBatteryLevelKey] = _currentBatteryLevel;
+        batteryInfo[kLowPowerModeKey] = @(_currentLowPowerMode);
         batteryInfo[kLastUpdatedKey] = [NSDate date];
         
         // Create the directory if it doesn't exist
@@ -229,8 +306,9 @@ static BatteryManager *sharedManager = nil;
         // Write the plist
         [batteryInfo writeToFile:BATTERY_PLIST_PATH atomically:YES];
         
-        PXLog(@"[WeaponX] 🔋 Saved battery info to global plist: %@%%",
-              @([_currentBatteryLevel floatValue] * 100));
+        PXLog(@"[WeaponX] 🔋 Saved battery info to global plist: %@%% LPM=%@",
+              @([_currentBatteryLevel floatValue] * 100),
+              _currentLowPowerMode ? @"YES" : @"NO");
     }
     @catch (NSException *exception) {
         // Log the error but don't crash
@@ -248,11 +326,10 @@ static BatteryManager *sharedManager = nil;
                                                       attributes:nil
                                                            error:nil];
             
-            // Build the path to the battery info plist
-            
             // Prepare the battery info dictionary
             NSMutableDictionary *batteryInfo = [NSMutableDictionary dictionary];
             batteryInfo[kBatteryLevelKey] = _currentBatteryLevel ?: @"0.75";
+            batteryInfo[kLowPowerModeKey] = @(_currentLowPowerMode);
             batteryInfo[kLastUpdatedKey] = [NSDate date];
             
             // Write to the plist file
@@ -264,6 +341,7 @@ static BatteryManager *sharedManager = nil;
             if (deviceIds) {
                 // Update the battery values in device_ids.plist
                 deviceIds[kBatteryLevelKey] = _currentBatteryLevel;
+                deviceIds[kLowPowerModeKey] = @(_currentLowPowerMode);
                 [deviceIds writeToFile:deviceIdsPath atomically:YES];
             }
         }

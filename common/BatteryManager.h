@@ -10,7 +10,11 @@
 - (NSString *)generateBatteryLevel;
 - (NSString *)randomizeBatteryLevel;
 
-// Generate battery info for UI display
+// Low Power Mode (profile-scoped Boolean; default NO)
+- (BOOL)lowPowerModeEnabled;
+- (void)setLowPowerModeEnabled:(BOOL)enabled;
+
+// Generate battery info for UI display (keeps current LPM; does not randomize it)
 - (NSDictionary *)generateBatteryInfo;
 
 // File operations

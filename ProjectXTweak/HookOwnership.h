@@ -1,5 +1,10 @@
-// Owner hook installation flags (set in ProjectXTweak/Tweak.x)
+// HookOwnership.h
+// Legacy ownership flags — retained for modules still checking gOwner* during transition.
+// New multi-module native hooks must register with PXNativeHookCoordinator and must NOT
+// call MSHookFunction for coordinator-owned symbols (see scripts/audit_native_hooks.sh).
+
 #include <objc/objc.h>
+
 extern BOOL gOwnerSysctlInstalled;
 extern BOOL gOwnerSysctlBynameInstalled;
 extern BOOL gOwnerUnameInstalled;

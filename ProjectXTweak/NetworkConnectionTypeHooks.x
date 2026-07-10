@@ -1249,14 +1249,8 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
                 PXLog(@"[NetworkHook] ERROR: Could not find SCNetworkReachabilityGetFlags function!");
             }
             
-            // Enable getifaddrs hook for local IP spoofing
-            void *getifaddrsPtr = dlsym(RTLD_DEFAULT, "getifaddrs");
-            if (getifaddrsPtr) {
-                MSHookFunction(getifaddrsPtr, (void *)hooked_getifaddrs, (void **)&original_getifaddrs);
-                PXLog(@"[NetworkHook] Successfully hooked getifaddrs for local IP spoofing");
-            } else {
-                PXLog(@"[NetworkHook] ERROR: Could not find getifaddrs function!");
-            }
+            // getifaddrs is coordinator-owned — skip direct MSHookFunction (Tweak/network providers).
+            PXLog(@"[NetworkHook] Skipping direct getifaddrs hook (PXNativeHookCoordinator owns symbol)");
             
             // Note: We don't hook CNCopySupportedInterfaces or CNCopyCurrentNetworkInfo
             // as they are already handled by WiFiHook.x for SSID/BSSID spoofing
@@ -1342,16 +1336,9 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
                 PXLog(@"[NetworkHook] Network connection type spoofing disabled");
             }
             
-            // Setup CNCopyCurrentNetworkInfo hook for WiFi signal strength
-            void *CNCopyCurrentNetworkInfoPtr = dlsym(RTLD_DEFAULT, "CNCopyCurrentNetworkInfo");
-            if (CNCopyCurrentNetworkInfoPtr) {
-                MSHookFunction(CNCopyCurrentNetworkInfoPtr,
-                      (void *)hooked_CNCopyCurrentNetworkInfo,
-                      (void **)&original_CNCopyCurrentNetworkInfo);
-                PXLog(@"[NetworkHook] Successfully hooked CNCopyCurrentNetworkInfo for WiFi signal strength spoofing");
-            } else {
-                PXLog(@"[NetworkHook] ERROR: Could not find CNCopyCurrentNetworkInfo function!");
-            }
+            // CNCopyCurrentNetworkInfo: WiFi module builds final dictionary; network provides policy only.
+            // Do not install a second MSHookFunction — coordinator owns the symbol.
+            PXLog(@"[NetworkHook] Skipping direct CNCopyCurrentNetworkInfo hook (coordinator/WiFi owns; policy-only)");
         } else {
             PXLog(@"[NetworkHook] App is not scoped, network spoofing will not be applied");
         }

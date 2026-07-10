@@ -3,6 +3,7 @@
 #import "ProfileManager.h"
 #import "ProjectXLogging.h"
 #import "HookOwnership.h"
+#import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
 #import <sys/sysctl.h>
 #import <sys/time.h>
@@ -507,50 +508,73 @@ static NSTimeInterval hook_systemUptime(NSProcessInfo *self, SEL _cmd) {
     return orig_systemUptime(self, _cmd);
 }
 
-// Install system call hooks ONLY for scoped apps
+// Register as coordinator providers — do NOT call MSHookFunction for sysctl/sysctlbyname.
 static void installSystemCallHooks(void) {
     @try {
         PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] enter");
         if (hooksInstalled) {
             PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] already installed");
-            return; // Already installed
+            return;
         }
-        
-        BOOL hookingSuccess = NO;
-        
-        // Use Substrate for rootful jailbreaks (iOS 12+)
-        if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-            // Hook sysctl
-            void *sysctlPtr = dlsym(RTLD_DEFAULT, "sysctl");
-            if (sysctlPtr) {
-                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] before hook sysctl owner=%d", gOwnerSysctlInstalled);
-                MSHookFunction(sysctlPtr, (void *)hook_sysctl, (void **)&orig_sysctl);
-                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] after hook sysctl");
-                hookingSuccess = YES;
+
+        PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+        [coord installOwnedSymbolsIfNeeded];
+        orig_sysctl = [coord originalForSymbol:kPXNativeSymbolSysctl];
+        orig_sysctlbyname = [coord originalForSymbol:kPXNativeSymbolSysctlByname];
+
+        // Priority Identity, provider ID sorts before "tweak.*" so boot-time keys win when handled.
+        [coord registerSysctlProvider:@"boottime.sysctl" priority:PXNativeHookPriorityIdentity pre:^BOOL(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+            (void)newp; (void)newlen;
+            if (!(namelen >= 2 && name && name[0] == CTL_KERN && name[1] == KERN_BOOTTIME)) return NO;
+            if (!shouldSpoofBootTimeForApp() || !isBootTimeOrUptimeEnabled()) return NO;
+            isInsideHook = YES;
+            updateCachedBootTimeValues();
+            isInsideHook = NO;
+            if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
+                struct timeval boottime;
+                boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
+                boottime.tv_usec = 0;
+                memcpy(oldp, &boottime, sizeof(boottime));
+                *oldlenp = sizeof(boottime);
+                if (outResult) *outResult = 0;
+                return YES;
             }
-            
-            // Hook sysctlbyname
-            void *sysctlbynamePtr = dlsym(RTLD_DEFAULT, "sysctlbyname");
-            if (sysctlbynamePtr) {
-                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] before hook sysctlbyname owner=%d", gOwnerSysctlBynameInstalled);
-                MSHookFunction(sysctlbynamePtr, (void *)hook_sysctlbyname, (void **)&orig_sysctlbyname);
-                PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] after hook sysctlbyname");
-                hookingSuccess = YES;
+            return NO;
+        } post:nil];
+
+        [coord registerSysctlBynameProvider:@"boottime.sysctlbyname" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+            (void)newp; (void)newlen;
+            if (!name || strcmp(name, "kern.boottime") != 0) return NO;
+            if (!shouldSpoofBootTimeForApp() || !isBootTimeOrUptimeEnabled()) return NO;
+            isInsideHook = YES;
+            updateCachedBootTimeValues();
+            isInsideHook = NO;
+            if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
+                struct timeval boottime;
+                boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
+                boottime.tv_usec = 0;
+                memcpy(oldp, &boottime, sizeof(boottime));
+                *oldlenp = sizeof(boottime);
+                if (outResult) *outResult = 0;
+                return YES;
             }
+            // Two-call sizing: oldp NULL
+            if (!oldp && oldlenp) {
+                *oldlenp = sizeof(struct timeval);
+                if (outResult) *outResult = 0;
+                return YES;
+            }
+            return NO;
+        } post:nil];
+
+        Class procInfoClass = objc_getClass("NSProcessInfo");
+        if (procInfoClass) {
+            MSHookMessageEx(procInfoClass, @selector(systemUptime), (IMP)hook_systemUptime, (IMP *)&orig_systemUptime);
         }
-        
-        if (hookingSuccess) {
-            hooksInstalled = YES;
-            NSString *bundleID = getCurrentBundleID();
-            PXLog(@"[BootTimeHooks] ✅ System call hooks installed for scoped app: %@", bundleID);
-            PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] success");
-            // Add systemUptime hook for NSProcessInfo
-            Class procInfoClass = objc_getClass("NSProcessInfo");
-            if (procInfoClass) {
-                MSHookMessageEx(procInfoClass, @selector(systemUptime), (IMP)hook_systemUptime, (IMP *)&orig_systemUptime);
-            }
-        }
-        
+
+        hooksInstalled = YES;
+        PXLog(@"[BootTimeHooks] ✅ Boot-time providers registered (no direct MSHookFunction)");
+        PXFileDebugAIDA64Log("[BootTime.installSystemCallHooks] success");
     } @catch (NSException *e) {
         PXLog(@"[BootTimeHooks] ❌ Exception installing hooks: %@", e);
     }

@@ -1,6 +1,7 @@
 #import "PXScope.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <fcntl.h>
+#import <os/lock.h>
 #import <stdarg.h>
 #import <stdio.h>
 #import <sys/stat.h>
@@ -76,18 +77,29 @@ static BOOL PXReadSecuritySettingBool(NSString *key) {
     return v ? [v boolValue] : NO;
 }
 
-// Small cache to avoid disk reads on hot paths.
-static NSTimeInterval gLastSettingsRead = 0;
-static BOOL gCachedDeviceSpoofEnabled = NO;
-static BOOL gCachedSafariStackEnabled = NO;
-static BOOL gCachedFullSpoofTestModeEnabled = NO;
-static BOOL gCachedDisplayUIScaleEnabled = YES;
-static BOOL gCachedDisplayPixelMetricsEnabled = YES;
-static BOOL gCachedDisplayWebScreenEnabled = YES;
-static BOOL gCacheValid = NO;
-static NSDictionary *gScopedAppsCache = nil;
+// Immutable snapshot for hot-path scope decisions.
+@interface PXScopeSnapshot : NSObject
+@property (nonatomic, assign) BOOL deviceSpoofEnabled;
+@property (nonatomic, assign) BOOL safariStackEnabled;
+@property (nonatomic, assign) BOOL fullSpoofTestModeEnabled;
+@property (nonatomic, assign) BOOL displayUIScaleEnabled;
+@property (nonatomic, assign) BOOL displayPixelMetricsEnabled;
+@property (nonatomic, assign) BOOL displayWebScreenEnabled;
+@property (nonatomic, copy) NSDictionary *scopedApps; // immutable copy
+@property (nonatomic, assign) uint64_t generation;
+@property (nonatomic, assign) NSTimeInterval expirationTime;
+@end
+
+@implementation PXScopeSnapshot
+@end
+
+static os_unfair_lock gSnapshotLock = OS_UNFAIR_LOCK_INIT;
+static os_unfair_lock gRefreshLock = OS_UNFAIR_LOCK_INIT;
+static os_unfair_lock gDecisionLogLock = OS_UNFAIR_LOCK_INIT;
+static PXScopeSnapshot *gSnapshot = nil; // immutable once published
 static uint64_t gScopeGeneration = 1;
-static NSMutableDictionary *gDecisionLogTimes = nil;
+static NSMutableDictionary *gDecisionLogTimes = nil; // protected by gDecisionLogLock
+static NSString *gWebKitHostBundle = nil; // process-lifetime immutable after first resolve
 
 static BOOL PXScopeFileDebugEnabled(void) {
     return access("/tmp/px_debug_scope", F_OK) == 0 || access("/tmp/px_debug_all", F_OK) == 0;
@@ -124,22 +136,7 @@ static void PXScopeFileLog(NSString *format, ...) {
     close(fd);
 }
 
-void PXInvalidateScopeDecisionCache(void) {
-    gCacheValid = NO;
-    gScopedAppsCache = nil;
-    gScopeGeneration++;
-}
-
-uint64_t PXScopeGeneration(void) {
-    return gScopeGeneration;
-}
-
-static void PXInvalidateScopeCache(void) {
-    PXInvalidateScopeDecisionCache();
-}
-
-static NSDictionary *PXLoadScopedApps(void) {
-    if (gScopedAppsCache) return gScopedAppsCache;
+static NSDictionary *PXLoadScopedAppsFromDisk(void) {
     NSArray<NSString *> *paths = @[
         @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
         @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"
@@ -148,49 +145,25 @@ static NSDictionary *PXLoadScopedApps(void) {
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
         NSDictionary *scoped = [dict isKindOfClass:[NSDictionary class]] ? dict[@"ScopedApps"] : nil;
         if ([scoped isKindOfClass:[NSDictionary class]]) {
-            gScopedAppsCache = [scoped copy];
-            return gScopedAppsCache;
+            return [scoped copy];
         }
     }
-    gScopedAppsCache = @{};
-    return gScopedAppsCache;
+    return @{};
 }
 
-static BOOL PXScopedBundleEnabled(NSString *bundleID) {
-    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
-    NSDictionary *scoped = PXLoadScopedApps();
-    NSDictionary *entry = [scoped[bundleID] isKindOfClass:[NSDictionary class]] ? scoped[bundleID] : nil;
-    return [entry[@"enabled"] boolValue];
-}
-
-static void PXScopeNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
-    PXInvalidateScopeCache();
-}
-
-static void PXEnsureScopeCache(void) {
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (gCacheValid && (now - gLastSettingsRead) < 1.0) {
-        return;
-    }
-    gLastSettingsRead = now;
-
+static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
+    // Disk/settings reads happen WITHOUT holding gSnapshotLock.
     BOOL deviceEnabled = PXReadSecuritySettingBool(@"deviceSpoofingEnabled");
-
-    // Full spoof test mode: force Safari/Auth stack spoofing ON (for failure testing).
     BOOL fullTest = PXReadSecuritySettingBool(@"fullSpoofTestModeEnabled");
 
-    // Default behavior: if safariStackSpoofEnabled is absent, follow deviceSpoofingEnabled.
     BOOL safariEnabled = deviceEnabled;
     if (PXReadSecuritySettingHasKey(@"safariStackSpoofEnabled")) {
         safariEnabled = deviceEnabled && PXReadSecuritySettingBool(@"safariStackSpoofEnabled");
     }
-    // In test mode, always allow Safari/Auth stack spoofing when global spoofing is enabled.
     if (deviceEnabled && fullTest) {
         safariEnabled = YES;
     }
 
-    // Display spoof controls. Defaults are ON when keys are absent.
     BOOL uiScaleEnabled = deviceEnabled;
     if (PXReadSecuritySettingHasKey(@"displayUIScaleSpoofEnabled")) {
         uiScaleEnabled = deviceEnabled && PXReadSecuritySettingBool(@"displayUIScaleSpoofEnabled");
@@ -206,13 +179,101 @@ static void PXEnsureScopeCache(void) {
         webScreenEnabled = deviceEnabled && PXReadSecuritySettingBool(@"displayWebScreenSpoofEnabled");
     }
 
-    gCachedDeviceSpoofEnabled = deviceEnabled;
-    gCachedFullSpoofTestModeEnabled = (deviceEnabled && fullTest);
-    gCachedSafariStackEnabled = safariEnabled;
-    gCachedDisplayUIScaleEnabled = uiScaleEnabled;
-    gCachedDisplayPixelMetricsEnabled = pixelMetricsEnabled;
-    gCachedDisplayWebScreenEnabled = webScreenEnabled;
-    gCacheValid = YES;
+    NSDictionary *scoped = PXLoadScopedAppsFromDisk();
+
+    PXScopeSnapshot *snap = [[PXScopeSnapshot alloc] init];
+    snap.deviceSpoofEnabled = deviceEnabled;
+    snap.fullSpoofTestModeEnabled = (deviceEnabled && fullTest);
+    snap.safariStackEnabled = safariEnabled;
+    snap.displayUIScaleEnabled = uiScaleEnabled;
+    snap.displayPixelMetricsEnabled = pixelMetricsEnabled;
+    snap.displayWebScreenEnabled = webScreenEnabled;
+    snap.scopedApps = scoped ?: @{};
+    snap.generation = generation;
+    snap.expirationTime = [NSDate timeIntervalSinceReferenceDate] + 1.0;
+    return snap;
+}
+
+static PXScopeSnapshot *PXCurrentSnapshot(void) {
+    PXScopeSnapshot *local = nil;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+
+    os_unfair_lock_lock(&gSnapshotLock);
+    local = gSnapshot;
+    BOOL needsRefresh = (!local || now >= local.expirationTime);
+    uint64_t gen = gScopeGeneration;
+    os_unfair_lock_unlock(&gSnapshotLock);
+
+    if (!needsRefresh) {
+        return local;
+    }
+
+    // Only one thread reloads disk; others keep using the last valid snapshot.
+    if (!os_unfair_lock_trylock(&gRefreshLock)) {
+        // Another thread is refreshing; return best available snapshot.
+        os_unfair_lock_lock(&gSnapshotLock);
+        local = gSnapshot;
+        os_unfair_lock_unlock(&gSnapshotLock);
+        if (local) return local;
+        // No snapshot yet — fall through and wait for refresh lock.
+        os_unfair_lock_lock(&gRefreshLock);
+    }
+
+    // Re-check after acquiring refresh lock.
+    os_unfair_lock_lock(&gSnapshotLock);
+    local = gSnapshot;
+    now = [NSDate timeIntervalSinceReferenceDate];
+    needsRefresh = (!local || now >= local.expirationTime);
+    gen = gScopeGeneration;
+    os_unfair_lock_unlock(&gSnapshotLock);
+
+    if (needsRefresh) {
+        PXScopeSnapshot *built = PXBuildSnapshot(gen);
+        os_unfair_lock_lock(&gSnapshotLock);
+        // Only publish if generation still matches (no invalidate during build).
+        if (gScopeGeneration == gen) {
+            gSnapshot = built;
+            local = built;
+        } else {
+            // Stale build; keep existing if any, else use built as best-effort.
+            if (!gSnapshot) gSnapshot = built;
+            local = gSnapshot;
+        }
+        os_unfair_lock_unlock(&gSnapshotLock);
+    } else {
+        os_unfair_lock_lock(&gSnapshotLock);
+        local = gSnapshot;
+        os_unfair_lock_unlock(&gSnapshotLock);
+    }
+
+    os_unfair_lock_unlock(&gRefreshLock);
+    return local;
+}
+
+void PXInvalidateScopeDecisionCache(void) {
+    // Atomically invalidate snapshot + bump generation. Do not mutate published snapshot objects.
+    os_unfair_lock_lock(&gSnapshotLock);
+    gSnapshot = nil;
+    gScopeGeneration++;
+    os_unfair_lock_unlock(&gSnapshotLock);
+}
+
+uint64_t PXScopeGeneration(void) {
+    os_unfair_lock_lock(&gSnapshotLock);
+    uint64_t gen = gScopeGeneration;
+    os_unfair_lock_unlock(&gSnapshotLock);
+    return gen;
+}
+
+static void PXScopeNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXInvalidateScopeDecisionCache();
+}
+
+static BOOL PXScopedBundleEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length || !snap) return NO;
+    NSDictionary *entry = [snap.scopedApps[bundleID] isKindOfClass:[NSDictionary class]] ? snap.scopedApps[bundleID] : nil;
+    return [entry[@"enabled"] boolValue];
 }
 
 __attribute__((constructor))
@@ -225,33 +286,33 @@ static void PXScopeInit(void) {
 }
 
 BOOL PXDeviceSpoofingEnabled(void) {
-    PXEnsureScopeCache();
-    return gCachedDeviceSpoofEnabled;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return snap.deviceSpoofEnabled;
 }
 
 BOOL PXSafariStackSpoofEnabled(void) {
-    PXEnsureScopeCache();
-    return gCachedSafariStackEnabled;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return snap.safariStackEnabled;
 }
 
 BOOL PXFullSpoofTestModeEnabled(void) {
-    PXEnsureScopeCache();
-    return gCachedFullSpoofTestModeEnabled;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return snap.fullSpoofTestModeEnabled;
 }
 
 BOOL PXDisplayUIScaleSpoofEnabled(void) {
-    PXEnsureScopeCache();
-    return gCachedDisplayUIScaleEnabled;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return snap.displayUIScaleEnabled;
 }
 
 BOOL PXDisplayPixelMetricsSpoofEnabled(void) {
-    PXEnsureScopeCache();
-    return gCachedDisplayPixelMetricsEnabled;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return snap.displayPixelMetricsEnabled;
 }
 
 BOOL PXDisplayWebScreenSpoofEnabled(void) {
-    PXEnsureScopeCache();
-    return gCachedDisplayWebScreenEnabled;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return snap.displayWebScreenEnabled;
 }
 
 BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName) {
@@ -293,9 +354,12 @@ BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
 }
 
 NSString *PXWebKitHostBundleIdentifier(void) {
-    static NSString *cachedHost = nil;
-    if (cachedHost.length) return cachedHost;
+    // Process-lifetime immutable cache; fail closed if not found.
+    if (gWebKitHostBundle) {
+        return gWebKitHostBundle.length ? gWebKitHostBundle : nil;
+    }
 
+    NSString *resolved = nil;
     NSArray<NSString *> *homeCandidates = @[
         NSHomeDirectory() ?: @"",
         [[[NSProcessInfo processInfo] environment][@"HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"HOME"] : @"",
@@ -307,20 +371,23 @@ NSString *PXWebKitHostBundleIdentifier(void) {
         NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
         NSString *identifier = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
         if (identifier.length) {
-            cachedHost = [identifier copy];
-            return cachedHost;
+            resolved = [identifier copy];
+            break;
         }
     }
-    return nil;
+    // Sentinel empty string means "looked up, not found" (fail closed).
+    gWebKitHostBundle = resolved ?: @"";
+    return resolved;
 }
 
 BOOL PXWebKitHostIsScopedForSpoofing(void) {
     if (!PXDeviceSpoofingEnabled()) return NO;
     NSString *host = PXWebKitHostBundleIdentifier();
-    if (!host.length) return NO;
+    if (!host.length) return NO; // fail closed
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (PXIsCriticalSystemProcess(host, proc)) return NO;
-    return PXScopedBundleEnabled(host);
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return PXScopedBundleEnabledInSnapshot(snap, host);
 }
 
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName) {
@@ -355,7 +422,8 @@ BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (PXIsCriticalSystemProcess(bundleID, proc)) return NO;
     if (PXIsWebKitHelperProcess(bundleID, proc)) return NO;
-    return PXScopedBundleEnabled(bundleID);
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return PXScopedBundleEnabledInSnapshot(snap, bundleID);
 }
 
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
@@ -367,19 +435,30 @@ BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PX
     BOOL safari = !webKitHelper && ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
     BOOL allowed = strict || safari || webKitHostScoped;
 
-    if (!gDecisionLogTimes) gDecisionLogTimes = [NSMutableDictionary dictionary];
-    NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", webKitHost ?: @"", (unsigned long)options, allowed];
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    NSNumber *last = gDecisionLogTimes[key];
+    // Decision log only when debug flags enabled — no hot-path file/NSLog otherwise.
     BOOL verboseFile = PXScopeFileDebugVerboseEnabled();
-    if (!last || now - [last doubleValue] > 5.0 || verboseFile) {
-        gDecisionLogTimes[key] = @(now);
-        if (!verboseFile || !last || now - [last doubleValue] > 5.0) {
-            NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
-                  bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+    BOOL debugOn = PXScopeFileDebugEnabled() || verboseFile;
+    if (debugOn) {
+        NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", webKitHost ?: @"", (unsigned long)options, allowed];
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        BOOL shouldLog = NO;
+        os_unfair_lock_lock(&gDecisionLogLock);
+        if (!gDecisionLogTimes) gDecisionLogTimes = [NSMutableDictionary dictionary];
+        NSNumber *last = gDecisionLogTimes[key];
+        if (!last || now - [last doubleValue] > 5.0 || verboseFile) {
+            gDecisionLogTimes[key] = @(now);
+            shouldLog = YES;
         }
-        PXScopeFileLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
-                       bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+        os_unfair_lock_unlock(&gDecisionLogLock);
+
+        if (shouldLog) {
+            if (!verboseFile || !last || now - [last doubleValue] > 5.0) {
+                NSLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
+                      bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+            }
+            PXScopeFileLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
+                           bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
+        }
     }
 
     return allowed;

@@ -9,7 +9,7 @@
 #import "PXScope.h"
 
 // Function declarations
-static NSString *getSpoofedUserDefaultsUUID();
+static NSString *getSpoofedUserDefaultsUUID(void);
 static BOOL isUUIDKey(NSString *key);
 static id processDictionaryValues(id object);
 
@@ -17,7 +17,7 @@ static id processDictionaryValues(id object);
 static NSMutableDictionary *cachedBundleDecisions = nil;
 
 // Recursion guard to prevent infinite loops when getSpoofedUserDefaultsUUID accesses NSUserDefaults
-static __thread BOOL isInsideHook = NO; 
+static __thread BOOL isInsideHook = NO;
 
 // Callback function for notifications that clear the cache
 static void clearCacheCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -38,7 +38,7 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 }
 
 // Add function to get spoofed UserDefaults UUID from manager
-static NSString *getSpoofedUserDefaultsUUID() {
+static NSString *getSpoofedUserDefaultsUUID(void) {
     // Use the UserDefaultsUUIDManager for consistent values across the app and hooks
     UserDefaultsUUIDManager *manager = [UserDefaultsUUIDManager sharedManager];
     NSString *uuid = [manager currentUserDefaultsUUID];
@@ -112,7 +112,8 @@ static NSString *getSpoofedUserDefaultsUUID() {
     return fallbackUUID;
 }
 
-// Function to recursively process dictionary values and replace UUIDs
+// Function to recursively process dictionary values and replace UUIDs.
+// Preserves immutable/mutable contract of the original collection when possible.
 static id processDictionaryValues(id object) {
     // Base case: not a dictionary or array
     if (!object || (![object isKindOfClass:[NSDictionary class]] && ![object isKindOfClass:[NSArray class]])) {
@@ -122,6 +123,7 @@ static id processDictionaryValues(id object) {
     // For dictionaries, check each key and recursively process values
     if ([object isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)object;
+        BOOL wasMutable = [object isKindOfClass:[NSMutableDictionary class]];
         NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:dict.count];
         
         NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
@@ -148,19 +150,20 @@ static id processDictionaryValues(id object) {
             result[key] = processDictionaryValues(dict[key]);
         }
         
-        return result;
+        return wasMutable ? result : [result copy];
     }
     
     // For arrays, recursively process each element
     if ([object isKindOfClass:[NSArray class]]) {
         NSArray *array = (NSArray *)object;
+        BOOL wasMutable = [object isKindOfClass:[NSMutableArray class]];
         NSMutableArray *result = [NSMutableArray arrayWithCapacity:array.count];
         
         for (id item in array) {
-            [result addObject:processDictionaryValues(item)];
+            [result addObject:processDictionaryValues(item) ?: [NSNull null]];
         }
         
-        return result;
+        return wasMutable ? result : [result copy];
     }
     
     // Shouldn't reach here, but just in case
@@ -222,6 +225,8 @@ static BOOL isUUIDKey(NSString *key) {
 
 #pragma mark - NSUserDefaults Hooks
 
+%group UserDefaultsHooks
+
 %hook NSUserDefaults
 
 // Base method for getting objects - SAFE VERSION
@@ -259,6 +264,9 @@ static BOOL isUUIDKey(NSString *key) {
         
         // Case 2: Value is NSUUID 
         if ([originalValue isKindOfClass:NSClassFromString(@"NSUUID")]) {
+            if (!keyIsUUID) {
+                return originalValue;
+            }
             isInsideHook = YES;
             NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
             isInsideHook = NO;
@@ -586,6 +594,8 @@ static BOOL isUUIDKey(NSString *key) {
 
 %end
 
+%end // %group UserDefaultsHooks
+
 #pragma mark - Constructor
 
 %ctor {
@@ -633,6 +643,9 @@ static BOOL isUUIDKey(NSString *key) {
             CFNotificationSuspensionBehaviorDeliverImmediately
         );
         
-        PXLog(@"[WeaponX] 🔍 UserDefaults hooks initialized");
+        // Activate NSUserDefaults hooks only after scope check
+        %init(UserDefaultsHooks);
+        
+        PXLog(@"[WeaponX] 🔍 UserDefaults hooks initialized for %@", bundleID);
     }
-} 
+}

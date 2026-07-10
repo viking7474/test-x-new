@@ -7,6 +7,7 @@
 #import "SystemUUIDManager.h"
 #import "DyldCacheUUIDManager.h"
 #import "PXScope.h"
+#import "PXNativeHookCoordinator.h"
 #import <dlfcn.h>
 #import <substrate.h>
 #import <mach-o/dyld.h>
@@ -15,6 +16,8 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import <sys/sysctl.h>
 #import <pthread.h>
+#import <string.h>
+#import <errno.h>
 
 // Macro for iOS version checking
 #define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v) ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
@@ -293,208 +296,22 @@ static NSString *getSpoofedDyldCacheUUID() {
     }
 }
 
-#pragma mark - NSUUID Hooks
+#pragma mark - Blanket UUID generation intentionally NOT hooked
+// Per Newplan: do not hook CFUUIDCreate / +[NSUUID UUID] / UUIDString / description /
+// initWithUUIDBytes. Generic UUID generation must remain unique. Keep only
+// gethostuuid, kern.uuid, IOKit platform UUID and dyld cache UUID (via coordinator).
 
-%hook NSUUID
+#pragma mark - IOKit Platform UUID (registered with PXNativeHookCoordinator)
+// Legacy %hookf removed — identity IOKit transforms register via coordinator.
 
-// Hook NSUUID's UUID method to intercept system UUID requests
-+ (instancetype)UUID {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            // Use direct check instead of manager
-            if (isSystemBootUUIDEnabled()) {
-                NSString *bootUUID = getSpoofedSystemBootUUID();
-                if (bootUUID && bootUUID.length > 0) {
-                    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:bootUUID];
-                    if (uuid) {
-                        PXLog(@"[WeaponX] 🔄 Spoofing NSUUID with: %@", bootUUID);
-                        return uuid;
-                    }
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in NSUUID+UUID: %@", exception);
-    }
-    
-    return %orig;
+static BOOL PXUUID_IOKitHandled = NO;
+static void PXUUIDRegisterIOKitProviders(void) {
+    // Providers registered from ctor; actual install is coordinator-owned.
+    (void)PXUUID_IOKitHandled;
 }
 
-// Hook UUIDString method to intercept UUID string requests
-- (NSString *)UUIDString {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            // Use direct check instead of manager
-            if (isSystemBootUUIDEnabled()) {
-                // Only spoof if this is a system UUID (we can check by comparing with the actual system UUID)
-                uuid_t bytes;
-                [self getUUIDBytes:bytes];
-                
-                // Create a string from the original UUID bytes
-                CFUUIDRef cfuuid = CFUUIDCreateFromUUIDBytes(kCFAllocatorDefault, *((CFUUIDBytes *)bytes));
-                if (!cfuuid) {
-                    return %orig;
-                }
-                
-                NSString *originalUUID = (NSString *)CFBridgingRelease(CFUUIDCreateString(kCFAllocatorDefault, cfuuid));
-                CFRelease(cfuuid);
-                
-                // Determine if this is likely a system UUID (can be enhanced with more checks)
-                io_registry_entry_t ioRegistryRoot = IORegistryEntryFromPath(kIOMasterPortDefault, "IOService:/");
-                if (ioRegistryRoot) {
-                    CFStringRef platformUUID = (CFStringRef)IORegistryEntryCreateCFProperty(
-                        ioRegistryRoot, 
-                        CFSTR("IOPlatformUUID"), 
-                        kCFAllocatorDefault, 
-                        0);
-                    IOObjectRelease(ioRegistryRoot);
-                    
-                    if (platformUUID) {
-                        NSString *systemUUID = (__bridge_transfer NSString *)platformUUID;
-                        if ([originalUUID isEqualToString:systemUUID]) {
-                            NSString *bootUUID = getSpoofedSystemBootUUID();
-                            if (bootUUID && bootUUID.length > 0) {
-                                PXLog(@"[WeaponX] 🔄 Spoofing UUIDString with: %@", bootUUID);
-                                return bootUUID;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in UUIDString: %@", exception);
-    }
-    
-    return %orig;
-}
-
-// Add additional initialization methods beyond what we already hook
-- (instancetype)initWithUUIDBytes:(const uuid_t)bytes {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID) && isSystemBootUUIDEnabled()) {
-            // Create string from bytes to see if it matches the system UUID
-            CFUUIDRef cfuuid = CFUUIDCreateFromUUIDBytes(kCFAllocatorDefault, *((CFUUIDBytes *)bytes));
-            if (!cfuuid) {
-                return %orig;
-            }
-            
-            NSString *originalUUID = (NSString *)CFBridgingRelease(CFUUIDCreateString(kCFAllocatorDefault, cfuuid));
-            CFRelease(cfuuid);
-            
-            // Check if this might be system UUID
-            io_registry_entry_t ioRegistryRoot = IORegistryEntryFromPath(kIOMasterPortDefault, "IOService:/");
-            if (ioRegistryRoot) {
-                CFStringRef platformUUID = (CFStringRef)IORegistryEntryCreateCFProperty(
-                    ioRegistryRoot, 
-                    CFSTR("IOPlatformUUID"), 
-                    kCFAllocatorDefault, 
-                    0);
-                IOObjectRelease(ioRegistryRoot);
-                
-                if (platformUUID) {
-                    NSString *systemUUID = (__bridge_transfer NSString *)platformUUID;
-                    if ([originalUUID isEqualToString:systemUUID]) {
-                        NSString *bootUUID = getSpoofedSystemBootUUID();
-                        if (bootUUID && bootUUID.length > 0) {
-                            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:bootUUID];
-                            PXLog(@"[WeaponX] 🔄 Spoofing NSUUID initWithUUIDBytes with: %@", bootUUID);
-                            return uuid ?: %orig;
-                        }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in NSUUID initWithUUIDBytes: %@", exception);
-    }
-    
-    return %orig;
-}
-
-// Add this to catch UIDevice's identifierForVendor
-- (NSString *)description {
-    NSString *origDescription = %orig;
-    
-    @try {
-        // Check if we need to spoof
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID) && isSystemBootUUIDEnabled()) {
-            // Generally we don't want to modify all descriptions, only ones that might be system UUIDs
-            // We'll check if the description matches the UUID pattern first
-            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$" 
-                                                                                  options:NSRegularExpressionCaseInsensitive 
-                                                                                    error:nil];
-            if ([regex numberOfMatchesInString:origDescription options:0 range:NSMakeRange(0, origDescription.length)] > 0) {
-                // It's a UUID string, now check if it's the system UUID
-                io_registry_entry_t ioRegistryRoot = IORegistryEntryFromPath(kIOMasterPortDefault, "IOService:/");
-                if (ioRegistryRoot) {
-                    CFStringRef platformUUID = (CFStringRef)IORegistryEntryCreateCFProperty(
-                        ioRegistryRoot, 
-                        CFSTR("IOPlatformUUID"), 
-                        kCFAllocatorDefault, 
-                        0);
-                    IOObjectRelease(ioRegistryRoot);
-                    
-                    if (platformUUID) {
-                        NSString *systemUUID = (__bridge_transfer NSString *)platformUUID;
-                        if ([origDescription isEqualToString:systemUUID]) {
-                            NSString *bootUUID = getSpoofedSystemBootUUID();
-                            if (bootUUID && bootUUID.length > 0) {
-                                PXLog(@"[WeaponX] 🔄 Spoofing NSUUID description from %@ to %@", origDescription, bootUUID);
-                                return bootUUID;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in NSUUID description: %@", exception);
-    }
-    
-    return origDescription;
-}
-
-%end
-
-#pragma mark - NSString UUID Hooks
-
-%hook NSString
-
-+ (NSString *)stringWithUUID:(uuid_t)bytes {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID)) {
-            // Use direct check instead of manager
-            if (isSystemBootUUIDEnabled()) {
-                NSString *bootUUID = getSpoofedSystemBootUUID();
-                if (bootUUID && bootUUID.length > 0) {
-                    PXLog(@"[WeaponX] 🔄 Spoofing System Boot UUID with: %@", bootUUID);
-                    return bootUUID;
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in stringWithUUID: %@", exception);
-    }
-    
-    // Call original if we're not spoofing
-    return %orig;
-}
-
-%end
-
-#pragma mark - IOKit Platform UUID Hooks
-
-// Hook the IOKit function to intercept platform UUID requests
+// Placeholder kept for structure; real registration is below near setupAdditionalSystemUUIDHooks.
+#if 0
 %hookf(CFTypeRef, IORegistryEntryCreateCFProperty, io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
     if (gOwnerIOKitInstalled) {
         return %orig;
@@ -553,6 +370,7 @@ static NSString *getSpoofedDyldCacheUUID() {
     
     return result;
 }
+#endif // 0 — legacy IOKit %hookf removed (coordinator-owned)
 
 #pragma mark - Dyld Cache UUID Hooks
 
@@ -755,174 +573,119 @@ static const struct dyld_all_image_infos* replaced_dyld_get_all_image_infos(void
     return orig_dyld_get_all_image_infos();
 }
 
-#pragma mark - Additional System UUID Methods
+#pragma mark - Additional System UUID Methods (coordinator providers)
 
-// Hook for gethostuuid system call
-static int (*orig_gethostuuid)(uuid_t id, const struct timespec *wait);
+// gethostuuid: returns exactly 16 UUID bytes (NOT the same serializer as kern.uuid).
+static void PXUUIDRegisterNativeProviders(void) {
+    PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
 
-static int replaced_gethostuuid(uuid_t id, const struct timespec *wait) {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (shouldSpoofForBundle(bundleID) && isSystemBootUUIDEnabled()) {
-            NSString *bootUUID = getSpoofedSystemBootUUID();
-            if (bootUUID && bootUUID.length > 0) {
-                // Convert string UUID to bytes
-                NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:bootUUID];
-                if (uuid) {
-                    [uuid getUUIDBytes:id];
-                    PXLog(@"[WeaponX] 🔄 Spoofing gethostuuid with: %@", bootUUID);
-                    return 0; // Success
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in replaced_gethostuuid: %@", exception);
-    }
-    
-    // Call original if we're not spoofing
-    if (orig_gethostuuid) {
-        return orig_gethostuuid(id, wait);
-    }
-    
-    return -1; // Error
-}
-
-// Hook for sysctlbyname for kern.uuid
-static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-
-static int replaced_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    @try {
-        // Check if we're looking for kern.uuid
-        if (name && strcmp(name, "kern.uuid") == 0) {
+    [coord registerGethostuuidProvider:@"uuid.gethostuuid" priority:PXNativeHookPriorityIdentity pre:^BOOL(uuid_t uuid, const struct timespec *wait, int *outResult) {
+        (void)wait;
+        @try {
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            
-            if (shouldSpoofForBundle(bundleID) && isSystemBootUUIDEnabled()) {
-                NSString *bootUUID = getSpoofedSystemBootUUID();
-                if (bootUUID && bootUUID.length > 0 && oldp && oldlenp) {
-                    // Convert the UUID string to bytes
-                    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:bootUUID];
-                    if (uuid) {
-                        uuid_t bytes;
-                        [uuid getUUIDBytes:bytes];
-                        
-                        // Copy as much as will fit
-                        size_t toCopy = MIN(*oldlenp, sizeof(uuid_t));
-                        memcpy(oldp, bytes, toCopy);
-                        *oldlenp = toCopy;
-                        
-                        PXLog(@"[WeaponX] 🔄 Spoofing sysctlbyname(kern.uuid) with: %@", bootUUID);
-                        return 0; // Success
-                    }
-                }
-            }
+            if (!shouldSpoofForBundle(bundleID) || !isSystemBootUUIDEnabled()) return NO;
+            NSString *bootUUID = getSpoofedSystemBootUUID();
+            if (!bootUUID.length) return NO;
+            NSUUID *ns = [[NSUUID alloc] initWithUUIDString:bootUUID];
+            if (!ns || !uuid) return NO;
+            [ns getUUIDBytes:uuid];
+            if (outResult) *outResult = 0;
+            return YES;
+        } @catch (__unused NSException *e) {
+            return NO;
         }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in replaced_sysctlbyname: %@", exception);
-    }
-    
-    // Call original
-    return orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
+    }];
+
+    // kern.uuid: NUL-terminated UUID *string* with correct two-call buffer sizing.
+    [coord registerSysctlBynameProvider:@"uuid.kern.uuid" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+        (void)newp; (void)newlen;
+        if (!name || strcmp(name, "kern.uuid") != 0) return NO;
+        @try {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (!shouldSpoofForBundle(bundleID) || !isSystemBootUUIDEnabled()) return NO;
+            NSString *bootUUID = getSpoofedSystemBootUUID();
+            if (!bootUUID.length || !oldlenp) return NO;
+            const char *cstr = bootUUID.UTF8String;
+            if (!cstr) return NO;
+            size_t required = strlen(cstr) + 1; // NUL-terminated string
+            if (!oldp) {
+                *oldlenp = required;
+                if (outResult) *outResult = 0;
+                return YES;
+            }
+            if (*oldlenp < required) {
+                *oldlenp = required;
+                errno = ENOMEM;
+                if (outResult) *outResult = -1;
+                return YES;
+            }
+            memset(oldp, 0, *oldlenp);
+            memcpy(oldp, cstr, required);
+            *oldlenp = required;
+            if (outResult) *outResult = 0;
+            return YES;
+        } @catch (__unused NSException *e) {
+            return NO;
+        }
+    } post:nil];
+
+    // IOKit IOPlatformUUID / system-id via coordinator post (identity).
+    [coord registerIORegistryCreateCFPropertyProvider:@"uuid.iokit.create" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+        (void)entry; (void)allocator; (void)options;
+        if (!key) return NO;
+        NSString *keyStr = (__bridge NSString *)key;
+        if (![keyStr isEqualToString:@"IOPlatformUUID"] && ![keyStr isEqualToString:@"system-id"]) return NO;
+        @try {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (!shouldSpoofForBundle(bundleID) || !isSystemBootUUIDEnabled()) return NO;
+            NSString *bootUUID = getSpoofedSystemBootUUID();
+            if (!bootUUID.length || !outResult) return NO;
+            *outResult = CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)bootUUID);
+            return YES;
+        } @catch (__unused NSException *e) {
+            return NO;
+        }
+    } post:nil];
+
+    [coord registerIORegistryCreateCFPropertiesProvider:@"uuid.iokit.properties" priority:PXNativeHookPriorityIdentity pre:nil post:^(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options, IOReturn *inoutResult) {
+        (void)entry; (void)allocator; (void)options;
+        if (!inoutResult || *inoutResult != kIOReturnSuccess || !properties || !*properties) return;
+        @try {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (!shouldSpoofForBundle(bundleID) || !isSystemBootUUIDEnabled()) return;
+            NSString *bootUUID = getSpoofedSystemBootUUID();
+            if (!bootUUID.length) return;
+            NSMutableDictionary *props = (__bridge NSMutableDictionary *)*properties;
+            if (props[@"IOPlatformUUID"]) props[@"IOPlatformUUID"] = bootUUID;
+            if (props[@"system-id"]) props[@"system-id"] = bootUUID;
+        } @catch (__unused NSException *e) {}
+    }];
+
+    [coord registerIORegistrySearchCFPropertyProvider:@"uuid.iokit.search" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+        (void)entry; (void)plane; (void)allocator; (void)options;
+        if (!key) return NO;
+        NSString *keyStr = (__bridge NSString *)key;
+        if (![keyStr isEqualToString:@"IOPlatformUUID"] && ![keyStr isEqualToString:@"system-id"]) return NO;
+        @try {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (!shouldSpoofForBundle(bundleID) || !isSystemBootUUIDEnabled()) return NO;
+            NSString *bootUUID = getSpoofedSystemBootUUID();
+            if (!bootUUID.length || !outResult) return NO;
+            *outResult = CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)bootUUID);
+            return YES;
+        } @catch (__unused NSException *e) {
+            return NO;
+        }
+    } post:nil];
+
+    // Do NOT hook CFUUIDCreate — generic UUID generation must stay unique.
+    PXLog(@"[WeaponX] ✅ UUID native providers registered (gethostuuid/kern.uuid/IOKit); CFUUIDCreate NOT hooked");
 }
 
-// Hook CFUUIDCreate to also catch CF-level UUID creation
-static CFUUIDRef (*orig_CFUUIDCreate)(CFAllocatorRef alloc);
-
-static CFUUIDRef replaced_CFUUIDCreate(CFAllocatorRef alloc) {
-    CFUUIDRef originalUUID = orig_CFUUIDCreate ? orig_CFUUIDCreate(alloc) : NULL;
-    
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        // Only hook for system UUID if we shouldn't spoof for this app or UUID spoofing is disabled
-        if (!shouldSpoofForBundle(bundleID) || !isSystemBootUUIDEnabled()) {
-            return originalUUID;
-        }
-        
-        // Convert UUID to string for logging and comparison
-        NSString *originalUUIDString = nil;
-        if (originalUUID) {
-            CFStringRef uuidStringRef = CFUUIDCreateString(kCFAllocatorDefault, originalUUID);
-            if (uuidStringRef) {
-                originalUUIDString = (__bridge_transfer NSString *)uuidStringRef;
-            }
-        }
-        
-        // Get spoofed UUID
-        NSString *bootUUID = getSpoofedSystemBootUUID();
-        if (bootUUID && bootUUID.length > 0) {
-            // Create a new UUID from our spoofed string
-            CFUUIDRef spoofedUUID = CFUUIDCreateFromString(kCFAllocatorDefault, (__bridge CFStringRef)bootUUID);
-            if (spoofedUUID) {
-                // Release the original UUID
-                if (originalUUID) {
-                    CFRelease(originalUUID);
-                }
-                
-                PXLog(@"[WeaponX] 🔄 Spoofing CFUUIDCreate from %@ to %@", originalUUIDString ?: @"nil", bootUUID);
-                return spoofedUUID;
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in replaced_CFUUIDCreate: %@", exception);
-    }
-    
-    return originalUUID;
-}
-
-#pragma mark - Constructor - Additional Hooks Setup
-
-static void setupAdditionalSystemUUIDHooks() {
-    @try {
-        // Hook gethostuuid system call
-        void *libc = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
-        if (libc) {
-            void *gethostuuid_sym = dlsym(libc, "gethostuuid");
-            if (gethostuuid_sym) {
-                MSHookFunction(gethostuuid_sym, 
-                              (void *)replaced_gethostuuid, 
-                              (void **)&orig_gethostuuid);
-                PXLog(@"[WeaponX] ✅ Successfully hooked gethostuuid");
-            } else {
-                PXLog(@"[WeaponX] ⚠️ Could not find gethostuuid symbol");
-            }
-            
-            // Hook sysctlbyname
-            void *sysctlbyname_sym = dlsym(libc, "sysctlbyname");
-            if (sysctlbyname_sym) {
-                MSHookFunction(sysctlbyname_sym, 
-                              (void *)replaced_sysctlbyname, 
-                              (void **)&orig_sysctlbyname);
-                PXLog(@"[WeaponX] ✅ Successfully hooked sysctlbyname");
-            } else {
-                PXLog(@"[WeaponX] ⚠️ Could not find sysctlbyname symbol");
-            }
-            
-            dlclose(libc);
-        } else {
-            PXLog(@"[WeaponX] ⚠️ Failed to open libSystem.B.dylib");
-        }
-        
-        // Hook CFUUIDCreate
-        void *coreFoundation = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
-        if (coreFoundation) {
-            void *cfuuidcreate_sym = dlsym(coreFoundation, "CFUUIDCreate");
-            if (cfuuidcreate_sym) {
-                MSHookFunction(cfuuidcreate_sym, 
-                              (void *)replaced_CFUUIDCreate, 
-                              (void **)&orig_CFUUIDCreate);
-                PXLog(@"[WeaponX] ✅ Successfully hooked CFUUIDCreate");
-            } else {
-                PXLog(@"[WeaponX] ⚠️ Could not find CFUUIDCreate symbol");
-            }
-            
-            dlclose(coreFoundation);
-        } else {
-            PXLog(@"[WeaponX] ⚠️ Failed to open CoreFoundation framework");
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] ❌ Exception in setupAdditionalSystemUUIDHooks: %@", exception);
-    }
+static void setupAdditionalSystemUUIDHooks(void) {
+    // Register providers only — coordinator installs symbols once.
+    PXUUIDRegisterNativeProviders();
+    [[PXNativeHookCoordinator sharedCoordinator] installOwnedSymbolsIfNeeded];
 }
 
 // Update constructor to initialize the additional hooks

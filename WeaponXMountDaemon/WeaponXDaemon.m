@@ -276,10 +276,25 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     return YES;
 }
 
+/// Stable checksum of filter bundle list (sorted join). Used in filter_daemon_debug.plist.
+static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    for (id obj in bundles) {
+        if ([obj isKindOfClass:[NSString class]] && [(NSString *)obj length]) {
+            [items addObject:(NSString *)obj];
+        }
+    }
+    [items sortUsingSelector:@selector(compare:)];
+    NSString *joined = [items componentsJoinedByString:@","];
+    // Include count + joined list so debug plists are human-readable and comparable.
+    return [NSString stringWithFormat:@"%lu:%@", (unsigned long)items.count, joined ?: @""];
+}
+
 - (NSDictionary *)atomicInstallPlistFromPath:(NSString *)src toPath:(NSString *)dst bundles:(NSArray *)bundles {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *tmp = [dst stringByAppendingFormat:@".tmp.%d", getpid()];
     [fm removeItemAtPath:tmp error:nil];
+    NSString *checksum = PXFilterBundlesChecksum(bundles);
 
     NSError *copyErr = nil;
     if (![fm copyItemAtPath:src toPath:tmp error:&copyErr]) {
@@ -290,7 +305,8 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
             @"dst": dst ?: @"",
             @"tmp": tmp ?: @"",
             @"bundleCount": @(bundles.count),
-            @"bundles": bundles ?: @[]
+            @"bundles": bundles ?: @[],
+            @"checksum": checksum ?: @""
         };
     }
 
@@ -308,7 +324,8 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
             @"dst": dst ?: @"",
             @"tmp": tmp ?: @"",
             @"bundleCount": @(bundles.count),
-            @"bundles": bundles ?: @[]
+            @"bundles": bundles ?: @[],
+            @"checksum": checksum ?: @""
         };
     }
 
@@ -318,7 +335,8 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
         @"dst": dst ?: @"",
         @"tmp": tmp ?: @"",
         @"bundleCount": @(bundles.count),
-        @"bundles": bundles ?: @[]
+        @"bundles": bundles ?: @[],
+        @"checksum": checksum ?: @""
     };
 }
 

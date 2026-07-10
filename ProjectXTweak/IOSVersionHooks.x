@@ -2095,10 +2095,9 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
             }
             
             if (cfCopySystemVersionDictionaryPtr) {
-                PXFileDebugAIDA64Log("[IOSVersion.ctor] before hook CFCopySystemVersionDictionary");
-                MSHookFunction(cfCopySystemVersionDictionaryPtr, (void *)replaced_CFCopySystemVersionDictionary, (void **)&original_CFCopySystemVersionDictionary);
-                PXFileDebugAIDA64Log("[IOSVersion.ctor] after hook CFCopySystemVersionDictionary");
-                IOSVERSION_LOG(@"Successfully hooked CFCopySystemVersionDictionary");
+                // Owned by PXNativeHookCoordinator — skip direct MSHookFunction.
+                PXFileDebugAIDA64Log("[IOSVersion.ctor] skip CFCopySystemVersionDictionary (coordinator-owned)");
+                IOSVERSION_LOG(@"Skipping CFCopySystemVersionDictionary (coordinator owns symbol)");
             } else {
                 // If we can't find the symbol, create a stub implementation
                 IOSVERSION_LOG(@"⚠️ Failed to find CFCopySystemVersionDictionary symbols, using fallback");
@@ -2148,14 +2147,8 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         if (libSystemHandle) {
             void *sysctlbynamePtr = dlsym(libSystemHandle, "sysctlbyname");
             if (sysctlbynamePtr) {
-                if (!gOwnerSysctlBynameInstalled) {
-                    PXFileDebugAIDA64Log("[IOSVersion.ctor] before hook sysctlbyname");
-                    MSHookFunction(sysctlbynamePtr, (void *)hooked_sysctlbyname, (void **)&original_sysctlbyname);
-                    PXFileDebugAIDA64Log("[IOSVersion.ctor] after hook sysctlbyname");
-                    IOSVERSION_LOG(@"Hooked sysctlbyname");
-                } else {
-                    IOSVERSION_LOG(@"Skipping sysctlbyname hook (owner already installed)");
-                }
+                // Owned by PXNativeHookCoordinator — Tweak identity provider handles version keys.
+                IOSVERSION_LOG(@"Skipping sysctlbyname hook (coordinator/owner handles)");
             } else {
                 IOSVERSION_LOG(@"⚠️ Failed to find sysctlbyname symbol");
             }

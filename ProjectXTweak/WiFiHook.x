@@ -15,6 +15,7 @@
 #import "MethodSwizzler.h"
 
 #import "PXScope.h"
+#import "PXNativeHookCoordinator.h"
 
 // Path to scoped apps plist
 static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
@@ -538,25 +539,21 @@ static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network) {
 #pragma mark - Hook Installation
 
 static void initializeHooks(void) {
-    // Install CNCopyCurrentNetworkInfo hook using Substrate
-    void *symbol = dlsym(RTLD_DEFAULT, "CNCopyCurrentNetworkInfo");
-    if (symbol) {
-        MSHookFunction(symbol, 
-                       (void *)replaced_CNCopyCurrentNetworkInfo, 
-                       (void **)&orig_CNCopyCurrentNetworkInfo);
-    } else {
-        // Try to find the symbol in the framework
-        void *captiveNetworkLib = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
-        if (captiveNetworkLib) {
-            symbol = dlsym(captiveNetworkLib, "CNCopyCurrentNetworkInfo");
-            if (symbol) {
-                MSHookFunction(symbol, 
-                      (void *)replaced_CNCopyCurrentNetworkInfo, 
-                      (void **)&orig_CNCopyCurrentNetworkInfo);
-            }
-            dlclose(captiveNetworkLib);
-        }
-    }
+    // CNCopyCurrentNetworkInfo: register as sole dictionary builder on coordinator.
+    PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+    [coord installOwnedSymbolsIfNeeded];
+    orig_CNCopyCurrentNetworkInfo = [coord originalForSymbol:kPXNativeSymbolCNCopyCurrentNetworkInfo];
+    static dispatch_once_t wifiCNOnce;
+    dispatch_once(&wifiCNOnce, ^{
+        [coord registerCNCopyCurrentNetworkInfoProvider:@"wifi.CNCopyCurrentNetworkInfo"
+                                              priority:PXNativeHookPriorityNetworkStorage
+                                                   pre:^BOOL(CFStringRef interfaceName, CFDictionaryRef *outResult) {
+            if (!orig_CNCopyCurrentNetworkInfo) return NO;
+            CFDictionaryRef r = replaced_CNCopyCurrentNetworkInfo(interfaceName);
+            if (outResult) *outResult = r;
+            return YES; // WiFi builds final dictionary
+        } post:nil];
+    });
     
     // Install NEHotspotHelper hook using method swizzling
     Class neHotspotHelperClass = NSClassFromString(@"NEHotspotHelper");

@@ -229,6 +229,8 @@ static int PXRunShellCommand(NSString *command) {
     }
 }
 
+static NSString * const kPXNoInjectionPlaceholder = @"com.hydra.projectx.no-injection-placeholder";
+
 static NSArray<NSString *> *PXEnabledScopeBundleIDs(void) {
     NSDictionary *scopePlist = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
     NSDictionary *scopedApps = [scopePlist[@"ScopedApps"] isKindOfClass:[NSDictionary class]] ? scopePlist[@"ScopedApps"] : nil;
@@ -241,17 +243,62 @@ static NSArray<NSString *> *PXEnabledScopeBundleIDs(void) {
         if ([entry isKindOfClass:[NSDictionary class]] && ![entry[@"enabled"] boolValue]) return;
         [bundleIDs addObject:bundleID];
     }];
-    return bundleIDs;
+    return [bundleIDs sortedArrayUsingSelector:@selector(compare:)];
 }
 
-static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
-    NSArray<NSString *> *validBundles = bundleIDs ?: @[];
-    NSMutableArray<NSString *> *bridgeBundles = [NSMutableArray array];
-    for (NSString *bundleID in validBundles) {
-        if (![bundleID hasPrefix:@"com.apple."]) {
-            [bridgeBundles addObject:bundleID];
-        }
+/// Sort + unique non-empty bundle IDs for stable filter output / comparison.
+static NSArray<NSString *> *PXNormalizedBundleList(NSArray *bundles) {
+    NSMutableOrderedSet<NSString *> *set = [NSMutableOrderedSet orderedSet];
+    for (id obj in bundles) {
+        if (![obj isKindOfClass:[NSString class]]) continue;
+        NSString *bid = (NSString *)obj;
+        if (!bid.length) continue;
+        [set addObject:bid];
     }
+    return [set.array sortedArrayUsingSelector:@selector(compare:)];
+}
+
+static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
+    if (!path.length) return @[];
+    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:path];
+    NSDictionary *filter = [plist[@"Filter"] isKindOfClass:[NSDictionary class]] ? plist[@"Filter"] : nil;
+    NSArray *bundles = [filter[@"Bundles"] isKindOfClass:[NSArray class]] ? filter[@"Bundles"] : nil;
+    return PXNormalizedBundleList(bundles ?: @[]);
+}
+
+static BOOL PXBundleIsAppleOrWebKit(NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return YES;
+    if ([bundleID hasPrefix:@"com.apple."]) return YES;
+    // Defensive: any WebKit-named helper outside the com.apple. prefix set.
+    if ([bundleID rangeOfString:@"WebKit" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    return NO;
+}
+
+/// Rebuild substrate filter plists from full enabled global_scope only.
+/// Never accepts a partial/just-added list; empty scope → placeholder-only (never Bundles=[]).
+static void PXWriteSubstrateFilterPlists(void) {
+    // 1–3. Enabled mains from global_scope → expand extensions + WebKit cluster → unique+sort.
+    NSArray<NSString *> *enabledMain = PXEnabledScopeBundleIDs();
+    NSArray<NSString *> *expanded = PXExpandedResetBundleIDs(enabledMain);
+    NSArray<NSString *> *validBundles = PXNormalizedBundleList(expanded);
+
+    // 4. Empty after expand: placeholder only (NEVER Bundles=[]).
+    if (validBundles.count == 0) {
+        validBundles = @[kPXNoInjectionPlaceholder];
+    }
+
+    // 5. Bridge: third-party app/extensions only (drop Apple/WebKit); empty → placeholder.
+    NSMutableArray<NSString *> *bridgeBuilder = [NSMutableArray array];
+    for (NSString *bundleID in validBundles) {
+        if ([bundleID isEqualToString:kPXNoInjectionPlaceholder]) continue;
+        if (PXBundleIsAppleOrWebKit(bundleID)) continue;
+        [bridgeBuilder addObject:bundleID];
+    }
+    NSArray<NSString *> *bridgeBundles = PXNormalizedBundleList(bridgeBuilder);
+    if (bridgeBundles.count == 0) {
+        bridgeBundles = @[kPXNoInjectionPlaceholder];
+    }
+
     NSDictionary *tweakPlist = @{
         @"Filter": @{
             @"Bundles": validBundles,
@@ -275,21 +322,37 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
     NSString *tmpBridgePath = [stagingDir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
     BOOL wroteTmpTweak = [tweakPlist writeToFile:tmpTweakPath atomically:YES];
     BOOL wroteTmpBridge = [bridgePlist writeToFile:tmpBridgePath atomically:YES];
+
+    // Compare normalized bundles: expected (global scope) vs staging vs installed.
+    NSArray<NSString *> *stagingTweakBundles = PXBundlesFromFilterPlistAtPath(tmpTweakPath);
+    NSArray<NSString *> *stagingBridgeBundles = PXBundlesFromFilterPlistAtPath(tmpBridgePath);
+    BOOL stagingMatches =
+        wroteTmpTweak && wroteTmpBridge &&
+        [stagingTweakBundles isEqualToArray:validBundles] &&
+        [stagingBridgeBundles isEqualToArray:bridgeBundles];
+
     NSMutableDictionary *debug = [@{
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"enabledMainBundles": enabledMain ?: @[],
         @"bundles": validBundles,
         @"bridgeBundles": bridgeBundles,
         @"tmpTweakPath": tmpTweakPath,
         @"tmpBridgePath": tmpBridgePath,
         @"wroteTmpTweak": @(wroteTmpTweak),
-        @"wroteTmpBridge": @(wroteTmpBridge)
+        @"wroteTmpBridge": @(wroteTmpBridge),
+        @"stagingTweakBundles": stagingTweakBundles,
+        @"stagingBridgeBundles": stagingBridgeBundles
     } mutableCopy];
+
+    BOOL anyInstalledDir = NO;
+    BOOL allInstalledMatch = YES;
     for (NSString *dir in dirs) {
         BOOL isDir = NO;
         if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
             debug[[NSString stringWithFormat:@"%@ exists", dir]] = @NO;
             continue;
         }
+        anyInstalledDir = YES;
         NSString *tweakPath = [dir stringByAppendingPathComponent:@"ProjectXTweak.plist"];
         NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
         BOOL wroteTweak = [tweakPlist writeToFile:tweakPath atomically:YES];
@@ -297,24 +360,43 @@ static void PXWriteSubstrateFilterPlists(NSArray<NSString *> *bundleIDs) {
         if (!wroteTweak && wroteTmpTweak) {
             int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpTweakPath), PXShellQuote(tweakPath), PXShellQuote(tweakPath)]);
             debug[[tweakPath stringByAppendingString:@" shellStatus"]] = @(status);
-            NSDictionary *installedPlist = [NSDictionary dictionaryWithContentsOfFile:tweakPath];
-            NSDictionary *installedFilter = [installedPlist[@"Filter"] isKindOfClass:[NSDictionary class]] ? installedPlist[@"Filter"] : nil;
-            NSArray *installedBundles = [installedFilter[@"Bundles"] isKindOfClass:[NSArray class]] ? installedFilter[@"Bundles"] : nil;
+            NSArray *installedBundles = PXBundlesFromFilterPlistAtPath(tweakPath);
             wroteTweak = [installedBundles isEqualToArray:validBundles];
         }
         if (!wroteBridge && wroteTmpBridge) {
             int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpBridgePath), PXShellQuote(bridgePath), PXShellQuote(bridgePath)]);
             debug[[bridgePath stringByAppendingString:@" shellStatus"]] = @(status);
-            NSDictionary *installedPlist = [NSDictionary dictionaryWithContentsOfFile:bridgePath];
-            NSDictionary *installedFilter = [installedPlist[@"Filter"] isKindOfClass:[NSDictionary class]] ? installedPlist[@"Filter"] : nil;
-            NSArray *installedBundles = [installedFilter[@"Bundles"] isKindOfClass:[NSArray class]] ? installedFilter[@"Bundles"] : nil;
+            NSArray *installedBundles = PXBundlesFromFilterPlistAtPath(bridgePath);
             wroteBridge = [installedBundles isEqualToArray:bridgeBundles];
         }
-        debug[tweakPath] = @(wroteTweak);
-        debug[bridgePath] = @(wroteBridge);
         [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:tweakPath error:nil];
         [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:bridgePath error:nil];
+
+        NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(tweakPath);
+        NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(bridgePath);
+        BOOL tweakOK = [installedTweak isEqualToArray:validBundles];
+        BOOL bridgeOK = [installedBridge isEqualToArray:bridgeBundles];
+        if (!tweakOK || !bridgeOK) {
+            allInstalledMatch = NO;
+        }
+        debug[tweakPath] = @(wroteTweak && tweakOK);
+        debug[bridgePath] = @(wroteBridge && bridgeOK);
+        debug[[tweakPath stringByAppendingString:@" bundles"]] = installedTweak;
+        debug[[bridgePath stringByAppendingString:@" bundles"]] = installedBridge;
     }
+
+    NSString *syncStatus = nil;
+    if (!stagingMatches) {
+        syncStatus = @"staging_mismatch";
+    } else if (!anyInstalledDir || !allInstalledMatch) {
+        syncStatus = @"installed_mismatch";
+    } else {
+        syncStatus = @"in_sync";
+    }
+    debug[@"syncStatus"] = syncStatus;
+    NSLog(@"[ProjectX] filter plists syncStatus=%@ tweakCount=%lu bridgeCount=%lu",
+          syncStatus, (unsigned long)validBundles.count, (unsigned long)bridgeBundles.count);
+
     NSString *debugDir = @"/var/mobile/Library/ProjectX";
     [fm createDirectoryAtPath:debugDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
     [debug writeToFile:[debugDir stringByAppendingPathComponent:@"filter_sync_debug.plist"] atomically:YES];
@@ -5201,7 +5283,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [[IdentifierManager sharedManager] setApplication:expandedID enabled:YES];
     }
     [[IdentifierManager sharedManager] saveScopedApps];
-    PXWriteSubstrateFilterPlists(expandedBundles);
+    // Always rebuild filter from full enabled global_scope (not just the added app).
+    PXWriteSubstrateFilterPlists();
     
     // Show success message
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Success"
@@ -5259,7 +5342,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [self.manager setApplication:expandedID enabled:YES];
     }
     [self.manager saveScopedApps];
-    PXWriteSubstrateFilterPlists(expandedBundles);
+    // Always rebuild filter from full enabled global_scope (not just the added app).
+    PXWriteSubstrateFilterPlists();
     
     // Check for errors
     if ([self.manager lastError]) {
@@ -5883,8 +5967,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self.mainStackView addArrangedSubview:self.rrsNoteTextField];
 
     [self refreshDashboardSelectionLabels];
-    NSArray<NSString *> *filterSource = self.selectedResetAppIDs.count ? self.selectedResetAppIDs : PXEnabledScopeBundleIDs();
-    PXWriteSubstrateFilterPlists(PXExpandedResetBundleIDs(filterSource));
+    // Always rebuild filter from full enabled global_scope.
+    PXWriteSubstrateFilterPlists();
 }
 
 - (UIView *)dashboardStatusCard {
@@ -6190,7 +6274,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [self.manager setApplication:bundleID enabled:YES];
     }
     [self.manager saveScopedApps];
-    PXWriteSubstrateFilterPlists(expandedBundles);
+    // Scope was just rewritten; rebuild filter from full enabled global_scope.
+    PXWriteSubstrateFilterPlists();
 }
 
 - (void)selectFakeTapped {

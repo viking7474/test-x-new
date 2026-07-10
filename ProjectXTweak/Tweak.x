@@ -31,6 +31,7 @@
 #import "MobileGestalt.h"
 #import "IOSVersionInfo.h"
 #import "HookOwnership.h"
+#import "PXNativeHookCoordinator.h"
 #import "PXScope.h"
 #import "PXFileDebug.h"
 #import <CoreFoundation/CoreFoundation.h>
@@ -650,6 +651,14 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     else if (strcmp(name, "kern.hostname") == 0 && [manager isIdentifierEnabled:@"DeviceName"]) {
         spoofedValue = [manager currentValueForIdentifier:@"DeviceName"];
     }
+    // kern.uuid: NUL-terminated UUID *string* (not raw 16 bytes — that is gethostuuid)
+    else if (strcmp(name, "kern.uuid") == 0 && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
+        spoofedValue = [manager currentValueForIdentifier:@"SystemBootUUID"];
+        if (!spoofedValue.length) {
+            // legacy one-way alias
+            spoofedValue = [manager currentValueForIdentifier:@"HardwareUUID"];
+        }
+    }
     
     // WRITE STRING VALUE if found
     if (spoofedValue.length > 0) {
@@ -858,14 +867,41 @@ static int uname_hook(struct utsname *buf) {
     }
 
     // Handle various identifier types
-    if ([propertyString isEqualToString:@"UniqueDeviceID"] || 
-        [propertyString isEqualToString:@"UniqueDeviceIDData"]) {
-        
+    if ([propertyString isEqualToString:@"UniqueDeviceID"]) {
         if ([manager isIdentifierEnabled:@"UDID"]) {
             NSString *spoofedUDID = [manager currentValueForIdentifier:@"UDID"];
-            if (spoofedUDID) {
-                PXLog(@"Spoofing UDID with: %@", spoofedUDID);
+            if (spoofedUDID.length) {
+                PXLog(@"Spoofing UniqueDeviceID with: %@", spoofedUDID);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedUDID);
+            }
+        }
+    }
+    if ([propertyString isEqualToString:@"UniqueDeviceIDData"]) {
+        // UniqueDeviceIDData must return CFData matching original ABI — not a string.
+        if ([manager isIdentifierEnabled:@"UDID"]) {
+            NSString *spoofedUDID = [manager currentValueForIdentifier:@"UDID"];
+            if (spoofedUDID.length) {
+                NSData *hexData = nil;
+                // Prefer raw hex bytes when UDID is 40-char hex; else UTF-8 bytes of the string.
+                if (spoofedUDID.length == 40) {
+                    NSMutableData *md = [NSMutableData dataWithCapacity:20];
+                    const char *c = spoofedUDID.UTF8String;
+                    for (NSUInteger i = 0; i + 1 < 40 && c; i += 2) {
+                        unsigned int byte = 0;
+                        if (sscanf(c + i, "%02x", &byte) == 1) {
+                            uint8_t b = (uint8_t)byte;
+                            [md appendBytes:&b length:1];
+                        }
+                    }
+                    if (md.length == 20) hexData = md;
+                }
+                if (!hexData) {
+                    hexData = [spoofedUDID dataUsingEncoding:NSUTF8StringEncoding];
+                }
+                if (hexData) {
+                    PXLog(@"Spoofing UniqueDeviceIDData (%lu bytes)", (unsigned long)hexData.length);
+                    return CFDataCreate(kCFAllocatorDefault, hexData.bytes, (CFIndex)hexData.length);
+                }
             }
         }
     } 
@@ -886,14 +922,23 @@ static int uname_hook(struct utsname *buf) {
             }
         }
     }
-    else if ([propertyString isEqualToString:@"InternationalMobileEquipmentIdentity"] ||
-             [propertyString isEqualToString:@"MobileEquipmentIdentifier"]) {
-        
+    else if ([propertyString isEqualToString:@"InternationalMobileEquipmentIdentity"]) {
+        // IMEI only — separate toggle/value from MEID.
         if ([manager isIdentifierEnabled:@"IMEI"]) {
             NSString *spoofedIMEI = [manager currentValueForIdentifier:@"IMEI"];
-            if (spoofedIMEI) {
+            if (spoofedIMEI.length) {
                 PXLog(@"Spoofing IMEI with: %@", spoofedIMEI);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedIMEI);
+            }
+        }
+    }
+    else if ([propertyString isEqualToString:@"MobileEquipmentIdentifier"]) {
+        // MEID only — separate toggle/value from IMEI.
+        if ([manager isIdentifierEnabled:@"MEID"]) {
+            NSString *spoofedMEID = [manager currentValueForIdentifier:@"MEID"];
+            if (spoofedMEID.length) {
+                PXLog(@"Spoofing MEID with: %@", spoofedMEID);
+                return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedMEID);
             }
         }
     }
@@ -903,8 +948,68 @@ static int uname_hook(struct utsname *buf) {
     return %orig;
 }
 
-// IDFA hook
+// ATT / IDFA consistency helpers (active when identifier IDFA is enabled — no second master toggle)
+static NSString *const kPXZeroIDFAUUID = @"00000000-0000-0000-0000-000000000000";
+
+static BOOL PXATTSpoofActive(void) {
+    if (!%c(IdentifierManager)) return NO;
+    IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
+    if (!manager) return NO;
+    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+        return NO;
+    }
+    return [manager isIdentifierEnabled:@"IDFA"];
+}
+
+// Returns profile ATT status 0...3. Falls back to device_ids / tracking_info via IdentifierManager.
+static NSInteger PXProfileATTAuthorizationStatus(void) {
+    IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
+    if (!manager) return 0;
+    if ([manager respondsToSelector:@selector(attAuthorizationStatus)]) {
+        NSInteger status = [manager attAuthorizationStatus];
+        if (status < 0) status = 0;
+        if (status > 3) status = 3;
+        return status;
+    }
+    // Manual fallback if method missing
+    @try {
+        NSString *identityDir = nil;
+        if ([manager respondsToSelector:@selector(profileIdentityPath)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            identityDir = [manager performSelector:@selector(profileIdentityPath)];
+#pragma clang diagnostic pop
+        }
+        if (identityDir.length) {
+            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:
+                [identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
+            if (deviceIds[@"ATTAuthorizationStatus"] != nil) {
+                NSInteger s = [deviceIds[@"ATTAuthorizationStatus"] integerValue];
+                if (s >= 0 && s <= 3) return s;
+            }
+            NSDictionary *tracking = [NSDictionary dictionaryWithContentsOfFile:
+                [identityDir stringByAppendingPathComponent:@"tracking_info.plist"]];
+            if (tracking[@"ATTAuthorizationStatus"] != nil) {
+                NSInteger s = [tracking[@"ATTAuthorizationStatus"] integerValue];
+                if (s >= 0 && s <= 3) return s;
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    return 0;
+}
+
+// IDFA + legacy advertisingTrackingEnabled (ATT consistency)
 %hook ASIdentifierManager
+
+- (BOOL)isAdvertisingTrackingEnabled {
+    if (!PXATTSpoofActive()) {
+        return %orig;
+    }
+    // YES only when profile ATT status is authorized (3)
+    return PXProfileATTAuthorizationStatus() == 3;
+}
 
 - (NSUUID *)advertisingIdentifier {
     if (!%c(IdentifierManager)) {
@@ -923,11 +1028,20 @@ static int uname_hook(struct utsname *buf) {
     }
 
     if ([manager isIdentifierEnabled:@"IDFA"]) {
-        NSString *idfaString = [manager currentValueForIdentifier:@"IDFA"];
-        if (idfaString) {
-            PXLog(@"Spoofing IDFA with: %@", idfaString);
-            return [[NSUUID alloc] initWithUUIDString:idfaString];
+        NSInteger attStatus = PXProfileATTAuthorizationStatus();
+        // authorized → profile IDFA; restricted/denied/notDetermined → zero UUID
+        if (attStatus != 3) {
+            PXLog(@"ATT status=%ld → returning zero IDFA", (long)attStatus);
+            return [[NSUUID alloc] initWithUUIDString:kPXZeroIDFAUUID];
         }
+        NSString *idfaString = [manager currentValueForIdentifier:@"IDFA"];
+        if (idfaString.length) {
+            PXLog(@"Spoofing IDFA with: %@", idfaString);
+            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:idfaString];
+            if (uuid) return uuid;
+        }
+        // Authorized but missing value — still zero rather than leaking real IDFA
+        return [[NSUUID alloc] initWithUUIDString:kPXZeroIDFAUUID];
     }
     
     PXLog(@"No IDFA spoofing applied, returning original value");
@@ -935,6 +1049,74 @@ static int uname_hook(struct utsname *buf) {
 }
 
 %end
+
+// ATTrackingManager (iOS 14+) — installed at runtime only if class/methods exist
+static NSInteger (*orig_ATTrackingManager_trackingAuthorizationStatus)(Class, SEL) = NULL;
+static void (*orig_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler)(Class, SEL, void (^)(NSInteger)) = NULL;
+
+static NSInteger hook_ATTrackingManager_trackingAuthorizationStatus(Class self, SEL _cmd) {
+    if (PXATTSpoofActive()) {
+        return PXProfileATTAuthorizationStatus();
+    }
+    if (orig_ATTrackingManager_trackingAuthorizationStatus) {
+        return orig_ATTrackingManager_trackingAuthorizationStatus(self, _cmd);
+    }
+    return 0;
+}
+
+static void hook_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler(Class self, SEL _cmd, void (^completion)(NSInteger)) {
+    if (PXATTSpoofActive()) {
+        // Do NOT call system prompt; deliver profile status async on main queue
+        NSInteger status = PXProfileATTAuthorizationStatus();
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(status);
+            });
+        }
+        return;
+    }
+    if (orig_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler) {
+        orig_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler(self, _cmd, completion);
+    } else if (completion) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(0);
+        });
+    }
+}
+
+static void PXInstallATTHooksIfAvailable(void) {
+    // Soft-link AppTrackingTransparency if present (iOS 14+)
+    void *attFramework = dlopen("/System/Library/Frameworks/AppTrackingTransparency.framework/AppTrackingTransparency", RTLD_LAZY);
+    (void)attFramework;
+
+    Class attClass = objc_getClass("ATTrackingManager");
+    if (!attClass) {
+        PXLog(@"[WeaponX] ATT: ATTrackingManager not present — using legacy ASIdentifierManager path only");
+        return;
+    }
+
+    SEL statusSel = NSSelectorFromString(@"trackingAuthorizationStatus");
+    Method statusMethod = class_getClassMethod(attClass, statusSel);
+    if (statusMethod) {
+        MSHookMessageEx(object_getClass((id)attClass), statusSel,
+                        (IMP)hook_ATTrackingManager_trackingAuthorizationStatus,
+                        (IMP *)&orig_ATTrackingManager_trackingAuthorizationStatus);
+        PXLog(@"[WeaponX] ATT: hooked +[ATTrackingManager trackingAuthorizationStatus]");
+    } else {
+        PXLog(@"[WeaponX] ATT: trackingAuthorizationStatus unsupported-selector");
+    }
+
+    SEL requestSel = NSSelectorFromString(@"requestTrackingAuthorizationWithCompletionHandler:");
+    Method requestMethod = class_getClassMethod(attClass, requestSel);
+    if (requestMethod) {
+        MSHookMessageEx(object_getClass((id)attClass), requestSel,
+                        (IMP)hook_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler,
+                        (IMP *)&orig_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler);
+        PXLog(@"[WeaponX] ATT: hooked +[ATTrackingManager requestTrackingAuthorizationWithCompletionHandler:]");
+    } else {
+        PXLog(@"[WeaponX] ATT: requestTrackingAuthorizationWithCompletionHandler: unsupported-selector");
+    }
+}
 
 // IDFV and device name hooks
 %hook UIDevice
@@ -2584,39 +2766,35 @@ static int getifaddrs_hook(struct ifaddrs **ifap) {
 }
 
 // Hook implementation for gethostname
+// Per Newplan: NOT gated by jailbreakDetectionEnabled. Scoped + DeviceName only.
 static int gethostname_hook(char *name, size_t namelen) {
-    // Call original first
-    int result = gethostname_orig(name, namelen);
-    
-    // Check if jailbreak detection bypass is enabled
-    NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    BOOL jailbreakDetectionEnabled = [securitySettings boolForKey:@"jailbreakDetectionEnabled"];
-    
-    if (!jailbreakDetectionEnabled) {
-        return result; // Skip if bypass is disabled
+    // Buffer null/size 0 → original
+    if (!name || namelen == 0) {
+        return gethostname_orig ? gethostname_orig(name, namelen) : -1;
     }
-    
-    // Check if the current app is in the scoped apps list
-    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!currentBundleID) {
-        return result;
-    }
-    
-    IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!manager || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionNone)) {
-        return result; // Skip if app is not in scoped list
-    }
-    
-    // If successful and we have a spoofed hostname
-    if (result == 0 && name && namelen > 0) {
-        const char *spoofedName = "SpoofedDevice";
-        strncpy(name, spoofedName, namelen - 1);
-        name[namelen - 1] = '\0'; // Ensure null termination
-        PXLog(@"Spoofed hostname: %s for app: %@", name, currentBundleID);
-    }
-    
-    return result;
+
+    @try {
+        NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (currentBundleID && PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+            IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
+            if (manager && [manager isIdentifierEnabled:@"DeviceName"]) {
+                NSString *deviceName = [manager currentValueForIdentifier:@"DeviceName"];
+                if (deviceName.length > 0) {
+                    const char *cstr = deviceName.UTF8String;
+                    if (cstr) {
+                        size_t len = strlen(cstr);
+                        size_t copyLen = (len < namelen - 1) ? len : (namelen - 1);
+                        memcpy(name, cstr, copyLen);
+                        name[copyLen] = '\0';
+                        return 0;
+                    }
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    return gethostname_orig ? gethostname_orig(name, namelen) : -1;
 }
 
 // Anti-detection callback function (must be a regular function, not a block)
@@ -2799,26 +2977,39 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
             }
         }
         
-        // IMEI for cellular devices
-        if ([keyString isEqualToString:@"kIMEIKey"] && [manager isIdentifierEnabled:@"IMEI"]) {
+        // IMEI for cellular devices (kIMEIKey / InternationalMobileEquipmentIdentity only)
+        if (([keyString isEqualToString:@"kIMEIKey"] ||
+             [keyString isEqualToString:@"InternationalMobileEquipmentIdentity"]) &&
+            [manager isIdentifierEnabled:@"IMEI"]) {
             NSString *spoofedIMEI = [manager currentValueForIdentifier:@"IMEI"];
-            if (spoofedIMEI) {
+            if (spoofedIMEI.length) {
                 PXLog(@"Spoofing IMEI with: %@", spoofedIMEI);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedIMEI);
             }
         }
+        // MEID only — separate toggle/value
+        if (([keyString isEqualToString:@"MobileEquipmentIdentifier"] ||
+             [keyString isEqualToString:@"kMEIDKey"] ||
+             [keyString isEqualToString:@"MEID"]) &&
+            [manager isIdentifierEnabled:@"MEID"]) {
+            NSString *spoofedMEID = [manager currentValueForIdentifier:@"MEID"];
+            if (spoofedMEID.length) {
+                PXLog(@"Spoofing MEID with: %@", spoofedMEID);
+                return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedMEID);
+            }
+        }
         
         // Hardware UUID / aliases
-        if ([keyString isEqualToString:@"IOPlatformUUID"] && [manager isIdentifierEnabled:@"HardwareUUID"]) {
-            NSString *spoofedUUID = [manager currentValueForIdentifier:@"HardwareUUID"];
+        if ([keyString isEqualToString:@"IOPlatformUUID"] && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
+            NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
             if (spoofedUUID) {
                 PXLog(@"Spoofing IOPlatformUUID with: %@", spoofedUUID);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedUUID);
             }
         }
 
-        if ([keyString isEqualToString:@"system-id"] && [manager isIdentifierEnabled:@"HardwareUUID"]) {
-            NSString *spoofedUUID = [manager currentValueForIdentifier:@"HardwareUUID"];
+        if ([keyString isEqualToString:@"system-id"] && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
+            NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
             if (spoofedUUID.length) {
                 CFTypeRef original = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
                 CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
@@ -3007,14 +3198,14 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
                 }
-                if ([keyString isEqualToString:@"IOPlatformUUID"] && [manager isIdentifierEnabled:@"HardwareUUID"]) {
-                    NSString *spoofedUUID = [manager currentValueForIdentifier:@"HardwareUUID"];
+                if ([keyString isEqualToString:@"IOPlatformUUID"] && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
+                    NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
                     CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
                 }
-                if ([keyString isEqualToString:@"system-id"] && [manager isIdentifierEnabled:@"HardwareUUID"]) {
-                    NSString *spoofedUUID = [manager currentValueForIdentifier:@"HardwareUUID"];
+                if ([keyString isEqualToString:@"system-id"] && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
+                    NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
                     CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
@@ -3153,8 +3344,8 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
             }
 
             if ([keyString isEqualToString:@"IOPlatformUUID"] || [keyString isEqualToString:@"system-id"]) {
-                if ([manager isIdentifierEnabled:@"HardwareUUID"]) {
-                    NSString *spoofedUUID = [manager currentValueForIdentifier:@"HardwareUUID"];
+                if ([manager isIdentifierEnabled:@"SystemBootUUID"]) {
+                    NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
                     CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
                     if (repl) {
                         if (original) CFRelease(original);
@@ -3375,60 +3566,113 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXLog(@"iOS 16+ detected, enabling compatibility mode");
     }
     
-    // Detect which hook system is being used
+    // Detect which hook system is being used (coordinator uses MSHookFunction on both Substrate and ElleKit)
     NSString *hookSystem = @"Unknown";
-    if (shouldInstallSpoofHooks && dlsym(RTLD_DEFAULT, "EKMethodsEqual")) {
+    if (dlsym(RTLD_DEFAULT, "EKMethodsEqual")) {
         hookSystem = @"ElleKit";
-        
-        // ElleKit-specific function hooking for lower-level identifiers
-        // This utilizes ElleKit's powerful low-level symbol rebinding capabilities
-        void *libSystemHandle = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
-        if (libSystemHandle) {
-            // Find symbols for network-related functions that could leak identifiers
-            void *getifaddrsSymbol = dlsym(libSystemHandle, "getifaddrs");
-            void *gethostnameSymbol = dlsym(libSystemHandle, "gethostname");
-            
-            // Hook these functions using ElleKit's API directly
-            if (getifaddrsSymbol) {
-                PXLog(@"Using ElleKit to hook getifaddrs for MAC address protection");
-                // Use the globally defined function instead of defining it inside the constructor
-                MSHookFunction(getifaddrsSymbol, (void *)getifaddrs_hook, (void **)&getifaddrs_orig);
-            }
-            
-            // Hook gethostname to spoof device name at the system level
-            if (gethostnameSymbol) {
-                PXLog(@"Using ElleKit to hook gethostname for device name protection");
-                // Use the globally defined function instead of defining it inside the constructor
-                MSHookFunction(gethostnameSymbol, (void *)gethostname_hook, (void **)&gethostname_orig);
-            }
-            
-    // Hook sysctlbyname which is commonly used to get device identifiers
-    void *sysctlbynameSymbol = dlsym(libSystemHandle, "sysctlbyname");
-    if (sysctlbynameSymbol) {
-        PXLog(@"Using ElleKit to hook sysctlbyname for system information protection");
-        PXFileDebugAIDA64Log("[Tweak.ctor] before hook sysctlbyname");
-        MSHookFunction(sysctlbynameSymbol, (void *)sysctlbyname_hook, (void **)&sysctlbyname_orig);
-        PXFileDebugAIDA64Log("[Tweak.ctor] after hook sysctlbyname");
-        gOwnerSysctlBynameInstalled = YES;
-    }
-
-            // Hook sysctl (MIB-based) for build/version keys
-            void *sysctlSym = dlsym(libSystemHandle, "sysctl");
-            if (sysctlSym) {
-                PXLog(@"Hooking sysctl for iOS version/build spoofing");
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook sysctl");
-                MSHookFunction(sysctlSym, (void *)sysctl_hook, (void **)&sysctl_orig);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook sysctl");
-                gOwnerSysctlInstalled = YES;
-            }
-
-            dlclose(libSystemHandle);
-        }
-    } else if (shouldInstallSpoofHooks && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+    } else if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
         hookSystem = @"MobileSubstrate";
     }
-    
     PXLog(@"Using hook system: %@", hookSystem);
+
+    // Register core identity providers + install owned native symbols via coordinator (sole MSHookFunction owner).
+    if (shouldInstallSpoofHooks) {
+        PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+        [coord installOwnedSymbolsIfNeeded];
+
+        // Wire original pointers for legacy hook bodies used as providers.
+        sysctl_orig = [coord originalForSymbol:kPXNativeSymbolSysctl];
+        sysctlbyname_orig = [coord originalForSymbol:kPXNativeSymbolSysctlByname];
+        gethostname_orig = [coord originalForSymbol:kPXNativeSymbolGethostname];
+        getifaddrs_orig = [coord originalForSymbol:kPXNativeSymbolGetifaddrs];
+        orig_IORegistryEntryCreateCFProperty = [coord originalForSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperty];
+        orig_IORegistryEntryCreateCFProperties = [coord originalForSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperties];
+        orig_IORegistryEntrySearchCFProperty = [coord originalForSymbol:kPXNativeSymbolIORegistryEntrySearchCFProperty];
+        CFCopySystemVersionDictionary_orig = [coord originalForSymbol:kPXNativeSymbolCFCopySystemVersionDictionary];
+
+        static dispatch_once_t tweakProvOnce;
+        dispatch_once(&tweakProvOnce, ^{
+            // Existing hook bodies call original then spoof; as pre returning YES they fully own the path (no double original).
+            [coord registerSysctlProvider:@"tweak.sysctl" priority:PXNativeHookPriorityIdentity pre:^BOOL(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+                if (!sysctl_orig) return NO;
+                int r = sysctl_hook(name, namelen, oldp, oldlenp, newp, newlen);
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+            [coord registerSysctlBynameProvider:@"tweak.sysctlbyname" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+                if (!sysctlbyname_orig) return NO;
+                int r = sysctlbyname_hook(name, oldp, oldlenp, newp, newlen);
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+            // gethostname provider notes (Newplan):
+            // - Coordinator owns MSHookFunction install (MS + ElleKit); not gated by jailbreakDetectionEnabled.
+            // - Scoped + DeviceName ON → write profile DeviceName; NUL-terminate; return 0.
+            // - null buffer / size 0 / invalid profile value → return NO so coordinator calls original.
+            // - UIDevice.name / NSHost / kern.hostname share the same DeviceName profile value.
+            [coord registerGethostnameProvider:@"tweak.gethostname" priority:PXNativeHookPriorityIdentity pre:^BOOL(char *name, size_t namelen, int *outResult) {
+                if (!name || namelen == 0) return NO;
+                @try {
+                    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+                    NSString *proc = [NSProcessInfo processInfo].processName;
+                    if (!currentBundleID || !PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+                        return NO;
+                    }
+                    IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
+                    if (!manager || ![manager isIdentifierEnabled:@"DeviceName"]) return NO;
+                    NSString *deviceName = [manager currentValueForIdentifier:@"DeviceName"];
+                    if (!deviceName.length) return NO;
+                    const char *cstr = deviceName.UTF8String;
+                    if (!cstr || cstr[0] == '\0') return NO;
+                    size_t len = strlen(cstr);
+                    size_t copyLen = (len < namelen - 1) ? len : (namelen - 1);
+                    memcpy(name, cstr, copyLen);
+                    name[copyLen] = '\0';
+                    if (outResult) *outResult = 0;
+                    return YES;
+                } @catch (__unused NSException *e) {
+                    return NO;
+                }
+            } post:nil];
+            [coord registerGetifaddrsProvider:@"tweak.getifaddrs" priority:PXNativeHookPriorityIdentity pre:^BOOL(struct ifaddrs **ifap, int *outResult) {
+                if (!getifaddrs_orig) return NO;
+                int r = getifaddrs_hook(ifap);
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+            [coord registerIORegistryCreateCFPropertyProvider:@"tweak.iokit.create" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+                if (!orig_IORegistryEntryCreateCFProperty) return NO;
+                CFTypeRef r = hook_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+            [coord registerIORegistryCreateCFPropertiesProvider:@"tweak.iokit.properties" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options, IOReturn *outResult) {
+                if (!orig_IORegistryEntryCreateCFProperties) return NO;
+                IOReturn r = hook_IORegistryEntryCreateCFProperties(entry, properties, allocator, options);
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+            [coord registerIORegistrySearchCFPropertyProvider:@"tweak.iokit.search" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+                if (!orig_IORegistryEntrySearchCFProperty) return NO;
+                CFTypeRef r = hook_IORegistryEntrySearchCFProperty(entry, plane, key, allocator, options);
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+            [coord registerCFCopySystemVersionDictionaryProvider:@"tweak.cf.systemversion" priority:PXNativeHookPriorityIdentity pre:^BOOL(CFDictionaryRef *outResult) {
+                if (!CFCopySystemVersionDictionary_orig) return NO;
+                CFDictionaryRef r = CFCopySystemVersionDictionary_hook();
+                if (outResult) *outResult = r;
+                return YES;
+            } post:nil];
+        });
+
+        gOwnerSysctlInstalled = [coord isSymbolInstalled:kPXNativeSymbolSysctl];
+        gOwnerSysctlBynameInstalled = [coord isSymbolInstalled:kPXNativeSymbolSysctlByname];
+        gOwnerIOKitInstalled = [coord isSymbolInstalled:kPXNativeSymbolIORegistryEntryCreateCFProperty];
+        gOwnerCFSystemInstalled = [coord isSymbolInstalled:kPXNativeSymbolCFCopySystemVersionDictionary];
+        gOwnerUnameInstalled = NO; // uname still installed below (not coordinator-owned)
+        PXLog(@"[WeaponX] Native coordinator installed. diagnostics=%@", [coord diagnostics]);
+    }
     
     // Initialize value cache
     valueCache = [NSMutableDictionary dictionary];
@@ -3446,6 +3690,10 @@ static char* hook_GSSystemGetSerialNo(void) {
         %init(Identifiers);
         PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
         gOwnerMGInstalled = YES;
+
+        // ATT (iOS 14+): install only if class/selectors exist. Active when IDFA identifier enabled.
+        // Legacy iOS uses ASIdentifierManager.isAdvertisingTrackingEnabled / advertisingIdentifier above.
+        PXInstallATTHooksIfAvailable();
     } else {
         PXFileDebugAIDA64Log("[Tweak.ctor] skip init Identifiers allowed=0");
     }
@@ -3585,153 +3833,30 @@ static char* hook_GSSystemGetSerialNo(void) {
         }
     }
     
-    // Hook IOKit for serial number spoofing
-    PXFileDebugAIDA64Log("[Tweak.ctor] before dlopen IOKit");
-    void *IOKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-    PXFileDebugAIDA64Log("[Tweak.ctor] after dlopen IOKit handle=%d", IOKitHandle ? 1 : 0);
-    if (IOKitHandle) {
-        BOOL didHookIOKit = NO;
-
-        void *IORegEntryCreateCFPropertyPtr = dlsym(IOKitHandle, "IORegistryEntryCreateCFProperty");
-        void *IORegEntryCreateCFPropertiesPtr = dlsym(IOKitHandle, "IORegistryEntryCreateCFProperties");
-        void *IORegEntrySearchCFPropertyPtr = dlsym(IOKitHandle, "IORegistryEntrySearchCFProperty");
-
-        if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-            if (IORegEntryCreateCFPropertyPtr) {
-                PXLog(@"Hooking IORegistryEntryCreateCFProperty (owner IOKit)");
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook IORegistryEntryCreateCFProperty");
-                MSHookFunction(IORegEntryCreateCFPropertyPtr, (void *)hook_IORegistryEntryCreateCFProperty,
-                               (void **)&orig_IORegistryEntryCreateCFProperty);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook IORegistryEntryCreateCFProperty");
-                didHookIOKit = YES;
-            } else {
-                PXLog(@"[WeaponX] ⚠️ IORegistryEntryCreateCFProperty symbol not found");
-            }
-
-            if (IORegEntryCreateCFPropertiesPtr) {
-                PXLog(@"Hooking IORegistryEntryCreateCFProperties (owner IOKit)");
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook IORegistryEntryCreateCFProperties");
-                MSHookFunction(IORegEntryCreateCFPropertiesPtr, (void *)hook_IORegistryEntryCreateCFProperties,
-                               (void **)&orig_IORegistryEntryCreateCFProperties);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook IORegistryEntryCreateCFProperties");
-                didHookIOKit = YES;
-            } else {
-                PXLog(@"[WeaponX] ⚠️ IORegistryEntryCreateCFProperties symbol not found");
-            }
-
-            if (IORegEntrySearchCFPropertyPtr) {
-                PXLog(@"Hooking IORegistryEntrySearchCFProperty (owner IOKit)");
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook IORegistryEntrySearchCFProperty");
-                MSHookFunction(IORegEntrySearchCFPropertyPtr, (void *)hook_IORegistryEntrySearchCFProperty,
-                               (void **)&orig_IORegistryEntrySearchCFProperty);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook IORegistryEntrySearchCFProperty");
-                didHookIOKit = YES;
-            } else {
-                PXLog(@"[WeaponX] ⚠️ IORegistryEntrySearchCFProperty symbol not found");
-            }
-        } else {
-            PXLog(@"[WeaponX] ❌ MSHookFunction not available, IOKit hooks skipped");
-        }
-
-        if (didHookIOKit) {
-            gOwnerIOKitInstalled = YES;
-        }
-        dlclose(IOKitHandle);
-        PXFileDebugAIDA64Log("[Tweak.ctor] after dlclose IOKit didHook=%d", didHookIOKit);
-    }
-    
-    // Hook GSSystemGetSerialNo for serial number access through GS framework
-    PXFileDebugAIDA64Log("[Tweak.ctor] before GS hook block");
+    // IOKit / sysctl / CFCopySystemVersionDictionary are owned by PXNativeHookCoordinator (installed above).
+    // uname remains a Tweak-owned exclusive symbol (not multi-module).
+    PXFileDebugAIDA64Log("[Tweak.ctor] before uname/GS hooks");
     void *GSHandle = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW);
     if (GSHandle) {
         void *GSSystemGetSerialNoPtr = dlsym(GSHandle, "GSSystemGetSerialNo");
-        if (GSSystemGetSerialNoPtr) {
-            PXLog(@"Hooking GSSystemGetSerialNo for serial number spoofing");
-            if (0) {
-                MSHookFunction(GSSystemGetSerialNoPtr, (void *)hook_GSSystemGetSerialNo, 
-                      (void **)&orig_GSSystemGetSerialNo);
-            } else if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-                MSHookFunction(GSSystemGetSerialNoPtr, (void *)hook_GSSystemGetSerialNo, 
-                              (void **)&orig_GSSystemGetSerialNo);
-            }
+        if (GSSystemGetSerialNoPtr && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+            MSHookFunction(GSSystemGetSerialNoPtr, (void *)hook_GSSystemGetSerialNo, (void **)&orig_GSSystemGetSerialNo);
         }
         dlclose(GSHandle);
     }
-    PXFileDebugAIDA64Log("[Tweak.ctor] after GS hook block");
-    
-    // Hook sysctlbyname for device identifier spoofing via sysctl
-    PXFileDebugAIDA64Log("[Tweak.ctor] before dlopen libc");
-    void *libcHandle = dlopen("/usr/lib/libc.dylib", RTLD_NOW);
-    if (!libcHandle) {
-        // Try alternative path
-        libcHandle = dlopen("/usr/lib/system/libsystem_c.dylib", RTLD_NOW);
-    }
+    void *libcHandle = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
+    if (!libcHandle) libcHandle = dlopen("/usr/lib/system/libsystem_c.dylib", RTLD_NOW);
     if (libcHandle) {
-        PXFileDebugAIDA64Log("[Tweak.ctor] after dlopen libc handle=1");
-        void *sysctlbynamePtr = dlsym(libcHandle, "sysctlbyname");
-        if (sysctlbynamePtr) {
-            PXLog(@"[WeaponX] 🔧 Hooking sysctlbyname for device identifier spoofing");
-            if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook libc sysctlbyname");
-                MSHookFunction(sysctlbynamePtr, (void *)sysctlbyname_hook, 
-                              (void **)&sysctlbyname_orig);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook libc sysctlbyname");
-                PXLog(@"[WeaponX] ✅ sysctlbyname hook registered successfully");
-                gOwnerSysctlBynameInstalled = YES;
-            } else {
-                PXLog(@"[WeaponX] ❌ MSHookFunction not available, sysctlbyname hook skipped");
-            }
-        } else {
-            PXLog(@"[WeaponX] ⚠️ sysctlbyname symbol not found in libc");
-        }
-
-        void *sysctlPtr = dlsym(libcHandle, "sysctl");
-        if (sysctlPtr) {
-            PXLog(@"[WeaponX] 🔧 Hooking sysctl for iOS version/build spoofing");
-            if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook libc sysctl");
-                MSHookFunction(sysctlPtr, (void *)sysctl_hook, (void **)&sysctl_orig);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook libc sysctl");
-                gOwnerSysctlInstalled = YES;
-            }
-        }
-        
         void *unamePtr = dlsym(libcHandle, "uname");
-        if (unamePtr) {
-            PXLog(@"[WeaponX] 🔧 Hooking uname for device model spoofing");
-            if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook uname");
-                MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook uname");
-                PXLog(@"[WeaponX] ✅ uname hook registered successfully");
-                gOwnerUnameInstalled = YES;
-            }
+        if (unamePtr && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+            MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
+            gOwnerUnameInstalled = YES;
+            PXLog(@"[WeaponX] ✅ uname hook registered successfully");
         }
         dlclose(libcHandle);
-        PXFileDebugAIDA64Log("[Tweak.ctor] after dlclose libc");
-    } else {
-        PXLog(@"[WeaponX] ⚠️ Failed to open libc for sysctlbyname hooking");
-        PXFileDebugAIDA64Log("[Tweak.ctor] failed dlopen libc");
     }
+    PXFileDebugAIDA64Log("[Tweak.ctor] after uname/GS hooks");
 
-    // Also try to hook CFCopySystemVersionDictionary via CoreFoundation
-    PXFileDebugAIDA64Log("[Tweak.ctor] before CF hook block");
-    void *cfHandle = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
-    if (cfHandle) {
-        void *cfSym = dlsym(cfHandle, "CFCopySystemVersionDictionary");
-        if (cfSym) {
-            PXLog(@"[WeaponX] 🔧 Hooking CFCopySystemVersionDictionary via CoreFoundation");
-            if (dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-                PXFileDebugAIDA64Log("[Tweak.ctor] before hook CFCopySystemVersionDictionary");
-                MSHookFunction(cfSym, (void *)CFCopySystemVersionDictionary_hook, (void **)&CFCopySystemVersionDictionary_orig);
-                PXFileDebugAIDA64Log("[Tweak.ctor] after hook CFCopySystemVersionDictionary");
-                gOwnerCFSystemInstalled = YES;
-            }
-        }
-        dlclose(cfHandle);
-    }
-    PXFileDebugAIDA64Log("[Tweak.ctor] after CF hook block");
-    
     // Initialize the location spoofing hooks
     PXFileDebugAIDA64Log("[Tweak.ctor] before init LocationSpoofing");
     %init(LocationSpoofing);

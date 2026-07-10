@@ -1190,14 +1190,8 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 // Hook sysctlbyname for memory-related calls
                 orig_sysctlbyname = dlsym(libSystem, "sysctlbyname");
                 if (orig_sysctlbyname) {
-                    if (!gOwnerSysctlBynameInstalled) {
-                        PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook sysctlbyname");
-                        MSHookFunction(orig_sysctlbyname, (void *)hook_sysctlbyname, (void **)&orig_sysctlbyname);
-                        PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook sysctlbyname");
-                        PXLog(@"[DeviceSpec] Successfully hooked sysctlbyname for memory spoofing");
-                    } else {
-                        PXLog(@"[DeviceSpec] Skipping sysctlbyname hook (owner already installed)");
-                    }
+                    // Always coordinator-owned for sysctlbyname — skip direct install.
+                    PXLog(@"[DeviceSpec] Skipping sysctlbyname hook (PXNativeHookCoordinator owns symbol)");
                 }
                 
                 // Hook host_statistics64 for VM stats spoofing

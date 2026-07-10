@@ -3,6 +3,7 @@
 #import "StorageManager.h"
 #import "ProjectXLogging.h"
 #import "HookOwnership.h"
+#import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
 #import <sys/mount.h>
 #import <dlfcn.h>
@@ -967,73 +968,56 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             
             PXLog(@"[StorageHooks] App %@ is scoped, setting up storage hooks", currentBundleID);
             
-            // Hook statfs
-            PXFileDebugAIDA64Log("[Storage.ctor] before dlopen self");
-            void *handle = dlopen(NULL, RTLD_GLOBAL);
-            PXFileDebugAIDA64Log("[Storage.ctor] after dlopen self handle=%d", handle ? 1 : 0);
-            
-            if (handle) {
-                orig_statfs = dlsym(handle, "statfs");
-                if (orig_statfs) {
-                    PXFileDebugAIDA64Log("[Storage.ctor] before hook statfs");
-                    MSHookFunction((void *)orig_statfs, (void *)replaced_statfs, (void **)&orig_statfs);
-                    PXFileDebugAIDA64Log("[Storage.ctor] after hook statfs");
-                    PXLog(@"[StorageHooks] Hooked statfs successfully");
-                }
-                
-                // Hook statfs64 (if available)
-                orig_statfs64 = dlsym(handle, "statfs64");
-                if (orig_statfs64) {
-                    PXFileDebugAIDA64Log("[Storage.ctor] before hook statfs64");
-                    MSHookFunction((void *)orig_statfs64, (void *)replaced_statfs64, (void **)&orig_statfs64);
-                    PXFileDebugAIDA64Log("[Storage.ctor] after hook statfs64");
-                    PXLog(@"[StorageHooks] Hooked statfs64 successfully");
-                }
-                
-                // Hook getfsstat
-                orig_getfsstat = dlsym(handle, "getfsstat");
-                if (orig_getfsstat) {
-                    PXFileDebugAIDA64Log("[Storage.ctor] before hook getfsstat");
-                    MSHookFunction((void *)orig_getfsstat, (void *)replaced_getfsstat, (void **)&orig_getfsstat);
-                    PXFileDebugAIDA64Log("[Storage.ctor] after hook getfsstat");
-                    PXLog(@"[StorageHooks] Hooked getfsstat successfully");
-                }
-                
-                // Hook getfsstat64 (if available)
-                orig_getfsstat64 = dlsym(handle, "getfsstat64");
-                if (orig_getfsstat64) {
-                    PXFileDebugAIDA64Log("[Storage.ctor] before hook getfsstat64");
-                    MSHookFunction((void *)orig_getfsstat64, (void *)replaced_getfsstat64, (void **)&orig_getfsstat64);
-                    PXFileDebugAIDA64Log("[Storage.ctor] after hook getfsstat64");
-                    PXLog(@"[StorageHooks] Hooked getfsstat64 successfully");
-                }
-                
-                dlclose(handle);
-                PXFileDebugAIDA64Log("[Storage.ctor] after dlclose self");
-            }
-            
-            // Hook IOKit functions
-            PXFileDebugAIDA64Log("[Storage.ctor] before dlopen IOKit");
-            void *ioKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-            PXFileDebugAIDA64Log("[Storage.ctor] after dlopen IOKit handle=%d", ioKitHandle ? 1 : 0);
-            if (ioKitHandle) {
-                // Get the function pointer for IORegistryEntryCreateCFProperty
-                void *ioRegEntryCreateCFPropertyPtr = dlsym(ioKitHandle, "IORegistryEntryCreateCFProperty");
-                
-                if (ioRegEntryCreateCFPropertyPtr) {
-                    if (!gOwnerIOKitInstalled) {
-                        PXFileDebugAIDA64Log("[Storage.ctor] before hook IORegistryEntryCreateCFProperty");
-                        MSHookFunction(ioRegEntryCreateCFPropertyPtr, (void *)replaced_IORegistryEntryCreateCFProperty, (void **)&orig_IORegistryEntryCreateCFProperty);
-                        PXFileDebugAIDA64Log("[Storage.ctor] after hook IORegistryEntryCreateCFProperty");
-                        PXLog(@"[StorageHooks] Hooked IORegistryEntryCreateCFProperty successfully");
-                    } else {
-                        PXLog(@"[StorageHooks] Skipping IORegistryEntryCreateCFProperty hook (owner already installed)");
+            // statfs family: post-processors on coordinator (no MSHookFunction).
+            // IOKit identity remains Tweak-owned; storage may still register IOKit post if needed later.
+            PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+            [coord installOwnedSymbolsIfNeeded];
+            orig_statfs = [coord originalForSymbol:kPXNativeSymbolStatfs];
+            orig_statfs64 = [coord originalForSymbol:kPXNativeSymbolStatfs64];
+            orig_getfsstat = [coord originalForSymbol:kPXNativeSymbolGetfsstat];
+            orig_getfsstat64 = [coord originalForSymbol:kPXNativeSymbolGetfsstat64];
+            orig_IORegistryEntryCreateCFProperty = [coord originalForSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperty];
+
+            static dispatch_once_t storageProvOnce;
+            dispatch_once(&storageProvOnce, ^{
+                [coord registerStatfsProvider:@"storage.statfs" priority:PXNativeHookPriorityNetworkStorage post:^(const char *path, struct statfs *buf, int *inoutResult) {
+                    if (!inoutResult || *inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
+                                 strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
+                        modifyStatfsWithSpoofedValues(buf);
                     }
-                }
-                
-                dlclose(ioKitHandle);
-                PXFileDebugAIDA64Log("[Storage.ctor] after dlclose IOKit");
-            }
+                }];
+                [coord registerStatfs64Provider:@"storage.statfs64" priority:PXNativeHookPriorityNetworkStorage post:^(const char *path, struct statfs64 *buf, int *inoutResult) {
+                    if (!inoutResult || *inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
+                                 strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
+                        modifyStatfs64WithSpoofedValues(buf);
+                    }
+                }];
+                [coord registerGetfsstatProvider:@"storage.getfsstat" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs *buf, int bufsize, int flags, int *inoutResult) {
+                    (void)bufsize; (void)flags;
+                    if (!inoutResult || *inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    for (int i = 0; i < *inoutResult; i++) {
+                        const char *mountPoint = buf[i].f_mntonname;
+                        if (mountPoint && mountPoint[0] &&
+                            (strcmp(mountPoint, "/") == 0 || strcmp(mountPoint, "/var") == 0 || strcmp(mountPoint, "/private/var") == 0)) {
+                            modifyStatfsWithSpoofedValues(&buf[i]);
+                        }
+                    }
+                }];
+                [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs64 *buf, int bufsize, int flags, int *inoutResult) {
+                    (void)bufsize; (void)flags;
+                    if (!inoutResult || *inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    for (int i = 0; i < *inoutResult; i++) {
+                        const char *mountPoint = buf[i].f_mntonname;
+                        if (mountPoint && mountPoint[0] &&
+                            (strcmp(mountPoint, "/") == 0 || strcmp(mountPoint, "/var") == 0 || strcmp(mountPoint, "/private/var") == 0)) {
+                            modifyStatfs64WithSpoofedValues(&buf[i]);
+                        }
+                    }
+                }];
+            });
+            PXLog(@"[StorageHooks] Registered statfs family providers on coordinator");
             
             // Initialize Objective-C hooks for scoped apps only
             PXFileDebugAIDA64Log("[Storage.ctor] before %%init");

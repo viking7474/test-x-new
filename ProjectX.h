@@ -24,6 +24,7 @@
 - (NSString *)generateSystemUptime;
 - (NSString *)generateBootTime;
 - (NSString *)generateDeviceModel;
+- (NSString *)generateUDID;
 - (void)regenerateAllEnabledIdentifiers;
 
 // Settings Management
@@ -32,6 +33,13 @@
 
 // Current Values
 - (NSString *)currentValueForIdentifier:(NSString *)type;
+
+// ATT Authorization Status (0...3: notDetermined, restricted, denied, authorized)
+- (NSInteger)attAuthorizationStatus;
+- (void)setATTAuthorizationStatus:(NSInteger)status;
+
+// Profile schema migration (v1 → v2)
+- (void)migrateProfileSchemaIfNeeded;
 
 // Persistence
 - (void)saveSettings;

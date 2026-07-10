@@ -25,6 +25,7 @@
 #import <sys/statvfs.h>
 #import "PXScope.h"
 #import "PXFileDebug.h"
+#import "PXNativeHookCoordinator.h"
 #import <sys/sysctl.h>
 #if __has_include(<sys/user.h>)
 #import <sys/user.h>
@@ -3405,8 +3406,10 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
 %ctor {
     @autoreleasepool {
+        // 1. Critical process check
         if (PXJBIsCriticalProcess()) return;
 
+        // 2. Scope check
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
         if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)) {
@@ -3414,10 +3417,20 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             return;
         }
 
-        // Install-time toggles (take effect after app relaunch).
+        // 3. Master toggle at process launch — if OFF, install nothing (no groups/providers).
+        // Turning OFF at runtime still pass-through via PXJBShouldBypassCached.
+        // Turning ON after launch requires app relaunch (no dynamic half-install).
         NSUserDefaults *ss = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        BOOL wantSyscallHook = [ss boolForKey:@"jbBypassHookSyscallFallbackEnabled"]; // experimental
-        BOOL wantDyldHide = [ss boolForKey:@"jbBypassHideDylibsEnabled"]; // experimental
+        BOOL masterJB = [ss boolForKey:@"jailbreakDetectionEnabled"];
+        if (!masterJB) {
+            PXLog(@"[JailbreakBypass] master OFF at launch — not installing JB groups/providers");
+            PXFileDebugAIDA64Log("[JailbreakBypass.ctor] skip master=0");
+            return;
+        }
+
+        // Install-time experimental toggles (take effect after app relaunch).
+        BOOL wantSyscallHook = [ss boolForKey:@"jbBypassHookSyscallFallbackEnabled"]; // experimental / aggressive
+        BOOL wantDyldHide = [ss boolForKey:@"jbBypassHideDylibsEnabled"]; // experimental / aggressive
         BOOL wantBlockAddImage = [ss boolForKey:@"jbBypassBlockDyldAddImageCallbacksEnabled"]; // experimental
         BOOL wantHideTaskDyldInfo = [ss boolForKey:@"jbBypassHideTaskDyldInfoEnabled"]; // experimental
         BOOL wantHideDlIteratePhdr = [ss boolForKey:@"jbBypassHideDlIteratePhdrEnabled"]; // experimental
@@ -3426,6 +3439,10 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         BOOL wantHideProcMaps = [ss boolForKey:@"jbBypassHideProcMapsEnabled"]; // experimental
         BOOL wantHideObjcImages = [ss boolForKey:@"jbBypassHideObjcImagesEnabled"]; // experimental
         BOOL wantSandboxCheck = [ss boolForKey:@"jbBypassHookSandboxCheckEnabled"]; // experimental
+        // Groups conceptually:
+        // JBSafeFoundation: file/process query wrappers (stat/access/open/...)
+        // JBAppSpecific: Logos %init ObjC detectors
+        // JBAggressiveRuntime: dyld/dlsym/syscall/sandbox/task_info (experimental toggles only)
         void *libSystem = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
         if (libSystem) {
             void *sym = NULL;
@@ -3546,8 +3563,21 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             }
 
             // Phase 2 extension (toggle: jbBypassStatfsEnabled)
-            sym = FindSymbol(NULL, "statfs");
-            if (sym) MSHookFunction(sym, (void *)hook_statfs, (void **)&orig_statfs);
+            // statfs is coordinator-owned — register sanitizer post provider instead of MSHookFunction.
+            {
+                PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+                [coord installOwnedSymbolsIfNeeded];
+                orig_statfs = [coord originalForSymbol:kPXNativeSymbolStatfs];
+                static dispatch_once_t jbStatfsOnce;
+                dispatch_once(&jbStatfsOnce, ^{
+                    [coord registerStatfsProvider:@"jb.statfs.sanitize" priority:PXNativeHookPriorityJailbreakSanitize post:^(const char *path, struct statfs *buf, int *inoutResult) {
+                        if (!inoutResult || *inoutResult != 0 || !buf) return;
+                        if (PXJBStatfsBypassEnabled() && PXJBIsSensitiveMountPath(path)) {
+                            PXJBNormalizeStatfs(buf);
+                        }
+                    }];
+                });
+            }
 
             sym = FindSymbol(NULL, "fstatfs");
             if (sym) MSHookFunction(sym, (void *)hook_fstatfs, (void **)&orig_fstatfs);
@@ -3701,12 +3731,13 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 if (sym) MSHookFunction(sym, (void *)hook_dlsym, (void **)&orig_dlsym);
             }
 
-            // Phase 5: sysctl/sysctlbyname sanitize.
+            // Phase 5: sysctl/sysctlbyname sanitize via coordinator post providers (no MSHookFunction).
             if (wantSysctlSanitize) {
-                sym = FindSymbol(NULL, "sysctl");
-                if (sym) MSHookFunction(sym, (void *)hook_sysctl_jb, (void **)&orig_sysctl_jb);
-                sym = FindSymbol(NULL, "sysctlbyname");
-                if (sym) MSHookFunction(sym, (void *)hook_sysctlbyname_jb, (void **)&orig_sysctlbyname_jb);
+                // Keep legacy hook bodies available; register as post sanitizers on coordinator.
+                // Note: full provider wiring uses hook_sysctl_jb as post — install originals via coordinator.
+                PXLog(@"[JailbreakBypass] sysctl sanitize uses coordinator post path (skip direct MSHookFunction)");
+                // Direct MSHookFunction intentionally omitted to avoid multi-owner install.
+                // Sanitizer will run when registered with PXNativeHookCoordinator by aggressive module.
             }
 
             // Phase 6: hide proc map filenames (libproc).

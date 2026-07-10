@@ -562,6 +562,14 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         }
     }
     
+    // Run profile schema migration once per load (reentrancy-safe)
+    static BOOL sMigratingSchema = NO;
+    if (!sMigratingSchema) {
+        sMigratingSchema = YES;
+        [self migrateProfileSchemaIfNeeded];
+        sMigratingSchema = NO;
+    }
+    
     return identityDir;
 }
 
@@ -1115,6 +1123,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         NSString *meid = [self generateMEID];
         if (meid) [self setCustomMEID:meid];
     }
+    if ([self isIdentifierEnabled:@"UDID"]) {
+        [self generateUDID];
+    }
     
     // Device profile group: DeviceModel + dependent specs + iOS version/build.
     // Only regenerate when at least one of the dependent identifiers is enabled.
@@ -1286,6 +1297,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
                 NSString *meid = [self generateMEID];
                 if (meid) [self setCustomMEID:meid];
             }
+            else if ([type isEqualToString:@"UDID"]) {
+                [self generateUDID];
+            }
             else if ([type isEqualToString:@"IOSVersion"]) {
                 [self generateIOSVersion];
             }
@@ -1456,11 +1470,28 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     if (identityDir) {
         NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
         NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-        NSString *value = deviceIds[type];
+        id rawValue = deviceIds[type];
+        
+        // Coerce NSNumber (e.g. LowPowerMode, ATT) to string for callers expecting NSString
+        NSString *value = nil;
+        if ([rawValue isKindOfClass:[NSString class]]) {
+            value = (NSString *)rawValue;
+        } else if ([rawValue isKindOfClass:[NSNumber class]]) {
+            value = [(NSNumber *)rawValue stringValue];
+        }
         
         if (value) {
             PXLog(@"Found %@ value in device_ids.plist: %@", type, value);
             return value;
+        }
+        
+        // Canonical SystemBootUUID: one-way read fallback to legacy HardwareUUID
+        if ([type isEqualToString:@"SystemBootUUID"]) {
+            id legacyHW = deviceIds[@"HardwareUUID"];
+            if ([legacyHW isKindOfClass:[NSString class]] && [(NSString *)legacyHW length] > 0) {
+                PXLog(@"Found SystemBootUUID via legacy HardwareUUID alias (read-only): %@", legacyHW);
+                return (NSString *)legacyHW;
+            }
         }
         
         // If not found in combined file, try type-specific files
@@ -1486,6 +1517,23 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
             if (uuidDict && uuidDict[@"value"]) {
                 PXLog(@"Found SystemBootUUID in system_boot_uuid.plist: %@", uuidDict[@"value"]);
                 return uuidDict[@"value"];
+            }
+        }
+        else if ([type isEqualToString:@"UDID"]) {
+            NSString *udidPath = [identityDir stringByAppendingPathComponent:@"udid.plist"];
+            NSDictionary *udidDict = [NSDictionary dictionaryWithContentsOfFile:udidPath];
+            if (udidDict && udidDict[@"value"]) {
+                PXLog(@"Found UDID in udid.plist: %@", udidDict[@"value"]);
+                return udidDict[@"value"];
+            }
+        }
+        else if ([type isEqualToString:@"ATTAuthorizationStatus"]) {
+            NSString *trackingPath = [identityDir stringByAppendingPathComponent:@"tracking_info.plist"];
+            NSDictionary *trackingDict = [NSDictionary dictionaryWithContentsOfFile:trackingPath];
+            if (trackingDict && trackingDict[@"ATTAuthorizationStatus"] != nil) {
+                NSString *statusStr = [trackingDict[@"ATTAuthorizationStatus"] description];
+                PXLog(@"Found ATTAuthorizationStatus in tracking_info.plist: %@", statusStr);
+                return statusStr;
             }
         }
         else if ([type isEqualToString:@"DyldCacheUUID"]) {
@@ -1840,6 +1888,12 @@ return @"Not Set";
                         PXLog(@"[WeaponX] 🔋 Battery level from BatteryManager: %@", level);
                         return level;
                     }
+                }
+                else if ([type isEqualToString:@"LowPowerMode"] && [sharedManager respondsToSelector:@selector(lowPowerModeEnabled)]) {
+                    BOOL lpm = [(BatteryManager *)sharedManager lowPowerModeEnabled];
+                    NSString *lpmStr = lpm ? @"1" : @"0";
+                    PXLog(@"[WeaponX] 🔋 LowPowerMode from BatteryManager: %@", lpmStr);
+                    return lpmStr;
                 }
             }
         }
@@ -2305,6 +2359,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
             @"SerialNumber": @NO,
             @"UDID": @NO,
             @"IMEI": @NO,
+            @"MEID": @NO,
             @"IOSVersion": @NO,
             @"StorageSystem": @NO,
             @"SystemBootUUID": @NO,
@@ -2331,6 +2386,16 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
             }
             [self.settings removeObjectForKey:@"SystemVersion"];
             [self.settings removeObjectForKey:@"BuildVersion"];
+            // Ensure UDID / MEID keys exist when missing from older settings
+            if (self.settings[@"UDID"] == nil) {
+                self.settings[@"UDID"] = @NO;
+            }
+            if (self.settings[@"MEID"] == nil) {
+                self.settings[@"MEID"] = @NO;
+            }
+            if (self.settings[@"IMEI"] == nil) {
+                self.settings[@"IMEI"] = @NO;
+            }
             PXLog(@"[WeaponX] ✅ Loaded %lu identifier settings from EnabledIdentifiers", (unsigned long)self.settings.count);
         } else {
             PXLog(@"[WeaponX] ⚠️ EnabledIdentifiers key not found, using defaults");
@@ -2339,6 +2404,9 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
                 @"IDFV": @NO,
                 @"DeviceName": @NO,
                 @"SerialNumber": @NO,
+                @"UDID": @NO,
+                @"IMEI": @NO,
+                @"MEID": @NO,
                 @"IOSVersion": @NO
             }];
         }
@@ -2390,6 +2458,9 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         @"IDFV",
         @"DeviceName",
         @"SerialNumber",
+        @"UDID",
+        @"IMEI",
+        @"MEID",
         @"IOSVersion",
         @"WiFi",
         @"StorageSystem",
@@ -2567,7 +2638,10 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         filePath = [identityDir stringByAppendingPathComponent:@"imei.plist"];
     } else if ([type isEqualToString:@"MEID"]) {
         filePath = [identityDir stringByAppendingPathComponent:@"meid.plist"];
+    } else if ([type isEqualToString:@"UDID"]) {
+        filePath = [identityDir stringByAppendingPathComponent:@"udid.plist"];
     } else if ([type isEqualToString:@"SystemBootUUID"]) {
+        // Canonical key only — never write HardwareUUID as a new key
         filePath = [identityDir stringByAppendingPathComponent:@"system_boot_uuid.plist"];
     } else if ([type isEqualToString:@"DyldCacheUUID"]) {
         filePath = [identityDir stringByAppendingPathComponent:@"dyld_cache_uuid.plist"];
@@ -2640,7 +2714,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     return [self saveCustomValue:value forType:@"IDFA"];
 }
 
-#pragma mark - IMEI/MEID Spoofing
+#pragma mark - IMEI/MEID Spoofing (kept strictly separate)
 
 - (BOOL)setCustomIMEI:(NSString *)value {
     // Validate IMEI: must be 15 digits, Luhn valid, and start with a US TAC (e.g., 353918, 356938, 359254, etc.)
@@ -2652,6 +2726,276 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // Validate MEID: 14 hex body + Luhn base-16 check digit.
     if (![self isValidMEID:value]) return NO;
     return [self saveCustomValue:value forType:@"MEID"];
+}
+
+#pragma mark - UDID Spoofing
+
+- (BOOL)isValidUDID:(NSString *)value {
+    if (![value isKindOfClass:[NSString class]] || value.length != 40) {
+        return NO;
+    }
+    // Canonical format: 40 lowercase hex characters only
+    NSCharacterSet *nonLowerHex = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet];
+    return [value rangeOfCharacterFromSet:nonLowerHex].location == NSNotFound;
+}
+
+- (NSString *)generateUDID {
+    // 40 lowercase hex characters
+    NSMutableString *udid = [NSMutableString stringWithCapacity:40];
+    for (int i = 0; i < 40; i++) {
+        [udid appendFormat:@"%x", arc4random_uniform(16)];
+    }
+    
+    NSString *identityDir = [self profileIdentityPath];
+    if (identityDir) {
+        NSDictionary *udidDict = @{@"value": udid, @"lastUpdated": [NSDate date]};
+        NSString *udidPath = [identityDir stringByAppendingPathComponent:@"udid.plist"];
+        [udidDict writeToFile:udidPath atomically:YES];
+        
+        // Sync device_ids.plist["UDID"]
+        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?:
+                                         [NSMutableDictionary dictionary];
+        deviceIds[@"UDID"] = udid;
+        [deviceIds writeToFile:deviceIdsPath atomically:YES];
+        
+        PXLog(@"[WeaponX] 🆔 Generated UDID: %@", udid);
+    }
+    
+    return [udid copy];
+}
+
+- (BOOL)setCustomUDID:(NSString *)value {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    // Normalize to lowercase before validation
+    NSString *normalized = [value lowercaseString];
+    if (![self isValidUDID:normalized]) return NO;
+    return [self saveCustomValue:normalized forType:@"UDID"];
+}
+
+#pragma mark - ATT Authorization Status
+
+- (NSInteger)attAuthorizationStatus {
+    NSString *identityDir = [self profileIdentityPath];
+    if (!identityDir) {
+        return 0; // notDetermined
+    }
+    
+    // Prefer device_ids.plist
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+    if (deviceIds[@"ATTAuthorizationStatus"] != nil) {
+        NSInteger status = [deviceIds[@"ATTAuthorizationStatus"] integerValue];
+        if (status >= 0 && status <= 3) {
+            return status;
+        }
+    }
+    
+    // Fall back to tracking_info.plist
+    NSString *trackingPath = [identityDir stringByAppendingPathComponent:@"tracking_info.plist"];
+    NSDictionary *trackingDict = [NSDictionary dictionaryWithContentsOfFile:trackingPath];
+    if (trackingDict[@"ATTAuthorizationStatus"] != nil) {
+        NSInteger status = [trackingDict[@"ATTAuthorizationStatus"] integerValue];
+        if (status >= 0 && status <= 3) {
+            return status;
+        }
+    }
+    
+    return 0; // notDetermined default
+}
+
+- (void)setATTAuthorizationStatus:(NSInteger)status {
+    // Clamp to valid ATTrackingManagerAuthorizationStatus range 0...3
+    if (status < 0) status = 0;
+    if (status > 3) status = 3;
+    
+    NSString *identityDir = [self profileIdentityPath];
+    if (!identityDir) {
+        PXLog(@"[WeaponX] ❌ setATTAuthorizationStatus: no identity path");
+        return;
+    }
+    
+    NSDictionary *trackingDict = @{
+        @"ATTAuthorizationStatus": @(status),
+        @"lastUpdated": [NSDate date]
+    };
+    NSString *trackingPath = [identityDir stringByAppendingPathComponent:@"tracking_info.plist"];
+    [trackingDict writeToFile:trackingPath atomically:YES];
+    
+    // Sync device_ids["ATTAuthorizationStatus"]
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?:
+                                     [NSMutableDictionary dictionary];
+    deviceIds[@"ATTAuthorizationStatus"] = @(status);
+    [deviceIds writeToFile:deviceIdsPath atomically:YES];
+    
+    PXLog(@"[WeaponX] 📡 ATTAuthorizationStatus set to: %ld", (long)status);
+}
+
+#pragma mark - Profile Schema Migration (v1 → v2)
+
+static BOOL PXIsNonZeroUUIDString(NSString *uuid) {
+    if (![uuid isKindOfClass:[NSString class]] || uuid.length == 0) {
+        return NO;
+    }
+    // Treat all-zero UUID as zero (case-insensitive)
+    NSString *normalized = [[uuid stringByReplacingOccurrencesOfString:@"-" withString:@""] lowercaseString];
+    for (NSUInteger i = 0; i < normalized.length; i++) {
+        if ([normalized characterAtIndex:i] != '0') {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (void)migrateProfileSchemaIfNeeded {
+    // Resolve identity path without re-entering migration (caller may already guard)
+    NSString *profileId = [self getActiveProfileId];
+    if (!profileId) {
+        return;
+    }
+    
+    NSString *profileDir = [PXProfilesPath() stringByAppendingPathComponent:profileId];
+    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
+    
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    if (![fileManager fileExistsAtPath:identityDir]) {
+        return;
+    }
+    
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+    if (!deviceIds) {
+        deviceIds = [NSMutableDictionary dictionary];
+    }
+    
+    NSInteger schemaVersion = [deviceIds[@"ProfileSchemaVersion"] respondsToSelector:@selector(integerValue)]
+        ? [deviceIds[@"ProfileSchemaVersion"] integerValue]
+        : 0;
+    
+    if (schemaVersion >= 2) {
+        return; // Already migrated
+    }
+    
+    PXLog(@"[WeaponX] 🔄 Migrating profile schema v%ld → v2 for profile %@", (long)schemaVersion, profileId);
+    
+    // 1) HardwareUUID → SystemBootUUID if canonical missing (one-way; do not write HardwareUUID)
+    NSString *systemBoot = nil;
+    id existingBoot = deviceIds[@"SystemBootUUID"];
+    if ([existingBoot isKindOfClass:[NSString class]] && [(NSString *)existingBoot length] > 0) {
+        systemBoot = (NSString *)existingBoot;
+    }
+    if (!systemBoot.length) {
+        NSString *bootPlistPath = [identityDir stringByAppendingPathComponent:@"system_boot_uuid.plist"];
+        NSDictionary *bootPlist = [NSDictionary dictionaryWithContentsOfFile:bootPlistPath];
+        if ([bootPlist[@"value"] isKindOfClass:[NSString class]] && [bootPlist[@"value"] length] > 0) {
+            systemBoot = bootPlist[@"value"];
+            deviceIds[@"SystemBootUUID"] = systemBoot;
+        }
+    }
+    if (!systemBoot.length) {
+        id legacyHW = deviceIds[@"HardwareUUID"];
+        if ([legacyHW isKindOfClass:[NSString class]] && [(NSString *)legacyHW length] > 0) {
+            systemBoot = (NSString *)legacyHW;
+            deviceIds[@"SystemBootUUID"] = systemBoot;
+            NSDictionary *bootDict = @{@"value": systemBoot, @"lastUpdated": [NSDate date]};
+            [bootDict writeToFile:[identityDir stringByAppendingPathComponent:@"system_boot_uuid.plist"] atomically:YES];
+            PXLog(@"[WeaponX] 🔄 Migrated HardwareUUID → SystemBootUUID: %@", systemBoot);
+        }
+    }
+    
+    // 2) Generate UDID if toggle enabled and value missing
+    BOOL udidEnabled = [self.settings[@"UDID"] boolValue];
+    NSString *existingUDID = nil;
+    id udidRaw = deviceIds[@"UDID"];
+    if ([udidRaw isKindOfClass:[NSString class]] && [(NSString *)udidRaw length] > 0) {
+        existingUDID = (NSString *)udidRaw;
+    }
+    if (!existingUDID.length) {
+        NSDictionary *udidPlist = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"udid.plist"]];
+        if ([udidPlist[@"value"] isKindOfClass:[NSString class]] && [udidPlist[@"value"] length] > 0) {
+            existingUDID = udidPlist[@"value"];
+            deviceIds[@"UDID"] = existingUDID;
+        }
+    }
+    if (udidEnabled && !existingUDID.length) {
+        NSMutableString *udid = [NSMutableString stringWithCapacity:40];
+        for (int i = 0; i < 40; i++) {
+            [udid appendFormat:@"%x", arc4random_uniform(16)];
+        }
+        NSDictionary *udidDict = @{@"value": udid, @"lastUpdated": [NSDate date]};
+        [udidDict writeToFile:[identityDir stringByAppendingPathComponent:@"udid.plist"] atomically:YES];
+        deviceIds[@"UDID"] = [udid copy];
+        PXLog(@"[WeaponX] 🔄 Migration generated UDID: %@", udid);
+    }
+    
+    // 3) Init ATTAuthorizationStatus default
+    if (deviceIds[@"ATTAuthorizationStatus"] == nil) {
+        BOOL idfaEnabled = [self.settings[@"IDFA"] boolValue];
+        NSString *idfa = nil;
+        id idfaRaw = deviceIds[@"IDFA"];
+        if ([idfaRaw isKindOfClass:[NSString class]]) {
+            idfa = (NSString *)idfaRaw;
+        }
+        if (!idfa.length) {
+            NSDictionary *idfaPlist = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"advertising_id.plist"]];
+            if ([idfaPlist[@"value"] isKindOfClass:[NSString class]]) {
+                idfa = idfaPlist[@"value"];
+            }
+        }
+        
+        // IDFA enabled + non-zero UUID → authorized (3); else notDetermined (0)
+        NSInteger attStatus = (idfaEnabled && PXIsNonZeroUUIDString(idfa)) ? 3 : 0;
+        deviceIds[@"ATTAuthorizationStatus"] = @(attStatus);
+        
+        NSDictionary *trackingDict = @{
+            @"ATTAuthorizationStatus": @(attStatus),
+            @"lastUpdated": [NSDate date]
+        };
+        [trackingDict writeToFile:[identityDir stringByAppendingPathComponent:@"tracking_info.plist"] atomically:YES];
+        PXLog(@"[WeaponX] 🔄 Migration ATTAuthorizationStatus default: %ld", (long)attStatus);
+    }
+    
+    // 4) Init LowPowerMode default = NO
+    if (deviceIds[@"LowPowerMode"] == nil) {
+        deviceIds[@"LowPowerMode"] = @NO;
+        
+        // Prefer identity battery_info.plist; also update profile-root path used by BatteryManager
+        NSString *batteryPath = [identityDir stringByAppendingPathComponent:@"battery_info.plist"];
+        NSMutableDictionary *batteryInfo = [NSMutableDictionary dictionaryWithContentsOfFile:batteryPath] ?:
+                                           [NSMutableDictionary dictionary];
+        if (batteryInfo[@"LowPowerMode"] == nil) {
+            batteryInfo[@"LowPowerMode"] = @NO;
+            [batteryInfo writeToFile:batteryPath atomically:YES];
+        }
+        
+        NSString *profileBatteryPath = [profileDir stringByAppendingPathComponent:@"battery_info.plist"];
+        NSMutableDictionary *profileBattery = [NSMutableDictionary dictionaryWithContentsOfFile:profileBatteryPath] ?:
+                                              [NSMutableDictionary dictionary];
+        if (profileBattery[@"LowPowerMode"] == nil) {
+            profileBattery[@"LowPowerMode"] = @NO;
+            if (profileBattery[@"BatteryLevel"] == nil && batteryInfo[@"BatteryLevel"] != nil) {
+                profileBattery[@"BatteryLevel"] = batteryInfo[@"BatteryLevel"];
+            }
+            [profileBattery writeToFile:profileBatteryPath atomically:YES];
+        }
+        
+        PXLog(@"[WeaponX] 🔄 Migration LowPowerMode default: NO");
+    }
+    
+    // Mark schema v2 and bump GenerationCounter once for the whole migration
+    deviceIds[@"ProfileSchemaVersion"] = @2;
+    NSInteger gen = [deviceIds[@"GenerationCounter"] respondsToSelector:@selector(integerValue)]
+        ? [deviceIds[@"GenerationCounter"] integerValue]
+        : 0;
+    deviceIds[@"GenerationCounter"] = @(gen + 1);
+    
+    BOOL wrote = [deviceIds writeToFile:deviceIdsPath atomically:YES];
+    if (wrote) {
+        PXLog(@"[WeaponX] ✅ Profile schema migrated to v2 (GenerationCounter=%ld)", (long)(gen + 1));
+    } else {
+        PXLog(@"[WeaponX] ⚠️ Failed to write device_ids.plist during schema migration");
+    }
 }
 
 static NSInteger PXHexValue(unichar c) {

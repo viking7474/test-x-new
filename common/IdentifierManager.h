@@ -71,10 +71,14 @@
 - (NSInteger)getCPUCoreCount;
 - (NSString *)getMetalFeatureSet;
 
-// IMEI/MEID
+// IMEI/MEID (kept separate — never merge)
 - (BOOL)setCustomIMEI:(NSString *)value;
 - (BOOL)setCustomMEID:(NSString *)value;
 - (NSString *)generateIMEI;
 - (NSString *)generateMEID;
+
+// UDID (40-char lowercase hex) — generateUDID / ATT / migrate are declared on IdentifierManager in ProjectX.h
+- (BOOL)setCustomUDID:(NSString *)value;
+- (BOOL)isValidUDID:(NSString *)value;
 
 @end
