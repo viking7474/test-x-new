@@ -55,10 +55,19 @@ typedef BOOL (^PXCFCopySystemVersionDictPreBlock)(CFDictionaryRef *outResult);
 typedef void (^PXCFCopySystemVersionDictPostBlock)(CFDictionaryRef *inoutResult);
 
 // --- statfs family ---
-typedef void (^PXStatfsPostBlock)(const char * _Nullable path, struct statfs *buf, int *inoutResult);
-typedef void (^PXStatfs64PostBlock)(const char * _Nullable path, struct statfs64 *buf, int *inoutResult);
-typedef void (^PXGetfsstatPostBlock)(struct statfs * _Nullable buf, int bufsize, int flags, int *inoutResult);
-typedef void (^PXGetfsstat64PostBlock)(struct statfs64 * _Nullable buf, int bufsize, int flags, int *inoutResult);
+// On Darwin/iOS, public headers expose 64-bit filesystem stats via struct statfs.
+// A separate local "struct statfs64" (as some modules used to invent) is a *different*
+// type and breaks block compatibility. Use one shared buffer type everywhere.
+#if defined(__APPLE__)
+typedef struct statfs PXStatfs64Buf;
+#else
+typedef struct statfs64 PXStatfs64Buf;
+#endif
+
+typedef void (^PXStatfsPostBlock)(const char * _Nullable path, struct statfs * _Nullable buf, int * _Nonnull inoutResult);
+typedef void (^PXStatfs64PostBlock)(const char * _Nullable path, PXStatfs64Buf * _Nullable buf, int * _Nonnull inoutResult);
+typedef void (^PXGetfsstatPostBlock)(struct statfs * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult);
+typedef void (^PXGetfsstat64PostBlock)(PXStatfs64Buf * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult);
 
 // --- CNCopyCurrentNetworkInfo ---
 typedef BOOL (^PXCNCopyNetworkInfoPreBlock)(CFStringRef interfaceName, CFDictionaryRef *outResult);

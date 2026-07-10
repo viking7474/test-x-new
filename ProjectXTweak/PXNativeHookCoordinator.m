@@ -60,9 +60,9 @@ static IOReturn (*g_orig_IORegistryEntryCreateCFProperties)(io_registry_entry_t,
 static CFTypeRef (*g_orig_IORegistryEntrySearchCFProperty)(io_registry_entry_t, const io_name_t, CFStringRef, CFAllocatorRef, IOOptionBits) = NULL;
 static CFDictionaryRef (*g_orig_CFCopySystemVersionDictionary)(void) = NULL;
 static int (*g_orig_statfs)(const char *, struct statfs *) = NULL;
-static int (*g_orig_statfs64)(const char *, struct statfs64 *) = NULL;
+static int (*g_orig_statfs64)(const char *, PXStatfs64Buf *) = NULL;
 static int (*g_orig_getfsstat)(struct statfs *, int, int) = NULL;
-static int (*g_orig_getfsstat64)(struct statfs64 *, int, int) = NULL;
+static int (*g_orig_getfsstat64)(PXStatfs64Buf *, int, int) = NULL;
 static CFDictionaryRef (*g_orig_CNCopyCurrentNetworkInfo)(CFStringRef) = NULL;
 static int (*g_orig_gethostuuid)(uuid_t, const struct timespec *) = NULL;
 
@@ -333,7 +333,7 @@ static int PXCoord_statfs(const char *path, struct statfs *buf) {
     return result;
 }
 
-static int PXCoord_statfs64(const char *path, struct statfs64 *buf) {
+static int PXCoord_statfs64(const char *path, PXStatfs64Buf *buf) {
     int result = g_orig_statfs64 ? g_orig_statfs64(path, buf) : -1;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs64];
@@ -355,7 +355,7 @@ static int PXCoord_getfsstat(struct statfs *buf, int bufsize, int flags) {
     return result;
 }
 
-static int PXCoord_getfsstat64(struct statfs64 *buf, int bufsize, int flags) {
+static int PXCoord_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
     int result = g_orig_getfsstat64 ? g_orig_getfsstat64(buf, bufsize, flags) : -1;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat64];

@@ -436,25 +436,6 @@ static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
     }
 }
 
-// Define struct statfs64 if not defined
-#ifndef HAVE_STATFS64
-struct statfs64 {
-    uint32_t    f_type;     /* type of filesystem */
-    uint32_t    f_bsize;    /* optimal transfer block size */
-    uint64_t    f_blocks;   /* total data blocks in file system */
-    uint64_t    f_bfree;    /* free blocks in fs */
-    uint64_t    f_bavail;   /* free blocks avail to non-superuser */
-    uint64_t    f_files;    /* total file nodes in file system */
-    uint64_t    f_ffree;    /* free file nodes in fs */
-    fsid_t      f_fsid;     /* file system id */
-    uint32_t    f_flags;    /* mount flags */
-    uint32_t    f_namelen;  /* maximum length of filenames */
-    char        f_fstypename[MFSNAMELEN]; /* fs type name */
-    char        f_mntonname[MNAMELEN];    /* directory on which mounted */
-    char        f_mntfromname[MNAMELEN];  /* mounted filesystem */
-};
-#endif
-
 // Define NSFileSystem constants as strings since they're just string constants
 #define NSFileSystemSize @"NSFileSystemSize"
 #define NSFileSystemFreeSize @"NSFileSystemFreeSize"
@@ -464,14 +445,14 @@ struct statfs64 {
 // Function pointer for statfs
 static int (*orig_statfs)(const char *path, struct statfs *buf);
 
-// Function pointer for statfs64 (64-bit variant)
-static int (*orig_statfs64)(const char *path, struct statfs64 *buf);
+// Function pointer for statfs64 (Darwin: same layout as struct statfs — use shared PXStatfs64Buf)
+static int (*orig_statfs64)(const char *path, PXStatfs64Buf *buf);
 
 // Function pointer for getfsstat
 static int (*orig_getfsstat)(struct statfs *buf, int bufsize, int flags);
 
 // Function pointer for getfsstat64
-static int (*orig_getfsstat64)(struct statfs64 *buf, int bufsize, int flags);
+static int (*orig_getfsstat64)(PXStatfs64Buf *buf, int bufsize, int flags);
 
 // Helper to modify statfs struct with spoofed values
 static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
@@ -497,28 +478,10 @@ static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
     }
 }
 
-// Helper to modify statfs64 struct with spoofed values
-static void modifyStatfs64WithSpoofedValues(struct statfs64 *buf) {
-    if (!buf) return;
-    
-    // Ensure block size is valid
-    if (buf->f_bsize == 0) {
-        buf->f_bsize = DEFAULT_BLOCK_SIZE; // Standard block size for APFS
-    }
-    
-    // Get storage values with appropriate units for this app
-    uint64_t totalBytes, freeBytes;
-    getStorageValuesForApp(&totalBytes, &freeBytes);
-    
-    // Calculate blocks
-    if (totalBytes > 0) {
-        buf->f_blocks = calculateBlockCount(totalBytes, buf->f_bsize);
-    }
-    
-    if (freeBytes > 0) {
-        buf->f_bfree = calculateBlockCount(freeBytes, buf->f_bsize);
-        buf->f_bavail = buf->f_bfree; // Available blocks = free blocks for non-root
-    }
+// Helper to modify statfs64 buffer (alias of struct statfs on Darwin)
+static void modifyStatfs64WithSpoofedValues(PXStatfs64Buf *buf) {
+    // Same layout as struct statfs on Apple — reuse the primary helper.
+    modifyStatfsWithSpoofedValues((struct statfs *)buf);
 }
 
 // Replacement for statfs to spoof filesystem info
@@ -552,14 +515,14 @@ static int replaced_statfs(const char *path, struct statfs *buf) {
 }
 
 // Replacement for statfs64 (64-bit variant)
-static int replaced_statfs64(const char *path, struct statfs64 *buf) {
+static int replaced_statfs64(const char *path, PXStatfs64Buf *buf) {
     // Check for null pointers
     if (!path || !buf) {
         return -1; // EINVAL
     }
     
     // Call original function
-    int ret = orig_statfs64(path, buf);
+    int ret = orig_statfs64 ? orig_statfs64(path, buf) : -1;
     
     if (ret == 0 && buf != NULL && shouldApplyStorageSpoofing()) {
         @try {
@@ -616,14 +579,14 @@ static int replaced_getfsstat(struct statfs *buf, int bufsize, int flags) {
 }
 
 // Replacement for getfsstat64
-static int replaced_getfsstat64(struct statfs64 *buf, int bufsize, int flags) {
+static int replaced_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
     // Check for null pointer or invalid size
     if (!buf || bufsize <= 0) {
         return -1; // EINVAL
     }
     
     // Call original function
-    int ret = orig_getfsstat64(buf, bufsize, flags);
+    int ret = orig_getfsstat64 ? orig_getfsstat64(buf, bufsize, flags) : -1;
     
     if (ret > 0 && buf != NULL && shouldApplyStorageSpoofing()) {
         @try {
@@ -980,16 +943,16 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
             static dispatch_once_t storageProvOnce;
             dispatch_once(&storageProvOnce, ^{
-                // Nullability must match PXNativeHookCoordinator typedefs (NS_ASSUME_NONNULL).
-                [coord registerStatfsProvider:@"storage.statfs" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, struct statfs * _Nonnull buf, int * _Nonnull inoutResult) {
-                    if (*inoutResult != 0 || !shouldApplyStorageSpoofing()) return;
+                // Use shared PXStatfs64Buf (struct statfs on Darwin) — never invent a local struct statfs64.
+                [coord registerStatfsProvider:@"storage.statfs" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, struct statfs * _Nullable buf, int * _Nonnull inoutResult) {
+                    if (*inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
                     if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
                                  strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
                         modifyStatfsWithSpoofedValues(buf);
                     }
                 }];
-                [coord registerStatfs64Provider:@"storage.statfs64" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, struct statfs64 * _Nonnull buf, int * _Nonnull inoutResult) {
-                    if (*inoutResult != 0 || !shouldApplyStorageSpoofing()) return;
+                [coord registerStatfs64Provider:@"storage.statfs64" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, PXStatfs64Buf * _Nullable buf, int * _Nonnull inoutResult) {
+                    if (*inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
                     if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
                                  strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
                         modifyStatfs64WithSpoofedValues(buf);
@@ -1006,7 +969,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                         }
                     }
                 }];
-                [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs64 * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
+                [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(PXStatfs64Buf * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
                     (void)bufsize; (void)flags;
                     if (*inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
                     for (int i = 0; i < *inoutResult; i++) {
