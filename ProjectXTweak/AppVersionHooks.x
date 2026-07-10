@@ -30,6 +30,13 @@ static NSMutableDictionary<NSString *, NSDate *> *gCachedProfileVersionMTime = n
 // Full-dictionary CF cache: stable retained CFDictionary per (bundleID + localized + generation)
 static _Atomic int32_t gAppVersionCacheGeneration = 0;
 
+// Prevent infinite recursion:
+// -[NSBundle infoDictionary] <-> -[NSBundle bundleIdentifier] <-> CFBundleGetInfoDictionary
+static __thread int gPXAppVersionInfoRecursion = 0;
+
+// Captured BEFORE hooks install — never call -[NSBundle bundleIdentifier] from hook bodies.
+static NSString *gMainBundleIDCached = nil;
+
 typedef struct {
     CFDictionaryRef dict;
     CFStringRef bundleID;
@@ -46,6 +53,52 @@ static NSString *gNSInfoDictBundleID = nil;
 static int32_t gNSInfoDictGeneration = -1;
 static NSString *gNSLocalizedInfoDictBundleID = nil;
 static int32_t gNSLocalizedInfoDictGeneration = -1;
+
+// Forward decls for original CF pointers (used by safe helpers).
+static CFDictionaryRef (*original_CFBundleGetInfoDictionary)(CFBundleRef bundle) = NULL;
+static CFDictionaryRef (*original_CFBundleGetLocalInfoDictionary)(CFBundleRef bundle) = NULL;
+
+/// Main bundle ID without re-entering infoDictionary hooks.
+static NSString *PXMainBundleIDCached(void) {
+    if (gMainBundleIDCached.length) return gMainBundleIDCached;
+
+    // Best effort while already inside a hook: read via ORIGINAL CF API only.
+    if (original_CFBundleGetInfoDictionary) {
+        CFBundleRef mainCF = CFBundleGetMainBundle();
+        if (mainCF) {
+            CFDictionaryRef info = original_CFBundleGetInfoDictionary(mainCF);
+            if (info) {
+                CFStringRef bid = CFDictionaryGetValue(info, kCFBundleIdentifierKey);
+                if (bid && CFGetTypeID(bid) == CFStringGetTypeID()) {
+                    gMainBundleIDCached = CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, bid));
+                    return gMainBundleIDCached;
+                }
+            }
+        }
+    }
+    return nil;
+}
+
+/// Identifier for an arbitrary CFBundle without going through hooked NSBundle paths.
+static NSString *PXCFBundleIDSafe(CFBundleRef bundle) {
+    if (!bundle) return nil;
+    // Prefer CFBundleGetIdentifier only when NOT inside our info-dict hooks — it can
+    // refresh via CFBundleGetInfoDictionary. When recursing, read from original dict.
+    if (gPXAppVersionInfoRecursion == 0) {
+        CFStringRef cfID = CFBundleGetIdentifier(bundle);
+        if (cfID) return (__bridge NSString *)cfID;
+    }
+    if (original_CFBundleGetInfoDictionary) {
+        CFDictionaryRef info = original_CFBundleGetInfoDictionary(bundle);
+        if (info) {
+            CFStringRef bid = CFDictionaryGetValue(info, kCFBundleIdentifierKey);
+            if (bid && CFGetTypeID(bid) == CFStringGetTypeID()) {
+                return (__bridge NSString *)bid;
+            }
+        }
+    }
+    return nil;
+}
 
 static NSDate *PXFileMTime(NSString *path) {
     if (!path.length) return nil;
@@ -236,7 +289,9 @@ void PXAppVersionHooksInvalidateCache(void) {
 #pragma mark - Full dictionary helpers
 
 static BOOL PXAppVersionScopeAllows(void) {
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    // NEVER call -[NSBundle bundleIdentifier] here — it re-enters infoDictionary.
+    NSString *bundleID = PXMainBundleIDCached();
+    if (!bundleID.length) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
 }
@@ -259,11 +314,16 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
     if (!bundle) return NO;
     if (!PXAppVersionScopeAllows()) return NO;
 
-    NSString *mainBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *mainBundleID = PXMainBundleIDCached();
     if (!mainBundleID.length) return NO;
 
-    NSString *bundleID = [bundle bundleIdentifier];
-    if (!bundleID.length || ![bundleID isEqualToString:mainBundleID]) return NO;
+    // Only spoof the main bundle. Compare object identity first to avoid
+    // calling -[NSBundle bundleIdentifier] (re-enters infoDictionary).
+    if (bundle != [NSBundle mainBundle]) {
+        // Non-main: try CF path via executable URL / already-known identity only.
+        // Reading [bundle bundleIdentifier] is unsafe under our hooks.
+        return NO;
+    }
 
     NSString *ver = nil;
     NSString *build = nil;
@@ -283,65 +343,80 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
 %hook NSBundle
 
 - (NSDictionary *)infoDictionary {
+    // Recursion: bundleIdentifier / CFBundleGetInfoDictionary re-enter here.
+    if (gPXAppVersionInfoRecursion > 0) {
+        return %orig;
+    }
+    gPXAppVersionInfoRecursion++;
     NSDictionary *original = %orig;
+    NSDictionary *result = original;
     @try {
         NSString *mainBundleID = nil;
         NSString *ver = nil;
         NSString *build = nil;
         if (!PXShouldSpoofMainBundleInfo(self, &mainBundleID, &ver, &build)) {
-            return original;
-        }
-
-        int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-        if (gNSInfoDictCache &&
-            gNSInfoDictGeneration == gen &&
-            gNSInfoDictBundleID &&
-            [gNSInfoDictBundleID isEqualToString:mainBundleID]) {
-            return gNSInfoDictCache;
-        }
-
-        NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
-        if (spoofed) {
-            gNSInfoDictCache = spoofed;
-            gNSInfoDictBundleID = [mainBundleID copy];
-            gNSInfoDictGeneration = gen;
-            return spoofed;
+            result = original;
+        } else {
+            int32_t gen = atomic_load(&gAppVersionCacheGeneration);
+            if (gNSInfoDictCache &&
+                gNSInfoDictGeneration == gen &&
+                gNSInfoDictBundleID &&
+                [gNSInfoDictBundleID isEqualToString:mainBundleID]) {
+                result = gNSInfoDictCache;
+            } else {
+                NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
+                if (spoofed) {
+                    gNSInfoDictCache = spoofed;
+                    gNSInfoDictBundleID = [mainBundleID copy];
+                    gNSInfoDictGeneration = gen;
+                    result = spoofed;
+                }
+            }
         }
     } @catch (__unused NSException *e) {
+        result = original;
     }
-    return original;
+    gPXAppVersionInfoRecursion--;
+    return result;
 }
 
 - (NSDictionary *)localizedInfoDictionary {
+    if (gPXAppVersionInfoRecursion > 0) {
+        return %orig;
+    }
+    gPXAppVersionInfoRecursion++;
     NSDictionary *original = %orig;
+    NSDictionary *result = original;
     @try {
         NSString *mainBundleID = nil;
         NSString *ver = nil;
         NSString *build = nil;
         if (!PXShouldSpoofMainBundleInfo(self, &mainBundleID, &ver, &build)) {
-            return original;
-        }
-        // localizedInfoDictionary may legitimately be nil — leave it alone.
-        if (!original) return original;
-
-        int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-        if (gNSLocalizedInfoDictCache &&
-            gNSLocalizedInfoDictGeneration == gen &&
-            gNSLocalizedInfoDictBundleID &&
-            [gNSLocalizedInfoDictBundleID isEqualToString:mainBundleID]) {
-            return gNSLocalizedInfoDictCache;
-        }
-
-        NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
-        if (spoofed) {
-            gNSLocalizedInfoDictCache = spoofed;
-            gNSLocalizedInfoDictBundleID = [mainBundleID copy];
-            gNSLocalizedInfoDictGeneration = gen;
-            return spoofed;
+            result = original;
+        } else if (!original) {
+            result = original; // may legitimately be nil
+        } else {
+            int32_t gen = atomic_load(&gAppVersionCacheGeneration);
+            if (gNSLocalizedInfoDictCache &&
+                gNSLocalizedInfoDictGeneration == gen &&
+                gNSLocalizedInfoDictBundleID &&
+                [gNSLocalizedInfoDictBundleID isEqualToString:mainBundleID]) {
+                result = gNSLocalizedInfoDictCache;
+            } else {
+                NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
+                if (spoofed) {
+                    gNSLocalizedInfoDictCache = spoofed;
+                    gNSLocalizedInfoDictBundleID = [mainBundleID copy];
+                    gNSLocalizedInfoDictGeneration = gen;
+                    result = spoofed;
+                }
+            }
         }
     } @catch (__unused NSException *e) {
+        result = original;
     }
-    return original;
+    gPXAppVersionInfoRecursion--;
+    return result;
 }
 
 %end
@@ -350,19 +425,19 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
 
 #pragma mark - CFBundle full dictionary hooks
 
-static CFDictionaryRef (*original_CFBundleGetInfoDictionary)(CFBundleRef bundle) = NULL;
-static CFDictionaryRef (*original_CFBundleGetLocalInfoDictionary)(CFBundleRef bundle) = NULL;
-
 static BOOL PXShouldSpoofCFBundleInfo(CFBundleRef bundle, NSString **outMainBundleID, NSString **outVer, NSString **outBuild) {
     if (!bundle) return NO;
     if (!PXAppVersionScopeAllows()) return NO;
 
-    CFStringRef cfID = CFBundleGetIdentifier(bundle);
-    if (!cfID) return NO;
-    NSString *nsBundleID = (__bridge NSString *)cfID;
+    NSString *mainBundleID = PXMainBundleIDCached();
+    if (!mainBundleID.length) return NO;
 
-    NSString *mainBundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!mainBundleID.length || ![nsBundleID isEqualToString:mainBundleID]) return NO;
+    // Only main CFBundle. Compare with CFBundleGetMainBundle to avoid CFBundleGetIdentifier
+    // (which can refresh info dictionary and re-enter our hook).
+    if (bundle != CFBundleGetMainBundle()) {
+        NSString *nsBundleID = PXCFBundleIDSafe(bundle);
+        if (!nsBundleID.length || ![nsBundleID isEqualToString:mainBundleID]) return NO;
+    }
 
     NSString *ver = nil;
     NSString *build = nil;
@@ -416,29 +491,44 @@ static CFDictionaryRef PXCachedOrBuildCFInfoDict(CFBundleRef bundle,
 }
 
 static CFDictionaryRef replaced_CFBundleGetInfoDictionary(CFBundleRef bundle) {
+    if (gPXAppVersionInfoRecursion > 0) {
+        return original_CFBundleGetInfoDictionary ? original_CFBundleGetInfoDictionary(bundle) : NULL;
+    }
+    gPXAppVersionInfoRecursion++;
     CFDictionaryRef original = NULL;
     if (original_CFBundleGetInfoDictionary) {
         original = original_CFBundleGetInfoDictionary(bundle);
     }
+    CFDictionaryRef result = original;
     @try {
-        return PXCachedOrBuildCFInfoDict(bundle, original, NO, &gCFInfoDictCache);
+        result = PXCachedOrBuildCFInfoDict(bundle, original, NO, &gCFInfoDictCache);
     } @catch (__unused NSException *e) {
-        return original;
+        result = original;
     }
+    gPXAppVersionInfoRecursion--;
+    return result;
 }
 
 static CFDictionaryRef replaced_CFBundleGetLocalInfoDictionary(CFBundleRef bundle) {
+    if (gPXAppVersionInfoRecursion > 0) {
+        return original_CFBundleGetLocalInfoDictionary ? original_CFBundleGetLocalInfoDictionary(bundle) : NULL;
+    }
+    gPXAppVersionInfoRecursion++;
     CFDictionaryRef original = NULL;
     if (original_CFBundleGetLocalInfoDictionary) {
         original = original_CFBundleGetLocalInfoDictionary(bundle);
     }
+    CFDictionaryRef result = original;
     @try {
         // Local info dict may be NULL — pass through.
-        if (!original) return original;
-        return PXCachedOrBuildCFInfoDict(bundle, original, YES, &gCFLocalInfoDictCache);
+        if (original) {
+            result = PXCachedOrBuildCFInfoDict(bundle, original, YES, &gCFLocalInfoDictCache);
+        }
     } @catch (__unused NSException *e) {
-        return original;
+        result = original;
     }
+    gPXAppVersionInfoRecursion--;
+    return result;
 }
 
 static void *PXFindCFSymbol(void *handle, const char *names[], int count) {
@@ -466,7 +556,10 @@ static void PXAppVersionCacheInvalidateNotification(CFNotificationCenterRef cent
 %ctor {
     @autoreleasepool {
         PXFileDebugAIDA64Log("[AppVersion.ctor] enter");
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        // Capture main bundle ID BEFORE installing hooks — prevents
+        // infoDictionary ↔ bundleIdentifier recursion under spoof paths.
+        gMainBundleIDCached = [[[NSBundle mainBundle] bundleIdentifier] copy];
+        NSString *bundleID = gMainBundleIDCached;
         NSString *proc = [NSProcessInfo processInfo].processName;
         if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)) {
             PXFileDebugAIDA64Log("[AppVersion.ctor] skip scope bundle=%s proc=%s",
