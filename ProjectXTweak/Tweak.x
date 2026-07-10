@@ -54,15 +54,101 @@ __attribute__((constructor(101))) static void PXProjectXTweakEarlyLoadMarker(voi
 // Cache for values
 static NSMutableDictionary *valueCache;
 
-// Compatibility shims for apps calling weakly-linked selectors.
+// Compatibility shims for apps calling weakly-linked / newer-iOS selectors
+// when the real OS is older than the spoofed iOS version (common crash pattern).
 static BOOL PXCompatReturnNo(id self, SEL _cmd) {
     return NO;
+}
+
+static id PXCompatReturnNil(id self, SEL _cmd) {
+    return nil;
+}
+
+static void PXCompatVoidNoop(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+}
+
+// Retain object for getter/setter pair using the selector as the association key.
+static void PXCompatSetAssociatedObject(id self, SEL _cmd, id value) {
+    // Key must be stable; use the selector pointer of the *setter* so get/set share storage.
+    // Callers pass a dedicated key SEL via function... we store by _cmd of setter.
+    objc_setAssociatedObject(self, (const void *)_cmd, value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static id PXCompatGetAssociatedForSetterSEL(id self, SEL setterSel) {
+    return objc_getAssociatedObject(self, (const void *)setterSel);
+}
+
+// scrollEdgeAppearance property (iOS 15+) — getter paired with setScrollEdgeAppearance:
+static id PXCompatGetScrollEdgeAppearance(id self, SEL _cmd) {
+    (void)_cmd;
+    return PXCompatGetAssociatedForSetterSEL(self, @selector(setScrollEdgeAppearance:));
+}
+
+static void PXCompatSetScrollEdgeAppearance(id self, SEL _cmd, id value) {
+    PXCompatSetAssociatedObject(self, _cmd, value);
+}
+
+static id PXCompatGetCompactScrollEdgeAppearance(id self, SEL _cmd) {
+    (void)_cmd;
+    return PXCompatGetAssociatedForSetterSEL(self, @selector(setCompactScrollEdgeAppearance:));
+}
+
+static void PXCompatSetCompactScrollEdgeAppearance(id self, SEL _cmd, id value) {
+    PXCompatSetAssociatedObject(self, _cmd, value);
+}
+
+static id PXCompatGetStandardAppearance(id self, SEL _cmd) {
+    (void)_cmd;
+    return PXCompatGetAssociatedForSetterSEL(self, @selector(setStandardAppearance:));
+}
+
+static void PXCompatSetStandardAppearance(id self, SEL _cmd, id value) {
+    PXCompatSetAssociatedObject(self, _cmd, value);
+}
+
+static id PXCompatGetCompactAppearance(id self, SEL _cmd) {
+    (void)_cmd;
+    return PXCompatGetAssociatedForSetterSEL(self, @selector(setCompactAppearance:));
+}
+
+static void PXCompatSetCompactAppearance(id self, SEL _cmd, id value) {
+    PXCompatSetAssociatedObject(self, _cmd, value);
+}
+
+static void PXCompatAddMethodIfMissing(Class cls, SEL sel, IMP imp, const char *types) {
+    if (!cls || !sel || !imp || !types) return;
+    if (class_getInstanceMethod(cls, sel)) return;
+    class_addMethod(cls, sel, imp, types);
+}
+
+static void PXCompatShimBarAppearanceClass(Class cls) {
+    if (!cls) return;
+    // UITabBar / UINavigationBar / UIToolbar — iOS 13 standardAppearance, iOS 15 scrollEdge*
+    PXCompatAddMethodIfMissing(cls, @selector(setStandardAppearance:),
+                               (IMP)PXCompatSetStandardAppearance, "v@:@");
+    PXCompatAddMethodIfMissing(cls, @selector(standardAppearance),
+                               (IMP)PXCompatGetStandardAppearance, "@@:");
+    PXCompatAddMethodIfMissing(cls, @selector(setCompactAppearance:),
+                               (IMP)PXCompatSetCompactAppearance, "v@:@");
+    PXCompatAddMethodIfMissing(cls, @selector(compactAppearance),
+                               (IMP)PXCompatGetCompactAppearance, "@@:");
+    PXCompatAddMethodIfMissing(cls, @selector(setScrollEdgeAppearance:),
+                               (IMP)PXCompatSetScrollEdgeAppearance, "v@:@");
+    PXCompatAddMethodIfMissing(cls, @selector(scrollEdgeAppearance),
+                               (IMP)PXCompatGetScrollEdgeAppearance, "@@:");
+    PXCompatAddMethodIfMissing(cls, @selector(setCompactScrollEdgeAppearance:),
+                               (IMP)PXCompatSetCompactScrollEdgeAppearance, "v@:@");
+    PXCompatAddMethodIfMissing(cls, @selector(compactScrollEdgeAppearance),
+                               (IMP)PXCompatGetCompactScrollEdgeAppearance, "@@:");
 }
 
 static void PXInstallCompatibilityShims(void) {
     @autoreleasepool {
         // Some apps call selectors that may not exist on all iOS builds.
-        // Add safe implementations only when missing to prevent crashes.
+        // When we spoof a newer iOS version, apps often branch into newer UIKit APIs
+        // without @available checks — add no-op / storage shims when missing.
+
         Class procInfoCls = objc_getClass("NSProcessInfo");
         if (procInfoCls && !class_getInstanceMethod(procInfoCls, @selector(isiOSAppOnMac))) {
             class_addMethod(procInfoCls, @selector(isiOSAppOnMac), (IMP)PXCompatReturnNo, "B@:");
@@ -72,6 +158,37 @@ static void PXInstallCompatibilityShims(void) {
         if (ctProvCls && !class_getInstanceMethod(ctProvCls, @selector(supportsEmbeddedSIM))) {
             class_addMethod(ctProvCls, @selector(supportsEmbeddedSIM), (IMP)PXCompatReturnNo, "B@:");
         }
+
+        // Crash signature (CPUDasher etc.): -[UITabBar setScrollEdgeAppearance:] on iOS < 15
+        // while spoofed systemVersion advertises 15+/16+.
+        PXCompatShimBarAppearanceClass(objc_getClass("UITabBar"));
+        PXCompatShimBarAppearanceClass(objc_getClass("UINavigationBar"));
+        PXCompatShimBarAppearanceClass(objc_getClass("UIToolbar"));
+
+        // UINavigationItem large title / appearance helpers (harmless if unused)
+        Class navItem = objc_getClass("UINavigationItem");
+        if (navItem) {
+            PXCompatAddMethodIfMissing(navItem, @selector(setStandardAppearance:),
+                                       (IMP)PXCompatSetStandardAppearance, "v@:@");
+            PXCompatAddMethodIfMissing(navItem, @selector(standardAppearance),
+                                       (IMP)PXCompatGetStandardAppearance, "@@:");
+            PXCompatAddMethodIfMissing(navItem, @selector(setScrollEdgeAppearance:),
+                                       (IMP)PXCompatSetScrollEdgeAppearance, "v@:@");
+            PXCompatAddMethodIfMissing(navItem, @selector(scrollEdgeAppearance),
+                                       (IMP)PXCompatGetScrollEdgeAppearance, "@@:");
+            PXCompatAddMethodIfMissing(navItem, @selector(setCompactAppearance:),
+                                       (IMP)PXCompatSetCompactAppearance, "v@:@");
+            PXCompatAddMethodIfMissing(navItem, @selector(compactAppearance),
+                                       (IMP)PXCompatGetCompactAppearance, "@@:");
+            PXCompatAddMethodIfMissing(navItem, @selector(setCompactScrollEdgeAppearance:),
+                                       (IMP)PXCompatSetCompactScrollEdgeAppearance, "v@:@");
+            PXCompatAddMethodIfMissing(navItem, @selector(compactScrollEdgeAppearance),
+                                       (IMP)PXCompatGetCompactScrollEdgeAppearance, "@@:");
+        }
+
+        // Quiet unused-function warnings if optimizer is aggressive
+        (void)PXCompatReturnNil;
+        (void)PXCompatVoidNoop;
     }
 }
 
