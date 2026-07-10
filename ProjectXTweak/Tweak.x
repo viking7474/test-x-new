@@ -9,6 +9,10 @@
 #import <dlfcn.h>
 #import "ProjectXLogging.h"
 #import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <mach-o/nlist.h>
+#import <mach/vm_prot.h>
+#import <mach/mach.h>
 #import <ifaddrs.h>
 #import <string.h>
 #import <net/if.h>
@@ -212,6 +216,286 @@ static void PXCompatShimWKWebView(void) {
     PXCompatAddMethodIfMissing(wk, evalWorld, (IMP)PXCompatWKEvaluateJavaScriptInWorld, "v@:@@@@?");
 }
 
+#pragma mark - WidgetKit soft stubs (iOS < 14)
+
+// Real OS major from disk (not spoofed). Used to decide if WidgetKit exists.
+static NSInteger PXRealOSMajorVersion(void) {
+    static NSInteger major = -1;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *sv = [NSDictionary dictionaryWithContentsOfFile:
+                            @"/System/Library/CoreServices/SystemVersion.plist"];
+        NSString *ver = [sv[@"ProductVersion"] isKindOfClass:[NSString class]] ? sv[@"ProductVersion"] : nil;
+        if (ver.length) {
+            major = [[ver componentsSeparatedByString:@"."].firstObject integerValue];
+        }
+        if (major < 0) major = 0;
+    });
+    return major;
+}
+
+// Fake storage large enough for Swift to read a few words without immediate OOB.
+static uint8_t gPXWidgetKitFakeMeta[256];
+static uint8_t gPXWidgetKitFakeInstance[256];
+
+// Type metadata accessor: _$s9WidgetKit0A6CenterCMa
+static void *PXStub_WidgetCenter_Ma(void) {
+    return gPXWidgetKitFakeMeta;
+}
+
+// shared singleton-ish pointer
+static void *PXStub_WidgetCenter_shared(void) {
+    return gPXWidgetKitFakeInstance;
+}
+
+// Generic no-op for void instance/class methods (reloadAllTimelines, etc.)
+static void PXStub_WidgetKit_void(void) {
+}
+
+// Generic pointer-returning stub
+static void *PXStub_WidgetKit_ptr(void) {
+    return gPXWidgetKitFakeInstance;
+}
+
+// Rebind one indirect symbol pointer in an image (fishhook-style, main binary only).
+static void PXRebindIndirectSymbol(const struct mach_header *header,
+                                   intptr_t slide,
+                                   const char *symbolName,
+                                   void *replacement) {
+    if (!header || !symbolName || !replacement) return;
+
+#if defined(__LP64__)
+    typedef struct mach_header_64 px_mh_t;
+    typedef struct segment_command_64 px_seg_t;
+    typedef struct section_64 px_sect_t;
+    typedef struct nlist_64 px_nlist_t;
+    const uint32_t LC_SEG = LC_SEGMENT_64;
+#else
+    typedef struct mach_header px_mh_t;
+    typedef struct segment_command px_seg_t;
+    typedef struct section px_sect_t;
+    typedef struct nlist px_nlist_t;
+    const uint32_t LC_SEG = LC_SEGMENT;
+#endif
+
+    const px_mh_t *mh = (const px_mh_t *)header;
+    Dl_info info;
+    if (dladdr(header, &info) == 0) return;
+
+    const uint8_t *cursor = (const uint8_t *)(mh + 1);
+    const struct symtab_command *symtab = NULL;
+    const struct dysymtab_command *dysymtab = NULL;
+    const px_seg_t *linkedit = NULL;
+
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)cursor;
+        if (lc->cmd == LC_SYMTAB) {
+            symtab = (const struct symtab_command *)lc;
+        } else if (lc->cmd == LC_DYSYMTAB) {
+            dysymtab = (const struct dysymtab_command *)lc;
+        } else if (lc->cmd == LC_SEG) {
+            const px_seg_t *seg = (const px_seg_t *)lc;
+            if (strcmp(seg->segname, SEG_LINKEDIT) == 0) {
+                linkedit = seg;
+            }
+        }
+        cursor += lc->cmdsize;
+    }
+    if (!symtab || !dysymtab || !linkedit) return;
+
+    const uintptr_t linkeditBase = (uintptr_t)slide + linkedit->vmaddr - linkedit->fileoff;
+    const char *strtab = (const char *)(linkeditBase + symtab->stroff);
+    const px_nlist_t *symtabEntries = (const px_nlist_t *)(linkeditBase + symtab->symoff);
+    const uint32_t *indirectSymtab = (const uint32_t *)(linkeditBase + dysymtab->indirectsymoff);
+
+    cursor = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)cursor;
+        if (lc->cmd == LC_SEG) {
+            const px_seg_t *seg = (const px_seg_t *)lc;
+            // Only patch DATA-ish segments (lazy/non-lazy symbol pointers)
+            if (strcmp(seg->segname, SEG_DATA) != 0 &&
+                strcmp(seg->segname, "__DATA_CONST") != 0 &&
+                strcmp(seg->segname, "__AUTH_CONST") != 0) {
+                cursor += lc->cmdsize;
+                continue;
+            }
+            const px_sect_t *sections = (const px_sect_t *)(seg + 1);
+            for (uint32_t s = 0; s < seg->nsects; s++) {
+                const px_sect_t *sect = &sections[s];
+                uint32_t type = sect->flags & SECTION_TYPE;
+                if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS) {
+                    continue;
+                }
+                uint32_t entryCount = (uint32_t)(sect->size / sizeof(void *));
+                void **indirect = (void **)((uintptr_t)slide + sect->addr);
+                uint32_t indirectOffset = sect->reserved1;
+                for (uint32_t j = 0; j < entryCount; j++) {
+                    uint32_t symIndex = indirectSymtab[indirectOffset + j];
+                    if (symIndex == INDIRECT_SYMBOL_ABS || symIndex == INDIRECT_SYMBOL_LOCAL ||
+                        symIndex == (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
+                        continue;
+                    }
+                    if (symIndex >= symtab->nsyms) continue;
+                    const px_nlist_t *nl = &symtabEntries[symIndex];
+                    const char *name = strtab + nl->n_un.n_strx;
+                    if (!name) continue;
+                    BOOL match = (strcmp(name, symbolName) == 0);
+                    if (!match && name[0] == '_' && strcmp(name + 1, symbolName) == 0) match = YES;
+                    if (!match && symbolName[0] == '_' && strcmp(name, symbolName + 1) == 0) match = YES;
+                    if (!match) continue;
+
+                    // DATA_CONST may be r-- — make the page writable first.
+                    vm_size_t psz = vm_page_size ? vm_page_size : 0x4000;
+                    vm_address_t page = (vm_address_t)&indirect[j];
+                    page &= ~(vm_address_t)(psz - 1);
+                    vm_protect(mach_task_self(), page, psz, FALSE,
+                               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                    indirect[j] = replacement;
+                }
+            }
+        }
+        cursor += lc->cmdsize;
+    }
+}
+
+static void PXRebindWidgetKitSymbolsInMainImage(void) {
+    // Only needed when WidgetKit.framework cannot load (real iOS < 14).
+    if (PXRealOSMajorVersion() >= 14) return;
+    void *wk = dlopen("/System/Library/Frameworks/WidgetKit.framework/WidgetKit", RTLD_LAZY | RTLD_NOLOAD);
+    if (wk) {
+        dlclose(wk);
+        return; // real WidgetKit present
+    }
+    // Probe load — if it fails, rebind main binary imports to stubs.
+    wk = dlopen("/System/Library/Frameworks/WidgetKit.framework/WidgetKit", RTLD_LAZY);
+    if (wk) {
+        dlclose(wk);
+        return;
+    }
+
+    const struct mach_header *mainHeader = NULL;
+    intptr_t slide = 0;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        // Main app executable (not a dylib/framework)
+        if (strstr(name, ".app/") && !strstr(name, ".dylib") && !strstr(name, ".framework/")) {
+            mainHeader = _dyld_get_image_header(i);
+            slide = _dyld_get_image_vmaddr_slide(i);
+            break;
+        }
+    }
+    if (!mainHeader) {
+        mainHeader = _dyld_get_image_header(0);
+        slide = _dyld_get_image_vmaddr_slide(0);
+    }
+    if (!mainHeader) return;
+
+    // Known mangled symbols used by apps (WidgetCenter.shared / reload*).
+    // Rebind prevents dyld_stub_binder abort: "can't resolve symbol ... WidgetKit".
+    struct { const char *name; void *rep; } pairs[] = {
+        { "_$s9WidgetKit0A6CenterCMa", (void *)PXStub_WidgetCenter_Ma },
+        { "$s9WidgetKit0A6CenterCMa", (void *)PXStub_WidgetCenter_Ma },
+        { "_$s9WidgetKit0A6CenterC6sharedACvgZ", (void *)PXStub_WidgetCenter_shared },
+        { "$s9WidgetKit0A6CenterC6sharedACvgZ", (void *)PXStub_WidgetCenter_shared },
+        { "_$s9WidgetKit0A6CenterC6sharedACvau", (void *)PXStub_WidgetCenter_shared },
+        { "_$s9WidgetKit0A6CenterC18reloadAllTimelinesyyF", (void *)PXStub_WidgetKit_void },
+        { "$s9WidgetKit0A6CenterC18reloadAllTimelinesyyF", (void *)PXStub_WidgetKit_void },
+        { "_$s9WidgetKit0A6CenterC15reloadTimelines6ofKindySS_tF", (void *)PXStub_WidgetKit_void },
+        { "$s9WidgetKit0A6CenterC15reloadTimelines6ofKindySS_tF", (void *)PXStub_WidgetKit_void },
+        // Broad fallbacks for other WidgetKit entry points — return inert pointer / no-op.
+        { NULL, NULL }
+    };
+
+    // Also walk all indirect symbols with prefix _$s9WidgetKit and rebind generically.
+    // First apply known pairs.
+    for (int i = 0; pairs[i].name; i++) {
+        PXRebindIndirectSymbol(mainHeader, slide, pairs[i].name, pairs[i].rep);
+    }
+
+    // Generic prefix scan: any remaining WidgetKit lazy binds → void stub (safe abort avoidance).
+#if defined(__LP64__)
+    typedef struct mach_header_64 px_mh_t;
+    typedef struct segment_command_64 px_seg_t;
+    typedef struct section_64 px_sect_t;
+    typedef struct nlist_64 px_nlist_t;
+    const uint32_t LC_SEG = LC_SEGMENT_64;
+#else
+    typedef struct mach_header px_mh_t;
+    typedef struct segment_command px_seg_t;
+    typedef struct section px_sect_t;
+    typedef struct nlist px_nlist_t;
+    const uint32_t LC_SEG = LC_SEGMENT;
+#endif
+    const px_mh_t *mh = (const px_mh_t *)mainHeader;
+    const uint8_t *cursor = (const uint8_t *)(mh + 1);
+    const struct symtab_command *symtab = NULL;
+    const struct dysymtab_command *dysymtab = NULL;
+    const px_seg_t *linkedit = NULL;
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)cursor;
+        if (lc->cmd == LC_SYMTAB) symtab = (const struct symtab_command *)lc;
+        else if (lc->cmd == LC_DYSYMTAB) dysymtab = (const struct dysymtab_command *)lc;
+        else if (lc->cmd == LC_SEG) {
+            const px_seg_t *seg = (const px_seg_t *)lc;
+            if (strcmp(seg->segname, SEG_LINKEDIT) == 0) linkedit = seg;
+        }
+        cursor += lc->cmdsize;
+    }
+    if (!symtab || !dysymtab || !linkedit) return;
+    const uintptr_t linkeditBase = (uintptr_t)slide + linkedit->vmaddr - linkedit->fileoff;
+    const char *strtab = (const char *)(linkeditBase + symtab->stroff);
+    const px_nlist_t *symtabEntries = (const px_nlist_t *)(linkeditBase + symtab->symoff);
+    const uint32_t *indirectSymtab = (const uint32_t *)(linkeditBase + dysymtab->indirectsymoff);
+
+    cursor = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)cursor;
+        if (lc->cmd == LC_SEG) {
+            const px_seg_t *seg = (const px_seg_t *)lc;
+            if (strcmp(seg->segname, SEG_DATA) != 0 &&
+                strcmp(seg->segname, "__DATA_CONST") != 0 &&
+                strcmp(seg->segname, "__AUTH_CONST") != 0) {
+                cursor += lc->cmdsize;
+                continue;
+            }
+            const px_sect_t *sections = (const px_sect_t *)(seg + 1);
+            for (uint32_t s = 0; s < seg->nsects; s++) {
+                const px_sect_t *sect = &sections[s];
+                uint32_t type = sect->flags & SECTION_TYPE;
+                if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+                uint32_t entryCount = (uint32_t)(sect->size / sizeof(void *));
+                void **indirect = (void **)((uintptr_t)slide + sect->addr);
+                uint32_t indirectOffset = sect->reserved1;
+                for (uint32_t j = 0; j < entryCount; j++) {
+                    uint32_t symIndex = indirectSymtab[indirectOffset + j];
+                    if (symIndex >= symtab->nsyms) continue;
+                    if (symIndex == INDIRECT_SYMBOL_ABS || symIndex == INDIRECT_SYMBOL_LOCAL) continue;
+                    const char *name = strtab + symtabEntries[symIndex].n_un.n_strx;
+                    if (!name) continue;
+                    const char *n = (name[0] == '_') ? name + 1 : name;
+                    if (strncmp(n, "$s9WidgetKit", 11) != 0 && strncmp(n, "WidgetKit", 9) != 0) continue;
+                    // Prefer pointer stub for accessors (Ma, shared, gZ, vau), void for methods (yF, yyF)
+                    BOOL wantPtr = (strstr(n, "Ma") != NULL) || (strstr(n, "shared") != NULL) ||
+                                   (strstr(n, "vau") != NULL) || (strstr(n, "vgZ") != NULL) ||
+                                   (strstr(n, "vpZ") != NULL);
+                    vm_size_t psz = vm_page_size ? vm_page_size : 0x4000;
+                    vm_address_t page = (vm_address_t)&indirect[j];
+                    page &= ~(vm_address_t)(psz - 1);
+                    vm_protect(mach_task_self(), page, psz, FALSE,
+                               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                    indirect[j] = wantPtr ? (void *)PXStub_WidgetKit_ptr : (void *)PXStub_WidgetKit_void;
+                }
+            }
+        }
+        cursor += lc->cmdsize;
+    }
+
+    PXLog(@"[WeaponX] WidgetKit missing on this iOS — rebound WidgetKit imports to soft stubs");
+}
+
 static void PXInstallCompatibilityShims(void) {
     @autoreleasepool {
         // Some apps call selectors that may not exist on all iOS builds.
@@ -259,9 +543,15 @@ static void PXInstallCompatibilityShims(void) {
         // on real iOS < 14 while spoofed version is 14+.
         PXCompatShimWKWebView();
 
+        // Crash: dyld can't resolve WidgetKit.WidgetCenter on real iOS < 14 (ARMCPUZ etc.)
+        // when app takes iOS 14+ path after version spoof / weak-link WidgetKit.
+        PXRebindWidgetKitSymbolsInMainImage();
+
         // Quiet unused-function warnings if optimizer is aggressive
         (void)PXCompatReturnNil;
         (void)PXCompatVoidNoop;
+        (void)PXStub_WidgetCenter_Ma;
+        (void)PXStub_WidgetCenter_shared;
     }
 }
 

@@ -895,20 +895,41 @@ static void modifyUserAgentString(NSString **userAgentString, NSString *original
             NSString *spoofedVersion = getSpoofedSystemVersion();
             if (spoofedVersion) {
                 NSOperatingSystemVersion spoofedStructVersion = getOperatingSystemVersion(spoofedVersion);
-                
-                // Implement the comparison logic ourselves instead of calling orig
-                BOOL result = (spoofedStructVersion.majorVersion > version.majorVersion) ||
-                             ((spoofedStructVersion.majorVersion == version.majorVersion) && 
-                              (spoofedStructVersion.minorVersion > version.minorVersion)) ||
-                             ((spoofedStructVersion.majorVersion == version.majorVersion) && 
-                              (spoofedStructVersion.minorVersion == version.minorVersion) && 
-                              (spoofedStructVersion.patchVersion >= version.patchVersion));
-                
-                BOOL originalResult = %orig;
-                NSLog(@"[iosversion] NSProcessInfo.isOperatingSystemAtLeastVersion: %ld.%ld.%ld, original: %d → spoofed: %d", 
-                      (long)version.majorVersion, (long)version.minorVersion, (long)version.patchVersion,
-                      originalResult, result);
-                
+
+                // Feature gate: never claim OS capabilities above the *real* device OS.
+                // systemVersion / operatingSystemVersion still return the full spoof for
+                // fingerprint display; this only blocks code paths that would load
+                // unavailable frameworks (e.g. WidgetKit on iOS 13 after spoofing 14+).
+                static NSOperatingSystemVersion realOS = {0, 0, 0};
+                static dispatch_once_t onceToken;
+                dispatch_once(&onceToken, ^{
+                    NSDictionary *sv = [NSDictionary dictionaryWithContentsOfFile:
+                                        @"/System/Library/CoreServices/SystemVersion.plist"];
+                    NSString *ver = [sv[@"ProductVersion"] isKindOfClass:[NSString class]] ? sv[@"ProductVersion"] : nil;
+                    if (ver.length) {
+                        NSArray *parts = [ver componentsSeparatedByString:@"."];
+                        if (parts.count > 0) realOS.majorVersion = [parts[0] integerValue];
+                        if (parts.count > 1) realOS.minorVersion = [parts[1] integerValue];
+                        if (parts.count > 2) realOS.patchVersion = [parts[2] integerValue];
+                    }
+                });
+
+                NSOperatingSystemVersion effective = spoofedStructVersion;
+                BOOL spoofAboveReal =
+                    (effective.majorVersion > realOS.majorVersion) ||
+                    (effective.majorVersion == realOS.majorVersion && effective.minorVersion > realOS.minorVersion) ||
+                    (effective.majorVersion == realOS.majorVersion && effective.minorVersion == realOS.minorVersion &&
+                     effective.patchVersion > realOS.patchVersion);
+                if (spoofAboveReal && realOS.majorVersion > 0) {
+                    effective = realOS;
+                }
+
+                BOOL result = (effective.majorVersion > version.majorVersion) ||
+                             ((effective.majorVersion == version.majorVersion) &&
+                              (effective.minorVersion > version.minorVersion)) ||
+                             ((effective.majorVersion == version.majorVersion) &&
+                              (effective.minorVersion == version.minorVersion) &&
+                              (effective.patchVersion >= version.patchVersion));
                 return result;
             }
         }
