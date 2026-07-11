@@ -276,15 +276,22 @@ static BOOL PXBundleIsAppleOrWebKit(NSString *bundleID) {
 
 /// Rebuild substrate filter plists from full enabled global_scope only.
 /// Never accepts a partial/just-added list; empty scope → placeholder-only (never Bundles=[]).
+/// Always includes SpringBoard so Profile Indicator (and other SB-hosted UI) can load.
 static void PXWriteSubstrateFilterPlists(void) {
     // 1–3. Enabled mains from global_scope → expand extensions + WebKit cluster → unique+sort.
     NSArray<NSString *> *enabledMain = PXEnabledScopeBundleIDs();
     NSArray<NSString *> *expanded = PXExpandedResetBundleIDs(enabledMain);
-    NSArray<NSString *> *validBundles = PXNormalizedBundleList(expanded);
+    NSMutableArray<NSString *> *withSystem = [NSMutableArray arrayWithArray:expanded ?: @[]];
+    // Profile Indicator runs inside SpringBoard; scope apps alone never inject there.
+    if (![withSystem containsObject:@"com.apple.springboard"]) {
+        [withSystem addObject:@"com.apple.springboard"];
+    }
+    NSArray<NSString *> *validBundles = PXNormalizedBundleList(withSystem);
 
-    // 4. Empty after expand: placeholder only (NEVER Bundles=[]).
+    // 4. Empty after expand: still keep SpringBoard (NEVER Bundles=[]).
     if (validBundles.count == 0) {
-        validBundles = @[kPXNoInjectionPlaceholder];
+        validBundles = @[@"com.apple.springboard", kPXNoInjectionPlaceholder];
+        validBundles = PXNormalizedBundleList(validBundles);
     }
 
     // 5. Bridge: third-party app/extensions only (drop Apple/WebKit); empty → placeholder.

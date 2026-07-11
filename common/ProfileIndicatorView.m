@@ -5,13 +5,79 @@
 #import "IPStatusViewController.h"
 #import "SecurityTabViewController.h"
 #import "PXPaths.h"
+#import <notify.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 // Forward declaration for static callbacks
 static void toggleIndicatorCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static void springboardLockCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static void springboardLockStateCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
-static void springboardBlankedScreenCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
+
+static NSString *const kPXSecuritySettingsDomain = @"com.weaponx.securitySettings";
+static NSString *const kPXProfileIndicatorEnabledKey = @"profileIndicatorEnabled";
+
+/// Prefer CFPreferences + on-disk plist (shared truth across ProjectX app + SpringBoard).
+static BOOL PXProfileIndicatorSettingEnabled(void) {
+    CFPropertyListRef pref = CFPreferencesCopyAppValue(
+        (__bridge CFStringRef)kPXProfileIndicatorEnabledKey,
+        (__bridge CFStringRef)kPXSecuritySettingsDomain);
+    if (pref) {
+        BOOL on = NO;
+        if (CFGetTypeID(pref) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)pref);
+        } else if (CFGetTypeID(pref) == CFNumberGetTypeID()) {
+            int n = 0;
+            CFNumberGetValue((CFNumberRef)pref, kCFNumberIntType, &n);
+            on = (n != 0);
+        }
+        CFRelease(pref);
+        return on;
+    }
+    NSArray<NSString *> *paths = @[
+        @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
+        @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
+    ];
+    for (NSString *path in paths) {
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (dict[kPXProfileIndicatorEnabledKey] != nil) {
+            return [dict[kPXProfileIndicatorEnabledKey] boolValue];
+        }
+    }
+    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:kPXSecuritySettingsDomain];
+    [ud synchronize];
+    return [ud boolForKey:kPXProfileIndicatorEnabledKey];
+}
+
+static void PXWriteProfileIndicatorSetting(BOOL enabled) {
+    CFPreferencesSetAppValue(
+        (__bridge CFStringRef)kPXProfileIndicatorEnabledKey,
+        enabled ? kCFBooleanTrue : kCFBooleanFalse,
+        (__bridge CFStringRef)kPXSecuritySettingsDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kPXSecuritySettingsDomain);
+
+    NSString *path = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
+    NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
+    dict[kPXProfileIndicatorEnabledKey] = @(enabled);
+    [dict writeToFile:path atomically:YES];
+
+    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:kPXSecuritySettingsDomain];
+    [ud setBool:enabled forKey:kPXProfileIndicatorEnabledKey];
+    [ud synchronize];
+}
+
+/// Real lock state via notify (lockstate Darwin fires for both lock and unlock).
+static BOOL PXSpringBoardIsLocked(void) {
+    int token = 0;
+    uint64_t state = 0;
+    if (notify_register_check("com.apple.springboard.lockstate", &token) == NOTIFY_STATUS_OK) {
+        notify_get_state(token, &state);
+        notify_cancel(token);
+        // Non-zero = locked on modern iOS.
+        return state != 0;
+    }
+    return NO;
+}
 
 @interface ProfileIndicatorView ()
 
@@ -112,16 +178,9 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
     if (self) {
         [self setup];
         [self registerForNotifications];
-        self.isDeviceLocked = NO;
-        // UIKit notifications for resign/become active (screen off/on, app background/foreground)
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(handleDeviceLock)
-                                                     name:UIApplicationWillResignActiveNotification
-                                                   object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(handleDeviceUnlock)
-                                                     name:UIApplicationDidBecomeActiveNotification
-                                                   object:nil];
+        // Only real lock state — do NOT use WillResignActive (hides indicator whenever any app opens).
+        self.isDeviceLocked = PXSpringBoardIsLocked();
+        // Protected data unavailable ≈ locked / device sleeping with passcode.
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleDeviceLock)
                                                      name:UIApplicationProtectedDataWillBecomeUnavailable
@@ -130,7 +189,7 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
                                                  selector:@selector(handleDeviceUnlock)
                                                      name:UIApplicationProtectedDataDidBecomeAvailable
                                                    object:nil];
-        // Register for SpringBoard lock/unlock Darwin notifications (works even without passcode)
+        // Register for SpringBoard lock/unlock Darwin notifications
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         (__bridge const void *)(self),
                                         springboardLockCallback,
@@ -141,13 +200,6 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
                                         (__bridge const void *)(self),
                                         springboardLockStateCallback,
                                         CFSTR("com.apple.springboard.lockstate"),
-                                        NULL,
-                                        CFNotificationSuspensionBehaviorDeliverImmediately);
-        // Screen blank/unblank notifications (for non-password devices)
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                        (__bridge const void *)(self),
-                                        springboardBlankedScreenCallback,
-                                        CFSTR("com.apple.springboard.hasBlankedScreen"),
                                         NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -278,33 +330,23 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
     // Use a fixed window size that's slightly larger than the circle to accommodate shadow
     CGRect windowFrame = CGRectMake(initialX, initialY, 60, 60);
     
-    // For SpringBoard, use a simple window without UIScene
-    if ([[[NSProcessInfo processInfo] processName] isEqualToString:@"SpringBoard"]) {
-        PXLog(@"Creating window for SpringBoard");
-        self.floatingWindow = [[PassThroughWindow alloc] initWithFrame:windowFrame];
-    } 
-    // For iOS 13+, use UIWindowScene
-    else if (@available(iOS 13.0, *)) {
+    // Prefer UIWindowScene on iOS 13+ (including SpringBoard — bare initWithFrame often never paints).
+    if (@available(iOS 13.0, *)) {
         NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
+        UIWindowScene *chosenScene = nil;
         for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                self.floatingWindow = [[PassThroughWindow alloc] initWithWindowScene:windowScene];
-                self.floatingWindow.frame = windowFrame;
-                PXLog(@"Created floating window with scene: %@", windowScene);
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                chosenScene = ws;
                 break;
             }
+            if (!chosenScene) chosenScene = ws;
         }
-        
-        // Fallback if we couldn't find an active scene
-        if (!self.floatingWindow && connectedScenes.count > 0) {
-            UIScene *anyScene = [connectedScenes anyObject];
-            if ([anyScene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)anyScene;
-                self.floatingWindow = [[PassThroughWindow alloc] initWithWindowScene:windowScene];
-                self.floatingWindow.frame = windowFrame;
-                PXLog(@"Created floating window with fallback scene");
-            }
+        if (chosenScene) {
+            self.floatingWindow = [[PassThroughWindow alloc] initWithWindowScene:chosenScene];
+            self.floatingWindow.frame = windowFrame;
+            PXLog(@"Created floating window with scene (activation=%ld)", (long)chosenScene.activationState);
         }
     }
     
@@ -316,8 +358,9 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
     
     // Configure the window properties
     self.floatingWindow.backgroundColor = [UIColor clearColor];
-    self.floatingWindow.windowLevel = UIWindowLevelAlert + 1; // Above alerts
-    self.floatingWindow.clipsToBounds = YES; // Don't let content bleed outside bounds
+    // StatusBar+ keeps it above icons but below system alerts when possible
+    self.floatingWindow.windowLevel = UIWindowLevelStatusBar + 100;
+    self.floatingWindow.clipsToBounds = NO; // Allow glow shadow
     self.floatingWindow.userInteractionEnabled = YES;
     
     // Disable touch interception in SpringBoard
@@ -724,13 +767,14 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
 }
 
 - (void)show {
+    // Refresh lock flag from system (do not trust stale isDeviceLocked after app switch).
+    self.isDeviceLocked = PXSpringBoardIsLocked();
     if (self.isDeviceLocked) {
         PXLog(@"ProfileIndicator: Show suppressed because device is locked");
         return;
     }
-    // Check settings to make sure we should be showing
-    NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    BOOL profileIndicatorEnabled = [securitySettings boolForKey:@"profileIndicatorEnabled"];
+    // Shared truth: CFPreferences + plist file (not only suite NSUserDefaults).
+    BOOL profileIndicatorEnabled = PXProfileIndicatorSettingEnabled();
     
     if (!profileIndicatorEnabled) {
         PXLog(@"ProfileIndicator: Not showing because setting is disabled");
@@ -738,51 +782,28 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
         return;
     }
     
-    // If already visible, do nothing
-    if (self.floatingWindow && !self.floatingWindow.hidden) {
-        PXLog(@"ProfileIndicator: Show called but already visible");
+    // If already visible, just refresh label
+    if (self.floatingWindow && !self.floatingWindow.hidden && self.profileLabel) {
+        PXLog(@"ProfileIndicator: Show called but already visible — refreshing profile id");
+        [self updateProfileIndicator];
         return;
     }
     
     PXLog(@"ProfileIndicator: Show requested by user or notification");
     
-    // Always completely hide first to ensure clean state
-    // This is critical to make sure any previous instances are fully cleaned up
-    [self hide];
-    
-    // Force destroy any existing floating windows from other instances
-    if (@available(iOS 13.0, *)) {
-        // Use scene-based window enumeration for iOS 13+ (modern approach)
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                NSArray<UIWindow *> *sceneWindows = windowScene.windows;
-                for (UIWindow *window in sceneWindows) {
-                    if ([window isKindOfClass:NSClassFromString(@"PassThroughWindow")] && window != self.floatingWindow) {
-                        PXLog(@"ProfileIndicator: ⚠️ Found another floating window in scene, destroying it");
-                        window.hidden = YES;
-                    }
-                }
-            }
-        }
-    } else {
-        // Fallback for older iOS (shouldn't be needed since we target iOS 15+)
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            if ([window isKindOfClass:NSClassFromString(@"PassThroughWindow")] && window != self.floatingWindow) {
-                PXLog(@"ProfileIndicator: ⚠️ Found another floating window, destroying it");
-                window.hidden = YES;
-            }
-        }
-        #pragma clang diagnostic pop
+    // Clean previous window if any (avoid full hide when already nil)
+    if (self.floatingWindow) {
+        [self hide];
     }
     
     PXLog(@"ProfileIndicator: 🔄 Show requested - performing full recreation");
     
     // Fully recreate the window and setup from scratch every time
     [self createFloatingWindow];
+    if (!self.floatingWindow) {
+        PXLog(@"ProfileIndicator: ❌ Failed to create floating window");
+        return;
+    }
     
     // Read the profile ID before creating the label
     NSString *profileId = nil;
@@ -822,9 +843,6 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
     // Ensure the label is visible
     self.profileLabel.alpha = 1.0;
     
-    // IMPORTANT CHANGE: Don't call updateProfileIndicator here, as it will create a duplicate indicator
-    // Instead, update the appearance directly based on the profile ID
-    
     // Update appearance based on profile ID
     [self updateIndicatorWithName:nil iconName:nil profileId:profileId];
     
@@ -838,7 +856,16 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
     self.alpha = 1.0;
     self.transform = CGAffineTransformIdentity;
     self.floatingWindow.hidden = NO;
-    [self.floatingWindow makeKeyAndVisible];
+    // Never makeKeyAndVisible on SpringBoard — steals key window from SB UI.
+    BOOL isSpringBoard = [[[NSProcessInfo processInfo] processName] isEqualToString:@"SpringBoard"];
+    if (!isSpringBoard) {
+        [self.floatingWindow makeKeyAndVisible];
+    } else {
+        // Ensure hierarchy is on-screen without becoming key.
+        self.floatingWindow.windowLevel = UIWindowLevelStatusBar + 100;
+        [self.floatingWindow setNeedsLayout];
+        [self.floatingWindow layoutIfNeeded];
+    }
     
     PXLog(@"ProfileIndicator: ✅ Show complete - Window visible: %d, Frame: %@, Label text: '%@'", 
           !self.floatingWindow.isHidden, 
@@ -943,20 +970,13 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
         if ([notificationName isEqualToString:@"com.hydra.projectx.enableProfileIndicator"]) {
             // Use dispatch_async to ensure UI updates happen on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
-                // Update setting first to ensure show() doesn't reject the request
-                NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-                [securitySettings setBool:YES forKey:@"profileIndicatorEnabled"];
-                [securitySettings synchronize];
-                
+                PXWriteProfileIndicatorSetting(YES);
+                indicatorView.isDeviceLocked = PXSpringBoardIsLocked();
                 [indicatorView show];
             });
         } else if ([notificationName isEqualToString:@"com.hydra.projectx.disableProfileIndicator"]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                // Update setting first for consistency
-                NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-                [securitySettings setBool:NO forKey:@"profileIndicatorEnabled"];
-                [securitySettings synchronize];
-                
+                PXWriteProfileIndicatorSetting(NO);
                 [indicatorView hide];
             });
         } else if ([notificationName isEqualToString:@"com.hydra.projectx.profileChanged"]) {
@@ -1007,7 +1027,10 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
 
 - (void)handleDeviceUnlock {
     self.isDeviceLocked = NO;
-    [self show]; // Show the indicator again when unlocked
+    // Only re-show if setting still enabled (avoid show after user disabled while locked).
+    if (PXProfileIndicatorSettingEnabled()) {
+        [self show];
+    }
 }
 
 - (void)handleTap:(UITapGestureRecognizer *)gesture {
@@ -1155,19 +1178,15 @@ static void springboardLockCallback(CFNotificationCenterRef center, void *observ
         [self handleDeviceLock];
     });
 }
-// SpringBoard lockstate (device unlocked)
+// lockstate fires for both lock and unlock — query notify state.
 static void springboardLockStateCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     ProfileIndicatorView *self = (__bridge ProfileIndicatorView *)observer;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self handleDeviceUnlock];
-    });
-}
-
-// Screen blanked (screen off or lock)
-static void springboardBlankedScreenCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    ProfileIndicatorView *self = (__bridge ProfileIndicatorView *)observer;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self handleDeviceLock];
+        if (PXSpringBoardIsLocked()) {
+            [self handleDeviceLock];
+        } else {
+            [self handleDeviceUnlock];
+        }
     });
 }
 // Screen unlocked/turned on

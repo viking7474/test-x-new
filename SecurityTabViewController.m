@@ -1619,8 +1619,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.profileIndicatorToggleSwitch.onTintColor = [UIColor systemBlueColor];
     self.profileIndicatorToggleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
     
-    // Check if profile indicator is enabled
+    // Check if profile indicator is enabled (prefer on-disk plist — same source as SpringBoard)
     BOOL profileIndicatorEnabled = [self.securitySettings boolForKey:@"profileIndicatorEnabled"];
+    NSDictionary *secPlist = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+    if (secPlist[@"profileIndicatorEnabled"] != nil) {
+        profileIndicatorEnabled = [secPlist[@"profileIndicatorEnabled"] boolValue];
+    }
     [self.profileIndicatorToggleSwitch setOn:profileIndicatorEnabled animated:NO];
     
     [self.profileIndicatorToggleSwitch addTarget:self action:@selector(profileIndicatorToggleChanged:) forControlEvents:UIControlEventValueChanged];
@@ -2317,9 +2321,74 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)profileIndicatorToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
     
-    // Save setting immediately and synchronize
+    // 1) Persist to on-disk plist (source of truth for SpringBoard / tweak)
+    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
+    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
+    settingsDict[@"profileIndicatorEnabled"] = @(enabled);
+    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
+                                                                   format:NSPropertyListXMLFormat_v1_0
+                                                                  options:0
+                                                                    error:nil];
+    if (plistData) {
+        [plistData writeToFile:securitySettingsPath atomically:YES];
+    }
+    CFPreferencesSetAppValue(CFSTR("profileIndicatorEnabled"),
+                             enabled ? kCFBooleanTrue : kCFBooleanFalse,
+                             CFSTR("com.weaponx.securitySettings"));
+    CFPreferencesAppSynchronize(CFSTR("com.weaponx.securitySettings"));
+
+    // 2) Suites + in-memory defaults
+    NSArray *suiteNames = @[
+        @"com.weaponx.securitySettings",
+        @"com.hydra.projectx.SecuritySettings",
+        @"com.hydra.projectx"
+    ];
+    for (NSString *suiteName in suiteNames) {
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
+        [defaults setBool:enabled forKey:@"profileIndicatorEnabled"];
+        [defaults synchronize];
+    }
     [self.securitySettings setBool:enabled forKey:@"profileIndicatorEnabled"];
     [self.securitySettings synchronize];
+
+    // 3) Ensure SpringBoard is listed in ProjectXTweak filter (Profile Indicator hosts in SB).
+    // Spoof hooks remain scope-gated; SB injection is required for the floating bubble.
+    NSArray<NSString *> *filterDirs = @[
+        @"/Library/MobileSubstrate/DynamicLibraries",
+        @"/var/jb/Library/MobileSubstrate/DynamicLibraries",
+        @"/var/mobile/Library/ProjectX/filter_plists"
+    ];
+    for (NSString *dir in filterDirs) {
+        NSString *tweakPath = [dir stringByAppendingPathComponent:@"ProjectXTweak.plist"];
+        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:tweakPath];
+        if (!plist) {
+            plist = [@{
+                @"Filter": @{
+                    @"Bundles": @[@"com.apple.springboard"],
+                    @"Mode": @"Any"
+                }
+            } mutableCopy];
+        }
+        NSMutableDictionary *filter = [plist[@"Filter"] isKindOfClass:[NSDictionary class]]
+            ? [plist[@"Filter"] mutableCopy]
+            : [@{@"Mode": @"Any"} mutableCopy];
+        NSMutableArray *bundles = [filter[@"Bundles"] isKindOfClass:[NSArray class]]
+            ? [filter[@"Bundles"] mutableCopy]
+            : [NSMutableArray array];
+        if (![bundles containsObject:@"com.apple.springboard"]) {
+            [bundles addObject:@"com.apple.springboard"];
+        }
+        // Drop pure placeholder-only if we now have springboard + real apps later.
+        filter[@"Bundles"] = bundles;
+        plist[@"Filter"] = filter;
+        [plist writeToFile:tweakPath atomically:YES];
+        [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0644}
+                                         ofItemAtPath:tweakPath
+                                                error:nil];
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.projectx.filterPlistChanged"),
+                                         NULL, NULL, YES);
     
     // Regular in-process notification with all necessary context
     NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
@@ -2341,9 +2410,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Post the Darwin notification synchronously to ensure immediate handling
     CFNotificationCenterPostNotification(darwinCenter, (__bridge CFStringRef)notificationName, NULL, NULL, YES);
     
-    PXLog(@"Profile indicator %@, saved to user defaults: %d, Darwin notification sent: %@", 
-           enabled ? @"enabled" : @"disabled", 
-           [self.securitySettings boolForKey:@"profileIndicatorEnabled"],
+    PXLog(@"Profile indicator %@, plist+CFPreferences saved, Darwin: %@",
+           enabled ? @"enabled" : @"disabled",
            notificationName);
     
     // Add haptic feedback

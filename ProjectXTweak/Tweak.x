@@ -4187,33 +4187,26 @@ static char* hook_GSSystemGetSerialNo(void) {
             %init(ScreenshotModifier);
         }
         
-        // Initialize profile indicator immediately
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // Check if profile indicator is enabled in settings
-            NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-            [securitySettings synchronize]; // Force synchronization to get latest state
-            
-            BOOL profileIndicatorEnabled = [securitySettings boolForKey:@"profileIndicatorEnabled"];
-            PXLog(@"ProfileIndicator: Checking if indicator should be shown at startup: %@", profileIndicatorEnabled ? @"YES" : @"NO");
-            
-            // Initialize the indicator view regardless of current state
-            PXLog(@"ProfileIndicator: Initializing profile indicator view at SpringBoard startup");
+        // Profile Indicator: init after SpringBoard UI is up (scenes / windows ready).
+        // Always create sharedInstance so Darwin enable/disable observers are registered.
+        // Retry show — early ctor often runs before UIWindowScene exists.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             ProfileIndicatorView *indicator = [ProfileIndicatorView sharedInstance];
-            
-            // Show indicator if enabled in settings
-            if (profileIndicatorEnabled) {
-                PXLog(@"ProfileIndicator: Enabled in settings, showing indicator");
+            BOOL enabled = PXReadSecuritySettingBool(@"profileIndicatorEnabled");
+            PXLog(@"ProfileIndicator: SB startup enabled=%d", enabled);
+            if (enabled) {
                 [indicator show];
-                PXLog(@"ProfileIndicator: Show method called during SpringBoard startup");
             } else {
-                PXLog(@"ProfileIndicator: Disabled in settings, indicator initialized but not shown");
-                // Make sure it's hidden
                 [indicator hide];
             }
-            
-            // Note: Darwin notification observers are registered within ProfileIndicatorView itself,
-            // so we don't need to register them here. This ensures clean separation of concerns.
-            PXLog(@"ProfileIndicator: Initialization complete, waiting for real-time updates");
+            // Additional delayed attempts if enabled (scene may attach late).
+            for (NSInteger attempt = 1; attempt <= 5; attempt++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((1.0 + attempt) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (!PXReadSecuritySettingBool(@"profileIndicatorEnabled")) return;
+                    [[ProfileIndicatorView sharedInstance] show];
+                });
+            }
+            PXLog(@"ProfileIndicator: SB delayed init complete");
         });
     }
 
