@@ -1,0 +1,510 @@
+{
+  "schemaVersion": 1,
+  "countries": {
+    "US": {
+      "iso": "us",
+      "localeIdentifier": "en_US",
+      "preferredLanguages": ["en-US"],
+      "carriers": [
+        {"name": "T-Mobile", "mcc": "310", "mnc": "260"},
+        {"name": "T-Mobile", "mcc": "310", "mnc": "160"},
+        {"name": "T-Mobile", "mcc": "310", "mnc": "240"},
+        {"name": "T-Mobile", "mcc": "310", "mnc": "800"},
+        {"name": "AT&T", "mcc": "310", "mnc": "410"},
+        {"name": "AT&T", "mcc": "310", "mnc": "170"},
+        {"name": "AT&T", "mcc": "310", "mnc": "150"},
+        {"name": "AT&T", "mcc": "310", "mnc": "680"},
+        {"name": "Verizon", "mcc": "311", "mnc": "480"},
+        {"name": "Verizon", "mcc": "310", "mnc": "004"},
+        {"name": "Verizon", "mcc": "310", "mnc": "010"},
+        {"name": "US Cellular", "mcc": "311", "mnc": "580"}
+      ]
+    },
+    "VN": {
+      "iso": "vn",
+      "localeIdentifier": "vi_VN",
+      "preferredLanguages": ["vi-VN", "en-US"],
+      "carriers": [
+        {"name": "Viettel", "mcc": "452", "mnc": "04"},
+        {"name": "Vinaphone", "mcc": "452", "mnc": "02"},
+        {"name": "MobiFone", "mcc": "452", "mnc": "01"},
+        {"name": "Vietnamobile", "mcc": "452", "mnc": "05"}
+      ]
+    },
+    "CA": {
+      "iso": "ca",
+      "localeIdentifier": "en_CA",
+      "preferredLanguages": ["en-CA", "fr-CA"],
+      "carriers": [
+        {"name": "Rogers", "mcc": "302", "mnc": "720"},
+        {"name": "Rogers", "mcc": "302", "mnc": "370"},
+        {"name": "Bell", "mcc": "302", "mnc": "610"},
+        {"name": "Bell", "mcc": "302", "mnc": "640"},
+        {"name": "Telus", "mcc": "302", "mnc": "220"},
+        {"name": "Freedom Mobile", "mcc": "302", "mnc": "490"},
+        {"name": "Videotron", "mcc": "302", "mnc": "500"}
+      ]
+    },
+    "IN": {
+      "iso": "in",
+      "localeIdentifier": "en_IN",
+      "preferredLanguages": ["en-IN", "hi-IN"],
+      "carriers": [
+        {"name": "Jio", "mcc": "405", "mnc": "840"},
+        {"name": "Jio", "mcc": "405", "mnc": "854"},
+        {"name": "Airtel", "mcc": "404", "mnc": "45"},
+        {"name": "Airtel", "mcc": "404", "mnc": "10"},
+        {"name": "Vi", "mcc": "404", "mnc": "20"},
+        {"name": "BSNL", "mcc": "404", "mnc": "34"}
+      ]
+    },
+    "GB": {
+      "iso": "gb",
+      "localeIdentifier": "en_GB",
+      "preferredLanguages": ["en-GB"],
+      "carriers": [
+        {"name": "EE", "mcc": "234", "mnc": "30"},
+        {"name": "EE", "mcc": "234", "mnc": "33"},
+        {"name": "O2", "mcc": "234", "mnc": "10"},
+        {"name": "Vodafone", "mcc": "234", "mnc": "15"},
+        {"name": "Three", "mcc": "234", "mnc": "20"}
+      ]
+    },
+    "DE": {
+      "iso": "de",
+      "localeIdentifier": "de_DE",
+      "preferredLanguages": ["de-DE", "en-US"],
+      "carriers": [
+        {"name": "Telekom", "mcc": "262", "mnc": "01"},
+        {"name": "Vodafone", "mcc": "262", "mnc": "02"},
+        {"name": "O2", "mcc": "262", "mnc": "03"},
+        {"name": "O2", "mcc": "262", "mnc": "07"}
+      ]
+    },
+    "FR": {
+      "iso": "fr",
+      "localeIdentifier": "fr_FR",
+      "preferredLanguages": ["fr-FR", "en-US"],
+      "carriers": [
+        {"name": "Orange", "mcc": "208", "mnc": "01"},
+        {"name": "SFR", "mcc": "208", "mnc": "10"},
+        {"name": "Bouygues", "mcc": "208", "mnc": "20"},
+        {"name": "Free", "mcc": "208", "mnc": "15"}
+      ]
+    },
+    "IT": {
+      "iso": "it",
+      "localeIdentifier": "it_IT",
+      "preferredLanguages": ["it-IT", "en-US"],
+      "carriers": [
+        {"name": "TIM", "mcc": "222", "mnc": "01"},
+        {"name": "Vodafone", "mcc": "222", "mnc": "10"},
+        {"name": "WindTre", "mcc": "222", "mnc": "88"},
+        {"name": "Iliad", "mcc": "222", "mnc": "50"}
+      ]
+    },
+    "ES": {
+      "iso": "es",
+      "localeIdentifier": "es_ES",
+      "preferredLanguages": ["es-ES", "en-US"],
+      "carriers": [
+        {"name": "Movistar", "mcc": "214", "mnc": "07"},
+        {"name": "Vodafone", "mcc": "214", "mnc": "01"},
+        {"name": "Orange", "mcc": "214", "mnc": "03"},
+        {"name": "Yoigo", "mcc": "214", "mnc": "04"}
+      ]
+    },
+    "NL": {
+      "iso": "nl",
+      "localeIdentifier": "nl_NL",
+      "preferredLanguages": ["nl-NL", "en-US"],
+      "carriers": [
+        {"name": "KPN", "mcc": "204", "mnc": "08"},
+        {"name": "Vodafone", "mcc": "204", "mnc": "04"},
+        {"name": "T-Mobile", "mcc": "204", "mnc": "16"}
+      ]
+    },
+    "PL": {
+      "iso": "pl",
+      "localeIdentifier": "pl_PL",
+      "preferredLanguages": ["pl-PL", "en-US"],
+      "carriers": [
+        {"name": "Orange", "mcc": "260", "mnc": "03"},
+        {"name": "Play", "mcc": "260", "mnc": "06"},
+        {"name": "T-Mobile", "mcc": "260", "mnc": "02"},
+        {"name": "Plus", "mcc": "260", "mnc": "01"}
+      ]
+    },
+    "JP": {
+      "iso": "jp",
+      "localeIdentifier": "ja_JP",
+      "preferredLanguages": ["ja-JP", "en-US"],
+      "carriers": [
+        {"name": "NTT DOCOMO", "mcc": "440", "mnc": "10"},
+        {"name": "au", "mcc": "440", "mnc": "50"},
+        {"name": "SoftBank", "mcc": "440", "mnc": "20"},
+        {"name": "Rakuten", "mcc": "440", "mnc": "11"}
+      ]
+    },
+    "KR": {
+      "iso": "kr",
+      "localeIdentifier": "ko_KR",
+      "preferredLanguages": ["ko-KR", "en-US"],
+      "carriers": [
+        {"name": "SK Telecom", "mcc": "450", "mnc": "05"},
+        {"name": "KT", "mcc": "450", "mnc": "08"},
+        {"name": "LG U+", "mcc": "450", "mnc": "06"}
+      ]
+    },
+    "CN": {
+      "iso": "cn",
+      "localeIdentifier": "zh_CN",
+      "preferredLanguages": ["zh-Hans-CN", "en-US"],
+      "carriers": [
+        {"name": "China Mobile", "mcc": "460", "mnc": "00"},
+        {"name": "China Mobile", "mcc": "460", "mnc": "02"},
+        {"name": "China Unicom", "mcc": "460", "mnc": "01"},
+        {"name": "China Telecom", "mcc": "460", "mnc": "11"}
+      ]
+    },
+    "TW": {
+      "iso": "tw",
+      "localeIdentifier": "zh_TW",
+      "preferredLanguages": ["zh-Hant-TW", "en-US"],
+      "carriers": [
+        {"name": "Chunghwa", "mcc": "466", "mnc": "92"},
+        {"name": "FarEasTone", "mcc": "466", "mnc": "01"},
+        {"name": "Taiwan Mobile", "mcc": "466", "mnc": "97"}
+      ]
+    },
+    "HK": {
+      "iso": "hk",
+      "localeIdentifier": "zh_HK",
+      "preferredLanguages": ["zh-Hant-HK", "en-HK"],
+      "carriers": [
+        {"name": "CSL", "mcc": "454", "mnc": "00"},
+        {"name": "3 Hong Kong", "mcc": "454", "mnc": "03"},
+        {"name": "SmarTone", "mcc": "454", "mnc": "06"},
+        {"name": "China Mobile HK", "mcc": "454", "mnc": "12"}
+      ]
+    },
+    "SG": {
+      "iso": "sg",
+      "localeIdentifier": "en_SG",
+      "preferredLanguages": ["en-SG", "zh-Hans-SG"],
+      "carriers": [
+        {"name": "Singtel", "mcc": "525", "mnc": "01"},
+        {"name": "StarHub", "mcc": "525", "mnc": "05"},
+        {"name": "M1", "mcc": "525", "mnc": "03"}
+      ]
+    },
+    "MY": {
+      "iso": "my",
+      "localeIdentifier": "ms_MY",
+      "preferredLanguages": ["ms-MY", "en-US"],
+      "carriers": [
+        {"name": "Maxis", "mcc": "502", "mnc": "12"},
+        {"name": "Celcom", "mcc": "502", "mnc": "13"},
+        {"name": "Digi", "mcc": "502", "mnc": "16"},
+        {"name": "U Mobile", "mcc": "502", "mnc": "18"}
+      ]
+    },
+    "TH": {
+      "iso": "th",
+      "localeIdentifier": "th_TH",
+      "preferredLanguages": ["th-TH", "en-US"],
+      "carriers": [
+        {"name": "AIS", "mcc": "520", "mnc": "03"},
+        {"name": "dtac", "mcc": "520", "mnc": "05"},
+        {"name": "TrueMove H", "mcc": "520", "mnc": "04"}
+      ]
+    },
+    "ID": {
+      "iso": "id",
+      "localeIdentifier": "id_ID",
+      "preferredLanguages": ["id-ID", "en-US"],
+      "carriers": [
+        {"name": "Telkomsel", "mcc": "510", "mnc": "10"},
+        {"name": "Indosat", "mcc": "510", "mnc": "01"},
+        {"name": "XL", "mcc": "510", "mnc": "11"},
+        {"name": "Tri", "mcc": "510", "mnc": "89"}
+      ]
+    },
+    "PH": {
+      "iso": "ph",
+      "localeIdentifier": "en_PH",
+      "preferredLanguages": ["en-PH", "fil-PH"],
+      "carriers": [
+        {"name": "Globe", "mcc": "515", "mnc": "02"},
+        {"name": "Smart", "mcc": "515", "mnc": "03"},
+        {"name": "DITO", "mcc": "515", "mnc": "66"}
+      ]
+    },
+    "AU": {
+      "iso": "au",
+      "localeIdentifier": "en_AU",
+      "preferredLanguages": ["en-AU"],
+      "carriers": [
+        {"name": "Telstra", "mcc": "505", "mnc": "01"},
+        {"name": "Optus", "mcc": "505", "mnc": "02"},
+        {"name": "Vodafone", "mcc": "505", "mnc": "03"}
+      ]
+    },
+    "BR": {
+      "iso": "br",
+      "localeIdentifier": "pt_BR",
+      "preferredLanguages": ["pt-BR", "en-US"],
+      "carriers": [
+        {"name": "Vivo", "mcc": "724", "mnc": "06"},
+        {"name": "Claro", "mcc": "724", "mnc": "05"},
+        {"name": "TIM", "mcc": "724", "mnc": "02"},
+        {"name": "Oi", "mcc": "724", "mnc": "31"}
+      ]
+    },
+    "MX": {
+      "iso": "mx",
+      "localeIdentifier": "es_MX",
+      "preferredLanguages": ["es-MX", "en-US"],
+      "carriers": [
+        {"name": "Telcel", "mcc": "334", "mnc": "020"},
+        {"name": "AT&T", "mcc": "334", "mnc": "050"},
+        {"name": "Movistar", "mcc": "334", "mnc": "030"}
+      ]
+    },
+    "TR": {
+      "iso": "tr",
+      "localeIdentifier": "tr_TR",
+      "preferredLanguages": ["tr-TR", "en-US"],
+      "carriers": [
+        {"name": "Turkcell", "mcc": "286", "mnc": "01"},
+        {"name": "Vodafone", "mcc": "286", "mnc": "02"},
+        {"name": "Türk Telekom", "mcc": "286", "mnc": "03"}
+      ]
+    },
+    "AE": {
+      "iso": "ae",
+      "localeIdentifier": "ar_AE",
+      "preferredLanguages": ["ar-AE", "en-US"],
+      "carriers": [
+        {"name": "Etisalat", "mcc": "424", "mnc": "02"},
+        {"name": "du", "mcc": "424", "mnc": "03"}
+      ]
+    },
+    "SA": {
+      "iso": "sa",
+      "localeIdentifier": "ar_SA",
+      "preferredLanguages": ["ar-SA", "en-US"],
+      "carriers": [
+        {"name": "STC", "mcc": "420", "mnc": "01"},
+        {"name": "Mobily", "mcc": "420", "mnc": "03"},
+        {"name": "Zain", "mcc": "420", "mnc": "04"}
+      ]
+    },
+    "RU": {
+      "iso": "ru",
+      "localeIdentifier": "ru_RU",
+      "preferredLanguages": ["ru-RU", "en-US"],
+      "carriers": [
+        {"name": "MTS", "mcc": "250", "mnc": "01"},
+        {"name": "Beeline", "mcc": "250", "mnc": "99"},
+        {"name": "MegaFon", "mcc": "250", "mnc": "02"},
+        {"name": "Tele2", "mcc": "250", "mnc": "20"}
+      ]
+    },
+    "UA": {
+      "iso": "ua",
+      "localeIdentifier": "uk_UA",
+      "preferredLanguages": ["uk-UA", "ru-UA", "en-US"],
+      "carriers": [
+        {"name": "Kyivstar", "mcc": "255", "mnc": "03"},
+        {"name": "Vodafone", "mcc": "255", "mnc": "01"},
+        {"name": "lifecell", "mcc": "255", "mnc": "06"}
+      ]
+    },
+    "SE": {
+      "iso": "se",
+      "localeIdentifier": "sv_SE",
+      "preferredLanguages": ["sv-SE", "en-US"],
+      "carriers": [
+        {"name": "Telia", "mcc": "240", "mnc": "01"},
+        {"name": "Tele2", "mcc": "240", "mnc": "07"},
+        {"name": "Telenor", "mcc": "240", "mnc": "08"},
+        {"name": "Three", "mcc": "240", "mnc": "02"}
+      ]
+    },
+    "NO": {
+      "iso": "no",
+      "localeIdentifier": "nb_NO",
+      "preferredLanguages": ["nb-NO", "en-US"],
+      "carriers": [
+        {"name": "Telenor", "mcc": "242", "mnc": "01"},
+        {"name": "Telia", "mcc": "242", "mnc": "02"},
+        {"name": "Ice", "mcc": "242", "mnc": "14"}
+      ]
+    },
+    "FI": {
+      "iso": "fi",
+      "localeIdentifier": "fi_FI",
+      "preferredLanguages": ["fi-FI", "en-US"],
+      "carriers": [
+        {"name": "Elisa", "mcc": "244", "mnc": "05"},
+        {"name": "Telia", "mcc": "244", "mnc": "91"},
+        {"name": "DNA", "mcc": "244", "mnc": "12"}
+      ]
+    },
+    "CH": {
+      "iso": "ch",
+      "localeIdentifier": "de_CH",
+      "preferredLanguages": ["de-CH", "fr-CH", "en-US"],
+      "carriers": [
+        {"name": "Swisscom", "mcc": "228", "mnc": "01"},
+        {"name": "Sunrise", "mcc": "228", "mnc": "02"},
+        {"name": "Salt", "mcc": "228", "mnc": "03"}
+      ]
+    },
+    "AT": {
+      "iso": "at",
+      "localeIdentifier": "de_AT",
+      "preferredLanguages": ["de-AT", "en-US"],
+      "carriers": [
+        {"name": "A1", "mcc": "232", "mnc": "01"},
+        {"name": "Magenta", "mcc": "232", "mnc": "03"},
+        {"name": "Drei", "mcc": "232", "mnc": "05"}
+      ]
+    },
+    "BE": {
+      "iso": "be",
+      "localeIdentifier": "nl_BE",
+      "preferredLanguages": ["nl-BE", "fr-BE", "en-US"],
+      "carriers": [
+        {"name": "Proximus", "mcc": "206", "mnc": "01"},
+        {"name": "Orange", "mcc": "206", "mnc": "10"},
+        {"name": "Base", "mcc": "206", "mnc": "20"}
+      ]
+    },
+    "PT": {
+      "iso": "pt",
+      "localeIdentifier": "pt_PT",
+      "preferredLanguages": ["pt-PT", "en-US"],
+      "carriers": [
+        {"name": "MEO", "mcc": "268", "mnc": "06"},
+        {"name": "NOS", "mcc": "268", "mnc": "03"},
+        {"name": "Vodafone", "mcc": "268", "mnc": "01"}
+      ]
+    },
+    "IE": {
+      "iso": "ie",
+      "localeIdentifier": "en_IE",
+      "preferredLanguages": ["en-IE"],
+      "carriers": [
+        {"name": "Vodafone", "mcc": "272", "mnc": "01"},
+        {"name": "Three", "mcc": "272", "mnc": "05"},
+        {"name": "eir", "mcc": "272", "mnc": "03"}
+      ]
+    },
+    "NZ": {
+      "iso": "nz",
+      "localeIdentifier": "en_NZ",
+      "preferredLanguages": ["en-NZ"],
+      "carriers": [
+        {"name": "Spark", "mcc": "530", "mnc": "05"},
+        {"name": "Vodafone", "mcc": "530", "mnc": "01"},
+        {"name": "2degrees", "mcc": "530", "mnc": "24"}
+      ]
+    },
+    "ZA": {
+      "iso": "za",
+      "localeIdentifier": "en_ZA",
+      "preferredLanguages": ["en-ZA"],
+      "carriers": [
+        {"name": "Vodacom", "mcc": "655", "mnc": "01"},
+        {"name": "MTN", "mcc": "655", "mnc": "10"},
+        {"name": "Cell C", "mcc": "655", "mnc": "07"},
+        {"name": "Telkom", "mcc": "655", "mnc": "02"}
+      ]
+    },
+    "EG": {
+      "iso": "eg",
+      "localeIdentifier": "ar_EG",
+      "preferredLanguages": ["ar-EG", "en-US"],
+      "carriers": [
+        {"name": "Vodafone", "mcc": "602", "mnc": "02"},
+        {"name": "Orange", "mcc": "602", "mnc": "01"},
+        {"name": "Etisalat", "mcc": "602", "mnc": "03"},
+        {"name": "WE", "mcc": "602", "mnc": "04"}
+      ]
+    },
+    "NG": {
+      "iso": "ng",
+      "localeIdentifier": "en_NG",
+      "preferredLanguages": ["en-NG"],
+      "carriers": [
+        {"name": "MTN", "mcc": "621", "mnc": "30"},
+        {"name": "Airtel", "mcc": "621", "mnc": "20"},
+        {"name": "Glo", "mcc": "621", "mnc": "50"},
+        {"name": "9mobile", "mcc": "621", "mnc": "60"}
+      ]
+    },
+    "AR": {
+      "iso": "ar",
+      "localeIdentifier": "es_AR",
+      "preferredLanguages": ["es-AR", "en-US"],
+      "carriers": [
+        {"name": "Claro", "mcc": "722", "mnc": "310"},
+        {"name": "Movistar", "mcc": "722", "mnc": "07"},
+        {"name": "Personal", "mcc": "722", "mnc": "34"}
+      ]
+    },
+    "CL": {
+      "iso": "cl",
+      "localeIdentifier": "es_CL",
+      "preferredLanguages": ["es-CL", "en-US"],
+      "carriers": [
+        {"name": "Entel", "mcc": "730", "mnc": "01"},
+        {"name": "Movistar", "mcc": "730", "mnc": "02"},
+        {"name": "Claro", "mcc": "730", "mnc": "03"}
+      ]
+    },
+    "CO": {
+      "iso": "co",
+      "localeIdentifier": "es_CO",
+      "preferredLanguages": ["es-CO", "en-US"],
+      "carriers": [
+        {"name": "Claro", "mcc": "732", "mnc": "101"},
+        {"name": "Movistar", "mcc": "732", "mnc": "123"},
+        {"name": "Tigo", "mcc": "732", "mnc": "103"}
+      ]
+    },
+    "IL": {
+      "iso": "il",
+      "localeIdentifier": "he_IL",
+      "preferredLanguages": ["he-IL", "en-US"],
+      "carriers": [
+        {"name": "Partner", "mcc": "425", "mnc": "01"},
+        {"name": "Cellcom", "mcc": "425", "mnc": "02"},
+        {"name": "Pelephone", "mcc": "425", "mnc": "03"}
+      ]
+    },
+    "PK": {
+      "iso": "pk",
+      "localeIdentifier": "ur_PK",
+      "preferredLanguages": ["ur-PK", "en-US"],
+      "carriers": [
+        {"name": "Jazz", "mcc": "410", "mnc": "01"},
+        {"name": "Telenor", "mcc": "410", "mnc": "06"},
+        {"name": "Zong", "mcc": "410", "mnc": "04"},
+        {"name": "Ufone", "mcc": "410", "mnc": "03"}
+      ]
+    },
+    "BD": {
+      "iso": "bd",
+      "localeIdentifier": "bn_BD",
+      "preferredLanguages": ["bn-BD", "en-US"],
+      "carriers": [
+        {"name": "Grameenphone", "mcc": "470", "mnc": "01"},
+        {"name": "Robi", "mcc": "470", "mnc": "02"},
+        {"name": "Banglalink", "mcc": "470", "mnc": "03"}
+      ]
+    }
+  }
+}

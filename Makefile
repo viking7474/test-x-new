@@ -133,6 +133,15 @@ internal-stage::
 	@mkdir -p $(THEOS_STAGING_DIR)/usr/bin
 	@cp -a weaponx-debug.sh $(THEOS_STAGING_DIR)/usr/bin/weaponx-debug
 	@chmod 755 $(THEOS_STAGING_DIR)/usr/bin/weaponx-debug
+	@echo "Installing carrier database..."
+	@mkdir -p $(THEOS_STAGING_DIR)/Library/WeaponX/Data
+	@mkdir -p $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data
+	@if [ -f "data/carrier_db.json" ]; then \
+		cp -a data/carrier_db.json $(THEOS_STAGING_DIR)/Library/WeaponX/Data/; \
+		cp -a data/carrier_db.json $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/; \
+		chmod 644 $(THEOS_STAGING_DIR)/Library/WeaponX/Data/carrier_db.json; \
+		chmod 644 $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/carrier_db.json; \
+	fi
 
 export CFLAGS = -fobjc-arc -Wno-error
 

@@ -58,36 +58,21 @@ static const NSTimeInterval kISOCountryCodeCacheValidDuration = 60.0; // 60 seco
 static NSString *const kFakeWiFiSSID = @"HomeWiFi";
 static NSString *const kFakeBSSID = @"00:11:22:33:44:55";
 
-// Best-effort carrier name for known MCC/MNC pairs when profile has no name.
+// Carrier name from CarrierDB (JSON) when available; never product branding.
 static NSString *PXCarrierNameForMCCMNC(NSString *mcc, NSString *mnc) {
     if (!mcc.length || !mnc.length) return kFakeCarrierName;
-    NSString *key = [NSString stringWithFormat:@"%@-%@", mcc, mnc];
-    static NSDictionary *map = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        map = @{
-            // United States
-            @"310-260": @"T-Mobile",
-            @"310-410": @"AT&T",
-            @"311-480": @"Verizon",
-            @"310-120": @"Sprint",
-            // Vietnam
-            @"452-01": @"MobiFone",
-            @"452-02": @"Vinaphone",
-            @"452-04": @"Viettel",
-            @"452-05": @"Vietnamobile",
-            // Common others
-            @"234-15": @"Vodafone UK",
-            @"234-10": @"O2",
-            @"262-01": @"Telekom",
-            @"208-01": @"Orange",
-            @"440-10": @"NTT DOCOMO",
-            @"460-00": @"China Mobile",
-            @"505-01": @"Telstra",
-        };
-    });
-    NSString *name = map[key];
-    return name.length ? name : kFakeCarrierName;
+    Class dbClass = NSClassFromString(@"CarrierDB");
+    if (dbClass && [dbClass respondsToSelector:@selector(sharedManager)]) {
+        id db = [dbClass sharedManager];
+        if ([db respondsToSelector:@selector(carrierNameForMCC:mnc:)]) {
+            NSString *name = [db carrierNameForMCC:mcc mnc:mnc];
+            if ([name isKindOfClass:[NSString class]] && name.length &&
+                ![name isEqualToString:@"ProjectX"] && ![name hasPrefix:@"ProjectX"]) {
+                return name;
+            }
+        }
+    }
+    return kFakeCarrierName;
 }
 
 // Cache for carrier details

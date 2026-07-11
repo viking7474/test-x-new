@@ -1,4 +1,5 @@
 #import "NetworkManager.h"
+#import "CarrierDB.h"
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import "ProjectXLogging.h"
@@ -15,112 +16,31 @@
     return sharedInstance;
 }
 
-#pragma mark - Carrier Methods
+#pragma mark - Carrier Methods (data-driven via CarrierDB)
 
 + (NSArray *)getCarriersForCountry:(NSString *)countryCode {
-    if ([countryCode.lowercaseString isEqualToString:@"us"]) {
-        return [self getUSCarriers];
-    } else if ([countryCode.lowercaseString isEqualToString:@"in"]) {
-        return [self getIndiaCarriers];
-    } else if ([countryCode.lowercaseString isEqualToString:@"ca"]) {
-        return [self getCanadaCarriers];
-    } else if ([countryCode.lowercaseString isEqualToString:@"vn"]) {
-        return [self getVietnamCarriers];
-    }
-    
-    // Return US carriers as default
-    return [self getUSCarriers];
-}
-
-+ (NSArray *)getVietnamCarriers {
-    return @[
-        @{@"name": @"Viettel", @"mcc": @"452", @"mnc": @"04"},
-        @{@"name": @"VinaPhone", @"mcc": @"452", @"mnc": @"02"},
-        @{@"name": @"MobiFone", @"mcc": @"452", @"mnc": @"01"},
-        @{@"name": @"Vietnamobile", @"mcc": @"452", @"mnc": @"05"}
-    ];
+    return [[CarrierDB sharedManager] carriersForCountry:countryCode];
 }
 
 + (NSDictionary *)getRandomCarrierForCountry:(NSString *)countryCode {
-    NSArray *carriers = [self getCarriersForCountry:countryCode];
-    if (carriers.count == 0) {
-        return @{
-            @"name": @"Unknown Carrier",
-            @"mcc": @"000",
-            @"mnc": @"00"
-        };
-    }
-    
-    NSUInteger randomIndex = arc4random_uniform((uint32_t)carriers.count);
-    return carriers[randomIndex];
+    return [[CarrierDB sharedManager] randomCarrierForCountry:countryCode];
+}
+
+// Legacy helpers — kept for call sites; backed by CarrierDB.
++ (NSArray *)getVietnamCarriers {
+    return [[CarrierDB sharedManager] carriersForCountry:@"VN"];
 }
 
 + (NSArray *)getUSCarriers {
-    return @[
-        // Major Carriers
-        @{@"name": @"Verizon", @"mcc": @"310", @"mnc": @"004"},
-        @{@"name": @"Verizon", @"mcc": @"310", @"mnc": @"010"},
-        @{@"name": @"Verizon", @"mcc": @"311", @"mnc": @"480"},
-        
-        @{@"name": @"AT&T", @"mcc": @"310", @"mnc": @"170"},
-        @{@"name": @"AT&T", @"mcc": @"310", @"mnc": @"410"},
-        @{@"name": @"AT&T", @"mcc": @"310", @"mnc": @"150"},
-        @{@"name": @"AT&T", @"mcc": @"310", @"mnc": @"680"},
-        
-        @{@"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"260"},
-        @{@"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"160"},
-        @{@"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"240"},
-        @{@"name": @"T-Mobile", @"mcc": @"310", @"mnc": @"800"},
-        
-        @{@"name": @"Sprint", @"mcc": @"310", @"mnc": @"120"},
-        @{@"name": @"Sprint", @"mcc": @"311", @"mnc": @"870"},
-        @{@"name": @"Sprint", @"mcc": @"312", @"mnc": @"530"},
-        
-        // Regional Carriers without spaces
-        @{@"name": @"Cellcom", @"mcc": @"311", @"mnc": @"210"}
-    ];
+    return [[CarrierDB sharedManager] carriersForCountry:@"US"];
 }
 
 + (NSArray *)getIndiaCarriers {
-    return @[
-        @{@"name": @"Jio", @"mcc": @"405", @"mnc": @"840"},
-        @{@"name": @"Jio", @"mcc": @"405", @"mnc": @"854"},
-        @{@"name": @"Jio", @"mcc": @"405", @"mnc": @"855"},
-        @{@"name": @"Jio", @"mcc": @"405", @"mnc": @"856"},
-        @{@"name": @"Jio", @"mcc": @"405", @"mnc": @"857"},
-        @{@"name": @"Airtel", @"mcc": @"404", @"mnc": @"45"},
-        @{@"name": @"Airtel", @"mcc": @"404", @"mnc": @"49"},
-        @{@"name": @"Airtel", @"mcc": @"404", @"mnc": @"70"},
-        @{@"name": @"Airtel", @"mcc": @"404", @"mnc": @"90"},
-        @{@"name": @"Airtel", @"mcc": @"404", @"mnc": @"92"},
-        @{@"name": @"BSNL", @"mcc": @"404", @"mnc": @"34"},
-        @{@"name": @"BSNL", @"mcc": @"404", @"mnc": @"38"},
-        @{@"name": @"BSNL", @"mcc": @"404", @"mnc": @"51"},
-        @{@"name": @"BSNL", @"mcc": @"404", @"mnc": @"53"},
-        @{@"name": @"MTNL", @"mcc": @"404", @"mnc": @"68"},
-        @{@"name": @"MTNL", @"mcc": @"404", @"mnc": @"69"}
-    ];
+    return [[CarrierDB sharedManager] carriersForCountry:@"IN"];
 }
 
 + (NSArray *)getCanadaCarriers {
-    return @[
-        @{@"name": @"Rogers", @"mcc": @"302", @"mnc": @"720"},
-        @{@"name": @"Rogers", @"mcc": @"302", @"mnc": @"370"},
-        @{@"name": @"Bell", @"mcc": @"302", @"mnc": @"610"},
-        @{@"name": @"Bell", @"mcc": @"302", @"mnc": @"640"},
-        @{@"name": @"Bell", @"mcc": @"302", @"mnc": @"651"},
-        @{@"name": @"Telus", @"mcc": @"302", @"mnc": @"220"},
-        @{@"name": @"Telus", @"mcc": @"302", @"mnc": @"221"},
-        @{@"name": @"Freedom Mobile", @"mcc": @"302", @"mnc": @"490"},
-        @{@"name": @"Videotron", @"mcc": @"302", @"mnc": @"500"},
-        @{@"name": @"Videotron", @"mcc": @"302", @"mnc": @"510"},
-        @{@"name": @"SaskTel", @"mcc": @"302", @"mnc": @"780"},
-        @{@"name": @"Fido", @"mcc": @"302", @"mnc": @"370"},
-        @{@"name": @"Koodo", @"mcc": @"302", @"mnc": @"220"},
-        @{@"name": @"Chatr", @"mcc": @"302", @"mnc": @"720"},
-        @{@"name": @"Cityfone", @"mcc": @"302", @"mnc": @"720"},
-        @{@"name": @"7-Eleven Speak Out", @"mcc": @"302", @"mnc": @"720"}
-    ];
+    return [[CarrierDB sharedManager] carriersForCountry:@"CA"];
 }
 
 #pragma mark - IP Address Methods
