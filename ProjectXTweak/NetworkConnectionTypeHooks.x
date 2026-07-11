@@ -13,6 +13,7 @@
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import "NetworkManager.h"
+#import "CarrierDB.h"
 
 #import "PXScope.h"
 
@@ -61,16 +62,10 @@ static NSString *const kFakeBSSID = @"00:11:22:33:44:55";
 // Carrier name from CarrierDB (JSON) when available; never product branding.
 static NSString *PXCarrierNameForMCCMNC(NSString *mcc, NSString *mnc) {
     if (!mcc.length || !mnc.length) return kFakeCarrierName;
-    Class dbClass = NSClassFromString(@"CarrierDB");
-    if (dbClass && [dbClass respondsToSelector:@selector(sharedManager)]) {
-        id db = [dbClass sharedManager];
-        if ([db respondsToSelector:@selector(carrierNameForMCC:mnc:)]) {
-            NSString *name = [db carrierNameForMCC:mcc mnc:mnc];
-            if ([name isKindOfClass:[NSString class]] && name.length &&
-                ![name isEqualToString:@"ProjectX"] && ![name hasPrefix:@"ProjectX"]) {
-                return name;
-            }
-        }
+    NSString *name = [[CarrierDB sharedManager] carrierNameForMCC:mcc mnc:mnc];
+    if ([name isKindOfClass:[NSString class]] && name.length &&
+        ![name isEqualToString:@"ProjectX"] && ![name hasPrefix:@"ProjectX"]) {
+        return name;
     }
     return kFakeCarrierName;
 }
