@@ -33,6 +33,13 @@
 
 @implementation AppDataCleaner {
     NSFileManager *_fileManager;
+    // Per-wipe discovery cache: verify reuses UUIDs from completeAppDataWipe (same features, less re-scan).
+    NSString *_wipeCacheBundleID;
+    NSString *_wipeCacheDataUUID;
+    NSString *_wipeCacheRootlessDataUUID;
+    NSArray *_wipeCacheGroupUUIDs;
+    NSArray *_wipeCacheRootlessGroupUUIDs;
+    NSArray *_wipeCacheExtensionContainers; // array of @{dataUUID, rootless}
 }
 
 - (BOOL)_sqliteExecAtPath:(NSString *)dbPath sql:(NSString *)sql errorOut:(NSString **)errorOut {
@@ -419,6 +426,43 @@ static NSString *PXShellQuote(NSString *s) {
     if (!s.length) return @"''";
     NSString *escaped = [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]; 
     return [NSString stringWithFormat:@"'%@'", escaped];
+}
+
+/// Shell fragment: wipe container children except MCM metadata, then recreate minimal layout.
+static NSString *PXShellWipeContainerKeepMetadata(NSString *containerPath) {
+    if (!containerPath.length) return @"";
+    NSString *q = PXShellQuote(containerPath);
+    return [NSString stringWithFormat:
+            @"find %@ -mindepth 1 -maxdepth 1 "
+            @"-not -name '.com.apple.mobile_container_manager.metadata.plist' "
+            @"-not -name '.com.apple.containermanagerd.metadata.plist' "
+            @"-exec rm -rf {} + 2>/dev/null || true; "
+            @"mkdir -p %@/Documents %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true",
+            q, q, q, q, q];
+}
+
+/// Shell fragment: fast data-container wipe (top-level dirs + hidden non-Apple + recreate).
+static NSString *PXShellFastDataContainerWipe(NSString *containerPath) {
+    if (!containerPath.length) return @"";
+    NSString *q = PXShellQuote(containerPath);
+    return [NSString stringWithFormat:
+            @"rm -rf %@/Documents %@/Library %@/tmp %@/StoreKit %@/SystemData 2>/dev/null || true; "
+            @"mkdir -p %@/Documents %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true; "
+            @"find %@ -mindepth 1 -maxdepth 1 -name '.*' ! -name '.com.apple*' -exec rm -rf {} \\; 2>/dev/null || true",
+            q, q, q, q, q,
+            q, q, q, q,
+            q];
+}
+
+/// Shell fragment: chflags + chmod + prune-aware final sweep (one traversal after unlock).
+static NSString *PXShellFinalSweep(NSString *containerPath) {
+    if (!containerPath.length) return @"";
+    NSString *q = PXShellQuote(containerPath);
+    return [NSString stringWithFormat:
+            @"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true; "
+            @"chmod -R 0777 %@ 2>/dev/null || true; "
+            @"find %@ -mindepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true",
+            q, q, q];
 }
 
 static NSString *PXTimestampSuffix(void) {
@@ -1066,6 +1110,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
     // Find extension containers (pass cached dirs for speed)
     NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:cachedDataDirs rootlessDataDirs:cachedRootlessDataDirs bundleDirs:cachedBundleDirs rootlessBundleDirs:cachedRootlessBundleDirs];
+
+    // Publish discovery for verifyDataCleared (same coverage, no second full re-scan).
+    _wipeCacheBundleID = [bundleID copy];
+    _wipeCacheDataUUID = [dataUUID copy];
+    _wipeCacheRootlessDataUUID = [rootlessDataUUID copy];
+    _wipeCacheGroupUUIDs = [groupUUIDs copy] ?: @[];
+    _wipeCacheRootlessGroupUUIDs = [rootlessGroupUUIDs copy] ?: @[];
+    _wipeCacheExtensionContainers = [extensionContainers copy] ?: @[];
     
     [self logMessage:@"[AppDataCleaner] Found UUIDs - Bundle: %@, Data: %@, RootlessData: %@, Groups=%lu RootlessGroups=%lu", 
           bundleUUID ?: @"nil", dataUUID ?: @"nil", rootlessDataUUID ?: @"nil", (unsigned long)groupUUIDs.count, (unsigned long)rootlessGroupUUIDs.count];
@@ -1074,30 +1126,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
      BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
      int rmTimeout = (deep || isSystemApp) ? (15 * 60) : (5 * 60);
      int findTimeout = (deep || isSystemApp) ? (20 * 60) : (8 * 60);
+     // Batched multi-container scripts can take as long as the sum of individual finds.
+     int batchTimeout = MAX(findTimeout, rmTimeout);
+     if (groupUUIDs.count + rootlessGroupUUIDs.count + extensionContainers.count > 1) {
+         batchTimeout = MIN(30 * 60, findTimeout + (int)(groupUUIDs.count + rootlessGroupUUIDs.count) * 60);
+     }
     
-    // Clear data container
+    // Clear data container — single shell: rm top-level dirs + mkdir + hidden cleanup
     if (dataUUID) {
         NSString *dataContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataUUID];
-        [self logMessage:@"[AppDataCleaner] Wiping data container: %@", dataContainerPath];
+        [self logMessage:@"[AppDataCleaner] Wiping data container (batched shell): %@", dataContainerPath];
         
         // DEBUG: Count files before
         NSError *err = nil;
         NSArray *beforeContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[dataContainerPath stringByAppendingPathComponent:@"Library"] error:&err];
         [self logMessage:@"[AppDataCleaner] DEBUG: Library has %lu items before wipe", (unsigned long)beforeContents.count];
         
-        // FAST wipe: remove top-level directories entirely (much faster than chmod -R + rm contents).
-        // Container metadata plists at root are preserved.
-        NSArray *subDirs = @[@"Documents", @"Library", @"tmp", @"StoreKit", @"SystemData"]; 
-        for (NSString *dir in subDirs) {
-            NSString *fullPath = [dataContainerPath stringByAppendingPathComponent:dir];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@' 2>/dev/null || true", fullPath] timeoutSec:rmTimeout];
-        }
-        // Recreate minimal structure to avoid app/iOS assumptions.
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"mkdir -p '%@/Documents' '%@/Library/Caches' '%@/Library/Preferences' '%@/tmp' 2>/dev/null || true",
-                                      dataContainerPath, dataContainerPath, dataContainerPath, dataContainerPath] timeoutSec:60];
-        
-        // Also wipe any hidden directories and files at root level
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -mindepth 1 -maxdepth 1 -name '.*' ! -name '.com.apple*' -exec rm -rf {} \\; 2>/dev/null || true", dataContainerPath] timeoutSec:findTimeout];
+        // FAST wipe: same subdirs/hidden rules as before, one posix_spawn instead of ~7.
+        [self runCommandWithPrivileges:PXShellFastDataContainerWipe(dataContainerPath) timeoutSec:batchTimeout];
         
         // DEBUG: Count files after
         NSArray *afterContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[dataContainerPath stringByAppendingPathComponent:@"Library"] error:nil];
@@ -1125,30 +1171,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     // Process rootless bundle container
     NSString *rootlessBundlePath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@", bundleUUID];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:rootlessBundlePath]) {
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'/*", rootlessBundlePath] timeoutSec:rmTimeout];
+    if (bundleUUID.length && [[NSFileManager defaultManager] fileExistsAtPath:rootlessBundlePath]) {
+        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf %@/* 2>/dev/null || true", PXShellQuote(rootlessBundlePath)] timeoutSec:rmTimeout];
     }
     
-    // Process group containers - DIRECT wipe using fast rm -rf
-    [self logMessage:@"[AppDataCleaner] Wiping %lu app group containers directly", (unsigned long)groupUUIDs.count];
+    // Process group + rootless group containers in ONE shell (same find/mkdir per path as before).
+    NSMutableArray<NSString *> *groupWipeParts = [NSMutableArray array];
+    [self logMessage:@"[AppDataCleaner] Wiping %lu app group containers (batched shell)", (unsigned long)groupUUIDs.count];
     for (NSString *groupUUID in groupUUIDs) {
         NSString *groupPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
         [self logMessage:@"[AppDataCleaner] Fast wiping group: %@", groupUUID];
-        // Wipe everything except container metadata (critical for stable mapping).
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -mindepth 1 -maxdepth 1 -not -name '.com.apple.mobile_container_manager.metadata.plist' -not -name '.com.apple.containermanagerd.metadata.plist' -exec rm -rf {} + 2>/dev/null || true",
-                                      groupPath] timeoutSec:findTimeout];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"mkdir -p '%@/Documents' '%@/Library/Caches' '%@/Library/Preferences' '%@/tmp' 2>/dev/null || true",
-                                      groupPath, groupPath, groupPath, groupPath] timeoutSec:60];
+        [groupWipeParts addObject:PXShellWipeContainerKeepMetadata(groupPath)];
     }
-    
-    // Process rootless group containers
     for (NSString *groupUUID in rootlessGroupUUIDs) {
         NSString *groupPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
         [self logMessage:@"[AppDataCleaner] Fast wiping rootless group: %@", groupUUID];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -mindepth 1 -maxdepth 1 -not -name '.com.apple.mobile_container_manager.metadata.plist' -not -name '.com.apple.containermanagerd.metadata.plist' -exec rm -rf {} + 2>/dev/null || true",
-                                      groupPath] timeoutSec:findTimeout];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"mkdir -p '%@/Documents' '%@/Library/Caches' '%@/Library/Preferences' '%@/tmp' 2>/dev/null || true",
-                                      groupPath, groupPath, groupPath, groupPath] timeoutSec:60];
+        [groupWipeParts addObject:PXShellWipeContainerKeepMetadata(groupPath)];
+    }
+    if (groupWipeParts.count > 0) {
+        [self runBatchedCommandsWithPrivileges:groupWipeParts timeoutSec:batchTimeout];
     }
     
     [self logMessage:@"[AppDataCleaner] Group containers wiped successfully"];
@@ -1170,16 +1211,17 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // If any lingering maild instance still holds files open, rename is safe; rm -rf can trigger SIGABRT later.
         NSString *mailPath = @"/var/mobile/Library/Mail";
         NSString *trashPath = [NSString stringWithFormat:@"/var/mobile/Library/Mail.WeaponXTrash.%@", PXTimestampSuffix()];
+        NSMutableArray<NSString *> *mailShell = [NSMutableArray array];
         if ([_fileManager fileExistsAtPath:mailPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"mv '%@' '%@' 2>/dev/null || true", mailPath, trashPath]];
+            [mailShell addObject:[NSString stringWithFormat:@"mv '%@' '%@' 2>/dev/null || true", mailPath, trashPath]];
         }
-        [self runCommandWithPrivileges:@"mkdir -p '/var/mobile/Library/Mail' 2>/dev/null || true"]; 
-        [self runCommandWithPrivileges:@"chown -R mobile:mobile '/var/mobile/Library/Mail' 2>/dev/null || true"]; 
-
-        [self runCommandWithPrivileges:@"rm -f '/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"]; 
-        [self runCommandWithPrivileges:@"rm -f '/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"]; 
-        [self runCommandWithPrivileges:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"]; 
-        [self runCommandWithPrivileges:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"]; 
+        [mailShell addObject:@"mkdir -p '/var/mobile/Library/Mail' 2>/dev/null || true"];
+        [mailShell addObject:@"chown -R mobile:mobile '/var/mobile/Library/Mail' 2>/dev/null || true"];
+        [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
+        [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
+        [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
+        [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
+        [self runBatchedCommandsWithPrivileges:mailShell timeoutSec:120]; 
 
         // Keep maild stopped while accounts cleanup runs.
         PXStopMailDaemonsBestEffort(self);
@@ -1287,28 +1329,37 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
     }
     
-    // Process extension containers - simplified
+    // Process extension containers — batched into one shell (same find+mkdir semantics).
     if (extensionContainers.count > 0) {
-        [self logMessage:@"[AppDataCleaner] Wiping %lu extension containers", (unsigned long)extensionContainers.count];
+        [self logMessage:@"[AppDataCleaner] Wiping %lu extension containers (batched shell)", (unsigned long)extensionContainers.count];
+        NSMutableArray<NSString *> *extParts = [NSMutableArray array];
         for (NSDictionary *extInfo in extensionContainers) {
             NSString *extDataUUID = extInfo[@"dataUUID"];
             if (extDataUUID) {
                 BOOL rootless = [extInfo[@"rootless"] boolValue];
                 NSString *basePath = rootless ? @"/containers/Data/Application" : @"/var/mobile/Containers/Data/Application";
                 NSString *containerPath = [basePath stringByAppendingPathComponent:extDataUUID];
-                [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -mindepth 1 -maxdepth 1 -not -name '.com.apple.mobile_container_manager.metadata.plist' -not -name '.com.apple.containermanagerd.metadata.plist' -exec rm -rf {} + 2>/dev/null || true", containerPath] timeoutSec:findTimeout];
-                [self runCommandWithPrivileges:[NSString stringWithFormat:@"mkdir -p '%@/Documents' '%@/Library/Caches' '%@/Library/Preferences' '%@/tmp' 2>/dev/null || true",
-                                              containerPath, containerPath, containerPath, containerPath] timeoutSec:60];
+                [extParts addObject:PXShellWipeContainerKeepMetadata(containerPath)];
             }
+        }
+        if (extParts.count > 0) {
+            [self runBatchedCommandsWithPrivileges:extParts timeoutSec:batchTimeout];
         }
         [self logMessage:@"[AppDataCleaner] Extension containers wiped"];
     }
     
-    // Clear preferences and cookies only (SAFE paths, no SpringBoard state!)
-    [self logMessage:@"[AppDataCleaner] Clearing preferences and cookies"];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '/var/mobile/Library/Preferences/%@.plist' 2>/dev/null || true", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '/var/mobile/Library/Caches/%@' 2>/dev/null || true", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '/var/mobile/Library/Cookies/%@.binarycookies' 2>/dev/null || true", bundleID]];
+    // Clear preferences and cookies only (SAFE paths, no SpringBoard state!) — one shell for all paths.
+    [self logMessage:@"[AppDataCleaner] Clearing preferences and cookies (batched shell)"];
+    NSString *bEsc = [bundleID stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+    [self runCommandWithPrivileges:[NSString stringWithFormat:
+        @"rm -f '/var/mobile/Library/Preferences/%@.plist' 2>/dev/null || true; "
+        @"rm -rf '/var/mobile/Library/Caches/%@' 2>/dev/null || true; "
+        @"rm -f '/var/mobile/Library/Cookies/%@.binarycookies' 2>/dev/null || true; "
+        @"rm -rf '/var/mobile/Library/Caches/%@' 2>/dev/null || true; "
+        @"rm -rf '/var/mobile/Library/Preferences/%@.plist' 2>/dev/null || true; "
+        @"rm -rf '/var/root/Library/Preferences/%@.plist' 2>/dev/null || true; "
+        @"rm -rf '/private/var/mobile/Library/Preferences/%@.plist' 2>/dev/null || true",
+        bEsc, bEsc, bEsc, bEsc, bEsc, bEsc, bEsc] timeoutSec:120];
     
     // NOTE: Removed SpringBoard/ApplicationState deletion - it causes RESPRING!
     // NOTE: Removed PluginKit clearing - it uses slow findPathsMatchingPattern
@@ -1318,10 +1369,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     // Skip RootHide var data clearing - uses slow findPathsMatchingPattern
     [self logMessage:@"[AppDataCleaner] Skipping RootHide cleaning (optimization)"];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Caches/%@", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Preferences/%@.plist", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/root/Library/Preferences/%@.plist", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /private/var/mobile/Library/Preferences/%@.plist", bundleID]];
 
     // Clear iCloud-related data
     [self logMessage:@"[AppDataCleaner] Clearing iCloud-related data"]; 
@@ -1419,18 +1466,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if (![containerPath isKindOfClass:[NSString class]] || containerPath.length == 0) return;
     if (![[NSFileManager defaultManager] fileExistsAtPath:containerPath]) return;
 
-    // Fast final sweep: avoid per-file chmod/chflags/rm.
+    // Fast final sweep: chflags + chmod + find in ONE shell (same steps, one spawn).
     // Preserve all .com.apple* entries to keep container metadata stable.
     BOOL deep = [self _deepCleanEnabled];
     int timeout = deep ? (20 * 60) : (8 * 60);
-
-    NSString *quoted = PXShellQuote(containerPath);
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true", quoted] timeoutSec:timeout];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"chmod -R 0777 %@ 2>/dev/null || true", quoted] timeoutSec:timeout];
-
-    // One traversal. -prune skips any .com.apple* anywhere in tree.
-    NSString *wipe = [NSString stringWithFormat:@"find %@ -mindepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true", quoted];
-    [self runCommandWithPrivileges:wipe timeoutSec:timeout];
+    [self runCommandWithPrivileges:PXShellFinalSweep(containerPath) timeoutSec:timeout];
 }
 
 // Remove crash logs and system logs for this bundleID
@@ -1551,12 +1591,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     NSLog(@"[AppDataCleaner] Fixing permissions before removal: %@", path);
     
-    // Try to fix permissions with chmod and remove flags with chflags
-    NSString *chmodCommand = [NSString stringWithFormat:@"chmod -R 0777 '%@' 2>/dev/null || true", path];
-    [self runCommandWithPrivileges:chmodCommand];
-    
-    NSString *chflagsCommand = [NSString stringWithFormat:@"chflags -R nouchg,noschg,nohidden '%@' 2>/dev/null || true", path];
-    [self runCommandWithPrivileges:chflagsCommand];
+    NSString *q = PXShellQuote(path);
+    // chmod + chflags in one spawn; then try NSFileManager; fall back to rm in same style as before.
+    [self runCommandWithPrivileges:[NSString stringWithFormat:
+        @"chmod -R 0777 %@ 2>/dev/null || true; "
+        @"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true",
+        q, q] timeoutSec:120];
     
     // Try standard file manager removal
     NSError *error;
@@ -1566,8 +1606,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSLog(@"[AppDataCleaner] Standard removal failed: %@", error.localizedDescription);
         
         // Try more aggressive removal with rm -rf
-        NSString *rmCommand = [NSString stringWithFormat:@"rm -rf '%@' 2>/dev/null", path];
-        [self runCommandWithPrivileges:rmCommand];
+        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", q] timeoutSec:120];
     }
 }
 
@@ -2687,16 +2726,18 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
 
     NSString *quoted = PXShellQuote(path);
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true", quoted] timeoutSec:timeoutSec];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"chmod -R 0777 %@ 2>/dev/null || true", quoted] timeoutSec:timeoutSec];
-
-    NSString *cmd = nil;
+    NSString *wipePart = nil;
     if (keepStructure) {
         // Keep .com.apple* metadata in this directory.
-        cmd = [NSString stringWithFormat:@"find %@ -mindepth 1 -maxdepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true", quoted];
+        wipePart = [NSString stringWithFormat:@"find %@ -mindepth 1 -maxdepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true", quoted];
     } else {
-        cmd = [NSString stringWithFormat:@"rm -rf %@/* 2>/dev/null || true", quoted];
+        wipePart = [NSString stringWithFormat:@"rm -rf %@/* 2>/dev/null || true", quoted];
     }
+    // chflags + chmod + wipe in one spawn (same feature set).
+    NSString *cmd = [NSString stringWithFormat:
+                     @"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true; "
+                     @"chmod -R 0777 %@ 2>/dev/null || true; %@",
+                     quoted, quoted, wipePart];
     [self runCommandWithPrivileges:cmd timeoutSec:timeoutSec];
 }
 
@@ -2856,6 +2897,30 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 - (void)runCommandWithPrivileges:(NSString *)command {
     [self runCommandWithPrivileges:command timeoutSec:60];
+}
+
+/// Batch multiple shell snippets into a single `/bin/sh -c` spawn.
+/// Same semantics as sequential `runCommandWithPrivileges:` (each piece still runs; failures are non-fatal via `|| true` in callers).
+/// Cuts posix_spawn + shell startup cost that dominates Reset Data when many small `rm`/`mkdir`/`find` are issued.
+- (void)runBatchedCommandsWithPrivileges:(NSArray<NSString *> *)commands timeoutSec:(int)timeoutSec {
+    if (![commands isKindOfClass:[NSArray class]] || commands.count == 0) {
+        return;
+    }
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:commands.count];
+    for (id c in commands) {
+        if (![c isKindOfClass:[NSString class]]) continue;
+        NSString *s = [(NSString *)c stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (s.length == 0) continue;
+        [parts addObject:s];
+    }
+    if (parts.count == 0) return;
+    if (parts.count == 1) {
+        [self runCommandWithPrivileges:parts[0] timeoutSec:timeoutSec];
+        return;
+    }
+    // Join with `;` so every step runs even if a prior command fails (matches prior independent spawns).
+    NSString *batched = [parts componentsJoinedByString:@"; "];
+    [self runCommandWithPrivileges:batched timeoutSec:timeoutSec];
 }
 
 // Optimized: find files/dirs under root matching any basename pattern (single traversal).
@@ -3020,51 +3085,67 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // Create an array to store paths that weren't cleared properly
     NSMutableArray *unclearedPaths = [NSMutableArray array];
     NSMutableSet<NSString *> *verifiedPaths = [NSMutableSet set];
+
+    // Prefer wipe-pass discovery cache (same UUIDs just used for wipe; avoids re-listing containers).
+    BOOL useWipeCache = (_wipeCacheBundleID.length && bundleID.length &&
+                         [_wipeCacheBundleID isEqualToString:bundleID]);
     
     // 1. Verify app data container is cleared
-    NSString *dataContainerUUID = [self findDataContainerUUID:bundleID];
+    NSString *dataContainerUUID = useWipeCache ? _wipeCacheDataUUID : [self findDataContainerUUID:bundleID];
     if (dataContainerUUID) {
         NSString *dataContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataContainerUUID];
         [self verifyClearedPath:dataContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
     }
 
-    NSString *rootlessDataContainerUUID = [self findRootlessDataContainerUUID:bundleID];
+    NSString *rootlessDataContainerUUID = useWipeCache ? _wipeCacheRootlessDataUUID : [self findRootlessDataContainerUUID:bundleID];
     if (rootlessDataContainerUUID) {
         NSString *rootlessDataContainerPath = [NSString stringWithFormat:@"/containers/Data/Application/%@", rootlessDataContainerUUID];
         [self verifyClearedPath:rootlessDataContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
     }
     
-    // 2. Verify group containers
-    NSArray *groupContainerUUIDs = [self findGroupContainerUUIDsForBundleID:bundleID];
+    // 2. Verify group containers (heuristic + entitlement-resolved — same as before when cache miss)
+    NSArray *groupContainerUUIDs = useWipeCache ? (_wipeCacheGroupUUIDs ?: @[]) : [self findGroupContainerUUIDsForBundleID:bundleID];
     for (NSString *groupUUID in groupContainerUUIDs) {
         NSString *groupContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
         [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
     }
 
-    NSArray *resolvedGroupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO];
-    for (NSString *groupUUID in resolvedGroupUUIDs) {
-        NSString *groupContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+    // When cache hit, wipe already used entitlement-resolved groups as primary set — still union heuristic above.
+    // On cache miss, keep dual resolution (findGroup + entitlements) exactly as historical behavior.
+    if (!useWipeCache) {
+        NSArray *resolvedGroupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO];
+        for (NSString *groupUUID in resolvedGroupUUIDs) {
+            NSString *groupContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
+            [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
     }
 
-    NSArray *rootlessGroupContainerUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
+    NSArray *rootlessGroupContainerUUIDs = useWipeCache ? (_wipeCacheRootlessGroupUUIDs ?: @[]) : [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
     for (NSString *groupUUID in rootlessGroupContainerUUIDs) {
         NSString *groupContainerPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
         [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
     }
     
     // 3. Verify extension containers
-    NSArray *extensionDataUUIDs = [self findExtensionDataContainersForBundleID:bundleID];
-    for (NSString *extensionUUID in extensionDataUUIDs) {
-        NSString *extensionPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", extensionUUID];
-        [self verifyClearedPath:extensionPath reportingTo:unclearedPaths seen:verifiedPaths];
+    if (!useWipeCache) {
+        NSArray *extensionDataUUIDs = [self findExtensionDataContainersForBundleID:bundleID];
+        for (NSString *extensionUUID in extensionDataUUIDs) {
+            NSString *extensionPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", extensionUUID];
+            [self verifyClearedPath:extensionPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
     }
 
-    NSArray *dataDirs = [self listDirectoriesInPath:@"/var/mobile/Containers/Data/Application"];
-    NSArray *rootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
-    NSArray *bundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
-    NSArray *rootlessBundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
-    NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:dataDirs rootlessDataDirs:rootlessDataDirs bundleDirs:bundleDirs rootlessBundleDirs:rootlessBundleDirs];
+    NSArray *extensionContainers = nil;
+    if (useWipeCache) {
+        extensionContainers = _wipeCacheExtensionContainers ?: @[];
+        NSLog(@"[AppDataCleaner] Verify reusing wipe discovery cache for %@", bundleID);
+    } else {
+        NSArray *dataDirs = [self listDirectoriesInPath:@"/var/mobile/Containers/Data/Application"];
+        NSArray *rootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
+        NSArray *bundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
+        NSArray *rootlessBundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
+        extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:dataDirs rootlessDataDirs:rootlessDataDirs bundleDirs:bundleDirs rootlessBundleDirs:rootlessBundleDirs];
+    }
     for (NSDictionary *extInfo in extensionContainers) {
         NSString *extDataUUID = extInfo[@"dataUUID"];
         if (!extDataUUID.length) continue;
@@ -3130,16 +3211,26 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
     
     // 7. Final verification summary
-    if (filteredPaths.count > 0) {
+    BOOL ok = (filteredPaths.count == 0);
+    if (!ok) {
         NSLog(@"[AppDataCleaner] ⚠️ WARNING: Verification found %lu uncleared data paths:", (unsigned long)filteredPaths.count);
         for (NSDictionary *item in filteredPaths) {
             NSLog(@"[AppDataCleaner] - UNCLEARED: %@ (%@)", item[@"path"], item[@"info"]);
         }
-        return NO;
     } else {
         NSLog(@"[AppDataCleaner] ✅ All data successfully cleared for %@", bundleID);
-        return YES;
     }
+
+    // Drop wipe discovery cache after consume (next clear rebuilds it).
+    if (useWipeCache) {
+        _wipeCacheBundleID = nil;
+        _wipeCacheDataUUID = nil;
+        _wipeCacheRootlessDataUUID = nil;
+        _wipeCacheGroupUUIDs = nil;
+        _wipeCacheRootlessGroupUUIDs = nil;
+        _wipeCacheExtensionContainers = nil;
+    }
+    return ok;
 }
 
 - (void)verifyClearedPath:(NSString *)path reportingTo:(NSMutableArray *)unclearedPaths seen:(NSMutableSet<NSString *> *)seenPaths {
@@ -4844,16 +4935,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         return;
     }
     
-    NSLog(@"[AppDataCleaner] Completely wiping container: %@", containerPath);
+    NSLog(@"[AppDataCleaner] Completely wiping container (batched shell): %@", containerPath);
 
     BOOL deep = [self _deepCleanEnabled];
-    int chmodTimeout = deep ? (10 * 60) : (3 * 60);
     int findTimeout = deep ? (20 * 60) : (8 * 60);
+    // Cover chmod + dual find + mkdir in one shell; use findTimeout as ceiling.
+    int timeout = deep ? (25 * 60) : (12 * 60);
+    (void)findTimeout;
 
-    // Set all permissions before removal
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"chmod -R 777 '%@'", containerPath] timeoutSec:chmodTimeout];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -type d -exec chmod 777 {} \\;", containerPath] timeoutSec:chmodTimeout];
-    
     // Preserve iOS container metadata files (do not rewrite them).
     // Modifying these can break MCM/LaunchServices container mapping and cause "Data container not found".
     NSArray *systemFiles = @[
@@ -4866,24 +4955,22 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSLog(@"[AppDataCleaner] Preserving system file: %@", fullPath);
         }
     }
-    
-    // Remove all non-system files first (preserve .com.apple.mobile_container_manager* and .com.apple.containermanagerd*)
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -type f -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -exec rm -f {} \\;", containerPath] timeoutSec:findTimeout];
-    
-    // Then remove empty non-system directories from bottom up
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -depth -type d -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -empty -delete", containerPath] timeoutSec:findTimeout];
-    
-    // Create minimal structure to avoid iOS crashes
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"mkdir -p '%@/Documents' '%@/Library/Caches' '%@/Library/Preferences' '%@/tmp'", 
-        containerPath, containerPath, containerPath, containerPath] timeoutSec:60];
-    
-    // Set proper permissions on the directories
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"chmod 755 '%@/Documents' '%@/Library' '%@/Library/Caches' '%@/Library/Preferences' '%@/tmp'", 
-        containerPath, containerPath, containerPath, containerPath, containerPath] timeoutSec:60];
-    
-    // Touch standard files that apps might expect
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"touch '%@/Documents/.nomedia' '%@/Library/Preferences/.initialized'", 
-        containerPath, containerPath] timeoutSec:60];
+
+    NSString *q = PXShellQuote(containerPath);
+    // Same steps as before (chmod → find files → empty dirs → mkdir → chmod → touch), one spawn.
+    NSString *script = [NSString stringWithFormat:
+        @"chmod -R 777 %@ 2>/dev/null || true; "
+        @"find %@ -type d -exec chmod 777 {} \\; 2>/dev/null || true; "
+        @"find %@ -type f -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -exec rm -f {} \\; 2>/dev/null || true; "
+        @"find %@ -depth -type d -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -empty -delete 2>/dev/null || true; "
+        @"mkdir -p %@/Documents %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true; "
+        @"chmod 755 %@/Documents %@/Library %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true; "
+        @"touch %@/Documents/.nomedia %@/Library/Preferences/.initialized 2>/dev/null || true",
+        q, q, q, q,
+        q, q, q, q,
+        q, q, q, q, q,
+        q, q];
+    [self runCommandWithPrivileges:script timeoutSec:timeout];
 }
 
 // NEW: Method to clean IconState.plist
@@ -5349,22 +5436,26 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Kill helpers again to reduce races.
         PXStopSafariDaemonsBestEffort(self);
 
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
         for (NSString *rel in pathsToNuke) {
             NSString *p = [containerPath stringByAppendingPathComponent:rel];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@' 2>/dev/null || true", p]];
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", PXShellQuote(p)]];
         }
 
         // Nuke WebKit caches with both dot and dash variants.
         NSString *cachesDir = [containerPath stringByAppendingPathComponent:@"Library/Caches"]; 
         if ([_fileManager fileExistsAtPath:cachesDir]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'/com.apple.WebKit.* '%@'/com.apple.WebKit-* 2>/dev/null || true", cachesDir, cachesDir]];
+            NSString *cq = PXShellQuote(cachesDir);
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.WebKit.* %@/com.apple.WebKit-* 2>/dev/null || true", cq, cq]];
         }
 
         // Remove any Safari/WebKit preferences under the container.
         NSString *prefsDir = [containerPath stringByAppendingPathComponent:@"Library/Preferences"]; 
         if ([_fileManager fileExistsAtPath:prefsDir]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '%@'/com.apple.Safari*.plist '%@'/com.apple.WebKit*.plist 2>/dev/null || true", prefsDir, prefsDir]];
+            NSString *pq = PXShellQuote(prefsDir);
+            [parts addObject:[NSString stringWithFormat:@"rm -f %@/com.apple.Safari*.plist %@/com.apple.WebKit*.plist 2>/dev/null || true", pq, pq]];
         }
+        [self runBatchedCommandsWithPrivileges:parts timeoutSec:5 * 60];
     }
 }
 
@@ -5506,6 +5597,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             continue;
         }
 
+        // One shell per library base: same paths as before, far fewer posix_spawn.
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+
         // Preferences that affect Safari session/cookies.
         NSString *prefsDir = [base stringByAppendingPathComponent:@"Preferences"];
         if ([_fileManager fileExistsAtPath:prefsDir]) {
@@ -5520,43 +5614,50 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             ];
             for (NSString *p in prefs) {
                 NSString *full = [prefsDir stringByAppendingPathComponent:p];
-                [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '%@' 2>/dev/null || true", full]];
+                [parts addObject:[NSString stringWithFormat:@"rm -f %@ 2>/dev/null || true", PXShellQuote(full)]];
             }
         }
 
         // Caches that can carry session state.
         NSString *cachesDir = [base stringByAppendingPathComponent:@"Caches"];
         if ([_fileManager fileExistsAtPath:cachesDir]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@/com.apple.Safari' 2>/dev/null || true", cachesDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@/com.apple.mobilesafari' 2>/dev/null || true", cachesDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@/com.apple.SafariViewService' 2>/dev/null || true", cachesDir]];
+            NSString *cq = PXShellQuote(cachesDir);
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.Safari 2>/dev/null || true", cq]];
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.mobilesafari 2>/dev/null || true", cq]];
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.SafariViewService 2>/dev/null || true", cq]];
             // Handle both dot and dash variants.
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'/com.apple.WebKit.* '%@'/com.apple.WebKit-* 2>/dev/null || true", cachesDir, cachesDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@/com.apple.nsurlsessiond' 2>/dev/null || true", cachesDir]];
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.WebKit.* %@/com.apple.WebKit-* 2>/dev/null || true", cq, cq]];
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.nsurlsessiond 2>/dev/null || true", cq]];
         }
 
         NSString *safariDir = [base stringByAppendingPathComponent:@"Safari"];
         if ([_fileManager fileExistsAtPath:safariDir]) {
             // Preserve bookmarks DB by default; nuke session/history/website data.
-            [self runCommandWithPrivileges:[NSString stringWithFormat:
-                @"find '%@' -mindepth 1 -maxdepth 1 -not -name 'Bookmarks.db' -not -name 'Bookmarks.db-wal' -not -name 'Bookmarks.db-shm' -exec rm -rf {} + 2>/dev/null || true",
-                safariDir]];
+            [parts addObject:[NSString stringWithFormat:
+                @"find %@ -mindepth 1 -maxdepth 1 -not -name 'Bookmarks.db' -not -name 'Bookmarks.db-wal' -not -name 'Bookmarks.db-shm' -exec rm -rf {} + 2>/dev/null || true",
+                PXShellQuote(safariDir)]];
         }
 
         // WebKit global stores are the main source of persistent web sessions.
         NSString *webKitDir = [base stringByAppendingPathComponent:@"WebKit"];
         if ([_fileManager fileExistsAtPath:webKitDir]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@' 2>/dev/null || true", webKitDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"mkdir -p '%@' 2>/dev/null || true", webKitDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"chown -R mobile:mobile '%@' 2>/dev/null || true", webKitDir]];
+            NSString *wq = PXShellQuote(webKitDir);
+            [parts addObject:[NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", wq]];
+            [parts addObject:[NSString stringWithFormat:@"mkdir -p %@ 2>/dev/null || true", wq]];
+            [parts addObject:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", wq]];
         }
 
         NSString *cookiesDir = [base stringByAppendingPathComponent:@"Cookies"];
         if ([_fileManager fileExistsAtPath:cookiesDir]) {
             // Cookie stores can be global. Removing them clears Safari sessions/cookies.
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '%@/Cookies.binarycookies' 2>/dev/null || true", cookiesDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '%@/Cookies.sqlite' '%@/Cookies.sqlite-wal' '%@/Cookies.sqlite-shm' 2>/dev/null || true", cookiesDir, cookiesDir, cookiesDir]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '%@'/*.binarycookies 2>/dev/null || true", cookiesDir]];
+            NSString *kq = PXShellQuote(cookiesDir);
+            [parts addObject:[NSString stringWithFormat:@"rm -f %@/Cookies.binarycookies 2>/dev/null || true", kq]];
+            [parts addObject:[NSString stringWithFormat:@"rm -f %@/Cookies.sqlite %@/Cookies.sqlite-wal %@/Cookies.sqlite-shm 2>/dev/null || true", kq, kq, kq]];
+            [parts addObject:[NSString stringWithFormat:@"rm -f %@/*.binarycookies 2>/dev/null || true", kq]];
+        }
+
+        if (parts.count > 0) {
+            [self runBatchedCommandsWithPrivileges:parts timeoutSec:8 * 60];
         }
     }
 
