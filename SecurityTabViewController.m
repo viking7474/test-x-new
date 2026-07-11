@@ -8,6 +8,7 @@
 #import "IPMonitorService.h"
 #import "LocationSpoofingManager.h"
 #import "NetworkManager.h"
+#import "CarrierDB.h"
 #import "IPStatusCacheManager.h" // Import for IP and location data saving
 #import "DomainBlockingSettings.h"
 #import "DomainManagementViewController.h"
@@ -1368,17 +1369,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (NSDictionary *)targetRegionDefaultsForCountryCode:(NSString *)countryCode {
     // Data-driven: CarrierDB loads carrier_db.json (full country/MCC-MNC coverage).
-    Class dbClass = NSClassFromString(@"CarrierDB");
-    if (dbClass && [dbClass respondsToSelector:@selector(sharedManager)]) {
-        id db = [dbClass sharedManager];
-        if ([db respondsToSelector:@selector(regionDefaultsForCountryCode:)]) {
-            NSDictionary *defaults = [db regionDefaultsForCountryCode:countryCode];
-            if ([defaults isKindOfClass:[NSDictionary class]] && defaults.count) {
-                return defaults;
-            }
-        }
+    NSDictionary *defaults = [[CarrierDB sharedManager] regionDefaultsForCountryCode:countryCode];
+    if ([defaults isKindOfClass:[NSDictionary class]] && defaults.count) {
+        return defaults;
     }
-    // Absolute last resort if CarrierDB unavailable at link time.
+    // Absolute last resort if CarrierDB returns empty.
     NSString *cc = [[countryCode ?: @"" uppercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (cc.length != 2) cc = @"US";
     return @{
