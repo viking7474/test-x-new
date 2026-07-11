@@ -43,8 +43,9 @@ static NSMutableDictionary *scopedAppsCache = nil;
 static NSDate *scopedAppsCacheTimestamp = nil;
 static const NSTimeInterval kScopedAppsCacheValidDuration = 30.0; // 30 seconds
 
-// Shared fake cellular carrier for consistent spoofing
-static NSString *const kFakeCarrierName = @"ProjectX";
+// Default cellular identity (US T-Mobile) — never use product name "ProjectX" as carrier.
+// Profile/target-region values override these when present.
+static NSString *const kFakeCarrierName = @"T-Mobile";
 static NSString *const kFakeMobileCountryCode = @"310";
 static NSString *const kFakeMobileNetworkCode = @"260";
 
@@ -53,9 +54,41 @@ static NSString *cachedISOCountryCode = nil;
 static NSDate *isoCountryCodeCacheTimestamp = nil;
 static const NSTimeInterval kISOCountryCodeCacheValidDuration = 60.0; // 60 seconds
 
-// Fake WiFi SSID
-static NSString *const kFakeWiFiSSID = @"ProjectX_WiFi";
+// Fallback WiFi identity (realistic-looking; profile WiFi info should override when set)
+static NSString *const kFakeWiFiSSID = @"HomeWiFi";
 static NSString *const kFakeBSSID = @"00:11:22:33:44:55";
+
+// Best-effort carrier name for known MCC/MNC pairs when profile has no name.
+static NSString *PXCarrierNameForMCCMNC(NSString *mcc, NSString *mnc) {
+    if (!mcc.length || !mnc.length) return kFakeCarrierName;
+    NSString *key = [NSString stringWithFormat:@"%@-%@", mcc, mnc];
+    static NSDictionary *map = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            // United States
+            @"310-260": @"T-Mobile",
+            @"310-410": @"AT&T",
+            @"311-480": @"Verizon",
+            @"310-120": @"Sprint",
+            // Vietnam
+            @"452-01": @"MobiFone",
+            @"452-02": @"Vinaphone",
+            @"452-04": @"Viettel",
+            @"452-05": @"Vietnamobile",
+            // Common others
+            @"234-15": @"Vodafone UK",
+            @"234-10": @"O2",
+            @"262-01": @"Telekom",
+            @"208-01": @"Orange",
+            @"440-10": @"NTT DOCOMO",
+            @"460-00": @"China Mobile",
+            @"505-01": @"Telstra",
+        };
+    });
+    NSString *name = map[key];
+    return name.length ? name : kFakeCarrierName;
+}
 
 // Cache for carrier details
 static NSString *cachedCarrierName = nil;
@@ -174,8 +207,17 @@ static NSDictionary *getTargetRegionPinnedOverrides(void) {
         return nil;
     }
 
+    NSString *resolvedName = name;
+    if (!resolvedName.length) {
+        resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
+    }
+    // Never leak product branding as a cellular carrier name.
+    if ([resolvedName isEqualToString:@"ProjectX"] || [resolvedName hasPrefix:@"ProjectX"]) {
+        resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
+    }
+
     cachedTargetRegion = @{
-        @"carrierName": name ?: kFakeCarrierName,
+        @"carrierName": resolvedName ?: kFakeCarrierName,
         @"mobileCountryCode": mcc,
         @"mobileNetworkCode": mnc,
         @"carrierISO": (iso ?: @"")
@@ -603,6 +645,13 @@ static NSDictionary *getCarrierDetailsFromProfile() {
     }
     
     // Update cache
+    // Sanitize legacy defaults that stored product name as carrier.
+    if (!carrierName.length ||
+        [carrierName isEqualToString:@"ProjectX"] ||
+        [carrierName hasPrefix:@"ProjectX"]) {
+        carrierName = PXCarrierNameForMCCMNC(mobileCountryCode, mobileNetworkCode);
+    }
+
     cachedCarrierName = carrierName;
     cachedMobileCountryCode = mobileCountryCode;
     cachedMobileNetworkCode = mobileNetworkCode;

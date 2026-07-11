@@ -1371,12 +1371,13 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     if (cc.length != 2) cc = @"US";
 
     // Minimal mapping table. Extend as needed.
+    // Carrier names must look like real operators — never use product branding.
     if ([cc isEqualToString:@"VN"]) {
         return @{
             @"carrierISO": @"vn",
             @"mcc": @"452",
             @"mnc": @"01",
-            @"carrierName": @"ProjectX",
+            @"carrierName": @"MobiFone",
             @"localeIdentifier": @"vi_VN",
             @"preferredLanguages": @[ @"vi-VN", @"en-US" ]
         };
@@ -1386,18 +1387,18 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
             @"carrierISO": @"us",
             @"mcc": @"310",
             @"mnc": @"260",
-            @"carrierName": @"ProjectX",
+            @"carrierName": @"T-Mobile",
             @"localeIdentifier": @"en_US",
             @"preferredLanguages": @[ @"en-US" ]
         };
     }
 
-    // Fallback: keep defaults sane.
+    // Fallback: keep defaults sane (US T-Mobile identity).
     return @{
         @"carrierISO": [[cc lowercaseString] copy],
         @"mcc": @"310",
         @"mnc": @"260",
-        @"carrierName": @"ProjectX",
+        @"carrierName": @"T-Mobile",
         @"localeIdentifier": [NSString stringWithFormat:@"en_%@", cc],
         @"preferredLanguages": @[ @"en-US" ]
     };

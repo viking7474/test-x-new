@@ -257,53 +257,145 @@ static NSDictionary *getProfileWiFiInfo(void) {
 
 #pragma mark - Core Hook Functions
 
+// Build a CNCopy-compatible network info dictionary (public + private key variants).
+// Always returns a new retained CFDictionary when ssid/bssid are non-empty.
+static CFDictionaryRef PXCreateSpoofedNetworkInfoDict(NSString *ssid, NSString *bssid) {
+    if (!ssid.length || !bssid.length) return NULL;
+    NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
+    // Canonical CaptiveNetwork keys
+    spoofedInfo[@"SSID"] = ssid;
+    spoofedInfo[@"BSSID"] = bssid;
+    // Some apps read lowercase / alternate keys
+    spoofedInfo[@"ssid"] = ssid;
+    spoofedInfo[@"bssid"] = bssid;
+    spoofedInfo[@"NetworkType"] = @"Infrastructure";
+    spoofedInfo[@"networkType"] = @"Infrastructure";
+    // SSIDDATA (NSData) used by older / private readers
+    NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
+    if (ssidData) {
+        spoofedInfo[@"SSIDDATA"] = ssidData;
+        spoofedInfo[@"ssidData"] = ssidData;
+    }
+    return CFBridgingRetain(spoofedInfo);
+}
+
+static NSDictionary *PXResolvedWiFiInfo(void) {
+    if (cachedWifiInfo && cachedWifiInfo[@"ssid"] && cachedWifiInfo[@"bssid"]) {
+        return cachedWifiInfo;
+    }
+    NSDictionary *wifiInfo = getProfileWiFiInfo();
+    if (wifiInfo && wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
+        if (!cachedWifiInfo) cachedWifiInfo = [NSMutableDictionary dictionary];
+        [cachedWifiInfo setDictionary:wifiInfo];
+        return cachedWifiInfo;
+    }
+    return nil;
+}
+
 // Implementation of CNCopyCurrentNetworkInfo hook
+// On iOS 13+ original often returns NULL without location entitlement — still spoof when scoped.
 static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    // Get the original result first
     CFDictionaryRef originalDict = orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
-    
+
     @try {
-        // Get the bundle ID for scope checking
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        // Check if we should spoof for this bundle
         if (!shouldSpoofForBundle(bundleID)) {
             return originalDict;
         }
-        
-        // Try to use cached info first
-        if (cachedWifiInfo && cachedWifiInfo[@"ssid"] && cachedWifiInfo[@"bssid"]) {
-            NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
-            spoofedInfo[@"SSID"] = cachedWifiInfo[@"ssid"];
-            spoofedInfo[@"BSSID"] = cachedWifiInfo[@"bssid"];
-            spoofedInfo[@"NetworkType"] = cachedWifiInfo[@"networkType"] ?: @"Infrastructure";
-            
-            return CFBridgingRetain(spoofedInfo);
-        }
-        
-        // Get WiFi info from profile
-        NSDictionary *wifiInfo = getProfileWiFiInfo();
-        if (wifiInfo && wifiInfo[@"ssid"] && wifiInfo[@"bssid"]) {
-            // Update cache
-            if (!cachedWifiInfo) {
-                cachedWifiInfo = [NSMutableDictionary dictionary];
+
+        NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+        if (wifiInfo) {
+            CFDictionaryRef spoofed = PXCreateSpoofedNetworkInfoDict(wifiInfo[@"ssid"], wifiInfo[@"bssid"]);
+            if (spoofed) {
+                if (originalDict) CFRelease(originalDict);
+                return spoofed;
             }
-            [cachedWifiInfo setDictionary:wifiInfo];
-            
-            // Create spoofed dictionary
-            NSMutableDictionary *spoofedInfo = [NSMutableDictionary dictionary];
-            spoofedInfo[@"SSID"] = wifiInfo[@"ssid"];
-            spoofedInfo[@"BSSID"] = wifiInfo[@"bssid"];
-            spoofedInfo[@"NetworkType"] = wifiInfo[@"networkType"] ?: @"Infrastructure";
-            
-            return CFBridgingRetain(spoofedInfo);
         }
-    } @catch (NSException *exception) {
-        // Silent exception handling
+    } @catch (__unused NSException *exception) {
     }
-    
-    // Return original if spoofing failed
+
     return originalDict;
+}
+
+// Ensure apps that iterate interfaces still see a Wi-Fi interface (en0).
+static CFArrayRef (*orig_CNCopySupportedInterfaces)(void) = NULL;
+static CFArrayRef replaced_CNCopySupportedInterfaces(void) {
+    CFArrayRef original = orig_CNCopySupportedInterfaces ? orig_CNCopySupportedInterfaces() : NULL;
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (!shouldSpoofForBundle(bundleID)) {
+            return original;
+        }
+        // If system already reports interfaces, keep them (order preserved).
+        if (original && CFArrayGetCount(original) > 0) {
+            return original;
+        }
+        // Fabricate en0 so CNCopyCurrentNetworkInfo(en0) is queried.
+        NSArray *ifaces = @[ @"en0" ];
+        if (original) CFRelease(original);
+        return CFBridgingRetain(ifaces);
+    } @catch (__unused NSException *e) {
+        return original;
+    }
+}
+
+// Try to build a synthetic NEHotspotNetwork when public API returns nil
+// (no location permission / not associated) so property swizzles still apply.
+static id PXCreateSpoofedNEHotspotNetwork(NSString *ssid, NSString *bssid) {
+    Class cls = NSClassFromString(@"NEHotspotNetwork");
+    if (!cls || !ssid.length || !bssid.length) return nil;
+
+    id net = nil;
+    @try {
+        net = [cls alloc];
+        if ([net respondsToSelector:@selector(init)]) {
+            net = [net init];
+        }
+    } @catch (__unused NSException *e) {
+        net = nil;
+    }
+    if (!net) {
+        @try { net = [[cls alloc] init]; } @catch (__unused NSException *e) { net = nil; }
+    }
+    if (!net) return nil;
+
+    // Private ivar / property names vary by iOS version — try all common ones.
+    NSArray<NSString *> *ssidKeys = @[ @"SSID", @"_SSID", @"ssid", @"_ssid" ];
+    NSArray<NSString *> *bssidKeys = @[ @"BSSID", @"_BSSID", @"bssid", @"_bssid" ];
+    for (NSString *k in ssidKeys) {
+        @try { [net setValue:ssid forKey:k]; } @catch (__unused NSException *e) {}
+    }
+    for (NSString *k in bssidKeys) {
+        @try { [net setValue:bssid forKey:k]; } @catch (__unused NSException *e) {}
+    }
+    return net;
+}
+
+// +[NEHotspotNetwork fetchCurrentWithCompletionHandler:] (iOS 14+) — primary path for many info apps.
+static void (*orig_NEHotspotNetwork_fetchCurrent)(id, SEL, void (^)(id)) = NULL;
+static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^completion)(id network)) {
+    void (^deliver)(id) = ^(id network) {
+        @try {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if (shouldSpoofForBundle(bundleID)) {
+                // If system gave us a network object, SSID/BSSID swizzles cover property reads.
+                // If nil (common without CoreLocation auth), synthesize one from profile.
+                if (!network) {
+                    NSDictionary *info = PXResolvedWiFiInfo();
+                    if (info) {
+                        network = PXCreateSpoofedNEHotspotNetwork(info[@"ssid"], info[@"bssid"]);
+                    }
+                }
+            }
+        } @catch (__unused NSException *e) {}
+        if (completion) completion(network);
+    };
+
+    if (orig_NEHotspotNetwork_fetchCurrent) {
+        orig_NEHotspotNetwork_fetchCurrent(self, _cmd, deliver);
+    } else if (completion) {
+        deliver(nil);
+    }
 }
 
 // Implementation of NEHotspotHelper dictionaryWithScanResult: hook
@@ -380,58 +472,22 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 @implementation NEHotspotNetwork (WeaponXHooks)
 
 - (NSString *)weaponx_SSID {
-    // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
-        return [self weaponx_SSID]; // Call original
+        return [self weaponx_SSID]; // original after exchange
     }
-    
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"ssid"]) {
-        return cachedWifiInfo[@"ssid"];
-    }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"ssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return wifiInfo[@"ssid"];
-    }
-    
-    // Call original as fallback
+    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+    if (wifiInfo[@"ssid"]) return wifiInfo[@"ssid"];
     return [self weaponx_SSID];
 }
 
 - (NSString *)weaponx_BSSID {
-    // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
-        return [self weaponx_BSSID]; // Call original
+        return [self weaponx_BSSID];
     }
-    
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"bssid"]) {
-        return cachedWifiInfo[@"bssid"];
-    }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"bssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return wifiInfo[@"bssid"];
-    }
-    
-    // Call original as fallback
+    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+    if (wifiInfo[@"bssid"]) return wifiInfo[@"bssid"];
     return [self weaponx_BSSID];
 }
 
@@ -480,63 +536,74 @@ static WiFiNetworkRef replaced_WiFiDeviceClientCopyCurrentNetwork(WiFiDeviceClie
 
 // Hook implementation for WiFiNetworkGetSSID
 static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
-    // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
-        return orig_WiFiNetworkGetSSID(network);
+        return orig_WiFiNetworkGetSSID ? orig_WiFiNetworkGetSSID(network) : NULL;
     }
-    
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"ssid"]) {
-        return (__bridge CFStringRef)cachedWifiInfo[@"ssid"];
+    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+    if (wifiInfo[@"ssid"]) {
+        // Caller owns returned CFString (Create rule of MobileWiFi GetSSID varies;
+        // CFStringCreateCopy is safe for both Get and Copy conventions when we spoof).
+        return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)wifiInfo[@"ssid"]);
     }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"ssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return (__bridge CFStringRef)wifiInfo[@"ssid"];
-    }
-    
-    // Call original as fallback
-    return orig_WiFiNetworkGetSSID(network);
+    return orig_WiFiNetworkGetSSID ? orig_WiFiNetworkGetSSID(network) : NULL;
 }
 
 // Hook implementation for WiFiNetworkGetBSSID
 static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network) {
-    // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
-        return orig_WiFiNetworkGetBSSID(network);
+        return orig_WiFiNetworkGetBSSID ? orig_WiFiNetworkGetBSSID(network) : NULL;
     }
-    
-    // Try to use cached info first
-    if (cachedWifiInfo && cachedWifiInfo[@"bssid"]) {
-        return (__bridge CFStringRef)cachedWifiInfo[@"bssid"];
+    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+    if (wifiInfo[@"bssid"]) {
+        return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)wifiInfo[@"bssid"]);
     }
-    
-    // Get WiFi info from profile
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"bssid"]) {
-        // Update cache
-        if (!cachedWifiInfo) {
-            cachedWifiInfo = [NSMutableDictionary dictionary];
-        }
-        [cachedWifiInfo setDictionary:wifiInfo];
-        
-        return (__bridge CFStringRef)wifiInfo[@"bssid"];
-    }
-    
-    // Call original as fallback
-    return orig_WiFiNetworkGetBSSID(network);
+    return orig_WiFiNetworkGetBSSID ? orig_WiFiNetworkGetBSSID(network) : NULL;
 }
 
 #pragma mark - Hook Installation
+
+// Apple80211GetInfoCopy — used by many device-info apps (AIDA-style private path).
+typedef int (*Apple80211Open_t)(void **handle);
+typedef int (*Apple80211Bind_t)(void *handle, const char *ifname);
+typedef int (*Apple80211GetInfoCopy_t)(void *handle, CFDictionaryRef *info);
+static Apple80211GetInfoCopy_t orig_Apple80211GetInfoCopy = NULL;
+
+static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info) {
+    int r = orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (!shouldSpoofForBundle(bundleID)) return r;
+
+        NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+        if (!wifiInfo) return r;
+
+        NSString *ssid = wifiInfo[@"ssid"];
+        NSString *bssid = wifiInfo[@"bssid"];
+        if (!ssid.length || !bssid.length) return r;
+
+        NSMutableDictionary *dict = nil;
+        if (info && *info) {
+            dict = [NSMutableDictionary dictionaryWithDictionary:(__bridge NSDictionary *)(*info)];
+        } else {
+            dict = [NSMutableDictionary dictionary];
+        }
+        // Common Apple80211 keys
+        dict[@"SSID_STR"] = ssid;
+        dict[@"SSID"] = ssid;
+        dict[@"BSSID"] = bssid;
+        NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
+        if (ssidData) dict[@"SSID_DATA"] = ssidData;
+
+        if (info) {
+            if (*info) CFRelease(*info);
+            *info = CFBridgingRetain(dict);
+            return 0; // success even if original failed
+        }
+    } @catch (__unused NSException *e) {}
+    return r;
+}
 
 static void initializeHooks(void) {
     // CNCopyCurrentNetworkInfo: register as sole dictionary builder on coordinator.
@@ -548,12 +615,23 @@ static void initializeHooks(void) {
         [coord registerCNCopyCurrentNetworkInfoProvider:@"wifi.CNCopyCurrentNetworkInfo"
                                               priority:PXNativeHookPriorityNetworkStorage
                                                    pre:^BOOL(CFStringRef interfaceName, CFDictionaryRef *outResult) {
-            if (!orig_CNCopyCurrentNetworkInfo) return NO;
+            // Always fully handle: replaced_* already falls through to original when not spoofing.
             CFDictionaryRef r = replaced_CNCopyCurrentNetworkInfo(interfaceName);
             if (outResult) *outResult = r;
-            return YES; // WiFi builds final dictionary
+            return YES;
         } post:nil];
     });
+
+    // CNCopySupportedInterfaces — not coordinator-owned; install directly.
+    void *cnSym = dlsym(RTLD_DEFAULT, "CNCopySupportedInterfaces");
+    if (!cnSym) {
+        void *sc = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
+        if (sc) cnSym = dlsym(sc, "CNCopySupportedInterfaces");
+    }
+    if (cnSym && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+        MSHookFunction(cnSym, (void *)replaced_CNCopySupportedInterfaces, (void **)&orig_CNCopySupportedInterfaces);
+        PXLog(@"[WiFiHook] Hooked CNCopySupportedInterfaces");
+    }
     
     // Install NEHotspotHelper hook using method swizzling
     Class neHotspotHelperClass = NSClassFromString(@"NEHotspotHelper");
@@ -565,7 +643,7 @@ static void initializeHooks(void) {
         }
     }
     
-    // Install NEHotspotNetwork swizzles
+    // Install NEHotspotNetwork instance property swizzles + class fetchCurrent
     Class neHotspotNetworkClass = NSClassFromString(@"NEHotspotNetwork");
     if (neHotspotNetworkClass) {
         [MethodSwizzler swizzleClass:neHotspotNetworkClass 
@@ -576,7 +654,6 @@ static void initializeHooks(void) {
                    originalSelector:@selector(BSSID) 
                    swizzledSelector:@selector(weaponx_BSSID)];
         
-        // Add additional property swizzles
         [MethodSwizzler swizzleClass:neHotspotNetworkClass 
                    originalSelector:@selector(signalStrength) 
                    swizzledSelector:@selector(weaponx_signalStrength)];
@@ -584,6 +661,17 @@ static void initializeHooks(void) {
         [MethodSwizzler swizzleClass:neHotspotNetworkClass 
                    originalSelector:@selector(secure) 
                    swizzledSelector:@selector(weaponx_secure)];
+
+        // +fetchCurrentWithCompletionHandler: (iOS 14+) — CPUDasher / modern readers
+        SEL fetchSel = NSSelectorFromString(@"fetchCurrentWithCompletionHandler:");
+        Method fetchMethod = class_getClassMethod(neHotspotNetworkClass, fetchSel);
+        if (fetchMethod && dlsym(RTLD_DEFAULT, "MSHookMessageEx")) {
+            MSHookMessageEx(object_getClass((id)neHotspotNetworkClass),
+                            fetchSel,
+                            (IMP)replaced_NEHotspotNetwork_fetchCurrent,
+                            (IMP *)&orig_NEHotspotNetwork_fetchCurrent);
+            PXLog(@"[WiFiHook] Hooked +[NEHotspotNetwork fetchCurrentWithCompletionHandler:]");
+        }
     }
     
     // Install MobileWiFi framework hooks
@@ -591,7 +679,6 @@ static void initializeHooks(void) {
     if (mobileWiFiLib) {
         void *symbol = NULL;
 
-        // Hook WiFiManagerClientCreate
         symbol = dlsym(mobileWiFiLib, "WiFiManagerClientCreate");
         if (symbol) {
             MSHookFunction(symbol,
@@ -599,7 +686,6 @@ static void initializeHooks(void) {
                   (void **)&orig_WiFiManagerClientCreate);
         }
 
-        // Hook WiFiDeviceClientCopyCurrentNetwork
         symbol = dlsym(mobileWiFiLib, "WiFiDeviceClientCopyCurrentNetwork");
         if (symbol) {
             MSHookFunction(symbol,
@@ -607,7 +693,6 @@ static void initializeHooks(void) {
                   (void **)&orig_WiFiDeviceClientCopyCurrentNetwork);
         }
 
-        // Hook WiFiNetworkGetSSID
         symbol = dlsym(mobileWiFiLib, "WiFiNetworkGetSSID");
         if (symbol) {
             MSHookFunction(symbol,
@@ -615,15 +700,37 @@ static void initializeHooks(void) {
                   (void **)&orig_WiFiNetworkGetSSID);
         }
 
-        // Hook WiFiNetworkGetBSSID
         symbol = dlsym(mobileWiFiLib, "WiFiNetworkGetBSSID");
         if (symbol) {
             MSHookFunction(symbol,
                   (void *)replaced_WiFiNetworkGetBSSID,
                   (void **)&orig_WiFiNetworkGetBSSID);
         }
+        // Keep library open so symbols stay valid for the process lifetime.
+    }
 
-        dlclose(mobileWiFiLib);
+    // Apple80211GetInfoCopy — optional private path used by some device-info tools
+    void *getInfo = dlsym(RTLD_DEFAULT, "Apple80211GetInfoCopy");
+    if (!getInfo) {
+        const char *candidates[] = {
+            "/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi",
+            "/System/Library/SystemConfiguration/IPConfiguration.bundle/IPConfiguration",
+            "/usr/lib/libMobileGestalt.dylib",
+            NULL
+        };
+        for (int i = 0; candidates[i]; i++) {
+            void *h = dlopen(candidates[i], RTLD_NOW);
+            if (!h) continue;
+            getInfo = dlsym(h, "Apple80211GetInfoCopy");
+            if (getInfo) break;
+        }
+        if (!getInfo) getInfo = dlsym(RTLD_DEFAULT, "Apple80211GetInfoCopy");
+    }
+    if (getInfo && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+        MSHookFunction(getInfo, (void *)replaced_Apple80211GetInfoCopy, (void **)&orig_Apple80211GetInfoCopy);
+        PXLog(@"[WiFiHook] Hooked Apple80211GetInfoCopy");
+    } else {
+        PXLog(@"[WiFiHook] Apple80211GetInfoCopy not found (optional)");
     }
 }
 
@@ -654,36 +761,18 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 }
 
 - (NSString *)_getSSID {
-    // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
-        return %orig;
-    }
-    
-    // Return spoofed SSID if available
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"ssid"]) {
-        return wifiInfo[@"ssid"];
-    }
-    
-    // Fallback to original if no spoofed data
+    if (!shouldSpoofForBundle(bundleID)) return %orig;
+    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+    if (wifiInfo[@"ssid"]) return wifiInfo[@"ssid"];
     return %orig;
 }
 
 - (id)_getBSSID {
-    // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) {
-        return %orig;
-    }
-    
-    // Return spoofed BSSID if available
-    NSDictionary *wifiInfo = getProfileWiFiInfo();
-    if (wifiInfo && wifiInfo[@"bssid"]) {
-        return wifiInfo[@"bssid"];
-    }
-    
-    // Fallback to original if no spoofed data
+    if (!shouldSpoofForBundle(bundleID)) return %orig;
+    NSDictionary *wifiInfo = PXResolvedWiFiInfo();
+    if (wifiInfo[@"bssid"]) return wifiInfo[@"bssid"];
     return %orig;
 }
 
