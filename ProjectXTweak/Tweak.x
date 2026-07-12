@@ -4195,7 +4195,11 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXFileDebugAIDA64Log("[Tweak.ctor] skip init Identifiers allowed=0");
     }
     
-    // SpringBoard returns early above; screenshot modifier stays disabled.
+    // ScreenshotModifier: Logos requires every %group to be %init'd somewhere.
+    // Intentionally disabled (SB-only feature was scope-gated off) — keep for compile.
+    if (0) {
+        %init(ScreenshotModifier);
+    }
 
     if (!shouldInstallSpoofHooks) {
         PXFileDebugAIDA64Log("[Tweak.ctor] exit skip native spoof hooks allowed=%d webkit=%d", PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack), isWebKitHelper);
