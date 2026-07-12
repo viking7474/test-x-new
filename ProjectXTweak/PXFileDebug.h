@@ -36,36 +36,15 @@ static inline void PXFileDebugWritePath(const char *path, const char *line, size
     close(fd);
 }
 
+/// AIDA64 file-debug is OPT-IN only. Auto-enabling for any "aida" process caused
+/// massive open/write on every hook/ctor and made AIDA64 hang / apps launch slowly.
+/// Enable with: touch /tmp/px_debug_aida64  OR  touch /tmp/px_debug_all
 static inline BOOL PXFileDebugAIDA64Enabled(void) {
     static int enabled = -1;
     if (enabled != -1) return enabled == 1;
     enabled = 0;
-
-    if (access("/tmp/px_debug_all", F_OK) == 0) {
+    if (access("/tmp/px_debug_all", F_OK) == 0 || access("/tmp/px_debug_aida64", F_OK) == 0) {
         enabled = 1;
-        return YES;
-    }
-
-    const char *prog = getprogname();
-    if (PXFileDebugContainsNoCase(prog, "aida")) {
-        enabled = 1;
-        return YES;
-    }
-
-    char exePath[1024] = {0};
-    uint32_t exeSize = sizeof(exePath);
-    if (_NSGetExecutablePath(exePath, &exeSize) == 0 && PXFileDebugContainsNoCase(exePath, "aida")) {
-        enabled = 1;
-        return YES;
-    }
-
-    @autoreleasepool {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        NSString *processName = [NSProcessInfo processInfo].processName;
-        if ([bundleID isEqualToString:@"com.finalwire.aida64"] ||
-            [processName rangeOfString:@"aida" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            enabled = 1;
-        }
     }
     return enabled == 1;
 }

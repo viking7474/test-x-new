@@ -3,7 +3,6 @@
 #import "PassThroughWindow.h"
 #import "ProfileManager.h"
 #import "IPStatusViewController.h"
-#import "SecurityTabViewController.h"
 #import "PXPaths.h"
 #import <notify.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -706,8 +705,8 @@ static BOOL PXSpringBoardIsLocked(void) {
                                    NULL,
                                    CFNotificationSuspensionBehaviorDeliverImmediately);
     
-    // Start a timer to periodically check for profile changes (every 2 seconds)
-    [NSTimer scheduledTimerWithTimeInterval:2.0
+    // Lightweight poll (Darwin already covers most updates). Avoid 2s I/O load on SpringBoard.
+    [NSTimer scheduledTimerWithTimeInterval:30.0
                                      target:self
                                    selector:@selector(checkForProfileChanges)
                                    userInfo:nil

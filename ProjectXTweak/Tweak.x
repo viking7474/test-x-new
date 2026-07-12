@@ -3960,34 +3960,51 @@ static char* hook_GSSystemGetSerialNo(void) {
 
 // Constructor
 %ctor {
+    NSString *currentProcessName = [NSProcessInfo processInfo].processName;
+    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    // SpringBoard hosts Profile Indicator only. Loading the full spoof stack + debug I/O
+    // here freezes app launches and overloads the system (user-visible "apps open slowly").
+    if (PXIsSpringBoardProcess() ||
+        [currentProcessName isEqualToString:@"SpringBoard"] ||
+        [currentBundleID isEqualToString:@"com.apple.springboard"]) {
+        PXLog(@"[WeaponX] SpringBoard: minimal init (Profile Indicator only)");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ProfileIndicatorView *indicator = [ProfileIndicatorView sharedInstance];
+            if (PXReadSecuritySettingBool(@"profileIndicatorEnabled")) {
+                [indicator show];
+            } else {
+                [indicator hide];
+            }
+        });
+        // One late retry if the first scene attach was too early.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!PXReadSecuritySettingBool(@"profileIndicatorEnabled")) return;
+            [[ProfileIndicatorView sharedInstance] show];
+        });
+        return;
+    }
+
     PXFileDebugLoadMarker("ProjectXTweak.Tweak.ctor");
     PXFileDebugAIDA64Log("[Tweak.ctor] enter");
-    // VERIFICATION: Create flag file FIRST - before anything else that might crash
-    [@"ctor_entry" writeToFile:@"/tmp/weaponx_ctor_started.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    
-    NSString *currentProcessName = [NSProcessInfo processInfo].processName;
-    NSString *flagPath = [NSString stringWithFormat:@"/tmp/weaponx_loaded_%@.txt", currentProcessName];
-    [@"Constructor executed!" writeToFile:flagPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    
-    // CRITICAL: Add simple NSLog to verify constructor runs
-    NSLog(@"[WeaponX-DEBUG] ========================================");
-    NSLog(@"[WeaponX-DEBUG] Constructor started in process: %@", currentProcessName);
-    NSLog(@"[WeaponX-DEBUG] Created flag file: %@", flagPath);
-    NSLog(@"[WeaponX-DEBUG] ========================================");
+    // Debug flag files only when explicitly debugging (avoid /tmp I/O on every app launch).
+    if (access("/tmp/px_debug_all", F_OK) == 0 || access("/tmp/px_debug_aida64", F_OK) == 0) {
+        [@"ctor_entry" writeToFile:@"/tmp/weaponx_ctor_started.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSString *flagPath = [NSString stringWithFormat:@"/tmp/weaponx_loaded_%@.txt", currentProcessName];
+        [@"Constructor executed!" writeToFile:flagPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
     
     // Add at beginning of ctor
     PXFileDebugAIDA64Log("[Tweak.ctor] before setupHookingEnvironment");
     setupHookingEnvironment();
     PXFileDebugAIDA64Log("[Tweak.ctor] after setupHookingEnvironment");
 
-    // Install shims for weakly-linked selectors to prevent crashes
+    // Install shims for weakly-linked selectors to prevent crashes (apps only, not SpringBoard).
     PXFileDebugAIDA64Log("[Tweak.ctor] before PXInstallCompatibilityShims");
     PXInstallCompatibilityShims();
     PXFileDebugAIDA64Log("[Tweak.ctor] after PXInstallCompatibilityShims");
     
     PXLog(@"ProjectX tweak initializing...");
     
-    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     BOOL shouldInstallSpoofHooks = NO;
     BOOL isWebKitHelper = PXIsWebKitHelperProcess(currentBundleID, currentProcessName);
     if (isWebKitHelper) {
@@ -4178,37 +4195,7 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXFileDebugAIDA64Log("[Tweak.ctor] skip init Identifiers allowed=0");
     }
     
-    // Initialize screenshot modification hooks if we're in SpringBoard
-    NSString *processName = [NSProcessInfo processInfo].processName;
-    if ([processName isEqualToString:@"SpringBoard"]) {
-        PXLog(@"Skipping screenshot hooks in SpringBoard while spoof hooks are scope-gated");
-        PXFileDebugAIDA64Log("[Tweak.ctor] skip ScreenshotModifier in SpringBoard");
-        if (0) {
-            %init(ScreenshotModifier);
-        }
-        
-        // Profile Indicator: init after SpringBoard UI is up (scenes / windows ready).
-        // Always create sharedInstance so Darwin enable/disable observers are registered.
-        // Retry show — early ctor often runs before UIWindowScene exists.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ProfileIndicatorView *indicator = [ProfileIndicatorView sharedInstance];
-            BOOL enabled = PXReadSecuritySettingBool(@"profileIndicatorEnabled");
-            PXLog(@"ProfileIndicator: SB startup enabled=%d", enabled);
-            if (enabled) {
-                [indicator show];
-            } else {
-                [indicator hide];
-            }
-            // Additional delayed attempts if enabled (scene may attach late).
-            for (NSInteger attempt = 1; attempt <= 5; attempt++) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((1.0 + attempt) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    if (!PXReadSecuritySettingBool(@"profileIndicatorEnabled")) return;
-                    [[ProfileIndicatorView sharedInstance] show];
-                });
-            }
-            PXLog(@"ProfileIndicator: SB delayed init complete");
-        });
-    }
+    // SpringBoard returns early above; screenshot modifier stays disabled.
 
     if (!shouldInstallSpoofHooks) {
         PXFileDebugAIDA64Log("[Tweak.ctor] exit skip native spoof hooks allowed=%d webkit=%d", PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack), isWebKitHelper);

@@ -650,66 +650,43 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 
 %ctor {
     @autoreleasepool {
-        // Initialize cache
-        scopedAppsCache = [NSMutableDictionary dictionary];
-        
-        // TEMPORARY DEBUG
-        NSLog(@"[DomainBlocking] Constructor called");
-        
-        // OPTIMIZATION: Check if domain blocking is globally enabled before expensive initialization
-        DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
-        NSLog(@"[DomainBlocking] Settings loaded, enabled: %@", settings.isEnabled ? @"YES" : @"NO");
-        NSLog(@"[DomainBlocking] Blocked domains: %@", settings.blockedDomains);
-        
-        if (!settings.isEnabled) {
-            NSLog(@"[DomainBlocking] Domain blocking is disabled globally - skipping hooks");
-            // Domain blocking is disabled globally - no need to initialize hooks
-            return;
-        }
-        
-        // Get bundle ID once for all checks
+        // Never run domain blocking work in SpringBoard / critical system processes.
+        if (PXIsSpringBoardProcess()) return;
         NSString *bundleID = getCurrentBundleID();
         NSString *proc = [NSProcessInfo processInfo].processName;
-        NSLog(@"[DomainBlocking] Current bundle ID: %@", bundleID);
-        
-        BOOL isScoped = bundleID && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
-        NSLog(@"[DomainBlocking] Is scoped app: %@", isScoped ? @"YES" : @"NO");
-        
-        if (!bundleID || !isScoped) {
-            NSLog(@"[DomainBlocking] Not a scoped app - skipping hooks");
-            // Not a scoped app - no need to initialize hooks
-            return;
-        }
-        
-        NSLog(@"[DomainBlocking] Installing domain blocking hooks for %@", bundleID);
-        // STEALTH: Silent initialization - no logging to avoid detection
-        
-        // Initialize DNS-level C function hooks with ElleKit
+        if (PXIsCriticalSystemProcess(bundleID, proc)) return;
+
+        scopedAppsCache = [NSMutableDictionary dictionary];
+
+        DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
+        if (!settings.isEnabled) return;
+
+        BOOL isScoped = bundleID.length && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
+        if (!isScoped) return;
+
+        // DNS-level C function hooks
         void *gethostbyname_ptr = dlsym(RTLD_DEFAULT, "gethostbyname");
         if (gethostbyname_ptr) {
             MSHookFunction(gethostbyname_ptr, (void *)hooked_gethostbyname, (void **)&original_gethostbyname);
         }
-        
+
         void *getaddrinfo_ptr = dlsym(RTLD_DEFAULT, "getaddrinfo");
         if (getaddrinfo_ptr) {
             MSHookFunction(getaddrinfo_ptr, (void *)hooked_getaddrinfo, (void **)&original_getaddrinfo);
         }
-        
+
         void *getnameinfo_ptr = dlsym(RTLD_DEFAULT, "getnameinfo");
         if (getnameinfo_ptr) {
             MSHookFunction(getnameinfo_ptr, (void *)hooked_getnameinfo, (void **)&original_getnameinfo);
         }
-        
-        // Initialize all Objective-C hooks
+
         %init;
-        
-        // Initialize Network.framework hooks if available (iOS 12+)
+
         Class NWEndpointClass = NSClassFromString(@"NWEndpoint");
         if (NWEndpointClass) {
             %init(NetworkFrameworkHooks);
         }
-        
-        // Initialize CFNetwork hooks for this scoped app
+
         %init(ScopedApps);
     }
 }

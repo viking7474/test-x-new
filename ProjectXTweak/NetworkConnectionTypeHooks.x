@@ -1238,24 +1238,20 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
 %ctor {
     @autoreleasepool {
-        // Initialize the scoped apps cache
-        scopedAppsCache = [NSMutableDictionary dictionary];
-        
-        PXLog(@"[NetworkHook] Initializing network connection type hooks");
-        
+        if (PXIsSpringBoardProcess()) return;
+
         NSString *bundleID = getCurrentBundleID();
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (PXIsWebKitHelperProcess(bundleID, proc)) {
-            PXLog(@"[NetworkHook] Skipping WebKit helper: %@", bundleID);
-            return;
-        }
+        if (PXIsCriticalSystemProcess(bundleID, proc)) return;
+        if (PXIsWebKitHelperProcess(bundleID, proc)) return;
+
         BOOL isScoped = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
-        
-        PXLog(@"[NetworkHook] Current app: %@, is scoped: %@", 
-              bundleID ?: @"(unknown)", isScoped ? @"YES" : @"NO");
-        
-        // Only initialize hooks if this is a scoped app
-        if (isScoped) {
+        if (!isScoped) return;
+
+        scopedAppsCache = [NSMutableDictionary dictionary];
+        PXLog(@"[NetworkHook] Installing network hooks for %@", bundleID ?: @"(unknown)");
+
+        {
             // Initialize CoreTelephony hooks
             %init;
             
@@ -1368,8 +1364,6 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
             // CNCopyCurrentNetworkInfo: WiFi module builds final dictionary; network provides policy only.
             // Do not install a second MSHookFunction — coordinator owns the symbol.
             PXLog(@"[NetworkHook] Skipping direct CNCopyCurrentNetworkInfo hook (coordinator/WiFi owns; policy-only)");
-        } else {
-            PXLog(@"[NetworkHook] App is not scoped, network spoofing will not be applied");
         }
     }
 } 

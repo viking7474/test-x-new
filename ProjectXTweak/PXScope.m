@@ -338,6 +338,15 @@ BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName) {
     return NO;
 }
 
+BOOL PXIsSpringBoardProcess(void) {
+    static int cached = -1;
+    if (cached != -1) return cached == 1;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+    cached = ([proc isEqualToString:@"SpringBoard"] || [bid isEqualToString:@"com.apple.springboard"]) ? 1 : 0;
+    return cached == 1;
+}
+
 BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
     if ([bundleID isEqualToString:@"com.apple.SafariViewService"]) return YES;
     if ([bundleID hasPrefix:@"com.apple.WebKit"]) return YES;

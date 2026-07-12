@@ -24,6 +24,8 @@ BOOL PXDisplayPixelMetricsSpoofEnabled(void);
 BOOL PXDisplayWebScreenSpoofEnabled(void);
 
 BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName);
+/// Cached process-name check (SpringBoard). Prefer this at %ctor top to skip work fast.
+BOOL PXIsSpringBoardProcess(void);
 BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName);
 NSString *PXWebKitHostBundleIdentifier(void);
 BOOL PXWebKitHostIsScopedForSpoofing(void);
