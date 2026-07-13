@@ -5,179 +5,214 @@
 ```text
 Program: Backup / Restore Hardening
 Current phase: Phase 1 — Clear Data Safety Boundary
-Current task: TASK-1.5 — Typed PXClearRequest
-Task file: docs/backup-restore-hardening/tasks/TASK-1.5-typed-clear-request.md
-Expected report: docs/backup-restore-hardening/reports/TASK-1.5-REPORT.md
+Current task: TASK-1.6 — Structured PXClearResult
+Task file: docs/backup-restore-hardening/tasks/TASK-1.6-structured-clear-result.md
+Expected report: docs/backup-restore-hardening/reports/TASK-1.6-REPORT.md
 Status: READY
 Build owner: Project owner via GitHub Actions
-Next task: TASK-1.6 remains LOCKED
+Next task: TASK-1.7 remains LOCKED
 ```
 
-## Phase 0 Result
+## Accepted Foundation
 
-Phase 0 — Reliable Command Execution is complete.
+### Phase 0 — Reliable Command Execution
 
-Accepted outcomes:
+Completed outcomes:
 
-- structured `CommandResult` contract;
+- structured `CommandResult`;
 - bounded stdout/stderr capture;
 - monotonic deadlines;
 - spawn-time process groups;
-- bounded group termination and reap;
+- bounded process-group termination and reap;
 - direct executable/argv API;
-- bounded cleaner compatibility wrapper;
-- bounded output-query helper;
+- bounded `AppDataCleaner` compatibility wrappers;
 - bounded direct `find` helpers;
-- no local `NSTask`, `posix_spawn`, pipe-capture or blocking `waitpid` engine remains in `AppDataCleaner.m`.
+- no local `NSTask`, pipe-capture, `posix_spawn` or blocking `waitpid` engine remains in `AppDataCleaner.m`.
 
-## Phase 1 Accepted Results
+### TASK-1.1 — Immutable resolved identity
 
-### TASK-1.1
+`PXResolvedContainer` provides immutable exact container identity and lexical candidate-path invariants. It is not deletion authorization.
 
-Immutable `PXResolvedContainer` provides exact identity, kind/root, copied readonly values, UUID/path consistency, and immutable value semantics. It does not authorize deletion.
+### TASK-1.2 — Exact application-data resolver
 
-### TASK-1.2
+`PXDataContainerResolver` resolves one root at a time using exact `MCMMetadataIdentifier` matching and fails closed on ambiguity.
 
-Standalone `PXDataContainerResolver` provides root-specific application-data discovery, exact `MCMMetadataIdentifier` matching, deterministic enumeration and ambiguity failure. It does not migrate callers.
+### TASK-1.3 — Canonical destructive-path validator
 
-### TASK-1.3
+`PXDestructivePathValidator` provides fixed-base authorization, canonical containment, symlink/mount/ownership checks, live metadata revalidation and final device/inode rechecks.
 
-Standalone `PXDestructivePathValidator` provides fixed-base authorization, POSIX canonicalization, symlink/mount/ownership checks, live metadata revalidation, final filesystem identity checks and canonical-path return semantics. It is not yet connected to Clear.
+### TASK-1.4 — Application bundles are read-only
 
-### TASK-1.4
+`AppDataCleaner` no longer:
 
-Application bundle containers are now read-only for in-file `AppDataCleaner` Clear behavior:
+- wipes rootless application-bundle contents;
+- deletes or recreates app receipts;
+- deletes extension receipts;
+- retains the dormant private receipt-wipe implementation.
 
-- rootless bundle content wipe removed;
-- application receipt deletion/recreation removed;
-- extension receipt deletion removed;
-- dormant private receipt mutation removed;
-- public receipt selector retained as a logged compatibility no-op;
-- read-only bundle discovery and inspection preserved.
+The public receipt selector remains as a logged compatibility no-op. Remaining application-bundle references are read-only discovery or inspection.
+
+### TASK-1.5 — Typed immutable request
+
+`PXClearRequest` provides:
+
+- exact validated bundle identifier;
+- closed five-bit component scope mask;
+- explicit deep-clean intent;
+- immutable copy/equality/hash semantics;
+- no application-bundle or receipt scope;
+- no caller integration.
 
 Accepted review:
 
 ```text
-docs/backup-restore-hardening/reviews/TASK-1.4-REVIEW.md
+docs/backup-restore-hardening/reviews/TASK-1.5-REVIEW.md
 ```
 
-## TASK-1.5 Purpose
-
-TASK-1.5 introduces immutable typed input for future Clear orchestration.
-
-The request records:
-
-- exact bundle identifier;
-- requested component scopes;
-- requested deep-clean intent.
-
-It does not execute Clear, resolve containers, validate paths, import into `AppDataCleaner`, alter completion behavior or create structured results.
-
-## TASK-1.5 Scope Model
-
-Allowed scope bits are exactly:
+Accepted commit:
 
 ```text
-ApplicationData
-ExtensionData
-AppGroups
-PluginKitData
-Keychain
+24cde1e — task 1.5
 ```
 
-There is deliberately no scope for application-bundle or receipt mutation.
+The commit contains accumulated prior-task artifacts, so future tasks should return to one commit per task.
 
-The default mask is the exact union of all five known bits. Custom valid subsets are allowed; zero and unknown bits fail closed.
+## TASK-1.6 Purpose
 
-## TASK-1.5 Gate Rules
+TASK-1.6 introduces immutable structured output for future Clear orchestration.
 
-TASK-1.5 may move to `COMPLETED` only when all conditions are met:
+The contract contains three classes in `PXClearResult.h/.m`:
 
-- [ ] Agent creates `reports/TASK-1.5-REPORT.md`.
-- [ ] Only `PXClearRequest.h/.m` are added as production code.
-- [ ] Public scope option set contains exactly five approved bits.
-- [ ] Known/default masks equal the exact union of all approved bits.
-- [ ] No application-bundle scope exists.
-- [ ] Public class, properties, initializer and default factory match the specification.
-- [ ] Bundle identifier validation is strict, exact and non-normalizing.
-- [ ] Scope mask rejects zero and unknown bits.
-- [ ] Valid known subsets are preserved unchanged.
-- [ ] Deep-clean value is preserved exactly.
-- [ ] Default factory uses the default mask and `deepClean == NO`.
-- [ ] Public properties are readonly and copied/assigned as specified.
-- [ ] The object is immutable and subclassing-restricted.
-- [ ] `copyWithZone:` returns `self`.
-- [ ] Equality and hash use identifier, scopes and deep-clean value.
-- [ ] No resolver, validator, command, filesystem, deletion, keychain or UI behavior is added.
-- [ ] No existing production caller references `PXClearRequest` or `PXClearScope`.
-- [ ] Makefile and protected existing source files remain unchanged.
-- [ ] `git diff --check` and new-file whitespace checks pass.
-- [ ] GitHub Actions succeeds or the project owner explicitly confirms the build.
+1. `PXClearFailure` — stable domain/code/message snapshot;
+2. `PXClearComponentResult` — one final outcome for one requested scope;
+3. `PXClearResult` — aggregate covering every requested scope exactly once.
+
+No existing Clear caller is changed in this task.
+
+## TASK-1.6 Status Model
+
+Allowed component statuses are exactly:
+
+```text
+Succeeded
+Skipped
+Failed
+```
+
+There is no pending, running, unknown, cancelled or partial status.
+
+Partial success is represented by:
+
+```text
+status = Failed
+succeededUnitCount > 0
+failedUnitCount > 0
+```
+
+## TASK-1.6 Aggregate Model
+
+The aggregate must:
+
+- contain exactly one component result for every bit in `request.scopes`;
+- contain no unrequested component;
+- reject duplicates and missing scopes;
+- store components in numeric scope order;
+- derive `succeededScopes`, `skippedScopes` and `failedScopes` internally;
+- expose `hasFailures` and `allRequestedScopesSucceeded` with exact, non-overlapping meanings.
+
+A skipped component is not a failure, but it prevents all requested scopes from being classified as succeeded.
+
+TASK-1.6 does not map these predicates to the legacy `BOOL success` completion callback.
+
+## TASK-1.6 Gate Rules
+
+TASK-1.6 may move to `COMPLETED` only when all conditions are met:
+
+- [ ] Agent creates `PXClearResult.h` and `PXClearResult.m`.
+- [ ] Agent creates `reports/TASK-1.6-REPORT.md`.
+- [ ] Existing production source remains unchanged.
+- [ ] Header imports `PXClearRequest.h` and Foundation only.
+- [ ] Component status enum contains exactly three approved values.
+- [ ] `PXClearFailure` stores only validated domain/code/message.
+- [ ] `PXClearComponentResult` accepts exactly one known scope bit.
+- [ ] Count partition is checked without overflow-prone addition.
+- [ ] Succeeded/Skipped/Failed invariants match the task specification.
+- [ ] Skipped components require a detail.
+- [ ] Failed components require a failure snapshot and at least one failed unit.
+- [ ] Partial success uses Failed plus mixed counts.
+- [ ] Aggregate covers request scopes exactly once.
+- [ ] Missing, duplicate and unrequested scopes are rejected.
+- [ ] Component storage order is canonical by scope.
+- [ ] Derived masks are disjoint and cover the request mask.
+- [ ] `hasFailures` means `failedScopes != 0`.
+- [ ] `allRequestedScopesSucceeded` means `succeededScopes == request.scopes`.
+- [ ] Scope lookup accepts only one known requested bit.
+- [ ] All three classes are immutable, subclassing-restricted and value-semantic.
+- [ ] No `NSError`/`userInfo` is stored as public result state.
+- [ ] No filesystem, command, resolver, validator, keychain, UI or Clear execution behavior exists.
+- [ ] No existing production caller references the new result model.
+- [ ] Protected checksums remain unchanged.
+- [ ] `git diff --check`, new-file whitespace and NUL checks pass.
+- [ ] GitHub Actions succeeds or project owner explicitly confirms build.
 - [ ] Coordinator review accepts the task.
 
 ## Task History
 
-| Task | Status | Agent report | Build | Review |
+| Task | Status | Report | Build | Review |
 |---|---|---|---|---|
-| TASK-0.1 | COMPLETED | `reports/TASK-0.1-REPORT.md` | PASSED | `reviews/TASK-0.1-REVIEW.md` — ACCEPTED |
-| TASK-0.2 | COMPLETED | `reports/TASK-0.2-REPORT.md` | PASSED | `reviews/TASK-0.2-REVIEW.md` — ACCEPTED |
-| TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.3-REVIEW.md` — ACCEPTED |
-| TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.4-REVIEW.md` — ACCEPTED |
-| TASK-0.5 | COMPLETED | `reports/TASK-0.5-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.5-REVIEW.md` — ACCEPTED |
-| TASK-0.6 | COMPLETED | `reports/TASK-0.6-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.6-REVIEW.md` — ACCEPTED |
-| TASK-0.7 | COMPLETED | `reports/TASK-0.7-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.7-REVIEW.md` — ACCEPTED |
-| TASK-1.1 | COMPLETED | `reports/TASK-1.1-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.1-REVIEW.md` — ACCEPTED |
-| TASK-1.2 | COMPLETED | `reports/TASK-1.2-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.2-REVIEW.md` — ACCEPTED |
-| TASK-1.3 | COMPLETED | `reports/TASK-1.3-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.3-REVIEW.md` — ACCEPTED |
-| TASK-1.4 | COMPLETED | `reports/TASK-1.4-REPORT.md` | accepted through owner continuation | `reviews/TASK-1.4-REVIEW.md` — ACCEPTED |
-| TASK-1.5 | READY | Not created | Not run | Not reviewed |
-| TASK-1.6 | LOCKED | Not created | Not run | Not reviewed |
+| TASK-0.1 | COMPLETED | `reports/TASK-0.1-REPORT.md` | PASSED | ACCEPTED |
+| TASK-0.2 | COMPLETED | `reports/TASK-0.2-REPORT.md` | PASSED | ACCEPTED |
+| TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-0.5 | COMPLETED | `reports/TASK-0.5-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-0.6 | COMPLETED | `reports/TASK-0.6-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-0.7 | COMPLETED | `reports/TASK-0.7-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-1.1 | COMPLETED | `reports/TASK-1.1-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-1.2 | COMPLETED | `reports/TASK-1.2-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-1.3 | COMPLETED | `reports/TASK-1.3-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-1.4 | COMPLETED | `reports/TASK-1.4-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-1.5 | COMPLETED | `reports/TASK-1.5-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.5-REVIEW.md` |
+| TASK-1.6 | READY | Not created | Not run | Not reviewed |
+| TASK-1.7 | LOCKED | Not created | Not run | Not reviewed |
 
-## Why TASK-1.5 Is Standalone
-
-The current Clear API combines one bundle identifier with many implicit component choices and a global deep-clean setting. Before migrating behavior, the program needs an immutable request object that makes the intended scope explicit.
-
-The sequence remains:
+## Migration Sequence
 
 ```text
-TASK-1.4 — remove application-bundle writes
 TASK-1.5 — immutable typed request
-TASK-1.6 — structured result object
+TASK-1.6 — immutable structured result
 TASK-1.7 — migrate main application-data Clear
-TASK-1.8 — migrate extension/PluginKit Clear
+TASK-1.8 — migrate extension and PluginKit data Clear
 TASK-1.9 — migrate App Group Clear
-TASK-1.10 — integrate keychain result
+TASK-1.10 — integrate Keychain result
+TASK-1.11 — remove unsafe permission and marker behavior
+TASK-1.12 — quarantine ambiguous legacy Clear APIs
 ```
 
-Keeping TASK-1.5 model-only allows validation, scope-mask, copy and equality semantics to be reviewed independently from destructive behavior.
+Request and result contracts must be accepted before destructive caller migration begins.
 
-## Current Working-Tree Note
+## Working-Tree Baseline
 
-At coordinator review time:
+At the opening of TASK-1.6:
 
 ```text
-HEAD: a2f5de8df684fe07f5adbf12c2513d6b223fd6d2
-AppDataCleaner.m: modified by accepted TASK-1.4
-PXDestructivePathValidator.h/.m: untracked TASK-1.3 baseline
-TASK-1.4 report/review/specification: uncommitted
+HEAD: 24cde1e978ca914d49cd1ae6427085cc3e3389c1
+Working tree: clean before coordinator documentation updates
 ```
 
-Commit/push TASK-1.3 and TASK-1.4 before beginning TASK-1.5 so the model-only diff is independently reviewable.
-
-If TASK-1.5 starts before those commits, the agent must treat every existing modified/untracked file as protected baseline and prove its checksum remains unchanged.
+TASK-1.6 must treat the complete commit as protected baseline and create only its two new production files plus its report.
 
 ## Blocked Work
 
-The following work is not authorized during TASK-1.5:
+The following work is not authorized during TASK-1.6:
 
-- importing `PXClearRequest` into `AppDataCleaner` or UI code;
-- changing `clearDataForBundleID:completion:`;
+- importing the result into `AppDataCleaner`;
+- adding or changing a Clear API;
+- mapping structured result predicates to legacy completion success;
 - resolving or validating containers;
-- invoking `PXDataContainerResolver` or `PXDestructivePathValidator`;
-- deleting or mutating files;
+- deleting, writing, renaming, chmod/chown or executing commands;
 - changing Keychain behavior;
-- adding `PXClearResult`;
-- changing Backup or Restore;
-- TASK-1.6 or later implementation.
+- changing Backup, Restore or UI;
+- editing `PXClearRequest`;
+- starting TASK-1.7 or later work.
 
-Agent must stop after TASK-1.5.
+Agent must stop after TASK-1.6.

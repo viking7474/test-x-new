@@ -373,3 +373,51 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: TASK-1.5 không được import vào existing production caller; TASK-1.6 xây result độc lập trước khi TASK-1.7 bắt đầu migration.
 - Reason: Request validation/copy/equality, result semantics và destructive integration cần ba review gate riêng để tránh thay contract và behavior trong cùng diff.
+
+## D-063 — Clear result is an immutable final snapshot
+
+- Status: Accepted
+- Decision: `PXClearResult` and its nested models represent final structured outcomes only; they contain no pending/running state, callbacks, locks or execution methods.
+- Reason: A value result must remain stable after publication and must not become a second orchestration engine.
+
+## D-064 — Component status is closed to succeeded, skipped and failed
+
+- Status: Accepted
+- Decision: Per-scope status has exactly `Succeeded`, `Skipped` and `Failed`. Partial success is represented as `Failed` with both succeeded and failed unit counts greater than zero.
+- Reason: A separate partial enum would duplicate count information and complicate aggregate masks; any failed unit must remain visible in `failedScopes`.
+
+## D-065 — Failures are stable domain/code/message snapshots
+
+- Status: Accepted
+- Decision: Result state stores immutable `PXClearFailure` values rather than retaining `NSError` and arbitrary `userInfo` graphs.
+- Reason: Mutable or non-value userInfo content would weaken copy/equality semantics and could retain unrelated objects across async boundaries.
+
+## D-066 — Component counts form an exact partition
+
+- Status: Accepted
+- Decision: Every component enforces `succeeded <= attempted` and `failed == attempted - succeeded`; validation uses subtraction after an upper-bound check.
+- Reason: Exact counts support multi-container scopes and partial outcomes while avoiding overflow-prone addition checks.
+
+## D-067 — Aggregate coverage is exact and canonical
+
+- Status: Accepted
+- Decision: `PXClearResult` contains exactly one component for every requested scope, rejects duplicates/unrequested/missing scopes and stores components sorted by numeric scope.
+- Reason: Exact coverage prevents silent omission and canonical ordering makes equality independent of caller array order.
+
+## D-068 — Skipped is distinct from both failure and full success
+
+- Status: Accepted
+- Decision: A skipped component does not set `hasFailures`, but it prevents `allRequestedScopesSucceeded` from being true.
+- Reason: No attempted work is not equivalent to failure, but it also cannot be reported as completed success.
+
+## D-069 — Result predicates do not define legacy completion policy
+
+- Status: Accepted
+- Decision: TASK-1.6 exposes derived masks and explicit predicates but does not map them to the current `BOOL success` callback.
+- Reason: Completion compatibility must be decided alongside real component migration and failure propagation, not inside a standalone model task.
+
+## D-070 — Structured result precedes destructive caller migration
+
+- Status: Accepted
+- Decision: TASK-1.6 adds only `PXClearResult.h/.m`; existing production callers remain unchanged until TASK-1.7.
+- Reason: Result invariants must be reviewed and built independently before they influence destructive control flow.
