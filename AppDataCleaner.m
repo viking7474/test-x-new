@@ -9,6 +9,7 @@
 #import <unistd.h>
 #import <sys/stat.h>
 #import <signal.h>
+#import <math.h>
 #import <sqlite3.h>
 #import <notify.h>
 
@@ -17,6 +18,8 @@
 #import "AppGroupContainerResolver.h"
 #import "FreezeManager.h"
 #import "common/PXProcessKiller.h"
+
+static const NSUInteger PXPrivilegedCommandMaxOutputBytes = 1024 * 1024;
 
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
@@ -3033,50 +3036,31 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     return [parts filteredArrayUsingPredicate:pred];
 }
 
+- (CommandResult *)runCommandWithPrivilegesResult:(NSString *)command
+                                        timeoutSec:(NSTimeInterval)timeoutSec {
+    if (![command isKindOfClass:[NSString class]] || command.length == 0 || !isfinite(timeoutSec)) {
+        CommandResult *result = [[CommandResult alloc] init];
+        result.runnerError = EINVAL;
+        return result;
+    }
+
+    NSTimeInterval effectiveTimeout = timeoutSec <= 0 ? 60.0 : timeoutSec;
+    return [[CommandRunner shared] runAndCapture:command
+                                      timeoutSec:effectiveTimeout
+                                  maxOutputBytes:PXPrivilegedCommandMaxOutputBytes];
+}
+
 - (void)runCommandWithPrivileges:(NSString *)command timeoutSec:(int)timeoutSec {
-    if (![command isKindOfClass:[NSString class]] || command.length == 0) {
-        return;
-    }
-
-    if (timeoutSec <= 0) {
-        timeoutSec = 60;
-    }
-
-    pid_t pid;
-    const char *args[] = {"/bin/sh", "-c", [command UTF8String], NULL};
-    int spawnResult = posix_spawn(&pid, args[0], NULL, NULL, (char * const *)args, NULL);
-    if (spawnResult != 0) {
-        return;
-    }
-
-    // Best-effort: isolate command in its own process group so we can kill the whole tree.
-    (void)setpgid(pid, pid);
-
-    const int maxWaitIterations = timeoutSec * 10; // 10 * 100ms = 1s
-    int iterations = 0;
-    int status = 0;
-
-    while (iterations < maxWaitIterations) {
-        pid_t result = waitpid(pid, &status, WNOHANG);
-        if (result == pid || result == -1) {
-            return;
+    CommandResult *result = [self runCommandWithPrivilegesResult:command
+                                                       timeoutSec:(NSTimeInterval)timeoutSec];
+    if (result.timedOut) {
+        NSTimeInterval effectiveTimeout = timeoutSec <= 0 ? 60.0 : (NSTimeInterval)timeoutSec;
+        NSString *shortCmd = [command isKindOfClass:[NSString class]] ? command : @"";
+        if (shortCmd.length > 240) {
+            shortCmd = [shortCmd substringToIndex:240];
         }
-        usleep(100000); // 100ms
-        iterations++;
+        NSLog(@"[AppDataCleaner] Command timed out after %.3f sec, killing: %@", effectiveTimeout, shortCmd);
     }
-
-    // Timeout reached: try graceful kill, then force kill.
-    NSString *shortCmd = command;
-    if (shortCmd.length > 240) {
-        shortCmd = [shortCmd substringToIndex:240];
-    }
-    NSLog(@"[AppDataCleaner] Command timed out after %d sec, killing: %@", timeoutSec, shortCmd);
-
-    // Kill process group (includes /bin/sh children).
-    kill(-pid, SIGTERM);
-    usleep(250000);
-    kill(-pid, SIGKILL);
-    waitpid(pid, &status, 0);
 }
 
 - (BOOL)verifyDataCleared:(NSString *)bundleID {
