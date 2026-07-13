@@ -21,12 +21,22 @@ typedef struct {
     NSTimeInterval timeoutSec;
     BOOL outputCapEnabled;
     NSUInteger maxOutputBytes;
+    BOOL processGroupEnabled;
 } PXCaptureOptions;
 
 typedef struct {
     BOOL reaped;
     BOOL stateUnavailable;
 } PXChildState;
+
+typedef struct {
+    BOOL enabled;
+    BOOL configured;
+    pid_t childPID;
+    pid_t processGroupID;
+    int lastGroupSignal;
+    BOOL finalGroupSignalSent;
+} PXProcessGroupState;
 
 static void PXSetRunnerErrorIfUnset(CommandResult *result, int errorCode) {
     if (result.runnerError == 0) {
@@ -141,6 +151,61 @@ static BOOL PXPollChild(pid_t pid,
     childState->stateUnavailable = YES;
     PXSetCriticalRunnerError(result, (waitResult == -1 && errno != 0) ? errno : ECHILD);
     return NO;
+}
+
+static int PXDestroySpawnAttributes(posix_spawnattr_t *attributes,
+                                    BOOL *attributesInitialized) {
+    if (!*attributesInitialized) {
+        return 0;
+    }
+
+    int destroyStatus = posix_spawnattr_destroy(attributes);
+    *attributesInitialized = NO;
+    return destroyStatus;
+}
+
+static BOOL PXValidateOwnedProcessGroup(const PXProcessGroupState *groupState,
+                                        pid_t spawnedChildPID,
+                                        CommandResult *result) {
+    pid_t runnerProcessGroup = getpgrp();
+    BOOL valid = groupState->enabled &&
+                 groupState->configured &&
+                 groupState->processGroupID > 1 &&
+                 groupState->childPID == spawnedChildPID &&
+                 groupState->processGroupID == spawnedChildPID &&
+                 groupState->processGroupID != runnerProcessGroup;
+    if (!valid) {
+        PXSetRunnerErrorIfUnset(result, EINVAL);
+    }
+    return valid;
+}
+
+static BOOL PXSignalOwnedProcessGroup(PXProcessGroupState *groupState,
+                                      pid_t spawnedChildPID,
+                                      const PXChildState *childState,
+                                      int signalNumber,
+                                      BOOL finalSignal,
+                                      CommandResult *result) {
+    if (childState->reaped || groupState->finalGroupSignalSent) {
+        PXSetRunnerErrorIfUnset(result, EINVAL);
+        return NO;
+    }
+    if (!PXValidateOwnedProcessGroup(groupState, spawnedChildPID, result)) {
+        return NO;
+    }
+
+    int signalStatus = kill(-groupState->processGroupID, signalNumber);
+    int signalError = signalStatus == 0 ? 0 : errno;
+
+    groupState->lastGroupSignal = signalNumber;
+    if (finalSignal) {
+        groupState->finalGroupSignalSent = YES;
+    }
+
+    if (signalStatus != 0 && signalError != ESRCH) {
+        PXSetRunnerErrorIfUnset(result, signalError != 0 ? signalError : EIO);
+    }
+    return YES;
 }
 
 static BOOL PXAppendCapturedBytes(NSMutableData *data,
@@ -340,6 +405,89 @@ static void PXAssignCapturedStrings(CommandResult *result,
     result.stderrString = PXStringFromCapturedData(errData);
 }
 
+static void PXRunBoundedDrainPhase(NSTimeInterval phaseDuration,
+                                   int *outFd,
+                                   BOOL *outOpen,
+                                   NSMutableData *outData,
+                                   int *errFd,
+                                   BOOL *errOpen,
+                                   NSMutableData *errData,
+                                   const PXCaptureOptions *options,
+                                   CommandResult *result) {
+    struct timespec phaseStartTime;
+    int clockError = PXMonotonicTime(&phaseStartTime);
+    BOOL clockAvailable = clockError == 0;
+    if (!clockAvailable) {
+        PXSetRunnerErrorIfUnset(result, clockError);
+    }
+
+    NSTimeInterval phaseDeadline = clockAvailable
+        ? PXMonotonicSeconds(&phaseStartTime) + phaseDuration
+        : 0;
+    NSUInteger maxAttempts = (NSUInteger)ceil(phaseDuration / PXCapturePollQuantumSec) + 2;
+
+    for (NSUInteger attempt = 0; attempt < maxAttempts; attempt++) {
+        PXDrainAvailableStreams(outFd,
+                                outOpen,
+                                outData,
+                                errFd,
+                                errOpen,
+                                errData,
+                                options,
+                                result);
+
+        NSTimeInterval waitSec = PXCapturePollQuantumSec;
+        if (clockAvailable) {
+            struct timespec nowTime;
+            int nowError = PXMonotonicTime(&nowTime);
+            if (nowError != 0) {
+                PXSetRunnerErrorIfUnset(result, nowError);
+                clockAvailable = NO;
+            } else {
+                NSTimeInterval remaining = phaseDeadline - PXMonotonicSeconds(&nowTime);
+                if (remaining <= 0) {
+                    break;
+                }
+                waitSec = MIN(waitSec, remaining);
+            }
+        }
+
+        BOOL outReady = NO;
+        BOOL errReady = NO;
+        if (!PXWaitForReadable(*outFd,
+                               *outOpen,
+                               *errFd,
+                               *errOpen,
+                               waitSec,
+                               &outReady,
+                               &errReady,
+                               result)) {
+            PXCloseFileDescriptor(outFd);
+            PXCloseFileDescriptor(errFd);
+            *outOpen = NO;
+            *errOpen = NO;
+            continue;
+        }
+
+        if (outReady) {
+            PXDrainStream(outFd,
+                          outOpen,
+                          outData,
+                          options,
+                          YES,
+                          result);
+        }
+        if (errReady) {
+            PXDrainStream(errFd,
+                          errOpen,
+                          errData,
+                          options,
+                          NO,
+                          result);
+        }
+    }
+}
+
 static void PXRunBoundedReapPhase(pid_t pid,
                                   NSTimeInterval phaseDuration,
                                   PXChildState *childState,
@@ -435,19 +583,49 @@ static void PXRunBoundedReapPhase(pid_t pid,
     }
 }
 
-static void PXTerminateDirectChild(pid_t pid,
-                                   BOOL markTimedOut,
-                                   PXChildState *childState,
-                                   int *outFd,
-                                   BOOL *outOpen,
-                                   NSMutableData *outData,
-                                   int *errFd,
-                                   BOOL *errOpen,
-                                   NSMutableData *errData,
-                                   const PXCaptureOptions *options,
-                                   CommandResult *result) {
-    if (markTimedOut) {
-        result.timedOut = YES;
+static void PXFinalizeCaptureDescriptors(int *outFd,
+                                         BOOL *outOpen,
+                                         NSMutableData *outData,
+                                         int *errFd,
+                                         BOOL *errOpen,
+                                         NSMutableData *errData,
+                                         const PXCaptureOptions *options,
+                                         CommandResult *result) {
+    PXDrainAvailableStreams(outFd,
+                            outOpen,
+                            outData,
+                            errFd,
+                            errOpen,
+                            errData,
+                            options,
+                            result);
+    PXCloseFileDescriptor(outFd);
+    PXCloseFileDescriptor(errFd);
+    *outOpen = NO;
+    *errOpen = NO;
+}
+
+static void PXTerminateDirectChildEmergency(pid_t pid,
+                                            PXChildState *childState,
+                                            int *outFd,
+                                            BOOL *outOpen,
+                                            NSMutableData *outData,
+                                            int *errFd,
+                                            BOOL *errOpen,
+                                            NSMutableData *errData,
+                                            const PXCaptureOptions *options,
+                                            CommandResult *result) {
+    if (pid <= 1 || pid == getpid()) {
+        PXSetRunnerErrorIfUnset(result, EINVAL);
+        PXFinalizeCaptureDescriptors(outFd,
+                                     outOpen,
+                                     outData,
+                                     errFd,
+                                     errOpen,
+                                     errData,
+                                     options,
+                                     result);
+        return;
     }
 
     if (!childState->reaped && !childState->stateUnavailable) {
@@ -458,7 +636,6 @@ static void PXTerminateDirectChild(pid_t pid,
         if (kill(pid, SIGTERM) != 0 && errno != ESRCH) {
             PXSetRunnerErrorIfUnset(result, errno != 0 ? errno : EIO);
         }
-
         PXRunBoundedReapPhase(pid,
                               PXTerminationGraceSec,
                               childState,
@@ -476,7 +653,6 @@ static void PXTerminateDirectChild(pid_t pid,
         if (kill(pid, SIGKILL) != 0 && errno != ESRCH) {
             PXSetRunnerErrorIfUnset(result, errno != 0 ? errno : EIO);
         }
-
         PXRunBoundedReapPhase(pid,
                               PXKillReapGraceSec,
                               childState,
@@ -494,19 +670,133 @@ static void PXTerminateDirectChild(pid_t pid,
         PXSetRunnerErrorIfUnset(result, ETIMEDOUT);
     }
 
-    PXDrainAvailableStreams(outFd,
-                            outOpen,
-                            outData,
-                            errFd,
-                            errOpen,
-                            errData,
-                            options,
-                            result);
+    PXFinalizeCaptureDescriptors(outFd,
+                                 outOpen,
+                                 outData,
+                                 errFd,
+                                 errOpen,
+                                 errData,
+                                 options,
+                                 result);
+}
 
-    PXCloseFileDescriptor(outFd);
-    PXCloseFileDescriptor(errFd);
-    *outOpen = NO;
-    *errOpen = NO;
+static void PXTerminateSpawnedCommand(pid_t pid,
+                                      BOOL markTimedOut,
+                                      PXProcessGroupState *groupState,
+                                      PXChildState *childState,
+                                      int *outFd,
+                                      BOOL *outOpen,
+                                      NSMutableData *outData,
+                                      int *errFd,
+                                      BOOL *errOpen,
+                                      NSMutableData *errData,
+                                      const PXCaptureOptions *options,
+                                      CommandResult *result) {
+    if (markTimedOut) {
+        result.timedOut = YES;
+    }
+
+    if (childState->reaped) {
+        PXSetRunnerErrorIfUnset(result, EINVAL);
+        PXTerminateDirectChildEmergency(pid,
+                                        childState,
+                                        outFd,
+                                        outOpen,
+                                        outData,
+                                        errFd,
+                                        errOpen,
+                                        errData,
+                                        options,
+                                        result);
+        return;
+    }
+
+    if (!PXValidateOwnedProcessGroup(groupState, pid, result)) {
+        PXTerminateDirectChildEmergency(pid,
+                                        childState,
+                                        outFd,
+                                        outOpen,
+                                        outData,
+                                        errFd,
+                                        errOpen,
+                                        errData,
+                                        options,
+                                        result);
+        return;
+    }
+
+    if (!PXSignalOwnedProcessGroup(groupState,
+                                   pid,
+                                   childState,
+                                   SIGTERM,
+                                   NO,
+                                   result)) {
+        PXTerminateDirectChildEmergency(pid,
+                                        childState,
+                                        outFd,
+                                        outOpen,
+                                        outData,
+                                        errFd,
+                                        errOpen,
+                                        errData,
+                                        options,
+                                        result);
+        return;
+    }
+
+    PXRunBoundedDrainPhase(PXTerminationGraceSec,
+                           outFd,
+                           outOpen,
+                           outData,
+                           errFd,
+                           errOpen,
+                           errData,
+                           options,
+                           result);
+
+    if (!PXSignalOwnedProcessGroup(groupState,
+                                   pid,
+                                   childState,
+                                   SIGKILL,
+                                   YES,
+                                   result)) {
+        PXTerminateDirectChildEmergency(pid,
+                                        childState,
+                                        outFd,
+                                        outOpen,
+                                        outData,
+                                        errFd,
+                                        errOpen,
+                                        errData,
+                                        options,
+                                        result);
+        return;
+    }
+
+    PXRunBoundedReapPhase(pid,
+                          PXKillReapGraceSec,
+                          childState,
+                          outFd,
+                          outOpen,
+                          outData,
+                          errFd,
+                          errOpen,
+                          errData,
+                          options,
+                          result);
+
+    if (!childState->reaped && !childState->stateUnavailable) {
+        PXSetRunnerErrorIfUnset(result, ETIMEDOUT);
+    }
+
+    PXFinalizeCaptureDescriptors(outFd,
+                                 outOpen,
+                                 outData,
+                                 errFd,
+                                 errOpen,
+                                 errData,
+                                 options,
+                                 result);
 }
 
 static CommandResult *PXRunCaptureCommand(NSString *command,
@@ -577,6 +867,34 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         return PXFinishResult(result, &startTime);
     }
 
+    posix_spawnattr_t attributes = {0};
+    BOOL attributesInitialized = NO;
+    int attributeStatus = 0;
+    if (options.processGroupEnabled) {
+        attributeStatus = posix_spawnattr_init(&attributes);
+        attributesInitialized = attributeStatus == 0;
+        if (attributeStatus == 0) {
+            attributeStatus = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+        }
+        if (attributeStatus == 0) {
+            attributeStatus = posix_spawnattr_setpgroup(&attributes, 0);
+        }
+        if (attributeStatus != 0) {
+            result.runnerError = attributeStatus;
+            int attributeDestroyStatus = PXDestroySpawnAttributes(&attributes,
+                                                                  &attributesInitialized);
+            if (attributeDestroyStatus != 0) {
+                PXSetRunnerErrorIfUnset(result, attributeDestroyStatus);
+            }
+            PXCloseFileDescriptor(&outPipe[0]);
+            PXCloseFileDescriptor(&outPipe[1]);
+            PXCloseFileDescriptor(&errPipe[0]);
+            PXCloseFileDescriptor(&errPipe[1]);
+            result.stderrString = @"posix_spawn attributes setup failed";
+            return PXFinishResult(result, &startTime);
+        }
+    }
+
     posix_spawn_file_actions_t actions;
     int actionStatus = posix_spawn_file_actions_init(&actions);
     BOOL actionsInitialized = actionStatus == 0;
@@ -589,10 +907,15 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     if (actionStatus != 0) {
         result.runnerError = actionStatus;
         if (actionsInitialized) {
-            int destroyStatus = posix_spawn_file_actions_destroy(&actions);
-            if (destroyStatus != 0) {
-                PXSetRunnerErrorIfUnset(result, destroyStatus);
+            int actionDestroyStatus = posix_spawn_file_actions_destroy(&actions);
+            if (actionDestroyStatus != 0) {
+                PXSetRunnerErrorIfUnset(result, actionDestroyStatus);
             }
+        }
+        int attributeDestroyStatus = PXDestroySpawnAttributes(&attributes,
+                                                              &attributesInitialized);
+        if (attributeDestroyStatus != 0) {
+            PXSetRunnerErrorIfUnset(result, attributeDestroyStatus);
         }
         PXCloseFileDescriptor(&outPipe[0]);
         PXCloseFileDescriptor(&outPipe[1]);
@@ -607,9 +930,14 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         int beforeSpawnError = PXMonotonicTime(&beforeSpawnTime);
         if (beforeSpawnError != 0) {
             result.runnerError = beforeSpawnError;
-            int destroyStatus = posix_spawn_file_actions_destroy(&actions);
-            if (destroyStatus != 0) {
-                PXSetRunnerErrorIfUnset(result, destroyStatus);
+            int actionDestroyStatus = posix_spawn_file_actions_destroy(&actions);
+            if (actionDestroyStatus != 0) {
+                PXSetRunnerErrorIfUnset(result, actionDestroyStatus);
+            }
+            int attributeDestroyStatus = PXDestroySpawnAttributes(&attributes,
+                                                                  &attributesInitialized);
+            if (attributeDestroyStatus != 0) {
+                PXSetRunnerErrorIfUnset(result, attributeDestroyStatus);
             }
             PXCloseFileDescriptor(&outPipe[0]);
             PXCloseFileDescriptor(&outPipe[1]);
@@ -619,9 +947,14 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         }
         if (PXMonotonicSeconds(&beforeSpawnTime) >= deadline) {
             result.timedOut = YES;
-            int destroyStatus = posix_spawn_file_actions_destroy(&actions);
-            if (destroyStatus != 0) {
-                PXSetRunnerErrorIfUnset(result, destroyStatus);
+            int actionDestroyStatus = posix_spawn_file_actions_destroy(&actions);
+            if (actionDestroyStatus != 0) {
+                PXSetRunnerErrorIfUnset(result, actionDestroyStatus);
+            }
+            int attributeDestroyStatus = PXDestroySpawnAttributes(&attributes,
+                                                                  &attributesInitialized);
+            if (attributeDestroyStatus != 0) {
+                PXSetRunnerErrorIfUnset(result, attributeDestroyStatus);
             }
             PXCloseFileDescriptor(&outPipe[0]);
             PXCloseFileDescriptor(&outPipe[1]);
@@ -632,16 +965,40 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     }
 
     pid_t pid = -1;
+    PXProcessGroupState groupState = {
+        options.processGroupEnabled,
+        NO,
+        -1,
+        -1,
+        0,
+        NO
+    };
     const char *argv[] = {"/bin/sh", "-c", commandUTF8, NULL};
+    const posix_spawnattr_t *spawnAttributes = attributesInitialized ? &attributes : NULL;
     int spawnStatus = posix_spawn(&pid,
                                   argv[0],
                                   &actions,
-                                  NULL,
+                                  spawnAttributes,
                                   (char *const *)argv,
                                   NULL);
-    int destroyStatus = posix_spawn_file_actions_destroy(&actions);
-    if (destroyStatus != 0) {
-        PXSetRunnerErrorIfUnset(result, destroyStatus);
+    if (spawnStatus == 0) {
+        groupState.childPID = pid;
+        if (options.processGroupEnabled && pid > 1) {
+            groupState.configured = YES;
+            groupState.processGroupID = pid;
+        } else if (options.processGroupEnabled) {
+            PXSetRunnerErrorIfUnset(result, EINVAL);
+        }
+    }
+
+    int actionDestroyStatus = posix_spawn_file_actions_destroy(&actions);
+    if (actionDestroyStatus != 0) {
+        PXSetRunnerErrorIfUnset(result, actionDestroyStatus);
+    }
+    int attributeDestroyStatus = PXDestroySpawnAttributes(&attributes,
+                                                          &attributesInitialized);
+    if (attributeDestroyStatus != 0) {
+        PXSetRunnerErrorIfUnset(result, attributeDestroyStatus);
     }
 
     PXCloseFileDescriptor(&outPipe[1]);
@@ -666,7 +1023,9 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
 
     while (!childState.stateUnavailable &&
            (!childState.reaped || outOpen || errOpen)) {
-        if (!PXPollChild(pid, &childState, result)) {
+        BOOL capturePipeOpen = outOpen || errOpen;
+        BOOL mayReapDirectChild = !options.processGroupEnabled || !capturePipeOpen;
+        if (mayReapDirectChild && !PXPollChild(pid, &childState, result)) {
             break;
         }
 
@@ -678,6 +1037,15 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
                                 errData,
                                 &options,
                                 result);
+
+        if (options.processGroupEnabled &&
+            capturePipeOpen &&
+            !outOpen &&
+            !errOpen &&
+            !childState.reaped &&
+            !PXPollChild(pid, &childState, result)) {
+            break;
+        }
 
         if (childState.reaped && !outOpen && !errOpen) {
             break;
@@ -737,40 +1105,40 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     }
 
     if (deadlineExpired) {
-        PXTerminateDirectChild(pid,
-                               YES,
-                               &childState,
-                               &outFd,
-                               &outOpen,
-                               outData,
-                               &errFd,
-                               &errOpen,
-                               errData,
-                               &options,
-                               result);
+        PXTerminateSpawnedCommand(pid,
+                                  YES,
+                                  &groupState,
+                                  &childState,
+                                  &outFd,
+                                  &outOpen,
+                                  outData,
+                                  &errFd,
+                                  &errOpen,
+                                  errData,
+                                  &options,
+                                  result);
     } else if (timingFailure && !childState.reaped && !childState.stateUnavailable) {
-        PXTerminateDirectChild(pid,
-                               NO,
-                               &childState,
-                               &outFd,
-                               &outOpen,
-                               outData,
-                               &errFd,
-                               &errOpen,
-                               errData,
-                               &options,
-                               result);
+        PXTerminateSpawnedCommand(pid,
+                                  NO,
+                                  &groupState,
+                                  &childState,
+                                  &outFd,
+                                  &outOpen,
+                                  outData,
+                                  &errFd,
+                                  &errOpen,
+                                  errData,
+                                  &options,
+                                  result);
     } else {
-        PXDrainAvailableStreams(&outFd,
-                                &outOpen,
-                                outData,
-                                &errFd,
-                                &errOpen,
-                                errData,
-                                &options,
-                                result);
-        PXCloseFileDescriptor(&outFd);
-        PXCloseFileDescriptor(&errFd);
+        PXFinalizeCaptureDescriptors(&outFd,
+                                     &outOpen,
+                                     outData,
+                                     &errFd,
+                                     &errOpen,
+                                     errData,
+                                     &options,
+                                     result);
     }
 
     PXAssignCapturedStrings(result, outData, errData);
@@ -870,6 +1238,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     options.timeoutSec = 0;
     options.outputCapEnabled = NO;
     options.maxOutputBytes = 0;
+    options.processGroupEnabled = NO;
     return PXRunCaptureCommand(command, options);
 }
 
@@ -881,6 +1250,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     options.timeoutSec = timeoutSec;
     options.outputCapEnabled = YES;
     options.maxOutputBytes = maxOutputBytes;
+    options.processGroupEnabled = YES;
     return PXRunCaptureCommand(command, options);
 }
 

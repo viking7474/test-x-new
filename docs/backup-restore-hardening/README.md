@@ -27,7 +27,8 @@ docs/backup-restore-hardening/
 ├── DECISIONS.md
 ├── tasks/
 │   ├── TASK-0.1-command-result-contract.md
-│   └── TASK-0.2-bounded-capture-deadline.md
+│   ├── TASK-0.2-bounded-capture-deadline.md
+│   └── TASK-0.3-spawn-process-group-termination.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo
