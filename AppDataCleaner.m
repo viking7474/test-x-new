@@ -38,6 +38,8 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request;
 - (NSArray<NSString *> *)_exactInstalledExtensionIdentifiersForApplicationIdentifier:(NSString *)bundleIdentifier
                                                                                 error:(NSError **)error;
+- (NSArray<NSString *> *)_exactApplicationGroupIdentifiersForBundleIdentifier:(NSString *)bundleIdentifier
+                                                                         error:(NSError **)error;
 - (PXClearComponentResult *)_clearExactDataContainerComponentForIdentifiers:(NSArray<NSString *> *)identifiers
                                                                        kind:(PXResolvedContainerKind)kind
                                                                       scope:(PXClearScope)scope
@@ -47,6 +49,13 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 - (PXClearComponentResult *)_componentByApplyingFinalPostconditionToResult:(PXClearComponentResult *)result
                                                             canonicalPaths:(NSArray<NSString *> *)canonicalPaths
                                                   successfulCanonicalPaths:(NSSet<NSString *> *)successfulCanonicalPaths;
+- (PXClearComponentResult *)_clearExactAppGroupsComponentForIdentifiers:(NSArray<NSString *> *)identifiers
+                                                              timeoutSec:(NSTimeInterval)timeoutSec
+                                                          canonicalPaths:(NSArray<NSString *> **)canonicalPaths
+                                                successfulCanonicalPaths:(NSSet<NSString *> **)successfulCanonicalPaths;
+- (PXClearComponentResult *)_appGroupsComponentByApplyingFinalPostconditionToResult:(PXClearComponentResult *)result
+                                                                     canonicalPaths:(NSArray<NSString *> *)canonicalPaths
+                                                           successfulCanonicalPaths:(NSSet<NSString *> *)successfulCanonicalPaths;
 - (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID
                                                          deepClean:(BOOL)deepClean;
 @end
@@ -56,8 +65,7 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
     // Per-wipe discovery cache: main application-data paths remain canonical validator outputs.
     NSString *_wipeCacheBundleID;
     NSArray<NSString *> *_wipeCacheApplicationDataCanonicalPaths;
-    NSArray *_wipeCacheGroupUUIDs;
-    NSArray *_wipeCacheRootlessGroupUUIDs;
+    NSArray<NSString *> *_wipeCacheAppGroupCanonicalPaths;
     NSArray<NSString *> *_wipeCacheExtensionDataCanonicalPaths;
     NSArray<NSString *> *_wipeCachePluginKitDataCanonicalPaths;
 }
@@ -675,6 +683,7 @@ static NSString *PXApplicationDataStatusName(PXClearComponentStatus status) {
 static const PXClearScope PXMigratedDataClearScopes =
     PXClearScopeApplicationData |
     PXClearScopeExtensionData |
+    PXClearScopeAppGroups |
     PXClearScopePluginKitData;
 
 typedef NS_ENUM(NSInteger, PXExactDataClearFailureCode) {
@@ -701,6 +710,109 @@ static NSString * const PXInstalledExtensionDiscoveryErrorDomain = @"PXInstalled
 static NSString * const PXNoInstalledExtensionsDetail = @"No installed application extensions were discovered";
 static NSString * const PXNoExactExtensionDataContainersDetail = @"No exact extension-data containers were found";
 static NSString * const PXNoExactPluginKitDataContainersDetail = @"No exact PluginKit data containers were found";
+static NSString * const PXAppGroupsClearFailureDomain = @"PXAppGroupsClear";
+static NSString * const PXAppGroupEntitlementDiscoveryErrorDomain = @"PXAppGroupEntitlementDiscovery";
+static NSString * const PXNoDeclaredAppGroupsDetail = @"No application-group identifiers were declared by the app";
+static NSString * const PXNoExactAppGroupContainersDetail = @"No exact App Group containers were found";
+
+typedef NS_ENUM(NSInteger, PXAppGroupsClearFailureCode) {
+    PXAppGroupsClearFailureCodeInvalidRequest = 1,
+    PXAppGroupsClearFailureCodeEntitlementDiscoveryFailed = 2,
+    PXAppGroupsClearFailureCodeResolutionFailed = 3,
+    PXAppGroupsClearFailureCodeValidationFailed = 4,
+    PXAppGroupsClearFailureCodeExecutionFailed = 5,
+    PXAppGroupsClearFailureCodePostconditionFailed = 6,
+    PXAppGroupsClearFailureCodeInternalResultFailure = 7,
+};
+
+typedef NS_ENUM(NSInteger, PXAppGroupEntitlementDiscoveryErrorCode) {
+    PXAppGroupEntitlementDiscoveryErrorCodeInvalidRequest = 1,
+    PXAppGroupEntitlementDiscoveryErrorCodeExtractionFailed = 2,
+    PXAppGroupEntitlementDiscoveryErrorCodeInvalidStructure = 3,
+};
+
+static BOOL PXAppGroupIdentifierStringContainsNUL(NSString *value) {
+    unichar nulCharacter = 0;
+    NSString *nulString =
+        [NSString stringWithCharacters:&nulCharacter length:1];
+    return [value rangeOfString:nulString].location != NSNotFound;
+}
+
+static BOOL PXAppGroupIdentifierStringContainsNonWhitespace(NSString *value) {
+    NSCharacterSet *whitespace =
+        [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    return [value rangeOfCharacterFromSet:[whitespace invertedSet]].location
+        != NSNotFound;
+}
+
+static BOOL PXAppGroupIdentifierIsValid(id value) {
+    if (![value isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+    NSString *identifier = (NSString *)value;
+    return identifier.length > 0 &&
+           PXAppGroupIdentifierStringContainsNonWhitespace(identifier) &&
+           !PXAppGroupIdentifierStringContainsNUL(identifier);
+}
+
+static void PXAppGroupEntitlementDiscoveryAssignError(NSError **error,
+                                                       PXAppGroupEntitlementDiscoveryErrorCode code,
+                                                       NSString *message) {
+    if (!error) return;
+    *error = [NSError errorWithDomain:PXAppGroupEntitlementDiscoveryErrorDomain
+                                 code:code
+                             userInfo:@{NSLocalizedDescriptionKey:
+                                            message ?: @"Application-group entitlement discovery failed"}];
+}
+
+static PXClearFailure *PXAppGroupsFailure(PXAppGroupsClearFailureCode code,
+                                          NSString *message) {
+    return [[PXClearFailure alloc] initWithDomain:PXAppGroupsClearFailureDomain
+                                            code:code
+                                         message:message ?: @"App Groups clear failed"];
+}
+
+static PXClearComponentResult *PXAppGroupsFailedComponent(PXAppGroupsClearFailureCode code,
+                                                          NSString *message) {
+    PXClearFailure *failure = PXAppGroupsFailure(code, message);
+    return [[PXClearComponentResult alloc] initWithScope:PXClearScopeAppGroups
+                                                  status:PXClearComponentStatusFailed
+                                      attemptedUnitCount:1
+                                      succeededUnitCount:0
+                                         failedUnitCount:1
+                                                  detail:@"App Groups clear could not produce a valid component result"
+                                                 failure:failure];
+}
+
+static BOOL PXAppGroupsComponentResultIsStructurallyValid(id value) {
+    if (![value isKindOfClass:[PXClearComponentResult class]]) return NO;
+    PXClearComponentResult *result = (PXClearComponentResult *)value;
+    if (result.scope != PXClearScopeAppGroups ||
+        result.succeededUnitCount > result.attemptedUnitCount ||
+        result.failedUnitCount != result.attemptedUnitCount - result.succeededUnitCount) {
+        return NO;
+    }
+
+    switch (result.status) {
+        case PXClearComponentStatusSucceeded:
+            return result.attemptedUnitCount > 0 &&
+                   result.succeededUnitCount == result.attemptedUnitCount &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil;
+        case PXClearComponentStatusSkipped:
+            return result.attemptedUnitCount == 0 &&
+                   result.succeededUnitCount == 0 &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil &&
+                   result.detail != nil;
+        case PXClearComponentStatusFailed:
+            return result.attemptedUnitCount > 0 &&
+                   result.failedUnitCount > 0 &&
+                   [result.failure isKindOfClass:[PXClearFailure class]] &&
+                   [result.failure.domain isEqualToString:PXAppGroupsClearFailureDomain];
+    }
+    return NO;
+}
 
 static BOOL PXStrictBundleIdentifierCharacterIsAllowed(unichar character) {
     return (character >= (unichar)'A' && character <= (unichar)'Z') ||
@@ -786,6 +898,16 @@ static NSString *PXExactDataComponentName(PXClearScope scope) {
     return scope == PXClearScopePluginKitData ? @"PluginKitData" : @"ExtensionData";
 }
 
+static NSString *PXMigratedComponentName(PXClearScope scope) {
+    switch (scope) {
+        case PXClearScopeApplicationData: return @"ApplicationData";
+        case PXClearScopeExtensionData: return @"ExtensionData";
+        case PXClearScopeAppGroups: return @"AppGroups";
+        case PXClearScopePluginKitData: return @"PluginKitData";
+        default: return @"Unknown";
+    }
+}
+
 static PXClearFailure *PXExactDataFailure(PXClearScope scope,
                                           PXExactDataClearFailureCode code,
                                           NSString *message) {
@@ -847,18 +969,21 @@ static BOOL PXMigratedClearResultIsStructurallyValid(id value) {
     PXClearResult *result = (PXClearResult *)value;
     if (![result.request isKindOfClass:[PXClearRequest class]] ||
         result.request.scopes != PXMigratedDataClearScopes ||
-        result.componentResults.count != 3) {
+        result.componentResults.count != 4) {
         return NO;
     }
 
     PXClearComponentResult *applicationData = result.componentResults[0];
     PXClearComponentResult *extensionData = result.componentResults[1];
-    PXClearComponentResult *pluginKitData = result.componentResults[2];
+    PXClearComponentResult *appGroups = result.componentResults[2];
+    PXClearComponentResult *pluginKitData = result.componentResults[3];
     return applicationData.scope == PXClearScopeApplicationData &&
            extensionData.scope == PXClearScopeExtensionData &&
+           appGroups.scope == PXClearScopeAppGroups &&
            pluginKitData.scope == PXClearScopePluginKitData &&
            PXApplicationDataComponentResultIsStructurallyValid(applicationData) &&
            PXExactDataComponentResultIsStructurallyValid(extensionData, PXClearScopeExtensionData) &&
+           PXAppGroupsComponentResultIsStructurallyValid(appGroups) &&
            PXExactDataComponentResultIsStructurallyValid(pluginKitData, PXClearScopePluginKitData);
 }
 
@@ -1533,6 +1658,60 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     return [extensionIdentifiers sortedArrayUsingSelector:@selector(compare:)];
 }
 
+#pragma mark - Exact Application Group Entitlements
+
+- (NSArray<NSString *> *)_exactApplicationGroupIdentifiersForBundleIdentifier:(NSString *)bundleIdentifier
+                                                                         error:(NSError **)error {
+    if (error) *error = nil;
+    if (!PXStrictBundleIdentifierIsValid(bundleIdentifier)) {
+        PXAppGroupEntitlementDiscoveryAssignError(error,
+                                                  PXAppGroupEntitlementDiscoveryErrorCodeInvalidRequest,
+                                                  @"Invalid application identifier for App Group entitlement discovery");
+        return nil;
+    }
+
+    AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
+    NSError *extractionError = nil;
+    NSDictionary *entitlements = [reader fullEntitlementsForBundleID:bundleIdentifier
+                                                               error:&extractionError];
+    if (extractionError || ![entitlements isKindOfClass:[NSDictionary class]]) {
+        PXAppGroupEntitlementDiscoveryAssignError(error,
+                                                  PXAppGroupEntitlementDiscoveryErrorCodeExtractionFailed,
+                                                  @"Application entitlements could not be extracted");
+        return nil;
+    }
+
+    NSArray<NSString *> *keys = @[
+        @"com.apple.security.application-groups",
+        @"application-groups"
+    ];
+    NSMutableSet<NSString *> *identifiers = [NSMutableSet set];
+
+    for (NSString *key in keys) {
+        id declaredValue = [entitlements objectForKey:key];
+        if (!declaredValue) {
+            continue;
+        }
+        if (![declaredValue isKindOfClass:[NSArray class]]) {
+            PXAppGroupEntitlementDiscoveryAssignError(error,
+                                                      PXAppGroupEntitlementDiscoveryErrorCodeInvalidStructure,
+                                                      @"An application-group entitlement has an invalid type");
+            return nil;
+        }
+        for (id element in (NSArray *)declaredValue) {
+            if (!PXAppGroupIdentifierIsValid(element)) {
+                PXAppGroupEntitlementDiscoveryAssignError(error,
+                                                          PXAppGroupEntitlementDiscoveryErrorCodeInvalidStructure,
+                                                          @"An application-group entitlement contains an invalid identifier");
+                return nil;
+            }
+            [identifiers addObject:[(NSString *)element copy]];
+        }
+    }
+
+    return [[identifiers allObjects] sortedArrayUsingSelector:@selector(compare:)];
+}
+
 #pragma mark - Exact Extension Data Components
 
 - (PXClearComponentResult *)_clearExactDataContainerComponentForIdentifiers:(NSArray<NSString *> *)identifiers
@@ -1770,88 +1949,383 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     return finalResult;
 }
 
+#pragma mark - Exact App Group Component
+
+- (PXClearComponentResult *)_clearExactAppGroupsComponentForIdentifiers:(NSArray<NSString *> *)identifiers
+                                                              timeoutSec:(NSTimeInterval)timeoutSec
+                                                          canonicalPaths:(NSArray<NSString *> **)canonicalPaths
+                                                successfulCanonicalPaths:(NSSet<NSString *> **)successfulCanonicalPaths {
+    if (canonicalPaths) *canonicalPaths = @[];
+    if (successfulCanonicalPaths) *successfulCanonicalPaths = [NSSet set];
+
+    if (![identifiers isKindOfClass:[NSArray class]] || timeoutSec <= 0.0) {
+        return PXAppGroupsFailedComponent(PXAppGroupsClearFailureCodeInvalidRequest,
+                                          @"Invalid exact App Groups clear request");
+    }
+    for (id identifier in identifiers) {
+        if (!PXAppGroupIdentifierIsValid(identifier)) {
+            return PXAppGroupsFailedComponent(PXAppGroupsClearFailureCodeInvalidRequest,
+                                              @"Invalid exact application-group identifier list");
+        }
+    }
+
+    NSArray<NSString *> *sortedIdentifiers =
+        [identifiers sortedArrayUsingSelector:@selector(compare:)];
+    if (sortedIdentifiers.count == 0) {
+        PXClearComponentResult *skipped =
+            [[PXClearComponentResult alloc] initWithScope:PXClearScopeAppGroups
+                                                   status:PXClearComponentStatusSkipped
+                                       attemptedUnitCount:0
+                                       succeededUnitCount:0
+                                          failedUnitCount:0
+                                                   detail:PXNoDeclaredAppGroupsDetail
+                                                  failure:nil];
+        return skipped ?: PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeInternalResultFailure,
+            @"Skipped App Groups result construction failed");
+    }
+
+    AppGroupContainerResolver *resolver = [[AppGroupContainerResolver alloc] init];
+    PXDestructivePathValidator *validator = [[PXDestructivePathValidator alloc] init];
+    NSMutableDictionary<NSString *, NSMutableArray<PXResolvedContainer *> *> *modelsByPath =
+        [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *physicalPathOrder = [NSMutableArray array];
+    NSMutableSet<NSString *> *successfulPaths = [NSMutableSet set];
+    NSUInteger attemptedUnits = 0;
+    NSUInteger succeededUnits = 0;
+    NSUInteger failedUnits = 0;
+    PXClearFailure *firstFailure = nil;
+
+    const PXResolvedContainerRoot roots[] = {
+        PXResolvedContainerRootRootful,
+        PXResolvedContainerRootRootless,
+    };
+    NSArray<NSString *> *rootLabels = @[@"rootful", @"rootless"];
+
+    for (NSString *identifier in sortedIdentifiers) {
+        for (NSUInteger rootIndex = 0; rootIndex < 2; rootIndex++) {
+            PXResolvedContainerRoot root = roots[rootIndex];
+            NSError *resolutionError = nil;
+            PXResolvedContainer *resolved =
+                [resolver resolveAppGroupContainerForGroupIdentifier:identifier
+                                                                root:root
+                                                               error:&resolutionError];
+            if (!resolved) {
+                if (!resolutionError) {
+                    continue;
+                }
+                attemptedUnits++;
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXAppGroupsFailure(
+                        PXAppGroupsClearFailureCodeResolutionFailed,
+                        [NSString stringWithFormat:@"App Groups exact resolution failed for %@",
+                                                   rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+
+            NSError *validationError = nil;
+            NSString *canonicalPath =
+                [validator validatedCanonicalPathForContainer:resolved error:&validationError];
+            if (canonicalPath.length == 0) {
+                attemptedUnits++;
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXAppGroupsFailure(
+                        PXAppGroupsClearFailureCodeValidationFailed,
+                        [NSString stringWithFormat:@"App Groups validation failed for %@",
+                                                   rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+
+            NSMutableArray<PXResolvedContainer *> *models = modelsByPath[canonicalPath];
+            if (!models) {
+                models = [NSMutableArray array];
+                modelsByPath[[canonicalPath copy]] = models;
+                [physicalPathOrder addObject:[canonicalPath copy]];
+            }
+            [models addObject:resolved];
+        }
+    }
+
+    for (NSString *canonicalPath in physicalPathOrder) {
+        attemptedUnits++;
+        NSArray<PXResolvedContainer *> *models = [modelsByPath[canonicalPath] copy];
+        NSString *wipeCommand = PXShellValidatedApplicationDataWipe(canonicalPath);
+        CommandResult *commandResult =
+            [self runCommandWithPrivilegesResult:wipeCommand timeoutSec:timeoutSec];
+        if (!PXApplicationDataCommandResultSucceeded(commandResult)) {
+            failedUnits++;
+            if (!firstFailure) {
+                firstFailure = PXAppGroupsFailure(
+                    PXAppGroupsClearFailureCodeExecutionFailed,
+                    @"App Groups bounded execution failed");
+            }
+            continue;
+        }
+
+        BOOL allModelsStillAuthorizePath = YES;
+        for (PXResolvedContainer *model in models) {
+            NSError *postValidationError = nil;
+            NSString *postCanonicalPath =
+                [validator validatedCanonicalPathForContainer:model error:&postValidationError];
+            if (postCanonicalPath.length == 0 ||
+                ![postCanonicalPath isEqualToString:canonicalPath]) {
+                allModelsStillAuthorizePath = NO;
+                break;
+            }
+        }
+        if (!allModelsStillAuthorizePath) {
+            failedUnits++;
+            if (!firstFailure) {
+                firstFailure = PXAppGroupsFailure(
+                    PXAppGroupsClearFailureCodeValidationFailed,
+                    @"App Groups post-command identity validation failed");
+            }
+            continue;
+        }
+
+        NSError *postconditionError = nil;
+        if (!PXApplicationDataPostconditionIsValid(canonicalPath, &postconditionError)) {
+            failedUnits++;
+            if (!firstFailure) {
+                firstFailure = PXAppGroupsFailure(
+                    PXAppGroupsClearFailureCodePostconditionFailed,
+                    @"App Groups strict postcondition failed");
+            }
+            continue;
+        }
+
+        succeededUnits++;
+        [successfulPaths addObject:[canonicalPath copy]];
+    }
+
+    if (canonicalPaths) *canonicalPaths = [physicalPathOrder copy];
+    if (successfulCanonicalPaths) *successfulCanonicalPaths = [successfulPaths copy];
+
+    if (attemptedUnits == 0) {
+        PXClearComponentResult *skipped =
+            [[PXClearComponentResult alloc] initWithScope:PXClearScopeAppGroups
+                                                   status:PXClearComponentStatusSkipped
+                                       attemptedUnitCount:0
+                                       succeededUnitCount:0
+                                          failedUnitCount:0
+                                                   detail:PXNoExactAppGroupContainersDetail
+                                                  failure:nil];
+        return skipped ?: PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeInternalResultFailure,
+            @"Absent App Groups result construction failed");
+    }
+
+    PXClearComponentStatus status = failedUnits > 0
+        ? PXClearComponentStatusFailed
+        : PXClearComponentStatusSucceeded;
+    NSString *detail = failedUnits > 0
+        ? @"One or more exact App Group physical units failed"
+        : @"All exact App Group physical units succeeded";
+    PXClearComponentResult *result =
+        [[PXClearComponentResult alloc] initWithScope:PXClearScopeAppGroups
+                                               status:status
+                                   attemptedUnitCount:attemptedUnits
+                                   succeededUnitCount:succeededUnits
+                                      failedUnitCount:failedUnits
+                                               detail:detail
+                                              failure:firstFailure];
+    if (!PXAppGroupsComponentResultIsStructurallyValid(result)) {
+        return PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeInternalResultFailure,
+            @"App Groups accounting produced an invalid result");
+    }
+    return result;
+}
+
+- (PXClearComponentResult *)_appGroupsComponentByApplyingFinalPostconditionToResult:(PXClearComponentResult *)result
+                                                                     canonicalPaths:(NSArray<NSString *> *)canonicalPaths
+                                                           successfulCanonicalPaths:(NSSet<NSString *> *)successfulCanonicalPaths {
+    if (!PXAppGroupsComponentResultIsStructurallyValid(result) ||
+        ![canonicalPaths isKindOfClass:[NSArray class]] ||
+        ![successfulCanonicalPaths isKindOfClass:[NSSet class]]) {
+        return PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeInternalResultFailure,
+            @"Final App Groups verification received invalid state");
+    }
+    if (result.status == PXClearComponentStatusSkipped || canonicalPaths.count == 0) {
+        return result;
+    }
+
+    NSUInteger succeededUnits = result.succeededUnitCount;
+    NSUInteger failedUnits = result.failedUnitCount;
+    PXClearFailure *firstFailure = result.failure;
+    BOOL changed = NO;
+
+    for (NSString *canonicalPath in canonicalPaths) {
+        NSError *postconditionError = nil;
+        if (PXApplicationDataPostconditionIsValid(canonicalPath, &postconditionError)) {
+            continue;
+        }
+        if ([successfulCanonicalPaths containsObject:canonicalPath]) {
+            if (succeededUnits > 0) succeededUnits--;
+            failedUnits++;
+            changed = YES;
+            if (!firstFailure) {
+                firstFailure = PXAppGroupsFailure(
+                    PXAppGroupsClearFailureCodePostconditionFailed,
+                    @"App Groups final strict postcondition failed");
+            }
+        } else {
+            [self logMessage:@"[AppDataCleaner] AppGroups final read-only verification remains failed for an already-failed physical unit"];
+        }
+    }
+
+    if (!changed) {
+        return result;
+    }
+
+    PXClearComponentResult *finalResult =
+        [[PXClearComponentResult alloc] initWithScope:PXClearScopeAppGroups
+                                               status:PXClearComponentStatusFailed
+                                   attemptedUnitCount:result.attemptedUnitCount
+                                   succeededUnitCount:succeededUnits
+                                      failedUnitCount:failedUnits
+                                               detail:@"App Groups final strict verification failed"
+                                              failure:firstFailure];
+    if (!PXAppGroupsComponentResultIsStructurallyValid(finalResult)) {
+        return PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeInternalResultFailure,
+            @"Final App Groups accounting produced an invalid result");
+    }
+    return finalResult;
+}
+
 - (PXClearResult *)_completeDataWipeForMigratedRequest:(PXClearRequest *)request {
     if (![request isKindOfClass:[PXClearRequest class]] ||
         request.scopes != PXMigratedDataClearScopes) {
         return nil;
     }
 
-    NSError *discoveryError = nil;
+    NSError *extensionDiscoveryError = nil;
     NSArray<NSString *> *extensionIdentifiers =
         [self _exactInstalledExtensionIdentifiersForApplicationIdentifier:request.bundleIdentifier
-                                                                     error:&discoveryError];
+                                                                     error:&extensionDiscoveryError];
 
-    PXClearRequest *applicationRequest = [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
-                                                                                   scopes:PXClearScopeApplicationData
-                                                                                deepClean:request.deepClean];
+    NSError *appGroupDiscoveryError = nil;
+    NSArray<NSString *> *appGroupIdentifiers =
+        [self _exactApplicationGroupIdentifiersForBundleIdentifier:request.bundleIdentifier
+                                                             error:&appGroupDiscoveryError];
+
+    PXClearRequest *applicationRequest =
+        [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
+                                                  scopes:PXClearScopeApplicationData
+                                               deepClean:request.deepClean];
     PXClearComponentResult *applicationResult = applicationRequest
         ? [self _completeAppDataWipeForApplicationDataRequest:applicationRequest]
         : nil;
     if (!PXApplicationDataComponentResultIsStructurallyValid(applicationResult)) {
-        applicationResult = PXApplicationDataFailedComponent(PXApplicationDataClearFailureCodeInternalResultFailure,
-                                                             @"ApplicationData internal result validation failed");
+        applicationResult = PXApplicationDataFailedComponent(
+            PXApplicationDataClearFailureCodeInternalResultFailure,
+            @"ApplicationData internal result validation failed");
     }
+
+    BOOL isSystemApplication = [request.bundleIdentifier hasPrefix:@"com.apple."];
+    NSTimeInterval timeoutSec = (request.deepClean || isSystemApplication)
+        ? (NSTimeInterval)(15 * 60)
+        : (NSTimeInterval)(5 * 60);
 
     NSArray<NSString *> *extensionCanonicalPaths = @[];
+    NSArray<NSString *> *appGroupCanonicalPaths = @[];
     NSArray<NSString *> *pluginKitCanonicalPaths = @[];
     NSSet<NSString *> *successfulExtensionPaths = [NSSet set];
+    NSSet<NSString *> *successfulAppGroupPaths = [NSSet set];
     NSSet<NSString *> *successfulPluginKitPaths = [NSSet set];
     PXClearComponentResult *extensionResult = nil;
+    PXClearComponentResult *appGroupsResult = nil;
     PXClearComponentResult *pluginKitResult = nil;
 
-    if (!extensionIdentifiers && discoveryError) {
-        extensionResult = PXExactDataFailedComponent(PXClearScopeExtensionData,
-                                                     PXExactDataClearFailureCodeDiscoveryFailed,
-                                                     @"Exact installed extension discovery failed");
-        pluginKitResult = PXExactDataFailedComponent(PXClearScopePluginKitData,
-                                                     PXExactDataClearFailureCodeDiscoveryFailed,
-                                                     @"Exact installed extension discovery failed");
+    if (!extensionIdentifiers && extensionDiscoveryError) {
+        extensionResult = PXExactDataFailedComponent(
+            PXClearScopeExtensionData,
+            PXExactDataClearFailureCodeDiscoveryFailed,
+            @"Exact installed extension discovery failed");
+        pluginKitResult = PXExactDataFailedComponent(
+            PXClearScopePluginKitData,
+            PXExactDataClearFailureCodeDiscoveryFailed,
+            @"Exact installed extension discovery failed");
     } else {
-        BOOL isSystemApplication = [request.bundleIdentifier hasPrefix:@"com.apple."];
-        NSTimeInterval timeoutSec = (request.deepClean || isSystemApplication)
-            ? (NSTimeInterval)(15 * 60)
-            : (NSTimeInterval)(5 * 60);
-        extensionResult = [self _clearExactDataContainerComponentForIdentifiers:extensionIdentifiers ?: @[]
-                                                                            kind:PXResolvedContainerKindExtensionData
-                                                                           scope:PXClearScopeExtensionData
-                                                                      timeoutSec:timeoutSec
-                                                                  canonicalPaths:&extensionCanonicalPaths
-                                                        successfulCanonicalPaths:&successfulExtensionPaths];
-        pluginKitResult = [self _clearExactDataContainerComponentForIdentifiers:extensionIdentifiers ?: @[]
-                                                                            kind:PXResolvedContainerKindPluginKitData
-                                                                           scope:PXClearScopePluginKitData
-                                                                      timeoutSec:timeoutSec
-                                                                  canonicalPaths:&pluginKitCanonicalPaths
-                                                        successfulCanonicalPaths:&successfulPluginKitPaths];
-
-        extensionResult = [self _componentByApplyingFinalPostconditionToResult:extensionResult
-                                                                 canonicalPaths:extensionCanonicalPaths
-                                                       successfulCanonicalPaths:successfulExtensionPaths];
-        pluginKitResult = [self _componentByApplyingFinalPostconditionToResult:pluginKitResult
-                                                                 canonicalPaths:pluginKitCanonicalPaths
-                                                       successfulCanonicalPaths:successfulPluginKitPaths];
+        extensionResult =
+            [self _clearExactDataContainerComponentForIdentifiers:extensionIdentifiers ?: @[]
+                                                             kind:PXResolvedContainerKindExtensionData
+                                                            scope:PXClearScopeExtensionData
+                                                       timeoutSec:timeoutSec
+                                                   canonicalPaths:&extensionCanonicalPaths
+                                         successfulCanonicalPaths:&successfulExtensionPaths];
+        pluginKitResult =
+            [self _clearExactDataContainerComponentForIdentifiers:extensionIdentifiers ?: @[]
+                                                             kind:PXResolvedContainerKindPluginKitData
+                                                            scope:PXClearScopePluginKitData
+                                                       timeoutSec:timeoutSec
+                                                   canonicalPaths:&pluginKitCanonicalPaths
+                                         successfulCanonicalPaths:&successfulPluginKitPaths];
     }
+
+    if (!appGroupIdentifiers && appGroupDiscoveryError) {
+        appGroupsResult = PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeEntitlementDiscoveryFailed,
+            @"Exact application-group entitlement discovery failed");
+    } else {
+        appGroupsResult =
+            [self _clearExactAppGroupsComponentForIdentifiers:appGroupIdentifiers ?: @[]
+                                                   timeoutSec:timeoutSec
+                                               canonicalPaths:&appGroupCanonicalPaths
+                                     successfulCanonicalPaths:&successfulAppGroupPaths];
+    }
+
+    extensionResult =
+        [self _componentByApplyingFinalPostconditionToResult:extensionResult
+                                              canonicalPaths:extensionCanonicalPaths
+                                    successfulCanonicalPaths:successfulExtensionPaths];
+    pluginKitResult =
+        [self _componentByApplyingFinalPostconditionToResult:pluginKitResult
+                                              canonicalPaths:pluginKitCanonicalPaths
+                                    successfulCanonicalPaths:successfulPluginKitPaths];
+    appGroupsResult =
+        [self _appGroupsComponentByApplyingFinalPostconditionToResult:appGroupsResult
+                                                        canonicalPaths:appGroupCanonicalPaths
+                                              successfulCanonicalPaths:successfulAppGroupPaths];
 
     _wipeCacheExtensionDataCanonicalPaths = [extensionCanonicalPaths copy] ?: @[];
+    _wipeCacheAppGroupCanonicalPaths = [appGroupCanonicalPaths copy] ?: @[];
     _wipeCachePluginKitDataCanonicalPaths = [pluginKitCanonicalPaths copy] ?: @[];
 
-    if (!PXExactDataComponentResultIsStructurallyValid(extensionResult, PXClearScopeExtensionData)) {
-        extensionResult = PXExactDataFailedComponent(PXClearScopeExtensionData,
-                                                     PXExactDataClearFailureCodeInternalResultFailure,
-                                                     @"ExtensionData internal result validation failed");
+    if (!PXExactDataComponentResultIsStructurallyValid(extensionResult,
+                                                       PXClearScopeExtensionData)) {
+        extensionResult = PXExactDataFailedComponent(
+            PXClearScopeExtensionData,
+            PXExactDataClearFailureCodeInternalResultFailure,
+            @"ExtensionData internal result validation failed");
     }
-    if (!PXExactDataComponentResultIsStructurallyValid(pluginKitResult, PXClearScopePluginKitData)) {
-        pluginKitResult = PXExactDataFailedComponent(PXClearScopePluginKitData,
-                                                     PXExactDataClearFailureCodeInternalResultFailure,
-                                                     @"PluginKitData internal result validation failed");
+    if (!PXAppGroupsComponentResultIsStructurallyValid(appGroupsResult)) {
+        appGroupsResult = PXAppGroupsFailedComponent(
+            PXAppGroupsClearFailureCodeInternalResultFailure,
+            @"AppGroups internal result validation failed");
+    }
+    if (!PXExactDataComponentResultIsStructurallyValid(pluginKitResult,
+                                                       PXClearScopePluginKitData)) {
+        pluginKitResult = PXExactDataFailedComponent(
+            PXClearScopePluginKitData,
+            PXExactDataClearFailureCodeInternalResultFailure,
+            @"PluginKitData internal result validation failed");
     }
 
-    PXClearResult *aggregate = [[PXClearResult alloc] initWithRequest:request
-                                                    componentResults:@[
-                                                        applicationResult,
-                                                        extensionResult,
-                                                        pluginKitResult
-                                                    ]];
+    PXClearResult *aggregate =
+        [[PXClearResult alloc] initWithRequest:request
+                             componentResults:@[
+                                 applicationResult,
+                                 extensionResult,
+                                 appGroupsResult,
+                                 pluginKitResult
+                             ]];
     return PXMigratedClearResultIsStructurallyValid(aggregate) ? aggregate : nil;
 }
 
@@ -2003,8 +2477,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                      frozeForThisClear = [freezer isApplicationFrozen:bundleID];
                  }
                  
-                 // Step 4: Run and consume the exact three-scope migrated aggregate.
-                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running migrated ApplicationData/ExtensionData/PluginKitData clear..."];
+                 // Step 4: Run and consume the exact four-scope migrated aggregate.
+                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running migrated ApplicationData/ExtensionData/AppGroups/PluginKitData clear..."];
                  PXClearResult *migratedResult =
                      [strongSelf _completeDataWipeForMigratedRequest:migratedRequest];
                  NSError *migratedClearError = nil;
@@ -2015,14 +2489,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                      NSArray<NSNumber *> *failurePrecedence = @[
                          @(PXClearScopeApplicationData),
                          @(PXClearScopeExtensionData),
+                         @(PXClearScopeAppGroups),
                          @(PXClearScopePluginKitData)
                      ];
                      for (NSNumber *scopeNumber in failurePrecedence) {
                          PXClearScope scope = (PXClearScope)scopeNumber.unsignedIntegerValue;
                          PXClearComponentResult *component = [migratedResult componentResultForScope:scope];
-                         NSString *componentName = scope == PXClearScopeApplicationData
-                             ? @"ApplicationData"
-                             : PXExactDataComponentName(scope);
+                         NSString *componentName = PXMigratedComponentName(scope);
                          [strongSelf logMessage:@"[AppDataCleaner] %@ result %@ attempted=%lu succeeded=%lu failed=%lu",
                                componentName,
                                PXApplicationDataStatusName(component.status),
@@ -2120,9 +2593,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
 
     for (PXClearComponentResult *component in result.componentResults) {
-        NSString *componentName = component.scope == PXClearScopeApplicationData
-            ? @"ApplicationData"
-            : PXExactDataComponentName(component.scope);
+        NSString *componentName = PXMigratedComponentName(component.scope);
         [self logMessage:@"[AppDataCleaner] completeAppDataWipe %@ status=%@ attempted=%lu succeeded=%lu failed=%lu",
               componentName,
               PXApplicationDataStatusName(component.status),
@@ -2142,16 +2613,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     NSString *bundleID = request.bundleIdentifier;
     [self logMessage:@"[AppDataCleaner] Starting complete wipe for %@", bundleID];
 
-    NSArray *groupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO];
-    NSArray *rootlessGroupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
-
     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
     int rmTimeout = (request.deepClean || isSystemApp) ? (15 * 60) : (5 * 60);
-    int findTimeout = (request.deepClean || isSystemApp) ? (20 * 60) : (8 * 60);
-    int batchTimeout = MAX(findTimeout, rmTimeout);
-    if (groupUUIDs.count + rootlessGroupUUIDs.count > 1) {
-        batchTimeout = MIN(30 * 60, findTimeout + (int)(groupUUIDs.count + rootlessGroupUUIDs.count) * 60);
-    }
 
     PXDataContainerResolver *resolver = [[PXDataContainerResolver alloc] init];
     PXDestructivePathValidator *validator = [[PXDestructivePathValidator alloc] init];
@@ -2274,38 +2737,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // Cache canonical paths in rootful/rootless order; never reconstruct them from UUIDs.
     _wipeCacheBundleID = [bundleID copy];
     _wipeCacheApplicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
-    _wipeCacheGroupUUIDs = [groupUUIDs copy] ?: @[];
-    _wipeCacheRootlessGroupUUIDs = [rootlessGroupUUIDs copy] ?: @[];
 
-    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu; Groups=%lu RootlessGroups=%lu",
+    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu",
           (unsigned long)attemptedUnits,
           (unsigned long)succeededUnits,
-          (unsigned long)failedUnits,
-          (unsigned long)groupUUIDs.count,
-          (unsigned long)rootlessGroupUUIDs.count];
+          (unsigned long)failedUnits];
 
     // Clear App Store receipt
     [self clearAppReceiptData:bundleID withBundleUUID:nil];
     
-    // Process group + rootless group containers in ONE shell (same find/mkdir per path as before).
-    NSMutableArray<NSString *> *groupWipeParts = [NSMutableArray array];
-    [self logMessage:@"[AppDataCleaner] Wiping %lu app group containers (batched shell)", (unsigned long)groupUUIDs.count];
-    for (NSString *groupUUID in groupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        [self logMessage:@"[AppDataCleaner] Fast wiping group: %@", groupUUID];
-        [groupWipeParts addObject:PXShellWipeContainerKeepMetadata(groupPath)];
-    }
-    for (NSString *groupUUID in rootlessGroupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
-        [self logMessage:@"[AppDataCleaner] Fast wiping rootless group: %@", groupUUID];
-        [groupWipeParts addObject:PXShellWipeContainerKeepMetadata(groupPath)];
-    }
-    if (groupWipeParts.count > 0) {
-        [self runBatchedCommandsWithPrivileges:groupWipeParts timeoutSec:batchTimeout];
-    }
-    
-    [self logMessage:@"[AppDataCleaner] Group containers wiped successfully"];
-
     // Extra cleanup for MobileMail: email/account display is primarily system-scoped (Accounts3 + /var/mobile/Library/Mail).
     if ([bundleID isEqualToString:@"com.apple.mobilemail"]) {
         [self logMessage:@"[AppDataCleaner] MobileMail: wiping /var/mobile/Library/Mail and mail prefs"]; 
@@ -2508,27 +2948,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     // NOTE: Universal keychain wipe removed (too broad / can delete unrelated items).
 
-    // === FINAL SWEEP FOR 100% COVERAGE ===
-    NSLog(@"[AppDataCleaner] Starting final sweep for any remaining traces of %@", bundleID);
-    NSMutableArray *finalSweepPaths = [NSMutableArray array];
-    for (NSString *groupUUID in groupUUIDs) {
-        NSString *path = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        NSLog(@"[AppDataCleaner][Detect] App Group Container: %@", path);
-        [finalSweepPaths addObject:path];
-    }
-    for (NSString *groupUUID in rootlessGroupUUIDs) {
-        NSString *path = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
-        NSLog(@"[AppDataCleaner][Detect] Rootless App Group Container: %@", path);
-        [finalSweepPaths addObject:path];
-    }
-    // Recursively remove all non-Apple files from each container (parallelized)
-    dispatch_apply(finalSweepPaths.count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
-        NSString *containerPath = finalSweepPaths[i];
-        NSLog(@"[AppDataCleaner][Sweep] Starting sweep for container: %@", containerPath);
-        [self finalSweepForContainer:containerPath];
-        NSLog(@"[AppDataCleaner][Sweep] Finished sweep for container: %@", containerPath);
-    });
-    // Sweep for crash logs and system logs
+    // Sweep for crash logs and system logs.
     [self removeCrashLogsForBundleID:bundleID];
 
     // Main application-data final sweep is read-only and consumes the canonical path cache directly.
@@ -4116,27 +4536,30 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         [self logMessage:@"[AppDataCleaner] Standalone verification used the legacy read-only application-data fallback"];
     }
     
-    // 2. Verify group containers (heuristic + entitlement-resolved — same as before when cache miss)
-    NSArray *groupContainerUUIDs = useWipeCache ? (_wipeCacheGroupUUIDs ?: @[]) : [self findGroupContainerUUIDsForBundleID:bundleID];
-    for (NSString *groupUUID in groupContainerUUIDs) {
-        NSString *groupContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
-    }
-
-    // When cache hit, wipe already used entitlement-resolved groups as primary set — still union heuristic above.
-    // On cache miss, keep dual resolution (findGroup + entitlements) exactly as historical behavior.
-    if (!useWipeCache) {
+    // 2. Main-wipe App Group verification consumes canonical validator outputs directly.
+    if (useWipeCache) {
+        for (NSString *canonicalPath in (_wipeCacheAppGroupCanonicalPaths ?: @[])) {
+            [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+    } else {
+        // Standalone compatibility remains read-only and cannot authorize mutation.
+        NSArray *groupContainerUUIDs = [self findGroupContainerUUIDsForBundleID:bundleID];
+        for (NSString *groupUUID in groupContainerUUIDs) {
+            NSString *groupContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
+            [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
         NSArray *resolvedGroupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO];
         for (NSString *groupUUID in resolvedGroupUUIDs) {
             NSString *groupContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
             [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
         }
-    }
-
-    NSArray *rootlessGroupContainerUUIDs = useWipeCache ? (_wipeCacheRootlessGroupUUIDs ?: @[]) : [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
-    for (NSString *groupUUID in rootlessGroupContainerUUIDs) {
-        NSString *groupContainerPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
-        [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+        NSArray *rootlessGroupContainerUUIDs =
+            [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
+        for (NSString *groupUUID in rootlessGroupContainerUUIDs) {
+            NSString *groupContainerPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
+            [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+        [self logMessage:@"[AppDataCleaner] Standalone verification used legacy read-only App Group discovery"];
     }
     
     // 3. Verify extension and PluginKit data containers.
@@ -4222,7 +4645,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (([path containsString:@"/var/mobile/Containers/Data/Application"] ||
              [path containsString:@"/containers/Data/Application"] ||
              [path containsString:@"/private/var/mobile/Containers/Data/PluginKitPlugin"] ||
-             [path containsString:@"/containers/Data/PluginKitPlugin"]) &&
+             [path containsString:@"/containers/Data/PluginKitPlugin"] ||
+             [path containsString:@"/private/var/mobile/Containers/Shared/AppGroup"] ||
+             [path containsString:@"/containers/Shared/AppGroup"]) &&
             ([info containsString:@"StoreKit"] || 
              [info containsString:@"Directory has 0 non-system files"] ||
              [info containsString:@"Directory has 1 non-system files: Documents"] ||
@@ -4250,8 +4675,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if (useWipeCache) {
         _wipeCacheBundleID = nil;
         _wipeCacheApplicationDataCanonicalPaths = nil;
-        _wipeCacheGroupUUIDs = nil;
-        _wipeCacheRootlessGroupUUIDs = nil;
+        _wipeCacheAppGroupCanonicalPaths = nil;
         _wipeCacheExtensionDataCanonicalPaths = nil;
         _wipeCachePluginKitDataCanonicalPaths = nil;
     }
@@ -5259,22 +5683,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         return;
     }
 
-    // Preserve legacy App Group deep scanning without re-resolving or mutating main application data.
-    NSArray *appGroupUUIDs = [self findAppGroupUUIDs:bundleID];
-    for (NSString *groupUUID in appGroupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        NSArray *encryptionPatterns = @[
-            @"*.enc*", @"*.encrypted*", @"*.secure*", @"*.token*", @"*Token*",
-            @"*Auth*", @"*auth*", @"*cred*", @"*Cred*", @"*secret*", @"*Secret*"
-        ];
-        NSArray<NSString *> *matches = [self findPathsUnderRoot:groupPath
-                                                    directories:NO
-                                                   namePatterns:encryptionPatterns];
-        for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Wiping encrypted file in group: %@", path);
-            [self securelyWipeFile:path];
-        }
-    }
 }
 
 - (void)_internalClearEncryptedData:(NSString *)bundleID {
@@ -6718,13 +7126,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self _wipeContainersInBasePaths:@[@"/var/mobile/Containers/Shared/SystemGroup", @"/containers/Shared/SystemGroup"]
                   matchingSubstrings:@[@"webkit", @"safariviewservice", @"mobilesafari"]
                                 tag:@"MobileSafari(systemgroup)"];
-    [self _wipeContainersInBasePaths:@[@"/var/mobile/Containers/Shared/AppGroup", @"/containers/Shared/AppGroup"]
-                  matchingSubstrings:@[@"webkit", @"safariviewservice", @"mobilesafari"]
-                                tag:@"MobileSafari(appgroup)"];
 
-    // Final fallback: scrub WebKit/Safari state by filesystem structure inside shared containers.
-    [self _scrubWebKitStateInSharedContainerBase:@"/var/mobile/Containers/Shared/AppGroup" tag:@"MobileSafari(appgroup-scrub)"];
-    [self _scrubWebKitStateInSharedContainerBase:@"/containers/Shared/AppGroup" tag:@"MobileSafari(appgroup-scrub)"];
+    // Final fallback remains limited to SystemGroup containers.
     [self _scrubWebKitStateInSharedContainerBase:@"/var/mobile/Containers/Shared/SystemGroup" tag:@"MobileSafari(systemgroup-scrub)"];
     [self _scrubWebKitStateInSharedContainerBase:@"/containers/Shared/SystemGroup" tag:@"MobileSafari(systemgroup-scrub)"];
 
