@@ -5,33 +5,34 @@
 ```text
 Program: Backup / Restore Hardening
 Current phase: Phase 0 — Reliable Command Execution
-Current task: TASK-0.3 — Spawn-Time Process Group and Group-Scoped Termination
-Task file: docs/backup-restore-hardening/tasks/TASK-0.3-spawn-process-group-termination.md
-Expected report: docs/backup-restore-hardening/reports/TASK-0.3-REPORT.md
+Current task: TASK-0.5 — AppDataCleaner CommandResult Compatibility Wrapper
+Task file: docs/backup-restore-hardening/tasks/TASK-0.5-app-data-cleaner-command-result-wrapper.md
+Expected report: docs/backup-restore-hardening/reports/TASK-0.5-REPORT.md
 Status: READY
 Build owner: Project owner via GitHub Actions
-Next task: TASK-0.4 remains LOCKED
+Next task: not opened; TASK-1.1 remains LOCKED pending Phase 0 audit
 ```
 
 ## Gate Rules
 
-TASK-0.3 chỉ được chuyển thành `COMPLETED` khi đáp ứng đủ:
+TASK-0.5 may move to `COMPLETED` only when all conditions are met:
 
-- [ ] Agent tạo report đúng template.
-- [ ] Chỉ sửa `CommandRunner.m` và report.
-- [ ] Không thay đổi public API hoặc `CommandRunner.h`.
-- [ ] Chỉ bounded overload bật process group.
-- [ ] Process group được tạo bằng `POSIX_SPAWN_SETPGROUP` tại spawn time.
-- [ ] Không có post-spawn `setpgid`.
-- [ ] Owned PGID bằng spawned child PID và được validate trước signal.
-- [ ] Timeout signal group bằng SIGTERM rồi SIGKILL.
-- [ ] Final group signal xảy ra trước direct child reap.
-- [ ] Group-enabled loop không reap leader khi descendant còn giữ capture pipe.
-- [ ] Post-KILL direct-child reap có giới hạn.
-- [ ] Legacy APIs và caller không đổi behavior.
-- [ ] Không sửa Clear, Backup, Restore, Keychain hoặc UI.
-- [ ] GitHub Actions build thành công.
-- [ ] Coordinator review và chấp nhận.
+- [ ] Agent creates the required report.
+- [ ] Code diff is limited to `AppDataCleaner.m`.
+- [ ] `AppDataCleaner.h` is unchanged.
+- [ ] `CommandRunner.h/.m` are unchanged.
+- [ ] Private result-returning wrapper exists.
+- [ ] Wrapper uses bounded shell `CommandRunner` API.
+- [ ] Fixed output cap is 1 MiB per stream.
+- [ ] Existing `void` signatures and callers are unchanged.
+- [ ] Existing command strings and timeout values are unchanged.
+- [ ] Old post-spawn `setpgid` and custom wait/kill loop are removed from the wrapper.
+- [ ] Batch helper behavior is unchanged.
+- [ ] No direct executable migration is performed.
+- [ ] No Clear, Backup, Restore, Keychain or UI business result is changed.
+- [ ] Remaining direct process-launch paths in `AppDataCleaner.m` are inventoried.
+- [ ] GitHub Actions build succeeds.
+- [ ] Coordinator review accepts the task.
 
 ## Task History
 
@@ -39,14 +40,18 @@ TASK-0.3 chỉ được chuyển thành `COMPLETED` khi đáp ứng đủ:
 |---|---|---|---|---|
 | TASK-0.1 | COMPLETED | `reports/TASK-0.1-REPORT.md` | PASSED | `reviews/TASK-0.1-REVIEW.md` — ACCEPTED |
 | TASK-0.2 | COMPLETED | `reports/TASK-0.2-REPORT.md` | PASSED | `reviews/TASK-0.2-REVIEW.md` — ACCEPTED |
-| TASK-0.3 | READY | Chưa có | Chưa chạy | Chưa review |
+| TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.3-REVIEW.md` — ACCEPTED |
+| TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.4-REVIEW.md` — ACCEPTED |
+| TASK-0.5 | READY | Not created | Not run | Not reviewed |
 
 ## Blocked Work
 
-Các task sau chưa được phép triển khai:
+The following work is not yet authorized:
 
-- TASK-0.4 — Direct executable/argv API.
-- TASK-0.5 — Compatibility result-returning wrapper trong `AppDataCleaner`.
-- Tất cả task thuộc Phase 1 trở đi.
+- TASK-1.1 — Introduce immutable `PXResolvedContainer`.
+- All later Phase 1 tasks.
+- All Backup, Restore, Keychain and UI phases.
 
-Agent không được tạo code cho task bị khóa trong diff của TASK-0.3.
+After TASK-0.5, coordinator review must inspect the remaining process-launch inventory. An additional Phase 0 task may be inserted before TASK-1.1 if a blocking command-execution defect remains.
+
+Agent must not implement any blocked work in the TASK-0.5 diff.

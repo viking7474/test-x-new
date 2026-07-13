@@ -10,6 +10,11 @@
 #import <unistd.h>
 #import <math.h>
 #import <float.h>
+#import <stdint.h>
+#import <stdlib.h>
+#import <string.h>
+
+extern char **environ;
 
 static const NSTimeInterval PXCapturePollQuantumSec = 0.05;
 static const NSTimeInterval PXTerminationGraceSec = 0.35;
@@ -38,6 +43,11 @@ typedef struct {
     BOOL finalGroupSignalSent;
 } PXProcessGroupState;
 
+typedef struct {
+    char **items;
+    size_t count;
+} PXOwnedArgv;
+
 static void PXSetRunnerErrorIfUnset(CommandResult *result, int errorCode) {
     if (result.runnerError == 0) {
         result.runnerError = errorCode != 0 ? errorCode : EIO;
@@ -46,6 +56,123 @@ static void PXSetRunnerErrorIfUnset(CommandResult *result, int errorCode) {
 
 static void PXSetCriticalRunnerError(CommandResult *result, int errorCode) {
     result.runnerError = errorCode != 0 ? errorCode : EIO;
+}
+
+static void PXDestroyOwnedArgv(PXOwnedArgv *ownedArgv) {
+    if (!ownedArgv || !ownedArgv->items) {
+        return;
+    }
+
+    for (size_t index = 0; index < ownedArgv->count; index++) {
+        free(ownedArgv->items[index]);
+        ownedArgv->items[index] = NULL;
+    }
+    free(ownedArgv->items);
+    ownedArgv->items = NULL;
+    ownedArgv->count = 0;
+}
+
+static BOOL PXCreateOwnedUTF8String(id value,
+                                    BOOL rejectEmbeddedNUL,
+                                    char **ownedString,
+                                    int *errorCode) {
+    *ownedString = NULL;
+    if (![value isKindOfClass:[NSString class]]) {
+        *errorCode = EINVAL;
+        return NO;
+    }
+
+    NSData *utf8Data = [(NSString *)value dataUsingEncoding:NSUTF8StringEncoding
+                                              allowLossyConversion:NO];
+    if (!utf8Data) {
+        *errorCode = EINVAL;
+        return NO;
+    }
+
+    NSUInteger byteLength = utf8Data.length;
+    if ((uintmax_t)byteLength > (uintmax_t)SIZE_MAX - 1) {
+        *errorCode = EOVERFLOW;
+        return NO;
+    }
+    if (rejectEmbeddedNUL &&
+        byteLength > 0 &&
+        memchr(utf8Data.bytes, '\0', (size_t)byteLength) != NULL) {
+        *errorCode = EINVAL;
+        return NO;
+    }
+
+    size_t allocationSize = (size_t)byteLength + 1;
+    char *buffer = malloc(allocationSize);
+    if (!buffer) {
+        *errorCode = ENOMEM;
+        return NO;
+    }
+    if (byteLength > 0) {
+        memcpy(buffer, utf8Data.bytes, (size_t)byteLength);
+    }
+    buffer[byteLength] = '\0';
+    *ownedString = buffer;
+    return YES;
+}
+
+static BOOL PXBuildOwnedArgv(id executablePathObject,
+                             id argumentsObject,
+                             BOOL rejectEmbeddedNUL,
+                             PXOwnedArgv *ownedArgv,
+                             int *errorCode) {
+    ownedArgv->items = NULL;
+    ownedArgv->count = 0;
+    *errorCode = 0;
+
+    if (![executablePathObject isKindOfClass:[NSString class]] ||
+        [(NSString *)executablePathObject length] == 0 ||
+        ![(NSString *)executablePathObject hasPrefix:@"/"] ||
+        ![argumentsObject isKindOfClass:[NSArray class]]) {
+        *errorCode = EINVAL;
+        return NO;
+    }
+
+    NSArray *arguments = (NSArray *)argumentsObject;
+    NSUInteger argumentCount = arguments.count;
+    if ((uintmax_t)argumentCount > (uintmax_t)SIZE_MAX - 2) {
+        *errorCode = EOVERFLOW;
+        return NO;
+    }
+
+    size_t pointerCount = (size_t)argumentCount + 2;
+    if (pointerCount > SIZE_MAX / sizeof(char *)) {
+        *errorCode = EOVERFLOW;
+        return NO;
+    }
+
+    ownedArgv->items = calloc(pointerCount, sizeof(char *));
+    if (!ownedArgv->items) {
+        *errorCode = ENOMEM;
+        return NO;
+    }
+    ownedArgv->count = (size_t)argumentCount + 1;
+
+    if (!PXCreateOwnedUTF8String(executablePathObject,
+                                 rejectEmbeddedNUL,
+                                 &ownedArgv->items[0],
+                                 errorCode)) {
+        PXDestroyOwnedArgv(ownedArgv);
+        return NO;
+    }
+
+    for (NSUInteger index = 0; index < argumentCount; index++) {
+        id argument = [arguments objectAtIndex:index];
+        if (!PXCreateOwnedUTF8String(argument,
+                                     rejectEmbeddedNUL,
+                                     &ownedArgv->items[(size_t)index + 1],
+                                     errorCode)) {
+            PXDestroyOwnedArgv(ownedArgv);
+            return NO;
+        }
+    }
+
+    ownedArgv->items[pointerCount - 1] = NULL;
+    return YES;
 }
 
 static void PXCloseFileDescriptor(int *fd) {
@@ -799,8 +926,11 @@ static void PXTerminateSpawnedCommand(pid_t pid,
                                  result);
 }
 
-static CommandResult *PXRunCaptureCommand(NSString *command,
-                                          PXCaptureOptions options) {
+static CommandResult *PXRunCaptureExecutable(id executablePathObject,
+                                              id argumentsObject,
+                                              char *const environment[],
+                                              BOOL rejectEmbeddedNUL,
+                                              PXCaptureOptions options) {
     CommandResult *result = [[CommandResult alloc] init];
     struct timespec startTime;
     int startClockError = PXMonotonicTime(&startTime);
@@ -818,14 +948,14 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         }
     }
 
-    if (!command) {
-        result.runnerError = EINVAL;
-        return PXFinishResult(result, &startTime);
-    }
-
-    const char *commandUTF8 = [command UTF8String];
-    if (!commandUTF8) {
-        result.runnerError = EINVAL;
+    PXOwnedArgv ownedArgv = {NULL, 0};
+    int argvError = 0;
+    if (!PXBuildOwnedArgv(executablePathObject,
+                          argumentsObject,
+                          rejectEmbeddedNUL,
+                          &ownedArgv,
+                          &argvError)) {
+        result.runnerError = argvError != 0 ? argvError : EINVAL;
         return PXFinishResult(result, &startTime);
     }
 
@@ -842,6 +972,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     if (pipe(outPipe) != 0) {
         result.runnerError = errno != 0 ? errno : EIO;
         result.stderrString = @"pipe(out) failed";
+        PXDestroyOwnedArgv(&ownedArgv);
         return PXFinishResult(result, &startTime);
     }
     if (pipe(errPipe) != 0) {
@@ -850,6 +981,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         PXCloseFileDescriptor(&outPipe[1]);
         result.runnerError = pipeError;
         result.stderrString = @"pipe(err) failed";
+        PXDestroyOwnedArgv(&ownedArgv);
         return PXFinishResult(result, &startTime);
     }
 
@@ -864,6 +996,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         PXCloseFileDescriptor(&errPipe[1]);
         result.runnerError = nonBlockingError;
         result.stderrString = @"fcntl(pipe) failed";
+        PXDestroyOwnedArgv(&ownedArgv);
         return PXFinishResult(result, &startTime);
     }
 
@@ -891,6 +1024,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
             PXCloseFileDescriptor(&errPipe[0]);
             PXCloseFileDescriptor(&errPipe[1]);
             result.stderrString = @"posix_spawn attributes setup failed";
+            PXDestroyOwnedArgv(&ownedArgv);
             return PXFinishResult(result, &startTime);
         }
     }
@@ -922,6 +1056,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         PXCloseFileDescriptor(&errPipe[0]);
         PXCloseFileDescriptor(&errPipe[1]);
         result.stderrString = @"posix_spawn file actions setup failed";
+        PXDestroyOwnedArgv(&ownedArgv);
         return PXFinishResult(result, &startTime);
     }
 
@@ -943,6 +1078,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
             PXCloseFileDescriptor(&outPipe[1]);
             PXCloseFileDescriptor(&errPipe[0]);
             PXCloseFileDescriptor(&errPipe[1]);
+            PXDestroyOwnedArgv(&ownedArgv);
             return PXFinishResult(result, &startTime);
         }
         if (PXMonotonicSeconds(&beforeSpawnTime) >= deadline) {
@@ -960,6 +1096,7 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
             PXCloseFileDescriptor(&outPipe[1]);
             PXCloseFileDescriptor(&errPipe[0]);
             PXCloseFileDescriptor(&errPipe[1]);
+            PXDestroyOwnedArgv(&ownedArgv);
             return PXFinishResult(result, &startTime);
         }
     }
@@ -973,14 +1110,14 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
         0,
         NO
     };
-    const char *argv[] = {"/bin/sh", "-c", commandUTF8, NULL};
     const posix_spawnattr_t *spawnAttributes = attributesInitialized ? &attributes : NULL;
     int spawnStatus = posix_spawn(&pid,
-                                  argv[0],
+                                  ownedArgv.items[0],
                                   &actions,
                                   spawnAttributes,
-                                  (char *const *)argv,
-                                  NULL);
+                                  (char *const *)ownedArgv.items,
+                                  environment);
+    PXDestroyOwnedArgv(&ownedArgv);
     if (spawnStatus == 0) {
         groupState.childPID = pid;
         if (options.processGroupEnabled && pid > 1) {
@@ -1239,7 +1376,12 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     options.outputCapEnabled = NO;
     options.maxOutputBytes = 0;
     options.processGroupEnabled = NO;
-    return PXRunCaptureCommand(command, options);
+    NSArray *arguments = command ? @[@"-c", command] : nil;
+    return PXRunCaptureExecutable(@"/bin/sh",
+                                  arguments,
+                                  NULL,
+                                  NO,
+                                  options);
 }
 
 - (CommandResult *)runAndCapture:(NSString *)command
@@ -1251,7 +1393,29 @@ static CommandResult *PXRunCaptureCommand(NSString *command,
     options.outputCapEnabled = YES;
     options.maxOutputBytes = maxOutputBytes;
     options.processGroupEnabled = YES;
-    return PXRunCaptureCommand(command, options);
+    NSArray *arguments = command ? @[@"-c", command] : nil;
+    return PXRunCaptureExecutable(@"/bin/sh",
+                                  arguments,
+                                  NULL,
+                                  NO,
+                                  options);
+}
+
+- (CommandResult *)runExecutableAndCapture:(NSString *)executablePath
+                                 arguments:(NSArray<NSString *> *)arguments
+                                timeoutSec:(NSTimeInterval)timeoutSec
+                            maxOutputBytes:(NSUInteger)maxOutputBytes {
+    PXCaptureOptions options;
+    options.deadlineEnabled = YES;
+    options.timeoutSec = timeoutSec;
+    options.outputCapEnabled = YES;
+    options.maxOutputBytes = maxOutputBytes;
+    options.processGroupEnabled = YES;
+    return PXRunCaptureExecutable(executablePath,
+                                  arguments,
+                                  environ,
+                                  YES,
+                                  options);
 }
 
 - (NSString *)firstExistingPath:(NSArray<NSString *> *)paths {

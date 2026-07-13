@@ -6,9 +6,9 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 
 - TASK-0.1 — Stabilize `CommandResult` contract. **COMPLETED**
 - TASK-0.2 — Add opt-in total deadline, bounded capture and deterministic direct-child timeout result. **COMPLETED**
-- TASK-0.3 — Configure process group at spawn time and upgrade timeout termination to the whole command group. **READY**
-- TASK-0.4 — Add direct executable plus argv API for critical operations. **LOCKED**
-- TASK-0.5 — Add compatibility result-returning wrapper in `AppDataCleaner`. **LOCKED**
+- TASK-0.3 — Configure process group at spawn time and upgrade timeout termination to the whole command group. **COMPLETED**
+- TASK-0.4 — Add bounded direct executable plus argv API for critical operations. **COMPLETED**
+- TASK-0.5 — Add compatibility result-returning wrapper in `AppDataCleaner`. **READY**
 
 ## Phase 1 — Clear Data Safety Boundary
 

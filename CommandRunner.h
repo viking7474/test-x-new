@@ -27,6 +27,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (CommandResult *)runAndCapture:(NSString *)command
                      timeoutSec:(NSTimeInterval)timeoutSec
                  maxOutputBytes:(NSUInteger)maxOutputBytes;
+- (CommandResult *)runExecutableAndCapture:(NSString *)executablePath
+                                 arguments:(NSArray<NSString *> *)arguments
+                                timeoutSec:(NSTimeInterval)timeoutSec
+                            maxOutputBytes:(NSUInteger)maxOutputBytes;
 
 - (nullable NSString *)firstExistingPath:(NSArray<NSString *> *)paths;
 
