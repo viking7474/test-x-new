@@ -38,7 +38,8 @@ docs/backup-restore-hardening/
 │   ├── TASK-1.3-canonical-destructive-path-validator.md
 │   ├── TASK-1.4-remove-application-bundle-writes.md
 │   ├── TASK-1.5-typed-clear-request.md
-│   └── TASK-1.6-structured-clear-result.md
+│   ├── TASK-1.6-structured-clear-result.md
+│   └── TASK-1.7-migrate-main-application-data-clear.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo

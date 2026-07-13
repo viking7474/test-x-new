@@ -421,3 +421,57 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: TASK-1.6 adds only `PXClearResult.h/.m`; existing production callers remain unchanged until TASK-1.7.
 - Reason: Result invariants must be reviewed and built independently before they influence destructive control flow.
+
+## D-071 — Main application-data roots are independent result units
+
+- Status: Accepted
+- Decision: TASK-1.7 processes rootful then rootless application-data roots independently. A missing exact container is not an attempted unit; resolver, validator, execution or postcondition failure is a failed unit.
+- Reason: Independent units preserve partial outcomes and prevent one root failure from hiding or blocking the other root.
+
+## D-072 — Main application-data selection has no legacy fallback
+
+- Status: Accepted
+- Decision: The main Clear path may select application-data targets only through `PXDataContainerResolver`; fuzzy finders, content heuristics, first-match behavior and raw UUID caches are not fallback authorization.
+- Reason: A canonical validator cannot repair an identity decision already made by an ambiguous legacy resolver.
+
+## D-073 — Canonical validator output is the only main mutation path
+
+- Status: Accepted
+- Decision: Every migrated application-data mutation uses the exact canonical path returned by `PXDestructivePathValidator`. Raw candidate paths, UUID reconstruction and `/var/mobile` aliases are forbidden after validation.
+- Reason: Returning to caller-built paths after validation discards the safety boundary and reopens alias or target-substitution risk.
+
+## D-074 — Main application-data commands are root-specific and result-returning
+
+- Status: Accepted
+- Decision: TASK-1.7 runs one bounded `CommandResult`-returning wipe per validated root and does not batch rootful/rootless into one shell invocation.
+- Reason: Per-root execution is required to attribute success/failure counts and to avoid a successful command masking another root's failure.
+
+## D-075 — Shell exit alone is not proof of a successful wipe
+
+- Status: Accepted
+- Decision: The migrated wipe uses a dedicated status-accumulating script, post-command validator recheck and strict filesystem postcondition. Required remove/recreate operations may not be hidden by unconditional `|| true` behavior.
+- Reason: Existing compatibility scripts can exit zero after failed operations; a structured Succeeded result requires observable postconditions, not merely shell completion.
+
+## D-076 — Main verification caches canonical paths, not UUIDs
+
+- Status: Accepted
+- Decision: TASK-1.7 replaces rootful/rootless main UUID cache fields with copied canonical application-data paths and uses those paths directly for main verification and final read-only sweep.
+- Reason: Reconstructing a path from cached UUID state after validation loses canonical spelling and can reintroduce legacy aliases.
+
+## D-077 — Application-data failure becomes a legacy completion failure
+
+- Status: Accepted
+- Decision: A Failed `PXClearScopeApplicationData` component causes `clearDataForBundleID:completion:` to return `success = NO`. Succeeded or Skipped application-data results continue the existing remaining completion policy.
+- Reason: The primary destructive component must not be reported as successful when exact resolution, validation, execution or postcondition checking fails.
+
+## D-078 — Application-data failure has callback-error precedence
+
+- Status: Accepted
+- Decision: When application-data and existing Keychain logic both fail in TASK-1.7, the application-data failure snapshot is converted to the callback `NSError`; the Keychain failure is still logged.
+- Reason: Failure of the primary container reset is the most direct explanation that Clear did not complete. Full multi-component precedence remains for later aggregate orchestration.
+
+## D-079 — Migration remains internal and component-scoped
+
+- Status: Accepted
+- Decision: TASK-1.7 preserves public `AppDataCleaner` selectors, emits only an internal ApplicationData component result and does not add a public typed Clear API or full five-scope aggregate.
+- Reason: Extension, PluginKit, App Group and Keychain components still use legacy behavior and cannot yet be represented honestly as a complete typed operation.

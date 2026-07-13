@@ -13,6 +13,10 @@
 
 #import "AppEntitlementsReader.h"
 #import "CommandRunner.h"
+#import "PXDataContainerResolver.h"
+#import "PXDestructivePathValidator.h"
+#import "PXClearRequest.h"
+#import "PXClearResult.h"
 #import "AppGroupContainerResolver.h"
 #import "FreezeManager.h"
 #import "common/PXProcessKiller.h"
@@ -30,14 +34,16 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 - (NSString *)runCommandAndGetOutput:(NSString *)command
                           timeoutSec:(NSTimeInterval)timeoutSec;
 - (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments;
+- (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request;
+- (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID
+                                                         deepClean:(BOOL)deepClean;
 @end
 
 @implementation AppDataCleaner {
     NSFileManager *_fileManager;
-    // Per-wipe discovery cache: verify reuses UUIDs from completeAppDataWipe (same features, less re-scan).
+    // Per-wipe discovery cache: main application-data paths remain canonical validator outputs.
     NSString *_wipeCacheBundleID;
-    NSString *_wipeCacheDataUUID;
-    NSString *_wipeCacheRootlessDataUUID;
+    NSArray<NSString *> *_wipeCacheApplicationDataCanonicalPaths;
     NSArray *_wipeCacheGroupUUIDs;
     NSArray *_wipeCacheRootlessGroupUUIDs;
     NSArray *_wipeCacheExtensionContainers; // array of @{dataUUID, rootless}
@@ -438,6 +444,219 @@ static NSString *PXShellQuote(NSString *s) {
     if (!s.length) return @"''";
     NSString *escaped = [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]; 
     return [NSString stringWithFormat:@"'%@'", escaped];
+}
+
+typedef NS_ENUM(NSInteger, PXApplicationDataClearFailureCode) {
+    PXApplicationDataClearFailureCodeInvalidRequest = 1,
+    PXApplicationDataClearFailureCodeResolutionFailed = 2,
+    PXApplicationDataClearFailureCodeValidationFailed = 3,
+    PXApplicationDataClearFailureCodeExecutionFailed = 4,
+    PXApplicationDataClearFailureCodePostconditionFailed = 5,
+    PXApplicationDataClearFailureCodeInternalResultFailure = 6,
+};
+
+static NSString * const PXApplicationDataClearFailureDomain = @"PXApplicationDataClear";
+static NSString * const PXApplicationDataClearSkippedDetail = @"No exact application-data container exists in either supported root";
+
+static void PXApplicationDataAssignError(NSError **error,
+                                         PXApplicationDataClearFailureCode code,
+                                         NSString *message) {
+    if (!error) return;
+    *error = [NSError errorWithDomain:PXApplicationDataClearFailureDomain
+                                 code:code
+                             userInfo:@{NSLocalizedDescriptionKey: message ?: @"Application-data clear failed"}];
+}
+
+static PXClearFailure *PXApplicationDataFailure(PXApplicationDataClearFailureCode code,
+                                                NSString *message) {
+    return [[PXClearFailure alloc] initWithDomain:PXApplicationDataClearFailureDomain
+                                            code:code
+                                         message:message ?: @"Application-data clear failed"];
+}
+
+static PXClearComponentResult *PXApplicationDataFailedComponent(PXApplicationDataClearFailureCode code,
+                                                                NSString *message) {
+    PXClearFailure *failure = PXApplicationDataFailure(code, message);
+    return [[PXClearComponentResult alloc] initWithScope:PXClearScopeApplicationData
+                                                  status:PXClearComponentStatusFailed
+                                      attemptedUnitCount:1
+                                      succeededUnitCount:0
+                                         failedUnitCount:1
+                                                  detail:@"Application-data clear could not produce a valid component result"
+                                                 failure:failure];
+}
+
+static BOOL PXApplicationDataComponentResultIsStructurallyValid(id value) {
+    if (![value isKindOfClass:[PXClearComponentResult class]]) return NO;
+    PXClearComponentResult *result = (PXClearComponentResult *)value;
+    if (result.scope != PXClearScopeApplicationData ||
+        result.succeededUnitCount > result.attemptedUnitCount ||
+        result.failedUnitCount != result.attemptedUnitCount - result.succeededUnitCount) {
+        return NO;
+    }
+
+    switch (result.status) {
+        case PXClearComponentStatusSucceeded:
+            return result.attemptedUnitCount > 0 &&
+                   result.succeededUnitCount == result.attemptedUnitCount &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil;
+        case PXClearComponentStatusSkipped:
+            return result.attemptedUnitCount == 0 &&
+                   result.succeededUnitCount == 0 &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil &&
+                   result.detail != nil;
+        case PXClearComponentStatusFailed:
+            return result.attemptedUnitCount > 0 &&
+                   result.failedUnitCount > 0 &&
+                   [result.failure isKindOfClass:[PXClearFailure class]];
+    }
+    return NO;
+}
+
+static NSError *PXApplicationDataLegacyErrorForFailure(PXClearFailure *failure) {
+    if (![failure isKindOfClass:[PXClearFailure class]]) {
+        return [NSError errorWithDomain:PXApplicationDataClearFailureDomain
+                                   code:PXApplicationDataClearFailureCodeInternalResultFailure
+                               userInfo:@{NSLocalizedDescriptionKey: @"Application-data clear returned an invalid failure result"}];
+    }
+    return [NSError errorWithDomain:failure.domain
+                               code:failure.code
+                           userInfo:@{NSLocalizedDescriptionKey: failure.message}];
+}
+
+static BOOL PXApplicationDataCommandResultSucceeded(CommandResult *result) {
+    return result != nil &&
+           result.isSucceeded &&
+           !result.stdoutTruncated &&
+           !result.stderrTruncated;
+}
+
+static NSString *PXShellValidatedApplicationDataWipe(NSString *canonicalPath) {
+    if (![canonicalPath isKindOfClass:[NSString class]] || canonicalPath.length == 0) return @"";
+    NSString *q = PXShellQuote(canonicalPath);
+    return [NSString stringWithFormat:
+            @"container=%@; status=0; "
+             "for item in \"$container\"/* \"$container\"/.[!.]* \"$container\"/..?*; do "
+             "if [ ! -e \"$item\" ] && [ ! -L \"$item\" ]; then continue; fi; "
+             "name=${item##*/}; "
+             "case \"$name\" in "
+             "'.com.apple.mobile_container_manager.metadata.plist'|'.com.apple.containermanagerd.metadata.plist') continue ;; "
+             "esac; "
+             "chflags -R nouchg,noschg \"$item\" 2>/dev/null || true; "
+             "rm -rf \"$item\" 2>/dev/null || status=1; "
+             "done; "
+             "for dir in Documents Library tmp; do "
+             "mkdir -p \"$container/$dir\" 2>/dev/null || status=1; "
+             "done; "
+             "exit \"$status\"",
+            q];
+}
+
+static BOOL PXApplicationDataPostconditionIsValid(NSString *canonicalPath, NSError **error) {
+    if (![canonicalPath isKindOfClass:[NSString class]] || canonicalPath.length == 0) {
+        PXApplicationDataAssignError(error,
+                                     PXApplicationDataClearFailureCodePostconditionFailed,
+                                     @"Application-data postcondition received an invalid canonical path");
+        return NO;
+    }
+
+    const char *containerFS = canonicalPath.fileSystemRepresentation;
+    struct stat containerStat;
+    if (!containerFS || lstat(containerFS, &containerStat) != 0 || !S_ISDIR(containerStat.st_mode)) {
+        PXApplicationDataAssignError(error,
+                                     PXApplicationDataClearFailureCodePostconditionFailed,
+                                     @"Application-data container is missing or is not a real directory");
+        return NO;
+    }
+
+    NSError *contentsError = nil;
+    NSArray<NSString *> *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:canonicalPath
+                                                                                       error:&contentsError];
+    if (![contents isKindOfClass:[NSArray class]] || contentsError) {
+        PXApplicationDataAssignError(error,
+                                     PXApplicationDataClearFailureCodePostconditionFailed,
+                                     @"Application-data container inspection failed");
+        return NO;
+    }
+
+    NSSet<NSString *> *allowed = [NSSet setWithArray:@[
+        @".com.apple.mobile_container_manager.metadata.plist",
+        @".com.apple.containermanagerd.metadata.plist",
+        @"Documents",
+        @"Library",
+        @"tmp"
+    ]];
+    NSSet<NSString *> *metadataNames = [NSSet setWithArray:@[
+        @".com.apple.mobile_container_manager.metadata.plist",
+        @".com.apple.containermanagerd.metadata.plist"
+    ]];
+
+    for (NSString *entry in contents) {
+        if (![entry isKindOfClass:[NSString class]] || ![allowed containsObject:entry]) {
+            PXApplicationDataAssignError(error,
+                                         PXApplicationDataClearFailureCodePostconditionFailed,
+                                         @"Application-data container contains an unexpected top-level entry");
+            return NO;
+        }
+        NSString *entryPath = [canonicalPath stringByAppendingPathComponent:entry];
+        const char *entryFS = entryPath.fileSystemRepresentation;
+        struct stat entryStat;
+        if (!entryFS || lstat(entryFS, &entryStat) != 0 || S_ISLNK(entryStat.st_mode)) {
+            PXApplicationDataAssignError(error,
+                                         PXApplicationDataClearFailureCodePostconditionFailed,
+                                         @"Application-data top-level entry inspection failed or found a symlink");
+            return NO;
+        }
+        if ([metadataNames containsObject:entry] && !S_ISREG(entryStat.st_mode)) {
+            PXApplicationDataAssignError(error,
+                                         PXApplicationDataClearFailureCodePostconditionFailed,
+                                         @"Application-data metadata entry is not a regular file");
+            return NO;
+        }
+    }
+
+    for (NSString *directoryName in @[@"Documents", @"Library", @"tmp"]) {
+        NSString *directoryPath = [canonicalPath stringByAppendingPathComponent:directoryName];
+        const char *directoryFS = directoryPath.fileSystemRepresentation;
+        struct stat directoryStat;
+        if (!directoryFS ||
+            lstat(directoryFS, &directoryStat) != 0 ||
+            !S_ISDIR(directoryStat.st_mode) ||
+            S_ISLNK(directoryStat.st_mode)) {
+            PXApplicationDataAssignError(error,
+                                         PXApplicationDataClearFailureCodePostconditionFailed,
+                                         @"Required application-data directory is missing or is not a real directory");
+            return NO;
+        }
+        NSError *directoryError = nil;
+        NSArray *directoryContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directoryPath
+                                                                                         error:&directoryError];
+        if (![directoryContents isKindOfClass:[NSArray class]] || directoryError) {
+            PXApplicationDataAssignError(error,
+                                         PXApplicationDataClearFailureCodePostconditionFailed,
+                                         @"Required application-data directory inspection failed");
+            return NO;
+        }
+        if (directoryContents.count != 0) {
+            PXApplicationDataAssignError(error,
+                                         PXApplicationDataClearFailureCodePostconditionFailed,
+                                         @"Required application-data directory is not empty");
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+static NSString *PXApplicationDataStatusName(PXClearComponentStatus status) {
+    switch (status) {
+        case PXClearComponentStatusSucceeded: return @"Succeeded";
+        case PXClearComponentStatusSkipped: return @"Skipped";
+        case PXClearComponentStatusFailed: return @"Failed";
+    }
+    return @"Invalid";
 }
 
 /// Shell fragment: wipe container children except MCM metadata, then recreate minimal layout.
@@ -906,6 +1125,20 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 - (void)clearDataForBundleID:(NSString *)bundleID completion:(void (^)(BOOL, NSError *))completion {
     [self logMessage:@"[AppDataCleaner] === STARTING data clearing for %@ ===", bundleID];
+
+    BOOL deepClean = [self _deepCleanEnabled];
+    PXClearRequest *applicationDataRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                                       scopes:PXClearScopeApplicationData
+                                                                                    deepClean:deepClean];
+    if (!applicationDataRequest) {
+        NSError *requestError = [NSError errorWithDomain:PXApplicationDataClearFailureDomain
+                                                    code:PXApplicationDataClearFailureCodeInvalidRequest
+                                                userInfo:@{NSLocalizedDescriptionKey: @"Invalid application-data clear request"}];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(NO, requestError);
+        });
+        return;
+    }
     
     // Use __block to track if completion was called
     __block BOOL completionCalled = NO;
@@ -969,7 +1202,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
     };
 
-    BOOL deepClean = [self _deepCleanEnabled];
     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
     // Deep Clean and system apps can legitimately take a long time.
     // Avoid failing early while still making progress.
@@ -1003,7 +1235,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                  // Step 0: Force Kill Application to release file locks
                  [strongSelf logMessage:@"[AppDataCleaner] Step 0: Kill application..."];
 
-                [strongSelf logMessage:@"[AppDataCleaner] Deep Clean (verify scan) = %@", [strongSelf _deepCleanEnabled] ? @"ON" : @"OFF"];
+                [strongSelf logMessage:@"[AppDataCleaner] Deep Clean (verify scan) = %@", deepClean ? @"ON" : @"OFF"];
                 
                 // Kill by executable name (no shell) to release file locks.
                 PXKillAppProcessBestEffort(strongSelf, bundleID);
@@ -1039,9 +1271,27 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                      frozeForThisClear = [freezer isApplicationFrozen:bundleID];
                  }
                  
-                 // Step 4: Use completeAppDataWipe for comprehensive data wiping
-                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running completeAppDataWipe..."];
-                 [strongSelf completeAppDataWipe:bundleID];
+                 // Step 4: Run the typed application-data component and consume its result.
+                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running typed application-data clear..."];
+                 PXClearComponentResult *applicationDataResult =
+                     [strongSelf _completeAppDataWipeForApplicationDataRequest:applicationDataRequest];
+                 NSError *applicationDataError = nil;
+                 if (!PXApplicationDataComponentResultIsStructurallyValid(applicationDataResult)) {
+                     applicationDataError = [NSError errorWithDomain:PXApplicationDataClearFailureDomain
+                                                               code:PXApplicationDataClearFailureCodeInternalResultFailure
+                                                           userInfo:@{NSLocalizedDescriptionKey: @"Application-data clear returned an invalid internal result"}];
+                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result is nil or structurally invalid"];
+                 } else if (applicationDataResult.status == PXClearComponentStatusFailed) {
+                     applicationDataError = PXApplicationDataLegacyErrorForFailure(applicationDataResult.failure);
+                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result Failed (%lu/%lu units succeeded)",
+                           (unsigned long)applicationDataResult.succeededUnitCount,
+                           (unsigned long)applicationDataResult.attemptedUnitCount];
+                 } else if (applicationDataResult.status == PXClearComponentStatusSkipped) {
+                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result Skipped: %@", applicationDataResult.detail];
+                 } else {
+                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result Succeeded (%lu units)",
+                           (unsigned long)applicationDataResult.succeededUnitCount];
+                 }
                 
                 // Step 5: Clear HTTP cookie storage in memory  
                 [strongSelf logMessage:@"[AppDataCleaner] Step 5: Clearing HTTP cookies from memory..."];
@@ -1076,11 +1326,18 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                 
                 [strongSelf logMessage:@"[AppDataCleaner] === COMPLETED data clearing for %@ ===", bundleID];
-                if (!keychainOK1 || !keychainOK2) {
-                    NSError *err = keychainError2 ?: keychainError1;
-                    safeCompletion(NO, err ?: [NSError errorWithDomain:@"AppDataCleaner"
-                                                                 code:-2
-                                                             userInfo:@{NSLocalizedDescriptionKey: @"Keychain wipe failed"}]);
+                BOOL keychainFailed = !keychainOK1 || !keychainOK2;
+                NSError *keychainError = keychainError2 ?: keychainError1;
+                if (applicationDataError) {
+                    if (keychainFailed) {
+                        [strongSelf logMessage:@"[AppDataCleaner] Keychain also failed; ApplicationData failure has callback precedence: %@",
+                              keychainError.localizedDescription ?: @"unknown keychain error"];
+                    }
+                    safeCompletion(NO, applicationDataError);
+                } else if (keychainFailed) {
+                    safeCompletion(NO, keychainError ?: [NSError errorWithDomain:@"AppDataCleaner"
+                                                                            code:-2
+                                                                        userInfo:@{NSLocalizedDescriptionKey: @"Keychain wipe failed"}]);
                 } else {
                     safeCompletion(YES, nil);
                 }
@@ -1100,84 +1357,191 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 #pragma mark - Improved Rootless-Compatible App Data Wiping
 
 - (void)completeAppDataWipe:(NSString *)bundleID {
+    BOOL deepClean = [self _deepCleanEnabled];
+    PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                        scopes:PXClearScopeApplicationData
+                                                                     deepClean:deepClean];
+    PXClearComponentResult *result = [self _completeAppDataWipeForApplicationDataRequest:request];
+    if (!PXApplicationDataComponentResultIsStructurallyValid(result)) {
+        [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid ApplicationData result"];
+        return;
+    }
+    [self logMessage:@"[AppDataCleaner] completeAppDataWipe ApplicationData status=%@ attempted=%lu succeeded=%lu failed=%lu",
+          PXApplicationDataStatusName(result.status),
+          (unsigned long)result.attemptedUnitCount,
+          (unsigned long)result.succeededUnitCount,
+          (unsigned long)result.failedUnitCount];
+}
+
+- (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request {
+    if (![request isKindOfClass:[PXClearRequest class]] ||
+        request.scopes != PXClearScopeApplicationData) {
+        return PXApplicationDataFailedComponent(PXApplicationDataClearFailureCodeInvalidRequest,
+                                                @"Invalid application-data clear request");
+    }
+
+    NSString *bundleID = request.bundleIdentifier;
     [self logMessage:@"[AppDataCleaner] Starting complete wipe for %@", bundleID];
-    
-    // --- Optimized: Cache directory listings for this cleaning pass ---
+
+    // Data/Application listings remain read-only inputs for extension discovery only.
     NSArray *cachedDataDirs = [self listDirectoriesInPath:@"/var/mobile/Containers/Data/Application"];
     NSArray *cachedRootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
     NSArray *cachedBundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
     NSArray *cachedRootlessBundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
-    // App groups are resolved from entitlements + resolver; no need to list all group dirs here.
 
-    [self logMessage:@"[AppDataCleaner] Found %lu data containers, %lu rootless containers", 
-          (unsigned long)cachedDataDirs.count, (unsigned long)cachedRootlessDataDirs.count];
-
-    // Optimized lookups using cached listings
-    NSString *dataUUID = [self optimized_findDataContainerUUID:bundleID inDirectories:cachedDataDirs];
-    NSString *rootlessDataUUID = [self optimized_findRootlessDataContainerUUID:bundleID inDirectories:cachedRootlessDataDirs];
-    // Resolve app groups from entitlements (avoid overly broad heuristics, especially for com.apple.*).
     NSArray *groupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO];
     NSArray *rootlessGroupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
-    NSString *bundleUUID = [self optimized_findBundleContainerUUID:bundleID inDirectories:cachedBundleDirs rootlessDirs:cachedRootlessBundleDirs];
+    NSString *bundleUUID = [self optimized_findBundleContainerUUID:bundleID
+                                                      inDirectories:cachedBundleDirs
+                                                       rootlessDirs:cachedRootlessBundleDirs];
+    NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID
+                                                                   dataDirs:cachedDataDirs
+                                                           rootlessDataDirs:cachedRootlessDataDirs
+                                                                 bundleDirs:cachedBundleDirs
+                                                         rootlessBundleDirs:cachedRootlessBundleDirs];
 
-    // Find extension containers (pass cached dirs for speed)
-    NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:cachedDataDirs rootlessDataDirs:cachedRootlessDataDirs bundleDirs:cachedBundleDirs rootlessBundleDirs:cachedRootlessBundleDirs];
+    BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
+    int rmTimeout = (request.deepClean || isSystemApp) ? (15 * 60) : (5 * 60);
+    int findTimeout = (request.deepClean || isSystemApp) ? (20 * 60) : (8 * 60);
+    int batchTimeout = MAX(findTimeout, rmTimeout);
+    if (groupUUIDs.count + rootlessGroupUUIDs.count + extensionContainers.count > 1) {
+        batchTimeout = MIN(30 * 60, findTimeout + (int)(groupUUIDs.count + rootlessGroupUUIDs.count) * 60);
+    }
 
-    // Publish discovery for verifyDataCleared (same coverage, no second full re-scan).
+    PXDataContainerResolver *resolver = [[PXDataContainerResolver alloc] init];
+    PXDestructivePathValidator *validator = [[PXDestructivePathValidator alloc] init];
+    NSArray<NSNumber *> *roots = @[@(PXResolvedContainerRootRootful), @(PXResolvedContainerRootRootless)];
+    NSMutableArray<NSString *> *canonicalApplicationDataPaths = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray<NSDictionary *> *successfulApplicationDataRoots = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray<NSString *> *rootSummaries = [@[@"rootful: absent", @"rootless: absent"] mutableCopy];
+    NSUInteger attemptedUnits = 0;
+    NSUInteger succeededUnits = 0;
+    NSUInteger failedUnits = 0;
+    PXClearFailure *firstFailure = nil;
+
+    for (NSUInteger rootIndex = 0; rootIndex < roots.count; rootIndex++) {
+        PXResolvedContainerRoot root = (PXResolvedContainerRoot)[roots[rootIndex] unsignedIntegerValue];
+        NSString *rootLabel = rootIndex == 0 ? @"rootful" : @"rootless";
+        NSError *resolutionError = nil;
+        PXResolvedContainer *container = [resolver resolveApplicationDataContainerForIdentifier:request.bundleIdentifier
+                                                                                            root:root
+                                                                                           error:&resolutionError];
+        if (!container) {
+            if (!resolutionError) {
+                rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: absent", rootLabel];
+                continue;
+            }
+            attemptedUnits++;
+            failedUnits++;
+            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: resolution failed", rootLabel];
+            if (!firstFailure) {
+                firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeResolutionFailed,
+                                                        rootIndex == 0
+                                                            ? @"Rootful application-data resolution failed"
+                                                            : @"Rootless application-data resolution failed");
+            }
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ resolution failed (%@:%ld)",
+                  rootLabel, resolutionError.domain ?: @"unknown", (long)resolutionError.code];
+            continue;
+        }
+
+        attemptedUnits++;
+        NSError *validationError = nil;
+        NSString *canonicalPath = [validator validatedCanonicalPathForContainer:container error:&validationError];
+        if (canonicalPath.length == 0) {
+            failedUnits++;
+            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: validation failed", rootLabel];
+            if (!firstFailure) {
+                firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeValidationFailed,
+                                                        rootIndex == 0
+                                                            ? @"Rootful application-data validation failed"
+                                                            : @"Rootless application-data validation failed");
+            }
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ validation failed (%@:%ld)",
+                  rootLabel, validationError.domain ?: @"unknown", (long)validationError.code];
+            continue;
+        }
+
+        // Validation is immediately followed by script construction and one bounded command for this root.
+        NSString *wipeCommand = PXShellValidatedApplicationDataWipe(canonicalPath);
+        CommandResult *commandResult = [self runCommandWithPrivilegesResult:wipeCommand
+                                                                  timeoutSec:(NSTimeInterval)rmTimeout];
+        [canonicalApplicationDataPaths addObject:[canonicalPath copy]];
+        if (!PXApplicationDataCommandResultSucceeded(commandResult)) {
+            failedUnits++;
+            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: execution failed", rootLabel];
+            if (!firstFailure) {
+                firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeExecutionFailed,
+                                                        rootIndex == 0
+                                                            ? @"Rootful application-data execution failed"
+                                                            : @"Rootless application-data execution failed");
+            }
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ command failed spawn=%d runner=%d timeout=%d normal=%d exit=%d signal=%d stdoutTruncated=%d stderrTruncated=%d",
+                  rootLabel,
+                  commandResult ? commandResult.spawnError : EINVAL,
+                  commandResult ? commandResult.runnerError : EINVAL,
+                  commandResult ? commandResult.timedOut : NO,
+                  commandResult ? commandResult.exitedNormally : NO,
+                  commandResult ? commandResult.exitCode : -1,
+                  commandResult ? commandResult.terminationSignal : 0,
+                  commandResult ? commandResult.stdoutTruncated : NO,
+                  commandResult ? commandResult.stderrTruncated : NO];
+            continue;
+        }
+
+        NSError *postValidationError = nil;
+        NSString *postCanonicalPath = [validator validatedCanonicalPathForContainer:container
+                                                                               error:&postValidationError];
+        if (postCanonicalPath.length == 0 || ![postCanonicalPath isEqualToString:canonicalPath]) {
+            failedUnits++;
+            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: post-command validation failed", rootLabel];
+            if (!firstFailure) {
+                firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeValidationFailed,
+                                                        rootIndex == 0
+                                                            ? @"Rootful application-data post-command validation failed"
+                                                            : @"Rootless application-data post-command validation failed");
+            }
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ post-command validation failed or canonical identity changed (%@:%ld)",
+                  rootLabel, postValidationError.domain ?: @"unknown", (long)postValidationError.code];
+            continue;
+        }
+
+        NSError *postconditionError = nil;
+        if (!PXApplicationDataPostconditionIsValid(postCanonicalPath, &postconditionError)) {
+            failedUnits++;
+            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: postcondition failed", rootLabel];
+            if (!firstFailure) {
+                firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodePostconditionFailed,
+                                                        rootIndex == 0
+                                                            ? @"Rootful application-data postcondition failed"
+                                                            : @"Rootless application-data postcondition failed");
+            }
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ postcondition failed (%@:%ld)",
+                  rootLabel, postconditionError.domain ?: @"unknown", (long)postconditionError.code];
+            continue;
+        }
+
+        succeededUnits++;
+        rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: succeeded", rootLabel];
+        [successfulApplicationDataRoots addObject:@{ @"path": [canonicalPath copy], @"index": @(rootIndex) }];
+    }
+
+    // Cache canonical paths in rootful/rootless order; never reconstruct them from UUIDs.
     _wipeCacheBundleID = [bundleID copy];
-    _wipeCacheDataUUID = [dataUUID copy];
-    _wipeCacheRootlessDataUUID = [rootlessDataUUID copy];
+    _wipeCacheApplicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
     _wipeCacheGroupUUIDs = [groupUUIDs copy] ?: @[];
     _wipeCacheRootlessGroupUUIDs = [rootlessGroupUUIDs copy] ?: @[];
     _wipeCacheExtensionContainers = [extensionContainers copy] ?: @[];
-    
-    [self logMessage:@"[AppDataCleaner] Found UUIDs - Bundle: %@, Data: %@, RootlessData: %@, Groups=%lu RootlessGroups=%lu", 
-          bundleUUID ?: @"nil", dataUUID ?: @"nil", rootlessDataUUID ?: @"nil", (unsigned long)groupUUIDs.count, (unsigned long)rootlessGroupUUIDs.count];
 
-     BOOL deep = [self _deepCleanEnabled];
-     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
-     int rmTimeout = (deep || isSystemApp) ? (15 * 60) : (5 * 60);
-     int findTimeout = (deep || isSystemApp) ? (20 * 60) : (8 * 60);
-     // Batched multi-container scripts can take as long as the sum of individual finds.
-     int batchTimeout = MAX(findTimeout, rmTimeout);
-     if (groupUUIDs.count + rootlessGroupUUIDs.count + extensionContainers.count > 1) {
-         batchTimeout = MIN(30 * 60, findTimeout + (int)(groupUUIDs.count + rootlessGroupUUIDs.count) * 60);
-     }
-    
-    // Clear data container — single shell: rm top-level dirs + mkdir + hidden cleanup
-    if (dataUUID) {
-        NSString *dataContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataUUID];
-        [self logMessage:@"[AppDataCleaner] Wiping data container (batched shell): %@", dataContainerPath];
-        
-        // DEBUG: Count files before
-        NSError *err = nil;
-        NSArray *beforeContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[dataContainerPath stringByAppendingPathComponent:@"Library"] error:&err];
-        [self logMessage:@"[AppDataCleaner] DEBUG: Library has %lu items before wipe", (unsigned long)beforeContents.count];
-        
-        // FAST wipe: same subdirs/hidden rules as before, one posix_spawn instead of ~7.
-        [self runCommandWithPrivileges:PXShellFastDataContainerWipe(dataContainerPath) timeoutSec:batchTimeout];
-        
-        // DEBUG: Count files after
-        NSArray *afterContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[dataContainerPath stringByAppendingPathComponent:@"Library"] error:nil];
-        [self logMessage:@"[AppDataCleaner] DEBUG: Library has %lu items AFTER wipe", (unsigned long)afterContents.count];
-        
-        // DEBUG: List remaining items
-        if (afterContents.count > 0) {
-            [self logMessage:@"[AppDataCleaner] DEBUG: Remaining items: %@", [afterContents componentsJoinedByString:@", "]];
-        }
-        
-        [self logMessage:@"[AppDataCleaner] Data container wiped successfully"];
-    }
-    
-    // Clear rootless data container using the same approach
-    if (rootlessDataUUID) {
-        NSString *rootlessDataPath = [NSString stringWithFormat:@"/containers/Data/Application/%@", rootlessDataUUID];
-        NSLog(@"[AppDataCleaner] Wiping rootless data container: %@", rootlessDataPath);
-        [self completelyWipeContainer:rootlessDataPath];
-    } else {
-        NSLog(@"[AppDataCleaner] Directory does not exist: /containers/Data/Application");
-    }
-    
+    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu; Bundle=%@ Groups=%lu RootlessGroups=%lu Extensions=%lu",
+          (unsigned long)attemptedUnits,
+          (unsigned long)succeededUnits,
+          (unsigned long)failedUnits,
+          bundleUUID ?: @"nil",
+          (unsigned long)groupUUIDs.count,
+          (unsigned long)rootlessGroupUUIDs.count,
+          (unsigned long)extensionContainers.count];
+
     // Clear App Store receipt
     [self clearAppReceiptData:bundleID withBundleUUID:bundleUUID];
     
@@ -1389,14 +1753,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     // Clear encrypted data 
     [self logMessage:@"[AppDataCleaner] DEBUG: Clearing encrypted data..."];
-    [self _internalClearEncryptedData:bundleID];
-    
-    // If we have a data container, verify HTTPStorages are wiped
-    if (dataUUID) {
-        NSString *authPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@/Library/HTTPStorages", dataUUID];
-        [self logMessage:@"[AppDataCleaner] DEBUG: Wiping HTTPStorages at %@", authPath];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'/* 2>/dev/null || true", authPath]];
-    }
+    [self _internalClearEncryptedDataOutsideMainApplicationContainer:bundleID deepClean:request.deepClean];
     
     // Clear Spotlight data
     [self logMessage:@"[AppDataCleaner] DEBUG: Clearing Spotlight indexes..."];
@@ -1431,12 +1788,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // === FINAL SWEEP FOR 100% COVERAGE ===
     NSLog(@"[AppDataCleaner] Starting final sweep for any remaining traces of %@", bundleID);
     NSMutableArray *finalSweepPaths = [NSMutableArray array];
-    if (dataUUID) {
-        [finalSweepPaths addObject:[NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataUUID]];
-    }
-    if (rootlessDataUUID) {
-        [finalSweepPaths addObject:[NSString stringWithFormat:@"/containers/Data/Application/%@", rootlessDataUUID]];
-    }
     for (NSString *groupUUID in groupUUIDs) {
         NSString *path = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
         NSLog(@"[AppDataCleaner][Detect] App Group Container: %@", path);
@@ -1464,7 +1815,83 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     });
     // Sweep for crash logs and system logs
     [self removeCrashLogsForBundleID:bundleID];
+
+    // Main application-data final sweep is read-only and consumes the canonical path cache directly.
+    for (NSString *canonicalPath in (_wipeCacheApplicationDataCanonicalPaths ?: @[])) {
+        NSDictionary *successfulRoot = nil;
+        for (NSDictionary *candidate in successfulApplicationDataRoots) {
+            if ([candidate[@"path"] isEqualToString:canonicalPath]) {
+                successfulRoot = candidate;
+                break;
+            }
+        }
+
+        NSError *finalPostconditionError = nil;
+        if (!PXApplicationDataPostconditionIsValid(canonicalPath, &finalPostconditionError)) {
+            if (!successfulRoot) {
+                [self logMessage:@"[AppDataCleaner] ApplicationData final read-only verification remains failed for an already-failed root (%@:%ld)",
+                      finalPostconditionError.domain ?: @"unknown",
+                      (long)finalPostconditionError.code];
+                continue;
+            }
+
+            NSUInteger rootIndex = [successfulRoot[@"index"] unsignedIntegerValue];
+            if (succeededUnits > 0) succeededUnits--;
+            failedUnits++;
+            rootSummaries[rootIndex] = rootIndex == 0
+                ? @"rootful: final read-only verification failed"
+                : @"rootless: final read-only verification failed";
+            if (!firstFailure) {
+                firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodePostconditionFailed,
+                                                        rootIndex == 0
+                                                            ? @"Rootful application-data final verification failed"
+                                                            : @"Rootless application-data final verification failed");
+            }
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ final read-only verification failed (%@:%ld)",
+                  rootIndex == 0 ? @"rootful" : @"rootless",
+                  finalPostconditionError.domain ?: @"unknown",
+                  (long)finalPostconditionError.code];
+        }
+    }
+
+    NSString *componentDetail = [rootSummaries componentsJoinedByString:@"; "];
+    PXClearComponentResult *componentResult = nil;
+    if (attemptedUnits == 0) {
+        componentResult = [[PXClearComponentResult alloc] initWithScope:PXClearScopeApplicationData
+                                                                 status:PXClearComponentStatusSkipped
+                                                     attemptedUnitCount:0
+                                                     succeededUnitCount:0
+                                                        failedUnitCount:0
+                                                                 detail:PXApplicationDataClearSkippedDetail
+                                                                failure:nil];
+    } else if (failedUnits > 0) {
+        if (!firstFailure) {
+            firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeInternalResultFailure,
+                                                    @"Application-data clear failed without a failure snapshot");
+        }
+        componentResult = [[PXClearComponentResult alloc] initWithScope:PXClearScopeApplicationData
+                                                                 status:PXClearComponentStatusFailed
+                                                     attemptedUnitCount:attemptedUnits
+                                                     succeededUnitCount:succeededUnits
+                                                        failedUnitCount:failedUnits
+                                                                 detail:componentDetail
+                                                                failure:firstFailure];
+    } else {
+        componentResult = [[PXClearComponentResult alloc] initWithScope:PXClearScopeApplicationData
+                                                                 status:PXClearComponentStatusSucceeded
+                                                     attemptedUnitCount:attemptedUnits
+                                                     succeededUnitCount:succeededUnits
+                                                        failedUnitCount:0
+                                                                 detail:componentDetail
+                                                                failure:nil];
+    }
+
+    if (!PXApplicationDataComponentResultIsStructurallyValid(componentResult)) {
+        componentResult = PXApplicationDataFailedComponent(PXApplicationDataClearFailureCodeInternalResultFailure,
+                                                           @"Application-data clear could not construct a valid component result");
+    }
     NSLog(@"[AppDataCleaner] Completed wipe for %@", bundleID);
+    return componentResult;
 }
 
 // FINAL SWEEP: Recursively remove all files/folders except .com.apple* or system files
@@ -2950,21 +3377,28 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     NSMutableArray *unclearedPaths = [NSMutableArray array];
     NSMutableSet<NSString *> *verifiedPaths = [NSMutableSet set];
 
-    // Prefer wipe-pass discovery cache (same UUIDs just used for wipe; avoids re-listing containers).
+    // Main application-data verification consumes only canonical validator outputs from the wipe pass.
     BOOL useWipeCache = (_wipeCacheBundleID.length && bundleID.length &&
                          [_wipeCacheBundleID isEqualToString:bundleID]);
-    
-    // 1. Verify app data container is cleared
-    NSString *dataContainerUUID = useWipeCache ? _wipeCacheDataUUID : [self findDataContainerUUID:bundleID];
-    if (dataContainerUUID) {
-        NSString *dataContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataContainerUUID];
-        [self verifyClearedPath:dataContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
-    }
 
-    NSString *rootlessDataContainerUUID = useWipeCache ? _wipeCacheRootlessDataUUID : [self findRootlessDataContainerUUID:bundleID];
-    if (rootlessDataContainerUUID) {
-        NSString *rootlessDataContainerPath = [NSString stringWithFormat:@"/containers/Data/Application/%@", rootlessDataContainerUUID];
-        [self verifyClearedPath:rootlessDataContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+    // 1. Main-wipe verification uses canonical paths. Standalone verification keeps its legacy read-only fallback.
+    if (useWipeCache) {
+        for (NSString *canonicalPath in (_wipeCacheApplicationDataCanonicalPaths ?: @[])) {
+            [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+    } else {
+        NSString *dataContainerUUID = [self findDataContainerUUID:bundleID];
+        if (dataContainerUUID) {
+            NSString *dataContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataContainerUUID];
+            [self verifyClearedPath:dataContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+
+        NSString *rootlessDataContainerUUID = [self findRootlessDataContainerUUID:bundleID];
+        if (rootlessDataContainerUUID) {
+            NSString *rootlessDataContainerPath = [NSString stringWithFormat:@"/containers/Data/Application/%@", rootlessDataContainerUUID];
+            [self verifyClearedPath:rootlessDataContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+        [self logMessage:@"[AppDataCleaner] Standalone verification used the legacy read-only application-data fallback"];
     }
     
     // 2. Verify group containers (heuristic + entitlement-resolved — same as before when cache miss)
@@ -3088,8 +3522,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // Drop wipe discovery cache after consume (next clear rebuilds it).
     if (useWipeCache) {
         _wipeCacheBundleID = nil;
-        _wipeCacheDataUUID = nil;
-        _wipeCacheRootlessDataUUID = nil;
+        _wipeCacheApplicationDataCanonicalPaths = nil;
         _wipeCacheGroupUUIDs = nil;
         _wipeCacheRootlessGroupUUIDs = nil;
         _wipeCacheExtensionContainers = nil;
@@ -4064,6 +4497,58 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 // Override the existing clearAppStateData method to call our internal implementation
 
 // Fix for line ~1757 - Replace the duplicate clearEncryptedData
+- (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID
+                                                         deepClean:(BOOL)deepClean {
+    NSLog(@"[AppDataCleaner] Clearing encrypted data outside the migrated main application-data container for %@", bundleID);
+
+    NSArray *encryptedPrefs = [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.enc*", bundleID]];
+    encryptedPrefs = [encryptedPrefs arrayByAddingObjectsFromArray:
+                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.encrypted*", bundleID]]];
+    encryptedPrefs = [encryptedPrefs arrayByAddingObjectsFromArray:
+                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.secure*", bundleID]]];
+    for (NSString *path in encryptedPrefs) {
+        [self securelyWipeFile:path];
+    }
+
+    NSArray<NSString *> *prefBases = @[
+        @"/private/var/mobile/Library/Preferences",
+        @"/var/jb/var/mobile/Library/Preferences",
+        @"/private/var/jb/var/mobile/Library/Preferences"
+    ];
+    NSMutableArray *rootlessEncryptedPrefs = [NSMutableArray array];
+    for (NSString *base in prefBases) {
+        if (![_fileManager fileExistsAtPath:base]) continue;
+        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.enc*", base, bundleID]]];
+        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.encrypted*", base, bundleID]]];
+        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.secure*", base, bundleID]]];
+    }
+    for (NSString *path in rootlessEncryptedPrefs) {
+        [self securelyWipeFile:path];
+    }
+
+    if (!deepClean) {
+        NSLog(@"[AppDataCleaner] Deep Clean OFF: skipping deep non-main encrypted/token scans");
+        return;
+    }
+
+    // Preserve legacy App Group deep scanning without re-resolving or mutating main application data.
+    NSArray *appGroupUUIDs = [self findAppGroupUUIDs:bundleID];
+    for (NSString *groupUUID in appGroupUUIDs) {
+        NSString *groupPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
+        NSArray *encryptionPatterns = @[
+            @"*.enc*", @"*.encrypted*", @"*.secure*", @"*.token*", @"*Token*",
+            @"*Auth*", @"*auth*", @"*cred*", @"*Cred*", @"*secret*", @"*Secret*"
+        ];
+        NSArray<NSString *> *matches = [self findPathsUnderRoot:groupPath
+                                                    directories:NO
+                                                   namePatterns:encryptionPatterns];
+        for (NSString *path in matches) {
+            NSLog(@"[AppDataCleaner] Wiping encrypted file in group: %@", path);
+            [self securelyWipeFile:path];
+        }
+    }
+}
+
 - (void)_internalClearEncryptedData:(NSString *)bundleID {
     NSLog(@"[AppDataCleaner] Clearing encrypted data for %@", bundleID);
     

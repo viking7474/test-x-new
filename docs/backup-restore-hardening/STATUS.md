@@ -5,93 +5,66 @@
 ```text
 Program: Backup / Restore Hardening
 Current phase: Phase 1 — Clear Data Safety Boundary
-Current task: TASK-1.6 — Structured PXClearResult
-Task file: docs/backup-restore-hardening/tasks/TASK-1.6-structured-clear-result.md
-Expected report: docs/backup-restore-hardening/reports/TASK-1.6-REPORT.md
+Current task: TASK-1.7 — Migrate Main Application-Data Clear
+Task file: docs/backup-restore-hardening/tasks/TASK-1.7-migrate-main-application-data-clear.md
+Expected report: docs/backup-restore-hardening/reports/TASK-1.7-REPORT.md
 Status: READY
 Build owner: Project owner via GitHub Actions
-Next task: TASK-1.7 remains LOCKED
+Next task: TASK-1.8 remains LOCKED
 ```
 
 ## Accepted Foundation
 
 ### Phase 0 — Reliable Command Execution
 
-Completed outcomes:
+Phase 0 is complete. Critical command execution now has:
 
 - structured `CommandResult`;
-- bounded stdout/stderr capture;
+- bounded stdout/stderr;
 - monotonic deadlines;
 - spawn-time process groups;
-- bounded process-group termination and reap;
-- direct executable/argv API;
-- bounded `AppDataCleaner` compatibility wrappers;
-- bounded direct `find` helpers;
-- no local `NSTask`, pipe-capture, `posix_spawn` or blocking `waitpid` engine remains in `AppDataCleaner.m`.
+- bounded group termination and reap;
+- direct executable/argv support;
+- bounded cleaner wrappers;
+- bounded direct `find` helpers.
 
 ### TASK-1.1 — Immutable resolved identity
 
-`PXResolvedContainer` provides immutable exact container identity and lexical candidate-path invariants. It is not deletion authorization.
+`PXResolvedContainer` stores exact immutable container identity and lexical candidate-path state. It does not authorize deletion.
 
 ### TASK-1.2 — Exact application-data resolver
 
-`PXDataContainerResolver` resolves one root at a time using exact `MCMMetadataIdentifier` matching and fails closed on ambiguity.
+`PXDataContainerResolver` resolves application-data containers one root at a time using exact `MCMMetadataIdentifier` equality and fails closed on ambiguity.
 
 ### TASK-1.3 — Canonical destructive-path validator
 
-`PXDestructivePathValidator` provides fixed-base authorization, canonical containment, symlink/mount/ownership checks, live metadata revalidation and final device/inode rechecks.
+`PXDestructivePathValidator` enforces fixed bases, canonical immediate-child containment, symlink rejection, mount/device boundaries, ownership/mode checks, live metadata identity and final inode rechecks.
 
-### TASK-1.4 — Application bundles are read-only
+### TASK-1.4 — Application bundles read-only
 
-`AppDataCleaner` no longer:
-
-- wipes rootless application-bundle contents;
-- deletes or recreates app receipts;
-- deletes extension receipts;
-- retains the dormant private receipt-wipe implementation.
-
-The public receipt selector remains as a logged compatibility no-op. Remaining application-bundle references are read-only discovery or inspection.
+Active writes to application bundle containers were removed. Receipt APIs remain compatibility no-ops and remaining bundle discovery is read-only.
 
 ### TASK-1.5 — Typed immutable request
 
 `PXClearRequest` provides:
 
-- exact validated bundle identifier;
-- closed five-bit component scope mask;
+- exact bundle identifier;
+- closed component scope mask;
 - explicit deep-clean intent;
-- immutable copy/equality/hash semantics;
-- no application-bundle or receipt scope;
-- no caller integration.
+- no application-bundle scope;
+- immutable value semantics.
 
-Accepted review:
+### TASK-1.6 — Structured immutable result
 
-```text
-docs/backup-restore-hardening/reviews/TASK-1.5-REVIEW.md
-```
-
-Accepted commit:
+`PXClearResult.h/.m` provide:
 
 ```text
-24cde1e — task 1.5
+PXClearFailure
+PXClearComponentResult
+PXClearResult
 ```
 
-The commit contains accumulated prior-task artifacts, so future tasks should return to one commit per task.
-
-## TASK-1.6 Purpose
-
-TASK-1.6 introduces immutable structured output for future Clear orchestration.
-
-The contract contains three classes in `PXClearResult.h/.m`:
-
-1. `PXClearFailure` — stable domain/code/message snapshot;
-2. `PXClearComponentResult` — one final outcome for one requested scope;
-3. `PXClearResult` — aggregate covering every requested scope exactly once.
-
-No existing Clear caller is changed in this task.
-
-## TASK-1.6 Status Model
-
-Allowed component statuses are exactly:
+Component statuses are exactly:
 
 ```text
 Succeeded
@@ -99,61 +72,194 @@ Skipped
 Failed
 ```
 
-There is no pending, running, unknown, cancelled or partial status.
+The result model enforces:
 
-Partial success is represented by:
+- one known bit per component;
+- overflow-safe unit partitions;
+- status-specific invariants;
+- Failed plus mixed counts for partial success;
+- exact aggregate request-scope coverage;
+- canonical component ordering;
+- derived success/skip/failure masks;
+- immutable copy/equality/hash semantics.
+
+Accepted commit:
 
 ```text
-status = Failed
-succeededUnitCount > 0
-failedUnitCount > 0
+81de2a7ef28f862f78a7ae55f0d8897066a85f94 — task-1.6
 ```
 
-## TASK-1.6 Aggregate Model
+Accepted review:
 
-The aggregate must:
+```text
+docs/backup-restore-hardening/reviews/TASK-1.6-REVIEW.md
+```
 
-- contain exactly one component result for every bit in `request.scopes`;
-- contain no unrequested component;
-- reject duplicates and missing scopes;
-- store components in numeric scope order;
-- derive `succeededScopes`, `skippedScopes` and `failedScopes` internally;
-- expose `hasFailures` and `allRequestedScopesSucceeded` with exact, non-overlapping meanings.
+Build:
 
-A skipped component is not a failure, but it prevents all requested scopes from being classified as succeeded.
+```text
+PASSED — reported by project owner
+```
 
-TASK-1.6 does not map these predicates to the legacy `BOOL success` completion callback.
+## TASK-1.7 Purpose
 
-## TASK-1.6 Gate Rules
+The current main Clear flow still selects application-data targets with legacy directory listings and UUID finders, reconstructs raw rootful/rootless paths and executes void command helpers that do not propagate operation failure.
 
-TASK-1.6 may move to `COMPLETED` only when all conditions are met:
+TASK-1.7 migrates only the primary application-data component to:
 
-- [ ] Agent creates `PXClearResult.h` and `PXClearResult.m`.
-- [ ] Agent creates `reports/TASK-1.6-REPORT.md`.
-- [ ] Existing production source remains unchanged.
-- [ ] Header imports `PXClearRequest.h` and Foundation only.
-- [ ] Component status enum contains exactly three approved values.
-- [ ] `PXClearFailure` stores only validated domain/code/message.
-- [ ] `PXClearComponentResult` accepts exactly one known scope bit.
-- [ ] Count partition is checked without overflow-prone addition.
-- [ ] Succeeded/Skipped/Failed invariants match the task specification.
-- [ ] Skipped components require a detail.
-- [ ] Failed components require a failure snapshot and at least one failed unit.
-- [ ] Partial success uses Failed plus mixed counts.
-- [ ] Aggregate covers request scopes exactly once.
-- [ ] Missing, duplicate and unrequested scopes are rejected.
-- [ ] Component storage order is canonical by scope.
-- [ ] Derived masks are disjoint and cover the request mask.
-- [ ] `hasFailures` means `failedScopes != 0`.
-- [ ] `allRequestedScopesSucceeded` means `succeededScopes == request.scopes`.
-- [ ] Scope lookup accepts only one known requested bit.
-- [ ] All three classes are immutable, subclassing-restricted and value-semantic.
-- [ ] No `NSError`/`userInfo` is stored as public result state.
-- [ ] No filesystem, command, resolver, validator, keychain, UI or Clear execution behavior exists.
-- [ ] No existing production caller references the new result model.
-- [ ] Protected checksums remain unchanged.
-- [ ] `git diff --check`, new-file whitespace and NUL checks pass.
-- [ ] GitHub Actions succeeds or project owner explicitly confirms build.
+1. an application-data-only `PXClearRequest` context;
+2. exact rootful/rootless resolution;
+3. immediate canonical validation;
+4. canonical-path-only mutation;
+5. one bounded command per root;
+6. post-command revalidation and strict postconditions;
+7. one `PXClearComponentResult`;
+8. legacy completion failure when the primary application-data component fails.
+
+## Unit Policy
+
+The deterministic unit order is:
+
+```text
+1. rootful application-data root
+2. rootless application-data root
+```
+
+A root absent with no resolver error does not count as attempted.
+
+A resolver, validator, command, revalidation or postcondition error counts as one attempted failed unit.
+
+A successful validated wipe counts as one succeeded unit.
+
+One root may succeed while the other fails. Both are processed; the final component status is Failed with mixed counts.
+
+## Result Policy
+
+### Succeeded
+
+At least one exact container exists and every attempted root succeeds.
+
+### Skipped
+
+Both supported roots have no exact container and no resolver error.
+
+Required detail:
+
+```text
+No exact application-data container exists in either supported root
+```
+
+Skipped is not a legacy completion failure.
+
+### Failed
+
+Any root fails resolution, validation, bounded execution, revalidation or postcondition checking.
+
+The first stable failure snapshot is retained; all root outcomes are summarized without filesystem paths or shell commands.
+
+## Completion Policy
+
+`clearDataForBundleID:completion:` must consume the application-data component result.
+
+```text
+ApplicationData Failed  -> legacy completion NO
+ApplicationData Success -> preserve existing remaining completion policy
+ApplicationData Skipped -> preserve existing remaining completion policy
+```
+
+If application-data and Keychain both fail, application-data failure is returned and the Keychain failure is logged.
+
+TASK-1.7 does not otherwise redesign the legacy completion callback.
+
+## Canonical Mutation Boundary
+
+For each root:
+
+```text
+exact resolver
+  -> pre-command validator
+  -> canonical path
+  -> one bounded strict wipe command
+  -> post-command validator
+  -> filesystem postcondition
+```
+
+The main path must not mutate using:
+
+- a legacy UUID finder;
+- `container.containerPath` after validation;
+- reconstructed `/var/mobile` paths;
+- raw UUID path formatting;
+- generic `completelyWipeContainer:`;
+- the void command wrapper.
+
+## Strict Wipe Requirement
+
+The migrated script must preserve MCM metadata, remove every other immediate child, recreate only `Documents`, `Library` and `tmp`, and return nonzero when required removal or recreation fails.
+
+It must not:
+
+- mask required operations with `|| true`;
+- recursively set mode `0777`;
+- create `.nomedia`, `.initialized` or other marker files;
+- replace the container directory;
+- modify metadata.
+
+A command result alone is not proof of success. The validator must run again and the postcondition must verify the exact allowed top-level state and empty required directories.
+
+## Canonical Cache Migration
+
+Raw main-container cache fields:
+
+```text
+_wipeCacheDataUUID
+_wipeCacheRootlessDataUUID
+```
+
+must be replaced by copied canonical paths, recommended:
+
+```text
+_wipeCacheApplicationDataCanonicalPaths
+```
+
+Main verification and final read-only sweep must use these canonical paths directly.
+
+Extension and App Group cache schemas remain unchanged.
+
+## TASK-1.7 Gate Rules
+
+TASK-1.7 may move to `COMPLETED` only when all conditions are met:
+
+- [ ] Agent creates `reports/TASK-1.7-REPORT.md`.
+- [ ] Only `AppDataCleaner.m` changes as production source.
+- [ ] `AppDataCleaner.h` remains unchanged.
+- [ ] Required resolver, validator, request and result imports exist only in `.m`.
+- [ ] Main flow constructs an application-data-only request with captured deep-clean intent.
+- [ ] Rootful and rootless are processed independently in fixed order.
+- [ ] No-match roots do not count as attempted.
+- [ ] Resolver/validator/command/postcondition errors count as failed units.
+- [ ] Legacy application-data finders do not select the main target.
+- [ ] Canonical validator output is the only main mutation path.
+- [ ] One bounded result-returning command is used per validated root.
+- [ ] Required command operations cannot be masked into unconditional success.
+- [ ] Command truncation is treated as failure.
+- [ ] Validator runs again after a successful command.
+- [ ] Required filesystem postcondition is checked.
+- [ ] One structured ApplicationData component result is produced.
+- [ ] Partial root success is represented as Failed with mixed counts.
+- [ ] Failed application-data result propagates to legacy completion.
+- [ ] Skipped application-data result does not fail legacy completion.
+- [ ] Raw UUID wipe cache is replaced by canonical path cache.
+- [ ] Main verification uses canonical cache paths.
+- [ ] Redundant raw HTTPStorages wipe is removed.
+- [ ] No later main-path helper bypasses the validated application-data boundary.
+- [ ] Extension/PluginKit/App Group behavior is not migrated.
+- [ ] Keychain is not converted to a component result.
+- [ ] Application-bundle read-only gates remain true.
+- [ ] Generic destructive helper implementations remain unchanged.
+- [ ] All protected checksums remain unchanged.
+- [ ] `git diff --check`, whitespace and NUL checks pass.
+- [ ] GitHub Actions succeeds or owner confirms build.
 - [ ] Coordinator review accepts the task.
 
 ## Task History
@@ -171,48 +277,36 @@ TASK-1.6 may move to `COMPLETED` only when all conditions are met:
 | TASK-1.2 | COMPLETED | `reports/TASK-1.2-REPORT.md` | PASSED reported by owner | ACCEPTED |
 | TASK-1.3 | COMPLETED | `reports/TASK-1.3-REPORT.md` | PASSED reported by owner | ACCEPTED |
 | TASK-1.4 | COMPLETED | `reports/TASK-1.4-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.5 | COMPLETED | `reports/TASK-1.5-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.5-REVIEW.md` |
-| TASK-1.6 | READY | Not created | Not run | Not reviewed |
-| TASK-1.7 | LOCKED | Not created | Not run | Not reviewed |
-
-## Migration Sequence
-
-```text
-TASK-1.5 — immutable typed request
-TASK-1.6 — immutable structured result
-TASK-1.7 — migrate main application-data Clear
-TASK-1.8 — migrate extension and PluginKit data Clear
-TASK-1.9 — migrate App Group Clear
-TASK-1.10 — integrate Keychain result
-TASK-1.11 — remove unsafe permission and marker behavior
-TASK-1.12 — quarantine ambiguous legacy Clear APIs
-```
-
-Request and result contracts must be accepted before destructive caller migration begins.
+| TASK-1.5 | COMPLETED | `reports/TASK-1.5-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-1.6 | COMPLETED | `reports/TASK-1.6-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.6-REVIEW.md` |
+| TASK-1.7 | READY | Not created | Not run | Not reviewed |
+| TASK-1.8 | LOCKED | Not created | Not run | Not reviewed |
 
 ## Working-Tree Baseline
 
-At the opening of TASK-1.6:
+Expected starting point:
 
 ```text
-HEAD: 24cde1e978ca914d49cd1ae6427085cc3e3389c1
-Working tree: clean before coordinator documentation updates
+HEAD: 81de2a7ef28f862f78a7ae55f0d8897066a85f94
+Production working tree: clean
+Coordinator documentation: may be modified/untracked
 ```
 
-TASK-1.6 must treat the complete commit as protected baseline and create only its two new production files plus its report.
+Commit coordinator documentation before TASK-1.7 when practical. Otherwise the agent must treat it as protected baseline and isolate the `AppDataCleaner.m` diff.
 
 ## Blocked Work
 
-The following work is not authorized during TASK-1.6:
+TASK-1.7 does not authorize:
 
-- importing the result into `AppDataCleaner`;
-- adding or changing a Clear API;
-- mapping structured result predicates to legacy completion success;
-- resolving or validating containers;
-- deleting, writing, renaming, chmod/chown or executing commands;
-- changing Keychain behavior;
-- changing Backup, Restore or UI;
-- editing `PXClearRequest`;
-- starting TASK-1.7 or later work.
+- a public typed Clear API;
+- full aggregate results for all scopes;
+- extension or PluginKit migration;
+- App Group migration;
+- Keychain component-result integration;
+- application-bundle mutation;
+- Backup/Restore/UI changes;
+- public legacy API removal;
+- generic helper redesign;
+- TASK-1.8 or later implementation.
 
-Agent must stop after TASK-1.6.
+Agent must stop after TASK-1.7.
