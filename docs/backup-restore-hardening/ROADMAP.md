@@ -10,13 +10,13 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 - TASK-0.4 — Add bounded direct executable plus argv API for critical operations. **COMPLETED**
 - TASK-0.5 — Add compatibility result-returning wrapper in `AppDataCleaner`. **COMPLETED**
 - TASK-0.6 — Bound `runCommandAndGetOutput:` and remove the `NSTask` pipe-deadlock path. **COMPLETED**
-- TASK-0.7 — Migrate direct `find` helpers to bounded executable/argv execution. **READY**
+- TASK-0.7 — Migrate direct `find` helpers to bounded executable/argv execution. **COMPLETED**
 
 ## Phase 1 — Clear Data Safety Boundary
 
-- TASK-1.1 — Introduce immutable `PXResolvedContainer`. **LOCKED**
-- TASK-1.2 — Add exact data-container resolver. **LOCKED**
-- TASK-1.3 — Add canonical destructive-path validator. **LOCKED**
+- TASK-1.1 — Introduce immutable `PXResolvedContainer`. **COMPLETED**
+- TASK-1.2 — Add exact application-data-container resolver. **COMPLETED**
+- TASK-1.3 — Add canonical destructive-path validator. **READY**
 - TASK-1.4 — Remove writes to application bundle containers. **LOCKED**
 - TASK-1.5 — Introduce typed `PXClearRequest`. **LOCKED**
 - TASK-1.6 — Introduce structured `PXClearResult`. **LOCKED**

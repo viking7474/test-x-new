@@ -4,36 +4,102 @@
 
 ```text
 Program: Backup / Restore Hardening
-Current phase: Phase 0 — Reliable Command Execution
-Current task: TASK-0.7 — Bounded Direct Find Helpers
-Task file: docs/backup-restore-hardening/tasks/TASK-0.7-bounded-direct-find-helpers.md
-Expected report: docs/backup-restore-hardening/reports/TASK-0.7-REPORT.md
+Current phase: Phase 1 — Clear Data Safety Boundary
+Current task: TASK-1.3 — Canonical Destructive Path Validator
+Task file: docs/backup-restore-hardening/tasks/TASK-1.3-canonical-destructive-path-validator.md
+Expected report: docs/backup-restore-hardening/reports/TASK-1.3-REPORT.md
 Status: READY
 Build owner: Project owner via GitHub Actions
-Next task: TASK-1.1 remains LOCKED
+Next task: TASK-1.4 remains LOCKED
 ```
 
-## Gate Rules
+## Phase 0 Result
 
-TASK-0.7 may move to `COMPLETED` only when all conditions are met:
+Phase 0 — Reliable Command Execution is complete.
 
-- [ ] Agent creates `reports/TASK-0.7-REPORT.md`.
-- [ ] Code diff is limited to `AppDataCleaner.m`.
-- [ ] Existing two find selectors and all callers remain unchanged.
-- [ ] Both helpers use the shared bounded direct executable/argv API.
-- [ ] Executable remains exact `/usr/bin/find`.
-- [ ] Timeout is 120 seconds per invocation.
-- [ ] Output cap is 4 MiB per stream.
-- [ ] No shell is used for find execution.
-- [ ] Timeout, signal, runner/spawn failure and truncation return `@[]`.
-- [ ] Normal non-zero exit is not rejected solely by exit code.
-- [ ] Only stdout is parsed as paths.
-- [ ] Existing find expressions, order and duplicate behavior remain unchanged.
-- [ ] Manual pipe/spawn/read/wait and C argv ownership are removed.
-- [ ] `AppDataCleaner.m` has zero active `posix_spawn` and `waitpid` calls.
-- [ ] `AppDataCleaner.h` and `CommandRunner.h/.m` remain unchanged.
-- [ ] No Clear, Backup, Restore, Keychain or UI behavior is changed.
-- [ ] `git diff --check` passes.
+Accepted outcomes:
+
+- structured `CommandResult` contract;
+- bounded stdout/stderr capture;
+- monotonic deadlines;
+- spawn-time process groups;
+- bounded group termination and reap;
+- direct executable/argv API;
+- bounded cleaner compatibility wrapper;
+- bounded output-query helper;
+- bounded direct `find` helpers;
+- no local `NSTask`, `posix_spawn`, pipe-capture or blocking `waitpid` engine remains in `AppDataCleaner.m`.
+
+## TASK-1.1 Result
+
+TASK-1.1 introduced immutable `PXResolvedContainer` with:
+
+- exact requested/metadata identity;
+- explicit data-container kind and root;
+- copied readonly string fields;
+- UUID and lexical path consistency checks;
+- immutable copy/equality/hash semantics;
+- no filesystem authorization, resolver or deletion logic.
+
+The model remains an identity snapshot only.
+
+## TASK-1.2 Result
+
+TASK-1.2 introduced standalone `PXDataContainerResolver` with:
+
+- root-specific application-data discovery;
+- fixed rootful and rootless bases;
+- immediate UUID-directory enumeration;
+- exact string `MCMMetadataIdentifier` matching;
+- no fuzzy/content/name heuristics;
+- explicit invalid-input, enumeration, ambiguity and invalid-candidate errors;
+- zero-match as a normal nil/no-error result;
+- no caller migration or deletion behavior.
+
+The resolver result remains a candidate. It is not safe to use destructively until TASK-1.3 returns a validated canonical path.
+
+At coordinator review time, the following remain untracked rather than isolated in dedicated commits:
+
+```text
+PXResolvedContainer.h/.m
+PXDataContainerResolver.h/.m
+TASK-1.1 and TASK-1.2 reports
+related coordinator task/review documentation
+```
+
+Commit/push TASK-1.1 and TASK-1.2 before beginning TASK-1.3 so validator changes are independently reviewable.
+
+## TASK-1.3 Gate Rules
+
+TASK-1.3 may move to `COMPLETED` only when all conditions are met:
+
+- [ ] Agent creates `reports/TASK-1.3-REPORT.md`.
+- [ ] Only `PXDestructivePathValidator.h/.m` are added as production changes.
+- [ ] Public validator API and exact error enum match the specification.
+- [ ] Success returns a canonical NSString path, not a raw candidate or boolean.
+- [ ] All four data-container kinds and both roots map to fixed allow-list bases.
+- [ ] Application bundle has no kind/base mapping.
+- [ ] Raw candidate must exactly equal fixed base plus UUID.
+- [ ] Candidate is inspected with `lstat` before canonicalization.
+- [ ] Candidate symlinks and non-directories are rejected.
+- [ ] Fixed base, candidate and metadata are canonicalized with POSIX semantics.
+- [ ] Canonical candidate is exactly one immediate child of canonical base.
+- [ ] Prefix-only containment is not used.
+- [ ] Initial and canonical candidate inode/device identities agree.
+- [ ] Candidate and canonical base are on the same device.
+- [ ] Mobile UID ownership policy is enforced.
+- [ ] World-writable base/candidate/metadata modes are rejected.
+- [ ] Metadata is a same-device, mobile-owned, non-world-writable regular file and not a symlink.
+- [ ] Only `.com.apple.mobile_container_manager.metadata.plist` is accepted.
+- [ ] Live metadata exact identity is revalidated.
+- [ ] AppGroup string/array exact identity policy is implemented.
+- [ ] Candidate and metadata inode/device state is rechecked before return.
+- [ ] No raw or partially validated path is returned on failure.
+- [ ] No existing caller references the validator.
+- [ ] No deletion, permission-changing, shell, process or command API is introduced.
+- [ ] `PXResolvedContainer`, resolver, Makefile and all protected source files remain unchanged.
+- [ ] Clear, Backup, Restore, Keychain and UI behavior remain unchanged.
+- [ ] `git diff --check` and new-file whitespace checks pass.
 - [ ] GitHub Actions succeeds.
 - [ ] Coordinator review accepts the task.
 
@@ -43,39 +109,47 @@ TASK-0.7 may move to `COMPLETED` only when all conditions are met:
 |---|---|---|---|---|
 | TASK-0.1 | COMPLETED | `reports/TASK-0.1-REPORT.md` | PASSED | `reviews/TASK-0.1-REVIEW.md` — ACCEPTED |
 | TASK-0.2 | COMPLETED | `reports/TASK-0.2-REPORT.md` | PASSED | `reviews/TASK-0.2-REVIEW.md` — ACCEPTED |
-| TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.3-REVIEW.md` — ACCEPTED |
-| TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.4-REVIEW.md` — ACCEPTED |
-| TASK-0.5 | COMPLETED | `reports/TASK-0.5-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.5-REVIEW.md` — ACCEPTED |
-| TASK-0.6 | COMPLETED | `reports/TASK-0.6-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.6-REVIEW.md` — ACCEPTED |
-| TASK-0.7 | READY | Not created | Not run | Not reviewed |
+| TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.3-REVIEW.md` — ACCEPTED |
+| TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.4-REVIEW.md` — ACCEPTED |
+| TASK-0.5 | COMPLETED | `reports/TASK-0.5-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.5-REVIEW.md` — ACCEPTED |
+| TASK-0.6 | COMPLETED | `reports/TASK-0.6-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.6-REVIEW.md` — ACCEPTED |
+| TASK-0.7 | COMPLETED | `reports/TASK-0.7-REPORT.md` | PASSED reported by owner | `reviews/TASK-0.7-REVIEW.md` — ACCEPTED |
+| TASK-1.1 | COMPLETED | `reports/TASK-1.1-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.1-REVIEW.md` — ACCEPTED |
+| TASK-1.2 | COMPLETED | `reports/TASK-1.2-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.2-REVIEW.md` — ACCEPTED |
+| TASK-1.3 | READY | Not created | Not run | Not reviewed |
+| TASK-1.4 | LOCKED | Not created | Not run | Not reviewed |
 
-## Why TASK-0.7 Is Required
+## Why TASK-1.3 Is Standalone
 
-TASK-0.6 removed the final `NSTask` execution path, but two direct local process engines still remain in `AppDataCleaner.m`:
+A `PXResolvedContainer` proves lexical consistency and exact stored identity. `PXDataContainerResolver` proves that one live metadata record matched during discovery. Neither proves that the path is still safe at the time a destructive operation begins.
 
-1. `findPathsMatchingPattern:`
-2. `findPathsUnderRoot:directories:namePatterns:`
+TASK-1.3 centralizes:
 
-Together they still contain:
+- kind/root fixed-base allow-listing;
+- exact raw-path equality;
+- symlink rejection;
+- canonical immediate-child containment;
+- mount/device boundary checks;
+- mobile ownership and mode checks;
+- metadata-file safety;
+- live identity revalidation;
+- final inode/device rechecks;
+- canonical-path return semantics.
 
-```text
-posix_spawn(: 2
-waitpid(: 2
-pipe(: 2
-blocking raw read loops: 2
-```
-
-They have no deadline, no output cap, no process-group timeout cleanup and one helper manually constructs borrowed C argv pointers.
-
-TASK-0.7 migrates both helpers to the accepted direct executable/argv API and finishes local process-execution hardening before destructive path work begins.
+It deliberately does not connect the path to deletion. That keeps safety-boundary correctness separate from the behavior changes planned in TASK-1.4 and later caller migrations.
 
 ## Blocked Work
 
-The following work is not yet authorized:
+The following work is not authorized during TASK-1.3:
 
-- TASK-1.1 — Introduce immutable `PXResolvedContainer`.
-- All later Phase 1 tasks.
-- All Backup, Restore, Keychain and UI phases.
-- Any `PXProcessKiller` or keychain command migration.
+- importing the validator into `AppDataCleaner`;
+- using validator output for deletion;
+- removing application-bundle writes;
+- changing or removing fuzzy legacy resolvers;
+- migrating raw UUID/path callers;
+- adding typed `PXClearRequest` or `PXClearResult`;
+- application-data, extension, app-group or PluginKit Clear migration;
+- Backup, Restore, Keychain or UI changes;
+- TASK-1.4 or later implementation.
 
-Agent must stop after TASK-0.7.
+Agent must stop after TASK-1.3.

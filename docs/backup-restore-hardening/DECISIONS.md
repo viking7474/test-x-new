@@ -199,3 +199,111 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: TASK-1.1 chỉ được mở sau khi TASK-0.7 qua source review và GitHub Actions, đồng thời `AppDataCleaner.m` không còn local `posix_spawn`, pipe capture hoặc blocking `waitpid` process engine.
 - Reason: Clear Data safety work không nên xây trên nền execution vẫn có thể treo hoặc trả output không đầy đủ.
+
+## D-034 — Resolved container identity precedes resolver migration
+
+- Status: Accepted
+- Decision: TASK-1.1 chỉ thêm immutable `PXResolvedContainer`; không resolver hoặc caller hiện hữu nào được migrate trong cùng task.
+- Reason: Tách correctness của value object khỏi filesystem discovery và destructive behavior giúp build/review gate xác định chính xác regression.
+
+## D-035 — Application bundle is not a clearable resolved-container kind
+
+- Status: Accepted
+- Decision: `PXResolvedContainerKind` chỉ gồm application data, app group, extension data và PluginKit data; không có application bundle, unknown hoặc any kind.
+- Reason: Application bundle là code/install content, không phải mutable data target. Phase 1 sẽ loại bỏ destructive writes vào bundle containers thay vì hợp thức hóa chúng trong model mới.
+
+## D-036 — Resolved identity requires exact metadata equality
+
+- Status: Accepted
+- Decision: Một `PXResolvedContainer` chỉ được tạo khi requested identifier và metadata identifier bằng nhau chính xác, case-sensitive; fuzzy/prefix/suffix/substring match không thể được biểu diễn.
+- Reason: Approximate identity không đủ an toàn để đi vào destructive path planning.
+
+## D-037 — Immutable identity is not deletion authorization
+
+- Status: Accepted
+- Decision: `PXResolvedContainer` chỉ giữ immutable identity và candidate path. Nó không kiểm tra filesystem, canonical root, symlink, ownership hoặc quyền xóa.
+- Reason: Canonical destructive-path policy phải được tập trung trong TASK-1.3, không phân tán vào constructor hay resolver.
+
+## D-038 — Candidate paths receive lexical checks only in TASK-1.1
+
+- Status: Accepted
+- Decision: Initializer kiểm tra absolute/non-root/no-trailing-slash/no-dot-component/no-NUL/UUID-last-component, nhưng không standardize, resolve symlink hoặc áp base-path allow-list.
+- Reason: Loại bỏ input cấu trúc rõ ràng nguy hiểm mà vẫn giữ ranh giới giữa immutable model và filesystem validator.
+
+## D-039 — Immutable value semantics are explicit
+
+- Status: Accepted
+- Decision: `PXResolvedContainer` copy toàn bộ string input, không có setter/readwrite property, `copyWithZone:` trả self và equality/hash dùng toàn bộ identity fields.
+- Reason: Snapshot phải ổn định khi truyền qua resolver, validator và plan; mutable alias hoặc identity-by-pointer sẽ tạo TOCTOU và dedup ambiguity.
+
+## D-040 — Exact application-data resolution is root-specific
+
+- Status: Accepted
+- Decision: TASK-1.2 resolve một root mỗi lần qua `PXResolvedContainerRoot`; rootful dùng `/private/var/mobile/Containers/Data/Application`, rootless dùng `/containers/Data/Application`.
+- Reason: Root-specific result tránh trộn namespace, giữ semantics rõ và cho phép caller tương lai xử lý rootful/rootless độc lập.
+
+## D-041 — Resolver identity comes only from exact MCM metadata
+
+- Status: Accepted
+- Decision: TASK-1.2 chỉ đọc `.com.apple.mobile_container_manager.metadata.plist`, chỉ nhận string `MCMMetadataIdentifier` và chỉ match bằng case-sensitive `isEqualToString:`.
+- Reason: Prefix, substring, company/app-name và content heuristics không đủ mạnh để tạo destructive identity.
+
+## D-042 — Rootful resolver uses one canonical spelling
+
+- Status: Accepted
+- Decision: TASK-1.2 không scan thêm `/var/mobile/Containers/Data/Application`; rootful candidate được dựng từ `/private/var/mobile/Containers/Data/Application` duy nhất.
+- Reason: Scan cả alias `/var` và `/private/var` có thể tạo duplicate giả và làm ambiguity phụ thuộc filesystem alias.
+
+## D-043 — Multiple exact matches fail closed
+
+- Status: Accepted
+- Decision: Resolver trả tối đa một application-data container cho mỗi root. Hai hoặc nhiều exact match trong cùng root trả ambiguity error và không chọn first/newest/arbitrary match.
+- Reason: Multiple exact metadata mappings là trạng thái không an toàn cho destructive selection; thứ tự directory không được quyết định target.
+
+## D-044 — Exact resolution still does not authorize deletion
+
+- Status: Accepted
+- Decision: TASK-1.2 có thể enumerate filesystem và tạo candidate object nhưng không canonicalize symlink/mount/ownership hoặc cung cấp deletion eligibility.
+- Reason: TASK-1.3 phải là một canonical safety boundary duy nhất trước khi bất kỳ caller phá hủy nào dùng resolver result.
+
+## D-045 — Validator returns the canonical path to be used
+
+- Status: Accepted
+- Decision: TASK-1.3 trả canonical `NSString` path khi validation thành công; không trả BOOL và không yêu cầu caller tiếp tục dùng `PXResolvedContainer.containerPath` thô.
+- Reason: Safety boundary phải truyền ra đúng filesystem target đã canonicalize. Trả BOOL rồi dùng lại raw path sẽ làm mất kết quả canonicalization và tái mở alias/symlink ambiguity.
+
+## D-046 — Kind and root map to one fixed lexical base
+
+- Status: Accepted
+- Decision: Mỗi combination `PXResolvedContainerKind`/`PXResolvedContainerRoot` map tới đúng một base allow-list; raw candidate phải bằng chính xác `base + UUID` trước canonicalization. Application bundle không có mapping.
+- Reason: Candidate do caller hoặc resolver dựng không được chọn base tùy ý, dùng `/var` alias hoặc đổi kind để mở rộng destructive namespace.
+
+## D-047 — Canonical containment is immediate-child equality, not prefix matching
+
+- Status: Accepted
+- Decision: Canonical candidate phải có parent bằng chính xác canonical base và last component bằng UUID. Không dùng `hasPrefix:` để authorize containment.
+- Reason: Prefix comparison nhận nhầm sibling như `/base2` và không chứng minh target là đúng một container child.
+
+## D-048 — Symlink, mount, ownership and mode failures are fail-closed
+
+- Status: Accepted
+- Decision: Validator dùng `lstat`, `realpath` và `stat`; reject candidate/metadata symlink, cross-device child mount, non-mobile ownership và world-writable base/candidate/metadata.
+- Reason: Exact metadata identity không đủ nếu filesystem object có thể redirect, bị mount thay thế hoặc được actor không phù hợp sửa đổi.
+
+## D-049 — Live metadata identity is revalidated at the canonical target
+
+- Status: Accepted
+- Decision: Validator đọc lại `.com.apple.mobile_container_manager.metadata.plist` dưới canonical candidate và exact-match `MCMMetadataIdentifier`; AppGroup cho phép string hoặc array có đúng một exact occurrence.
+- Reason: `PXResolvedContainer` là snapshot có thể được tạo trước đó hoặc thủ công. Destructive authorization phải dựa trên metadata hiện tại tại target đã canonicalize.
+
+## D-050 — Validation includes final filesystem identity rechecks
+
+- Status: Accepted
+- Decision: Sau metadata read, validator `lstat` lại candidate và metadata, yêu cầu device/inode không đổi trước khi trả canonical path.
+- Reason: Recheck giảm cửa sổ TOCTOU trong chính validation. Kết quả vẫn chỉ đúng tại thời điểm kiểm tra nên caller tương lai phải validate ngay trước thao tác.
+
+## D-051 — Validator contract precedes destructive caller integration
+
+- Status: Accepted
+- Decision: TASK-1.3 chỉ thêm standalone validator; không existing caller nào được import hoặc dùng output để xóa trong cùng task.
+- Reason: Review canonical safety correctness phải tách khỏi thay đổi behavior của application-bundle và Clear migration.

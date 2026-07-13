@@ -32,7 +32,10 @@ docs/backup-restore-hardening/
 │   ├── TASK-0.4-direct-executable-argv-api.md
 │   ├── TASK-0.5-app-data-cleaner-command-result-wrapper.md
 │   ├── TASK-0.6-bounded-output-query-helper.md
-│   └── TASK-0.7-bounded-direct-find-helpers.md
+│   ├── TASK-0.7-bounded-direct-find-helpers.md
+│   ├── TASK-1.1-immutable-resolved-container.md
+│   ├── TASK-1.2-exact-application-data-container-resolver.md
+│   └── TASK-1.3-canonical-destructive-path-validator.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo
