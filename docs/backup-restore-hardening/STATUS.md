@@ -5,34 +5,34 @@
 ```text
 Program: Backup / Restore Hardening
 Current phase: Phase 0 — Reliable Command Execution
-Current task: TASK-0.6 — Bound Output Query Helper and Remove NSTask Deadlock
-Task file: docs/backup-restore-hardening/tasks/TASK-0.6-bounded-output-query-helper.md
-Expected report: docs/backup-restore-hardening/reports/TASK-0.6-REPORT.md
+Current task: TASK-0.7 — Bounded Direct Find Helpers
+Task file: docs/backup-restore-hardening/tasks/TASK-0.7-bounded-direct-find-helpers.md
+Expected report: docs/backup-restore-hardening/reports/TASK-0.7-REPORT.md
 Status: READY
 Build owner: Project owner via GitHub Actions
-Next task: TASK-0.7 remains LOCKED
-Phase 1: TASK-1.1 remains LOCKED
+Next task: TASK-1.1 remains LOCKED
 ```
 
 ## Gate Rules
 
-TASK-0.6 may move to `COMPLETED` only when all conditions are met:
+TASK-0.7 may move to `COMPLETED` only when all conditions are met:
 
-- [ ] Agent creates `reports/TASK-0.6-REPORT.md`.
+- [ ] Agent creates `reports/TASK-0.7-REPORT.md`.
 - [ ] Code diff is limited to `AppDataCleaner.m`.
-- [ ] Existing `runCommandAndGetOutput:` selector remains source-compatible.
-- [ ] Private timed overload is added in `.m` only.
-- [ ] Default output-query timeout is 60 seconds.
-- [ ] Execution delegates to `runCommandWithPrivilegesResult:timeoutSec:`.
-- [ ] No duplicate spawn/pipe/deadline implementation is added.
-- [ ] Invalid or incomplete execution maps to the legacy `@"error"` sentinel.
-- [ ] Normal non-zero exit is not treated as error solely because of exit code.
-- [ ] stdout/stderr merge and trimming follow the task contract.
-- [ ] `PXWaitForProcessExit` uses bounded per-probe execution and does not interpret `@"error"` as process exit.
-- [ ] `NSTask`, `NSPipe`, `waitUntilExit` and `readDataToEndOfFile` are removed from `AppDataCleaner.m`.
-- [ ] Existing command strings and caller business decisions remain unchanged.
-- [ ] Direct find helpers remain unchanged for TASK-0.7.
+- [ ] Existing two find selectors and all callers remain unchanged.
+- [ ] Both helpers use the shared bounded direct executable/argv API.
+- [ ] Executable remains exact `/usr/bin/find`.
+- [ ] Timeout is 120 seconds per invocation.
+- [ ] Output cap is 4 MiB per stream.
+- [ ] No shell is used for find execution.
+- [ ] Timeout, signal, runner/spawn failure and truncation return `@[]`.
+- [ ] Normal non-zero exit is not rejected solely by exit code.
+- [ ] Only stdout is parsed as paths.
+- [ ] Existing find expressions, order and duplicate behavior remain unchanged.
+- [ ] Manual pipe/spawn/read/wait and C argv ownership are removed.
+- [ ] `AppDataCleaner.m` has zero active `posix_spawn` and `waitpid` calls.
 - [ ] `AppDataCleaner.h` and `CommandRunner.h/.m` remain unchanged.
+- [ ] No Clear, Backup, Restore, Keychain or UI behavior is changed.
 - [ ] `git diff --check` passes.
 - [ ] GitHub Actions succeeds.
 - [ ] Coordinator review accepts the task.
@@ -46,31 +46,36 @@ TASK-0.6 may move to `COMPLETED` only when all conditions are met:
 | TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.3-REVIEW.md` — ACCEPTED |
 | TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.4-REVIEW.md` — ACCEPTED |
 | TASK-0.5 | COMPLETED | `reports/TASK-0.5-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.5-REVIEW.md` — ACCEPTED |
-| TASK-0.6 | READY | Not created | Not run | Not reviewed |
-| TASK-0.7 | LOCKED | Not created | Not run | Not reviewed |
+| TASK-0.6 | COMPLETED | `reports/TASK-0.6-REPORT.md` | COMPLETED/PASSED reported by owner | `reviews/TASK-0.6-REVIEW.md` — ACCEPTED |
+| TASK-0.7 | READY | Not created | Not run | Not reviewed |
 
-## Why Phase 0 Was Extended
+## Why TASK-0.7 Is Required
 
-TASK-0.5 inventory found three remaining local process-execution paths in `AppDataCleaner.m`:
+TASK-0.6 removed the final `NSTask` execution path, but two direct local process engines still remain in `AppDataCleaner.m`:
 
-1. `runCommandAndGetOutput:` uses `NSTask`, waits before draining a shared pipe, has no timeout and can deadlock.
-2. `findPathsMatchingPattern:` uses direct blocking/unbounded `posix_spawn` capture.
-3. `findPathsUnderRoot:directories:namePatterns:` uses direct blocking/unbounded `posix_spawn` capture.
+1. `findPathsMatchingPattern:`
+2. `findPathsUnderRoot:directories:namePatterns:`
 
-They are split into two small build-gated tasks:
+Together they still contain:
 
 ```text
-TASK-0.6 — NSTask output-query compatibility migration
-TASK-0.7 — direct find helper migration
+posix_spawn(: 2
+waitpid(: 2
+pipe(: 2
+blocking raw read loops: 2
 ```
+
+They have no deadline, no output cap, no process-group timeout cleanup and one helper manually constructs borrowed C argv pointers.
+
+TASK-0.7 migrates both helpers to the accepted direct executable/argv API and finishes local process-execution hardening before destructive path work begins.
 
 ## Blocked Work
 
 The following work is not yet authorized:
 
-- TASK-0.7 implementation.
 - TASK-1.1 — Introduce immutable `PXResolvedContainer`.
 - All later Phase 1 tasks.
 - All Backup, Restore, Keychain and UI phases.
+- Any `PXProcessKiller` or keychain command migration.
 
-Agent must stop after TASK-0.6.
+Agent must stop after TASK-0.7.

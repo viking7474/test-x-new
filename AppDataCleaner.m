@@ -1,6 +1,4 @@
 #import "AppDataCleaner.h"
-#import <spawn.h>
-#import <sys/wait.h>
 #import <Security/Security.h>
 #import <UIKit/UIKit.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -21,6 +19,9 @@
 
 static const NSUInteger PXPrivilegedCommandMaxOutputBytes = 1024 * 1024;
 static const NSTimeInterval PXOutputQueryDefaultTimeoutSec = 60.0;
+static NSString * const PXFindExecutablePath = @"/usr/bin/find";
+static const NSTimeInterval PXFindCommandTimeoutSec = 120.0;
+static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
@@ -28,6 +29,7 @@ static const NSTimeInterval PXOutputQueryDefaultTimeoutSec = 60.0;
 @interface AppDataCleaner ()
 - (NSString *)runCommandAndGetOutput:(NSString *)command
                           timeoutSec:(NSTimeInterval)timeoutSec;
+- (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments;
 @end
 
 @implementation AppDataCleaner {
@@ -2812,9 +2814,57 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     return (nonSystemFiles.count > 0);
 }
 
+- (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments {
+    if (![arguments isKindOfClass:[NSArray class]] || arguments.count == 0) {
+        return @[];
+    }
+
+    for (id argument in arguments) {
+        if (![argument isKindOfClass:[NSString class]] || [(NSString *)argument length] == 0) {
+            return @[];
+        }
+    }
+
+    CommandResult *result =
+        [[CommandRunner shared] runExecutableAndCapture:PXFindExecutablePath
+                                              arguments:arguments
+                                             timeoutSec:PXFindCommandTimeoutSec
+                                         maxOutputBytes:PXFindCommandMaxOutputBytes];
+
+    if (result == nil ||
+        result.spawnError != 0 ||
+        result.runnerError != 0 ||
+        result.timedOut ||
+        !result.exitedNormally ||
+        result.stdoutTruncated ||
+        result.stderrTruncated) {
+        NSLog(@"[AppDataCleaner] Find command failed: resultNil=%d spawnError=%d runnerError=%d timedOut=%d exitedNormally=%d terminationSignal=%d exitCode=%d stdoutTruncated=%d stderrTruncated=%d",
+              result == nil,
+              result.spawnError,
+              result.runnerError,
+              result.timedOut,
+              result.exitedNormally,
+              result.terminationSignal,
+              result.exitCode,
+              result.stdoutTruncated,
+              result.stderrTruncated);
+        return @[];
+    }
+
+    NSString *output = result.stdoutString ?: @"";
+    NSArray<NSString *> *parts =
+        [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    return [parts filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+        (void)bindings;
+        return [object isKindOfClass:[NSString class]] && [(NSString *)object length] > 0;
+    }]];
+}
+
 - (NSArray *)findPathsMatchingPattern:(NSString *)pattern {
-    NSMutableArray *paths = [NSMutableArray array];
-    
+    if (![pattern isKindOfClass:[NSString class]] || pattern.length == 0) {
+        return @[];
+    }
+
     // Optimize search root: Default to /, but if pattern starts with exact path prefix, use that
     NSString *searchRoot = @"/";
     
@@ -2844,65 +2894,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
     }
     
-    // Create a pipe to read command output
-    int pipefds[2];
-    pipe(pipefds);
-    
-    // Set up the find command and arguments
-    pid_t pid;
-    const char *findPath = "/usr/bin/find";
-    const char *args[] = {
-        "find",
-        "-L",  // Follow symbolic links
-        [searchRoot UTF8String], // Use optimized search root
-        "-path",
-        [pattern UTF8String],
-        NULL
-    };
-    
-    // Set up the file actions to redirect output
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addclose(&actions, pipefds[0]);
-    posix_spawn_file_actions_adddup2(&actions, pipefds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, pipefds[1]);
-    
-    // Spawn the process
-    int status = posix_spawn(&pid, findPath, &actions, NULL, (char *const *)args, NULL);
-    
-    if (status == 0) {
-        // Close write end of pipe in parent
-        close(pipefds[1]);
-        
-        // Read output from the pipe
-        NSMutableData *data = [NSMutableData data];
-        char buffer[1024];
-        ssize_t bytesRead;
-        
-        while ((bytesRead = read(pipefds[0], buffer, sizeof(buffer))) > 0) {
-            [data appendBytes:buffer length:bytesRead];
-        }
-        
-        // Close read end of pipe
-        close(pipefds[0]);
-        
-        // Wait for process to complete
-        waitpid(pid, &status, 0);
-        
-        // Convert output to string and split into paths
-        NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (output) {
-            [paths addObjectsFromArray:[output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]];
-        }
-    }
-    
-    // Clean up
-    posix_spawn_file_actions_destroy(&actions);
-    
-    // Filter out empty strings
-    return [paths filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
-        return [object isKindOfClass:[NSString class]] && [(NSString *)object length] > 0;
-    }]];
+    NSArray<NSString *> *arguments = @[
+        @"-L",
+        searchRoot,
+        @"-path",
+        pattern
+    ];
+    return [self runBoundedFindWithArguments:arguments];
 }
 
 - (void)runCommandWithPrivileges:(NSString *)command {
@@ -2952,95 +2950,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
     if (patterns.count == 0) return @[];
 
-    // Create a pipe to read command output
-    int pipefds[2];
-    if (pipe(pipefds) != 0) {
-        return @[];
-    }
+    NSMutableArray<NSString *> *arguments = [NSMutableArray array];
+    [arguments addObject:@"-L"];
+    [arguments addObject:root];
+    [arguments addObject:@"-type"];
+    [arguments addObject:(directories ? @"d" : @"f")];
+    [arguments addObject:@"("];
 
-    // Build argv for: find -L <root> -type f|d ( -name p1 -o -name p2 ... ) -print
-    // Reserve: find -L root -type X ( -name p1 -o -name p2 ... ) -print NULL
-    NSUInteger argc = 0;
-    argc += 1; // find
-    argc += 1; // -L
-    argc += 1; // root
-    argc += 2; // -type f|d
-    argc += 1; // (
-    argc += patterns.count * 2; // -name pat
-    if (patterns.count > 1) {
-        argc += (patterns.count - 1) * 1; // -o
-    }
-    argc += 1; // )
-    argc += 1; // -print
-    argc += 1; // NULL
-
-    char **argv = (char **)calloc(argc, sizeof(char *));
-    if (!argv) {
-        close(pipefds[0]);
-        close(pipefds[1]);
-        return @[];
-    }
-
-    NSUInteger idx = 0;
-    argv[idx++] = (char *)"find";
-    argv[idx++] = (char *)"-L";
-    argv[idx++] = (char *)[root UTF8String];
-    argv[idx++] = (char *)"-type";
-    argv[idx++] = (char *)(directories ? "d" : "f");
-    argv[idx++] = (char *)"(";
-    for (NSUInteger i = 0; i < patterns.count; i++) {
-        if (i > 0) {
-            argv[idx++] = (char *)"-o";
+    for (NSUInteger index = 0; index < patterns.count; index++) {
+        if (index > 0) {
+            [arguments addObject:@"-o"];
         }
-        argv[idx++] = (char *)"-name";
-        argv[idx++] = (char *)[patterns[i] UTF8String];
-    }
-    argv[idx++] = (char *)")";
-    argv[idx++] = (char *)"-print";
-    argv[idx++] = NULL;
-
-    // Set up the find command and arguments
-    pid_t pid = 0;
-    const char *findPath = "/usr/bin/find";
-
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addclose(&actions, pipefds[0]);
-    posix_spawn_file_actions_adddup2(&actions, pipefds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, pipefds[1]);
-
-    int spawnStatus = posix_spawn(&pid, findPath, &actions, NULL, (char *const *)argv, NULL);
-    posix_spawn_file_actions_destroy(&actions);
-    free(argv);
-
-    if (spawnStatus != 0 || pid <= 0) {
-        close(pipefds[0]);
-        close(pipefds[1]);
-        return @[];
+        [arguments addObject:@"-name"];
+        [arguments addObject:patterns[index]];
     }
 
-    close(pipefds[1]);
-
-    NSMutableData *data = [NSMutableData data];
-    char buffer[2048];
-    ssize_t bytesRead;
-    while ((bytesRead = read(pipefds[0], buffer, sizeof(buffer))) > 0) {
-        [data appendBytes:buffer length:(NSUInteger)bytesRead];
-    }
-    close(pipefds[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-
-    NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!output.length) return @[];
-
-    NSArray *parts = [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    NSPredicate *pred = [NSPredicate predicateWithBlock:^BOOL(id obj, NSDictionary *bindings) {
-        (void)bindings;
-        return [obj isKindOfClass:[NSString class]] && [(NSString *)obj length] > 0;
-    }];
-    return [parts filteredArrayUsingPredicate:pred];
+    [arguments addObject:@")"];
+    [arguments addObject:@"-print"];
+    return [self runBoundedFindWithArguments:arguments];
 }
 
 - (CommandResult *)runCommandWithPrivilegesResult:(NSString *)command

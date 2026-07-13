@@ -169,3 +169,33 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: `PXWaitForProcessExit` dùng timed output-query overload với mỗi probe tối đa một giây và không coi `@"error"` là process đã thoát.
 - Reason: Outer timeout không có ý nghĩa nếu một `pgrep` probe có thể block vô hạn; error phải fail closed thay vì tạo false exit detection.
+
+## D-029 — Direct find helpers must use the shared direct-executable contract
+
+- Status: Accepted
+- Decision: TASK-0.7 chuyển cả hai helper `find` trong `AppDataCleaner.m` sang `runExecutableAndCapture:arguments:timeoutSec:maxOutputBytes:` với executable chính xác `/usr/bin/find`; không shell và không local spawn/pipe engine.
+- Reason: Hai helper là các đường local process execution cuối cùng còn blocking, unbounded và duplicate lifecycle logic trước khi Phase 1 bắt đầu.
+
+## D-030 — Find execution has one fixed bounded policy
+
+- Status: Accepted
+- Decision: Mỗi invocation của direct find helper dùng deadline 120 giây và cap 4 MiB riêng cho stdout/stderr.
+- Reason: Một policy cố định giúp caller giữ nguyên, tránh unbounded traversal/output và tạo build gate rõ trước khi thay đổi destructive path semantics.
+
+## D-031 — Incomplete find output fails closed
+
+- Status: Accepted
+- Decision: Invalid input, spawn/runner failure, timeout, signal termination hoặc stream truncation trả `@[]`; không parse hay trả path list một phần. Normal non-zero exit vẫn có thể dùng stdout hoàn chỉnh.
+- Reason: Danh sách path thiếu không đủ tin cậy cho destructive operations, nhưng `find` có thể emit match hợp lệ rồi exit non-zero do lỗi cục bộ nên complete stdout vẫn giữ compatibility.
+
+## D-032 — Find path parsing is stdout-only
+
+- Status: Accepted
+- Decision: Direct find helpers chỉ split `stdoutString`; stderr không được merge thành path. Order, duplicate và non-empty line content được giữ nguyên, không trim/sort/canonicalize/deduplicate.
+- Reason: Implementations cũ chỉ đọc stdout. Captured stderr là diagnostic data, không phải filesystem path.
+
+## D-033 — Phase 0 closes only after TASK-0.7 gate
+
+- Status: Accepted
+- Decision: TASK-1.1 chỉ được mở sau khi TASK-0.7 qua source review và GitHub Actions, đồng thời `AppDataCleaner.m` không còn local `posix_spawn`, pipe capture hoặc blocking `waitpid` process engine.
+- Reason: Clear Data safety work không nên xây trên nền execution vẫn có thể treo hoặc trả output không đầy đủ.

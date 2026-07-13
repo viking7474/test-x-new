@@ -9,8 +9,8 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 - TASK-0.3 — Configure process group at spawn time and upgrade timeout termination to the whole command group. **COMPLETED**
 - TASK-0.4 — Add bounded direct executable plus argv API for critical operations. **COMPLETED**
 - TASK-0.5 — Add compatibility result-returning wrapper in `AppDataCleaner`. **COMPLETED**
-- TASK-0.6 — Bound `runCommandAndGetOutput:` and remove the `NSTask` pipe-deadlock path. **READY**
-- TASK-0.7 — Migrate direct `find` helpers to bounded executable/argv execution. **LOCKED**
+- TASK-0.6 — Bound `runCommandAndGetOutput:` and remove the `NSTask` pipe-deadlock path. **COMPLETED**
+- TASK-0.7 — Migrate direct `find` helpers to bounded executable/argv execution. **READY**
 
 ## Phase 1 — Clear Data Safety Boundary
 
