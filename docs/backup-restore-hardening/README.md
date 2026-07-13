@@ -35,7 +35,9 @@ docs/backup-restore-hardening/
 │   ├── TASK-0.7-bounded-direct-find-helpers.md
 │   ├── TASK-1.1-immutable-resolved-container.md
 │   ├── TASK-1.2-exact-application-data-container-resolver.md
-│   └── TASK-1.3-canonical-destructive-path-validator.md
+│   ├── TASK-1.3-canonical-destructive-path-validator.md
+│   ├── TASK-1.4-remove-application-bundle-writes.md
+│   └── TASK-1.5-typed-clear-request.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo

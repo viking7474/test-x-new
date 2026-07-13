@@ -307,3 +307,69 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: TASK-1.3 chỉ thêm standalone validator; không existing caller nào được import hoặc dùng output để xóa trong cùng task.
 - Reason: Review canonical safety correctness phải tách khỏi thay đổi behavior của application-bundle và Clear migration.
+
+## D-052 — Application bundle containers are read-only Clear inputs
+
+- Status: Accepted
+- Decision: TASK-1.4 loại bỏ mọi active write của `AppDataCleaner` dưới `/var/containers/Bundle/Application`, `/var/mobile/Containers/Bundle/Application` và `/containers/Bundle/Application`.
+- Reason: Bundle containers chứa installed code/resources, không phải mutable application data. Clear Data không được xóa receipt, extension code hoặc nội dung bundle để giả lập reset.
+
+## D-053 — Receipt clear selector remains as a non-mutating compatibility shim
+
+- Status: Accepted
+- Decision: Public selector `clearAppReceiptData:withBundleUUID:` giữ nguyên ABI nhưng chỉ log việc bỏ qua receipt mutation và không truy cập filesystem hay chạy command.
+- Reason: Xóa selector công khai trong cùng task có thể phá caller ngoài repo; compatibility no-op loại bỏ write mà không mở rộng API migration.
+
+## D-054 — Read-only bundle discovery remains available
+
+- Status: Accepted
+- Decision: TASK-1.4 giữ các bundle UUID/Info.plist resolver, process-name lookup, extension discovery và bundle-size calculation nếu chúng chỉ đọc.
+- Reason: Mục tiêu là loại write vào code container, không làm mất các chức năng inspection hiện hữu hoặc trộn resolver cleanup vào behavior-removal diff.
+
+## D-055 — Application-bundle writes are removed, not validated
+
+- Status: Accepted
+- Decision: TASK-1.4 không import `PXDestructivePathValidator` để hợp thức hóa bundle mutation; application bundle không có `PXResolvedContainerKind` và không được đưa vào destructive allow-list.
+- Reason: Validator dành cho mutable data containers. Code/install content phải read-only thay vì trở thành một target destructive được canonicalize.
+
+## D-056 — Generic destructive helpers are not redesigned in TASK-1.4
+
+- Status: Accepted
+- Decision: `fixPermissionsAndRemovePath:`, `wipeDirectoryContents:` và các generic helper khác giữ nguyên; TASK-1.4 chỉ loại mọi in-file application-bundle path truyền vào chúng.
+- Reason: Các helper còn phục vụ nhiều data path. Quarantine public destructive API và permission behavior thuộc TASK-1.11/TASK-1.12, không nên trộn vào bundle-write removal.
+
+## D-057 — Clear scope is an explicit closed option set
+
+- Status: Accepted
+- Decision: `PXClearScope` chỉ gồm ApplicationData, ExtensionData, AppGroups, PluginKitData và Keychain. Zero mask và unknown bits bị reject.
+- Reason: Request phải biểu diễn chính xác các component đã được lên kế hoạch migrate; open-ended/custom bits sẽ làm caller và result policy không thể kiểm chứng.
+
+## D-058 — Application bundle is absent from the Clear request model
+
+- Status: Accepted
+- Decision: Không có application-bundle hoặc receipt scope trong `PXClearRequest`.
+- Reason: TASK-1.4 đã thiết lập application bundle là read-only. Đưa bundle mutation trở lại dưới một scope mới sẽ phá safety boundary vừa đóng.
+
+## D-059 — Default Clear request includes all approved typed components
+
+- Status: Accepted
+- Decision: `PXClearScopeDefaultMask` bằng union của cả năm known bits; default factory đặt `deepClean = NO`.
+- Reason: Factory phải thay thế intent của legacy full Clear ở mức component đã được approve nhưng không tự kích hoạt deep/aggressive behavior.
+
+## D-060 — Request validation is strict and non-normalizing
+
+- Status: Accepted
+- Decision: Bundle identifier phải là chuỗi ASCII bundle-safe, không NUL/slash/wildcard/empty component; accepted value được giữ nguyên, không trim/lowercase/normalize.
+- Reason: Identity không được silently rewrite trước resolver/result correlation. Invalid input phải fail tại model boundary thay vì tạo target gần đúng.
+
+## D-061 — Deep-clean intent is data, not behavior, in TASK-1.5
+
+- Status: Accepted
+- Decision: `PXClearRequest` lưu boolean deep-clean chính xác nhưng không đọc global setting và không thực thi policy.
+- Reason: Loại hidden input khỏi orchestration tương lai, đồng thời giữ TASK-1.5 là value-object-only diff.
+
+## D-062 — Typed request precedes typed result and caller migration
+
+- Status: Accepted
+- Decision: TASK-1.5 không được import vào existing production caller; TASK-1.6 xây result độc lập trước khi TASK-1.7 bắt đầu migration.
+- Reason: Request validation/copy/equality, result semantics và destructive integration cần ba review gate riêng để tránh thay contract và behavior trong cùng diff.

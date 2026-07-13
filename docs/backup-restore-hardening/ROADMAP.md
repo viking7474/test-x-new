@@ -16,9 +16,9 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 
 - TASK-1.1 — Introduce immutable `PXResolvedContainer`. **COMPLETED**
 - TASK-1.2 — Add exact application-data-container resolver. **COMPLETED**
-- TASK-1.3 — Add canonical destructive-path validator. **READY**
-- TASK-1.4 — Remove writes to application bundle containers. **LOCKED**
-- TASK-1.5 — Introduce typed `PXClearRequest`. **LOCKED**
+- TASK-1.3 — Add canonical destructive-path validator. **COMPLETED**
+- TASK-1.4 — Remove writes to application bundle containers. **COMPLETED**
+- TASK-1.5 — Introduce typed `PXClearRequest`. **READY**
 - TASK-1.6 — Introduce structured `PXClearResult`. **LOCKED**
 - TASK-1.7 — Migrate main data-container clear. **LOCKED**
 - TASK-1.8 — Migrate extension-container clear. **LOCKED**

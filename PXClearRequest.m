@@ -1,0 +1,136 @@
+#import "PXClearRequest.h"
+
+const PXClearScope PXClearScopeKnownMask =
+    PXClearScopeApplicationData |
+    PXClearScopeExtensionData |
+    PXClearScopeAppGroups |
+    PXClearScopePluginKitData |
+    PXClearScopeKeychain;
+
+const PXClearScope PXClearScopeDefaultMask =
+    PXClearScopeApplicationData |
+    PXClearScopeExtensionData |
+    PXClearScopeAppGroups |
+    PXClearScopePluginKitData |
+    PXClearScopeKeychain;
+
+static BOOL PXClearRequestStringContainsNUL(NSString *value) {
+    unichar nulCharacter = 0;
+    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
+    return [value rangeOfString:nulString].location != NSNotFound;
+}
+
+static BOOL PXClearRequestStringContainsNonWhitespace(NSString *value) {
+    NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    return [value rangeOfCharacterFromSet:[whitespace invertedSet]].location != NSNotFound;
+}
+
+static BOOL PXClearRequestCharacterIsAllowed(unichar character) {
+    return (character >= (unichar)'A' && character <= (unichar)'Z') ||
+           (character >= (unichar)'a' && character <= (unichar)'z') ||
+           (character >= (unichar)'0' && character <= (unichar)'9') ||
+           character == (unichar)'-' ||
+           character == (unichar)'.';
+}
+
+static BOOL PXClearRequestBundleIdentifierIsValid(id value) {
+    if (![value isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+
+    NSString *identifier = (NSString *)value;
+    if (identifier.length == 0 ||
+        !PXClearRequestStringContainsNonWhitespace(identifier) ||
+        PXClearRequestStringContainsNUL(identifier)) {
+        return NO;
+    }
+
+    if ([identifier rangeOfString:@"/"].location != NSNotFound ||
+        [identifier rangeOfString:@"\\"].location != NSNotFound ||
+        [identifier rangeOfString:@"*"].location != NSNotFound ||
+        [identifier characterAtIndex:0] == (unichar)'.' ||
+        [identifier characterAtIndex:(identifier.length - 1)] == (unichar)'.' ||
+        [identifier rangeOfString:@".."].location != NSNotFound) {
+        return NO;
+    }
+
+    NSUInteger componentLength = 0;
+    for (NSUInteger index = 0; index < identifier.length; index++) {
+        unichar character = [identifier characterAtIndex:index];
+        if (!PXClearRequestCharacterIsAllowed(character)) {
+            return NO;
+        }
+        if (character == (unichar)'.') {
+            if (componentLength == 0) {
+                return NO;
+            }
+            componentLength = 0;
+        } else {
+            componentLength++;
+        }
+    }
+
+    return componentLength > 0;
+}
+
+static BOOL PXClearRequestScopesAreValid(PXClearScope scopes) {
+    return scopes != 0 &&
+           (scopes & ~PXClearScopeKnownMask) == 0;
+}
+
+@implementation PXClearRequest
+
+@synthesize bundleIdentifier = _bundleIdentifier;
+@synthesize scopes = _scopes;
+@synthesize deepClean = _deepClean;
+
+- (nullable instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
+                                            scopes:(PXClearScope)scopes
+                                         deepClean:(BOOL)deepClean {
+    if (!PXClearRequestBundleIdentifierIsValid(bundleIdentifier) ||
+        !PXClearRequestScopesAreValid(scopes)) {
+        return nil;
+    }
+
+    self = [super init];
+    if (self) {
+        _bundleIdentifier = [bundleIdentifier copy];
+        _scopes = scopes;
+        _deepClean = deepClean;
+    }
+    return self;
+}
+
++ (nullable instancetype)defaultRequestForBundleIdentifier:(NSString *)bundleIdentifier {
+    return [[self alloc] initWithBundleIdentifier:bundleIdentifier
+                                           scopes:PXClearScopeDefaultMask
+                                        deepClean:NO];
+}
+
+- (id)copyWithZone:(NSZone *)zone {
+    (void)zone;
+    return self;
+}
+
+- (BOOL)isEqual:(id)object {
+    if (self == object) {
+        return YES;
+    }
+    if (![object isMemberOfClass:[PXClearRequest class]]) {
+        return NO;
+    }
+
+    PXClearRequest *other = (PXClearRequest *)object;
+    return [_bundleIdentifier isEqualToString:other->_bundleIdentifier] &&
+           _scopes == other->_scopes &&
+           _deepClean == other->_deepClean;
+}
+
+- (NSUInteger)hash {
+    NSUInteger hashValue = _bundleIdentifier.hash;
+    hashValue = hashValue * 31u + (NSUInteger)_scopes;
+    hashValue = hashValue * 31u + (_deepClean ? 1u : 0u);
+    return hashValue;
+}
+
+@end

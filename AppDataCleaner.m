@@ -1181,12 +1181,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // Clear App Store receipt
     [self clearAppReceiptData:bundleID withBundleUUID:bundleUUID];
     
-    // Process rootless bundle container
-    NSString *rootlessBundlePath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@", bundleUUID];
-    if (bundleUUID.length && [[NSFileManager defaultManager] fileExistsAtPath:rootlessBundlePath]) {
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf %@/* 2>/dev/null || true", PXShellQuote(rootlessBundlePath)] timeoutSec:rmTimeout];
-    }
-    
     // Process group + rootless group containers in ONE shell (same find/mkdir per path as before).
     NSMutableArray<NSString *> *groupWipeParts = [NSMutableArray array];
     [self logMessage:@"[AppDataCleaner] Wiping %lu app group containers (batched shell)", (unsigned long)groupUUIDs.count];
@@ -1508,57 +1502,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // NEW: Method to clear app store receipt data
 - (void)clearAppReceiptData:(NSString *)bundleID withBundleUUID:(NSString *)bundleUUID {
-    if (!bundleUUID) {
-        NSLog(@"[AppDataCleaner] No bundle UUID found for cleaning app receipt");
-        return;
-    }
-    
-    NSLog(@"[AppDataCleaner] Clearing App Store receipt for %@", bundleID);
-    
-    // First find the app name from the bundle directory
-    NSString *bundlePath = [NSString stringWithFormat:@"/var/containers/Bundle/Application/%@", bundleUUID];
-    NSArray *bundleContents = [self listDirectoriesInPath:bundlePath];
-    
-    for (NSString *item in bundleContents) {
-        if ([item hasSuffix:@".app"]) {
-            // Found the app bundle, now target the _MASReceipt directory
-            NSString *receiptPath = [NSString stringWithFormat:@"/var/containers/Bundle/Application/%@/%@/_MASReceipt", 
-                                   bundleUUID, item];
-            
-            NSLog(@"[AppDataCleaner] Wiping app receipt at: %@", receiptPath);
-            
-            // Use a more aggressive approach due to potential permission issues
-            [self fixPermissionsAndRemovePath:receiptPath];
-            
-            // Create an empty directory to avoid errors 
-            [_fileManager createDirectoryAtPath:receiptPath
-                   withIntermediateDirectories:YES
-                                    attributes:nil
-                                         error:nil];
-            break;
-        }
-    }
-    
-    // Also check rootless path
-    NSString *rootlessBundlePath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@", bundleUUID];
-    NSArray *rootlessBundleContents = [self listDirectoriesInPath:rootlessBundlePath];
-    
-    for (NSString *item in rootlessBundleContents) {
-        if ([item hasSuffix:@".app"]) {
-            NSString *receiptPath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@/%@/_MASReceipt", 
-                                   bundleUUID, item];
-            
-            NSLog(@"[AppDataCleaner] Wiping rootless app receipt at: %@", receiptPath);
-            [self fixPermissionsAndRemovePath:receiptPath];
-            
-            // Create an empty directory to avoid errors
-            [_fileManager createDirectoryAtPath:receiptPath
-                   withIntermediateDirectories:YES
-                                    attributes:nil
-                                         error:nil];
-            break;
-        }
-    }
+    (void)bundleUUID;
+    NSLog(@"[AppDataCleaner] Skipping receipt mutation for %@ because the application bundle is read-only.",
+          bundleID ?: @"(unknown)");
 }
 
 // NEW: Enhanced method to clear app group containers with better subfolder handling
@@ -4458,7 +4404,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     for (NSDictionary *extension in extensionInfo) {
         NSString *extensionBundleID = extension[@"bundleID"];
         NSString *dataUUID = extension[@"dataUUID"];
-        NSString *bundleUUID = extension[@"bundleUUID"];
         NSString *type = extension[@"type"];
         BOOL isRootless = [extension[@"rootless"] boolValue];
         
@@ -4503,51 +4448,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 [self securelyWipeFile:[dbPath stringByAppendingString:@"-journal"]];
                 [self securelyWipeFile:[dbPath stringByAppendingString:@"-wal"]];
                 [self securelyWipeFile:[dbPath stringByAppendingString:@"-shm"]];
-            }
-        }
-        
-        // 2. Clear extension bundle receipt if available
-        if (bundleUUID.length > 0) {
-            NSString *basePath = isRootless ?
-                @"/containers/Bundle/Application/" :
-                @"/var/containers/Bundle/Application/";
-            
-            // Extensions can be directly in the bundle directory or in PlugIns/Plugins subdirectory
-            NSString *bundlePath = [NSString stringWithFormat:@"%@%@", basePath, bundleUUID];
-            NSArray *bundleContents = [self listDirectoriesInPath:bundlePath];
-            
-            for (NSString *item in bundleContents) {
-                // Direct .appex file
-                if ([item hasSuffix:@".appex"]) {
-                    NSString *infoPlistPath = [NSString stringWithFormat:@"%@%@/Info.plist", bundlePath, item];
-                    NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
-                    NSString *itemBundleID = infoPlist[@"CFBundleIdentifier"];
-                    
-                    if ([itemBundleID isEqualToString:extensionBundleID]) {
-                        NSString *receiptPath = [NSString stringWithFormat:@"%@%@/_MASReceipt", bundlePath, item];
-                        NSLog(@"[AppDataCleaner] Clearing extension receipt: %@", receiptPath);
-                        [self fixPermissionsAndRemovePath:receiptPath];
-                    }
-                }
-                // Check in PlugIns/Plugins directory
-                else if ([item isEqualToString:@"PlugIns"] || [item isEqualToString:@"Plugins"]) {
-                    NSString *pluginsPath = [NSString stringWithFormat:@"%@%@", bundlePath, item];
-                    NSArray *plugins = [self listDirectoriesInPath:pluginsPath];
-                    
-                    for (NSString *plugin in plugins) {
-                        if ([plugin hasSuffix:@".appex"]) {
-                            NSString *infoPlistPath = [NSString stringWithFormat:@"%@/%@/Info.plist", pluginsPath, plugin];
-                            NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
-                            NSString *itemBundleID = infoPlist[@"CFBundleIdentifier"];
-                            
-                            if ([itemBundleID isEqualToString:extensionBundleID]) {
-                                NSString *receiptPath = [NSString stringWithFormat:@"%@/%@/_MASReceipt", pluginsPath, plugin];
-                                NSLog(@"[AppDataCleaner] Clearing extension receipt in plugins: %@", receiptPath);
-                                [self fixPermissionsAndRemovePath:receiptPath];
-                            }
-                        }
-                    }
-                }
             }
         }
         
@@ -4700,41 +4600,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     NSLog(@"[AppDataCleaner] No bundle container UUID found for %@", bundleID);
     return nil;
-}
-
-- (void)clearAppReceiptData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing App Store receipt for %@", bundleID);
-    
-    // 1. Find the bundle container UUID
-    NSString *bundleUUID = [self findBundleContainerUUID:bundleID];
-    if (!bundleUUID) {
-        NSLog(@"[AppDataCleaner] Could not find bundle UUID to clear receipt");
-        return;
-    }
-    
-    // 2. Clear the standard receipt path
-    NSString *receiptPath = [NSString stringWithFormat:@"/var/containers/Bundle/Application/%@/*/._MASReceipt", bundleUUID];
-    NSArray *receipts = [self findPathsMatchingPattern:receiptPath];
-    for (NSString *path in receipts) {
-        NSLog(@"[AppDataCleaner] Wiping app receipt at: %@", path);
-        [self wipeDirectoryContents:path keepDirectoryStructure:YES];
-    }
-    
-    // 3. Try alternate paths with glob expansion
-    NSString *altReceiptPath = [NSString stringWithFormat:@"/var/mobile/Containers/Bundle/Application/%@/*/_MASReceipt", bundleUUID];
-    receipts = [self findPathsMatchingPattern:altReceiptPath];
-    for (NSString *path in receipts) {
-        NSLog(@"[AppDataCleaner] Wiping app receipt at: %@", path);
-        [self wipeDirectoryContents:path keepDirectoryStructure:YES];
-    }
-    
-    // 4. Check rootless paths too
-    NSString *rootlessReceiptPath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@/*/_MASReceipt", bundleUUID];
-    receipts = [self findPathsMatchingPattern:rootlessReceiptPath];
-    for (NSString *path in receipts) {
-        NSLog(@"[AppDataCleaner] Wiping rootless app receipt at: %@", path);
-        [self wipeDirectoryContents:path keepDirectoryStructure:YES];
-    }
 }
 
 // Add these methods to our collection for the most comprehensive clearing
