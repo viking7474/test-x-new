@@ -189,27 +189,73 @@ static NSSet<NSString *> *WXExcludedRestoreKeys(void) {
     return s;
 }
 
-static void WXWipe(NSArray<NSString *> *groups, NSString *logPath) {
+static BOOL WXWipeGroupIsValid(id value) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSString *group = (NSString *)value;
+    if (group.length == 0 || [group rangeOfString:@","].location != NSNotFound) return NO;
+    unichar nulCharacter = 0;
+    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
+    if ([group rangeOfString:nulString].location != NSNotFound) return NO;
+    NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    if ([group rangeOfCharacterFromSet:[whitespace invertedSet]].location == NSNotFound) return NO;
+    return [[group stringByTrimmingCharactersInSet:whitespace] isEqualToString:group];
+}
+
+static NSArray<NSString *> *WXValidatedWipeGroups(id value) {
+    if (![value isKindOfClass:[NSArray class]] || [(NSArray *)value count] == 0) return nil;
+    NSMutableArray<NSString *> *groups = [NSMutableArray array];
+    for (id group in (NSArray *)value) {
+        if (!WXWipeGroupIsValid(group)) return nil;
+        [groups addObject:(NSString *)group];
+    }
+    return [groups copy];
+}
+
+static NSDictionary *WXWipeResult(NSArray<NSString *> *groups, NSString *logPath) {
+    NSArray<NSString *> *validatedGroups = WXValidatedWipeGroups(groups);
+    if (!validatedGroups) {
+        return @{ @"ok": @NO,
+                  @"attempted": @0,
+                  @"succeeded": @0,
+                  @"failed": @0 };
+    }
+
     NSArray<NSString *> *classNames = @[ @"GenericPassword", @"InternetPassword" ];
-    for (NSString *group in groups) {
-        if (![group isKindOfClass:[NSString class]] || !group.length) continue;
+    NSUInteger attempted = 0;
+    NSUInteger succeeded = 0;
+    NSUInteger failed = 0;
+    for (NSString *group in validatedGroups) {
         for (NSString *className in classNames) {
             CFTypeRef secClass = WXSecClassFromName(className);
             if (!secClass) continue;
-            NSMutableDictionary *q = [@{
+            attempted++;
+            NSMutableDictionary *query = [@{
                 (__bridge id)kSecClass: (__bridge id)secClass,
                 (__bridge id)kSecAttrAccessGroup: group,
                 (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
             } mutableCopy];
             if (@available(iOS 9.0, *)) {
-                q[(__bridge id)kSecUseAuthenticationUI] = (__bridge id)kSecUseAuthenticationUIFail;
+                query[(__bridge id)kSecUseAuthenticationUI] = (__bridge id)kSecUseAuthenticationUIFail;
             }
-            OSStatus st = SecItemDelete((__bridge CFDictionaryRef)q);
-            if (st != errSecSuccess && st != errSecItemNotFound) {
-                WXAppendLog(logPath, [NSString stringWithFormat:@"wipe group=%@ class=%@ error=%@", group, className, WXSecError(st)]);
+            OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+            if (status == errSecSuccess || status == errSecItemNotFound) {
+                succeeded++;
+            } else {
+                failed++;
+                WXAppendLog(logPath,
+                    [NSString stringWithFormat:@"wipe class=%@ status=%d", className, (int)status]);
             }
         }
     }
+    BOOL ok = attempted > 0 && failed == 0 && succeeded == attempted;
+    return @{ @"ok": @(ok),
+              @"attempted": @(attempted),
+              @"succeeded": @(succeeded),
+              @"failed": @(failed) };
+}
+
+static void WXWipe(NSArray<NSString *> *groups, NSString *logPath) {
+    (void)WXWipeResult(groups, logPath);
 }
 
 static NSDictionary *WXRestoreFromImport(NSDictionary *importPlist, NSArray<NSString *> *allowedGroups, BOOL overwrite, NSString *logPath) {
@@ -313,13 +359,15 @@ static void WXProcessRequestForCurrentApp(void) {
         NSString *action = req[@"action"];
         NSString *nonce = req[@"nonce"];
         NSString *reqBundle = req[@"bundleID"];
-        NSArray *groups = req[@"groups"];
+        id groupsObject = req[@"groups"];
+        NSArray *groups = [groupsObject isKindOfClass:[NSArray class]] ? groupsObject : @[];
         NSString *respPath = req[@"respPath"];
         NSString *logPath = req[@"logPath"];
+        BOOL responsePathWasValid = WXIsTmpPath(respPath);
+        BOOL logPathWasValid = WXIsTmpPath(logPath);
 
         if (![reqBundle isKindOfClass:[NSString class]] || ![reqBundle isEqualToString:bundleID]) return;
         if (![nonce isKindOfClass:[NSString class]] || !nonce.length) return;
-        if (![groups isKindOfClass:[NSArray class]]) groups = @[];
         if (![action isKindOfClass:[NSString class]]) action = @"";
 
         if (!WXIsTmpPath(respPath)) respPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_response_%@.plist", safe];
@@ -379,9 +427,20 @@ static void WXProcessRequestForCurrentApp(void) {
                 WXAppendLog(logPath, [NSString stringWithFormat:@"restore ok=%d", ok]);
             }
         } else if ([action isEqualToString:@"wipe"]) {
-            // Keychain wipe in app context (group-scoped)
-            WXWipe((NSArray *)groups, logPath);
-            resp[@"ok"] = @YES;
+            NSArray<NSString *> *validatedGroups = WXValidatedWipeGroups(groupsObject);
+            if (!responsePathWasValid || !logPathWasValid || !validatedGroups) {
+                resp[@"ok"] = @NO;
+                resp[@"attempted"] = @0;
+                resp[@"succeeded"] = @0;
+                resp[@"failed"] = @0;
+                resp[@"error"] = @"invalid wipe request";
+            } else {
+                NSDictionary *wipeResult = WXWipeResult(validatedGroups, logPath);
+                resp[@"ok"] = wipeResult[@"ok"] ?: @NO;
+                resp[@"attempted"] = wipeResult[@"attempted"] ?: @0;
+                resp[@"succeeded"] = wipeResult[@"succeeded"] ?: @0;
+                resp[@"failed"] = wipeResult[@"failed"] ?: @0;
+            }
         } else {
             resp[@"ok"] = @NO;
             resp[@"error"] = @"unknown action";
@@ -419,10 +478,6 @@ __attribute__((constructor)) static void WXKeychainBridgeInit(void) {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
         PXFileDebugAIDA64Log("[KeychainBridge.ctor] bundle=%s", bundleID.UTF8String ?: "<nil>");
         if (!bundleID.length) return;
-        if ([bundleID hasPrefix:@"com.apple."]) {
-            PXFileDebugAIDA64Log("[KeychainBridge.ctor] skip system bundle=%s", bundleID.UTF8String ?: "<nil>");
-            return;
-        }
         NSString *safe = WXSafeBundle(bundleID);
 
         NSString *notifyName = [NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safe];

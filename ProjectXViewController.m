@@ -3837,27 +3837,22 @@ static void PXWriteSubstrateFilterPlists(void) {
         keychainEnabled = [defaults boolForKey:enabledKey];
     }
 
-    NSArray<NSString *> *selectedGroups = nil;
+    NSArray<NSString *> *selectedGroups = @[];
     id savedGroups = [defaults objectForKey:groupsKey];
-    if ([savedGroups isKindOfClass:[NSArray class]]) {
-        selectedGroups = (NSArray<NSString *> *)savedGroups;
-    }
-
-    // Default: select ALL groups from entitlements if not present.
-    if (!selectedGroups.count) {
+    if (savedGroups == nil) {
         NSError *err = nil;
         AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
-        NSArray<NSString *> *entGroups = [reader keychainAccessGroupsForBundleID:bundleID error:&err];
-        if (entGroups.count > 0) {
-            selectedGroups = entGroups;
-            [defaults setObject:entGroups forKey:groupsKey];
-            // Do not auto-enable keychain wipe.
-            [defaults setBool:NO forKey:enabledKey];
+        NSArray<NSString *> *entitlementGroups =
+            [reader keychainAccessGroupsForBundleID:bundleID error:&err];
+        selectedGroups = entitlementGroups.count > 0 ? entitlementGroups : @[];
+        if (entitlementGroups.count > 0) {
+            [defaults setObject:entitlementGroups forKey:groupsKey];
             [defaults synchronize];
-            keychainEnabled = NO;
-        } else {
-            selectedGroups = @[];
         }
+    } else if ([savedGroups isKindOfClass:[NSArray class]]) {
+        selectedGroups = (NSArray<NSString *> *)savedGroups;
+    } else {
+        selectedGroups = @[];
     }
 
      if (isSystemApp && !allowSystemKeychainWipe) {
@@ -3868,7 +3863,9 @@ static void PXWriteSubstrateFilterPlists(void) {
      }
 
      NSString *keychainState = keychainEnabled ? @"ON" : ((isSystemApp && !allowSystemKeychainWipe) ? @"OFF (Not supported)" : @"OFF");
-     NSString *groupsLine = (isSystemApp && !allowSystemKeychainWipe) ? @"N/A" : (selectedGroups.count > 0 ? [NSString stringWithFormat:@"%lu", (unsigned long)selectedGroups.count] : @"Unavailable");
+     NSString *groupsLine = (isSystemApp && !allowSystemKeychainWipe)
+         ? @"N/A"
+         : [NSString stringWithFormat:@"%lu selected", (unsigned long)selectedGroups.count];
 
     NSString *msg = [NSString stringWithFormat:@"Are you sure you want to clear all data for this app? This will remove %@.%@\n\nKeychain Wipe: %@ (may log you out)\nKeychain Groups: %@\n\nThis action cannot be undone.",
                      dataSizeStr ?: @"", dataDetailsStr ?: @"", keychainState, groupsLine];
@@ -3892,7 +3889,8 @@ static void PXWriteSubstrateFilterPlists(void) {
         }];
         [alert addAction:toggleAction];
 
-        NSString *groupsTitle = selectedGroups.count > 0 ? [NSString stringWithFormat:@"Keychain Groups (%lu)…", (unsigned long)selectedGroups.count] : @"Keychain Groups…";
+        NSString *groupsTitle = [NSString stringWithFormat:@"Keychain Groups (%lu)…",
+                                   (unsigned long)selectedGroups.count];
         UIAlertAction *groupsAction = [UIAlertAction actionWithTitle:groupsTitle
                                                              style:UIAlertActionStyleDefault
                                                            handler:^(__unused UIAlertAction *action) {

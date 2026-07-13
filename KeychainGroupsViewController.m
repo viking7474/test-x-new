@@ -111,12 +111,17 @@ static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.projectx
     NSError *err = nil;
     AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
     NSArray<NSString *> *groups = [reader keychainAccessGroupsForBundleID:self.bundleID error:&err];
+    id savedObject = [self.defaults objectForKey:PXKeychainWipeGroupsKey(self.bundleID)];
     if (!groups.count) {
         self.groups = @[];
         self.filteredGroups = self.groups;
         [self.selected removeAllObjects];
-        self.footerLabel.text = err ? [NSString stringWithFormat:@"Failed to read entitlements: %@", err.localizedDescription]
-                               : @"No keychain-access-groups found for this app.";
+        if (savedObject != nil && ![savedObject isKindOfClass:[NSArray class]]) {
+            self.footerLabel.text = @"Saved Keychain group selection is invalid. Select groups and save again.";
+        } else {
+            self.footerLabel.text = err ? [NSString stringWithFormat:@"Failed to read entitlements: %@", err.localizedDescription]
+                                   : @"No keychain-access-groups found for this app.";
+        }
         self.navigationItem.rightBarButtonItem.enabled = NO;
         [self.tableView reloadData];
         return;
@@ -126,16 +131,19 @@ static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.projectx
     self.filteredGroups = self.groups;
     self.navigationItem.rightBarButtonItem.enabled = YES;
 
-    // Default selection: ALL groups.
-    NSArray *saved = [self.defaults objectForKey:PXKeychainWipeGroupsKey(self.bundleID)];
-    if ([saved isKindOfClass:[NSArray class]] && [(NSArray *)saved count] > 0) {
-        for (id v in (NSArray *)saved) {
-            if ([v isKindOfClass:[NSString class]]) {
-                [self.selected addObject:(NSString *)v];
+    [self.selected removeAllObjects];
+    if (savedObject == nil) {
+        [self.selected addObjectsFromArray:self.groups];
+    } else if ([savedObject isKindOfClass:[NSArray class]]) {
+        NSSet<NSString *> *currentGroupSet = [NSSet setWithArray:self.groups];
+        for (id value in (NSArray *)savedObject) {
+            if ([value isKindOfClass:[NSString class]] &&
+                [currentGroupSet containsObject:(NSString *)value]) {
+                [self.selected addObject:(NSString *)value];
             }
         }
     } else {
-        [self.selected addObjectsFromArray:self.groups];
+        self.footerLabel.text = @"Saved Keychain group selection is invalid. Select groups and save again.";
     }
     [self.tableView reloadData];
 }

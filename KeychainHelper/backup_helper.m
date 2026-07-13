@@ -248,18 +248,32 @@ int main(int argc, const char *argv[]) {
                                                                itemClasses:PXKeychainItemClassAll
                                                                      error:&error];
                 
+                NSUInteger processed = result ? result.itemsProcessed : 0;
+                NSUInteger succeeded = result ? result.itemsSucceeded : 0;
+                NSUInteger failed = result ? result.itemsFailed : 0;
+                NSUInteger warningCount = result ? result.warnings.count : 0;
+                fprintf(stdout,
+                        "PXKEYCHAIN_WIPE_RESULT processed=%lu succeeded=%lu failed=%lu warnings=%lu\n",
+                        (unsigned long)processed,
+                        (unsigned long)succeeded,
+                        (unsigned long)failed,
+                        (unsigned long)warningCount);
+
                 if (!result) {
                     logError(@"Wipe failed: %@", error.localizedDescription);
                     return 2;
                 }
-                
-                logSuccess(@"Wipe complete: %lu items deleted",
-                          (unsigned long)result.itemsSucceeded);
-                
+
                 for (id warningObj in result.warnings) {
                     NSString *warning = PXSafeString(warningObj);
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
+                if (result.itemsFailed > 0 || result.warnings.count > 0) {
+                    return 2;
+                }
+
+                logSuccess(@"Wipe complete: %lu items deleted",
+                          (unsigned long)result.itemsSucceeded);
                 break;
             }
                 

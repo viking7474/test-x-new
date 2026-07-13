@@ -8,6 +8,7 @@
 #import <sys/stat.h>
 #import <signal.h>
 #import <math.h>
+#import <string.h>
 #import <sqlite3.h>
 #import <notify.h>
 
@@ -29,6 +30,8 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
+
+@class PXKeychainClearPlan;
 
 @interface AppDataCleaner ()
 - (NSString *)runCommandAndGetOutput:(NSString *)command
@@ -58,6 +61,93 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
                                                            successfulCanonicalPaths:(NSSet<NSString *> *)successfulCanonicalPaths;
 - (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID
                                                          deepClean:(BOOL)deepClean;
+- (PXKeychainClearPlan *)_keychainClearPlanForBundleIdentifier:(NSString *)bundleIdentifier;
+- (BOOL)_executeKeychainWipeForBundleIdentifier:(NSString *)bundleIdentifier
+                                  selectedGroups:(NSArray<NSString *> *)selectedGroups
+                           applicationIdentifier:(NSString *)applicationIdentifier
+                              systemApplication:(BOOL)systemApplication
+                                          error:(NSError **)error;
+- (PXClearComponentResult *)_keychainComponentForPlan:(PXKeychainClearPlan *)plan
+                                          passResults:(NSArray<NSNumber *> *)passResults;
+@end
+
+@interface PXKeychainClearPlan : NSObject {
+@private
+    NSString *_bundleIdentifier;
+    BOOL _enabled;
+    BOOL _systemApplication;
+    BOOL _systemPolicyAllowed;
+    NSArray<NSString *> *_selectedGroups;
+    NSArray<NSString *> *_authorizedGroups;
+    NSString *_applicationIdentifier;
+    NSUInteger _plannedPassCount;
+    NSString *_skipDetail;
+    NSInteger _planningFailureCode;
+    NSString *_planningFailureMessage;
+}
+@property (nonatomic, copy, readonly) NSString *bundleIdentifier;
+@property (nonatomic, assign, readonly, getter=isEnabled) BOOL enabled;
+@property (nonatomic, assign, readonly, getter=isSystemApplication) BOOL systemApplication;
+@property (nonatomic, assign, readonly, getter=isSystemPolicyAllowed) BOOL systemPolicyAllowed;
+@property (nonatomic, copy, readonly) NSArray<NSString *> *selectedGroups;
+@property (nonatomic, copy, readonly) NSArray<NSString *> *authorizedGroups;
+@property (nonatomic, copy, readonly) NSString *applicationIdentifier;
+@property (nonatomic, assign, readonly) NSUInteger plannedPassCount;
+@property (nonatomic, copy, readonly) NSString *skipDetail;
+@property (nonatomic, assign, readonly) NSInteger planningFailureCode;
+@property (nonatomic, copy, readonly) NSString *planningFailureMessage;
+- (instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
+                                 enabled:(BOOL)enabled
+                       systemApplication:(BOOL)systemApplication
+                     systemPolicyAllowed:(BOOL)systemPolicyAllowed
+                          selectedGroups:(NSArray<NSString *> *)selectedGroups
+                        authorizedGroups:(NSArray<NSString *> *)authorizedGroups
+                   applicationIdentifier:(NSString *)applicationIdentifier
+                        plannedPassCount:(NSUInteger)plannedPassCount
+                              skipDetail:(NSString *)skipDetail
+                     planningFailureCode:(NSInteger)planningFailureCode
+                  planningFailureMessage:(NSString *)planningFailureMessage;
+@end
+
+@implementation PXKeychainClearPlan
+@synthesize bundleIdentifier = _bundleIdentifier;
+@synthesize enabled = _enabled;
+@synthesize systemApplication = _systemApplication;
+@synthesize systemPolicyAllowed = _systemPolicyAllowed;
+@synthesize selectedGroups = _selectedGroups;
+@synthesize authorizedGroups = _authorizedGroups;
+@synthesize applicationIdentifier = _applicationIdentifier;
+@synthesize plannedPassCount = _plannedPassCount;
+@synthesize skipDetail = _skipDetail;
+@synthesize planningFailureCode = _planningFailureCode;
+@synthesize planningFailureMessage = _planningFailureMessage;
+- (instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
+                                 enabled:(BOOL)enabled
+                       systemApplication:(BOOL)systemApplication
+                     systemPolicyAllowed:(BOOL)systemPolicyAllowed
+                          selectedGroups:(NSArray<NSString *> *)selectedGroups
+                        authorizedGroups:(NSArray<NSString *> *)authorizedGroups
+                   applicationIdentifier:(NSString *)applicationIdentifier
+                        plannedPassCount:(NSUInteger)plannedPassCount
+                              skipDetail:(NSString *)skipDetail
+                     planningFailureCode:(NSInteger)planningFailureCode
+                  planningFailureMessage:(NSString *)planningFailureMessage {
+    self = [super init];
+    if (self) {
+        _bundleIdentifier = [bundleIdentifier copy] ?: @"";
+        _enabled = enabled;
+        _systemApplication = systemApplication;
+        _systemPolicyAllowed = systemPolicyAllowed;
+        _selectedGroups = [selectedGroups copy] ?: @[];
+        _authorizedGroups = [authorizedGroups copy] ?: @[];
+        _applicationIdentifier = [applicationIdentifier copy];
+        _plannedPassCount = plannedPassCount;
+        _skipDetail = [skipDetail copy];
+        _planningFailureCode = planningFailureCode;
+        _planningFailureMessage = [planningFailureMessage copy];
+    }
+    return self;
+}
 @end
 
 @implementation AppDataCleaner {
@@ -686,6 +776,29 @@ static const PXClearScope PXMigratedDataClearScopes =
     PXClearScopeAppGroups |
     PXClearScopePluginKitData;
 
+static const PXClearScope PXMigratedFullClearScopes =
+    PXClearScopeApplicationData |
+    PXClearScopeExtensionData |
+    PXClearScopeAppGroups |
+    PXClearScopePluginKitData |
+    PXClearScopeKeychain;
+
+typedef NS_ENUM(NSInteger, PXKeychainClearFailureCode) {
+    PXKeychainClearFailureCodeInvalidRequest = 1,
+    PXKeychainClearFailureCodeConfigurationFailed = 2,
+    PXKeychainClearFailureCodeAuthorizationFailed = 3,
+    PXKeychainClearFailureCodeInitialPassFailed = 4,
+    PXKeychainClearFailureCodeFinalPassFailed = 5,
+    PXKeychainClearFailureCodeInternalResultFailure = 6,
+};
+
+static NSString * const PXKeychainClearFailureDomain = @"PXKeychainClear";
+static NSString * const PXKeychainDisabledDetail = @"Keychain wipe is disabled for this app";
+static NSString * const PXKeychainNoSelectionDetail = @"No keychain access groups are selected";
+static NSString * const PXKeychainNoAuthorizedGroupsDetail = @"No authorized keychain access groups were discovered";
+static NSString * const PXKeychainSuccessDetail = @"All planned keychain wipe passes succeeded";
+static NSString * const PXKeychainFailureDetail = @"One or more keychain wipe passes failed";
+
 typedef NS_ENUM(NSInteger, PXExactDataClearFailureCode) {
     PXExactDataClearFailureCodeInvalidRequest = 1,
     PXExactDataClearFailureCodeDiscoveryFailed = 2,
@@ -695,6 +808,93 @@ typedef NS_ENUM(NSInteger, PXExactDataClearFailureCode) {
     PXExactDataClearFailureCodePostconditionFailed = 6,
     PXExactDataClearFailureCodeInternalResultFailure = 7,
 };
+
+static BOOL PXKeychainExactStringIsValid(id value) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSString *string = (NSString *)value;
+    if (string.length == 0 || [string rangeOfString:@","].location != NSNotFound) return NO;
+    unichar nulCharacter = 0;
+    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
+    if ([string rangeOfString:nulString].location != NSNotFound) return NO;
+    NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    if ([string rangeOfCharacterFromSet:[whitespace invertedSet]].location == NSNotFound) return NO;
+    NSString *trimmed = [string stringByTrimmingCharactersInSet:whitespace];
+    return [trimmed isEqualToString:string];
+}
+
+static PXClearFailure *PXKeychainFailure(PXKeychainClearFailureCode code, NSString *message) {
+    return [[PXClearFailure alloc] initWithDomain:PXKeychainClearFailureDomain
+                                            code:code
+                                         message:message ?: @"Keychain clear failed"];
+}
+
+static void PXAssignKeychainNSError(NSError **error,
+                                    PXKeychainClearFailureCode code,
+                                    NSString *message) {
+    if (!error) return;
+    *error = [NSError errorWithDomain:PXKeychainClearFailureDomain
+                                 code:code
+                             userInfo:@{NSLocalizedDescriptionKey: message ?: @"Keychain clear failed"}];
+}
+
+static BOOL PXBoundedCommandSucceeded(CommandResult *result) {
+    return [result isKindOfClass:[CommandResult class]] &&
+           result.isSucceeded &&
+           !result.stdoutTruncated &&
+           !result.stderrTruncated;
+}
+
+static BOOL PXNumberIsBooleanTrue(id value) {
+    if (![value isKindOfClass:[NSNumber class]]) return NO;
+    CFTypeRef cfValue = (__bridge CFTypeRef)value;
+    return CFGetTypeID(cfValue) == CFBooleanGetTypeID() && [(NSNumber *)value boolValue];
+}
+
+static BOOL PXReadNonnegativeInteger(id value, NSUInteger *outValue) {
+    if (![value isKindOfClass:[NSNumber class]]) return NO;
+    CFTypeRef cfValue = (__bridge CFTypeRef)value;
+    if (CFGetTypeID(cfValue) == CFBooleanGetTypeID()) return NO;
+    const char *type = [(NSNumber *)value objCType];
+    if (!type || !strchr("cCsSiIlLqQ", type[0])) return NO;
+    long long signedValue = [(NSNumber *)value longLongValue];
+    if (signedValue < 0) return NO;
+    unsigned long long unsignedValue = [(NSNumber *)value unsignedLongLongValue];
+    if (unsignedValue > (unsigned long long)NSUIntegerMax) return NO;
+    if (outValue) *outValue = (NSUInteger)unsignedValue;
+    return YES;
+}
+
+static BOOL PXKeychainBridgeResponseIsValid(id value,
+                                            NSString *bundleIdentifier,
+                                            NSString *nonce) {
+    if (![value isKindOfClass:[NSDictionary class]] ||
+        ![bundleIdentifier isKindOfClass:[NSString class]] ||
+        ![nonce isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+    NSDictionary *response = (NSDictionary *)value;
+    if (![response[@"nonce"] isKindOfClass:[NSString class]] ||
+        ![response[@"nonce"] isEqualToString:nonce] ||
+        ![response[@"bundleID"] isKindOfClass:[NSString class]] ||
+        ![response[@"bundleID"] isEqualToString:bundleIdentifier] ||
+        ![response[@"action"] isKindOfClass:[NSString class]] ||
+        ![response[@"action"] isEqualToString:@"wipe"] ||
+        !PXNumberIsBooleanTrue(response[@"ok"])) {
+        return NO;
+    }
+    NSUInteger attempted = 0, succeeded = 0, failed = 0;
+    if (!PXReadNonnegativeInteger(response[@"attempted"], &attempted) ||
+        !PXReadNonnegativeInteger(response[@"succeeded"], &succeeded) ||
+        !PXReadNonnegativeInteger(response[@"failed"], &failed) ||
+        attempted == 0 ||
+        succeeded > attempted ||
+        failed != attempted - succeeded ||
+        failed != 0 ||
+        succeeded != attempted) {
+        return NO;
+    }
+    return YES;
+}
 
 typedef NS_ENUM(NSInteger, PXInstalledExtensionDiscoveryErrorCode) {
     PXInstalledExtensionDiscoveryErrorCodeInvalidRequest = 1,
@@ -904,6 +1104,7 @@ static NSString *PXMigratedComponentName(PXClearScope scope) {
         case PXClearScopeExtensionData: return @"ExtensionData";
         case PXClearScopeAppGroups: return @"AppGroups";
         case PXClearScopePluginKitData: return @"PluginKitData";
+        case PXClearScopeKeychain: return @"Keychain";
         default: return @"Unknown";
     }
 }
@@ -964,7 +1165,7 @@ static BOOL PXExactDataComponentResultIsStructurallyValid(id value,
     return NO;
 }
 
-static BOOL PXMigratedClearResultIsStructurallyValid(id value) {
+static BOOL PXMigratedDataClearResultIsStructurallyValid(id value) {
     if (![value isKindOfClass:[PXClearResult class]]) return NO;
     PXClearResult *result = (PXClearResult *)value;
     if (![result.request isKindOfClass:[PXClearRequest class]] ||
@@ -985,6 +1186,64 @@ static BOOL PXMigratedClearResultIsStructurallyValid(id value) {
            PXExactDataComponentResultIsStructurallyValid(extensionData, PXClearScopeExtensionData) &&
            PXAppGroupsComponentResultIsStructurallyValid(appGroups) &&
            PXExactDataComponentResultIsStructurallyValid(pluginKitData, PXClearScopePluginKitData);
+}
+
+static BOOL PXKeychainComponentResultIsStructurallyValid(id value) {
+    if (![value isKindOfClass:[PXClearComponentResult class]]) return NO;
+    PXClearComponentResult *result = (PXClearComponentResult *)value;
+    if (result.scope != PXClearScopeKeychain ||
+        result.succeededUnitCount > result.attemptedUnitCount ||
+        result.failedUnitCount != result.attemptedUnitCount - result.succeededUnitCount) {
+        return NO;
+    }
+    switch (result.status) {
+        case PXClearComponentStatusSucceeded:
+            return (result.attemptedUnitCount == 1 || result.attemptedUnitCount == 2) &&
+                   result.succeededUnitCount == result.attemptedUnitCount &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil &&
+                   [result.detail isEqualToString:PXKeychainSuccessDetail];
+        case PXClearComponentStatusSkipped:
+            return result.attemptedUnitCount == 0 &&
+                   result.succeededUnitCount == 0 &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil &&
+                   ([result.detail isEqualToString:PXKeychainDisabledDetail] ||
+                    [result.detail isEqualToString:PXKeychainNoSelectionDetail] ||
+                    [result.detail isEqualToString:PXKeychainNoAuthorizedGroupsDetail]);
+        case PXClearComponentStatusFailed:
+            return (result.attemptedUnitCount == 1 || result.attemptedUnitCount == 2) &&
+                   result.failedUnitCount > 0 &&
+                   [result.failure isKindOfClass:[PXClearFailure class]] &&
+                   [result.failure.domain isEqualToString:PXKeychainClearFailureDomain] &&
+                   [result.detail isEqualToString:PXKeychainFailureDetail];
+    }
+    return NO;
+}
+
+static BOOL PXMigratedFullClearResultIsStructurallyValid(id value) {
+    if (![value isKindOfClass:[PXClearResult class]]) return NO;
+    PXClearResult *result = (PXClearResult *)value;
+    if (![result.request isKindOfClass:[PXClearRequest class]] ||
+        result.request.scopes != PXMigratedFullClearScopes ||
+        result.componentResults.count != 5) {
+        return NO;
+    }
+    PXClearComponentResult *applicationData = result.componentResults[0];
+    PXClearComponentResult *extensionData = result.componentResults[1];
+    PXClearComponentResult *appGroups = result.componentResults[2];
+    PXClearComponentResult *pluginKitData = result.componentResults[3];
+    PXClearComponentResult *keychain = result.componentResults[4];
+    return applicationData.scope == PXClearScopeApplicationData &&
+           extensionData.scope == PXClearScopeExtensionData &&
+           appGroups.scope == PXClearScopeAppGroups &&
+           pluginKitData.scope == PXClearScopePluginKitData &&
+           keychain.scope == PXClearScopeKeychain &&
+           PXApplicationDataComponentResultIsStructurallyValid(applicationData) &&
+           PXExactDataComponentResultIsStructurallyValid(extensionData, PXClearScopeExtensionData) &&
+           PXAppGroupsComponentResultIsStructurallyValid(appGroups) &&
+           PXExactDataComponentResultIsStructurallyValid(pluginKitData, PXClearScopePluginKitData) &&
+           PXKeychainComponentResultIsStructurallyValid(keychain);
 }
 
 static NSError *PXMigratedInternalError(NSString *message) {
@@ -1159,181 +1418,359 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 #pragma mark - Keychain Wipe Settings
 
-- (BOOL)_isKeychainWipeEnabledForBundleID:(NSString *)bundleID {
-    if (!bundleID.length) return NO;
+- (PXKeychainClearPlan *)_keychainClearPlanForBundleIdentifier:(NSString *)bundleIdentifier {
+    BOOL systemApplication = [bundleIdentifier hasPrefix:@"com.apple."];
+    if (!PXStrictBundleIdentifierIsValid(bundleIdentifier)) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:NO
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:NO
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:@[]
+                                              applicationIdentifier:nil
+                                                   plannedPassCount:0
+                                                         skipDetail:nil
+                                                planningFailureCode:PXKeychainClearFailureCodeInvalidRequest
+                                             planningFailureMessage:@"Invalid Keychain clear request"];
+    }
+
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *key = PXKeychainWipeEnabledKey(bundleID);
-    if ([defaults objectForKey:key] == nil) {
-        // Default OFF (safer): keychain wipe can log you out and may not be restorable for some apps.
+    id enabledObject = [defaults objectForKey:PXKeychainWipeEnabledKey(bundleIdentifier)];
+    id selectedObject = [defaults objectForKey:PXKeychainWipeGroupsKey(bundleIdentifier)];
+    BOOL enabled = [enabledObject respondsToSelector:@selector(boolValue)] && [enabledObject boolValue];
+    if (!enabled) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:NO
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:YES
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:@[]
+                                              applicationIdentifier:nil
+                                                   plannedPassCount:0
+                                                         skipDetail:PXKeychainDisabledDetail
+                                                planningFailureCode:0
+                                             planningFailureMessage:nil];
+    }
+
+    BOOL systemPolicyAllowed = YES;
+    if (systemApplication) {
+        NSUserDefaults *securityDefaults =
+            [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+        id policyObject = [securityDefaults objectForKey:@"allowSystemKeychainWipeEnabled"];
+        systemPolicyAllowed = [policyObject respondsToSelector:@selector(boolValue)] &&
+                              [policyObject boolValue];
+    }
+
+    AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
+    NSError *entitlementsError = nil;
+    id entitlementsObject = [reader fullEntitlementsForBundleID:bundleIdentifier
+                                                          error:&entitlementsError];
+    if (entitlementsError || ![entitlementsObject isKindOfClass:[NSDictionary class]]) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:systemPolicyAllowed
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:@[]
+                                              applicationIdentifier:nil
+                                                   plannedPassCount:0
+                                                         skipDetail:nil
+                                                planningFailureCode:PXKeychainClearFailureCodeConfigurationFailed
+                                             planningFailureMessage:@"Signed Keychain authorization could not be read"];
+    }
+
+    NSDictionary *entitlements = (NSDictionary *)entitlementsObject;
+    NSMutableSet<NSString *> *authorizedSet = [NSMutableSet set];
+    id signedGroupsObject = entitlements[@"keychain-access-groups"];
+    if (signedGroupsObject && ![signedGroupsObject isKindOfClass:[NSArray class]]) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:systemPolicyAllowed
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:@[]
+                                              applicationIdentifier:nil
+                                                   plannedPassCount:0
+                                                         skipDetail:nil
+                                                planningFailureCode:PXKeychainClearFailureCodeAuthorizationFailed
+                                             planningFailureMessage:@"Signed Keychain authorization is malformed"];
+    }
+    for (id groupObject in (NSArray *)(signedGroupsObject ?: @[])) {
+        if (!PXKeychainExactStringIsValid(groupObject)) {
+            return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                                enabled:YES
+                                                      systemApplication:systemApplication
+                                                    systemPolicyAllowed:systemPolicyAllowed
+                                                         selectedGroups:@[]
+                                                       authorizedGroups:@[]
+                                                  applicationIdentifier:nil
+                                                       plannedPassCount:0
+                                                             skipDetail:nil
+                                                    planningFailureCode:PXKeychainClearFailureCodeAuthorizationFailed
+                                                 planningFailureMessage:@"Signed Keychain authorization is malformed"];
+        }
+        [authorizedSet addObject:(NSString *)groupObject];
+    }
+
+    NSString *applicationIdentifier = nil;
+    id applicationIdentifierObject = entitlements[@"application-identifier"];
+    if (applicationIdentifierObject) {
+        if (!PXKeychainExactStringIsValid(applicationIdentifierObject)) {
+            return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                                enabled:YES
+                                                      systemApplication:systemApplication
+                                                    systemPolicyAllowed:systemPolicyAllowed
+                                                         selectedGroups:@[]
+                                                       authorizedGroups:@[]
+                                                  applicationIdentifier:nil
+                                                       plannedPassCount:0
+                                                             skipDetail:nil
+                                                    planningFailureCode:PXKeychainClearFailureCodeAuthorizationFailed
+                                                 planningFailureMessage:@"Signed Keychain authorization is malformed"];
+        }
+        applicationIdentifier = (NSString *)applicationIdentifierObject;
+        [authorizedSet addObject:applicationIdentifier];
+    }
+
+    NSArray<NSString *> *authorizedGroups =
+        [[authorizedSet allObjects] sortedArrayUsingSelector:@selector(compare:)];
+
+    NSArray<NSString *> *selectedGroups = nil;
+    BOOL selectedObjectWasExplicit = selectedObject != nil;
+    if (!selectedObjectWasExplicit) {
+        selectedGroups = authorizedGroups;
+    } else if (![selectedObject isKindOfClass:[NSArray class]]) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:systemPolicyAllowed
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:authorizedGroups
+                                              applicationIdentifier:applicationIdentifier
+                                                   plannedPassCount:0
+                                                         skipDetail:nil
+                                                planningFailureCode:PXKeychainClearFailureCodeConfigurationFailed
+                                             planningFailureMessage:@"Saved Keychain selection is malformed"];
+    } else {
+        NSMutableSet<NSString *> *selectedSet = [NSMutableSet set];
+        for (id selectedObjectValue in (NSArray *)selectedObject) {
+            if (!PXKeychainExactStringIsValid(selectedObjectValue)) {
+                return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                                    enabled:YES
+                                                          systemApplication:systemApplication
+                                                        systemPolicyAllowed:systemPolicyAllowed
+                                                             selectedGroups:@[]
+                                                           authorizedGroups:authorizedGroups
+                                                      applicationIdentifier:applicationIdentifier
+                                                           plannedPassCount:0
+                                                                 skipDetail:nil
+                                                        planningFailureCode:PXKeychainClearFailureCodeConfigurationFailed
+                                                     planningFailureMessage:@"Saved Keychain selection is malformed"];
+            }
+            [selectedSet addObject:(NSString *)selectedObjectValue];
+        }
+        selectedGroups = [[selectedSet allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    }
+
+    if (systemApplication && !systemPolicyAllowed) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:YES
+                                                systemPolicyAllowed:NO
+                                                     selectedGroups:selectedGroups ?: @[]
+                                                   authorizedGroups:authorizedGroups
+                                              applicationIdentifier:applicationIdentifier
+                                                   plannedPassCount:0
+                                                         skipDetail:nil
+                                                planningFailureCode:PXKeychainClearFailureCodeConfigurationFailed
+                                             planningFailureMessage:@"System Keychain wipe policy denied the request"];
+    }
+
+    if (authorizedGroups.count == 0) {
+        if (selectedObjectWasExplicit && selectedGroups.count > 0) {
+            return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                                enabled:YES
+                                                      systemApplication:systemApplication
+                                                    systemPolicyAllowed:systemPolicyAllowed
+                                                         selectedGroups:selectedGroups
+                                                       authorizedGroups:@[]
+                                                  applicationIdentifier:applicationIdentifier
+                                                       plannedPassCount:0
+                                                             skipDetail:nil
+                                                    planningFailureCode:PXKeychainClearFailureCodeAuthorizationFailed
+                                                 planningFailureMessage:@"Saved Keychain selection is not authorized"];
+        }
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:systemPolicyAllowed
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:@[]
+                                              applicationIdentifier:applicationIdentifier
+                                                   plannedPassCount:0
+                                                         skipDetail:PXKeychainNoAuthorizedGroupsDetail
+                                                planningFailureCode:0
+                                             planningFailureMessage:nil];
+    }
+
+    if (selectedObjectWasExplicit && selectedGroups.count == 0) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:systemApplication
+                                                systemPolicyAllowed:systemPolicyAllowed
+                                                     selectedGroups:@[]
+                                                   authorizedGroups:authorizedGroups
+                                              applicationIdentifier:applicationIdentifier
+                                                   plannedPassCount:0
+                                                         skipDetail:PXKeychainNoSelectionDetail
+                                                planningFailureCode:0
+                                             planningFailureMessage:nil];
+    }
+
+    NSSet<NSString *> *authorizedMembership = [NSSet setWithArray:authorizedGroups];
+    for (NSString *selectedGroup in selectedGroups) {
+        if (![authorizedMembership containsObject:selectedGroup]) {
+            return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                                enabled:YES
+                                                      systemApplication:systemApplication
+                                                    systemPolicyAllowed:systemPolicyAllowed
+                                                         selectedGroups:selectedGroups
+                                                       authorizedGroups:authorizedGroups
+                                                  applicationIdentifier:applicationIdentifier
+                                                       plannedPassCount:0
+                                                             skipDetail:nil
+                                                    planningFailureCode:PXKeychainClearFailureCodeAuthorizationFailed
+                                                 planningFailureMessage:@"Saved Keychain selection is not authorized"];
+        }
+    }
+
+    if (!systemApplication && !PXKeychainExactStringIsValid(applicationIdentifier)) {
+        return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                            enabled:YES
+                                                  systemApplication:NO
+                                                systemPolicyAllowed:YES
+                                                     selectedGroups:selectedGroups
+                                                   authorizedGroups:authorizedGroups
+                                              applicationIdentifier:nil
+                                                   plannedPassCount:0
+                                                         skipDetail:nil
+                                                planningFailureCode:PXKeychainClearFailureCodeAuthorizationFailed
+                                             planningFailureMessage:@"Signed application identifier is required"];
+    }
+
+    return [[PXKeychainClearPlan alloc] initWithBundleIdentifier:bundleIdentifier
+                                                        enabled:YES
+                                              systemApplication:systemApplication
+                                            systemPolicyAllowed:systemPolicyAllowed
+                                                 selectedGroups:selectedGroups
+                                               authorizedGroups:authorizedGroups
+                                          applicationIdentifier:applicationIdentifier
+                                               plannedPassCount:(systemApplication ? 1u : 2u)
+                                                     skipDetail:nil
+                                            planningFailureCode:0
+                                         planningFailureMessage:nil];
+}
+
+- (BOOL)_executeKeychainWipeForBundleIdentifier:(NSString *)bundleIdentifier
+                                  selectedGroups:(NSArray<NSString *> *)selectedGroups
+                           applicationIdentifier:(NSString *)applicationIdentifier
+                              systemApplication:(BOOL)systemApplication
+                                          error:(NSError **)error {
+    if (error) *error = nil;
+    if (!PXStrictBundleIdentifierIsValid(bundleIdentifier) ||
+        ![selectedGroups isKindOfClass:[NSArray class]] ||
+        selectedGroups.count == 0) {
+        PXAssignKeychainNSError(error,
+                                PXKeychainClearFailureCodeInvalidRequest,
+                                @"Invalid Keychain execution request");
         return NO;
     }
-    return [defaults boolForKey:key];
-}
-
-- (NSArray<NSString *> *)_selectedKeychainGroupsForBundleID:(NSString *)bundleID
-                                                     error:(NSError **)error {
-    if (!bundleID.length) return @[];
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    id saved = [defaults objectForKey:PXKeychainWipeGroupsKey(bundleID)];
-    if ([saved isKindOfClass:[NSArray class]] && [(NSArray *)saved count] > 0) {
-        NSMutableArray<NSString *> *out = [NSMutableArray array];
-        for (id v in (NSArray *)saved) {
-            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
-                [out addObject:(NSString *)v];
-            }
-        }
-        return out;
-    }
-
-    // Default selection: ALL groups from entitlements.
-    AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
-    NSError *entErr = nil;
-    NSArray<NSString *> *groups = [reader keychainAccessGroupsForBundleID:bundleID error:&entErr];
-    if (groups.count > 0) {
-        [defaults setObject:groups forKey:PXKeychainWipeGroupsKey(bundleID)];
-        // Keep wipe disabled by default; user can enable explicitly in UI.
-        [defaults setBool:NO forKey:PXKeychainWipeEnabledKey(bundleID)];
-        [defaults synchronize];
-        return groups;
-    }
-
-    if (error) {
-        *error = entErr ?: [NSError errorWithDomain:@"AppDataCleaner"
-                                               code:100
-                                           userInfo:@{NSLocalizedDescriptionKey: @"Failed to read keychain-access-groups for this app"}];
-    }
-    return @[];
-}
-
-- (BOOL)_wipeSelectedKeychainForBundleID:(NSString *)bundleID
-                                   error:(NSError **)error {
-    if (!bundleID.length) return YES;
-    if (![self _isKeychainWipeEnabledForBundleID:bundleID]) {
-        [self logMessage:@"[AppDataCleaner] Keychain wipe disabled for %@", bundleID];
-        return YES;
-    }
-
-    NSError *groupsErr = nil;
-    NSArray<NSString *> *groups = [self _selectedKeychainGroupsForBundleID:bundleID error:&groupsErr];
-    if (groups.count == 0) {
-        // User may have selected none, or we couldn't resolve entitlements.
-        if (groupsErr) {
-            if (error) *error = groupsErr;
+    for (id group in selectedGroups) {
+        if (!PXKeychainExactStringIsValid(group)) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeInvalidRequest,
+                                    @"Invalid Keychain execution request");
             return NO;
         }
-        [self logMessage:@"[AppDataCleaner] Keychain wipe enabled but 0 groups selected for %@ (skipping)", bundleID];
-        return YES;
+    }
+    if (!systemApplication && !PXKeychainExactStringIsValid(applicationIdentifier)) {
+        PXAssignKeychainNSError(error,
+                                PXKeychainClearFailureCodeAuthorizationFailed,
+                                @"Signed application identifier is required");
+        return NO;
     }
 
-    BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
-    if (isSystemApp) {
-        NSUserDefaults *sec = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        BOOL allow = [sec boolForKey:@"allowSystemKeychainWipeEnabled"];
-        if (!allow) {
-            if (error) {
-                *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                             code:101
-                                         userInfo:@{NSLocalizedDescriptionKey: @"System keychain wipe is disabled (enable in Security tab)"}];
-            }
-            return NO;
-        }
-        [self logMessage:@"[AppDataCleaner] System keychain wipe enabled for %@", bundleID];
-
-        // Use in-app bridge to wipe keychain groups (helper resign is unreliable for system apps).
-        NSString *safeBundle = [[bundleID componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"_"];
-        NSString *reqPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_request_%@.plist", safeBundle];
-        NSString *respPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_response_%@.plist", safeBundle];
-        NSString *logPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_bridge_%@.log", safeBundle];
+    if (systemApplication) {
+        NSString *safeBundle = [[bundleIdentifier componentsSeparatedByCharactersInSet:
+            [[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"_"];
         NSString *nonce = [[NSUUID UUID] UUIDString];
-
-        [[NSFileManager defaultManager] removeItemAtPath:reqPath error:nil];
-        [[NSFileManager defaultManager] removeItemAtPath:respPath error:nil];
-
-        NSDictionary *req = @{
-            @"action": @"wipe",
-            @"bundleID": bundleID,
-            @"groups": groups,
-            @"nonce": nonce,
-            @"respPath": respPath,
-            @"logPath": logPath,
-            @"bridgeOnly": @YES,
-        };
-
-        [self logMessage:@"[AppDataCleaner] System keychain wipe via bridge: nonce=%@", nonce];
-        [self logMessage:@"[AppDataCleaner] System keychain wipe via bridge: request=%@", reqPath];
-        [self logMessage:@"[AppDataCleaner] System keychain wipe via bridge: response=%@", respPath];
-        [self logMessage:@"[AppDataCleaner] System keychain wipe via bridge: log=%@", logPath];
-        if (![req writeToFile:reqPath atomically:YES]) {
-            if (error) {
-                *error = [NSError errorWithDomain:@"AppDataCleaner" code:105 userInfo:@{NSLocalizedDescriptionKey: @"Failed to write keychain bridge request"}];
+        NSString *requestPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_request_%@.plist", safeBundle];
+        NSString *responsePath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_response_%@_%@.plist", safeBundle, nonce];
+        NSString *logPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_bridge_%@_%@.log", safeBundle, nonce];
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        BOOL success = NO;
+        @try {
+            [fileManager removeItemAtPath:requestPath error:nil];
+            [fileManager removeItemAtPath:responsePath error:nil];
+            NSDictionary *request = @{
+                @"action": @"wipe",
+                @"bundleID": bundleIdentifier,
+                @"groups": selectedGroups,
+                @"nonce": nonce,
+                @"respPath": responsePath,
+                @"logPath": logPath,
+                @"bridgeOnly": @YES,
+            };
+            if (![request writeToFile:requestPath atomically:YES]) {
+                PXAssignKeychainNSError(error,
+                                        PXKeychainClearFailureCodeConfigurationFailed,
+                                        @"Keychain bridge request could not be created");
+                return NO;
             }
-            return NO;
-        }
 
-        // Notify bridge and launch app
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                            (__bridge CFStringRef)[NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safeBundle],
-                                            NULL, NULL, true);
-        Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
-        BOOL opened = NO;
-        if (wsCls) {
-            id ws = [wsCls performSelector:@selector(defaultWorkspace)];
-            if (ws && [ws respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, @selector(openApplicationWithBundleID:), bundleID);
-
-                // Immediately bring ProjectX back to foreground (best-effort).
-                NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
-                if (selfBundle.length) {
-                    ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, @selector(openApplicationWithBundleID:), selfBundle);
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                (__bridge CFStringRef)[NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safeBundle],
+                NULL, NULL, true);
+            Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+            BOOL opened = NO;
+            if (workspaceClass) {
+                id workspace = [workspaceClass performSelector:@selector(defaultWorkspace)];
+                if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                    opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
+                                                                  @selector(openApplicationWithBundleID:),
+                                                                  bundleIdentifier);
+                    NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+                    if (selfBundle.length) {
+                        ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
+                                                             @selector(openApplicationWithBundleID:),
+                                                             selfBundle);
+                    }
                 }
             }
-        }
-
-        NSTimeInterval waitSec = opened ? 30.0 : 6.0;
-        NSDictionary *resp = PXWaitForKeychainBridgeResponse(safeBundle, respPath, nonce, waitSec);
-
-        // Kill app after bridge (may be SIGSTOP'd)
-        PXKillAppProcessBestEffort(self, bundleID);
-
-        // If it failed, include bridge log snippet for debugging.
-        if (![resp isKindOfClass:[NSDictionary class]] || ![resp[@"ok"] respondsToSelector:@selector(boolValue)] || ![resp[@"ok"] boolValue]) {
-            NSString *bridgeLog = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
-            if (bridgeLog.length) {
-                NSString *snippet = bridgeLog;
-                if (snippet.length > 600) {
-                    snippet = [snippet substringFromIndex:(snippet.length - 600)];
-                }
-                [self logMessage:@"[AppDataCleaner] System keychain bridge log (tail): %@", snippet];
+            NSDictionary *response = PXWaitForKeychainBridgeResponse(safeBundle,
+                                                                      responsePath,
+                                                                      nonce,
+                                                                      opened ? 30.0 : 6.0);
+            PXKillAppProcessBestEffort(self, bundleIdentifier);
+            success = PXKeychainBridgeResponseIsValid(response, bundleIdentifier, nonce);
+            if (!success) {
+                PXAssignKeychainNSError(error,
+                                        PXKeychainClearFailureCodeInternalResultFailure,
+                                        @"Keychain bridge returned incomplete execution evidence");
             }
-        }
-
-        if (![resp isKindOfClass:[NSDictionary class]] || ![resp[@"ok"] respondsToSelector:@selector(boolValue)] || ![resp[@"ok"] boolValue]) {
-            NSString *msg = [resp[@"error"] isKindOfClass:[NSString class]] ? resp[@"error"] : @"System keychain wipe timed out";
-            if (error) {
-                *error = [NSError errorWithDomain:@"AppDataCleaner" code:106 userInfo:@{NSLocalizedDescriptionKey: msg}];
-            }
+            return success;
+        } @catch (__unused NSException *exception) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeInternalResultFailure,
+                                    @"Keychain bridge execution failed");
             return NO;
+        } @finally {
+            PXKillAppProcessBestEffort(self, bundleIdentifier);
+            [fileManager removeItemAtPath:requestPath error:nil];
+            [fileManager removeItemAtPath:responsePath error:nil];
+            [fileManager removeItemAtPath:[responsePath stringByAppendingString:@".tmp"] error:nil];
+            [fileManager removeItemAtPath:logPath error:nil];
         }
-
-        [self logMessage:@"[AppDataCleaner] System keychain wipe succeeded for %@", bundleID];
-
-        [[NSFileManager defaultManager] removeItemAtPath:reqPath error:nil];
-        [[NSFileManager defaultManager] removeItemAtPath:respPath error:nil];
-        return YES;
-    }
-
-    AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
-    NSError *entErr = nil;
-    NSDictionary *fullEnt = [reader fullEntitlementsForBundleID:bundleID error:&entErr];
-    NSString *appIdentifier = nil;
-    if ([fullEnt isKindOfClass:[NSDictionary class]]) {
-        id v = fullEnt[@"application-identifier"];
-        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) {
-            appIdentifier = (NSString *)v;
-        }
-    }
-    if (!appIdentifier.length) {
-        appIdentifier = bundleID;
     }
 
     CommandRunner *runner = [CommandRunner shared];
@@ -1343,125 +1780,239 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         @"/private/preboot/jb/usr/bin/ldid",
         @"/bin/ldid"
     ]];
-    if (!ldidPath.length) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                         code:102
-                                     userInfo:@{NSLocalizedDescriptionKey: @"ldid not found (required for keychain wipe)"}];
-        }
+    if (!ldidPath.length || ![ldidPath hasPrefix:@"/"]) {
+        PXAssignKeychainNSError(error,
+                                PXKeychainClearFailureCodeConfigurationFailed,
+                                @"Keychain signing tool is unavailable");
         return NO;
     }
-
     NSString *helperPath = [runner firstExistingPath:@[
         @"/Library/WeaponX/backup_helper",
         @"/var/jb/Library/WeaponX/backup_helper",
         @"/private/var/jb/Library/WeaponX/backup_helper"
     ]];
-    if (!helperPath.length) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                         code:103
-                                     userInfo:@{NSLocalizedDescriptionKey: @"backup_helper not found (WeaponX not installed?)"}];
-        }
+    if (!helperPath.length || ![helperPath hasPrefix:@"/"]) {
+        PXAssignKeychainNSError(error,
+                                PXKeychainClearFailureCodeConfigurationFailed,
+                                @"Keychain helper is unavailable");
         return NO;
     }
 
-    // Create temp dir
-    NSString *tmpDir = [NSString stringWithFormat:@"/tmp/keychain_wipe_%d", getpid()];
-    [_fileManager createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *workingHelper = [tmpDir stringByAppendingPathComponent:@"backup_helper"];
-    NSString *entPath = [tmpDir stringByAppendingPathComponent:@"helper_ent.plist"];
-
-    // Copy helper
-    [_fileManager removeItemAtPath:workingHelper error:nil];
-    NSError *copyErr = nil;
-    if (![_fileManager copyItemAtPath:helperPath toPath:workingHelper error:&copyErr]) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                         code:104
-                                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to copy backup_helper: %@", copyErr.localizedDescription ?: @"unknown"]}];
+    NSString *temporaryDirectory = [NSString stringWithFormat:@"/tmp/keychain_wipe_%d_%@",
+                                    getpid(), [[NSUUID UUID] UUIDString]];
+    NSString *workingHelper = [temporaryDirectory stringByAppendingPathComponent:@"backup_helper"];
+    NSString *entitlementsPath = [temporaryDirectory stringByAppendingPathComponent:@"helper_ent.plist"];
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    BOOL success = NO;
+    @try {
+        NSError *directoryError = nil;
+        if (![fileManager createDirectoryAtPath:temporaryDirectory
+                    withIntermediateDirectories:NO
+                                     attributes:@{NSFilePosixPermissions: @0700}
+                                          error:&directoryError]) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeConfigurationFailed,
+                                    @"Temporary Keychain workspace could not be created");
+            return NO;
         }
+        NSError *copyError = nil;
+        if (![fileManager copyItemAtPath:helperPath toPath:workingHelper error:&copyError]) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeConfigurationFailed,
+                                    @"Keychain helper could not be prepared");
+            return NO;
+        }
+        chmod(workingHelper.fileSystemRepresentation, 0755);
+
+        NSDictionary *helperEntitlements = @{
+            @"platform-application": @YES,
+            @"application-identifier": applicationIdentifier,
+            @"com.apple.private.security.no-sandbox": @YES,
+            @"com.apple.private.security.no-container": @YES,
+            @"com.apple.private.security.container-required": @NO,
+            @"com.apple.keystore.access-keychain-keys": @YES,
+            @"com.apple.keystore.device": @YES,
+            @"keychain-access-groups": selectedGroups,
+        };
+        NSError *serializationError = nil;
+        NSData *entitlementsData = [NSPropertyListSerialization dataWithPropertyList:helperEntitlements
+                                                                               format:NSPropertyListXMLFormat_v1_0
+                                                                              options:0
+                                                                                error:&serializationError];
+        NSError *writeError = nil;
+        if (!entitlementsData.length || serializationError ||
+            ![entitlementsData writeToFile:entitlementsPath
+                                   options:NSDataWritingAtomic
+                                     error:&writeError]) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeConfigurationFailed,
+                                    @"Keychain helper authorization could not be prepared");
+            return NO;
+        }
+
+        CommandResult *signResult = [runner runExecutableAndCapture:ldidPath
+                                                           arguments:@[
+                                                               [@"-S" stringByAppendingString:entitlementsPath],
+                                                               workingHelper
+                                                           ]
+                                                          timeoutSec:60.0
+                                                      maxOutputBytes:1024 * 1024];
+        if (!PXBoundedCommandSucceeded(signResult)) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeInitialPassFailed,
+                                    @"Keychain helper signing failed");
+            return NO;
+        }
+
+        NSString *groupsCSV = [selectedGroups componentsJoinedByString:@","];
+        CommandResult *wipeResult = [runner runExecutableAndCapture:workingHelper
+                                                           arguments:@[
+                                                               @"--action", @"wipe",
+                                                               @"--groups", groupsCSV
+                                                           ]
+                                                          timeoutSec:120.0
+                                                      maxOutputBytes:1024 * 1024];
+        success = PXBoundedCommandSucceeded(wipeResult);
+        NSDictionary *diagnostic = @{
+            @"success": @(success),
+            @"exitCode": @(wipeResult ? wipeResult.exitCode : -1),
+            @"timedOut": @(wipeResult ? wipeResult.timedOut : NO),
+            @"stdoutTruncated": @(wipeResult ? wipeResult.stdoutTruncated : NO),
+            @"stderrTruncated": @(wipeResult ? wipeResult.stderrTruncated : NO),
+            @"groupCount": @(selectedGroups.count),
+        };
+        [[NSUserDefaults standardUserDefaults] setObject:diagnostic
+                                                  forKey:[NSString stringWithFormat:@"DataCleaningKeychainResult_%@",
+                                                                                     bundleIdentifier]];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        if (!success) {
+            PXAssignKeychainNSError(error,
+                                    PXKeychainClearFailureCodeInitialPassFailed,
+                                    @"Keychain helper execution failed");
+        }
+        return success;
+    } @catch (__unused NSException *exception) {
+        PXAssignKeychainNSError(error,
+                                PXKeychainClearFailureCodeInternalResultFailure,
+                                @"Keychain helper execution failed");
+        return NO;
+    } @finally {
+        [fileManager removeItemAtPath:workingHelper error:nil];
+        [fileManager removeItemAtPath:entitlementsPath error:nil];
+        [fileManager removeItemAtPath:temporaryDirectory error:nil];
+    }
+}
+
+- (PXClearComponentResult *)_keychainComponentForPlan:(PXKeychainClearPlan *)plan
+                                          passResults:(NSArray<NSNumber *> *)passResults {
+    if (![plan isKindOfClass:[PXKeychainClearPlan class]] ||
+        ![passResults isKindOfClass:[NSArray class]]) {
+        PXClearFailure *failure = PXKeychainFailure(PXKeychainClearFailureCodeInternalResultFailure,
+                                                    @"Keychain result construction failed");
+        return [[PXClearComponentResult alloc] initWithScope:PXClearScopeKeychain
+                                                     status:PXClearComponentStatusFailed
+                                         attemptedUnitCount:1
+                                         succeededUnitCount:0
+                                            failedUnitCount:1
+                                                     detail:PXKeychainFailureDetail
+                                                    failure:failure];
+    }
+    if (plan.planningFailureCode != 0) {
+        PXClearFailure *failure = PXKeychainFailure((PXKeychainClearFailureCode)plan.planningFailureCode,
+                                                    plan.planningFailureMessage ?: @"Keychain planning failed");
+        PXClearComponentResult *result = [[PXClearComponentResult alloc] initWithScope:PXClearScopeKeychain
+                                                                                status:PXClearComponentStatusFailed
+                                                                    attemptedUnitCount:1
+                                                                    succeededUnitCount:0
+                                                                       failedUnitCount:1
+                                                                                detail:PXKeychainFailureDetail
+                                                                               failure:failure];
+        return PXKeychainComponentResultIsStructurallyValid(result) ? result : nil;
+    }
+    if (plan.skipDetail.length) {
+        PXClearComponentResult *result = [[PXClearComponentResult alloc] initWithScope:PXClearScopeKeychain
+                                                                                status:PXClearComponentStatusSkipped
+                                                                    attemptedUnitCount:0
+                                                                    succeededUnitCount:0
+                                                                       failedUnitCount:0
+                                                                                detail:plan.skipDetail
+                                                                               failure:nil];
+        return PXKeychainComponentResultIsStructurallyValid(result) ? result : nil;
+    }
+    if ((plan.plannedPassCount != 1 && plan.plannedPassCount != 2) ||
+        passResults.count != plan.plannedPassCount) {
+        PXClearFailure *failure = PXKeychainFailure(PXKeychainClearFailureCodeInternalResultFailure,
+                                                    @"Keychain execution accounting is incomplete");
+        PXClearComponentResult *result = [[PXClearComponentResult alloc] initWithScope:PXClearScopeKeychain
+                                                                                status:PXClearComponentStatusFailed
+                                                                    attemptedUnitCount:1
+                                                                    succeededUnitCount:0
+                                                                       failedUnitCount:1
+                                                                                detail:PXKeychainFailureDetail
+                                                                               failure:failure];
+        return PXKeychainComponentResultIsStructurallyValid(result) ? result : nil;
+    }
+
+    NSUInteger succeeded = 0;
+    PXClearFailure *firstFailure = nil;
+    for (NSUInteger index = 0; index < passResults.count; index++) {
+        BOOL passSucceeded = [passResults[index] respondsToSelector:@selector(boolValue)] &&
+                             [passResults[index] boolValue];
+        if (passSucceeded) {
+            succeeded++;
+        } else if (!firstFailure) {
+            PXKeychainClearFailureCode code = index == 0
+                ? PXKeychainClearFailureCodeInitialPassFailed
+                : PXKeychainClearFailureCodeFinalPassFailed;
+            firstFailure = PXKeychainFailure(code,
+                index == 0 ? @"Initial keychain wipe pass failed" : @"Final keychain wipe pass failed");
+        }
+    }
+    NSUInteger failed = plan.plannedPassCount - succeeded;
+    PXClearComponentResult *result = [[PXClearComponentResult alloc]
+        initWithScope:PXClearScopeKeychain
+               status:(failed == 0 ? PXClearComponentStatusSucceeded : PXClearComponentStatusFailed)
+   attemptedUnitCount:plan.plannedPassCount
+   succeededUnitCount:succeeded
+      failedUnitCount:failed
+               detail:(failed == 0 ? PXKeychainSuccessDetail : PXKeychainFailureDetail)
+              failure:firstFailure];
+    if (!PXKeychainComponentResultIsStructurallyValid(result)) {
+        PXClearFailure *failure = PXKeychainFailure(PXKeychainClearFailureCodeInternalResultFailure,
+                                                    @"Keychain result construction failed");
+        return [[PXClearComponentResult alloc] initWithScope:PXClearScopeKeychain
+                                                     status:PXClearComponentStatusFailed
+                                         attemptedUnitCount:1
+                                         succeededUnitCount:0
+                                            failedUnitCount:1
+                                                     detail:PXKeychainFailureDetail
+                                                    failure:failure];
+    }
+    return result;
+}
+
+- (BOOL)_wipeSelectedKeychainForBundleID:(NSString *)bundleID
+                                   error:(NSError **)error {
+    if (error) *error = nil;
+    PXKeychainClearPlan *plan = [self _keychainClearPlanForBundleIdentifier:bundleID];
+    if (![plan isKindOfClass:[PXKeychainClearPlan class]]) {
+        PXAssignKeychainNSError(error,
+                                PXKeychainClearFailureCodeInternalResultFailure,
+                                @"Keychain plan construction failed");
         return NO;
     }
-    chmod([workingHelper fileSystemRepresentation], 0755);
-
-    // Write entitlements for the helper (scoped to selected groups)
-    NSDictionary *helperEnt = @{
-        @"platform-application": @YES,
-        @"application-identifier": appIdentifier,
-        @"com.apple.private.security.no-sandbox": @YES,
-        @"com.apple.private.security.no-container": @YES,
-        @"com.apple.private.security.container-required": @NO,
-        @"com.apple.keystore.access-keychain-keys": @YES,
-        @"com.apple.keystore.device": @YES,
-        @"keychain-access-groups": groups,
-    };
-    NSError *plistErr = nil;
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:helperEnt
-                                                                   format:NSPropertyListXMLFormat_v1_0
-                                                                  options:0
-                                                                    error:&plistErr];
-    if (!plistData.length || plistErr) {
-        if (error) {
-            *error = plistErr ?: [NSError errorWithDomain:@"AppDataCleaner"
-                                                    code:105
-                                                userInfo:@{NSLocalizedDescriptionKey: @"Failed to build helper entitlements"}];
-        }
+    if (plan.skipDetail.length) return YES;
+    if (plan.planningFailureCode != 0) {
+        PXAssignKeychainNSError(error,
+                                (PXKeychainClearFailureCode)plan.planningFailureCode,
+                                plan.planningFailureMessage ?: @"Keychain planning failed");
         return NO;
     }
-    if (![plistData writeToFile:entPath atomically:YES]) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                         code:106
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to write helper entitlements file"}];
-        }
-        return NO;
-    }
-
-    // Resign
-    NSString *signCmd = [NSString stringWithFormat:@"%@ -S%@ %@",
-                         PXShellQuote(ldidPath),
-                         PXShellQuote(entPath),
-                         PXShellQuote(workingHelper)];
-    CommandResult *signRes = [runner runAndCapture:signCmd];
-    if (signRes.exitCode != 0) {
-        if (error) {
-            NSString *msg = signRes.stderrString.length ? signRes.stderrString : @"ldid failed";
-            *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                         code:107
-                                     userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to resign helper: %@", msg]}];
-        }
-        return NO;
-    }
-
-    NSString *groupsCSV = [groups componentsJoinedByString:@","];
-    NSString *wipeCmd = [NSString stringWithFormat:@"%@ --action wipe --groups %@",
-                         PXShellQuote(workingHelper),
-                         PXShellQuote(groupsCSV)];
-    [self logMessage:@"[AppDataCleaner] Keychain wipe via helper for %@ (groups=%lu)", bundleID, (unsigned long)groups.count];
-    CommandResult *wipeRes = [runner runAndCapture:wipeCmd];
-
-    NSDictionary *report = @{
-        @"bundleID": bundleID,
-        @"groups": groups,
-        @"exitCode": @(wipeRes.exitCode),
-        @"stdout": wipeRes.stdoutString ?: @"",
-        @"stderr": wipeRes.stderrString ?: @"",
-    };
-    [[NSUserDefaults standardUserDefaults] setObject:report forKey:[NSString stringWithFormat:@"DataCleaningKeychainResult_%@", bundleID]];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-
-    if (wipeRes.exitCode != 0) {
-        if (error) {
-            NSString *msg = wipeRes.stderrString.length ? wipeRes.stderrString : @"Keychain wipe failed";
-            *error = [NSError errorWithDomain:@"AppDataCleaner"
-                                         code:108
-                                     userInfo:@{NSLocalizedDescriptionKey: msg}];
-        }
-        return NO;
-    }
-
-    return YES;
+    return [self _executeKeychainWipeForBundleIdentifier:plan.bundleIdentifier
+                                          selectedGroups:plan.selectedGroups
+                                   applicationIdentifier:plan.applicationIdentifier
+                                      systemApplication:plan.systemApplication
+                                                  error:error];
 }
 
 #pragma mark - Exact Installed Extension Discovery
@@ -2326,7 +2877,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                  appGroupsResult,
                                  pluginKitResult
                              ]];
-    return PXMigratedClearResultIsStructurallyValid(aggregate) ? aggregate : nil;
+    return PXMigratedDataClearResultIsStructurallyValid(aggregate) ? aggregate : nil;
 }
 
 #pragma mark - Main Public Methods
@@ -2335,60 +2886,46 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self logMessage:@"[AppDataCleaner] === STARTING data clearing for %@ ===", bundleID];
 
     BOOL deepClean = [self _deepCleanEnabled];
-    PXClearRequest *migratedRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
-                                                                                scopes:PXMigratedDataClearScopes
-                                                                             deepClean:deepClean];
-    if (!migratedRequest) {
-        NSError *requestError = PXMigratedInternalError(@"Invalid migrated data-clear request");
+    PXClearRequest *fullRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                            scopes:PXMigratedFullClearScopes
+                                                                         deepClean:deepClean];
+    PXClearRequest *dataRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                            scopes:PXMigratedDataClearScopes
+                                                                         deepClean:deepClean];
+    if (!fullRequest || !dataRequest) {
+        NSError *requestError = PXMigratedInternalError(@"Invalid full Clear request");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(NO, requestError);
         });
         return;
     }
-    
-    // Use __block to track if completion was called
+
     __block BOOL completionCalled = NO;
     __block dispatch_semaphore_t completionLock = dispatch_semaphore_create(1);
-
-    // Freeze/unfreeze around destructive wipes to prevent relaunch mid-clean.
     FreezeManager *freezer = [FreezeManager sharedManager];
     __block BOOL wasFrozen = [freezer isApplicationFrozen:bundleID];
     __block BOOL frozeForThisClear = NO;
-    
-    // Capture self for logging in blocks
     __weak typeof(self) weakSelf = self;
-
-    // Keep ProjectX running even if another app is launched (e.g., system keychain wipe via bridge).
     __block UIBackgroundTaskIdentifier bgTask = UIBackgroundTaskInvalid;
     dispatch_async(dispatch_get_main_queue(), ^{
-        bgTask = [[UIApplication sharedApplication] beginBackgroundTaskWithName:@"AppDataCleaner" expirationHandler:^{
-            // Best-effort: allow watchdog to handle timeout.
-        }];
+        bgTask = [[UIApplication sharedApplication] beginBackgroundTaskWithName:@"AppDataCleaner"
+                                                              expirationHandler:^{}];
     });
-
-    // Cancelable watchdog (avoid false timeout after success)
     __block dispatch_source_t watchdogTimer = nil;
-    
-    // Helper block to safely call completion only once
+
     void (^safeCompletion)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
         dispatch_semaphore_wait(completionLock, DISPATCH_TIME_FOREVER);
         if (!completionCalled) {
             completionCalled = YES;
             dispatch_semaphore_signal(completionLock);
-
-            // Unfreeze only if we froze it in this operation.
             if (frozeForThisClear) {
-                @try {
-                    [freezer unfreezeApplication:bundleID];
-                } @catch (__unused NSException *e) {
-                }
+                @try { [freezer unfreezeApplication:bundleID]; }
+                @catch (__unused NSException *exception) {}
             }
-
             if (watchdogTimer) {
                 dispatch_source_cancel(watchdogTimer);
                 watchdogTimer = nil;
             }
-
             if (bgTask != UIBackgroundTaskInvalid) {
                 UIBackgroundTaskIdentifier taskToEnd = bgTask;
                 bgTask = UIBackgroundTaskInvalid;
@@ -2396,12 +2933,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     [[UIApplication sharedApplication] endBackgroundTask:taskToEnd];
                 });
             }
-
             [weakSelf logMessage:@"[AppDataCleaner] Calling completion handler (success=%d)", success];
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) {
-                    completion(success, error);
-                }
+                if (completion) completion(success, error);
             });
         } else {
             dispatch_semaphore_signal(completionLock);
@@ -2409,173 +2943,198 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     };
 
     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
-    // Deep Clean and system apps can legitimately take a long time.
-    // Avoid failing early while still making progress.
     int timeoutSec = (deepClean || isSystemApp) ? (30 * 60) : 120;
-
-    // Run watchdog on a global queue so it isn't delayed by UI activity.
-    watchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
-    dispatch_source_set_timer(watchdogTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeoutSec * NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 1 * NSEC_PER_SEC);
+    watchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+    dispatch_source_set_timer(watchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeoutSec * NSEC_PER_SEC),
+                              DISPATCH_TIME_FOREVER,
+                              1 * NSEC_PER_SEC);
     dispatch_source_set_event_handler(watchdogTimer, ^{
         dispatch_semaphore_wait(completionLock, DISPATCH_TIME_FOREVER);
         BOOL alreadyCompleted = completionCalled;
         dispatch_semaphore_signal(completionLock);
-        if (alreadyCompleted) {
-            return;
-        }
+        if (alreadyCompleted) return;
         [weakSelf logMessage:@"[AppDataCleaner] WATCHDOG: %d second timeout reached", timeoutSec];
-        NSError *timeoutError = [NSError errorWithDomain:@"AppDataCleaner"
-                                                   code:-100
-                                               userInfo:@{NSLocalizedDescriptionKey: @"Clear Data timed out"}];
-        safeCompletion(NO, timeoutError);
+        safeCompletion(NO, [NSError errorWithDomain:@"AppDataCleaner"
+                                               code:-100
+                                           userInfo:@{NSLocalizedDescriptionKey: @"Clear Data timed out"}]);
     });
     dispatch_resume(watchdogTimer);
-    
-    // Dispatch the cleaning process to background queue
+
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         @autoreleasepool {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             [strongSelf logMessage:@"[AppDataCleaner] Background cleaning started for %@", bundleID];
-            
             @try {
-                 // Step 0: Force Kill Application to release file locks
-                 [strongSelf logMessage:@"[AppDataCleaner] Step 0: Kill application..."];
-
+                [strongSelf logMessage:@"[AppDataCleaner] Step 0: Kill application..."];
                 [strongSelf logMessage:@"[AppDataCleaner] Deep Clean (verify scan) = %@", deepClean ? @"ON" : @"OFF"];
-                
-                // Kill by executable name (no shell) to release file locks.
                 PXKillAppProcessBestEffort(strongSelf, bundleID);
+                [NSThread sleepForTimeInterval:0.5];
+                if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) {
+                    [strongSelf logMessage:@"[AppDataCleaner] MobileSafari: stopping WebKit/Safari helper processes..."];
+                    PXStopSafariDaemonsBestEffort(strongSelf);
+                }
 
-                [NSThread sleepForTimeInterval:0.5]; // Wait for process to die
+                [strongSelf logMessage:@"[AppDataCleaner] Step 1: Planning and running initial Keychain pass..."];
+                PXKeychainClearPlan *keychainPlan =
+                    [strongSelf _keychainClearPlanForBundleIdentifier:fullRequest.bundleIdentifier];
+                NSMutableArray<NSNumber *> *keychainPassResults = [NSMutableArray array];
+                if (keychainPlan.planningFailureCode == 0 &&
+                    keychainPlan.skipDetail.length == 0 &&
+                    keychainPlan.plannedPassCount > 0) {
+                    NSError *initialPassError = nil;
+                    BOOL initialPassSucceeded = [strongSelf
+                        _executeKeychainWipeForBundleIdentifier:keychainPlan.bundleIdentifier
+                                                selectedGroups:keychainPlan.selectedGroups
+                                         applicationIdentifier:keychainPlan.applicationIdentifier
+                                            systemApplication:keychainPlan.systemApplication
+                                                        error:&initialPassError];
+                    [keychainPassResults addObject:@(initialPassSucceeded)];
+                    if (!initialPassSucceeded) {
+                        [strongSelf logMessage:@"[AppDataCleaner] Initial Keychain pass failed (%@:%ld)",
+                            initialPassError.domain ?: PXKeychainClearFailureDomain,
+                            (long)initialPassError.code];
+                    }
+                }
 
-                 // Safari: also stop WebKit helper processes to fully release cookie/session DBs.
-                 if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) {
-                     [strongSelf logMessage:@"[AppDataCleaner] MobileSafari: stopping WebKit/Safari helper processes..."];
-                     PXStopSafariDaemonsBestEffort(strongSelf);
-                 }
-                 
-                 // Step 1: Clear keychain FIRST (most important for login data)
-                 [strongSelf logMessage:@"[AppDataCleaner] Step 1: Clearing keychain (selected groups)..."];
-                NSError *keychainError1 = nil;
-                BOOL keychainOK1 = [strongSelf _wipeSelectedKeychainForBundleID:bundleID error:&keychainError1];
-                
-                // Step 2: Clear URL credentials (session tokens)
                 [strongSelf logMessage:@"[AppDataCleaner] Step 2: Clearing URL credentials..."];
                 [strongSelf clearURLCredentialsForBundleID:bundleID];
-                
-                // Step 3: Clear app state data (login sessions)
                 [strongSelf logMessage:@"[AppDataCleaner] Step 3: Clearing app state data..."];
                 [strongSelf _internalClearAppStateData:bundleID];
 
-                 // Freeze now (after any in-app keychain bridge launch) to prevent relaunch mid-wipe.
-                 if (!wasFrozen) {
-                     [strongSelf logMessage:@"[AppDataCleaner] Freezing app launch to prevent relaunch during wipe..."];
-                     @try {
-                         [freezer freezeApplication:bundleID];
-                     } @catch (__unused NSException *e) {
-                     }
-                     frozeForThisClear = [freezer isApplicationFrozen:bundleID];
-                 }
-                 
-                 // Step 4: Run and consume the exact four-scope migrated aggregate.
-                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running migrated ApplicationData/ExtensionData/AppGroups/PluginKitData clear..."];
-                 PXClearResult *migratedResult =
-                     [strongSelf _completeDataWipeForMigratedRequest:migratedRequest];
-                 NSError *migratedClearError = nil;
-                 if (!PXMigratedClearResultIsStructurallyValid(migratedResult)) {
-                     migratedClearError = PXMigratedInternalError(@"Migrated data clear returned an invalid aggregate result");
-                     [strongSelf logMessage:@"[AppDataCleaner] Migrated aggregate is nil, incomplete, or structurally invalid"];
-                 } else {
-                     NSArray<NSNumber *> *failurePrecedence = @[
-                         @(PXClearScopeApplicationData),
-                         @(PXClearScopeExtensionData),
-                         @(PXClearScopeAppGroups),
-                         @(PXClearScopePluginKitData)
-                     ];
-                     for (NSNumber *scopeNumber in failurePrecedence) {
-                         PXClearScope scope = (PXClearScope)scopeNumber.unsignedIntegerValue;
-                         PXClearComponentResult *component = [migratedResult componentResultForScope:scope];
-                         NSString *componentName = PXMigratedComponentName(scope);
-                         [strongSelf logMessage:@"[AppDataCleaner] %@ result %@ attempted=%lu succeeded=%lu failed=%lu",
-                               componentName,
-                               PXApplicationDataStatusName(component.status),
-                               (unsigned long)component.attemptedUnitCount,
-                               (unsigned long)component.succeededUnitCount,
-                               (unsigned long)component.failedUnitCount];
-                         if (component.status == PXClearComponentStatusFailed) {
-                             NSError *componentError = PXMigratedNSErrorForFailure(component.failure);
-                             [strongSelf logMessage:@"[AppDataCleaner] %@ failed (%@:%ld)",
-                                   componentName,
-                                   componentError.domain,
-                                   (long)componentError.code];
-                             if (!migratedClearError) {
-                                 migratedClearError = componentError;
-                             }
-                         }
-                     }
-                 }
-                
-                // Step 5: Clear HTTP cookie storage in memory  
+                if (!wasFrozen) {
+                    [strongSelf logMessage:@"[AppDataCleaner] Freezing app launch to prevent relaunch during wipe..."];
+                    @try { [freezer freezeApplication:bundleID]; }
+                    @catch (__unused NSException *exception) {}
+                    frozeForThisClear = [freezer isApplicationFrozen:bundleID];
+                }
+
+                [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running four-scope data aggregate..."];
+                PXClearResult *dataResult = [strongSelf _completeDataWipeForMigratedRequest:dataRequest];
+                NSArray<PXClearComponentResult *> *dataComponents = nil;
+                if (PXMigratedDataClearResultIsStructurallyValid(dataResult)) {
+                    dataComponents = dataResult.componentResults;
+                } else {
+                    [strongSelf logMessage:@"[AppDataCleaner] Four-scope data aggregate is structurally invalid"];
+                    dataComponents = @[
+                        PXApplicationDataFailedComponent(
+                            PXApplicationDataClearFailureCodeInternalResultFailure,
+                            @"ApplicationData aggregate result was invalid"),
+                        PXExactDataFailedComponent(
+                            PXClearScopeExtensionData,
+                            PXExactDataClearFailureCodeInternalResultFailure,
+                            @"ExtensionData aggregate result was invalid"),
+                        PXAppGroupsFailedComponent(
+                            PXAppGroupsClearFailureCodeInternalResultFailure,
+                            @"AppGroups aggregate result was invalid"),
+                        PXExactDataFailedComponent(
+                            PXClearScopePluginKitData,
+                            PXExactDataClearFailureCodeInternalResultFailure,
+                            @"PluginKitData aggregate result was invalid")
+                    ];
+                }
+
                 [strongSelf logMessage:@"[AppDataCleaner] Step 5: Clearing HTTP cookies from memory..."];
                 NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
                 NSArray *allCookies = [[cookieStorage cookies] copy];
-                for (NSHTTPCookie *cookie in allCookies) {
-                    [cookieStorage deleteCookie:cookie];
+                for (NSHTTPCookie *cookie in allCookies) [cookieStorage deleteCookie:cookie];
+                [strongSelf logMessage:@"[AppDataCleaner] Cleared %lu cookies from memory",
+                    (unsigned long)allCookies.count];
+
+                [strongSelf logMessage:@"[AppDataCleaner] Step 6: Running planned final Keychain pass..."];
+                if (keychainPlan.planningFailureCode == 0 &&
+                    keychainPlan.skipDetail.length == 0 &&
+                    keychainPlan.plannedPassCount == 2) {
+                    NSError *finalPassError = nil;
+                    BOOL finalPassSucceeded = [strongSelf
+                        _executeKeychainWipeForBundleIdentifier:keychainPlan.bundleIdentifier
+                                                selectedGroups:keychainPlan.selectedGroups
+                                         applicationIdentifier:keychainPlan.applicationIdentifier
+                                            systemApplication:keychainPlan.systemApplication
+                                                        error:&finalPassError];
+                    [keychainPassResults addObject:@(finalPassSucceeded)];
+                    if (!finalPassSucceeded) {
+                        [strongSelf logMessage:@"[AppDataCleaner] Final Keychain pass failed (%@:%ld)",
+                            finalPassError.domain ?: PXKeychainClearFailureDomain,
+                            (long)finalPassError.code];
+                    }
                 }
-                [strongSelf logMessage:@"[AppDataCleaner] Cleared %lu cookies from memory", (unsigned long)allCookies.count];
-                
-                // Step 6: Clear keychain AGAIN to catch any recreated items
-                [strongSelf logMessage:@"[AppDataCleaner] Step 6: Final keychain cleanup (selected groups)..."];
-                NSError *keychainError2 = nil;
-                BOOL keychainOK2 = YES;
-                // System keychain wipe requires launching the app; do it once per run to avoid long UX.
-                if ([bundleID hasPrefix:@"com.apple."]) {
-                    [strongSelf logMessage:@"[AppDataCleaner] Skipping second keychain wipe for system app %@", bundleID];
-                } else {
-                    keychainOK2 = [strongSelf _wipeSelectedKeychainForBundleID:bundleID error:&keychainError2];
+
+                PXClearComponentResult *keychainComponent =
+                    [strongSelf _keychainComponentForPlan:keychainPlan passResults:keychainPassResults];
+                if (!PXKeychainComponentResultIsStructurallyValid(keychainComponent)) {
+                    PXClearFailure *failure = PXKeychainFailure(
+                        PXKeychainClearFailureCodeInternalResultFailure,
+                        @"Keychain component result was invalid");
+                    keychainComponent = [[PXClearComponentResult alloc]
+                        initWithScope:PXClearScopeKeychain
+                               status:PXClearComponentStatusFailed
+                   attemptedUnitCount:1
+                   succeededUnitCount:0
+                      failedUnitCount:1
+                               detail:PXKeychainFailureDetail
+                              failure:failure];
                 }
-                
-                // Step 7: Sync filesystem
+
                 [strongSelf logMessage:@"[AppDataCleaner] Step 7: Syncing filesystem..."];
                 sync();
-
-                // Step 8: Verification is log-only for now; the existing verifier is intentionally broad
-                // and can report system-created directories that do not indicate account leakage.
                 [strongSelf logMessage:@"[AppDataCleaner] Step 8: Verifying clear result (log-only)..."];
                 BOOL clearVerified = [strongSelf verifyDataCleared:bundleID];
                 if (!clearVerified) {
-                    [strongSelf logMessage:@"[AppDataCleaner] WARNING: Clear verification found residual data; review log before switching accounts"];
+                    [strongSelf logMessage:@"[AppDataCleaner] WARNING: broad verification found residual data"];
                 }
-                
-                [strongSelf logMessage:@"[AppDataCleaner] === COMPLETED data clearing for %@ ===", bundleID];
-                BOOL keychainFailed = !keychainOK1 || !keychainOK2;
-                NSError *keychainError = keychainError2 ?: keychainError1;
-                if (keychainFailed) {
-                    [strongSelf logMessage:@"[AppDataCleaner] Keychain failed: %@",
-                          keychainError.localizedDescription ?: @"unknown keychain error"];
+
+                NSMutableArray<PXClearComponentResult *> *fullComponents =
+                    [NSMutableArray arrayWithArray:dataComponents ?: @[]];
+                [fullComponents addObject:keychainComponent];
+                PXClearResult *fullResult = [[PXClearResult alloc] initWithRequest:fullRequest
+                                                                  componentResults:fullComponents];
+                if (!PXMigratedFullClearResultIsStructurallyValid(fullResult)) {
+                    [strongSelf logMessage:@"[AppDataCleaner] Final five-scope aggregate is structurally invalid"];
+                    safeCompletion(NO, PXMigratedInternalError(@"Full Clear returned an invalid aggregate result"));
+                    return;
                 }
-                if (migratedClearError) {
-                    if (keychainFailed) {
-                        [strongSelf logMessage:@"[AppDataCleaner] Migrated component failure has callback precedence over Keychain"];
+
+                NSError *callbackError = nil;
+                NSArray<NSNumber *> *failurePrecedence = @[
+                    @(PXClearScopeApplicationData),
+                    @(PXClearScopeExtensionData),
+                    @(PXClearScopeAppGroups),
+                    @(PXClearScopePluginKitData),
+                    @(PXClearScopeKeychain)
+                ];
+                for (NSNumber *scopeNumber in failurePrecedence) {
+                    PXClearScope scope = (PXClearScope)scopeNumber.unsignedIntegerValue;
+                    PXClearComponentResult *component = [fullResult componentResultForScope:scope];
+                    [strongSelf logMessage:@"[AppDataCleaner] %@ result %@ attempted=%lu succeeded=%lu failed=%lu",
+                        PXMigratedComponentName(scope),
+                        PXApplicationDataStatusName(component.status),
+                        (unsigned long)component.attemptedUnitCount,
+                        (unsigned long)component.succeededUnitCount,
+                        (unsigned long)component.failedUnitCount];
+                    if (component.status == PXClearComponentStatusFailed) {
+                        NSError *componentError = PXMigratedNSErrorForFailure(component.failure);
+                        [strongSelf logMessage:@"[AppDataCleaner] %@ failed (%@:%ld)",
+                            PXMigratedComponentName(scope),
+                            componentError.domain,
+                            (long)componentError.code];
+                        if (!callbackError) callbackError = componentError;
                     }
-                    safeCompletion(NO, migratedClearError);
-                } else if (keychainFailed) {
-                    safeCompletion(NO, keychainError ?: [NSError errorWithDomain:@"AppDataCleaner"
-                                                                            code:-2
-                                                                        userInfo:@{NSLocalizedDescriptionKey: @"Keychain wipe failed"}]);
-                } else {
-                    safeCompletion(YES, nil);
                 }
-                
+
+                [strongSelf logMessage:@"[AppDataCleaner] === COMPLETED data clearing for %@ ===", bundleID];
+                safeCompletion(callbackError == nil, callbackError);
             } @catch (NSException *exception) {
                 [strongSelf logMessage:@"[AppDataCleaner] EXCEPTION: %@", exception];
-                safeCompletion(NO, [NSError errorWithDomain:@"AppDataCleaner" 
-                                                      code:-1 
-                                                  userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Unknown error"}]);
+                safeCompletion(NO, [NSError errorWithDomain:@"AppDataCleaner"
+                                                      code:-1
+                                                  userInfo:@{NSLocalizedDescriptionKey:
+                                                                 exception.reason ?: @"Unknown error"}]);
             }
         }
     });
-    
+
     [self logMessage:@"[AppDataCleaner] clearDataForBundleID returned immediately"];
 }
 
@@ -2587,7 +3146,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                         scopes:PXMigratedDataClearScopes
                                                                      deepClean:deepClean];
     PXClearResult *result = request ? [self _completeDataWipeForMigratedRequest:request] : nil;
-    if (!PXMigratedClearResultIsStructurallyValid(result)) {
+    if (!PXMigratedDataClearResultIsStructurallyValid(result)) {
         [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid migrated aggregate"];
         return;
     }
