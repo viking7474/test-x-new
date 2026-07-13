@@ -30,7 +30,8 @@ docs/backup-restore-hardening/
 │   ├── TASK-0.2-bounded-capture-deadline.md
 │   ├── TASK-0.3-spawn-process-group-termination.md
 │   ├── TASK-0.4-direct-executable-argv-api.md
-│   └── TASK-0.5-app-data-cleaner-command-result-wrapper.md
+│   ├── TASK-0.5-app-data-cleaner-command-result-wrapper.md
+│   └── TASK-0.6-bounded-output-query-helper.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo

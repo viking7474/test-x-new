@@ -20,18 +20,14 @@
 #import "common/PXProcessKiller.h"
 
 static const NSUInteger PXPrivilegedCommandMaxOutputBytes = 1024 * 1024;
+static const NSTimeInterval PXOutputQueryDefaultTimeoutSec = 60.0;
 
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
 
-// For NSTask compatibility on iOS
-@interface NSTask : NSObject
-- (void)setLaunchPath:(NSString *)path;
-- (void)setArguments:(NSArray *)arguments;
-- (void)setStandardOutput:(id)output;
-- (void)setStandardError:(id)error;
-- (void)launch;
-- (void)waitUntilExit;
+@interface AppDataCleaner ()
+- (NSString *)runCommandAndGetOutput:(NSString *)command
+                          timeoutSec:(NSTimeInterval)timeoutSec;
 @end
 
 @implementation AppDataCleaner {
@@ -402,10 +398,21 @@ static NSString *PXFirstExistingPath(NSFileManager *fm, NSArray<NSString *> *pat
 static BOOL PXWaitForProcessExit(AppDataCleaner *selfRef, NSString *procName, NSTimeInterval timeout) {
     if (!selfRef || !procName.length) return YES;
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
-    while ((CFAbsoluteTimeGetCurrent() - start) < timeout) {
+    while (YES) {
+        NSTimeInterval elapsed = CFAbsoluteTimeGetCurrent() - start;
+        NSTimeInterval remaining = timeout - elapsed;
+        if (remaining <= 0) {
+            break;
+        }
+
+        NSTimeInterval probeTimeout = MIN(1.0, remaining);
+        if (probeTimeout <= 0) {
+            break;
+        }
+
         NSString *cmd = [NSString stringWithFormat:@"pgrep -x '%@' 2>/dev/null | head -n 1", procName];
-        NSString *out = [selfRef runCommandAndGetOutput:cmd];
-        if (![out isKindOfClass:[NSString class]] || out.length == 0) {
+        NSString *out = [selfRef runCommandAndGetOutput:cmd timeoutSec:probeTimeout];
+        if ([out isKindOfClass:[NSString class]] && out.length == 0) {
             return YES;
         }
         [NSThread sleepForTimeInterval:0.1];
@@ -3408,37 +3415,58 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // Helper to run a command and get its output
 - (NSString *)runCommandAndGetOutput:(NSString *)command {
-    NSLog(@"[AppDataCleaner] Running command: %@", command);
-    
-    NSTask *task = [[NSTask alloc] init];
-    [task setLaunchPath:@"/bin/sh"];
-    [task setArguments:@[@"-c", command]];
-    
-    NSPipe *pipe = [NSPipe pipe];
-    [task setStandardOutput:pipe];
-    [task setStandardError:pipe];
-    
-    NSFileHandle *file = [pipe fileHandleForReading];
-    
-    @try {
-        [task launch];
-        [task waitUntilExit];
-        
-        NSData *data = [file readDataToEndOfFile];
-        NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        
-        // Trim whitespace from output
-        output = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        
-        return output;
-    } @catch (NSException *exception) {
-        NSLog(@"[AppDataCleaner] Error running command: %@", exception);
-        return @"error";
-    } @finally {
-        [file closeFile];
-    }
+    return [self runCommandAndGetOutput:command
+                                timeoutSec:PXOutputQueryDefaultTimeoutSec];
 }
 
+- (NSString *)runCommandAndGetOutput:(NSString *)command
+                          timeoutSec:(NSTimeInterval)timeoutSec {
+    NSLog(@"[AppDataCleaner] Running command: %@", command);
+
+    if (![command isKindOfClass:[NSString class]] ||
+        command.length == 0 ||
+        !isfinite(timeoutSec)) {
+        NSLog(@"[AppDataCleaner] Command query failed: invalid input");
+        return @"error";
+    }
+
+    NSTimeInterval effectiveTimeout = timeoutSec <= 0
+        ? PXOutputQueryDefaultTimeoutSec
+        : timeoutSec;
+    CommandResult *result = [self runCommandWithPrivilegesResult:command
+                                                       timeoutSec:effectiveTimeout];
+
+    BOOL failed = result.runnerError != 0 ||
+                  result.spawnError != 0 ||
+                  result.timedOut ||
+                  !result.exitedNormally ||
+                  result.stdoutTruncated ||
+                  result.stderrTruncated;
+    if (failed) {
+        NSLog(@"[AppDataCleaner] Command query failed: spawnError=%d runnerError=%d timedOut=%d exitedNormally=%d terminationSignal=%d stdoutTruncated=%d stderrTruncated=%d",
+              result.spawnError,
+              result.runnerError,
+              result.timedOut,
+              result.exitedNormally,
+              result.terminationSignal,
+              result.stdoutTruncated,
+              result.stderrTruncated);
+        return @"error";
+    }
+
+    NSString *stdoutString = result.stdoutString ?: @"";
+    NSString *stderrString = result.stderrString ?: @"";
+    NSMutableString *mergedOutput = [NSMutableString stringWithString:stdoutString];
+    if (stderrString.length > 0) {
+        if (mergedOutput.length > 0 && ![mergedOutput hasSuffix:@"\n"]) {
+            [mergedOutput appendString:@"\n"];
+        }
+        [mergedOutput appendString:stderrString];
+    }
+
+    return [mergedOutput stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
 #pragma mark - Public Header Methods
 
 - (BOOL)hasDataToClear:(NSString *)bundleID {

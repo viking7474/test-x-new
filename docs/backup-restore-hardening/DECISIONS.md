@@ -139,3 +139,33 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: TASK-0.5 phải liệt kê mọi `posix_spawn`, `NSTask`, wait và process-launch path còn lại trong `AppDataCleaner.m`; coordinator quyết định có cần thêm Phase 0 task hay không.
 - Reason: Hoàn thành một wrapper không đồng nghĩa toàn bộ file đã loại bỏ hang, unbounded output hoặc duplicate execution logic.
+
+## D-024 — Remaining AppDataCleaner launch hardening is split into two tasks
+
+- Status: Accepted
+- Decision: `runCommandAndGetOutput:` được xử lý riêng trong TASK-0.6; hai direct `find` helper được giữ cho TASK-0.7.
+- Reason: Tách deadlock `NSTask` khỏi direct-executable migration giúp diff nhỏ, build gate rõ và tránh thay nhiều output contract trong một commit.
+
+## D-025 — Output query compatibility uses bounded shell execution
+
+- Status: Accepted
+- Decision: `runCommandAndGetOutput:` giữ selector/string contract nhưng delegate qua bounded `runCommandWithPrivilegesResult:timeoutSec:` với default timeout 60 giây.
+- Reason: Caller hiện dùng shell pipeline, redirect và sqlite/find expressions; mục tiêu là loại deadlock và unbounded capture mà không đổi command syntax.
+
+## D-026 — Incomplete query output is not trustworthy
+
+- Status: Accepted
+- Decision: Invalid input, spawn/runner failure, timeout, signal termination hoặc stdout/stderr truncation được map sang sentinel `@"error"`; normal non-zero exit không tự động trở thành error nếu execution hoàn tất bình thường.
+- Reason: Caller không được ra quyết định từ output thiếu, nhưng behavior cũ vẫn trả output của command non-zero nên cần giữ tương thích đó.
+
+## D-027 — Separate captures are merged deterministically
+
+- Status: Accepted
+- Decision: Output query merge stdout trước, thêm newline khi cần, rồi stderr và trim một lần; không rewrite command bằng `2>&1`.
+- Reason: `CommandRunner` capture hai stream riêng nên không thể khôi phục interleaving byte-level; deterministic merge giữ cả hai stream mà không làm thay đổi shell command.
+
+## D-028 — Process-exit probes have their own deadline
+
+- Status: Accepted
+- Decision: `PXWaitForProcessExit` dùng timed output-query overload với mỗi probe tối đa một giây và không coi `@"error"` là process đã thoát.
+- Reason: Outer timeout không có ý nghĩa nếu một `pgrep` probe có thể block vô hạn; error phải fail closed thay vì tạo false exit detection.
