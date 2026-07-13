@@ -150,6 +150,11 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 }
 @end
 
+static void PXLogQuarantinedLegacyClearSelector(SEL selector) {
+    NSLog(@"[AppDataCleaner] Legacy Clear selector %@ is quarantined; use clearDataForBundleID:completion:.",
+          NSStringFromSelector(selector));
+}
+
 @implementation AppDataCleaner {
     NSFileManager *_fileManager;
     // Per-wipe discovery cache: main application-data paths remain canonical validator outputs.
@@ -1287,14 +1292,6 @@ static NSString *PXShellFastDataContainerWipe(NSString *containerPath) {
             q];
 }
 
-/// Shell fragment: prune-aware final sweep deletion with existing path quoting.
-static NSString *PXShellFinalSweep(NSString *containerPath) {
-    if (!containerPath.length) return @"";
-    NSString *q = PXShellQuote(containerPath);
-    return [NSString stringWithFormat:
-            @"find %@ -mindepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true",
-            q];
-}
 
 static NSString *PXTimestampSuffix(void) {
     return [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970]];
@@ -3588,14 +3585,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // FINAL SWEEP: Recursively remove all files/folders except .com.apple* or system files
 - (void)finalSweepForContainer:(NSString *)containerPath {
-    if (![containerPath isKindOfClass:[NSString class]] || containerPath.length == 0) return;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:containerPath]) return;
-
-    // Fast final sweep uses only the prune-aware deletion fragment.
-    // Preserve all .com.apple* entries to keep container metadata stable.
-    BOOL deep = [self _deepCleanEnabled];
-    int timeout = deep ? (20 * 60) : (8 * 60);
-    [self runCommandWithPrivileges:PXShellFinalSweep(containerPath) timeoutSec:timeout];
+    (void)containerPath;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Remove crash logs and system logs for this bundleID
@@ -3628,58 +3619,23 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // NEW: Enhanced method to clear app group containers with better subfolder handling
 - (void)clearAppGroupContainers:(NSString *)bundleID withGroupUUIDs:(NSArray *)groupUUIDs isRootless:(BOOL)isRootless {
-    NSString *basePath = isRootless ? 
-        @"/containers/Shared/AppGroup/%@" : 
-        @"/var/mobile/Containers/Shared/AppGroup/%@";
-    
-    for (NSString *groupUUID in groupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:basePath, groupUUID];
-        NSLog(@"[AppDataCleaner] Completely wiping app group at: %@", groupPath);
-        
-        // Use forceful command to clear EVERYTHING inside except Apple metadata
-        NSString *forceCommand = [NSString stringWithFormat:@"find '%@' -not -path \"*/.com.apple*\" -not -path \"%@/.com.apple*\" -delete 2>/dev/null || true", groupPath, groupPath];
-        [self runCommandWithPrivileges:forceCommand];
-        
-        // Rebuild essential directory structure
-        NSArray *essentialDirs = @[
-            @"Library/Caches",
-            @"Library/Preferences",
-            @"Library/Application Support",
-            @"Documents"
-        ];
-        
-        for (NSString *dir in essentialDirs) {
-            NSString *dirPath = [NSString stringWithFormat:@"%@/%@", groupPath, dir];
-            [_fileManager createDirectoryAtPath:dirPath withIntermediateDirectories:YES attributes:nil error:nil];
-        }
-    }
+    (void)bundleID;
+    (void)groupUUIDs;
+    (void)isRootless;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Helper for app group cleaning with default rootless setting
 - (void)clearAppGroupContainers:(NSString *)bundleID withGroupUUIDs:(NSArray *)groupUUIDs {
-    [self clearAppGroupContainers:bundleID withGroupUUIDs:groupUUIDs isRootless:NO];
+    (void)bundleID;
+    (void)groupUUIDs;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Compatibility helper: remove a path without permission or flag mutation.
 - (void)fixPermissionsAndRemovePath:(NSString *)path {
-    if (![path isKindOfClass:[NSString class]] || path.length == 0) {
-        return;
-    }
-    if (![_fileManager fileExistsAtPath:path]) {
-        return;
-    }
-
-    NSLog(@"[AppDataCleaner] Removing path: %@", path);
-
-    NSError *error = nil;
-    BOOL success = [_fileManager removeItemAtPath:path error:&error];
-    if (!success) {
-        NSLog(@"[AppDataCleaner] Standard removal failed: %@", error.localizedDescription);
-        NSString *quotedPath = PXShellQuote(path);
-        [self runCommandWithPrivileges:
-            [NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", quotedPath]
-                              timeoutSec:120];
-    }
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Add the Spotlight indexes clearing method
@@ -4024,457 +3980,26 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 #pragma mark - Cleaning Methods
 
 - (void)wipeDirectoryContents:(NSString *)path keepDirectoryStructure:(BOOL)keepStructure {
-    if (![_fileManager fileExistsAtPath:path]) {
-        return;
-    }
-    
-    NSError *error;
-    NSArray *contents = [_fileManager contentsOfDirectoryAtPath:path error:&error];
-    
-    if (error) {
-        NSLog(@"[AppDataCleaner] Error listing directory %@: %@", path, error.localizedDescription);
-        // Try to recover with force command
-        NSString *forceCommand = [NSString stringWithFormat:@"rm -rf '%@'/* 2>/dev/null || true", path];
-        [self runCommandWithPrivileges:forceCommand];
-        return;
-    }
-    
-    for (NSString *item in contents) {
-        NSString *itemPath = [path stringByAppendingPathComponent:item];
-        
-        // Skip metadata plists if keeping structure
-        if (keepStructure && [item hasPrefix:@".com.apple"]) {
-            continue;
-        }
-        
-        // Securely delete the file/directory with better error handling
-        if (![self securelyWipeFile:itemPath]) {
-            // If standard removal fails, try force
-            NSLog(@"[AppDataCleaner] Standard wipe failed for %@, using force removal", itemPath);
-            [self fixPermissionsAndRemovePath:itemPath];
-        }
-    }
-    
-    // Double-check the directory is now empty
-    NSArray *remainingContents = [_fileManager contentsOfDirectoryAtPath:path error:&error];
-    if (remainingContents.count > 0 && ![remainingContents[0] hasPrefix:@"."]) {
-        NSLog(@"[AppDataCleaner] Directory still has content after wiping, using force command: %@", path);
-        NSString *forceCommand = [NSString stringWithFormat:@"rm -rf '%@'/* 2>/dev/null || true", path];
-        [self runCommandWithPrivileges:forceCommand];
-    }
+    (void)path;
+    (void)keepStructure;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (BOOL)securelyWipeFile:(NSString *)path {
-    if (![_fileManager fileExistsAtPath:path]) {
-        return YES; // Already doesn't exist
-    }
-    
-    // For directories, recursively wipe contents
-    BOOL isDirectory = NO;
-    [_fileManager fileExistsAtPath:path isDirectory:&isDirectory];
-    
-    if (isDirectory) {
-        NSDirectoryEnumerator *enumerator = [_fileManager enumeratorAtPath:path];
-        NSString *file;
-        
-        while ((file = [enumerator nextObject])) {
-            NSString *fullPath = [path stringByAppendingPathComponent:file];
-            [self securelyWipeFile:fullPath];
-        }
-    }
-    
-    // Secure overwrite for files (not directories)
-    if (!isDirectory) {
-    const char *cPath = [path fileSystemRepresentation];
-    int fd = open(cPath, O_RDWR);
-        if (fd >= 0) {
-    off_t fileSize = lseek(fd, 0, SEEK_END);
-            if (fileSize > 0) {
-    // Multiple pass overwrite
-    for (int pass = 0; pass < 3; pass++) {
-        lseek(fd, 0, SEEK_SET);
-        char *buffer = (char *)calloc(1024, 1);
-        
-        if (pass == 0) memset(buffer, 0xFF, 1024);  // First pass: 1's
-        if (pass == 1) memset(buffer, 0x00, 1024);  // Second pass: 0's
-        if (pass == 2) arc4random_buf(buffer, 1024); // Third pass: random
-        
-        size_t bytesRemaining = fileSize;
-        while (bytesRemaining > 0) {
-            size_t bytesToWrite = MIN(bytesRemaining, 1024);
-            write(fd, buffer, bytesToWrite);
-            bytesRemaining -= bytesToWrite;
-        }
-        
-        free(buffer);
-    }
-            }
-    close(fd);
-        }
-    }
-    
-    // Finally remove the file/directory
-    NSError *error;
-    BOOL success = [_fileManager removeItemAtPath:path error:&error];
-    if (!success) {
-        NSLog(@"[AppDataCleaner] Error removing %@: %@", path, error.localizedDescription);
-        
-        // Try with higher privileges if normal removal fails
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf \"%@\"", path]];
-        
-        // Check if it's gone now
-        return ![_fileManager fileExistsAtPath:path];
-    }
-    
-    return YES;
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return NO;
 }
 
 - (void)clearKeychainItemsForBundleID:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing keychain items for %@", bundleID);
-    
-    // More aggressive approach for keychain clearing
-    
-    // 1. Build an array of possible access groups and service names
-    NSMutableArray *possibleAccessGroups = [NSMutableArray arrayWithObjects:
-        bundleID,
-        [NSString stringWithFormat:@"%@.*", bundleID],
-        nil];
-    
-    // Get the app identifier prefix (team ID) for enterprise apps
-    NSArray *bundleComponents = [bundleID componentsSeparatedByString:@"."];
-    if (bundleComponents.count >= 2) {
-        NSString *appIdPrefix = [NSString stringWithFormat:@"%@.%@", bundleComponents[0], bundleComponents[1]];
-        [possibleAccessGroups addObject:appIdPrefix];
-        [possibleAccessGroups addObject:[NSString stringWithFormat:@"%@.*", appIdPrefix]];
-    }
-    
-    // Add common group patterns
-    [possibleAccessGroups addObject:[NSString stringWithFormat:@"group.%@", bundleID]];
-    [possibleAccessGroups addObject:[NSString stringWithFormat:@"%@.group", bundleID]];
-    [possibleAccessGroups addObject:[NSString stringWithFormat:@"*%@*", bundleID]]; // Wildcard match
-    
-    // Facebook-specific access groups (Meta apps share keychain)
-    [possibleAccessGroups addObject:@"com.facebook.Facebook"];
-    [possibleAccessGroups addObject:@"com.facebook.Messenger"];
-    [possibleAccessGroups addObject:@"com.facebook.Instagram"];
-    [possibleAccessGroups addObject:@"com.facebook.WhatsApp"];
-    [possibleAccessGroups addObject:@"com.facebook.family"];
-    [possibleAccessGroups addObject:@"group.com.facebook.family"];
-    [possibleAccessGroups addObject:@"group.com.facebook.Facebook"];
-    [possibleAccessGroups addObject:@"com.facebook.token"];
-    [possibleAccessGroups addObject:@"com.facebook.sdk"];
-    [possibleAccessGroups addObject:@"com.facebook.core"];
-    [possibleAccessGroups addObject:@"*facebook*"];
-    [possibleAccessGroups addObject:@"*meta*"];
-    [possibleAccessGroups addObject:@"*fbauth*"];
-    [possibleAccessGroups addObject:@"*FBSDKAccessToken*"];
-    
-    // For Uber and similar apps using Firebase, add these specific groups
-    [possibleAccessGroups addObject:@"com.google.firebase.auth"];
-    [possibleAccessGroups addObject:@"com.google.HTTPClient"];
-    [possibleAccessGroups addObject:@"com.firebase.auth"];
-    [possibleAccessGroups addObject:@"com.google.ios.auth"];
-    
-    // Special groups for delivery/rideshare apps
-    [possibleAccessGroups addObject:@"com.uber.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.ubercab.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.ubercab.UberClient.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.helix.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.lyft.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.lyft.ios.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.zimride.instant.keychainaccess"];
-    [possibleAccessGroups addObject:@"com.grubhub.search.keychainaccess"];
-    [possibleAccessGroups addObject:@"doordash.DoorDashConsumer.keychainaccess"];
-    [possibleAccessGroups addObject:@"doordash.DoorDashConsumer.5P29S428QN.keychainaccess"];
-    [possibleAccessGroups addObject:@"*uber*"];
-    [possibleAccessGroups addObject:@"*ubercab*"];
-    [possibleAccessGroups addObject:@"*helix*"];
-    [possibleAccessGroups addObject:@"*lyft*"];
-    [possibleAccessGroups addObject:@"*zimride*"];
-    [possibleAccessGroups addObject:@"*grubhub*"];
-    [possibleAccessGroups addObject:@"*doordash*"];
-    
-    // Even more aggressive - extract keywords from the bundle ID
-    for (NSString *component in bundleComponents) {
-        if (component.length > 3 && ![component isEqualToString:@"com"] && 
-            ![component isEqualToString:@"org"] && ![component isEqualToString:@"net"]) {
-            [possibleAccessGroups addObject:[NSString stringWithFormat:@"*%@*", component]];
-            [possibleAccessGroups addObject:component];
-        }
-    }
-    
-    // 2. Additional search terms for Uber and similar apps
-    NSMutableArray *searchTerms = [NSMutableArray arrayWithObject:bundleID];
-    
-    // Extract app name without com.company prefix
-    if (bundleComponents.count > 1) {
-        [searchTerms addObject:[bundleComponents lastObject]];
-    }
-
-    // Add common keywords for auth data
-    [searchTerms addObjectsFromArray:@[
-        @"auth", @"token", @"credential", @"session", @"login", 
-        @"oauth", @"account", @"user", @"api", @"firebase",
-        @"google", @"identity", @"refresh", @"jwt", @"device"
-    ]];
-    
-    // 3. Keychain security classes
-    NSArray *secClasses = @[
-        (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecClassInternetPassword,
-        (__bridge id)kSecClassCertificate,
-        (__bridge id)kSecClassKey,
-        (__bridge id)kSecClassIdentity
-    ];
-    
-    // 4. Very aggressive clearing - iterate through different combinations
-    for (id secClass in secClasses) {
-        // First try with direct bundle ID match with all items
-        NSDictionary *query = @{
-            (__bridge id)kSecClass: secClass,
-            (__bridge id)kSecReturnAttributes: @YES,
-            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-        };
-        
-        // 4.1 Retrieve all items of this class first to inspect them
-        CFTypeRef result = NULL;
-        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-        
-        if (status == errSecSuccess && result != NULL) {
-            NSArray *items = (__bridge_transfer NSArray *)result;
-            NSLog(@"[AppDataCleaner] DEBUG: Found %lu keychain items of this class", (unsigned long)items.count);
-            
-            int matchCount = 0;
-            // 4.2 Examine each item to see if it matches our bundle ID or keywords
-            for (NSDictionary *item in items) {
-                BOOL shouldDelete = NO;
-                
-                // 4.3 Check access group (case-insensitive)
-                NSString *accessGroup = item[(__bridge id)kSecAttrAccessGroup];
-                if (accessGroup) {
-                    NSString *accessGroupLower = [accessGroup lowercaseString];
-                    for (NSString *groupPattern in possibleAccessGroups) {
-                        NSString *patternLower = [[groupPattern stringByReplacingOccurrencesOfString:@"*" withString:@""] lowercaseString];
-                        if ([accessGroupLower containsString:patternLower] && patternLower.length > 2) {
-                            shouldDelete = YES;
-                            break;
-                        }
-                    }
-                }
-                
-                // 4.4 Check service name (case-insensitive)
-                NSString *service = item[(__bridge id)kSecAttrService];
-                if (!shouldDelete && service) {
-                    NSString *serviceLower = [service lowercaseString];
-                    for (NSString *term in searchTerms) {
-                        if ([serviceLower containsString:[term lowercaseString]]) {
-                            shouldDelete = YES;
-                            break;
-                        }
-                    }
-                }
-                
-                // 4.5 Check account name (case-insensitive)
-                NSString *account = item[(__bridge id)kSecAttrAccount];
-                if (!shouldDelete && account) {
-                    NSString *accountLower = [account lowercaseString];
-                    for (NSString *term in searchTerms) {
-                        if ([accountLower containsString:[term lowercaseString]]) {
-                            shouldDelete = YES;
-                            break;
-                        }
-                    }
-                }
-                
-                // 4.6 Check label (case-insensitive)
-                NSString *label = item[(__bridge id)kSecAttrLabel];
-                if (!shouldDelete && label) {
-                    NSString *labelLower = [label lowercaseString];
-                    for (NSString *term in searchTerms) {
-                        if ([labelLower containsString:[term lowercaseString]]) {
-                            shouldDelete = YES;
-                            break;
-                        }
-                    }
-                }
-                
-                // 4.7 If we should delete this item, create a query that matches it exactly
-                if (shouldDelete) {
-                    matchCount++;
-                    NSMutableDictionary *deleteQuery = [NSMutableDictionary dictionaryWithDictionary:@{
-                        (__bridge id)kSecClass: secClass
-                    }];
-                    
-                    // Add all available attributes to ensure we match only this item
-                    if (accessGroup) deleteQuery[(__bridge id)kSecAttrAccessGroup] = accessGroup;
-                    if (service) deleteQuery[(__bridge id)kSecAttrService] = service;
-                    if (account) deleteQuery[(__bridge id)kSecAttrAccount] = account;
-                    if (label) deleteQuery[(__bridge id)kSecAttrLabel] = label;
-                    
-                    OSStatus deleteStatus = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
-                    if (deleteStatus == errSecSuccess) {
-                        NSLog(@"[AppDataCleaner] DELETED keychain: svc=%@ grp=%@", service ?: @"nil", accessGroup ?: @"nil");
-                    } else {
-                         NSLog(@"[AppDataCleaner] FAILED to delete keychain: status=%d, svc=%@ grp=%@", (int)deleteStatus, service ?: @"nil", accessGroup ?: @"nil");
-                    }
-                }
-            }
-            NSLog(@"[AppDataCleaner] DEBUG: Scanned %lu items, Matched %d items for deletion", (unsigned long)items.count, matchCount);
-        }
-        
-        // 5. Original direct matches approach - keep this for backward compatibility
-        for (NSString *accessGroup in possibleAccessGroups) {
-            query = @{
-                (__bridge id)kSecClass: secClass,
-                (__bridge id)kSecAttrAccessGroup: accessGroup,
-                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-            };
-            SecItemDelete((__bridge CFDictionaryRef)query);
-        }
-        
-        // 6. Try service name matches with all search terms
-        for (NSString *term in searchTerms) {
-            query = @{
-                (__bridge id)kSecClass: secClass,
-                (__bridge id)kSecAttrService: term,
-                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-            };
-            SecItemDelete((__bridge CFDictionaryRef)query);
-        }
-        
-        // 7. Try account matches with all search terms
-        for (NSString *term in searchTerms) {
-            query = @{
-                (__bridge id)kSecClass: secClass,
-                (__bridge id)kSecAttrAccount: term,
-                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-            };
-            SecItemDelete((__bridge CFDictionaryRef)query);
-        }
-    }
-    
-    // 8. Clear URL credentials which might store login sessions
-    [self clearURLCredentialsForBundleID:bundleID];
-    
-    // 9. Use command-line security tool as a backup method
-    NSString *keychainScript = [NSString stringWithFormat:
-                               @"security delete-generic-password -l '%@' 2>/dev/null || true;"
-                               @"security delete-internet-password -l '%@' 2>/dev/null || true", 
-                               bundleID, bundleID];
-    [self runCommandWithPrivileges:keychainScript];
-    
-    // 10. For Uber and apps like it, clear Google tokens
-    [self runCommandWithPrivileges:@"security delete-generic-password -l 'com.google.HTTPClient' 2>/dev/null || true"];
-    [self runCommandWithPrivileges:@"security delete-generic-password -l 'com.google.ios.auth' 2>/dev/null || true"];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Universal keychain wipe - very aggressive approach
 - (void)universalKeychainWipeForBundleID:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Universal keychain wipe for %@", bundleID);
-    
-    // Extract app identifiers
-    NSArray *components = [bundleID componentsSeparatedByString:@"."];
-    NSString *appName = components.lastObject ?: @"";
-    NSString *companyName = components.count > 1 ? components[1] : @"";
-    
-    // Build list of search patterns
-    NSMutableArray *patterns = [NSMutableArray array];
-    [patterns addObject:bundleID];
-    [patterns addObject:[bundleID lowercaseString]];
-    if (appName.length > 0) {
-        [patterns addObject:appName];
-        [patterns addObject:[appName lowercaseString]];
-    }
-    if (companyName.length > 0) {
-        [patterns addObject:companyName];
-        [patterns addObject:[companyName lowercaseString]];
-    }
-    
-    // Delete by each pattern using security command
-    for (NSString *pattern in patterns) {
-        // Delete generic passwords
-        [self runCommandWithPrivileges:[NSString stringWithFormat:
-            @"security dump-keychain -d 2>/dev/null | grep -i '%@' | grep 'svce' | cut -d'\"' -f4 | while read svc; do security delete-generic-password -s \"$svc\" 2>/dev/null; done || true", pattern]];
-        
-        // Delete internet passwords  
-        [self runCommandWithPrivileges:[NSString stringWithFormat:
-            @"security dump-keychain -d 2>/dev/null | grep -i '%@' | grep 'srvr' | cut -d'\"' -f4 | while read srv; do security delete-internet-password -s \"$srv\" 2>/dev/null; done || true", pattern]];
-    }
-    
-    // Direct deletion using SecItemDelete with broader queries
-    NSArray *secClasses = @[
-        (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecClassInternetPassword
-    ];
-    
-    for (id secClass in secClasses) {
-        // Query ALL items and delete those matching our bundle
-        NSDictionary *query = @{
-            (__bridge id)kSecClass: secClass,
-            (__bridge id)kSecReturnAttributes: @YES,
-            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
-        };
-        
-        CFTypeRef result = NULL;
-        if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &result) == errSecSuccess && result) {
-            NSArray *items = (__bridge_transfer NSArray *)result;
-            
-            for (NSDictionary *item in items) {
-                NSString *service = item[(__bridge id)kSecAttrService];
-                NSString *account = item[(__bridge id)kSecAttrAccount];
-                NSString *accessGroup = item[(__bridge id)kSecAttrAccessGroup];
-                
-                BOOL shouldDelete = NO;
-                
-                // Check if any attribute matches our patterns
-                for (NSString *pattern in patterns) {
-                    NSString *lowerPattern = [pattern lowercaseString];
-                    if ((service && [[service lowercaseString] containsString:lowerPattern]) ||
-                        (account && [[account lowercaseString] containsString:lowerPattern]) ||
-                        (accessGroup && [[accessGroup lowercaseString] containsString:lowerPattern])) {
-                        shouldDelete = YES;
-                        break;
-                    }
-                }
-                
-                if (shouldDelete) {
-                    NSMutableDictionary *deleteQuery = [NSMutableDictionary dictionary];
-                    deleteQuery[(__bridge id)kSecClass] = secClass;
-                    if (service) deleteQuery[(__bridge id)kSecAttrService] = service;
-                    if (account) deleteQuery[(__bridge id)kSecAttrAccount] = account;
-                    
-                    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
-                    if (status == errSecSuccess) {
-                        NSLog(@"[AppDataCleaner] Deleted keychain item - service: %@, account: %@", service, account);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Backup: Try to delete ALL generic passwords that might match this app
-    // This is more aggressive and catches items missed by pattern matching
-    NSArray *bundleParts = [bundleID componentsSeparatedByString:@"."];
-    for (NSString *part in bundleParts) {
-        if (part.length < 3) continue;
-        if ([part isEqualToString:@"com"] || [part isEqualToString:@"org"]) continue;
-        
-        // Delete by service name containing part
-        NSDictionary *deleteByService = @{
-            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrService: part
-        };
-        SecItemDelete((__bridge CFDictionaryRef)deleteByService);
-        
-        // Delete by account containing part
-        NSDictionary *deleteByAccount = @{
-            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrAccount: part
-        };
-        SecItemDelete((__bridge CFDictionaryRef)deleteByAccount);
-    }
-    
-    NSLog(@"[AppDataCleaner] Universal keychain wipe completed for %@", bundleID);
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearURLCredentialsForBundleID:(NSString *)bundleID {
@@ -4564,101 +4089,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (void)clearPluginKitData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing PluginKit and extension data for %@", bundleID);
-    
-    // PluginKit stores data about app extensions which can also contain auth data
-    NSArray *pluginKitPaths = @[
-        @"/var/mobile/Library/PlugInKit/",
-        @"/var/mobile/Library/PlugInKit/",
-        @"/var/mobile/Library/MobileContainerManager/PluginKitPlugin/",
-        @"/var/mobile/Library/MobileContainerManager/PluginKitPlugin/"
-    ];
-    
-    for (NSString *basePath in pluginKitPaths) {
-        if ([_fileManager fileExistsAtPath:basePath]) {
-            // Look for plists and DBs with this app's bundle ID
-            NSArray *matches = [self findPathsMatchingPattern:[NSString stringWithFormat:@"%@**/%@*", basePath, bundleID]];
-            for (NSString *path in matches) {
-                NSLog(@"[AppDataCleaner] Wiping PluginKit file: %@", path);
-        [self securelyWipeFile:path];
-            }
-            
-            // Also look for any domain components (like "uber" from "com.ubercab.UberClient")
-            NSArray *bundleComponents = [bundleID componentsSeparatedByString:@"."];
-            for (NSString *component in bundleComponents) {
-                if (component.length > 3 && ![component isEqualToString:@"com"] && 
-                    ![component isEqualToString:@"org"] && ![component isEqualToString:@"net"]) {
-                    matches = [self findPathsMatchingPattern:[NSString stringWithFormat:@"%@**/*%@*", basePath, component]];
-                    for (NSString *path in matches) {
-                        NSLog(@"[AppDataCleaner] Wiping PluginKit file with component %@: %@", component, path);
-                        [self securelyWipeFile:path];
-                    }
-                }
-            }
-        }
-    }
-    
-    // Check for container manager data
-    NSString *containerMgrPath = @"/var/mobile/Library/MobileContainerManager/containers.plist";
-    if ([_fileManager fileExistsAtPath:containerMgrPath]) {
-        NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"containers.plist.temp"];
-        [_fileManager copyItemAtPath:containerMgrPath toPath:tempPath error:nil];
-        
-        NSMutableDictionary *containers = [NSMutableDictionary dictionaryWithContentsOfFile:tempPath];
-        if (containers) {
-            BOOL modified = NO;
-            NSArray *keys = [containers allKeys];
-            for (NSString *key in keys) {
-                id value = containers[key];
-                if ([value isKindOfClass:[NSDictionary class]]) {
-                    NSString *identifier = value[@"identifier"];
-                    if ([identifier isKindOfClass:[NSString class]] && [identifier containsString:bundleID]) {
-                        [containers removeObjectForKey:key];
-                        modified = YES;
-                        NSLog(@"[AppDataCleaner] Removed container reference %@ for %@", key, bundleID);
-                    }
-                }
-            }
-            
-            if (modified) {
-                [containers writeToFile:tempPath atomically:YES];
-                [self runCommandWithPrivileges:[NSString stringWithFormat:@"cp '%@' '%@'", tempPath, containerMgrPath]];
-            }
-        }
-        
-        [_fileManager removeItemAtPath:tempPath error:nil];
-    }
-    
-    // Also check rootless path
-    NSString *rootlessContainerMgrPath = @"/var/mobile/Library/MobileContainerManager/containers.plist";
-    if ([_fileManager fileExistsAtPath:rootlessContainerMgrPath]) {
-        NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"containers.plist.temp"];
-        [_fileManager copyItemAtPath:rootlessContainerMgrPath toPath:tempPath error:nil];
-        
-        NSMutableDictionary *containers = [NSMutableDictionary dictionaryWithContentsOfFile:tempPath];
-        if (containers) {
-            BOOL modified = NO;
-            NSArray *keys = [containers allKeys];
-            for (NSString *key in keys) {
-                id value = containers[key];
-                if ([value isKindOfClass:[NSDictionary class]]) {
-                    NSString *identifier = value[@"identifier"];
-                    if ([identifier isKindOfClass:[NSString class]] && [identifier containsString:bundleID]) {
-                        [containers removeObjectForKey:key];
-                        modified = YES;
-                        NSLog(@"[AppDataCleaner] Removed rootless container reference %@ for %@", key, bundleID);
-                    }
-                }
-            }
-            
-            if (modified) {
-                [containers writeToFile:tempPath atomically:YES];
-                [self runCommandWithPrivileges:[NSString stringWithFormat:@"cp '%@' '%@'", tempPath, rootlessContainerMgrPath]];
-            }
-        }
-        
-        [_fileManager removeItemAtPath:tempPath error:nil];
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearThumbnailCaches:(NSString *)bundleID {
@@ -4790,22 +4222,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (void)fastWipeDirectoryContents:(NSString *)path keepDirectoryStructure:(BOOL)keepStructure timeoutSec:(int)timeoutSec {
-    if (![path isKindOfClass:[NSString class]] || path.length == 0) return;
-    if (![_fileManager fileExistsAtPath:path]) return;
-
-    if (timeoutSec <= 0) {
-        timeoutSec = 8 * 60;
-    }
-
-    NSString *quoted = PXShellQuote(path);
-    NSString *wipePart = nil;
-    if (keepStructure) {
-        // Keep .com.apple* metadata in this directory.
-        wipePart = [NSString stringWithFormat:@"find %@ -mindepth 1 -maxdepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true", quoted];
-    } else {
-        wipePart = [NSString stringWithFormat:@"rm -rf %@/* 2>/dev/null || true", quoted];
-    }
-    [self runCommandWithPrivileges:wipePart timeoutSec:timeoutSec];
+    (void)path;
+    (void)keepStructure;
+    (void)timeoutSec;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearSystemLogs:(NSString *)bundleID {
@@ -5776,54 +5196,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // Implementation of helper methods that map to the main cleaning function
 - (void)performFullCleanup:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Starting full cleanup for %@", bundleID);
-
-    // First clear app state data which stores login sessions
-    [self _internalClearAppStateData:bundleID];
-    
-    // Get UUIDs for containers
-    NSString *dataUUID = [self findDataContainerUUID:bundleID];
-    NSString *rootlessDataUUID = [self findRootlessDataContainerUUID:bundleID];
-    NSString *bundleUUID = [self findBundleContainerUUID:bundleID];
-    
-    NSLog(@"[AppDataCleaner] Found UUIDs - Data: %@, Rootless: %@, Bundle: %@", 
-          dataUUID ?: @"Not found", rootlessDataUUID ?: @"Not found", bundleUUID ?: @"Not found");
-    
-    // Clear standard data container 
-    [self completelyWipeContainer:[NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataUUID]];
-    [self completelyWipeContainer:[NSString stringWithFormat:@"/containers/Data/Application/%@", rootlessDataUUID]];
-    
-    // Clear all kinds of user data
-    {
-        NSError *kcErr = nil;
-        if (![self _wipeSelectedKeychainForBundleID:bundleID error:&kcErr]) {
-            [self logMessage:@"[AppDataCleaner] WARNING: Keychain wipe failed in performFullCleanup: %@", kcErr.localizedDescription ?: @"unknown"];
-        }
-    }
-    [self clearURLCredentialsForBundleID:bundleID];
-    [self clearICloudData:bundleID];
-    [self clearPluginKitData:bundleID];
-    [self clearThumbnailCaches:bundleID];
-    [self clearSystemLogs:bundleID];
-    // [self cleanAppGroupContainers:bundleID]; // Disabled - now handled directly in completeAppDataWipe
-    [self clearAppReceiptData:bundleID withBundleUUID:bundleUUID];
-    [self clearPushNotificationData:bundleID];
-    [self clearBluetoothData:bundleID];
-    
-    // Clear app settings
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Preferences/%@*", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Preferences/%@*", bundleID]];
-    
-    // Clear encrypted data
-    [self _internalClearEncryptedData:bundleID];
-    
-    // Process iOS 15+ specific issues
-    [self clearAppIssuesForIOS15:bundleID];
-    
-    // NEW: Run app-specific deep cleaning for ride-sharing & food delivery
-    
-    // Refresh system services to ensure changes are applied
-    [self refreshSystemServices];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)performSecondaryCleanup:(NSString *)bundleID {
@@ -5836,105 +5210,39 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (void)clearAppCache:(NSString *)bundleID {
-    NSString *appDataUUID = [self findDataContainerUUID:bundleID];
-    NSString *rootlessDataUUID = [self findRootlessDataContainerUUID:bundleID];
-    
-    if (appDataUUID) {
-        NSString *cachePath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@/Library/Caches", appDataUUID];
-        [self wipeDirectoryContents:cachePath keepDirectoryStructure:YES];
-    }
-    
-    if (rootlessDataUUID) {
-        NSString *cachePath = [NSString stringWithFormat:@"/containers/Data/Application/%@/Library/Caches", rootlessDataUUID];
-        [self wipeDirectoryContents:cachePath keepDirectoryStructure:YES];
-    }
-    
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Caches/%@*", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Caches/%@*", bundleID]];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearAppPreferences:(NSString *)bundleID {
-    NSString *appDataUUID = [self findDataContainerUUID:bundleID];
-    NSString *rootlessDataUUID = [self findRootlessDataContainerUUID:bundleID];
-    
-    if (appDataUUID) {
-        NSString *prefsPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@/Library/Preferences", appDataUUID];
-        [self wipeDirectoryContents:prefsPath keepDirectoryStructure:YES];
-    }
-    
-    if (rootlessDataUUID) {
-        NSString *prefsPath = [NSString stringWithFormat:@"/containers/Data/Application/%@/Library/Preferences", rootlessDataUUID];
-        [self wipeDirectoryContents:prefsPath keepDirectoryStructure:YES];
-    }
-    
-    [self securelyWipeFile:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", bundleID]];
-    [self securelyWipeFile:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", bundleID]];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearAppCookies:(NSString *)bundleID {
-    NSString *appDataUUID = [self findDataContainerUUID:bundleID];
-    NSString *rootlessDataUUID = [self findRootlessDataContainerUUID:bundleID];
-    
-    if (appDataUUID) {
-        NSString *cookiesPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@/Library/Cookies", appDataUUID];
-        [self wipeDirectoryContents:cookiesPath keepDirectoryStructure:YES];
-    }
-    
-    if (rootlessDataUUID) {
-        NSString *cookiesPath = [NSString stringWithFormat:@"/containers/Data/Application/%@/Library/Cookies", rootlessDataUUID];
-        [self wipeDirectoryContents:cookiesPath keepDirectoryStructure:YES];
-    }
-    
-    [self securelyWipeFile:[NSString stringWithFormat:@"/var/mobile/Library/Cookies/%@.binarycookies", bundleID]];
-    [self securelyWipeFile:[NSString stringWithFormat:@"/var/mobile/Library/Cookies/%@.binarycookies", bundleID]];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearAppWebKitData:(NSString *)bundleID {
-    NSString *appDataUUID = [self findDataContainerUUID:bundleID];
-    NSString *rootlessDataUUID = [self findRootlessDataContainerUUID:bundleID];
-    
-    if (appDataUUID) {
-        NSString *webkitPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@/Library/WebKit", appDataUUID];
-        [self wipeDirectoryContents:webkitPath keepDirectoryStructure:YES];
-    }
-    
-    if (rootlessDataUUID) {
-        NSString *webkitPath = [NSString stringWithFormat:@"/containers/Data/Application/%@/Library/WebKit", rootlessDataUUID];
-        [self wipeDirectoryContents:webkitPath keepDirectoryStructure:YES];
-    }
-    
-    [self securelyWipeFile:[NSString stringWithFormat:@"/var/mobile/Library/WebKit/WebsiteData/*/%@", bundleID]];
-    [self securelyWipeFile:[NSString stringWithFormat:@"/var/mobile/Library/WebKit/WebsiteData/*/%@", bundleID]];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearAppKeychain:(NSString *)bundleID {
-    NSError *kcErr = nil;
-    if (![self _wipeSelectedKeychainForBundleID:bundleID error:&kcErr]) {
-        [self logMessage:@"[AppDataCleaner] WARNING: Keychain wipe failed: %@", kcErr.localizedDescription ?: @"unknown"];
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearAppGroupData:(NSString *)bundleID {
-    NSArray *appGroupUUIDs = [self findAppGroupUUIDs:bundleID];
-    NSArray *rootlessGroupUUIDs = [self findRootlessAppGroupUUIDs:bundleID];
-    
-    for (NSString *groupUUID in appGroupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        [self wipeDirectoryContents:groupPath keepDirectoryStructure:YES];
-    }
-    
-    for (NSString *groupUUID in rootlessGroupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
-        [self wipeDirectoryContents:groupPath keepDirectoryStructure:YES];
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Map the remaining methods to the main function
 - (void)clearKeychainData:(NSString *)bundleID {
-    NSError *kcErr = nil;
-    if (![self _wipeSelectedKeychainForBundleID:bundleID error:&kcErr]) {
-        [self logMessage:@"[AppDataCleaner] WARNING: Keychain wipe failed: %@", kcErr.localizedDescription ?: @"unknown"];
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 - (void)clearSharedContainers:(NSString *)bundleID { [self clearAppGroupData:bundleID]; }
 - (void)clearUserDefaults:(NSString *)bundleID { [self clearAppPreferences:bundleID]; }
@@ -5974,7 +5282,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 - (void)clearAppStateData:(NSString *)bundleID {
     [self _internalClearAppStateData:bundleID];
 }
-- (void)secureDataWipe:(NSString *)bundleID { [self completeAppDataWipe:bundleID]; }
+- (void)secureDataWipe:(NSString *)bundleID {
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+}
 
 - (NSDictionary *)getDataUsage:(NSString *)bundleID {
     NSMutableDictionary *usage = [NSMutableDictionary dictionary];
@@ -6077,57 +5388,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // Add a specialized method for WebKit directories to handle the recursion issues
 - (void)wipeWebKitDirectoryContents:(NSString *)path {
-    if (![_fileManager fileExistsAtPath:path]) {
-        return;
-    }
-    
-    NSLog(@"[AppDataCleaner] Using specialized WebKit cleaning for: %@", path);
-    
-    // 1. Delete the current WebKit contents.
-    NSString *command = [NSString stringWithFormat:@"rm -rf '%@'/* 2>/dev/null", path];
-    [self runCommandWithPrivileges:command];
-    
-    // 3. Specifically target WebsiteData subdirectory with all storage types
-    NSString *websiteDataPath = [path stringByAppendingPathComponent:@"WebsiteData"];
-    if ([_fileManager fileExistsAtPath:websiteDataPath]) {
-        NSLog(@"[AppDataCleaner] Deep cleaning WebsiteData at: %@", websiteDataPath);
-        
-        // Use find command to handle any nested storage structure (more robust)
-        NSString *command = [NSString stringWithFormat:@"find '%@' -mindepth 1 -maxdepth 1 -not -name '.com.apple*' -exec rm -rf {} \\; 2>/dev/null", websiteDataPath];
-        [self runCommandWithPrivileges:command];
-        
-        // Recreate standard WebKit storage directories to avoid crashes
-        NSArray *webStorageDirs = @[
-            @"LocalStorage",
-            @"IndexedDB",
-            @"WebSQL",
-            @"ServiceWorkers",
-            @"CacheStorage"
-        ];
-        
-        for (NSString *dir in webStorageDirs) {
-            NSString *dirPath = [websiteDataPath stringByAppendingPathComponent:dir];
-            [_fileManager createDirectoryAtPath:dirPath 
-                    withIntermediateDirectories:YES 
-                                     attributes:nil 
-                                          error:nil];
-        }
-    }
-    
-    // 4. Forcefully remove LocalStorage (often contains auth tokens)
-    NSString *localStoragePath = [websiteDataPath stringByAppendingPathComponent:@"LocalStorage"];
-    command = [NSString stringWithFormat:@"find '%@' -type f -exec rm -f {} \\; 2>/dev/null", localStoragePath];
-    [self runCommandWithPrivileges:command];
-    
-    // 5. Specific handling for IndexedDB to ensure we catch all nested structures
-    NSString *indexedDBPath = [websiteDataPath stringByAppendingPathComponent:@"IndexedDB"];
-    NSLog(@"[AppDataCleaner] Deep cleaning IndexedDB at: %@", indexedDBPath);
-    
-    // Use find with greater depth to catch all nested structure
-    command = [NSString stringWithFormat:@"find '%@' -type f -exec rm -f {} \\; 2>/dev/null", indexedDBPath];
-    [self runCommandWithPrivileges:command];
-    command = [NSString stringWithFormat:@"find '%@' -type d -name 'v*' -exec rm -rf {} \\; 2>/dev/null", indexedDBPath];
-    [self runCommandWithPrivileges:command];
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Add new method to handle app state data cleaning for modern apps
@@ -6229,123 +5491,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (void)_internalClearEncryptedData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing encrypted data for %@", bundleID);
-    
-    // 1. Check for encrypted plist files in preferences
-    NSArray *encryptedPrefs = [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.enc*", bundleID]];
-    encryptedPrefs = [encryptedPrefs arrayByAddingObjectsFromArray:
-                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.encrypted*", bundleID]]];
-    encryptedPrefs = [encryptedPrefs arrayByAddingObjectsFromArray:
-                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.secure*", bundleID]]];
-    
-    for (NSString *path in encryptedPrefs) {
-        [self securelyWipeFile:path];
-    }
-    
-    // 2. Also check alternate preference locations
-    NSArray<NSString *> *prefBases = @[
-        @"/private/var/mobile/Library/Preferences",
-        @"/var/jb/var/mobile/Library/Preferences",
-        @"/private/var/jb/var/mobile/Library/Preferences"
-    ];
-    NSMutableArray *rootlessEncryptedPrefs = [NSMutableArray array];
-    for (NSString *base in prefBases) {
-        if (![_fileManager fileExistsAtPath:base]) continue;
-        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.enc*", base, bundleID]]];
-        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.encrypted*", base, bundleID]]];
-        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.secure*", base, bundleID]]];
-    }
-    
-    for (NSString *path in rootlessEncryptedPrefs) {
-        [self securelyWipeFile:path];
-    }
-
-    // Deep Clean toggle: default OFF (fast mode assumes wiped containers are clean).
-    // When OFF, skip expensive recursive scans under app containers.
-    if (![self _deepCleanEnabled]) {
-        NSLog(@"[AppDataCleaner] Deep Clean OFF: skipping deep container encrypted/token scans");
-        return;
-    }
-    
-    // 3. Find data container for more thorough search
-    NSString *dataUUID = [self findDataContainerUUID:bundleID];
-    if (dataUUID) {
-        NSString *dataPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataUUID];
-        
-        // 4. Target all encrypted storage formats in data container
-        NSArray *encryptionPatterns = @[
-            @"*.enc*", @"*.encrypted*", @"*.secure*", @"*.token*", @"*Token*",
-            @"*Auth*", @"*auth*", @"*cred*", @"*Cred*", @"*secret*", @"*Secret*",
-            @"*login*", @"*Login*", @"*session*", @"*Session*", @"*api*key*",
-            @"*firebase*", @"*google*auth*", @"*oauth*", @"*jwt*"
-        ];
-        
-        // Single traversal for all patterns (major perf win).
-        NSArray<NSString *> *matches = [self findPathsUnderRoot:dataPath directories:NO namePatterns:encryptionPatterns];
-        for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Wiping encrypted file: %@", path);
-            [self securelyWipeFile:path];
-        }
-        
-        // 5. Specifically target Google/Firebase auth folders
-        NSArray *googlePaths = [self findPathsUnderRoot:dataPath directories:YES namePatterns:@[@"Google*", @"google*"]];
-        for (NSString *path in googlePaths) {
-            NSLog(@"[AppDataCleaner] Wiping Google auth directory: %@", path);
-            [self fastWipeDirectoryContents:path keepDirectoryStructure:YES timeoutSec:8 * 60];
-        }
-        
-        // 6. Target Firebase-related files
-        NSArray *firebasePaths = [self findPathsUnderRoot:dataPath directories:YES namePatterns:@[@"Firebase*", @"firebase*"]];
-        for (NSString *path in firebasePaths) {
-            NSLog(@"[AppDataCleaner] Wiping Firebase directory: %@", path);
-            [self fastWipeDirectoryContents:path keepDirectoryStructure:YES timeoutSec:8 * 60];
-        }
-        
-        // 7. Target OAuth directories
-        NSArray *oauthPaths = [self findPathsUnderRoot:dataPath directories:YES namePatterns:@[@"*oauth*", @"*OAuth*"]];
-        for (NSString *path in oauthPaths) {
-            NSLog(@"[AppDataCleaner] Wiping OAuth directory: %@", path);
-            [self fastWipeDirectoryContents:path keepDirectoryStructure:YES timeoutSec:8 * 60];
-        }
-        
-        // 8. Uber-specific directories (other apps use similar patterns)
-        NSArray *authDirs = @[
-            @"Library/Application Support/Credentials",
-            @"Library/Application Support/Authentication",
-            @"Library/Application Support/GoogleService-Info",
-            @"Library/Application Support/Google/FIRApp",
-            @"Library/Application Support/com.firebase",
-            @"Library/Caches/com.google.firebase",
-            @"Library/Caches/com.firebase",
-            @"Library/HTTPStorages"
-        ];
-        
-        for (NSString *dir in authDirs) {
-            NSString *fullPath = [dataPath stringByAppendingPathComponent:dir];
-            if ([_fileManager fileExistsAtPath:fullPath]) {
-                NSLog(@"[AppDataCleaner] Wiping auth directory: %@", fullPath);
-                [self fastWipeDirectoryContents:fullPath keepDirectoryStructure:YES timeoutSec:10 * 60];
-            }
-        }
-    }
-    
-    // 9. Check app group containers
-    NSArray *appGroupUUIDs = [self findAppGroupUUIDs:bundleID];
-    for (NSString *groupUUID in appGroupUUIDs) {
-        NSString *groupPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", groupUUID];
-        
-        // Look for encrypted/auth files in group containers
-        NSArray *encryptionPatterns = @[
-            @"*.enc*", @"*.encrypted*", @"*.secure*", @"*.token*", @"*Token*",
-            @"*Auth*", @"*auth*", @"*cred*", @"*Cred*", @"*secret*", @"*Secret*"
-        ];
-        
-        NSArray<NSString *> *matches = [self findPathsUnderRoot:groupPath directories:NO namePatterns:encryptionPatterns];
-        for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Wiping encrypted file in group: %@", path);
-            [self securelyWipeFile:path];
-        }
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Override the existing clearEncryptedData method to call our internal implementation
@@ -6558,137 +5705,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // Method to clear extension containers
 - (void)clearExtensionContainers:(NSArray *)extensionInfo forApp:(NSString *)bundleID {
-    if (extensionInfo.count == 0) {
-        NSLog(@"[AppDataCleaner] No extension containers found to clear for %@", bundleID);
-        return;
-    }
-    
-    NSLog(@"[AppDataCleaner] Clearing %lu extension containers for %@", (unsigned long)extensionInfo.count, bundleID);
-    
-    for (NSDictionary *extension in extensionInfo) {
-        NSString *extensionBundleID = extension[@"bundleID"];
-        NSString *dataUUID = extension[@"dataUUID"];
-        NSString *type = extension[@"type"];
-        BOOL isRootless = [extension[@"rootless"] boolValue];
-        
-        // 1. Clear extension data container
-        if (dataUUID.length > 0) {
-            NSString *basePath = isRootless ? 
-                @"/containers/Data/" : 
-                @"/var/mobile/Containers/Data/";
-            
-            NSString *containerType = [type isEqualToString:@"pluginkit"] ? @"PluginKitPlugin" : @"Application";
-            NSString *dataPath = [NSString stringWithFormat:@"%@%@/%@", basePath, containerType, dataUUID];
-            
-            NSLog(@"[AppDataCleaner] Clearing extension data container: %@", dataPath);
-            
-            // Fix permissions first
-            [self fixPermissionsForPath:dataPath];
-            
-            // Clear important directories
-            NSArray *subDirs = @[
-                        @"Documents",
-                        @"Library/Caches",
-                        @"Library/Preferences",
-                        @"Library/WebKit",
-                        @"Library/Application Support",
-                @"tmp"
-            ];
-            
-            for (NSString *subDir in subDirs) {
-                NSString *fullPath = [dataPath stringByAppendingPathComponent:subDir];
-                
-                if ([subDir isEqualToString:@"Library/WebKit"]) {
-                    [self wipeWebKitDirectoryContents:fullPath];
-                } else {
-                    [self wipeDirectoryContents:fullPath keepDirectoryStructure:YES];
-                }
-            }
-            
-            // Clear databases
-            NSArray *dbFiles = [self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/Library/**/*.sqlite*", dataPath]];
-            for (NSString *dbPath in dbFiles) {
-                [self securelyWipeFile:dbPath];
-                [self securelyWipeFile:[dbPath stringByAppendingString:@"-journal"]];
-                [self securelyWipeFile:[dbPath stringByAppendingString:@"-wal"]];
-                [self securelyWipeFile:[dbPath stringByAppendingString:@"-shm"]];
-            }
-        }
-        
-        // 3. Clear extension keychain items (best-effort)
-        {
-            NSError *kcErr = nil;
-            if (![self _wipeSelectedKeychainForBundleID:extensionBundleID error:&kcErr]) {
-                [self logMessage:@"[AppDataCleaner] WARNING: Extension keychain wipe failed (%@): %@", extensionBundleID, kcErr.localizedDescription ?: @"unknown"];
-            }
-        }
-        
-        // 4. Clear extension preferences
-        NSString *prefsPath = [NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", extensionBundleID];
-        [self securelyWipeFile:prefsPath];
-        
-        NSString *rootlessPrefsPath = [NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", extensionBundleID];
-        [self securelyWipeFile:rootlessPrefsPath];
-    }
+    (void)extensionInfo;
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Compatibility no-op: recursive permission mutation is intentionally disabled.
 - (void)fixPermissionsForPath:(NSString *)path {
-    if (![path isKindOfClass:[NSString class]] || path.length == 0) {
-        return;
-    }
-
-    BOOL pathExists = [_fileManager fileExistsAtPath:path];
-    NSLog(@"[AppDataCleaner] Recursive permission mutation intentionally skipped for %@ (exists=%@)",
-          path,
-          pathExists ? @"YES" : @"NO");
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // Add a new method for aggressive cleanup of stubborn files
 - (void)performAggressiveCleanupFor:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Performing aggressive cleanup for %@", bundleID);
-    
-    // Kill the app first to ensure no files are in use
-    PXKillallByName(bundleID, SIGKILL);
-    
-    // Get the data container
-    NSString *dataUUID = [self findDataContainerUUID:bundleID];
-    if (dataUUID) {
-        NSString *dataContainerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", dataUUID];
-        
-        // Add additional aggressive cleaning of the Documents directory
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@/Documents' -type f -exec rm -f {} \\; 2>/dev/null || true", dataContainerPath]];
-        
-        // Find and remove all database files which may contain authentication data
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -name '*.db*' -exec rm -f {} \\; 2>/dev/null || true", dataContainerPath]];
-        
-        // NEW: Use the comprehensive container wipe
-        [self completelyWipeContainer:dataContainerPath];
-    }
-    
-    // Ensure keychain items are really gone
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"security delete-generic-password -l '%@' 2>/dev/null || true;security delete-internet-password -l '%@' 2>/dev/null || true", bundleID, bundleID]];
-    
-    // Clear PushStore which can contain tokens
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/SpringBoard/PushStore/%@* 2>/dev/null || true", bundleID]];
-    
-    // Clear UsageLog which tracks app usage
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/UsageLog/%@* 2>/dev/null || true", bundleID]];
-    
-    // Clear WebKit LocalStorage which may contain credentials
-    [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/WebKit/WebsiteData/LocalStorage/* 2>/dev/null || true"];
-    
-    // Clear account data specific to this app
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '/var/mobile/Library/Accounts/%@*' 2>/dev/null || true", bundleID]];
-    
-    // NEW: Clean the SiriAnalytics database
-    [self cleanSiriAnalyticsDatabase:bundleID];
-    
-    // NEW: Clean IconState.plist
-    [self cleanIconStatePlist:bundleID];
-    
-    // NEW: Clean LaunchServices database
-    [self cleanLaunchServicesDatabase:bundleID];
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (NSString *)findBundleContainerUUID:(NSString *)bundleID {
@@ -6891,37 +5922,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 // NEW: Method to completely wipe a container directory
 - (void)completelyWipeContainer:(NSString *)containerPath {
-    if (![_fileManager fileExistsAtPath:containerPath]) {
-        return;
-    }
-
-    NSLog(@"[AppDataCleaner] Completely wiping container (batched shell): %@", containerPath);
-
-    BOOL deep = [self _deepCleanEnabled];
-    int timeout = deep ? (25 * 60) : (12 * 60);
-
-    // Preserve iOS container metadata files (do not rewrite them).
-    // Modifying these can break MCM/LaunchServices container mapping and cause "Data container not found".
-    NSArray *systemFiles = @[
-        @".com.apple.containermanagerd.metadata.plist",
-        @".com.apple.mobile_container_manager.metadata.plist"
-    ];
-    for (NSString *systemFile in systemFiles) {
-        NSString *fullPath = [containerPath stringByAppendingPathComponent:systemFile];
-        if ([_fileManager fileExistsAtPath:fullPath]) {
-            NSLog(@"[AppDataCleaner] Preserving system file: %@", fullPath);
-        }
-    }
-
-    NSString *q = PXShellQuote(containerPath);
-    // Preserve metadata, delete non-metadata contents, then recreate the compatibility directory structure.
-    NSString *script = [NSString stringWithFormat:
-        @"find %@ -type f -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -exec rm -f {} \\; 2>/dev/null || true; "
-        @"find %@ -depth -type d -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -empty -delete 2>/dev/null || true; "
-        @"mkdir -p %@/Documents %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true",
-        q, q,
-        q, q, q, q];
-    [self runCommandWithPrivileges:script timeoutSec:timeout];
+    (void)containerPath;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // NEW: Method to clean IconState.plist
@@ -7162,250 +6164,37 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (void)_wipeRelatedDataContainersForBundleIDs:(NSArray<NSString *> *)bundleIDs {
-    if (![bundleIDs isKindOfClass:[NSArray class]] || bundleIDs.count == 0) return;
-
-    for (NSString *bid in bundleIDs) {
-        if (![bid isKindOfClass:[NSString class]] || bid.length == 0) continue;
-        [self logMessage:@"[AppDataCleaner] Wiping related data containers for %@", bid];
-
-        // Rootful and rootless: scan metadata identifiers and wipe all matches.
-        NSArray<NSString *> *bases = @[
-            @"/var/mobile/Containers/Data/Application",
-            @"/containers/Data/Application"
-        ];
-        for (NSString *base in bases) {
-            if (![_fileManager fileExistsAtPath:base]) continue;
-            NSArray *uuids = [self listDirectoriesInPath:base];
-            for (NSString *uuid in uuids) {
-                if (![uuid isKindOfClass:[NSString class]] || !uuid.length) continue;
-                NSString *metadataPath = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, uuid];
-                NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-                NSString *ident = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-                if (!ident.length) continue;
-
-                // Exact match or prefix match (some services use suffixes).
-                BOOL match = [ident isEqualToString:bid] || [ident hasPrefix:[bid stringByAppendingString:@"."]] || [ident containsString:bid];
-                if (!match) continue;
-
-                NSString *p = [NSString stringWithFormat:@"%@/%@", base, uuid];
-                [self logMessage:@"[AppDataCleaner] Related container: %@ (ident=%@)", p, ident];
-                [self completelyWipeContainer:p];
-            }
-        }
-    }
+    (void)bundleIDs;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)_wipeRelatedSystemGroupContainersForIdentifiers:(NSArray<NSString *> *)idents {
-    if (![idents isKindOfClass:[NSArray class]] || idents.count == 0) return;
-
-    NSArray<NSString *> *bases = @[
-        @"/var/mobile/Containers/Shared/SystemGroup",
-        @"/containers/Shared/SystemGroup"
-    ];
-
-    for (NSString *base in bases) {
-        if (![_fileManager fileExistsAtPath:base]) continue;
-        NSArray *uuids = [self listDirectoriesInPath:base];
-        for (NSString *uuid in uuids) {
-            if (![uuid isKindOfClass:[NSString class]] || !uuid.length) continue;
-            NSString *metadataPath = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, uuid];
-            NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-            NSString *ident = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-            if (!ident.length) continue;
-
-            BOOL match = NO;
-            for (NSString *needle in idents) {
-                if (![needle isKindOfClass:[NSString class]] || !needle.length) continue;
-                if ([ident isEqualToString:needle] || [ident containsString:needle]) {
-                    match = YES;
-                    break;
-                }
-            }
-            if (!match) continue;
-
-            NSString *p = [NSString stringWithFormat:@"%@/%@", base, uuid];
-            [self logMessage:@"[AppDataCleaner] Related systemgroup container: %@ (ident=%@)", p, ident];
-            [self completelyWipeContainer:p];
-        }
-    }
+    (void)idents;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)_wipeContainersInBasePaths:(NSArray<NSString *> *)bases
                matchingSubstrings:(NSArray<NSString *> *)needles
                              tag:(NSString *)tag {
-    if (![bases isKindOfClass:[NSArray class]] || !bases.count) return;
-    if (![needles isKindOfClass:[NSArray class]] || !needles.count) return;
-
-    NSMutableArray<NSString *> *needlesLower = [NSMutableArray array];
-    for (NSString *n in needles) {
-        if ([n isKindOfClass:[NSString class]] && n.length) {
-            [needlesLower addObject:[n lowercaseString]];
-        }
-    }
-    if (!needlesLower.count) return;
-
-    NSUInteger matched = 0;
-    for (NSString *base in bases) {
-        if (![base isKindOfClass:[NSString class]] || !base.length) continue;
-        if (![_fileManager fileExistsAtPath:base]) continue;
-
-        NSArray *uuids = [self listDirectoriesInPath:base];
-        [self logMessage:@"[AppDataCleaner] %@ scanning %@ (count=%lu)", tag ?: @"", base, (unsigned long)uuids.count];
-        for (NSString *uuid in uuids) {
-            if (![uuid isKindOfClass:[NSString class]] || !uuid.length) continue;
-            NSString *metadataPath = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, uuid];
-            NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-            NSString *ident = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-            if (!ident.length) continue;
-            NSString *identLower = [ident lowercaseString];
-
-            BOOL match = NO;
-            for (NSString *needle in needlesLower) {
-                if ([identLower containsString:needle]) {
-                    match = YES;
-                    break;
-                }
-            }
-            if (!match) continue;
-
-            NSString *p = [NSString stringWithFormat:@"%@/%@", base, uuid];
-            matched++;
-            [self logMessage:@"[AppDataCleaner] %@ matched container: %@ (ident=%@)", tag ?: @"", p, ident];
-            [self completelyWipeContainer:p];
-        }
-    }
-    if (!matched) {
-        [self logMessage:@"[AppDataCleaner] %@ no containers matched substrings=%@", tag ?: @"", needlesLower];
-    }
+    (void)bases;
+    (void)needles;
+    (void)tag;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)_wipeDataContainersByIdentifierPrefixOrSubstring:(NSArray<NSString *> *)prefixes
                                               substrings:(NSArray<NSString *> *)substrings
                                                     tag:(NSString *)tag {
-    NSArray<NSString *> *bases = @[
-        @"/var/mobile/Containers/Data/Application",
-        @"/containers/Data/Application"
-    ];
-    NSMutableArray<NSString *> *pfx = [NSMutableArray array];
-    for (NSString *s in prefixes) {
-        if ([s isKindOfClass:[NSString class]] && s.length) [pfx addObject:s];
-    }
-    NSMutableArray<NSString *> *subs = [NSMutableArray array];
-    for (NSString *s in substrings) {
-        if ([s isKindOfClass:[NSString class]] && s.length) [subs addObject:[s lowercaseString]];
-    }
-
-    NSUInteger matched = 0;
-    for (NSString *base in bases) {
-        if (![_fileManager fileExistsAtPath:base]) continue;
-        NSArray *uuids = [self listDirectoriesInPath:base];
-        [self logMessage:@"[AppDataCleaner] %@ scanning %@ (count=%lu)", tag ?: @"", base, (unsigned long)uuids.count];
-        for (NSString *uuid in uuids) {
-            if (![uuid isKindOfClass:[NSString class]] || !uuid.length) continue;
-            NSString *metadataPath = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, uuid];
-            NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-            NSString *ident = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-            if (!ident.length) continue;
-
-            BOOL match = NO;
-            for (NSString *pre in pfx) {
-                if ([ident hasPrefix:pre]) { match = YES; break; }
-            }
-            if (!match) {
-                NSString *lower = [ident lowercaseString];
-                for (NSString *sub in subs) {
-                    if ([lower containsString:sub]) { match = YES; break; }
-                }
-            }
-            if (!match) continue;
-
-            NSString *p = [NSString stringWithFormat:@"%@/%@", base, uuid];
-            matched++;
-            [self logMessage:@"[AppDataCleaner] %@ matched data container: %@ (ident=%@)", tag ?: @"", p, ident];
-            [self completelyWipeContainer:p];
-        }
-    }
-    if (!matched) {
-        [self logMessage:@"[AppDataCleaner] %@ no data containers matched", tag ?: @""];
-    }
+    (void)prefixes;
+    (void)substrings;
+    (void)tag;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)_scrubWebKitStateInSharedContainerBase:(NSString *)base tag:(NSString *)tag {
-    if (!base.length) return;
-    if (![_fileManager fileExistsAtPath:base]) {
-        [self logMessage:@"[AppDataCleaner] %@ shared base missing: %@", tag ?: @"", base];
-        return;
-    }
-
-    NSArray *uuids = [self listDirectoriesInPath:base];
-    [self logMessage:@"[AppDataCleaner] %@ scrub scan %@ (count=%lu)", tag ?: @"", base, (unsigned long)uuids.count];
-
-    for (NSString *uuid in uuids) {
-        if (![uuid isKindOfClass:[NSString class]] || !uuid.length) continue;
-        NSString *containerPath = [NSString stringWithFormat:@"%@/%@", base, uuid];
-        NSString *metadataPath = [containerPath stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"]; 
-        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        NSString *ident = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-
-        // Detect Safari/WebKit state by structure, not identifier (ident can be opaque on some builds).
-        NSArray<NSString *> *pathsToNuke = @[
-            @"Library/WebKit",
-            @"Library/Safari",
-            @"Library/Cookies",
-            @"Library/HTTPStorages",
-            @"Library/Caches/com.apple.Safari",
-            @"Library/Caches/com.apple.mobilesafari",
-            @"Library/Caches/com.apple.SafariViewService"
-        ];
-        BOOL hasAny = NO;
-        for (NSString *rel in pathsToNuke) {
-            NSString *p = [containerPath stringByAppendingPathComponent:rel];
-            if ([_fileManager fileExistsAtPath:p]) { hasAny = YES; break; }
-        }
-
-        // Also detect any WebKit caches via glob patterns.
-        if (!hasAny) {
-            NSString *caches = [containerPath stringByAppendingPathComponent:@"Library/Caches"]; 
-            if ([_fileManager fileExistsAtPath:caches]) {
-                // Cheap heuristic: if any entry begins with com.apple.WebKit.
-                NSArray *entries = [_fileManager contentsOfDirectoryAtPath:caches error:nil];
-                for (NSString *e in entries) {
-                    if ([[e lowercaseString] containsString:@"webkit"] || [[e lowercaseString] containsString:@"safari"]) {
-                        hasAny = YES;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (!hasAny) continue;
-
-        [self logMessage:@"[AppDataCleaner] %@ scrubbing container=%@ ident=%@", tag ?: @"", containerPath, ident ?: @""];
-
-        // Kill helpers again to reduce races.
-        PXStopSafariDaemonsBestEffort(self);
-
-        NSMutableArray<NSString *> *parts = [NSMutableArray array];
-        for (NSString *rel in pathsToNuke) {
-            NSString *p = [containerPath stringByAppendingPathComponent:rel];
-            [parts addObject:[NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", PXShellQuote(p)]];
-        }
-
-        // Nuke WebKit caches with both dot and dash variants.
-        NSString *cachesDir = [containerPath stringByAppendingPathComponent:@"Library/Caches"]; 
-        if ([_fileManager fileExistsAtPath:cachesDir]) {
-            NSString *cq = PXShellQuote(cachesDir);
-            [parts addObject:[NSString stringWithFormat:@"rm -rf %@/com.apple.WebKit.* %@/com.apple.WebKit-* 2>/dev/null || true", cq, cq]];
-        }
-
-        // Remove any Safari/WebKit preferences under the container.
-        NSString *prefsDir = [containerPath stringByAppendingPathComponent:@"Library/Preferences"]; 
-        if ([_fileManager fileExistsAtPath:prefsDir]) {
-            NSString *pq = PXShellQuote(prefsDir);
-            [parts addObject:[NSString stringWithFormat:@"rm -f %@/com.apple.Safari*.plist %@/com.apple.WebKit*.plist 2>/dev/null || true", pq, pq]];
-        }
-        [self runBatchedCommandsWithPrivileges:parts timeoutSec:5 * 60];
-    }
+    (void)base;
+    (void)tag;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)_wipeMobileSafariSystemStores {
@@ -7720,367 +6509,26 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (void)cleanAppGroupContainers:(NSString *)bundleID {
-    [self logMessage:@"[AppDataCleaner] Cleaning app group containers for %@", bundleID];
-    
-    // First, check if the app has its own app groups
-    NSArray *groupUUIDs = [self findGroupContainerUUIDsForBundleID:bundleID];
-    NSArray *rootlessGroupUUIDs = [self findRootlessAppGroupUUIDs:bundleID];
-    
-    [self logMessage:@"[AppDataCleaner] Found %lu group containers", (unsigned long)groupUUIDs.count];
-    
-    // Get the app's base identifier components for searching
-    NSArray *parts = [bundleID componentsSeparatedByString:@"."];
-    NSString *companyName = parts.count > 1 ? parts[1] : @"";
-    
-    // Handle standard app group containers
-    for (NSString *uuid in groupUUIDs) {
-        NSString *containerPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", uuid];
-        [self logMessage:@"[AppDataCleaner] Checking app group container: %@", uuid];
-        
-        // Get and log the group identifier before wiping
-        NSString *metadataPath = [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.metadata.plist", containerPath];
-        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        NSString *groupIdentifier = metadata[@"MCMMetadataIdentifier"];
-        [self logMessage:@"[AppDataCleaner] Group identifier: %@", groupIdentifier];
-        
-        // Safety check: Don't wipe system groups
-        if ([groupIdentifier hasPrefix:@"group.com.apple"] || [groupIdentifier hasPrefix:@"com.apple"]) {
-             [self logMessage:@"[AppDataCleaner] SKIPPING system group: %@", groupIdentifier];
-             continue;
-        }
-        
-        // STRICT matching: Only wipe groups that DEFINITELY belong to this app
-        // For com.facebook.Facebook, we should only wipe groups containing "facebook"
-        BOOL isAppGroup = NO;
-        
-        // Check 1: Group contains full bundleID (e.g., group.com.facebook.Facebook)
-        if ([groupIdentifier containsString:bundleID]) {
-            isAppGroup = YES;
-            [self logMessage:@"[AppDataCleaner] Matched by bundleID"];
-        }
-        
-        // Check 2: Group contains company name (e.g., group.com.facebook.family)
-        // But ONLY if companyName is meaningful (not "com", "org", "net", etc.)
-        if (!isAppGroup && companyName.length > 3 && 
-            ![companyName isEqualToString:@"com"] && 
-            ![companyName isEqualToString:@"org"] && 
-            ![companyName isEqualToString:@"net"] &&
-            ![companyName isEqualToString:@"app"]) {
-            // Case-insensitive check for company name
-            if ([[groupIdentifier lowercaseString] containsString:[companyName lowercaseString]]) {
-                isAppGroup = YES;
-                [self logMessage:@"[AppDataCleaner] Matched by company name: %@", companyName];
-            }
-        }
-        
-        // DO NOT use firstComponent (it's usually "com" which matches everything!)
-        
-        if (isAppGroup) {
-            // This is definitely owned by our app - completely wipe it
-            [self logMessage:@"[AppDataCleaner] Wiping owned group container: %@", uuid];
-            [self completelyWipeContainer:containerPath];
-        } else {
-            // This does NOT belong to our app - SKIP it entirely
-            [self logMessage:@"[AppDataCleaner] SKIPPING unrelated group: %@", groupIdentifier];
-            // Don't even do selective cleaning on other apps' groups
-        }
-    }
-    
-    // Handle rootless app group containers using the same logic
-    for (NSString *uuid in rootlessGroupUUIDs) {
-        NSString *containerPath = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", uuid];
-        [self logMessage:@"[AppDataCleaner] Checking rootless app group container: %@", uuid];
-        
-        // Get and log the group identifier
-        NSString *metadataPath = [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.metadata.plist", containerPath];
-        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        id groupIdentifier = metadata[@"MCMMetadataIdentifier"];
-        
-        NSString *groupIdString = nil;
-        if ([groupIdentifier isKindOfClass:[NSString class]]) {
-            groupIdString = (NSString *)groupIdentifier;
-        }
-        
-        [self logMessage:@"[AppDataCleaner] Rootless group identifier: %@", groupIdString];
-        
-        if (groupIdString && ([groupIdString hasPrefix:@"group.com.apple"] || [groupIdString hasPrefix:@"com.apple"])) {
-             [self logMessage:@"[AppDataCleaner] SKIPPING rootless system group: %@", groupIdString];
-             continue;
-        }
-        
-        // STRICT matching: Only wipe groups that DEFINITELY belong to this app
-        BOOL isAppGroup = NO;
-        
-        // Check 1: Group contains full bundleID
-        if (groupIdString && [groupIdString containsString:bundleID]) {
-            isAppGroup = YES;
-        }
-        
-        // Check 2: Group contains company name (e.g., "facebook")
-        if (!isAppGroup && groupIdString && companyName.length > 3 && 
-            ![companyName isEqualToString:@"com"] && 
-            ![companyName isEqualToString:@"org"] && 
-            ![companyName isEqualToString:@"net"]) {
-            if ([[groupIdString lowercaseString] containsString:[companyName lowercaseString]]) {
-                isAppGroup = YES;
-            }
-        }
-        
-        if (isAppGroup) {
-            [self logMessage:@"[AppDataCleaner] Wiping owned rootless group: %@", uuid];
-            [self completelyWipeContainer:containerPath];
-        } else {
-            [self logMessage:@"[AppDataCleaner] SKIPPING unrelated rootless group: %@", groupIdString];
-        }
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 
 
 - (void)cleanAppSpecificFilesInSharedContainer:(NSString *)containerPath bundleID:(NSString *)bundleID appName:(NSString *)appName companyName:(NSString *)companyName {
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-                            NSError *error = nil;
-    NSArray *contents = [fileManager contentsOfDirectoryAtPath:containerPath error:&error];
-    
-    if (error) {
-        NSLog(@"[AppDataCleaner] Error accessing container %@: %@", containerPath, error);
-        return;
-    }
-    
-    // First pass: identify items that are definitely related to our app
-    for (NSString *item in contents) {
-        if ([item hasPrefix:@".com.apple"]) continue; // Skip system files
-        
-        BOOL isAppRelated = NO;
-        
-        // Very likely related to our app
-        if ([item containsString:bundleID] || 
-            (appName.length > 3 && [item containsString:appName]) || 
-            (companyName.length > 3 && [item containsString:companyName])) {
-            isAppRelated = YES;
-        }
-        
-        // Check additional app-specific patterns
-        NSArray *appSpecificPatterns = @[@"auth", @"credentials", @"token", @"session", appName.lowercaseString];
-        for (NSString *pattern in appSpecificPatterns) {
-            if ([item.lowercaseString containsString:pattern]) {
-                isAppRelated = YES;
-                break;
-            }
-        }
-        
-        if (isAppRelated) {
-            NSString *itemPath = [containerPath stringByAppendingPathComponent:item];
-            NSLog(@"[AppDataCleaner] Removing app-specific item from shared group: %@", itemPath);
-            [self fixPermissionsAndRemovePath:itemPath];
-        }
-    }
-    
-    // Second pass: handle database files that might contain app data
-    NSString *findDbCommand = [NSString stringWithFormat:@"find '%@' -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite-*'", containerPath];
-    NSString *output = [self runCommandAndGetOutput:findDbCommand];
-    if (output.length > 0) {
-        NSArray *dbFiles = [output componentsSeparatedByString:@"\n"];
-        
-        for (NSString *dbFile in dbFiles) {
-            if (dbFile.length > 0 && [fileManager fileExistsAtPath:dbFile]) {
-                NSLog(@"[AppDataCleaner] Cleaning app data from database: %@", dbFile);
-                [self cleanDatabaseFile:dbFile bundleID:bundleID appName:appName companyName:companyName];
-            }
-        }
-    }
+    (void)containerPath;
+    (void)bundleID;
+    (void)appName;
+    (void)companyName;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)deepCleanSystemSharedContainer:(NSString *)containerPath bundleID:(NSString *)bundleID appName:(NSString *)appName companyName:(NSString *)companyName {
-    // Get the container UUID from the path
-    NSString *uuid = [containerPath lastPathComponent];
-    
-    // Handle specific known problematic containers differently based on their content types
-    if ([uuid isEqualToString:@"1E1577AF-3EC2-4748-ADE9-937471B52738"] || // File Provider Storage
-        [uuid isEqualToString:@"101EFFE4-1A84-480A-B865-EDE04D8B9923"]) { // File Provider LocalStorage
-        NSLog(@"[AppDataCleaner] Deep cleaning File Provider container: %@", containerPath);
-        
-        // Clean File Provider Storage directories that might reference our app
-        NSString *command = [NSString stringWithFormat:@"find '%@' -type d -name '*%@*' -exec rm -rf {} \\; 2>/dev/null || true", 
-                           containerPath, appName];
-        [self runCommandWithPrivileges:command];
-        
-        // Also search for company names in the directory names
-        if (companyName.length > 0) {
-            command = [NSString stringWithFormat:@"find '%@' -type d -name '*%@*' -exec rm -rf {} \\; 2>/dev/null || true", 
-                      containerPath, companyName];
-            [self runCommandWithPrivileges:command];
-        }
-    } 
-    else if ([uuid isEqualToString:@"1E17A582-F7DC-429D-BE50-4A69226EC3FA"]) { // Maps
-        NSLog(@"[AppDataCleaner] Deep cleaning Maps container: %@", containerPath);
-        
-        // Clean map data entries related to our app
-        NSString *mapsDbPath = [containerPath stringByAppendingPathComponent:@"Maps/Maps.sqlite"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:mapsDbPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM location_bookmarks WHERE title LIKE '%%%@%%' OR subtitle LIKE '%%%@%%';\" 2>/dev/null || true", mapsDbPath, appName, appName]];
-            
-            // Add specific cleaning for Lyft and Zimride names
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM location_bookmarks WHERE title LIKE '%%lyft%%' OR subtitle LIKE '%%lyft%%';\" 2>/dev/null || true", mapsDbPath]];
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM location_bookmarks WHERE title LIKE '%%zimride%%' OR subtitle LIKE '%%zimride%%';\" 2>/dev/null || true", mapsDbPath]];
-            
-            if (companyName.length > 0) {
-                [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM location_bookmarks WHERE title LIKE '%%%@%%' OR subtitle LIKE '%%%@%%';\" 2>/dev/null || true", mapsDbPath, companyName, companyName]];
-            }
-            
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"VACUUM;\" 2>/dev/null || true", mapsDbPath]];
-        }
-    }
-    else if ([uuid isEqualToString:@"0DCF64D5-9838-4EFF-8D0E-8CCB197B65C1"]) { // Lyft group
-        NSLog(@"[AppDataCleaner] Deep cleaning Lyft container: %@", containerPath);
-        
-        // If our app is a transportation app, we should clean cross-app references
-        NSString *lyftStoragePath = [containerPath stringByAppendingPathComponent:@"com.zimride.instant.storage"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:lyftStoragePath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", lyftStoragePath]];
-        }
-        
-        // Check com.lyft.ios storage path
-        NSString *lyftIosStoragePath = [containerPath stringByAppendingPathComponent:@"com.lyft.ios.storage"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:lyftIosStoragePath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", lyftIosStoragePath]];
-        }
-        
-        // Also check old Lyft storage path
-        NSString *oldLyftStoragePath = [containerPath stringByAppendingPathComponent:@"com.lyft.ios.storage"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:oldLyftStoragePath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", oldLyftStoragePath]];
-        }
-        
-        // Check for com.lyft.ios directory
-        NSString *lyftIosPath = [containerPath stringByAppendingPathComponent:@"com.lyft.ios"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:lyftIosPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", lyftIosPath]];
-        }
-        
-        // Check for alternate storage paths too
-        NSString *alternateLyftPath = [containerPath stringByAppendingPathComponent:@"com.zimride.instant"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:alternateLyftPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", alternateLyftPath]];
-        }
-        
-        // Check old Lyft path
-        NSString *alternateOldLyftPath = [containerPath stringByAppendingPathComponent:@"com.lyft.me"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:alternateOldLyftPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", alternateOldLyftPath]];
-        }
-        
-        // Clean credentials
-        NSString *credentialsPath = [containerPath stringByAppendingPathComponent:@"Credentials"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:credentialsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", credentialsPath]];
-        }
-        
-        // Clean tokens
-        NSString *tokensPath = [containerPath stringByAppendingPathComponent:@"Tokens"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:tokensPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", tokensPath]];
-        }
-        
-        // Clean ride history
-        NSString *ridesPath = [containerPath stringByAppendingPathComponent:@"RideHistory"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:ridesPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", ridesPath]];
-        }
-        
-        // Clean saved locations
-        NSString *locationsPath = [containerPath stringByAppendingPathComponent:@"SavedLocations"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:locationsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", locationsPath]];
-        }
-        
-        // Clean databases
-        NSString *dbsPath = [containerPath stringByAppendingPathComponent:@"Databases"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:dbsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -name '*.db' -o -name '*.sqlite' -exec rm -f {} \\; 2>/dev/null || true", dbsPath]];
-        }
-        
-        // Find and clean any files/folders containing "lyft" in the name
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -type d -name '*lyft*' -exec rm -rf {} \\; 2>/dev/null || true", containerPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -type f -name '*lyft*' -exec rm -f {} \\; 2>/dev/null || true", containerPath]];
-        
-        // Find and clean any files/folders containing "zimride" in the name
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -type d -name '*zimride*' -exec rm -rf {} \\; 2>/dev/null || true", containerPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -type f -name '*zimride*' -exec rm -f {} \\; 2>/dev/null || true", containerPath]];
-    }
-    else if ([uuid isEqualToString:@"F7DD9815-AC23-47C4-A316-59779EDAB38D"]) { // Uber group
-        NSLog(@"[AppDataCleaner] Deep cleaning Uber container: %@", containerPath);
-        
-        // Clean Uber files - target both storage and credentials paths
-        NSString *uberStoragePath = [containerPath stringByAppendingPathComponent:@"com.uber.ios.storage"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:uberStoragePath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", uberStoragePath]];
-        }
-        
-        // Check for Helix (alternative Uber name)
-        NSString *helixStoragePath = [containerPath stringByAppendingPathComponent:@"com.helix.ios.storage"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:helixStoragePath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", helixStoragePath]];
-        }
-        
-        // Clean credentials storage specifically
-        // Clean credentials storage specifically
-        NSString *credentialsPath = [containerPath stringByAppendingPathComponent:@"Credentials"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:credentialsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", credentialsPath]];
-        }
-        
-        // Clean tokens directory
-        NSString *tokensPath = [containerPath stringByAppendingPathComponent:@"Tokens"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:tokensPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", tokensPath]];
-        }
-        
-        // Clean location history and trip data
-        NSString *tripsPath = [containerPath stringByAppendingPathComponent:@"Trips"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:tripsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", tripsPath]];
-        }
-        
-        // Clean location history
-        NSString *locHistoryPath = [containerPath stringByAppendingPathComponent:@"LocationHistory"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:locHistoryPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", locHistoryPath]];
-        }
-        
-        // Clean saved places
-        NSString *savedPlacesPath = [containerPath stringByAppendingPathComponent:@"SavedPlaces"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:savedPlacesPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", savedPlacesPath]];
-        }
-        
-        // Clean ride history
-        NSString *rideHistoryPath = [containerPath stringByAppendingPathComponent:@"RideHistory"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:rideHistoryPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", rideHistoryPath]];
-        }
-        
-        // Clean payment data
-        NSString *paymentsPath = [containerPath stringByAppendingPathComponent:@"Payments"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:paymentsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", paymentsPath]];
-        }
-        
-        // Clean cached data
-        NSString *cachePath = [containerPath stringByAppendingPathComponent:@"Cache"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:cachePath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", cachePath]];
-        }
-        
-        // Clean databases
-        NSString *dbsPath = [containerPath stringByAppendingPathComponent:@"Databases"];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:dbsPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -name '*.db' -o -name '*.sqlite' -exec rm -f {} \\; 2>/dev/null || true", dbsPath]];
-        } else {
-            // Clean all SQLite databases
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -name '*.db' -o -name '*.sqlite' -exec rm -f {} \\; 2>/dev/null || true", containerPath]];
-        }
-    }
+    (void)containerPath;
+    (void)bundleID;
+    (void)appName;
+    (void)companyName;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)cleanDatabaseFile:(NSString *)dbPath bundleID:(NSString *)bundleID appName:(NSString *)appName companyName:(NSString *)companyName {
