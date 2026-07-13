@@ -1287,15 +1287,13 @@ static NSString *PXShellFastDataContainerWipe(NSString *containerPath) {
             q];
 }
 
-/// Shell fragment: chflags + chmod + prune-aware final sweep (one traversal after unlock).
+/// Shell fragment: prune-aware final sweep deletion with existing path quoting.
 static NSString *PXShellFinalSweep(NSString *containerPath) {
     if (!containerPath.length) return @"";
     NSString *q = PXShellQuote(containerPath);
     return [NSString stringWithFormat:
-            @"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true; "
-            @"chmod -R 0777 %@ 2>/dev/null || true; "
             @"find %@ -mindepth 1 -path '*/.com.apple*' -prune -o -exec rm -rf {} + 2>/dev/null || true",
-            q, q, q];
+            q];
 }
 
 static NSString *PXTimestampSuffix(void) {
@@ -3327,7 +3325,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             [mailShell addObject:[NSString stringWithFormat:@"mv '%@' '%@' 2>/dev/null || true", mailPath, trashPath]];
         }
         [mailShell addObject:@"mkdir -p '/var/mobile/Library/Mail' 2>/dev/null || true"];
-        [mailShell addObject:@"chown -R mobile:mobile '/var/mobile/Library/Mail' 2>/dev/null || true"];
+        [mailShell addObject:@"chown mobile:mobile '/var/mobile/Library/Mail' 2>/dev/null || true"];
         [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
         [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
         [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
@@ -3593,7 +3591,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if (![containerPath isKindOfClass:[NSString class]] || containerPath.length == 0) return;
     if (![[NSFileManager defaultManager] fileExistsAtPath:containerPath]) return;
 
-    // Fast final sweep: chflags + chmod + find in ONE shell (same steps, one spawn).
+    // Fast final sweep uses only the prune-aware deletion fragment.
     // Preserve all .com.apple* entries to keep container metadata stable.
     BOOL deep = [self _deepCleanEnabled];
     int timeout = deep ? (20 * 60) : (8 * 60);
@@ -3662,30 +3660,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self clearAppGroupContainers:bundleID withGroupUUIDs:groupUUIDs isRootless:NO];
 }
 
-// NEW: Helper method to fix permissions and forcefully remove paths
+// Compatibility helper: remove a path without permission or flag mutation.
 - (void)fixPermissionsAndRemovePath:(NSString *)path {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0) {
+        return;
+    }
     if (![_fileManager fileExistsAtPath:path]) {
         return;
     }
-    
-    NSLog(@"[AppDataCleaner] Fixing permissions before removal: %@", path);
-    
-    NSString *q = PXShellQuote(path);
-    // chmod + chflags in one spawn; then try NSFileManager; fall back to rm in same style as before.
-    [self runCommandWithPrivileges:[NSString stringWithFormat:
-        @"chmod -R 0777 %@ 2>/dev/null || true; "
-        @"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true",
-        q, q] timeoutSec:120];
-    
-    // Try standard file manager removal
-    NSError *error;
+
+    NSLog(@"[AppDataCleaner] Removing path: %@", path);
+
+    NSError *error = nil;
     BOOL success = [_fileManager removeItemAtPath:path error:&error];
-    
     if (!success) {
         NSLog(@"[AppDataCleaner] Standard removal failed: %@", error.localizedDescription);
-        
-        // Try more aggressive removal with rm -rf
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", q] timeoutSec:120];
+        NSString *quotedPath = PXShellQuote(path);
+        [self runCommandWithPrivileges:
+            [NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", quotedPath]
+                              timeoutSec:120];
     }
 }
 
@@ -4812,12 +4805,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     } else {
         wipePart = [NSString stringWithFormat:@"rm -rf %@/* 2>/dev/null || true", quoted];
     }
-    // chflags + chmod + wipe in one spawn (same feature set).
-    NSString *cmd = [NSString stringWithFormat:
-                     @"chflags -R nouchg,noschg,nohidden %@ 2>/dev/null || true; "
-                     @"chmod -R 0777 %@ 2>/dev/null || true; %@",
-                     quoted, quoted, wipePart];
-    [self runCommandWithPrivileges:cmd timeoutSec:timeoutSec];
+    [self runCommandWithPrivileges:wipePart timeoutSec:timeoutSec];
 }
 
 - (void)clearSystemLogs:(NSString *)bundleID {
@@ -6095,11 +6083,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     
     NSLog(@"[AppDataCleaner] Using specialized WebKit cleaning for: %@", path);
     
-    // 1. First fix permissions at root level
-    NSString *permissionCommand = [NSString stringWithFormat:@"chmod -R 777 '%@' 2>/dev/null || true", path];
-    [self runCommandWithPrivileges:permissionCommand];
-    
-    // 2. Create a separate process to clean WebKit with appropriate permissions
+    // 1. Delete the current WebKit contents.
     NSString *command = [NSString stringWithFormat:@"rm -rf '%@'/* 2>/dev/null", path];
     [self runCommandWithPrivileges:command];
     
@@ -6648,21 +6632,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
 }
 
-// Helper method to fix permissions on a path
+// Compatibility no-op: recursive permission mutation is intentionally disabled.
 - (void)fixPermissionsForPath:(NSString *)path {
-    if (![_fileManager fileExistsAtPath:path]) {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0) {
         return;
     }
-    
-    NSLog(@"[AppDataCleaner] Fixing permissions for path: %@", path);
-    
-    // Command to fix permissions of the entire directory
-    NSString *chmodCommand = [NSString stringWithFormat:@"chmod -R 0777 '%@' 2>/dev/null || true", path];
-    [self runCommandWithPrivileges:chmodCommand];
-    
-    // Remove any immutable or hidden flags
-    NSString *chflagsCommand = [NSString stringWithFormat:@"chflags -R nouchg,noschg,nohidden '%@' 2>/dev/null || true", path];
-    [self runCommandWithPrivileges:chflagsCommand];
+
+    BOOL pathExists = [_fileManager fileExistsAtPath:path];
+    NSLog(@"[AppDataCleaner] Recursive permission mutation intentionally skipped for %@ (exists=%@)",
+          path,
+          pathExists ? @"YES" : @"NO");
 }
 
 // Add a new method for aggressive cleanup of stubborn files
@@ -6679,9 +6658,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         
         // Add additional aggressive cleaning of the Documents directory
         [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@/Documents' -type f -exec rm -f {} \\; 2>/dev/null || true", dataContainerPath]];
-        
-        // Force proper permissions on Library
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"chmod -R 755 '%@/Library' 2>/dev/null || true", dataContainerPath]];
         
         // Find and remove all database files which may contain authentication data
         [self runCommandWithPrivileges:[NSString stringWithFormat:@"find '%@' -name '*.db*' -exec rm -f {} \\; 2>/dev/null || true", dataContainerPath]];
@@ -6918,14 +6894,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if (![_fileManager fileExistsAtPath:containerPath]) {
         return;
     }
-    
+
     NSLog(@"[AppDataCleaner] Completely wiping container (batched shell): %@", containerPath);
 
     BOOL deep = [self _deepCleanEnabled];
-    int findTimeout = deep ? (20 * 60) : (8 * 60);
-    // Cover chmod + dual find + mkdir in one shell; use findTimeout as ceiling.
     int timeout = deep ? (25 * 60) : (12 * 60);
-    (void)findTimeout;
 
     // Preserve iOS container metadata files (do not rewrite them).
     // Modifying these can break MCM/LaunchServices container mapping and cause "Data container not found".
@@ -6941,19 +6914,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
 
     NSString *q = PXShellQuote(containerPath);
-    // Same steps as before (chmod → find files → empty dirs → mkdir → chmod → touch), one spawn.
+    // Preserve metadata, delete non-metadata contents, then recreate the compatibility directory structure.
     NSString *script = [NSString stringWithFormat:
-        @"chmod -R 777 %@ 2>/dev/null || true; "
-        @"find %@ -type d -exec chmod 777 {} \\; 2>/dev/null || true; "
         @"find %@ -type f -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -exec rm -f {} \\; 2>/dev/null || true; "
         @"find %@ -depth -type d -not -name '.com.apple.mobile_container_manager*' -not -name '.com.apple.containermanagerd*' -empty -delete 2>/dev/null || true; "
-        @"mkdir -p %@/Documents %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true; "
-        @"chmod 755 %@/Documents %@/Library %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true; "
-        @"touch %@/Documents/.nomedia %@/Library/Preferences/.initialized 2>/dev/null || true",
-        q, q, q, q,
-        q, q, q, q,
-        q, q, q, q, q,
-        q, q];
+        @"mkdir -p %@/Documents %@/Library/Caches %@/Library/Preferences %@/tmp 2>/dev/null || true",
+        q, q,
+        q, q, q, q];
     [self runCommandWithPrivileges:script timeoutSec:timeout];
 }
 
@@ -7044,8 +7011,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // Force data flush by running VACUUM
     [self runCommandWithPrivileges:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"VACUUM;\""];
     
-    // For verification purposes, ensure the database can't be flagged during verification
-    [self runCommandWithPrivileges:@"touch -r /var/mobile/Library/Assistant/SiriAnalytics.db /System/Library/PrivateFrameworks/AssistantServices.framework/AssistantServices"];
 }
 
 // NEW: Method to clean LaunchServices database
@@ -7628,7 +7593,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSString *wq = PXShellQuote(webKitDir);
             [parts addObject:[NSString stringWithFormat:@"rm -rf %@ 2>/dev/null || true", wq]];
             [parts addObject:[NSString stringWithFormat:@"mkdir -p %@ 2>/dev/null || true", wq]];
-            [parts addObject:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", wq]];
+            [parts addObject:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true", wq]];
         }
 
         NSString *cookiesDir = [base stringByAppendingPathComponent:@"Cookies"];
