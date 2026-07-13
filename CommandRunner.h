@@ -6,6 +6,15 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) int exitCode;
 @property (nonatomic, copy) NSString *stdoutString;
 @property (nonatomic, copy) NSString *stderrString;
+@property (nonatomic, assign) int spawnError;
+@property (nonatomic, assign) int runnerError;
+@property (nonatomic, assign) int terminationSignal;
+@property (nonatomic, assign) BOOL exitedNormally;
+@property (nonatomic, assign) BOOL timedOut;
+@property (nonatomic, assign) NSTimeInterval duration;
+@property (nonatomic, assign) BOOL stdoutTruncated;
+@property (nonatomic, assign) BOOL stderrTruncated;
+@property (nonatomic, readonly, getter=isSucceeded) BOOL succeeded;
 @end
 
 @interface CommandRunner : NSObject
