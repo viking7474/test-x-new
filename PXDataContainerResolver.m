@@ -1,33 +1,15 @@
 #import "PXDataContainerResolver.h"
 
+#import <sys/stat.h>
+
 NSString * const PXDataContainerResolverErrorDomain = @"PXDataContainerResolverErrorDomain";
 
-static NSString * const PXRootfulApplicationDataBase = @"/private/var/mobile/Containers/Data/Application";
-static NSString * const PXRootlessApplicationDataBase = @"/containers/Data/Application";
-static NSString * const PXContainerMetadataFilename = @".com.apple.mobile_container_manager.metadata.plist";
-static NSString * const PXContainerMetadataIdentifierKey = @"MCMMetadataIdentifier";
-
-static void PXSetDataContainerResolverError(NSError * _Nullable * _Nullable error,
-                                            PXDataContainerResolverErrorCode code,
-                                            NSString *description) {
-    if (error == NULL) {
-        return;
-    }
-
-    *error = [NSError errorWithDomain:PXDataContainerResolverErrorDomain
-                                 code:code
-                             userInfo:@{NSLocalizedDescriptionKey: description}];
-}
-
-static BOOL PXStringContainsNUL(NSString *value) {
-    unichar nulCharacter = 0;
-    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
-    return [value rangeOfString:nulString].location != NSNotFound;
-}
-
-static BOOL PXStringContainsNonWhitespace(NSString *value) {
-    NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-    return [value rangeOfCharacterFromSet:[whitespace invertedSet]].location != NSNotFound;
+static BOOL PXResolverCharacterIsAllowed(unichar character) {
+    return (character >= (unichar)'A' && character <= (unichar)'Z') ||
+           (character >= (unichar)'a' && character <= (unichar)'z') ||
+           (character >= (unichar)'0' && character <= (unichar)'9') ||
+           character == (unichar)'-' ||
+           character == (unichar)'.';
 }
 
 static BOOL PXResolverIdentifierIsValid(id value) {
@@ -36,9 +18,34 @@ static BOOL PXResolverIdentifierIsValid(id value) {
     }
 
     NSString *identifier = (NSString *)value;
-    return identifier.length > 0 &&
-           PXStringContainsNonWhitespace(identifier) &&
-           !PXStringContainsNUL(identifier);
+    if (identifier.length == 0 ||
+        [identifier characterAtIndex:0] == (unichar)'.' ||
+        [identifier characterAtIndex:(identifier.length - 1)] == (unichar)'.') {
+        return NO;
+    }
+
+    NSUInteger componentLength = 0;
+    for (NSUInteger index = 0; index < identifier.length; index++) {
+        unichar character = [identifier characterAtIndex:index];
+        if (!PXResolverCharacterIsAllowed(character)) {
+            return NO;
+        }
+        if (character == (unichar)'.') {
+            if (componentLength == 0) {
+                return NO;
+            }
+            componentLength = 0;
+        } else {
+            componentLength++;
+        }
+    }
+    return componentLength > 0;
+}
+
+static BOOL PXResolverKindIsAllowed(PXResolvedContainerKind kind) {
+    return kind == PXResolvedContainerKindApplicationData ||
+           kind == PXResolvedContainerKindExtensionData ||
+           kind == PXResolvedContainerKindPluginKitData;
 }
 
 static BOOL PXResolverRootIsValid(PXResolvedContainerRoot root) {
@@ -46,134 +53,175 @@ static BOOL PXResolverRootIsValid(PXResolvedContainerRoot root) {
            root == PXResolvedContainerRootRootless;
 }
 
-static NSString *PXApplicationDataBaseForRoot(PXResolvedContainerRoot root) {
-    switch (root) {
-        case PXResolvedContainerRootRootful:
-            return PXRootfulApplicationDataBase;
-        case PXResolvedContainerRootRootless:
-            return PXRootlessApplicationDataBase;
+static NSString *PXResolverBasePath(PXResolvedContainerKind kind,
+                                    PXResolvedContainerRoot root) {
+    if (!PXResolverKindIsAllowed(kind) || !PXResolverRootIsValid(root)) {
+        return nil;
     }
-    return nil;
+
+    if (kind == PXResolvedContainerKindPluginKitData) {
+        return root == PXResolvedContainerRootRootful
+            ? @"/private/var/mobile/Containers/Data/PluginKitPlugin"
+            : @"/containers/Data/PluginKitPlugin";
+    }
+
+    return root == PXResolvedContainerRootRootful
+        ? @"/private/var/mobile/Containers/Data/Application"
+        : @"/containers/Data/Application";
 }
 
-static BOOL PXDirectoryEntryIsValid(id value) {
-    if (![value isKindOfClass:[NSString class]]) {
+static void PXResolverAssignError(NSError **error,
+                                  PXDataContainerResolverErrorCode code,
+                                  NSString *message) {
+    if (!error) {
+        return;
+    }
+    *error = [NSError errorWithDomain:PXDataContainerResolverErrorDomain
+                                 code:code
+                             userInfo:@{NSLocalizedDescriptionKey: message ?: @"Data container resolution failed"}];
+}
+
+static BOOL PXResolverImmediateDirectoryIsValid(NSString *path) {
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    if (!fileSystemPath) {
         return NO;
     }
 
-    NSString *entry = (NSString *)value;
-    if (entry.length == 0 ||
-        [entry isEqualToString:@"."] ||
-        [entry isEqualToString:@".."] ||
-        [entry hasPrefix:@"."] ||
-        [entry rangeOfString:@"/"].location != NSNotFound ||
-        PXStringContainsNUL(entry)) {
+    struct stat entryStat;
+    if (lstat(fileSystemPath, &entryStat) != 0) {
+        return NO;
+    }
+    return S_ISDIR(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
+}
+
+static BOOL PXResolverMetadataFileIsValid(NSString *path) {
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    if (!fileSystemPath) {
         return NO;
     }
 
-    return [[NSUUID alloc] initWithUUIDString:entry] != nil;
+    struct stat entryStat;
+    if (lstat(fileSystemPath, &entryStat) != 0) {
+        return NO;
+    }
+    return S_ISREG(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
 }
 
 @implementation PXDataContainerResolver
 
-- (nullable PXResolvedContainer *)resolveApplicationDataContainerForIdentifier:(NSString *)identifier
-                                                                          root:(PXResolvedContainerRoot)root
-                                                                         error:(NSError * _Nullable * _Nullable)error {
-    if (error != NULL) {
+- (PXResolvedContainer *)resolveDataContainerForIdentifier:(NSString *)identifier
+                                                       kind:(PXResolvedContainerKind)kind
+                                                       root:(PXResolvedContainerRoot)root
+                                                      error:(NSError **)error {
+    if (error) {
         *error = nil;
     }
 
-    if (!PXResolverIdentifierIsValid(identifier) || !PXResolverRootIsValid(root)) {
-        PXSetDataContainerResolverError(error,
-                                        PXDataContainerResolverErrorInvalidInput,
-                                        @"The application identifier or container root is invalid.");
+    if (!PXResolverIdentifierIsValid(identifier) ||
+        !PXResolverKindIsAllowed(kind) ||
+        !PXResolverRootIsValid(root)) {
+        PXResolverAssignError(error,
+                              PXDataContainerResolverErrorInvalidInput,
+                              @"Invalid data container resolution request");
         return nil;
     }
 
-    NSString *basePath = PXApplicationDataBaseForRoot(root);
+    NSString *basePath = PXResolverBasePath(kind, root);
+    if (basePath.length == 0) {
+        PXResolverAssignError(error,
+                              PXDataContainerResolverErrorInvalidInput,
+                              @"Invalid data container resolution request");
+        return nil;
+    }
+
     NSFileManager *fileManager = [NSFileManager defaultManager];
     BOOL baseIsDirectory = NO;
     if (![fileManager fileExistsAtPath:basePath isDirectory:&baseIsDirectory]) {
         return nil;
     }
     if (!baseIsDirectory) {
-        PXSetDataContainerResolverError(error,
-                                        PXDataContainerResolverErrorEnumerationFailed,
-                                        @"The selected application-data container base is not a directory.");
+        PXResolverAssignError(error,
+                              PXDataContainerResolverErrorEnumerationFailed,
+                              @"Data container root is not a directory");
         return nil;
     }
 
     NSError *enumerationError = nil;
-    NSArray *rawChildNames = [fileManager contentsOfDirectoryAtPath:basePath
-                                                              error:&enumerationError];
-    if (![rawChildNames isKindOfClass:[NSArray class]] || enumerationError != nil) {
-        PXSetDataContainerResolverError(error,
-                                        PXDataContainerResolverErrorEnumerationFailed,
-                                        @"The selected application-data container base could not be enumerated.");
+    NSArray<NSString *> *entries = [fileManager contentsOfDirectoryAtPath:basePath
+                                                                     error:&enumerationError];
+    if (![entries isKindOfClass:[NSArray class]] || enumerationError) {
+        PXResolverAssignError(error,
+                              PXDataContainerResolverErrorEnumerationFailed,
+                              @"Data container root enumeration failed");
         return nil;
     }
 
-    NSMutableArray<NSString *> *childNames = [NSMutableArray array];
-    for (id rawChildName in rawChildNames) {
-        if ([rawChildName isKindOfClass:[NSString class]]) {
-            [childNames addObject:(NSString *)rawChildName];
-        }
-    }
-    [childNames sortUsingSelector:@selector(compare:)];
+    entries = [entries sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray<PXResolvedContainer *> *matches = [NSMutableArray array];
 
-    PXResolvedContainer *resolvedContainer = nil;
-    for (NSString *containerUUID in childNames) {
-        if (!PXDirectoryEntryIsValid(containerUUID)) {
+    for (NSString *entry in entries) {
+        if (![entry isKindOfClass:[NSString class]] || entry.length == 0 ||
+            [entry characterAtIndex:0] == (unichar)'.' ||
+            [[NSUUID alloc] initWithUUIDString:entry] == nil) {
             continue;
         }
 
-        NSString *containerPath = [basePath stringByAppendingPathComponent:containerUUID];
-        BOOL candidateIsDirectory = NO;
-        if (![fileManager fileExistsAtPath:containerPath isDirectory:&candidateIsDirectory] ||
-            !candidateIsDirectory) {
+        NSString *containerPath = [basePath stringByAppendingPathComponent:entry];
+        if (!PXResolverImmediateDirectoryIsValid(containerPath)) {
             continue;
         }
 
-        NSString *metadataPath = [containerPath stringByAppendingPathComponent:PXContainerMetadataFilename];
-        id metadataObject = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        if (![metadataObject isKindOfClass:[NSDictionary class]]) {
+        NSString *metadataPath = [containerPath stringByAppendingPathComponent:
+                                  @".com.apple.mobile_container_manager.metadata.plist"];
+        if (!PXResolverMetadataFileIsValid(metadataPath)) {
             continue;
         }
 
-        id rawMetadataIdentifier = [(NSDictionary *)metadataObject objectForKey:PXContainerMetadataIdentifierKey];
-        if (!PXResolverIdentifierIsValid(rawMetadataIdentifier)) {
+        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+        if (![metadata isKindOfClass:[NSDictionary class]]) {
             continue;
         }
 
-        NSString *metadataIdentifier = (NSString *)rawMetadataIdentifier;
-        if (![metadataIdentifier isEqualToString:identifier]) {
+        id metadataIdentifier = metadata[@"MCMMetadataIdentifier"];
+        if (![metadataIdentifier isKindOfClass:[NSString class]] ||
+            ![(NSString *)metadataIdentifier isEqualToString:identifier]) {
             continue;
         }
 
-        PXResolvedContainer *candidate = [[PXResolvedContainer alloc]
-            initWithKind:PXResolvedContainerKindApplicationData
-                    root:root
-     requestedIdentifier:identifier
-      metadataIdentifier:metadataIdentifier
-           containerUUID:containerUUID
-           containerPath:containerPath];
-        if (candidate == nil) {
-            PXSetDataContainerResolverError(error,
-                                            PXDataContainerResolverErrorInvalidCandidate,
-                                            @"An exact metadata match could not produce a valid resolved container.");
+        PXResolvedContainer *candidate = [[PXResolvedContainer alloc] initWithKind:kind
+                                                                              root:root
+                                                               requestedIdentifier:identifier
+                                                                metadataIdentifier:(NSString *)metadataIdentifier
+                                                                     containerUUID:entry
+                                                                     containerPath:containerPath];
+        if (!candidate) {
+            PXResolverAssignError(error,
+                                  PXDataContainerResolverErrorInvalidCandidate,
+                                  @"Exact data container match could not be represented safely");
             return nil;
         }
-
-        if (resolvedContainer != nil) {
-            PXSetDataContainerResolverError(error,
-                                            PXDataContainerResolverErrorAmbiguousMatch,
-                                            @"Multiple exact application-data container matches were found.");
-            return nil;
-        }
-        resolvedContainer = candidate;
+        [matches addObject:candidate];
     }
 
-    return resolvedContainer;
+    if (matches.count == 0) {
+        return nil;
+    }
+    if (matches.count > 1) {
+        PXResolverAssignError(error,
+                              PXDataContainerResolverErrorAmbiguousMatch,
+                              @"Multiple exact data container matches were found");
+        return nil;
+    }
+    return matches.firstObject;
+}
+
+- (PXResolvedContainer *)resolveApplicationDataContainerForIdentifier:(NSString *)identifier
+                                                                  root:(PXResolvedContainerRoot)root
+                                                                 error:(NSError **)error {
+    return [self resolveDataContainerForIdentifier:identifier
+                                              kind:PXResolvedContainerKindApplicationData
+                                              root:root
+                                             error:error];
 }
 
 @end

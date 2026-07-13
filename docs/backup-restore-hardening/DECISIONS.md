@@ -475,3 +475,57 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: TASK-1.7 preserves public `AppDataCleaner` selectors, emits only an internal ApplicationData component result and does not add a public typed Clear API or full five-scope aggregate.
 - Reason: Extension, PluginKit, App Group and Keychain components still use legacy behavior and cannot yet be represented honestly as a complete typed operation.
+
+## D-080 — Installed extension identity comes from contained app-extension bundles
+
+- Status: Accepted
+- Decision: TASK-1.8 derives extension identifiers only from exact `CFBundleIdentifier` values of real `.appex` bundles physically contained in the exact installed main `.app`; parent-bundle prefix matching is not ownership proof.
+- Reason: Extension identifiers are not required to share a string prefix with the parent app, while unrelated identifiers can share one. Physical containment in the exact read-only app bundle provides a stronger identity source.
+
+## D-081 — Data-container resolution is generalized by explicit kind
+
+- Status: Accepted
+- Decision: `PXDataContainerResolver` gains one generic exact resolver for ApplicationData, ExtensionData and PluginKitData. The existing application-data API remains and delegates to the generic method. AppGroup is rejected.
+- Reason: All three kinds use exact string `MCMMetadataIdentifier` semantics, while App Group metadata can be an array and remains owned by its specialized resolver.
+
+## D-082 — Duplicate installed extension identifiers fail closed
+
+- Status: Accepted
+- Decision: If the same extension bundle identifier appears at two distinct `.appex` paths inside the selected main app bundle, migrated extension discovery fails instead of silently deduplicating or choosing one path.
+- Reason: Two code locations claiming one extension identity are ambiguous authorization input for destructive container selection.
+
+## D-083 — ExtensionData and PluginKitData use independent identifier-root units
+
+- Status: Accepted
+- Decision: TASK-1.8 processes sorted extension identifiers with rootful then rootless units separately for ExtensionData and PluginKitData. Missing exact containers are not attempted; every resolver/validation/execution/postcondition failure is one failed unit.
+- Reason: Independent units preserve exact partial outcomes across multiple extensions, roots and container kinds.
+
+## D-084 — PluginKitData means only validated PluginKitPlugin containers
+
+- Status: Accepted
+- Decision: The PluginKitData component covers only exact validated containers under the fixed rootful/rootless `Containers/Data/PluginKitPlugin` bases. Global PlugInKit databases or wildcard-matched library files are outside this component.
+- Reason: Global PlugInKit state is not represented by `PXResolvedContainerKindPluginKitData` and cannot be authorized through container metadata identity.
+
+## D-085 — Migrated extension containers use the TASK-1.7 strict wipe boundary
+
+- Status: Accepted
+- Decision: ExtensionData and PluginKitData reuse the same canonical-path-only bounded command, post-command validator and strict filesystem postcondition as ApplicationData; raw UUID paths, permission-fixing helpers and batched void commands are forbidden.
+- Reason: All mutable data-container kinds require the same proof that exact resolution, canonical authorization, execution and final layout succeeded.
+
+## D-086 — The internal migrated aggregate grows to three scopes
+
+- Status: Accepted
+- Decision: TASK-1.8 constructs an internal request/result aggregate containing exactly ApplicationData, ExtensionData and PluginKitData. AppGroups and Keychain remain legacy side effects until their dedicated migration tasks.
+- Reason: The aggregate must cover only components whose structured outcomes are truthful and reviewable at the current gate.
+
+## D-087 — Migrated callback failure precedence is component ordered
+
+- Status: Accepted
+- Decision: Legacy callback error precedence after TASK-1.8 is ApplicationData, ExtensionData, PluginKitData, then Keychain. Lower-precedence simultaneous failures are logged.
+- Reason: Deterministic precedence prevents callback behavior from depending on execution order while preserving the most foundational container failure.
+
+## D-088 — Extension verification caches canonical paths by scope
+
+- Status: Accepted
+- Decision: Raw extension dictionaries and UUID cache state are replaced in the migrated flow by separate copied canonical path arrays for ExtensionData and PluginKitData.
+- Reason: Verification must consume validator outputs directly and must not reconstruct destructive identities from legacy UUID/type/root dictionaries.

@@ -34,7 +34,19 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 - (NSString *)runCommandAndGetOutput:(NSString *)command
                           timeoutSec:(NSTimeInterval)timeoutSec;
 - (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments;
+- (PXClearResult *)_completeDataWipeForMigratedRequest:(PXClearRequest *)request;
 - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request;
+- (NSArray<NSString *> *)_exactInstalledExtensionIdentifiersForApplicationIdentifier:(NSString *)bundleIdentifier
+                                                                                error:(NSError **)error;
+- (PXClearComponentResult *)_clearExactDataContainerComponentForIdentifiers:(NSArray<NSString *> *)identifiers
+                                                                       kind:(PXResolvedContainerKind)kind
+                                                                      scope:(PXClearScope)scope
+                                                                 timeoutSec:(NSTimeInterval)timeoutSec
+                                                             canonicalPaths:(NSArray<NSString *> **)canonicalPaths
+                                                   successfulCanonicalPaths:(NSSet<NSString *> **)successfulCanonicalPaths;
+- (PXClearComponentResult *)_componentByApplyingFinalPostconditionToResult:(PXClearComponentResult *)result
+                                                            canonicalPaths:(NSArray<NSString *> *)canonicalPaths
+                                                  successfulCanonicalPaths:(NSSet<NSString *> *)successfulCanonicalPaths;
 - (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID
                                                          deepClean:(BOOL)deepClean;
 @end
@@ -46,7 +58,8 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
     NSArray<NSString *> *_wipeCacheApplicationDataCanonicalPaths;
     NSArray *_wipeCacheGroupUUIDs;
     NSArray *_wipeCacheRootlessGroupUUIDs;
-    NSArray *_wipeCacheExtensionContainers; // array of @{dataUUID, rootless}
+    NSArray<NSString *> *_wipeCacheExtensionDataCanonicalPaths;
+    NSArray<NSString *> *_wipeCachePluginKitDataCanonicalPaths;
 }
 
 - (BOOL)_sqliteExecAtPath:(NSString *)dbPath sql:(NSString *)sql errorOut:(NSString **)errorOut {
@@ -659,6 +672,211 @@ static NSString *PXApplicationDataStatusName(PXClearComponentStatus status) {
     return @"Invalid";
 }
 
+static const PXClearScope PXMigratedDataClearScopes =
+    PXClearScopeApplicationData |
+    PXClearScopeExtensionData |
+    PXClearScopePluginKitData;
+
+typedef NS_ENUM(NSInteger, PXExactDataClearFailureCode) {
+    PXExactDataClearFailureCodeInvalidRequest = 1,
+    PXExactDataClearFailureCodeDiscoveryFailed = 2,
+    PXExactDataClearFailureCodeResolutionFailed = 3,
+    PXExactDataClearFailureCodeValidationFailed = 4,
+    PXExactDataClearFailureCodeExecutionFailed = 5,
+    PXExactDataClearFailureCodePostconditionFailed = 6,
+    PXExactDataClearFailureCodeInternalResultFailure = 7,
+};
+
+typedef NS_ENUM(NSInteger, PXInstalledExtensionDiscoveryErrorCode) {
+    PXInstalledExtensionDiscoveryErrorCodeInvalidRequest = 1,
+    PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed = 2,
+    PXInstalledExtensionDiscoveryErrorCodeAmbiguousMatch = 3,
+    PXInstalledExtensionDiscoveryErrorCodeInvalidCandidate = 4,
+};
+
+static NSString * const PXExtensionDataClearFailureDomain = @"PXExtensionDataClear";
+static NSString * const PXPluginKitDataClearFailureDomain = @"PXPluginKitDataClear";
+static NSString * const PXMigratedDataClearFailureDomain = @"PXMigratedDataClear";
+static NSString * const PXInstalledExtensionDiscoveryErrorDomain = @"PXInstalledExtensionDiscovery";
+static NSString * const PXNoInstalledExtensionsDetail = @"No installed application extensions were discovered";
+static NSString * const PXNoExactExtensionDataContainersDetail = @"No exact extension-data containers were found";
+static NSString * const PXNoExactPluginKitDataContainersDetail = @"No exact PluginKit data containers were found";
+
+static BOOL PXStrictBundleIdentifierCharacterIsAllowed(unichar character) {
+    return (character >= (unichar)'A' && character <= (unichar)'Z') ||
+           (character >= (unichar)'a' && character <= (unichar)'z') ||
+           (character >= (unichar)'0' && character <= (unichar)'9') ||
+           character == (unichar)'-' ||
+           character == (unichar)'.';
+}
+
+static BOOL PXStrictBundleIdentifierIsValid(id value) {
+    if (![value isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+    NSString *identifier = (NSString *)value;
+    if (identifier.length == 0 ||
+        [identifier characterAtIndex:0] == (unichar)'.' ||
+        [identifier characterAtIndex:(identifier.length - 1)] == (unichar)'.') {
+        return NO;
+    }
+
+    NSUInteger componentLength = 0;
+    for (NSUInteger index = 0; index < identifier.length; index++) {
+        unichar character = [identifier characterAtIndex:index];
+        if (!PXStrictBundleIdentifierCharacterIsAllowed(character)) {
+            return NO;
+        }
+        if (character == (unichar)'.') {
+            if (componentLength == 0) {
+                return NO;
+            }
+            componentLength = 0;
+        } else {
+            componentLength++;
+        }
+    }
+    return componentLength > 0;
+}
+
+static BOOL PXReadOnlyRealDirectoryAtPath(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0) {
+        return NO;
+    }
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    struct stat pathStat;
+    return fileSystemPath != NULL &&
+           lstat(fileSystemPath, &pathStat) == 0 &&
+           S_ISDIR(pathStat.st_mode) &&
+           !S_ISLNK(pathStat.st_mode);
+}
+
+static BOOL PXReadOnlyRegularNonSymlinkFileAtPath(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0) {
+        return NO;
+    }
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    struct stat pathStat;
+    return fileSystemPath != NULL &&
+           lstat(fileSystemPath, &pathStat) == 0 &&
+           S_ISREG(pathStat.st_mode) &&
+           !S_ISLNK(pathStat.st_mode);
+}
+
+static void PXInstalledExtensionDiscoveryAssignError(NSError **error,
+                                                      PXInstalledExtensionDiscoveryErrorCode code,
+                                                      NSString *message) {
+    if (!error) return;
+    *error = [NSError errorWithDomain:PXInstalledExtensionDiscoveryErrorDomain
+                                 code:code
+                             userInfo:@{NSLocalizedDescriptionKey: message ?: @"Installed extension discovery failed"}];
+}
+
+static NSString *PXExactDataFailureDomainForScope(PXClearScope scope) {
+    if (scope == PXClearScopeExtensionData) {
+        return PXExtensionDataClearFailureDomain;
+    }
+    if (scope == PXClearScopePluginKitData) {
+        return PXPluginKitDataClearFailureDomain;
+    }
+    return PXMigratedDataClearFailureDomain;
+}
+
+static NSString *PXExactDataComponentName(PXClearScope scope) {
+    return scope == PXClearScopePluginKitData ? @"PluginKitData" : @"ExtensionData";
+}
+
+static PXClearFailure *PXExactDataFailure(PXClearScope scope,
+                                          PXExactDataClearFailureCode code,
+                                          NSString *message) {
+    return [[PXClearFailure alloc] initWithDomain:PXExactDataFailureDomainForScope(scope)
+                                            code:code
+                                         message:message ?: @"Exact extension data clear failed"];
+}
+
+static PXClearComponentResult *PXExactDataFailedComponent(PXClearScope scope,
+                                                          PXExactDataClearFailureCode code,
+                                                          NSString *message) {
+    PXClearFailure *failure = PXExactDataFailure(scope, code, message);
+    NSString *detail = scope == PXClearScopePluginKitData
+        ? @"PluginKitData clear could not produce a valid component result"
+        : @"ExtensionData clear could not produce a valid component result";
+    return [[PXClearComponentResult alloc] initWithScope:scope
+                                                  status:PXClearComponentStatusFailed
+                                      attemptedUnitCount:1
+                                      succeededUnitCount:0
+                                         failedUnitCount:1
+                                                  detail:detail
+                                                 failure:failure];
+}
+
+static BOOL PXExactDataComponentResultIsStructurallyValid(id value,
+                                                          PXClearScope expectedScope) {
+    if (![value isKindOfClass:[PXClearComponentResult class]]) return NO;
+    PXClearComponentResult *result = (PXClearComponentResult *)value;
+    if (result.scope != expectedScope ||
+        (expectedScope != PXClearScopeExtensionData && expectedScope != PXClearScopePluginKitData) ||
+        result.succeededUnitCount > result.attemptedUnitCount ||
+        result.failedUnitCount != result.attemptedUnitCount - result.succeededUnitCount) {
+        return NO;
+    }
+
+    switch (result.status) {
+        case PXClearComponentStatusSucceeded:
+            return result.attemptedUnitCount > 0 &&
+                   result.succeededUnitCount == result.attemptedUnitCount &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil;
+        case PXClearComponentStatusSkipped:
+            return result.attemptedUnitCount == 0 &&
+                   result.succeededUnitCount == 0 &&
+                   result.failedUnitCount == 0 &&
+                   result.failure == nil &&
+                   result.detail != nil;
+        case PXClearComponentStatusFailed:
+            return result.attemptedUnitCount > 0 &&
+                   result.failedUnitCount > 0 &&
+                   [result.failure isKindOfClass:[PXClearFailure class]] &&
+                   [result.failure.domain isEqualToString:PXExactDataFailureDomainForScope(expectedScope)];
+    }
+    return NO;
+}
+
+static BOOL PXMigratedClearResultIsStructurallyValid(id value) {
+    if (![value isKindOfClass:[PXClearResult class]]) return NO;
+    PXClearResult *result = (PXClearResult *)value;
+    if (![result.request isKindOfClass:[PXClearRequest class]] ||
+        result.request.scopes != PXMigratedDataClearScopes ||
+        result.componentResults.count != 3) {
+        return NO;
+    }
+
+    PXClearComponentResult *applicationData = result.componentResults[0];
+    PXClearComponentResult *extensionData = result.componentResults[1];
+    PXClearComponentResult *pluginKitData = result.componentResults[2];
+    return applicationData.scope == PXClearScopeApplicationData &&
+           extensionData.scope == PXClearScopeExtensionData &&
+           pluginKitData.scope == PXClearScopePluginKitData &&
+           PXApplicationDataComponentResultIsStructurallyValid(applicationData) &&
+           PXExactDataComponentResultIsStructurallyValid(extensionData, PXClearScopeExtensionData) &&
+           PXExactDataComponentResultIsStructurallyValid(pluginKitData, PXClearScopePluginKitData);
+}
+
+static NSError *PXMigratedInternalError(NSString *message) {
+    return [NSError errorWithDomain:PXMigratedDataClearFailureDomain
+                               code:PXExactDataClearFailureCodeInternalResultFailure
+                           userInfo:@{NSLocalizedDescriptionKey: message ?: @"Migrated data clear returned an invalid internal result"}];
+}
+
+static NSError *PXMigratedNSErrorForFailure(PXClearFailure *failure) {
+    if (![failure isKindOfClass:[PXClearFailure class]]) {
+        return PXMigratedInternalError(@"Migrated data clear returned an invalid component failure");
+    }
+    return [NSError errorWithDomain:failure.domain
+                               code:failure.code
+                           userInfo:@{NSLocalizedDescriptionKey: failure.message}];
+}
+
 /// Shell fragment: wipe container children except MCM metadata, then recreate minimal layout.
 static NSString *PXShellWipeContainerKeepMetadata(NSString *containerPath) {
     if (!containerPath.length) return @"";
@@ -1121,19 +1339,533 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     return YES;
 }
 
+#pragma mark - Exact Installed Extension Discovery
+
+- (NSArray<NSString *> *)_exactInstalledExtensionIdentifiersForApplicationIdentifier:(NSString *)bundleIdentifier
+                                                                                error:(NSError **)error {
+    if (error) *error = nil;
+    if (!PXStrictBundleIdentifierIsValid(bundleIdentifier)) {
+        PXInstalledExtensionDiscoveryAssignError(error,
+                                                 PXInstalledExtensionDiscoveryErrorCodeInvalidRequest,
+                                                 @"Invalid application identifier for installed extension discovery");
+        return nil;
+    }
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSArray<NSString *> *bundleRoots = @[
+        @"/var/containers/Bundle/Application",
+        @"/containers/Bundle/Application"
+    ];
+    NSMutableArray<NSString *> *matchingApplicationBundles = [NSMutableArray array];
+
+    for (NSString *bundleRoot in bundleRoots) {
+        struct stat rootStat;
+        if (lstat(bundleRoot.fileSystemRepresentation, &rootStat) != 0) {
+            int savedErrno = errno;
+            if (savedErrno == ENOENT || savedErrno == ENOTDIR) {
+                continue;
+            }
+            PXInstalledExtensionDiscoveryAssignError(error,
+                                                     PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed,
+                                                     @"Application bundle root inspection failed");
+            return nil;
+        }
+        if (!S_ISDIR(rootStat.st_mode) || S_ISLNK(rootStat.st_mode)) {
+            PXInstalledExtensionDiscoveryAssignError(error,
+                                                     PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed,
+                                                     @"Application bundle root is not a real directory");
+            return nil;
+        }
+
+        NSError *rootEnumerationError = nil;
+        NSArray<NSString *> *uuidEntries = [fileManager contentsOfDirectoryAtPath:bundleRoot
+                                                                            error:&rootEnumerationError];
+        if (![uuidEntries isKindOfClass:[NSArray class]] || rootEnumerationError) {
+            PXInstalledExtensionDiscoveryAssignError(error,
+                                                     PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed,
+                                                     @"Application bundle root enumeration failed");
+            return nil;
+        }
+        uuidEntries = [uuidEntries sortedArrayUsingSelector:@selector(compare:)];
+
+        for (NSString *uuidEntry in uuidEntries) {
+            if (![uuidEntry isKindOfClass:[NSString class]] || uuidEntry.length == 0 ||
+                [uuidEntry characterAtIndex:0] == (unichar)'.' ||
+                [[NSUUID alloc] initWithUUIDString:uuidEntry] == nil) {
+                continue;
+            }
+            NSString *uuidContainerPath = [bundleRoot stringByAppendingPathComponent:uuidEntry];
+            if (!PXReadOnlyRealDirectoryAtPath(uuidContainerPath)) {
+                continue;
+            }
+
+            NSError *containerEnumerationError = nil;
+            NSArray<NSString *> *appEntries = [fileManager contentsOfDirectoryAtPath:uuidContainerPath
+                                                                               error:&containerEnumerationError];
+            if (![appEntries isKindOfClass:[NSArray class]] || containerEnumerationError) {
+                PXInstalledExtensionDiscoveryAssignError(error,
+                                                         PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed,
+                                                         @"Application bundle container enumeration failed");
+                return nil;
+            }
+            appEntries = [appEntries sortedArrayUsingSelector:@selector(compare:)];
+
+            for (NSString *appEntry in appEntries) {
+                if (![appEntry isKindOfClass:[NSString class]] ||
+                    ![[appEntry pathExtension] isEqualToString:@"app"]) {
+                    continue;
+                }
+                NSString *appBundlePath = [uuidContainerPath stringByAppendingPathComponent:appEntry];
+                if (!PXReadOnlyRealDirectoryAtPath(appBundlePath)) {
+                    continue;
+                }
+                NSString *infoPath = [appBundlePath stringByAppendingPathComponent:@"Info.plist"];
+                if (!PXReadOnlyRegularNonSymlinkFileAtPath(infoPath)) {
+                    continue;
+                }
+                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+                id installedIdentifier = [info isKindOfClass:[NSDictionary class]]
+                    ? info[@"CFBundleIdentifier"]
+                    : nil;
+                if ([installedIdentifier isKindOfClass:[NSString class]] &&
+                    [(NSString *)installedIdentifier isEqualToString:bundleIdentifier]) {
+                    [matchingApplicationBundles addObject:[appBundlePath copy]];
+                }
+            }
+        }
+    }
+
+    if (matchingApplicationBundles.count == 0) {
+        PXInstalledExtensionDiscoveryAssignError(error,
+                                                 PXInstalledExtensionDiscoveryErrorCodeInvalidCandidate,
+                                                 @"No exact installed application bundle match was found");
+        return nil;
+    }
+    if (matchingApplicationBundles.count > 1) {
+        PXInstalledExtensionDiscoveryAssignError(error,
+                                                 PXInstalledExtensionDiscoveryErrorCodeAmbiguousMatch,
+                                                 @"Multiple exact installed application bundle matches were found");
+        return nil;
+    }
+
+    NSString *applicationBundlePath = matchingApplicationBundles.firstObject;
+    NSArray<NSString *> *extensionLocations = @[
+        applicationBundlePath,
+        [applicationBundlePath stringByAppendingPathComponent:@"PlugIns"],
+        [applicationBundlePath stringByAppendingPathComponent:@"Plugins"]
+    ];
+    NSMutableArray<NSString *> *extensionIdentifiers = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenIdentifiers = [NSMutableSet set];
+
+    for (NSUInteger locationIndex = 0; locationIndex < extensionLocations.count; locationIndex++) {
+        NSString *extensionLocation = extensionLocations[locationIndex];
+        struct stat locationStat;
+        if (lstat(extensionLocation.fileSystemRepresentation, &locationStat) != 0) {
+            int savedErrno = errno;
+            if (locationIndex > 0 && (savedErrno == ENOENT || savedErrno == ENOTDIR)) {
+                continue;
+            }
+            PXInstalledExtensionDiscoveryAssignError(error,
+                                                     PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed,
+                                                     @"Extension bundle location inspection failed");
+            return nil;
+        }
+        if (!S_ISDIR(locationStat.st_mode) || S_ISLNK(locationStat.st_mode)) {
+            PXInstalledExtensionDiscoveryAssignError(error,
+                                                     PXInstalledExtensionDiscoveryErrorCodeInvalidCandidate,
+                                                     @"Extension bundle location is not a real directory");
+            return nil;
+        }
+
+        NSError *locationEnumerationError = nil;
+        NSArray<NSString *> *extensionEntries = [fileManager contentsOfDirectoryAtPath:extensionLocation
+                                                                                  error:&locationEnumerationError];
+        if (![extensionEntries isKindOfClass:[NSArray class]] || locationEnumerationError) {
+            PXInstalledExtensionDiscoveryAssignError(error,
+                                                     PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed,
+                                                     @"Extension bundle location enumeration failed");
+            return nil;
+        }
+        extensionEntries = [extensionEntries sortedArrayUsingSelector:@selector(compare:)];
+
+        for (NSString *extensionEntry in extensionEntries) {
+            if (![extensionEntry isKindOfClass:[NSString class]] ||
+                ![[extensionEntry pathExtension] isEqualToString:@"appex"]) {
+                continue;
+            }
+            NSString *extensionBundlePath = [extensionLocation stringByAppendingPathComponent:extensionEntry];
+            if (!PXReadOnlyRealDirectoryAtPath(extensionBundlePath)) {
+                PXInstalledExtensionDiscoveryAssignError(error,
+                                                         PXInstalledExtensionDiscoveryErrorCodeInvalidCandidate,
+                                                         @"An extension bundle is not a real directory");
+                return nil;
+            }
+            NSString *extensionInfoPath = [extensionBundlePath stringByAppendingPathComponent:@"Info.plist"];
+            if (!PXReadOnlyRegularNonSymlinkFileAtPath(extensionInfoPath)) {
+                PXInstalledExtensionDiscoveryAssignError(error,
+                                                         PXInstalledExtensionDiscoveryErrorCodeInvalidCandidate,
+                                                         @"An extension bundle Info.plist is not a regular file");
+                return nil;
+            }
+            NSDictionary *extensionInfo = [NSDictionary dictionaryWithContentsOfFile:extensionInfoPath];
+            id extensionIdentifier = [extensionInfo isKindOfClass:[NSDictionary class]]
+                ? extensionInfo[@"CFBundleIdentifier"]
+                : nil;
+            if (!PXStrictBundleIdentifierIsValid(extensionIdentifier)) {
+                PXInstalledExtensionDiscoveryAssignError(error,
+                                                         PXInstalledExtensionDiscoveryErrorCodeInvalidCandidate,
+                                                         @"An extension bundle identifier is invalid");
+                return nil;
+            }
+
+            NSString *exactIdentifier = (NSString *)extensionIdentifier;
+            if ([seenIdentifiers containsObject:exactIdentifier]) {
+                PXInstalledExtensionDiscoveryAssignError(error,
+                                                         PXInstalledExtensionDiscoveryErrorCodeAmbiguousMatch,
+                                                         @"An extension identifier is present in multiple extension bundles");
+                return nil;
+            }
+            [seenIdentifiers addObject:exactIdentifier];
+            [extensionIdentifiers addObject:[exactIdentifier copy]];
+        }
+    }
+
+    return [extensionIdentifiers sortedArrayUsingSelector:@selector(compare:)];
+}
+
+#pragma mark - Exact Extension Data Components
+
+- (PXClearComponentResult *)_clearExactDataContainerComponentForIdentifiers:(NSArray<NSString *> *)identifiers
+                                                                       kind:(PXResolvedContainerKind)kind
+                                                                      scope:(PXClearScope)scope
+                                                                 timeoutSec:(NSTimeInterval)timeoutSec
+                                                             canonicalPaths:(NSArray<NSString *> **)canonicalPaths
+                                                   successfulCanonicalPaths:(NSSet<NSString *> **)successfulCanonicalPaths {
+    if (canonicalPaths) *canonicalPaths = @[];
+    if (successfulCanonicalPaths) *successfulCanonicalPaths = [NSSet set];
+
+    BOOL kindAndScopeMatch =
+        (kind == PXResolvedContainerKindExtensionData && scope == PXClearScopeExtensionData) ||
+        (kind == PXResolvedContainerKindPluginKitData && scope == PXClearScopePluginKitData);
+    if (!kindAndScopeMatch ||
+        ![identifiers isKindOfClass:[NSArray class]] ||
+        timeoutSec <= 0.0) {
+        return PXExactDataFailedComponent(scope,
+                                          PXExactDataClearFailureCodeInvalidRequest,
+                                          @"Invalid exact data-container clear request");
+    }
+    for (id identifier in identifiers) {
+        if (!PXStrictBundleIdentifierIsValid(identifier)) {
+            return PXExactDataFailedComponent(scope,
+                                              PXExactDataClearFailureCodeInvalidRequest,
+                                              @"Invalid exact extension identifier list");
+        }
+    }
+
+    NSArray<NSString *> *sortedIdentifiers = [identifiers sortedArrayUsingSelector:@selector(compare:)];
+    if (sortedIdentifiers.count == 0) {
+        PXClearComponentResult *skipped = [[PXClearComponentResult alloc] initWithScope:scope
+                                                                                 status:PXClearComponentStatusSkipped
+                                                                     attemptedUnitCount:0
+                                                                     succeededUnitCount:0
+                                                                        failedUnitCount:0
+                                                                                 detail:PXNoInstalledExtensionsDetail
+                                                                                failure:nil];
+        return skipped ?: PXExactDataFailedComponent(scope,
+                                                     PXExactDataClearFailureCodeInternalResultFailure,
+                                                     @"Skipped exact data-container result construction failed");
+    }
+
+    PXDataContainerResolver *resolver = [[PXDataContainerResolver alloc] init];
+    PXDestructivePathValidator *validator = [[PXDestructivePathValidator alloc] init];
+    NSMutableArray<NSString *> *validatedCanonicalPaths = [NSMutableArray array];
+    NSMutableSet<NSString *> *successfulPaths = [NSMutableSet set];
+    NSUInteger attemptedUnits = 0;
+    NSUInteger succeededUnits = 0;
+    NSUInteger failedUnits = 0;
+    PXClearFailure *firstFailure = nil;
+
+    const PXResolvedContainerRoot roots[] = {
+        PXResolvedContainerRootRootful,
+        PXResolvedContainerRootRootless,
+    };
+    NSArray<NSString *> *rootLabels = @[@"rootful", @"rootless"];
+    NSString *componentName = PXExactDataComponentName(scope);
+
+    for (NSString *identifier in sortedIdentifiers) {
+        for (NSUInteger rootIndex = 0; rootIndex < 2; rootIndex++) {
+            PXResolvedContainerRoot root = roots[rootIndex];
+            NSError *resolutionError = nil;
+            PXResolvedContainer *resolved = [resolver resolveDataContainerForIdentifier:identifier
+                                                                                    kind:kind
+                                                                                    root:root
+                                                                                   error:&resolutionError];
+            if (!resolved) {
+                if (!resolutionError) {
+                    continue;
+                }
+                attemptedUnits++;
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXExactDataFailure(scope,
+                                                      PXExactDataClearFailureCodeResolutionFailed,
+                                                      [NSString stringWithFormat:@"%@ exact resolution failed for %@", componentName, rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+
+            attemptedUnits++;
+            NSError *validationError = nil;
+            NSString *canonicalPath = [validator validatedCanonicalPathForContainer:resolved
+                                                                               error:&validationError];
+            if (canonicalPath.length == 0) {
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXExactDataFailure(scope,
+                                                      PXExactDataClearFailureCodeValidationFailed,
+                                                      [NSString stringWithFormat:@"%@ validation failed for %@", componentName, rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+            [validatedCanonicalPaths addObject:[canonicalPath copy]];
+
+            NSString *wipeCommand = PXShellValidatedApplicationDataWipe(canonicalPath);
+            CommandResult *commandResult = [self runCommandWithPrivilegesResult:wipeCommand
+                                                                      timeoutSec:timeoutSec];
+            if (!PXApplicationDataCommandResultSucceeded(commandResult)) {
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXExactDataFailure(scope,
+                                                      PXExactDataClearFailureCodeExecutionFailed,
+                                                      [NSString stringWithFormat:@"%@ bounded execution failed for %@", componentName, rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+
+            NSError *postValidationError = nil;
+            NSString *postCanonicalPath = [validator validatedCanonicalPathForContainer:resolved
+                                                                                    error:&postValidationError];
+            if (postCanonicalPath.length == 0 || ![postCanonicalPath isEqualToString:canonicalPath]) {
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXExactDataFailure(scope,
+                                                      PXExactDataClearFailureCodeValidationFailed,
+                                                      [NSString stringWithFormat:@"%@ post-command validation failed for %@", componentName, rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+
+            NSError *postconditionError = nil;
+            if (!PXApplicationDataPostconditionIsValid(postCanonicalPath, &postconditionError)) {
+                failedUnits++;
+                if (!firstFailure) {
+                    firstFailure = PXExactDataFailure(scope,
+                                                      PXExactDataClearFailureCodePostconditionFailed,
+                                                      [NSString stringWithFormat:@"%@ strict postcondition failed for %@", componentName, rootLabels[rootIndex]]);
+                }
+                continue;
+            }
+
+            succeededUnits++;
+            [successfulPaths addObject:[canonicalPath copy]];
+        }
+    }
+
+    if (canonicalPaths) *canonicalPaths = [validatedCanonicalPaths copy];
+    if (successfulCanonicalPaths) *successfulCanonicalPaths = [successfulPaths copy];
+
+    if (attemptedUnits == 0) {
+        NSString *detail = scope == PXClearScopePluginKitData
+            ? PXNoExactPluginKitDataContainersDetail
+            : PXNoExactExtensionDataContainersDetail;
+        PXClearComponentResult *skipped = [[PXClearComponentResult alloc] initWithScope:scope
+                                                                                 status:PXClearComponentStatusSkipped
+                                                                     attemptedUnitCount:0
+                                                                     succeededUnitCount:0
+                                                                        failedUnitCount:0
+                                                                                 detail:detail
+                                                                                failure:nil];
+        return skipped ?: PXExactDataFailedComponent(scope,
+                                                     PXExactDataClearFailureCodeInternalResultFailure,
+                                                     @"Absent exact data-container result construction failed");
+    }
+
+    PXClearComponentStatus status = failedUnits > 0
+        ? PXClearComponentStatusFailed
+        : PXClearComponentStatusSucceeded;
+    NSString *detail = failedUnits > 0
+        ? [NSString stringWithFormat:@"One or more exact %@ units failed", componentName]
+        : [NSString stringWithFormat:@"All exact %@ units succeeded", componentName];
+    PXClearComponentResult *result = [[PXClearComponentResult alloc] initWithScope:scope
+                                                                            status:status
+                                                                attemptedUnitCount:attemptedUnits
+                                                                succeededUnitCount:succeededUnits
+                                                                   failedUnitCount:failedUnits
+                                                                            detail:detail
+                                                                           failure:firstFailure];
+    if (!PXExactDataComponentResultIsStructurallyValid(result, scope)) {
+        return PXExactDataFailedComponent(scope,
+                                          PXExactDataClearFailureCodeInternalResultFailure,
+                                          @"Exact data-container accounting produced an invalid result");
+    }
+    return result;
+}
+
+- (PXClearComponentResult *)_componentByApplyingFinalPostconditionToResult:(PXClearComponentResult *)result
+                                                            canonicalPaths:(NSArray<NSString *> *)canonicalPaths
+                                                  successfulCanonicalPaths:(NSSet<NSString *> *)successfulCanonicalPaths {
+    PXClearScope scope = result.scope;
+    if (!PXExactDataComponentResultIsStructurallyValid(result, scope) ||
+        ![canonicalPaths isKindOfClass:[NSArray class]] ||
+        ![successfulCanonicalPaths isKindOfClass:[NSSet class]]) {
+        return PXExactDataFailedComponent(scope,
+                                          PXExactDataClearFailureCodeInternalResultFailure,
+                                          @"Final exact data-container verification received invalid state");
+    }
+    if (result.status == PXClearComponentStatusSkipped || canonicalPaths.count == 0) {
+        return result;
+    }
+
+    NSUInteger succeededUnits = result.succeededUnitCount;
+    NSUInteger failedUnits = result.failedUnitCount;
+    PXClearFailure *firstFailure = result.failure;
+    BOOL changed = NO;
+
+    for (NSString *canonicalPath in canonicalPaths) {
+        NSError *postconditionError = nil;
+        if (PXApplicationDataPostconditionIsValid(canonicalPath, &postconditionError)) {
+            continue;
+        }
+        if ([successfulCanonicalPaths containsObject:canonicalPath]) {
+            if (succeededUnits > 0) succeededUnits--;
+            failedUnits++;
+            changed = YES;
+            if (!firstFailure) {
+                firstFailure = PXExactDataFailure(scope,
+                                                  PXExactDataClearFailureCodePostconditionFailed,
+                                                  [NSString stringWithFormat:@"%@ final strict postcondition failed", PXExactDataComponentName(scope)]);
+            }
+        } else {
+            [self logMessage:@"[AppDataCleaner] %@ final read-only verification remains failed for an already-failed unit",
+                  PXExactDataComponentName(scope)];
+        }
+    }
+
+    if (!changed) {
+        return result;
+    }
+
+    PXClearComponentResult *finalResult = [[PXClearComponentResult alloc] initWithScope:scope
+                                                                                 status:PXClearComponentStatusFailed
+                                                                     attemptedUnitCount:result.attemptedUnitCount
+                                                                     succeededUnitCount:succeededUnits
+                                                                        failedUnitCount:failedUnits
+                                                                                 detail:[NSString stringWithFormat:@"%@ final strict verification failed", PXExactDataComponentName(scope)]
+                                                                                failure:firstFailure];
+    if (!PXExactDataComponentResultIsStructurallyValid(finalResult, scope)) {
+        return PXExactDataFailedComponent(scope,
+                                          PXExactDataClearFailureCodeInternalResultFailure,
+                                          @"Final exact data-container accounting produced an invalid result");
+    }
+    return finalResult;
+}
+
+- (PXClearResult *)_completeDataWipeForMigratedRequest:(PXClearRequest *)request {
+    if (![request isKindOfClass:[PXClearRequest class]] ||
+        request.scopes != PXMigratedDataClearScopes) {
+        return nil;
+    }
+
+    NSError *discoveryError = nil;
+    NSArray<NSString *> *extensionIdentifiers =
+        [self _exactInstalledExtensionIdentifiersForApplicationIdentifier:request.bundleIdentifier
+                                                                     error:&discoveryError];
+
+    PXClearRequest *applicationRequest = [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
+                                                                                   scopes:PXClearScopeApplicationData
+                                                                                deepClean:request.deepClean];
+    PXClearComponentResult *applicationResult = applicationRequest
+        ? [self _completeAppDataWipeForApplicationDataRequest:applicationRequest]
+        : nil;
+    if (!PXApplicationDataComponentResultIsStructurallyValid(applicationResult)) {
+        applicationResult = PXApplicationDataFailedComponent(PXApplicationDataClearFailureCodeInternalResultFailure,
+                                                             @"ApplicationData internal result validation failed");
+    }
+
+    NSArray<NSString *> *extensionCanonicalPaths = @[];
+    NSArray<NSString *> *pluginKitCanonicalPaths = @[];
+    NSSet<NSString *> *successfulExtensionPaths = [NSSet set];
+    NSSet<NSString *> *successfulPluginKitPaths = [NSSet set];
+    PXClearComponentResult *extensionResult = nil;
+    PXClearComponentResult *pluginKitResult = nil;
+
+    if (!extensionIdentifiers && discoveryError) {
+        extensionResult = PXExactDataFailedComponent(PXClearScopeExtensionData,
+                                                     PXExactDataClearFailureCodeDiscoveryFailed,
+                                                     @"Exact installed extension discovery failed");
+        pluginKitResult = PXExactDataFailedComponent(PXClearScopePluginKitData,
+                                                     PXExactDataClearFailureCodeDiscoveryFailed,
+                                                     @"Exact installed extension discovery failed");
+    } else {
+        BOOL isSystemApplication = [request.bundleIdentifier hasPrefix:@"com.apple."];
+        NSTimeInterval timeoutSec = (request.deepClean || isSystemApplication)
+            ? (NSTimeInterval)(15 * 60)
+            : (NSTimeInterval)(5 * 60);
+        extensionResult = [self _clearExactDataContainerComponentForIdentifiers:extensionIdentifiers ?: @[]
+                                                                            kind:PXResolvedContainerKindExtensionData
+                                                                           scope:PXClearScopeExtensionData
+                                                                      timeoutSec:timeoutSec
+                                                                  canonicalPaths:&extensionCanonicalPaths
+                                                        successfulCanonicalPaths:&successfulExtensionPaths];
+        pluginKitResult = [self _clearExactDataContainerComponentForIdentifiers:extensionIdentifiers ?: @[]
+                                                                            kind:PXResolvedContainerKindPluginKitData
+                                                                           scope:PXClearScopePluginKitData
+                                                                      timeoutSec:timeoutSec
+                                                                  canonicalPaths:&pluginKitCanonicalPaths
+                                                        successfulCanonicalPaths:&successfulPluginKitPaths];
+
+        extensionResult = [self _componentByApplyingFinalPostconditionToResult:extensionResult
+                                                                 canonicalPaths:extensionCanonicalPaths
+                                                       successfulCanonicalPaths:successfulExtensionPaths];
+        pluginKitResult = [self _componentByApplyingFinalPostconditionToResult:pluginKitResult
+                                                                 canonicalPaths:pluginKitCanonicalPaths
+                                                       successfulCanonicalPaths:successfulPluginKitPaths];
+    }
+
+    _wipeCacheExtensionDataCanonicalPaths = [extensionCanonicalPaths copy] ?: @[];
+    _wipeCachePluginKitDataCanonicalPaths = [pluginKitCanonicalPaths copy] ?: @[];
+
+    if (!PXExactDataComponentResultIsStructurallyValid(extensionResult, PXClearScopeExtensionData)) {
+        extensionResult = PXExactDataFailedComponent(PXClearScopeExtensionData,
+                                                     PXExactDataClearFailureCodeInternalResultFailure,
+                                                     @"ExtensionData internal result validation failed");
+    }
+    if (!PXExactDataComponentResultIsStructurallyValid(pluginKitResult, PXClearScopePluginKitData)) {
+        pluginKitResult = PXExactDataFailedComponent(PXClearScopePluginKitData,
+                                                     PXExactDataClearFailureCodeInternalResultFailure,
+                                                     @"PluginKitData internal result validation failed");
+    }
+
+    PXClearResult *aggregate = [[PXClearResult alloc] initWithRequest:request
+                                                    componentResults:@[
+                                                        applicationResult,
+                                                        extensionResult,
+                                                        pluginKitResult
+                                                    ]];
+    return PXMigratedClearResultIsStructurallyValid(aggregate) ? aggregate : nil;
+}
+
 #pragma mark - Main Public Methods
 
 - (void)clearDataForBundleID:(NSString *)bundleID completion:(void (^)(BOOL, NSError *))completion {
     [self logMessage:@"[AppDataCleaner] === STARTING data clearing for %@ ===", bundleID];
 
     BOOL deepClean = [self _deepCleanEnabled];
-    PXClearRequest *applicationDataRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
-                                                                                       scopes:PXClearScopeApplicationData
-                                                                                    deepClean:deepClean];
-    if (!applicationDataRequest) {
-        NSError *requestError = [NSError errorWithDomain:PXApplicationDataClearFailureDomain
-                                                    code:PXApplicationDataClearFailureCodeInvalidRequest
-                                                userInfo:@{NSLocalizedDescriptionKey: @"Invalid application-data clear request"}];
+    PXClearRequest *migratedRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                                scopes:PXMigratedDataClearScopes
+                                                                             deepClean:deepClean];
+    if (!migratedRequest) {
+        NSError *requestError = PXMigratedInternalError(@"Invalid migrated data-clear request");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) completion(NO, requestError);
         });
@@ -1271,26 +2003,43 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                      frozeForThisClear = [freezer isApplicationFrozen:bundleID];
                  }
                  
-                 // Step 4: Run the typed application-data component and consume its result.
-                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running typed application-data clear..."];
-                 PXClearComponentResult *applicationDataResult =
-                     [strongSelf _completeAppDataWipeForApplicationDataRequest:applicationDataRequest];
-                 NSError *applicationDataError = nil;
-                 if (!PXApplicationDataComponentResultIsStructurallyValid(applicationDataResult)) {
-                     applicationDataError = [NSError errorWithDomain:PXApplicationDataClearFailureDomain
-                                                               code:PXApplicationDataClearFailureCodeInternalResultFailure
-                                                           userInfo:@{NSLocalizedDescriptionKey: @"Application-data clear returned an invalid internal result"}];
-                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result is nil or structurally invalid"];
-                 } else if (applicationDataResult.status == PXClearComponentStatusFailed) {
-                     applicationDataError = PXApplicationDataLegacyErrorForFailure(applicationDataResult.failure);
-                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result Failed (%lu/%lu units succeeded)",
-                           (unsigned long)applicationDataResult.succeededUnitCount,
-                           (unsigned long)applicationDataResult.attemptedUnitCount];
-                 } else if (applicationDataResult.status == PXClearComponentStatusSkipped) {
-                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result Skipped: %@", applicationDataResult.detail];
+                 // Step 4: Run and consume the exact three-scope migrated aggregate.
+                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running migrated ApplicationData/ExtensionData/PluginKitData clear..."];
+                 PXClearResult *migratedResult =
+                     [strongSelf _completeDataWipeForMigratedRequest:migratedRequest];
+                 NSError *migratedClearError = nil;
+                 if (!PXMigratedClearResultIsStructurallyValid(migratedResult)) {
+                     migratedClearError = PXMigratedInternalError(@"Migrated data clear returned an invalid aggregate result");
+                     [strongSelf logMessage:@"[AppDataCleaner] Migrated aggregate is nil, incomplete, or structurally invalid"];
                  } else {
-                     [strongSelf logMessage:@"[AppDataCleaner] ApplicationData result Succeeded (%lu units)",
-                           (unsigned long)applicationDataResult.succeededUnitCount];
+                     NSArray<NSNumber *> *failurePrecedence = @[
+                         @(PXClearScopeApplicationData),
+                         @(PXClearScopeExtensionData),
+                         @(PXClearScopePluginKitData)
+                     ];
+                     for (NSNumber *scopeNumber in failurePrecedence) {
+                         PXClearScope scope = (PXClearScope)scopeNumber.unsignedIntegerValue;
+                         PXClearComponentResult *component = [migratedResult componentResultForScope:scope];
+                         NSString *componentName = scope == PXClearScopeApplicationData
+                             ? @"ApplicationData"
+                             : PXExactDataComponentName(scope);
+                         [strongSelf logMessage:@"[AppDataCleaner] %@ result %@ attempted=%lu succeeded=%lu failed=%lu",
+                               componentName,
+                               PXApplicationDataStatusName(component.status),
+                               (unsigned long)component.attemptedUnitCount,
+                               (unsigned long)component.succeededUnitCount,
+                               (unsigned long)component.failedUnitCount];
+                         if (component.status == PXClearComponentStatusFailed) {
+                             NSError *componentError = PXMigratedNSErrorForFailure(component.failure);
+                             [strongSelf logMessage:@"[AppDataCleaner] %@ failed (%@:%ld)",
+                                   componentName,
+                                   componentError.domain,
+                                   (long)componentError.code];
+                             if (!migratedClearError) {
+                                 migratedClearError = componentError;
+                             }
+                         }
+                     }
                  }
                 
                 // Step 5: Clear HTTP cookie storage in memory  
@@ -1328,12 +2077,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 [strongSelf logMessage:@"[AppDataCleaner] === COMPLETED data clearing for %@ ===", bundleID];
                 BOOL keychainFailed = !keychainOK1 || !keychainOK2;
                 NSError *keychainError = keychainError2 ?: keychainError1;
-                if (applicationDataError) {
+                if (keychainFailed) {
+                    [strongSelf logMessage:@"[AppDataCleaner] Keychain failed: %@",
+                          keychainError.localizedDescription ?: @"unknown keychain error"];
+                }
+                if (migratedClearError) {
                     if (keychainFailed) {
-                        [strongSelf logMessage:@"[AppDataCleaner] Keychain also failed; ApplicationData failure has callback precedence: %@",
-                              keychainError.localizedDescription ?: @"unknown keychain error"];
+                        [strongSelf logMessage:@"[AppDataCleaner] Migrated component failure has callback precedence over Keychain"];
                     }
-                    safeCompletion(NO, applicationDataError);
+                    safeCompletion(NO, migratedClearError);
                 } else if (keychainFailed) {
                     safeCompletion(NO, keychainError ?: [NSError errorWithDomain:@"AppDataCleaner"
                                                                             code:-2
@@ -1359,18 +2111,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 - (void)completeAppDataWipe:(NSString *)bundleID {
     BOOL deepClean = [self _deepCleanEnabled];
     PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
-                                                                        scopes:PXClearScopeApplicationData
+                                                                        scopes:PXMigratedDataClearScopes
                                                                      deepClean:deepClean];
-    PXClearComponentResult *result = [self _completeAppDataWipeForApplicationDataRequest:request];
-    if (!PXApplicationDataComponentResultIsStructurallyValid(result)) {
-        [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid ApplicationData result"];
+    PXClearResult *result = request ? [self _completeDataWipeForMigratedRequest:request] : nil;
+    if (!PXMigratedClearResultIsStructurallyValid(result)) {
+        [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid migrated aggregate"];
         return;
     }
-    [self logMessage:@"[AppDataCleaner] completeAppDataWipe ApplicationData status=%@ attempted=%lu succeeded=%lu failed=%lu",
-          PXApplicationDataStatusName(result.status),
-          (unsigned long)result.attemptedUnitCount,
-          (unsigned long)result.succeededUnitCount,
-          (unsigned long)result.failedUnitCount];
+
+    for (PXClearComponentResult *component in result.componentResults) {
+        NSString *componentName = component.scope == PXClearScopeApplicationData
+            ? @"ApplicationData"
+            : PXExactDataComponentName(component.scope);
+        [self logMessage:@"[AppDataCleaner] completeAppDataWipe %@ status=%@ attempted=%lu succeeded=%lu failed=%lu",
+              componentName,
+              PXApplicationDataStatusName(component.status),
+              (unsigned long)component.attemptedUnitCount,
+              (unsigned long)component.succeededUnitCount,
+              (unsigned long)component.failedUnitCount];
+    }
 }
 
 - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request {
@@ -1383,28 +2142,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     NSString *bundleID = request.bundleIdentifier;
     [self logMessage:@"[AppDataCleaner] Starting complete wipe for %@", bundleID];
 
-    // Data/Application listings remain read-only inputs for extension discovery only.
-    NSArray *cachedDataDirs = [self listDirectoriesInPath:@"/var/mobile/Containers/Data/Application"];
-    NSArray *cachedRootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
-    NSArray *cachedBundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
-    NSArray *cachedRootlessBundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
-
     NSArray *groupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO];
     NSArray *rootlessGroupUUIDs = [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES];
-    NSString *bundleUUID = [self optimized_findBundleContainerUUID:bundleID
-                                                      inDirectories:cachedBundleDirs
-                                                       rootlessDirs:cachedRootlessBundleDirs];
-    NSArray *extensionContainers = [self optimized_findExtensionContainers:bundleID
-                                                                   dataDirs:cachedDataDirs
-                                                           rootlessDataDirs:cachedRootlessDataDirs
-                                                                 bundleDirs:cachedBundleDirs
-                                                         rootlessBundleDirs:cachedRootlessBundleDirs];
 
     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
     int rmTimeout = (request.deepClean || isSystemApp) ? (15 * 60) : (5 * 60);
     int findTimeout = (request.deepClean || isSystemApp) ? (20 * 60) : (8 * 60);
     int batchTimeout = MAX(findTimeout, rmTimeout);
-    if (groupUUIDs.count + rootlessGroupUUIDs.count + extensionContainers.count > 1) {
+    if (groupUUIDs.count + rootlessGroupUUIDs.count > 1) {
         batchTimeout = MIN(30 * 60, findTimeout + (int)(groupUUIDs.count + rootlessGroupUUIDs.count) * 60);
     }
 
@@ -1531,19 +2276,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     _wipeCacheApplicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
     _wipeCacheGroupUUIDs = [groupUUIDs copy] ?: @[];
     _wipeCacheRootlessGroupUUIDs = [rootlessGroupUUIDs copy] ?: @[];
-    _wipeCacheExtensionContainers = [extensionContainers copy] ?: @[];
 
-    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu; Bundle=%@ Groups=%lu RootlessGroups=%lu Extensions=%lu",
+    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu; Groups=%lu RootlessGroups=%lu",
           (unsigned long)attemptedUnits,
           (unsigned long)succeededUnits,
           (unsigned long)failedUnits,
-          bundleUUID ?: @"nil",
           (unsigned long)groupUUIDs.count,
-          (unsigned long)rootlessGroupUUIDs.count,
-          (unsigned long)extensionContainers.count];
+          (unsigned long)rootlessGroupUUIDs.count];
 
     // Clear App Store receipt
-    [self clearAppReceiptData:bundleID withBundleUUID:bundleUUID];
+    [self clearAppReceiptData:bundleID withBundleUUID:nil];
     
     // Process group + rootless group containers in ONE shell (same find/mkdir per path as before).
     NSMutableArray<NSString *> *groupWipeParts = [NSMutableArray array];
@@ -1699,25 +2441,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
     }
     
-    // Process extension containers — batched into one shell (same find+mkdir semantics).
-    if (extensionContainers.count > 0) {
-        [self logMessage:@"[AppDataCleaner] Wiping %lu extension containers (batched shell)", (unsigned long)extensionContainers.count];
-        NSMutableArray<NSString *> *extParts = [NSMutableArray array];
-        for (NSDictionary *extInfo in extensionContainers) {
-            NSString *extDataUUID = extInfo[@"dataUUID"];
-            if (extDataUUID) {
-                BOOL rootless = [extInfo[@"rootless"] boolValue];
-                NSString *basePath = rootless ? @"/containers/Data/Application" : @"/var/mobile/Containers/Data/Application";
-                NSString *containerPath = [basePath stringByAppendingPathComponent:extDataUUID];
-                [extParts addObject:PXShellWipeContainerKeepMetadata(containerPath)];
-            }
-        }
-        if (extParts.count > 0) {
-            [self runBatchedCommandsWithPrivileges:extParts timeoutSec:batchTimeout];
-        }
-        [self logMessage:@"[AppDataCleaner] Extension containers wiped"];
-    }
-    
     // Clear preferences and cookies only (SAFE paths, no SpringBoard state!) — one shell for all paths.
     [self logMessage:@"[AppDataCleaner] Clearing preferences and cookies (batched shell)"];
     NSString *bEsc = [bundleID stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
@@ -1796,14 +2519,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     for (NSString *groupUUID in rootlessGroupUUIDs) {
         NSString *path = [NSString stringWithFormat:@"/containers/Shared/AppGroup/%@", groupUUID];
         NSLog(@"[AppDataCleaner][Detect] Rootless App Group Container: %@", path);
-        [finalSweepPaths addObject:path];
-    }
-    for (NSDictionary *extInfo in extensionContainers) {
-        NSString *extDataUUID = extInfo[@"dataUUID"];
-        BOOL rootless = [extInfo[@"rootless"] boolValue];
-        NSString *basePath = rootless ? @"/containers/Data/Application" : @"/var/mobile/Containers/Data/Application";
-        NSString *path = [basePath stringByAppendingPathComponent:extDataUUID];
-        NSLog(@"[AppDataCleaner][Detect] Extension Data Container: %@", path);
         [finalSweepPaths addObject:path];
     }
     // Recursively remove all non-Apple files from each container (parallelized)
@@ -3424,32 +4139,42 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
     }
     
-    // 3. Verify extension containers
-    if (!useWipeCache) {
+    // 3. Verify extension and PluginKit data containers.
+    if (useWipeCache) {
+        for (NSString *canonicalPath in (_wipeCacheExtensionDataCanonicalPaths ?: @[])) {
+            [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+        for (NSString *canonicalPath in (_wipeCachePluginKitDataCanonicalPaths ?: @[])) {
+            [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
+        }
+        NSLog(@"[AppDataCleaner] Verify reusing canonical migrated wipe cache for %@", bundleID);
+    } else {
+        // Standalone verifier compatibility: legacy discovery is read-only and never feeds mutation.
         NSArray *extensionDataUUIDs = [self findExtensionDataContainersForBundleID:bundleID];
         for (NSString *extensionUUID in extensionDataUUIDs) {
             NSString *extensionPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", extensionUUID];
             [self verifyClearedPath:extensionPath reportingTo:unclearedPaths seen:verifiedPaths];
         }
-    }
 
-    NSArray *extensionContainers = nil;
-    if (useWipeCache) {
-        extensionContainers = _wipeCacheExtensionContainers ?: @[];
-        NSLog(@"[AppDataCleaner] Verify reusing wipe discovery cache for %@", bundleID);
-    } else {
         NSArray *dataDirs = [self listDirectoriesInPath:@"/var/mobile/Containers/Data/Application"];
         NSArray *rootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
         NSArray *bundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
         NSArray *rootlessBundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
-        extensionContainers = [self optimized_findExtensionContainers:bundleID dataDirs:dataDirs rootlessDataDirs:rootlessDataDirs bundleDirs:bundleDirs rootlessBundleDirs:rootlessBundleDirs];
-    }
-    for (NSDictionary *extInfo in extensionContainers) {
-        NSString *extDataUUID = extInfo[@"dataUUID"];
-        if (!extDataUUID.length) continue;
-        BOOL rootless = [extInfo[@"rootless"] boolValue];
-        NSString *basePath = rootless ? @"/containers/Data/Application" : @"/var/mobile/Containers/Data/Application";
-        [self verifyClearedPath:[basePath stringByAppendingPathComponent:extDataUUID] reportingTo:unclearedPaths seen:verifiedPaths];
+        NSArray *legacyExtensionContainers = [self optimized_findExtensionContainers:bundleID
+                                                                            dataDirs:dataDirs
+                                                                    rootlessDataDirs:rootlessDataDirs
+                                                                          bundleDirs:bundleDirs
+                                                                  rootlessBundleDirs:rootlessBundleDirs];
+        for (NSDictionary *extInfo in legacyExtensionContainers) {
+            NSString *extDataUUID = extInfo[@"dataUUID"];
+            if (!extDataUUID.length) continue;
+            BOOL rootless = [extInfo[@"rootless"] boolValue];
+            NSString *basePath = rootless ? @"/containers/Data/Application" : @"/var/mobile/Containers/Data/Application";
+            [self verifyClearedPath:[basePath stringByAppendingPathComponent:extDataUUID]
+                       reportingTo:unclearedPaths
+                              seen:verifiedPaths];
+        }
+        [self logMessage:@"[AppDataCleaner] Standalone verification used legacy read-only extension inspection"];
     }
     
     // 4. Verify system paths. SpringBoard ApplicationState is intentionally not deleted (respring risk).
@@ -3495,7 +4220,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         
         // Skip app container paths that only contain system directories
         if (([path containsString:@"/var/mobile/Containers/Data/Application"] ||
-             [path containsString:@"/containers/Data/Application"]) &&
+             [path containsString:@"/containers/Data/Application"] ||
+             [path containsString:@"/private/var/mobile/Containers/Data/PluginKitPlugin"] ||
+             [path containsString:@"/containers/Data/PluginKitPlugin"]) &&
             ([info containsString:@"StoreKit"] || 
              [info containsString:@"Directory has 0 non-system files"] ||
              [info containsString:@"Directory has 1 non-system files: Documents"] ||
@@ -3525,7 +4252,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         _wipeCacheApplicationDataCanonicalPaths = nil;
         _wipeCacheGroupUUIDs = nil;
         _wipeCacheRootlessGroupUUIDs = nil;
-        _wipeCacheExtensionContainers = nil;
+        _wipeCacheExtensionDataCanonicalPaths = nil;
+        _wipeCachePluginKitDataCanonicalPaths = nil;
     }
     return ok;
 }

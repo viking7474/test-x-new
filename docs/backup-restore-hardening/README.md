@@ -39,7 +39,8 @@ docs/backup-restore-hardening/
 │   ├── TASK-1.4-remove-application-bundle-writes.md
 │   ├── TASK-1.5-typed-clear-request.md
 │   ├── TASK-1.6-structured-clear-result.md
-│   └── TASK-1.7-migrate-main-application-data-clear.md
+│   ├── TASK-1.7-migrate-main-application-data-clear.md
+│   └── TASK-1.8-migrate-extension-and-pluginkit-data-clear.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo

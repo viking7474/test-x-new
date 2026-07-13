@@ -16,6 +16,11 @@ typedef NS_ENUM(NSInteger, PXDataContainerResolverErrorCode) {
 __attribute__((objc_subclassing_restricted))
 @interface PXDataContainerResolver : NSObject
 
+- (nullable PXResolvedContainer *)resolveDataContainerForIdentifier:(NSString *)identifier
+                                                               kind:(PXResolvedContainerKind)kind
+                                                               root:(PXResolvedContainerRoot)root
+                                                              error:(NSError * _Nullable * _Nullable)error;
+
 - (nullable PXResolvedContainer *)resolveApplicationDataContainerForIdentifier:(NSString *)identifier
                                                                           root:(PXResolvedContainerRoot)root
                                                                          error:(NSError * _Nullable * _Nullable)error;

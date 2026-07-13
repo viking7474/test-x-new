@@ -20,8 +20,8 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 - TASK-1.4 — Remove writes to application bundle containers. **COMPLETED**
 - TASK-1.5 — Introduce typed `PXClearRequest`. **COMPLETED**
 - TASK-1.6 — Introduce structured `PXClearResult`. **COMPLETED**
-- TASK-1.7 — Migrate main application-data clear through exact resolution and canonical validation. **READY**
-- TASK-1.8 — Migrate extension-container clear. **LOCKED**
+- TASK-1.7 — Migrate main application-data clear through exact resolution and canonical validation. **COMPLETED**
+- TASK-1.8 — Migrate ExtensionData and PluginKitData clear through exact installed extension identity, exact metadata resolution and canonical validation. **READY**
 - TASK-1.9 — Migrate app-group clear. **LOCKED**
 - TASK-1.10 — Integrate keychain clear result correctly. **LOCKED**
 - TASK-1.11 — Remove unsafe permission and marker-file behavior. **LOCKED**
