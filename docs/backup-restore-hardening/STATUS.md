@@ -5,12 +5,12 @@
 ```text
 Program: Backup / Restore Hardening
 Current phase: Phase 1 — Clear Data Safety Boundary
-Current task: TASK-1.8 — Migrate ExtensionData and PluginKitData Clear
-Task file: docs/backup-restore-hardening/tasks/TASK-1.8-migrate-extension-and-pluginkit-data-clear.md
-Expected report: docs/backup-restore-hardening/reports/TASK-1.8-REPORT.md
+Current task: TASK-1.10 — Integrate Keychain Clear Result Correctly
+Task file: docs/backup-restore-hardening/tasks/TASK-1.10-integrate-keychain-clear-result.md
+Expected report: docs/backup-restore-hardening/reports/TASK-1.10-REPORT.md
 Status: READY
 Build owner: Project owner via GitHub Actions
-Next task: TASK-1.9 remains LOCKED
+Next task: TASK-1.11 remains LOCKED
 ```
 
 ## Accepted foundation
@@ -28,53 +28,52 @@ Completed outcomes:
 - bounded `AppDataCleaner` command wrappers;
 - bounded direct `find` helpers.
 
-### TASK-1.1 — Immutable resolved identity
+### TASK-1.1 through TASK-1.6 — Safety contracts
 
-`PXResolvedContainer` provides exact immutable identity, kind/root, UUID/path consistency and value semantics. It is not deletion authorization.
+Accepted infrastructure:
 
-### TASK-1.2 — Exact application-data resolver
+- immutable exact `PXResolvedContainer` identity;
+- root-specific exact data-container resolution;
+- canonical destructive-path validation;
+- application-bundle containers are read-only;
+- immutable typed `PXClearRequest`;
+- immutable structured `PXClearResult`.
 
-`PXDataContainerResolver` resolves one application-data root at a time using exact `MCMMetadataIdentifier` equality and fails closed on ambiguity.
+### TASK-1.7 — ApplicationData
 
-### TASK-1.3 — Canonical destructive path validator
-
-`PXDestructivePathValidator` enforces fixed bases, exact raw path equality, symlink rejection, canonical immediate-child containment, mount/device checks, ownership/mode checks, live metadata identity and final filesystem identity rechecks.
-
-### TASK-1.4 — Application bundles read-only
-
-Main Clear no longer writes application bundles or receipts. Remaining bundle discovery is read-only.
-
-### TASK-1.5 — Typed immutable request
-
-`PXClearRequest` provides a strict bundle identifier, closed scope mask and explicit deep-clean intent.
-
-### TASK-1.6 — Structured immutable result
-
-`PXClearFailure`, `PXClearComponentResult` and `PXClearResult` provide immutable final outcomes, exact unit partitions, canonical aggregate coverage and explicit success/skip/failure semantics.
-
-### TASK-1.7 — Main ApplicationData migrated
-
-The primary application-data component now uses:
+Rootful and rootless ApplicationData use:
 
 ```text
-exact root-specific resolver
+exact resolver
   -> canonical validator
-  -> canonical-path-only bounded command
+  -> one bounded strict command
   -> post-command validator
   -> strict postcondition
-  -> PXClearComponentResult
+  -> structured component result
 ```
+
+### TASK-1.8 and TASK-1.8A — ExtensionData and PluginKitData
+
+Accepted outcomes:
+
+- installed extension identifiers come from exact contained `.appex` bundles;
+- ExtensionData and PluginKitData use exact metadata resolution;
+- generic resolver compatibility with TASK-1.2 is preserved;
+- raw extension UUID caches are replaced by canonical paths;
+- callback precedence is deterministic.
+
+### TASK-1.9 — AppGroups
 
 Accepted commit:
 
 ```text
-f98a0f6d9f52cb08f151c29520af6fb6e255616b — task 1.7
+0bb2e354715e00f20c4df95719e900ae5e8e1673
 ```
 
 Accepted review:
 
 ```text
-docs/backup-restore-hardening/reviews/TASK-1.7-REVIEW.md
+docs/backup-restore-hardening/reviews/TASK-1.9-REVIEW.md
 ```
 
 Build:
@@ -83,202 +82,214 @@ Build:
 PASSED — reported by project owner
 ```
 
-## TASK-1.8 purpose
-
-The main flow still discovers extension containers by scanning mutable data-container metadata and accepting identifiers with the application bundle identifier as a prefix.
-
-That behavior is unsafe because:
-
-- prefix ownership is not exact identity;
-- an unrelated identifier can share the prefix;
-- extension identifiers do not have to follow a parent-prefix naming convention;
-- raw UUID dictionaries are later converted into destructive paths;
-- ExtensionData and PluginKitData are batched into void shell commands;
-- command and postcondition failures are not represented structurally.
-
-TASK-1.8 replaces this with:
-
-1. exact read-only discovery of installed `.appex` identifiers inside the exact main `.app` bundle;
-2. a generic exact data-container resolver for ApplicationData, ExtensionData and PluginKitData;
-3. canonical validator output as the only mutable target path;
-4. one bounded strict command per resolved container;
-5. post-command revalidation and strict postcondition;
-6. separate ExtensionData and PluginKitData component results;
-7. a three-component migrated aggregate with ApplicationData;
-8. legacy callback failure propagation.
-
-## Exact extension identity source
-
-The migrated flow must not infer extension ownership from:
+Accepted AppGroups boundary:
 
 ```text
-metadataIdentifier hasPrefix applicationBundleIdentifier
-metadataIdentifier contains applicationBundleIdentifier
-company or short-name matching
-container contents
-first match
+signed application-group entitlements
+  -> root-specific exact typed resolver
+  -> canonical validator
+  -> unique physical-container plan
+  -> one bounded strict command per canonical path
+  -> every alias identity revalidated
+  -> strict postcondition
+  -> structured AppGroups component
 ```
 
-The exact identifier set comes only from real, non-symlink `.appex` bundles physically contained in the exact main application bundle.
-
-Allowed locations:
-
-```text
-<App>.app/<Extension>.appex
-<App>.app/PlugIns/<Extension>.appex
-<App>.app/Plugins/<Extension>.appex
-```
-
-Each extension identifier comes from exact `CFBundleIdentifier` in a regular non-symlink `Info.plist`.
-
-## Resolver expansion
-
-TASK-1.8 adds a generic method to `PXDataContainerResolver` while retaining the existing application-data method.
-
-Allowed kinds:
+The internal data aggregate now contains exactly:
 
 ```text
 ApplicationData
 ExtensionData
+AppGroups
 PluginKitData
 ```
 
-AppGroup remains invalid for this resolver.
+App Group mutation through legacy fuzzy resolvers, raw UUID reconstruction, deep encrypted scans, final sweeps and MobileSafari Shared/AppGroup fallbacks is no longer reachable from the migrated main Clear path.
 
-Fixed bases:
+## TASK-1.10 purpose
 
-| Kind | Rootful | Rootless |
-|---|---|---|
-| ApplicationData | `/private/var/mobile/Containers/Data/Application` | `/containers/Data/Application` |
-| ExtensionData | `/private/var/mobile/Containers/Data/Application` | `/containers/Data/Application` |
-| PluginKitData | `/private/var/mobile/Containers/Data/PluginKitPlugin` | `/containers/Data/PluginKitPlugin` |
+Keychain is the final approved `PXClearScope` still outside the structured full Clear result.
 
-All matching remains exact, root-specific and ambiguity-failing.
-
-## Unit policy
-
-Deterministic order:
+Current main Clear behavior is split across two loose calls:
 
 ```text
-ExtensionData
-  extension identifiers ascending
-    rootful
-    rootless
-
-PluginKitData
-  extension identifiers ascending
-    rootful
-    rootless
+initial _wipeSelectedKeychainForBundleID
+four-scope data aggregate
+final _wipeSelectedKeychainForBundleID
+separate BOOL/error callback branch
 ```
 
-For each `(scope, identifier, root)` tuple:
+This causes ambiguity and false success because:
 
-- absent container with no resolver error: not attempted;
-- resolver/validation/execution/revalidation/postcondition error: one failed attempted unit;
-- complete success: one succeeded unit;
-- later unit failures do not stop remaining units.
+- disabled and succeeded both return `YES`;
+- explicit empty selection is replaced with all groups;
+- settings and entitlements can be reread differently between passes;
+- selected groups are not exact-checked against signed authorization;
+- non-system helper execution is unbounded;
+- helper warnings can still exit zero;
+- the system bridge always reports success after wipe requests;
+- callback outcome is not derived from one final `PXClearResult`.
 
-## Result policy
+TASK-1.10 must create a truthful Keychain component and one final five-scope aggregate.
 
-### Extension discovery failure
+## Full Clear result boundary
 
-If the exact main app bundle or exact `.appex` identity set cannot be established, both ExtensionData and PluginKitData fail with one synthetic discovery unit each.
-
-No metadata-prefix fallback is allowed.
-
-### No installed extensions
-
-Both components are Skipped with:
-
-```text
-No installed application extensions were discovered
-```
-
-### No exact containers for one scope
-
-ExtensionData:
-
-```text
-No exact extension-data containers were found
-```
-
-PluginKitData:
-
-```text
-No exact PluginKit data containers were found
-```
-
-### Partial outcome
-
-Any failed unit makes the component `Failed`; mixed counts represent partial success.
-
-## Migrated aggregate
-
-The internal migrated request and aggregate contain exactly:
+`clearDataForBundleID:completion:` must use:
 
 ```text
 ApplicationData
 ExtensionData
+AppGroups
 PluginKitData
+Keychain
 ```
 
-App Group and Keychain remain legacy side effects and are not included until TASK-1.9 and TASK-1.10.
+The existing four-scope data operation remains separate and unchanged.
 
-Legacy callback failure precedence becomes:
+`completeAppDataWipe:` remains data-only and must not gain Keychain side effects.
+
+## Keychain plan policy
+
+One immutable request-scoped plan captures:
+
+- enable flag;
+- exact selected setting object;
+- signed exact authorized groups;
+- signed application identifier when required;
+- system-app transport policy;
+- planned pass count.
+
+The plan is created once and reused by every pass.
+
+Identity authorization comes only from signed:
+
+```text
+keychain-access-groups
+application-identifier
+```
+
+Selected groups must be an exact subset of the signed set.
+
+No hard-coded vendor groups, bundle-prefix inference, service/account matching or existing item inspection may authorize the typed flow.
+
+## Empty selection policy
+
+```text
+saved setting absent -> default to all signed authorized groups
+saved NSArray         -> exact selection, including empty
+saved malformed value -> planning failure
+```
+
+An explicit empty array produces:
+
+```text
+Keychain Skipped 0/0/0
+No keychain access groups are selected
+```
+
+It must not silently become all groups.
+
+## Pass accounting
+
+### Non-system application
+
+```text
+initial pass
+final pass
+```
+
+Both passes use the same plan. The final pass still runs after an initial failure.
+
+### System application
+
+```text
+one bridge pass
+```
+
+The current intentional second-pass skip is preserved and does not count as a unit.
+
+### Outcomes
+
+```text
+disabled / empty / no authorized groups -> Skipped 0/0/0
+planning failure                         -> Failed 1/0/1
+non-system full success                  -> Succeeded 2/2/0
+non-system partial failure               -> Failed 2/1/1
+non-system total failure                 -> Failed 2/0/2
+system success                           -> Succeeded 1/1/0
+system failure                           -> Failed 1/0/1
+```
+
+## Execution evidence
+
+Non-system signing and helper wipe must use bounded direct executable/argv calls.
+
+The helper wipe action must return nonzero when:
+
+- `itemsFailed > 0`; or
+- warnings are present.
+
+The system bridge must report:
+
+```text
+attempted
+succeeded
+failed
+ok
+```
+
+and may set `ok` only for a complete failure-free partition.
+
+AppDataCleaner must reject stale, malformed or partial bridge responses.
+
+## Callback policy
+
+After TASK-1.10, callback failure precedence is:
 
 ```text
 1. ApplicationData
 2. ExtensionData
-3. PluginKitData
-4. Keychain
+3. AppGroups
+4. PluginKitData
+5. Keychain
 ```
 
-Skipped components are not callback failures.
+The final five-scope result is the only component-based callback source.
 
-## Canonical cache migration
+Skipped components are not callback failures. Therefore callback success is based on absence of failed components, not `allRequestedScopesSucceeded`.
 
-The raw extension dictionary cache must be removed:
+## TASK-1.10 gate rules
 
-```text
-_wipeCacheExtensionContainers
-```
+TASK-1.10 may move to `COMPLETED` only when all conditions are met:
 
-It is replaced by separate canonical path arrays for:
-
-```text
-ExtensionData
-PluginKitData
-```
-
-Verification consumes those paths directly and never reconstructs them from UUIDs.
-
-## TASK-1.8 gate rules
-
-TASK-1.8 may move to `COMPLETED` only when all conditions are met:
-
-- [ ] Agent creates `reports/TASK-1.8-REPORT.md`.
-- [ ] Only `PXDataContainerResolver.h/.m` and `AppDataCleaner.m` change as production source.
-- [ ] Generic resolver API is added exactly once.
-- [ ] Existing application-data resolver remains and delegates to generic resolution.
-- [ ] Generic resolver accepts exactly ApplicationData, ExtensionData and PluginKitData.
-- [ ] Generic resolver rejects AppGroup and invalid kinds.
-- [ ] Generic resolver keeps exact metadata identity and ambiguity failure.
-- [ ] Installed extension identifiers come only from exact read-only `.appex` inspection.
-- [ ] Migrated discovery contains no parent-prefix ownership test.
-- [ ] Duplicate extension identifier at different paths fails closed.
-- [ ] ExtensionData and PluginKitData use exact resolver + validator.
-- [ ] Mutation uses canonical validator output only.
-- [ ] One bounded result command runs per resolved container.
-- [ ] Post-command validation and strict postcondition are required.
-- [ ] Separate component results have exact unit accounting.
-- [ ] Internal aggregate contains exactly three migrated components.
-- [ ] Failure precedence is ApplicationData, ExtensionData, PluginKitData, Keychain.
-- [ ] Raw extension dictionary cache is removed.
-- [ ] Canonical ExtensionData and PluginKitData caches are used directly.
-- [ ] Legacy extension discovery/mutation is unreachable from migrated main flow.
-- [ ] ApplicationData TASK-1.7 behavior does not regress.
-- [ ] App Group and Keychain are not migrated.
-- [ ] Application bundles remain read-only.
+- [ ] Agent creates `reports/TASK-1.10-REPORT.md`.
+- [ ] Only the five allowed production files change.
+- [ ] Four-scope data mask remains exact and unchanged.
+- [ ] Five-scope full mask is added exactly.
+- [ ] Full Clear request contains all five scopes.
+- [ ] `completeAppDataWipe:` remains four-scope and data-only.
+- [ ] One immutable Keychain plan is captured before the initial pass.
+- [ ] Settings and entitlements are not reread between passes.
+- [ ] Signed exact groups are the only typed authorization.
+- [ ] Selected groups are an exact subset of signed authorization.
+- [ ] Explicit empty selection remains empty and produces Skipped.
+- [ ] Malformed/unauthorized configuration fails closed.
+- [ ] System policy denial remains failure when Keychain was requested.
+- [ ] Non-system uses two exact pass units.
+- [ ] System uses one exact bridge pass unit.
+- [ ] Planning, success, partial and total failure counts are exact.
+- [ ] Non-system ldid and helper execution are bounded and direct.
+- [ ] Temporary artifacts are cleaned on every path.
+- [ ] Raw stdout/stderr/group values are not persisted.
+- [ ] `backup_helper` exits nonzero for warnings or failed items.
+- [ ] System bridge reports real operation counts.
+- [ ] AppDataCleaner validates full bridge response identity and partition.
+- [ ] KeychainGroups UI preserves an explicit empty selection.
+- [ ] Clear confirmation preserves an explicit empty selection.
+- [ ] Final aggregate contains exactly five components.
+- [ ] Callback error comes only from final aggregate precedence.
+- [ ] Separate `keychainOK1/keychainOK2/keychainFailed` callback logic is removed.
+- [ ] Extension Keychain, Backup and Restore remain out of scope.
 - [ ] Protected files remain unchanged.
 - [ ] `git diff --check`, whitespace and NUL gates pass.
 - [ ] GitHub Actions succeeds or owner confirms build.
@@ -288,58 +299,53 @@ TASK-1.8 may move to `COMPLETED` only when all conditions are met:
 
 | Task | Status | Report | Build | Review |
 |---|---|---|---|---|
-| TASK-0.1 | COMPLETED | `reports/TASK-0.1-REPORT.md` | PASSED | ACCEPTED |
-| TASK-0.2 | COMPLETED | `reports/TASK-0.2-REPORT.md` | PASSED | ACCEPTED |
-| TASK-0.3 | COMPLETED | `reports/TASK-0.3-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-0.4 | COMPLETED | `reports/TASK-0.4-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-0.5 | COMPLETED | `reports/TASK-0.5-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-0.6 | COMPLETED | `reports/TASK-0.6-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-0.7 | COMPLETED | `reports/TASK-0.7-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.1 | COMPLETED | `reports/TASK-1.1-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.2 | COMPLETED | `reports/TASK-1.2-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.3 | COMPLETED | `reports/TASK-1.3-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.4 | COMPLETED | `reports/TASK-1.4-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.5 | COMPLETED | `reports/TASK-1.5-REPORT.md` | PASSED reported by owner | ACCEPTED |
-| TASK-1.6 | COMPLETED | `reports/TASK-1.6-REPORT.md` | PASSED reported by owner | ACCEPTED |
+| TASK-0.1 through TASK-0.7 | COMPLETED | Present | PASSED | ACCEPTED |
+| TASK-1.1 through TASK-1.6 | COMPLETED | Present | PASSED reported by owner | ACCEPTED |
 | TASK-1.7 | COMPLETED | `reports/TASK-1.7-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.7-REVIEW.md` |
-| TASK-1.8 | READY | Not created | Not run | Not reviewed |
-| TASK-1.9 | LOCKED | Not created | Not run | Not reviewed |
+| TASK-1.8 | COMPLETED | `reports/TASK-1.8-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.8-REVIEW.md` plus corrective acceptance |
+| TASK-1.8A | COMPLETED | `reports/TASK-1.8A-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.8A-REVIEW.md` |
+| TASK-1.9 | COMPLETED | `reports/TASK-1.9-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.9-REVIEW.md` |
+| TASK-1.10 | READY | Not created | Not run | Not reviewed |
+| TASK-1.11 | LOCKED | Not created | Not run | Not reviewed |
 
 ## Working-tree baseline
 
-At TASK-1.8 opening:
+At TASK-1.10 opening:
 
 ```text
-HEAD: f98a0f6d9f52cb08f151c29520af6fb6e255616b
-Working tree: clean before coordinator documentation updates
+HEAD: 0bb2e354715e00f20c4df95719e900ae5e8e1673
+TASK-1.9 build: PASSED reported by owner
 ```
 
-Coordinator-owned uncommitted files after opening TASK-1.8 may include:
+Coordinator-owned uncommitted files may include:
 
 ```text
 docs/backup-restore-hardening/DECISIONS.md
 docs/backup-restore-hardening/README.md
 docs/backup-restore-hardening/ROADMAP.md
 docs/backup-restore-hardening/STATUS.md
-docs/backup-restore-hardening/reviews/TASK-1.7-REVIEW.md
-docs/backup-restore-hardening/tasks/TASK-1.8-migrate-extension-and-pluginkit-data-clear.md
+docs/backup-restore-hardening/reviews/TASK-1.8-REVIEW.md
+docs/backup-restore-hardening/reviews/TASK-1.8A-REVIEW.md
+docs/backup-restore-hardening/reviews/TASK-1.9-REVIEW.md
+docs/backup-restore-hardening/tasks/TASK-1.8A-restore-resolver-contract-and-report-gates.md
+docs/backup-restore-hardening/tasks/TASK-1.9-migrate-app-group-clear.md
+docs/backup-restore-hardening/tasks/TASK-1.10-integrate-keychain-clear-result.md
 ```
 
-The agent must treat those as protected coordinator baseline and must not rewrite the task specification.
+The agent must treat these as protected coordinator baseline and must not rewrite task specifications or reviews.
 
 ## Blocked work
 
-TASK-1.8 does not authorize:
+TASK-1.10 does not authorize:
 
-- App Group migration;
-- Keychain component result integration;
+- TASK-1.11 permission/marker cleanup;
+- legacy aggressive Keychain API quarantine;
 - extension Keychain migration;
-- extension preference migration;
-- global PlugInKit database/file cleanup as PluginKitData;
-- legacy public helper quarantine;
-- generic destructive helper redesign;
-- Backup, Restore or UI changes;
+- Backup/Restore Keychain migration;
+- public Clear API changes;
 - application-bundle writes;
-- TASK-1.9 or later implementation.
+- data-container/App Group resolver changes;
+- UI layout redesign;
+- broad vendor/service/account Keychain matching.
 
-Agent must stop after TASK-1.8.
+Agent must stop after TASK-1.10.

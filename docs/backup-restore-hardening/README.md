@@ -40,7 +40,10 @@ docs/backup-restore-hardening/
 │   ├── TASK-1.5-typed-clear-request.md
 │   ├── TASK-1.6-structured-clear-result.md
 │   ├── TASK-1.7-migrate-main-application-data-clear.md
-│   └── TASK-1.8-migrate-extension-and-pluginkit-data-clear.md
+│   ├── TASK-1.8-migrate-extension-and-pluginkit-data-clear.md
+│   ├── TASK-1.8A-restore-resolver-contract-and-report-gates.md
+│   ├── TASK-1.9-migrate-app-group-clear.md
+│   └── TASK-1.10-integrate-keychain-clear-result.md
 ├── reports/
 │   ├── README.md
 │   └── TASK-x.y-REPORT.md                 # agent tạo

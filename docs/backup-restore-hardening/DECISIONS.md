@@ -529,3 +529,111 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: Raw extension dictionaries and UUID cache state are replaced in the migrated flow by separate copied canonical path arrays for ExtensionData and PluginKitData.
 - Reason: Verification must consume validator outputs directly and must not reconstruct destructive identities from legacy UUID/type/root dictionaries.
+
+## D-089 — Generic resolver expansion must preserve TASK-1.2 input compatibility
+
+- Status: Accepted
+- Decision: Adding `resolveDataContainerForIdentifier:kind:root:error:` must not narrow the accepted identifier-input contract of the existing ApplicationData resolver. Public resolver input remains runtime NSString, nonempty, non-whitespace-only and free of U+0000, with no bundle-syntax normalization or whitelist.
+- Reason: The existing public selector delegates to the generic method. Applying the stricter `PXClearRequest` bundle syntax inside the resolver would be a backwards-incompatible behavior change unrelated to exact metadata identity.
+
+## D-090 — Strict extension identifier syntax belongs at installed-code discovery
+
+- Status: Accepted
+- Decision: TASK-1.8 keeps `PXClearRequest`-equivalent strict identifier validation in the private read-only `.appex` discovery boundary, not in the public data-container resolver.
+- Reason: Installed extension code identity is expected to be a valid bundle identifier, while the generic resolver's job is exact metadata lookup under its previously accepted string contract.
+
+## D-091 — Cumulative whitespace evidence is part of task acceptance
+
+- Status: Accepted
+- Decision: A task report that claims whitespace verification passed cannot be accepted when `git show --check` or the cumulative baseline-to-HEAD diff reports added trailing whitespace. Corrective commits must clean the evidence and rerun both gates.
+- Reason: False verification evidence weakens review trust even when production source is otherwise correct.
+
+## D-092 — Typed App Group resolution coexists with the legacy resolver API
+
+- Status: Accepted
+- Decision: TASK-1.9 adds a root-specific typed App Group resolver returning `PXResolvedContainerKindAppGroup` while preserving `resolveGroupContainersForGroupIDs:` and `AppGroupContainerInfo` for current Backup/Restore callers.
+- Reason: Clear requires exact error-bearing destructive identity, but changing the legacy model and Backup/Restore behavior in the same task would exceed the migration boundary.
+
+## D-093 — Signed application entitlements are the only App Group identity source
+
+- Status: Accepted
+- Decision: Migrated AppGroups discovery reads only `com.apple.security.application-groups` and the compatibility key `application-groups` from the target application's signed entitlements. Prefix, company-name, metadata substring and content heuristics cannot authorize a group.
+- Reason: App Group identifiers are declared capabilities. Filesystem similarity or naming conventions do not prove that the target app is entitled to mutate a shared container.
+
+## D-094 — App Group metadata supports one exact string or one exact array occurrence
+
+- Status: Accepted
+- Decision: The typed App Group resolver accepts a metadata string equal to the requested group identifier or an array containing that identifier exactly once. Duplicate exact occurrences are invalid metadata; multiple physical exact matches in one root are ambiguous.
+- Reason: The validator already enforces this live metadata policy. Resolution must produce a candidate compatible with the same exact identity rules.
+
+## D-095 — App Group execution units are unique canonical physical containers
+
+- Status: Accepted
+- Decision: Multiple entitled group identifiers that resolve and validate to the same canonical App Group path are collapsed into one physical execution unit. Every associated identity model is retained and revalidated after the single command.
+- Reason: App Group metadata arrays can legitimately associate several exact identifiers with one container. Wiping the same physical directory multiple times would distort result counts and increase race exposure.
+
+## D-096 — AppGroups use the common strict data-container mutation boundary
+
+- Status: Accepted
+- Decision: Each unique canonical App Group container receives one bounded strict wipe, post-command identity revalidation and strict postcondition. Raw UUID reconstruction, batched void commands, permission-fixing helpers and destructive final sweeps are forbidden in the migrated path.
+- Reason: Shared containers require the same canonical authorization and observable completion proof as ApplicationData, ExtensionData and PluginKitData.
+
+## D-097 — The migrated aggregate grows to four scopes
+
+- Status: Accepted
+- Decision: TASK-1.9 aggregates exactly ApplicationData, ExtensionData, AppGroups and PluginKitData. Legacy callback failure precedence becomes ApplicationData, ExtensionData, AppGroups, PluginKitData, then Keychain.
+- Reason: AppGroups becomes a truthful structured component while Keychain remains outside the typed aggregate until TASK-1.10.
+
+## D-098 — App Group verification caches canonical paths, not root-specific UUIDs
+
+- Status: Accepted
+- Decision: `_wipeCacheGroupUUIDs` and `_wipeCacheRootlessGroupUUIDs` are replaced with one deterministic canonical App Group path array used directly by cache-hit verification.
+- Reason: A root flag plus UUID reconstructs pre-validation state. Verification must consume the exact paths authorized by the validator.
+
+## D-099 — Typed AppGroups must be the only reachable main-flow App Group mutation
+
+- Status: Accepted
+- Decision: After TASK-1.9, the migrated main Clear flow cannot mutate App Group containers through deep encrypted scans, fuzzy legacy resolvers, group final sweeps or MobileSafari substring/structure fallbacks. MobileSafari SystemGroup and global store cleanup remain separate.
+- Reason: A later legacy mutation would bypass typed identity, canonical authorization and component accounting even if the initial AppGroups operation was correct.
+
+## D-100 — Keychain configuration is snapshotted once per full Clear
+
+- Status: Accepted
+- Decision: TASK-1.10 reads the per-app enable flag, saved selection, signed Keychain authorization and system-app policy once before the initial Keychain pass. The same immutable snapshot drives every planned pass.
+- Reason: Re-reading mutable defaults or entitlements between passes can silently change scope and make two executions impossible to represent as one stable component.
+
+## D-101 — Exact signed access groups are the only typed Keychain authorization
+
+- Status: Accepted
+- Decision: The typed Keychain plan accepts only exact selected groups that are members of the target application's signed `keychain-access-groups` plus valid `application-identifier`. Hard-coded vendor groups, service names, account labels and bundle-prefix heuristics are excluded.
+- Reason: Keychain access group entitlement is the capability boundary. Similar names or legacy aggressive matching do not authorize deletion of shared credentials.
+
+## D-102 — Explicit empty Keychain selection is preserved
+
+- Status: Accepted
+- Decision: A saved empty group array means the user selected no groups and produces a Skipped Keychain component. Only an absent saved object may default to all exact authorized groups.
+- Reason: Treating an empty selection as missing configuration silently broadens a destructive operation and contradicts the UI's Select None action.
+
+## D-103 — Keychain pass invocations are structured units
+
+- Status: Accepted
+- Decision: Non-system applications have two planned Keychain units, initial and final; system applications have one bridge unit. Planning failures use one synthetic failed unit, while disabled or empty policy uses zero-unit Skipped.
+- Reason: Unit counts must distinguish skipped policy, complete success, partial two-pass failure and total failure without inventing a separate partial status.
+
+## D-104 — Full Clear produces a five-scope result while completeAppDataWipe remains data-only
+
+- Status: Accepted
+- Decision: `clearDataForBundleID:completion:` builds a final aggregate containing ApplicationData, ExtensionData, AppGroups, PluginKitData and Keychain. `completeAppDataWipe:` remains a four-scope data-only compatibility selector.
+- Reason: Full Clear needs one truthful final result, but adding Keychain side effects to the existing data-only compatibility selector would be an unrelated public behavior change.
+
+## D-105 — Keychain helper and bridge success require complete execution evidence
+
+- Status: Accepted
+- Decision: Non-system signing/helper execution uses bounded direct executable APIs and fails on incomplete/truncated results. The CLI returns nonzero for wipe warnings or failed items. The system bridge reports attempted/succeeded/failed delete operations and may set `ok` only when the partition is complete and failure-free.
+- Reason: Process exit zero or an unconditional bridge boolean does not prove that selected Keychain classes were deleted successfully.
+
+## D-106 — Legacy callback outcome derives only from the final five-scope result
+
+- Status: Accepted
+- Decision: After TASK-1.10, callback error precedence is ApplicationData, ExtensionData, AppGroups, PluginKitData, then Keychain. No separate Keychain boolean branch may override or bypass the final aggregate.
+- Reason: One final structured result prevents divergence between logged component outcomes and the legacy `BOOL/NSError` callback while preserving Skipped as non-failure.

@@ -21,9 +21,10 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 - TASK-1.5 — Introduce typed `PXClearRequest`. **COMPLETED**
 - TASK-1.6 — Introduce structured `PXClearResult`. **COMPLETED**
 - TASK-1.7 — Migrate main application-data clear through exact resolution and canonical validation. **COMPLETED**
-- TASK-1.8 — Migrate ExtensionData and PluginKitData clear through exact installed extension identity, exact metadata resolution and canonical validation. **READY**
-- TASK-1.9 — Migrate app-group clear. **LOCKED**
-- TASK-1.10 — Integrate keychain clear result correctly. **LOCKED**
+- TASK-1.8 — Migrate ExtensionData and PluginKitData clear through exact installed extension identity, exact metadata resolution and canonical validation. **COMPLETED**
+- TASK-1.8A — Restore TASK-1.2 resolver input compatibility and clean TASK-1.8 report gates. **COMPLETED**
+- TASK-1.9 — Migrate app-group clear through signed entitlement identity, exact typed resolution and canonical validation. **COMPLETED**
+- TASK-1.10 — Integrate keychain clear result correctly. **READY**
 - TASK-1.11 — Remove unsafe permission and marker-file behavior. **LOCKED**
 - TASK-1.12 — Quarantine ambiguous legacy clear APIs. **LOCKED**
 
