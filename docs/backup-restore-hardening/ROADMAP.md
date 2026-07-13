@@ -4,9 +4,9 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 
 ## Phase 0 — Reliable Command Execution
 
-- TASK-0.1 — Stabilize `CommandResult` contract. **READY**
-- TASK-0.2 — Add total deadline, bounded capture and reliable timeout result. **LOCKED**
-- TASK-0.3 — Configure process group at spawn time and reliable termination sequence. **LOCKED**
+- TASK-0.1 — Stabilize `CommandResult` contract. **COMPLETED**
+- TASK-0.2 — Add opt-in total deadline, bounded capture and deterministic direct-child timeout result. **READY**
+- TASK-0.3 — Configure process group at spawn time and upgrade timeout termination to the whole command group. **LOCKED**
 - TASK-0.4 — Add direct executable plus argv API for critical operations. **LOCKED**
 - TASK-0.5 — Add compatibility result-returning wrapper in `AppDataCleaner`. **LOCKED**
 

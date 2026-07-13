@@ -24,6 +24,9 @@ NS_ASSUME_NONNULL_BEGIN
 // stdout/stderr capture depends on method used.
 - (CommandResult *)run:(NSString *)command;
 - (CommandResult *)runAndCapture:(NSString *)command;
+- (CommandResult *)runAndCapture:(NSString *)command
+                     timeoutSec:(NSTimeInterval)timeoutSec
+                 maxOutputBytes:(NSUInteger)maxOutputBytes;
 
 - (nullable NSString *)firstExistingPath:(NSArray<NSString *> *)paths;
 

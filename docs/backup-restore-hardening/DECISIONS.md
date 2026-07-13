@@ -37,3 +37,27 @@ Tài liệu này ghi các quyết định đã chốt trong quá trình triển 
 - Status: Accepted
 - Decision: Build xanh không tự động đồng nghĩa task hoàn thành. Vẫn cần review scope, contract và safety behavior.
 - Reason: Nhiều regression destructive vẫn có thể compile thành công.
+
+## D-007 — Deadline API is opt-in until process-group hardening
+
+- Status: Accepted
+- Decision: TASK-0.2 thêm overload deadline/output-cap thật nhưng không áp policy mới cho `runAndCapture:` legacy và không migrate caller.
+- Reason: Trước TASK-0.3, timeout chỉ có thể terminate direct child PID; áp mặc định cho shell command hiện tại có thể để lại pipeline/background descendant.
+
+## D-008 — Output limit is per stream and must keep draining
+
+- Status: Accepted
+- Decision: `maxOutputBytes` giới hạn riêng stdout và stderr. Khi đạt cap, runner tiếp tục đọc rồi discard để child không block vì pipe đầy.
+- Reason: Dừng đọc sau cap sẽ biến cơ chế bảo vệ bộ nhớ thành một deadlock mới.
+
+## D-009 — Timeout is a dedicated result state
+
+- Status: Accepted
+- Decision: Timeout thành công về mặt runner được biểu diễn bằng `timedOut = YES`, không dùng synthetic exit code và không tự động gán `runnerError = ETIMEDOUT`.
+- Reason: Phân biệt deadline policy với child exit, spawn failure và runner failure.
+
+## D-010 — Deadlines and duration use monotonic time
+
+- Status: Accepted
+- Decision: Deadline và `duration` phải dùng monotonic clock; không dùng wall clock hoặc `NSDate`.
+- Reason: Thay đổi giờ hệ thống, timezone hoặc clock synchronization không được kéo dài hay rút ngắn command deadline.

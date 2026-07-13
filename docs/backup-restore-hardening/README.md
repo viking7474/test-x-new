@@ -26,10 +26,13 @@ docs/backup-restore-hardening/
 ├── STATUS.md
 ├── DECISIONS.md
 ├── tasks/
-│   └── TASK-0.1-command-result-contract.md
+│   ├── TASK-0.1-command-result-contract.md
+│   └── TASK-0.2-bounded-capture-deadline.md
 ├── reports/
 │   ├── README.md
-│   └── TASK-0.1-REPORT.md                 # agent tạo sau khi hoàn thành
+│   └── TASK-x.y-REPORT.md                 # agent tạo
+├── reviews/
+│   └── TASK-x.y-REVIEW.md                 # coordinator tạo sau review/build
 └── templates/
     └── AGENT_REPORT_TEMPLATE.md
 ```
