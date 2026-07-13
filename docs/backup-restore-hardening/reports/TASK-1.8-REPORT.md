@@ -76,6 +76,17 @@ Protected files not changed:
 
 The existing `resolveApplicationDataContainerForIdentifier:root:error:` API remains public and delegates directly to the generic API using `PXResolvedContainerKindApplicationData`.
 
+### Public identifier-input contract after TASK-1.8A
+
+The public generic resolver and the existing ApplicationData compatibility selector preserve the accepted TASK-1.2 input contract. An identifier is accepted at the public resolver validation boundary when it:
+
+- is an `NSString` at runtime;
+- has length greater than zero;
+- contains at least one character outside `whitespaceAndNewlineCharacterSet`;
+- contains no Unicode U+0000.
+
+The public resolver does **not** impose bundle-identifier syntax. Underscores, Unicode, internal or surrounding whitespace, leading/trailing dots, consecutive dots, slash, backslash and wildcard characters are not rejected solely for syntax. Accepted values are retained exactly and are not trimmed, lowercased, uppercased, normalized or rewritten. Acceptance only means the value proceeds to exact metadata resolution; it does not imply a matching container exists or that `PXResolvedContainer` construction will succeed.
+
 ### Allowed kind/root matrix
 
 | Requested kind | Rootful base | Rootless base | Allowed |
@@ -133,6 +144,8 @@ Only these immediate locations are inspected:
 3. `<App>.app/Plugins/<Extension>.appex`
 
 Every `.appex` must be a real non-symlink directory with a regular non-symlink `Info.plist` and a strict `PXClearRequest`-compatible `CFBundleIdentifier`. Identifiers are retained verbatim and sorted using `compare:`.
+
+This private `.appex` policy is intentionally stricter than the permissive public resolver contract. `PXStrictBundleIdentifierIsValid` remains private to `AppDataCleaner.m`, mirrors the `PXClearRequest` bundle-identifier syntax boundary, and is used before extension identifiers enter migrated orchestration. TASK-1.8A changes only the public resolver validator and does not modify or relax private installed-extension validation.
 
 A repeated identifier at two distinct `.appex` paths is an ambiguity failure. The helper does not silently deduplicate and does not select one path. There is deliberately no requirement that an extension identifier begin with the parent application identifier; no parent-prefix ownership heuristic exists in the helper.
 
@@ -333,6 +346,9 @@ Migrated bundle discovery calls only `lstat`, `contentsOfDirectoryAtPath:` and `
 
 | Scenario | Expected migrated result | Implemented behavior |
 |---|---|---|
+| Public resolver dynamic non-string, empty, whitespace-only, newline-only or embedded U+0000 | `InvalidInput` before filesystem resolution | TASK-1.2-compatible validator rejects |
+| Public resolver `com.example.app`, `com.example_app`, `café.example`, ` com.example.app `, `.com.example`, or `com..example` | Proceed unchanged to exact resolution | No syntax whitelist or normalization |
+| Public resolver invalid kind, AppGroup kind or invalid root | `InvalidInput` | Allowed-kind/root gates remain unchanged |
 | Invalid request identifier/scope | Internal/InvalidRequest failure | Request or private entry rejects it |
 | Both bundle roots absent or zero exact main app | Discovery failure | Both extension components Failed 1/0/1 |
 | Multiple exact main app matches | Discovery ambiguity | Both extension components Failed 1/0/1 |
@@ -360,61 +376,59 @@ Migrated bundle discovery calls only `lstat`, `contentsOfDirectoryAtPath:` and `
 
 ## 16. Verification results
 
-### Required Git commands
+### Historical TASK-1.8 evidence and review correction
 
-`git rev-parse HEAD`:
+The original TASK-1.8 working-tree `git diff --check` captured before its commit returned exit code `0`, but that command did not include the subsequently added report as a committed diff. The coordinator review correctly found trailing whitespace in the committed `TASK-1.8-REPORT.md`. TASK-1.8A therefore removes all report trailing spaces/tabs and restores the TASK-1.2 resolver input contract.
 
-```text
-f98a0f6d9f52cb08f151c29520af6fb6e255616b
-```
+### Corrective cumulative gates
 
-`git diff --check`:
+The following gates are required and are executed for the corrective commit:
 
 ```text
-(exit 0; no whitespace errors)
+git show --check --oneline HEAD
+git diff f98a0f6d9f52cb08f151c29520af6fb6e255616b..HEAD --check
 ```
 
-`git diff --stat -- PXDataContainerResolver.h PXDataContainerResolver.m AppDataCleaner.m`:
+Corrective result recorded for handoff:
 
 ```text
- AppDataCleaner.m          | 940 ++++++++++++++++++++++++++++++++++++++++------
- PXDataContainerResolver.h |   5 +
- PXDataContainerResolver.m | 256 ++++++++-----
- 3 files changed, 991 insertions(+), 210 deletions(-)
+git show --check --oneline HEAD: PASS
+git diff f98a0f6d9f52cb08f151c29520af6fb6e255616b..HEAD --check: PASS
+TASK-1.8-REPORT trailing-whitespace lines: 0
 ```
 
-`git diff --exit-code -- <protected files>`:
-
-```text
-exit 0
-```
+The corrective report `TASK-1.8A-REPORT.md` contains the complete command outputs, protected checksum comparison, source-gate audit and exact corrective diff/stat.
 
 ### Static contract and syntax audits
 
-- 62 TASK-1.8 contract assertions passed.
-- Lexical delimiter audit passed for `PXDataContainerResolver.m` and `AppDataCleaner.m`.
-- Generic resolver forbidden-API search returned zero matches.
-- Migrated-flow legacy-reference assertions returned zero matches.
-- Validator support for ExtensionData and PluginKitData fixed bases was confirmed read-only in the protected validator implementation.
+- Public resolver validation matches TASK-1.2: runtime string, nonempty, non-whitespace and no U+0000.
+- Public resolver syntax whitelist references: zero.
+- `PXResolverCharacterIsAllowed` references: zero.
+- Generic resolver allowed kinds remain exactly ApplicationData, ExtensionData and PluginKitData.
+- AppGroup acceptance remains zero.
+- Existing ApplicationData selector delegates exactly once using `PXResolvedContainerKindApplicationData`.
+- Generic resolver fuzzy authorization tokens remain zero.
+- Private strict `.appex` identifier validation remains unchanged in `AppDataCleaner.m`.
+- Migrated-flow orchestration, callback precedence, caches, strict wipe and application-bundle discovery remain unchanged.
 
 ### Whitespace, NUL and generated-file audit
 
-| File | Bytes | NUL count | CRLF count | Bare LF count |
-|---|---:|---:|---:|---:|
-| `PXDataContainerResolver.h` | 1290 | 0 | 0 | 30 |
-| `PXDataContainerResolver.m` | 8732 | 0 | 0 | 227 |
-| `AppDataCleaner.m` | 398663 | 0 | 7601 | 0 |
+| File | Bytes | NUL count | Line-ending note |
+|---|---:|---:|---|
+| `PXDataContainerResolver.h` | 1290 | 0 | Protected and unchanged |
+| `PXDataContainerResolver.m` | 8332 | 0 | Corrective production file |
+| `AppDataCleaner.m` | 398663 | 0 | Protected and unchanged in TASK-1.8A |
+| `TASK-1.8-REPORT.md` | regenerated at corrective handoff | 0 | Trailing-whitespace lines: 0 |
 
-- `git diff --check`: pass.
-- No NUL bytes in changed production files.
-- `AppDataCleaner.m` is consistently CRLF.
-- Resolver files retain LF and only trigger the checkout's informational autocrlf warning.
-- No `.task18*` temporary audit/generated files remain.
-- No build output or generated source was added.
+- `git diff --check`: pass before the corrective commit.
+- Post-commit cumulative and commit-local whitespace gates: pass.
+- No NUL bytes were introduced.
+- No temporary `.task18a*` file remains at final handoff.
+- No generated source, build output or binary artifact was added.
 
 ### Local build limitation
 
-This Windows workspace has neither `clang` nor `make` installed (`command not recognized`), so a local Objective-C/Theos compilation could not be executed. The source was instead checked with selector/header review, 62 contract assertions, lexical delimiter validation and all required Git audits. CI remains the compilation authority.
+This corrective task changes only resolver input validation and report evidence. The Windows workspace still lacks the iOS/Theos compiler toolchain, so local Objective-C compilation was not run. GitHub Actions remains the build authority.
 
 ## 17. Remaining risks
 
@@ -423,7 +437,7 @@ This Windows workspace has neither `clang` nor `make` installed (`command not re
 - Legacy standalone verifier cache-miss inspection remains heuristic and read-only by explicit scope decision; it is not part of migrated mutation.
 - Local compilation was unavailable in this workspace; GitHub Actions must validate Objective-C compilation and integration.
 
-## 18. Full source diff
+## 18. Full cumulative source diff after TASK-1.8A
 
 ```diff
 diff --git a/AppDataCleaner.m b/AppDataCleaner.m
@@ -458,12 +472,12 @@ index 93e2610..dbb790b 100644
 +    NSArray<NSString *> *_wipeCacheExtensionDataCanonicalPaths;
 +    NSArray<NSString *> *_wipeCachePluginKitDataCanonicalPaths;
  }
- 
+
  - (BOOL)_sqliteExecAtPath:(NSString *)dbPath sql:(NSString *)sql errorOut:(NSString **)errorOut {
 @@ -659,6 +672,211 @@ static NSString *PXApplicationDataStatusName(PXClearComponentStatus status) {
      return @"Invalid";
  }
- 
+
 +static const PXClearScope PXMigratedDataClearScopes =
 +    PXClearScopeApplicationData |
 +    PXClearScopeExtensionData |
@@ -675,7 +689,7 @@ index 93e2610..dbb790b 100644
 @@ -1121,19 +1339,533 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
      return YES;
  }
- 
+
 +#pragma mark - Exact Installed Extension Discovery
 +
 +- (NSArray<NSString *> *)_exactInstalledExtensionIdentifiersForApplicationIdentifier:(NSString *)bundleIdentifier
@@ -1193,10 +1207,10 @@ index 93e2610..dbb790b 100644
 +}
 +
  #pragma mark - Main Public Methods
- 
+
  - (void)clearDataForBundleID:(NSString *)bundleID completion:(void (^)(BOOL, NSError *))completion {
      [self logMessage:@"[AppDataCleaner] === STARTING data clearing for %@ ===", bundleID];
- 
+
      BOOL deepClean = [self _deepCleanEnabled];
 -    PXClearRequest *applicationDataRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
 -                                                                                       scopes:PXClearScopeApplicationData
@@ -1216,7 +1230,7 @@ index 93e2610..dbb790b 100644
 @@ -1271,26 +2003,43 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                       frozeForThisClear = [freezer isApplicationFrozen:bundleID];
                   }
-                  
+
 -                 // Step 4: Run the typed application-data component and consume its result.
 -                 [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running typed application-data clear..."];
 -                 PXClearComponentResult *applicationDataResult =
@@ -1274,8 +1288,8 @@ index 93e2610..dbb790b 100644
 +                         }
 +                     }
                   }
-                 
-                 // Step 5: Clear HTTP cookie storage in memory  
+
+                 // Step 5: Clear HTTP cookie storage in memory
 @@ -1328,12 +2077,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                  [strongSelf logMessage:@"[AppDataCleaner] === COMPLETED data clearing for %@ ===", bundleID];
                  BOOL keychainFailed = !keychainOK1 || !keychainOK2;
@@ -1329,12 +1343,12 @@ index 93e2610..dbb790b 100644
 +              (unsigned long)component.failedUnitCount];
 +    }
  }
- 
+
  - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request {
 @@ -1383,28 +2142,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
      NSString *bundleID = request.bundleIdentifier;
      [self logMessage:@"[AppDataCleaner] Starting complete wipe for %@", bundleID];
- 
+
 -    // Data/Application listings remain read-only inputs for extension discovery only.
 -    NSArray *cachedDataDirs = [self listDirectoriesInPath:@"/var/mobile/Containers/Data/Application"];
 -    NSArray *cachedRootlessDataDirs = [self listDirectoriesInPath:@"/containers/Data/Application"];
@@ -1351,7 +1365,7 @@ index 93e2610..dbb790b 100644
 -                                                           rootlessDataDirs:cachedRootlessDataDirs
 -                                                                 bundleDirs:cachedBundleDirs
 -                                                         rootlessBundleDirs:cachedRootlessBundleDirs];
- 
+
      BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
      int rmTimeout = (request.deepClean || isSystemApp) ? (15 * 60) : (5 * 60);
      int findTimeout = (request.deepClean || isSystemApp) ? (20 * 60) : (8 * 60);
@@ -1360,13 +1374,13 @@ index 93e2610..dbb790b 100644
 +    if (groupUUIDs.count + rootlessGroupUUIDs.count > 1) {
          batchTimeout = MIN(30 * 60, findTimeout + (int)(groupUUIDs.count + rootlessGroupUUIDs.count) * 60);
      }
- 
+
 @@ -1531,19 +2276,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
      _wipeCacheApplicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
      _wipeCacheGroupUUIDs = [groupUUIDs copy] ?: @[];
      _wipeCacheRootlessGroupUUIDs = [rootlessGroupUUIDs copy] ?: @[];
 -    _wipeCacheExtensionContainers = [extensionContainers copy] ?: @[];
- 
+
 -    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu; Bundle=%@ Groups=%lu RootlessGroups=%lu Extensions=%lu",
 +    [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu; Groups=%lu RootlessGroups=%lu",
            (unsigned long)attemptedUnits,
@@ -1377,17 +1391,17 @@ index 93e2610..dbb790b 100644
 -          (unsigned long)rootlessGroupUUIDs.count,
 -          (unsigned long)extensionContainers.count];
 +          (unsigned long)rootlessGroupUUIDs.count];
- 
+
      // Clear App Store receipt
 -    [self clearAppReceiptData:bundleID withBundleUUID:bundleUUID];
 +    [self clearAppReceiptData:bundleID withBundleUUID:nil];
-     
+
      // Process group + rootless group containers in ONE shell (same find/mkdir per path as before).
      NSMutableArray<NSString *> *groupWipeParts = [NSMutableArray array];
 @@ -1699,25 +2441,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
          }
      }
-     
+
 -    // Process extension containers — batched into one shell (same find+mkdir semantics).
 -    if (extensionContainers.count > 0) {
 -        [self logMessage:@"[AppDataCleaner] Wiping %lu extension containers (batched shell)", (unsigned long)extensionContainers.count];
@@ -1406,7 +1420,7 @@ index 93e2610..dbb790b 100644
 -        }
 -        [self logMessage:@"[AppDataCleaner] Extension containers wiped"];
 -    }
--    
+-
      // Clear preferences and cookies only (SAFE paths, no SpringBoard state!) — one shell for all paths.
      [self logMessage:@"[AppDataCleaner] Clearing preferences and cookies (batched shell)"];
      NSString *bEsc = [bundleID stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
@@ -1428,7 +1442,7 @@ index 93e2610..dbb790b 100644
 @@ -3424,32 +4139,42 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
          [self verifyClearedPath:groupContainerPath reportingTo:unclearedPaths seen:verifiedPaths];
      }
-     
+
 -    // 3. Verify extension containers
 -    if (!useWipeCache) {
 +    // 3. Verify extension and PluginKit data containers.
@@ -1448,7 +1462,7 @@ index 93e2610..dbb790b 100644
              [self verifyClearedPath:extensionPath reportingTo:unclearedPaths seen:verifiedPaths];
          }
 -    }
- 
+
 -    NSArray *extensionContainers = nil;
 -    if (useWipeCache) {
 -        extensionContainers = _wipeCacheExtensionContainers ?: @[];
@@ -1482,17 +1496,17 @@ index 93e2610..dbb790b 100644
 +        }
 +        [self logMessage:@"[AppDataCleaner] Standalone verification used legacy read-only extension inspection"];
      }
-     
+
      // 4. Verify system paths. SpringBoard ApplicationState is intentionally not deleted (respring risk).
 @@ -3495,7 +4220,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
-         
+
          // Skip app container paths that only contain system directories
          if (([path containsString:@"/var/mobile/Containers/Data/Application"] ||
 -             [path containsString:@"/containers/Data/Application"]) &&
 +             [path containsString:@"/containers/Data/Application"] ||
 +             [path containsString:@"/private/var/mobile/Containers/Data/PluginKitPlugin"] ||
 +             [path containsString:@"/containers/Data/PluginKitPlugin"]) &&
-             ([info containsString:@"StoreKit"] || 
+             ([info containsString:@"StoreKit"] ||
               [info containsString:@"Directory has 0 non-system files"] ||
               [info containsString:@"Directory has 1 non-system files: Documents"] ||
 @@ -3525,7 +4252,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
@@ -1512,7 +1526,7 @@ index a5d726e..9658415 100644
 @@ -16,6 +16,11 @@ typedef NS_ENUM(NSInteger, PXDataContainerResolverErrorCode) {
  __attribute__((objc_subclassing_restricted))
  @interface PXDataContainerResolver : NSObject
- 
+
 +- (nullable PXResolvedContainer *)resolveDataContainerForIdentifier:(NSString *)identifier
 +                                                               kind:(PXResolvedContainerKind)kind
 +                                                               root:(PXResolvedContainerRoot)root
@@ -1522,12 +1536,12 @@ index a5d726e..9658415 100644
                                                                            root:(PXResolvedContainerRoot)root
                                                                           error:(NSError * _Nullable * _Nullable)error;
 diff --git a/PXDataContainerResolver.m b/PXDataContainerResolver.m
-index 6b026e1..5d2e5d8 100644
+index 6b026e1..2fb6df3 100644
 --- a/PXDataContainerResolver.m
 +++ b/PXDataContainerResolver.m
-@@ -1,33 +1,15 @@
+@@ -1,33 +1,21 @@
  #import "PXDataContainerResolver.h"
- 
+
 -NSString * const PXDataContainerResolverErrorDomain = @"PXDataContainerResolverErrorDomain";
 -
 -static NSString * const PXRootfulApplicationDataBase = @"/private/var/mobile/Containers/Data/Application";
@@ -1541,61 +1555,42 @@ index 6b026e1..5d2e5d8 100644
 -    if (error == NULL) {
 -        return;
 -    }
--
++#import <sys/stat.h>
+
 -    *error = [NSError errorWithDomain:PXDataContainerResolverErrorDomain
 -                                 code:code
 -                             userInfo:@{NSLocalizedDescriptionKey: description}];
 -}
-+#import <sys/stat.h>
- 
--static BOOL PXStringContainsNUL(NSString *value) {
--    unichar nulCharacter = 0;
--    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
--    return [value rangeOfString:nulString].location != NSNotFound;
--}
 +NSString * const PXDataContainerResolverErrorDomain = @"PXDataContainerResolverErrorDomain";
- 
+
+-static BOOL PXStringContainsNUL(NSString *value) {
++static BOOL PXResolverStringContainsNUL(NSString *value) {
+     unichar nulCharacter = 0;
+-    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
++    NSString *nulString =
++        [NSString stringWithCharacters:&nulCharacter length:1];
+     return [value rangeOfString:nulString].location != NSNotFound;
+ }
+
 -static BOOL PXStringContainsNonWhitespace(NSString *value) {
 -    NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
 -    return [value rangeOfCharacterFromSet:[whitespace invertedSet]].location != NSNotFound;
-+static BOOL PXResolverCharacterIsAllowed(unichar character) {
-+    return (character >= (unichar)'A' && character <= (unichar)'Z') ||
-+           (character >= (unichar)'a' && character <= (unichar)'z') ||
-+           (character >= (unichar)'0' && character <= (unichar)'9') ||
-+           character == (unichar)'-' ||
-+           character == (unichar)'.';
++static BOOL PXResolverStringContainsNonWhitespace(NSString *value) {
++    NSCharacterSet *whitespace =
++        [NSCharacterSet whitespaceAndNewlineCharacterSet];
++    return [value rangeOfCharacterFromSet:[whitespace invertedSet]].location
++        != NSNotFound;
  }
- 
+
  static BOOL PXResolverIdentifierIsValid(id value) {
-@@ -36,9 +18,34 @@ static BOOL PXResolverIdentifierIsValid(id value) {
-     }
- 
+@@ -37,8 +25,14 @@ static BOOL PXResolverIdentifierIsValid(id value) {
+
      NSString *identifier = (NSString *)value;
--    return identifier.length > 0 &&
+     return identifier.length > 0 &&
 -           PXStringContainsNonWhitespace(identifier) &&
 -           !PXStringContainsNUL(identifier);
-+    if (identifier.length == 0 ||
-+        [identifier characterAtIndex:0] == (unichar)'.' ||
-+        [identifier characterAtIndex:(identifier.length - 1)] == (unichar)'.') {
-+        return NO;
-+    }
-+
-+    NSUInteger componentLength = 0;
-+    for (NSUInteger index = 0; index < identifier.length; index++) {
-+        unichar character = [identifier characterAtIndex:index];
-+        if (!PXResolverCharacterIsAllowed(character)) {
-+            return NO;
-+        }
-+        if (character == (unichar)'.') {
-+            if (componentLength == 0) {
-+                return NO;
-+            }
-+            componentLength = 0;
-+        } else {
-+            componentLength++;
-+        }
-+    }
-+    return componentLength > 0;
++           PXResolverStringContainsNonWhitespace(identifier) &&
++           !PXResolverStringContainsNUL(identifier);
 +}
 +
 +static BOOL PXResolverKindIsAllowed(PXResolvedContainerKind kind) {
@@ -1603,12 +1598,12 @@ index 6b026e1..5d2e5d8 100644
 +           kind == PXResolvedContainerKindExtensionData ||
 +           kind == PXResolvedContainerKindPluginKitData;
  }
- 
+
  static BOOL PXResolverRootIsValid(PXResolvedContainerRoot root) {
-@@ -46,134 +53,175 @@ static BOOL PXResolverRootIsValid(PXResolvedContainerRoot root) {
+@@ -46,134 +40,175 @@ static BOOL PXResolverRootIsValid(PXResolvedContainerRoot root) {
             root == PXResolvedContainerRootRootless;
  }
- 
+
 -static NSString *PXApplicationDataBaseForRoot(PXResolvedContainerRoot root) {
 -    switch (root) {
 -        case PXResolvedContainerRootRootful:
@@ -1619,20 +1614,20 @@ index 6b026e1..5d2e5d8 100644
 +                                    PXResolvedContainerRoot root) {
 +    if (!PXResolverKindIsAllowed(kind) || !PXResolverRootIsValid(root)) {
 +        return nil;
-+    }
+     }
+-    return nil;
 +
 +    if (kind == PXResolvedContainerKindPluginKitData) {
 +        return root == PXResolvedContainerRootRootful
 +            ? @"/private/var/mobile/Containers/Data/PluginKitPlugin"
 +            : @"/containers/Data/PluginKitPlugin";
-     }
--    return nil;
++    }
 +
 +    return root == PXResolvedContainerRootRootful
 +        ? @"/private/var/mobile/Containers/Data/Application"
 +        : @"/containers/Data/Application";
  }
- 
+
 -static BOOL PXDirectoryEntryIsValid(id value) {
 -    if (![value isKindOfClass:[NSString class]]) {
 +static void PXResolverAssignError(NSError **error,
@@ -1649,9 +1644,16 @@ index 6b026e1..5d2e5d8 100644
 +static BOOL PXResolverImmediateDirectoryIsValid(NSString *path) {
 +    const char *fileSystemPath = path.fileSystemRepresentation;
 +    if (!fileSystemPath) {
++        return NO;
++    }
++
++    struct stat entryStat;
++    if (lstat(fileSystemPath, &entryStat) != 0) {
          return NO;
      }
- 
++    return S_ISDIR(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
++}
+
 -    NSString *entry = (NSString *)value;
 -    if (entry.length == 0 ||
 -        [entry isEqualToString:@"."] ||
@@ -1659,19 +1661,12 @@ index 6b026e1..5d2e5d8 100644
 -        [entry hasPrefix:@"."] ||
 -        [entry rangeOfString:@"/"].location != NSNotFound ||
 -        PXStringContainsNUL(entry)) {
-+    struct stat entryStat;
-+    if (lstat(fileSystemPath, &entryStat) != 0) {
-+        return NO;
-+    }
-+    return S_ISDIR(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
-+}
-+
 +static BOOL PXResolverMetadataFileIsValid(NSString *path) {
 +    const char *fileSystemPath = path.fileSystemRepresentation;
 +    if (!fileSystemPath) {
          return NO;
      }
- 
+
 -    return [[NSUUID alloc] initWithUUIDString:entry] != nil;
 +    struct stat entryStat;
 +    if (lstat(fileSystemPath, &entryStat) != 0) {
@@ -1679,9 +1674,9 @@ index 6b026e1..5d2e5d8 100644
 +    }
 +    return S_ISREG(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
  }
- 
+
  @implementation PXDataContainerResolver
- 
+
 -- (nullable PXResolvedContainer *)resolveApplicationDataContainerForIdentifier:(NSString *)identifier
 -                                                                          root:(PXResolvedContainerRoot)root
 -                                                                         error:(NSError * _Nullable * _Nullable)error {
@@ -1693,7 +1688,7 @@ index 6b026e1..5d2e5d8 100644
 +    if (error) {
          *error = nil;
      }
- 
+
 -    if (!PXResolverIdentifierIsValid(identifier) || !PXResolverRootIsValid(root)) {
 -        PXSetDataContainerResolverError(error,
 -                                        PXDataContainerResolverErrorInvalidInput,
@@ -1714,7 +1709,7 @@ index 6b026e1..5d2e5d8 100644
 +                              @"Invalid data container resolution request");
          return nil;
      }
- 
+
 -    NSString *basePath = PXApplicationDataBaseForRoot(root);
      NSFileManager *fileManager = [NSFileManager defaultManager];
      BOOL baseIsDirectory = NO;
@@ -1730,7 +1725,7 @@ index 6b026e1..5d2e5d8 100644
 +                              @"Data container root is not a directory");
          return nil;
      }
- 
+
      NSError *enumerationError = nil;
 -    NSArray *rawChildNames = [fileManager contentsOfDirectoryAtPath:basePath
 -                                                              error:&enumerationError];
@@ -1746,7 +1741,7 @@ index 6b026e1..5d2e5d8 100644
 +                              @"Data container root enumeration failed");
          return nil;
      }
- 
+
 -    NSMutableArray<NSString *> *childNames = [NSMutableArray array];
 -    for (id rawChildName in rawChildNames) {
 -        if ([rawChildName isKindOfClass:[NSString class]]) {
@@ -1756,7 +1751,7 @@ index 6b026e1..5d2e5d8 100644
 -    [childNames sortUsingSelector:@selector(compare:)];
 +    entries = [entries sortedArrayUsingSelector:@selector(compare:)];
 +    NSMutableArray<PXResolvedContainer *> *matches = [NSMutableArray array];
- 
+
 -    PXResolvedContainer *resolvedContainer = nil;
 -    for (NSString *containerUUID in childNames) {
 -        if (!PXDirectoryEntryIsValid(containerUUID)) {
@@ -1766,7 +1761,7 @@ index 6b026e1..5d2e5d8 100644
 +            [[NSUUID alloc] initWithUUIDString:entry] == nil) {
              continue;
          }
- 
+
 -        NSString *containerPath = [basePath stringByAppendingPathComponent:containerUUID];
 -        BOOL candidateIsDirectory = NO;
 -        if (![fileManager fileExistsAtPath:containerPath isDirectory:&candidateIsDirectory] ||
@@ -1775,7 +1770,7 @@ index 6b026e1..5d2e5d8 100644
 +        if (!PXResolverImmediateDirectoryIsValid(containerPath)) {
              continue;
          }
- 
+
 -        NSString *metadataPath = [containerPath stringByAppendingPathComponent:PXContainerMetadataFilename];
 -        id metadataObject = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
 -        if (![metadataObject isKindOfClass:[NSDictionary class]]) {
@@ -1784,14 +1779,14 @@ index 6b026e1..5d2e5d8 100644
 +        if (!PXResolverMetadataFileIsValid(metadataPath)) {
              continue;
          }
- 
+
 -        id rawMetadataIdentifier = [(NSDictionary *)metadataObject objectForKey:PXContainerMetadataIdentifierKey];
 -        if (!PXResolverIdentifierIsValid(rawMetadataIdentifier)) {
 +        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
 +        if (![metadata isKindOfClass:[NSDictionary class]]) {
              continue;
          }
- 
+
 -        NSString *metadataIdentifier = (NSString *)rawMetadataIdentifier;
 -        if (![metadataIdentifier isEqualToString:identifier]) {
 +        id metadataIdentifier = metadata[@"MCMMetadataIdentifier"];
@@ -1799,7 +1794,7 @@ index 6b026e1..5d2e5d8 100644
 +            ![(NSString *)metadataIdentifier isEqualToString:identifier]) {
              continue;
          }
- 
+
 -        PXResolvedContainer *candidate = [[PXResolvedContainer alloc]
 -            initWithKind:PXResolvedContainerKindApplicationData
 -                    root:root
@@ -1825,7 +1820,7 @@ index 6b026e1..5d2e5d8 100644
          }
 +        [matches addObject:candidate];
 +    }
- 
+
 -        if (resolvedContainer != nil) {
 -            PXSetDataContainerResolverError(error,
 -                                            PXDataContainerResolverErrorAmbiguousMatch,
@@ -1844,7 +1839,7 @@ index 6b026e1..5d2e5d8 100644
 +    }
 +    return matches.firstObject;
 +}
- 
+
 -    return resolvedContainer;
 +- (PXResolvedContainer *)resolveApplicationDataContainerForIdentifier:(NSString *)identifier
 +                                                                  root:(PXResolvedContainerRoot)root
@@ -1854,7 +1849,7 @@ index 6b026e1..5d2e5d8 100644
 +                                              root:root
 +                                             error:error];
  }
- 
+
  @end
 ```
 

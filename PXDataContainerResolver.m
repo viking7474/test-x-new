@@ -4,12 +4,18 @@
 
 NSString * const PXDataContainerResolverErrorDomain = @"PXDataContainerResolverErrorDomain";
 
-static BOOL PXResolverCharacterIsAllowed(unichar character) {
-    return (character >= (unichar)'A' && character <= (unichar)'Z') ||
-           (character >= (unichar)'a' && character <= (unichar)'z') ||
-           (character >= (unichar)'0' && character <= (unichar)'9') ||
-           character == (unichar)'-' ||
-           character == (unichar)'.';
+static BOOL PXResolverStringContainsNUL(NSString *value) {
+    unichar nulCharacter = 0;
+    NSString *nulString =
+        [NSString stringWithCharacters:&nulCharacter length:1];
+    return [value rangeOfString:nulString].location != NSNotFound;
+}
+
+static BOOL PXResolverStringContainsNonWhitespace(NSString *value) {
+    NSCharacterSet *whitespace =
+        [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    return [value rangeOfCharacterFromSet:[whitespace invertedSet]].location
+        != NSNotFound;
 }
 
 static BOOL PXResolverIdentifierIsValid(id value) {
@@ -18,28 +24,9 @@ static BOOL PXResolverIdentifierIsValid(id value) {
     }
 
     NSString *identifier = (NSString *)value;
-    if (identifier.length == 0 ||
-        [identifier characterAtIndex:0] == (unichar)'.' ||
-        [identifier characterAtIndex:(identifier.length - 1)] == (unichar)'.') {
-        return NO;
-    }
-
-    NSUInteger componentLength = 0;
-    for (NSUInteger index = 0; index < identifier.length; index++) {
-        unichar character = [identifier characterAtIndex:index];
-        if (!PXResolverCharacterIsAllowed(character)) {
-            return NO;
-        }
-        if (character == (unichar)'.') {
-            if (componentLength == 0) {
-                return NO;
-            }
-            componentLength = 0;
-        } else {
-            componentLength++;
-        }
-    }
-    return componentLength > 0;
+    return identifier.length > 0 &&
+           PXResolverStringContainsNonWhitespace(identifier) &&
+           !PXResolverStringContainsNUL(identifier);
 }
 
 static BOOL PXResolverKindIsAllowed(PXResolvedContainerKind kind) {
