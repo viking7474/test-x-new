@@ -2765,9 +2765,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![mainDataWorkspace cleanupWithError:&mainDataCleanupError]) {
             [warnings addObject:@"Main-data staging cleanup failed"];
         }
-        NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentApplicationData
-                                                   warnings:PXRestoreWarningsSuffix(warnings, applicationWarningStart)],
+        BOOL applicationResultMarked =
+            [resultAccumulator markComponentSucceeded:PXRestoreComponentApplicationData
+                                              warnings:PXRestoreWarningsSuffix(warnings, applicationWarningStart)];
+        NSCAssert(applicationResultMarked,
                   @"ApplicationData result state must be publishable");
+        (void)applicationResultMarked;
 
         // Post-restore hygiene: refresh preferences daemon caches.
         // Some apps read state via cfprefsd and may not notice external file writes immediately.
@@ -2847,9 +2850,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (!profileStagingCleaned) {
                 [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
-            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentProfileAppData
-                                                       warnings:PXRestoreWarningsSuffix(warnings, profileWarningStart)],
+            BOOL profileResultMarked =
+                [resultAccumulator markComponentSucceeded:PXRestoreComponentProfileAppData
+                                                  warnings:PXRestoreWarningsSuffix(warnings, profileWarningStart)];
+            NSCAssert(profileResultMarked,
                       @"ProfileAppData result state must be publishable");
+            (void)profileResultMarked;
         }
 
         // Restore global Safari library (if present)
@@ -2924,9 +2930,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (!safariStagingCleaned) {
                 [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
-            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentGlobalSafari
-                                                       warnings:PXRestoreWarningsSuffix(warnings, safariWarningStart)],
+            BOOL safariResultMarked =
+                [resultAccumulator markComponentSucceeded:PXRestoreComponentGlobalSafari
+                                                  warnings:PXRestoreWarningsSuffix(warnings, safariWarningStart)];
+            NSCAssert(safariResultMarked,
                       @"GlobalSafari result state must be publishable");
+            (void)safariResultMarked;
         }
 
         NSUInteger appGroupWarningStart = warnings.count;
@@ -3201,9 +3210,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (!appGroupStagingCleanupComplete) {
                 [warnings addObject:@"App Group staging cleanup failed"];
             }
-            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentAppGroups
-                                                       warnings:PXRestoreWarningsSuffix(warnings, appGroupWarningStart)],
+            BOOL appGroupsResultMarked =
+                [resultAccumulator markComponentSucceeded:PXRestoreComponentAppGroups
+                                                  warnings:PXRestoreWarningsSuffix(warnings, appGroupWarningStart)];
+            NSCAssert(appGroupsResultMarked,
                       @"AppGroups result state must be publishable");
+            (void)appGroupsResultMarked;
 
         }
 
@@ -3302,9 +3314,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                 if (!stagingCleaned) [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
-            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentSystemGlobal
-                                                       warnings:PXRestoreWarningsSuffix(warnings, systemGlobalWarningStart)],
+            BOOL systemGlobalResultMarked =
+                [resultAccumulator markComponentSucceeded:PXRestoreComponentSystemGlobal
+                                                  warnings:PXRestoreWarningsSuffix(warnings, systemGlobalWarningStart)];
+            NSCAssert(systemGlobalResultMarked,
                       @"SystemGlobal result state must be publishable");
+            (void)systemGlobalResultMarked;
         }
 
         // Restore shared system DBs (if present)
@@ -3407,9 +3422,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
             if (!sharedStagingCleaned) [warnings addObject:@"Optional-file staging cleanup failed"];
             [warnings addObject:@"Restored shared system DBs (this may affect multiple apps)"];
-            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentSharedSystemDatabases
-                                                       warnings:PXRestoreWarningsSuffix(warnings, sharedDatabaseWarningStart)],
+            BOOL sharedDatabasesResultMarked =
+                [resultAccumulator markComponentSucceeded:PXRestoreComponentSharedSystemDatabases
+                                                  warnings:PXRestoreWarningsSuffix(warnings, sharedDatabaseWarningStart)];
+            NSCAssert(sharedDatabasesResultMarked,
                       @"SharedSystemDatabases result state must be publishable");
+            (void)sharedDatabasesResultMarked;
             PXKillallByName(@"accountsd", SIGTERM);
             PXKillallByName(@"calaccessd", SIGTERM);
             PXKillallByName(@"imagent", SIGTERM);
@@ -3477,9 +3495,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 PXKillallByName(@"cfprefsd", SIGTERM);
             }
             if (!preferencesStagingCleaned) [warnings addObject:@"Optional-file staging cleanup failed"];
-            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentPreferences
-                                                       warnings:PXRestoreWarningsSuffix(warnings, preferencesWarningStart)],
+            BOOL preferencesResultMarked =
+                [resultAccumulator markComponentSucceeded:PXRestoreComponentPreferences
+                                                  warnings:PXRestoreWarningsSuffix(warnings, preferencesWarningStart)];
+            NSCAssert(preferencesResultMarked,
                       @"Preferences result state must be publishable");
+            (void)preferencesResultMarked;
         }
 
         // Keychain restore (warning-only on execution failure)
@@ -3534,19 +3555,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSArray<NSString *> *keychainWarnings =
                 PXRestoreWarningsSuffix(warnings, keychainExecutionWarningStart);
             if (ok) {
-                NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentKeychain
-                                                           warnings:keychainWarnings],
+                BOOL keychainSuccessResultMarked =
+                    [resultAccumulator markComponentSucceeded:PXRestoreComponentKeychain
+                                                      warnings:keychainWarnings];
+                NSCAssert(keychainSuccessResultMarked,
                           @"Keychain success result state must be publishable");
+                (void)keychainSuccessResultMarked;
             } else {
                 PXRestoreFailure *keychainFailure =
                     [[PXRestoreFailure alloc] initWithDomain:PXBackupErrorDomain
                                                        code:322
                                                     message:@"Keychain restore failed"];
-                NSCAssert([resultAccumulator markComponentFailed:PXRestoreComponentKeychain
-                                                         failure:keychainFailure
-                                                  rollbackStatus:PXRestoreRollbackStatusNotPerformed
-                                                        warnings:keychainWarnings],
+                BOOL keychainFailureResultMarked =
+                    [resultAccumulator markComponentFailed:PXRestoreComponentKeychain
+                                                   failure:keychainFailure
+                                            rollbackStatus:PXRestoreRollbackStatusNotPerformed
+                                                  warnings:keychainWarnings];
+                NSCAssert(keychainFailureResultMarked,
                           @"Keychain failure result state must be publishable");
+                (void)keychainFailureResultMarked;
             }
 
             PXDebugHeader(debugKeychain, @"Keychain After Restore");
@@ -3595,9 +3622,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![fm fileExistsAtPath:libraryPath isDirectory:&libraryIsDir] || !libraryIsDir) {
             [warnings addObject:@"Post-restore verification: Library directory missing after restore"];
         }
-        NSCAssert([resultAccumulator appendWarnings:PXRestoreWarningsSuffix(warnings, postVerificationWarningStart)
-                                          toComponent:PXRestoreComponentApplicationData],
+        BOOL postVerificationWarningsAttached =
+            [resultAccumulator appendWarnings:PXRestoreWarningsSuffix(warnings, postVerificationWarningStart)
+                                  toComponent:PXRestoreComponentApplicationData];
+        NSCAssert(postVerificationWarningsAttached,
                   @"Post-verification warnings must attach to ApplicationData");
+        (void)postVerificationWarningsAttached;
 
         [self _killRelatedProcessesForBundleID:bundleID];
 
