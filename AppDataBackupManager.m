@@ -10,6 +10,7 @@
 #import "AppEntitlementsReader.h"
 #import "AppGroupContainerResolver.h"
 #import "PXBackupManifestValidator.h"
+#import "PXBackupArtifactVerifier.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
@@ -1890,6 +1891,22 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
         NSString *dataUUID = dataContainerModel.containerUUID;
 
+        NSError *artifactError = nil;
+        PXVerifiedBackupArtifactSet *verifiedArtifacts =
+            [PXBackupArtifactVerifier verifiedArtifactsForManifest:manifest
+                                                    backupDirectory:backupDir
+                                                              error:&artifactError];
+        if (!verifiedArtifacts) {
+            NSError *err = artifactError ?: [NSError errorWithDomain:PXBackupArtifactVerifierErrorDomain
+                                                                 code:PXBackupArtifactVerifierErrorInvalidInput
+                                                             userInfo:@{
+                                                                 NSLocalizedDescriptionKey: @"Backup artifact verification failed",
+                                                                 PXBackupArtifactVerifierErrorFieldPathKey: @"$"
+                                                             }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
         NSMutableArray<NSString *> *warnings = [NSMutableArray array];
         NSFileManager *fm = [NSFileManager defaultManager];
         CommandRunner *runner = [CommandRunner shared];
@@ -1986,57 +2003,22 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
         }
 
-        // Integrity verify artifacts (best-effort)
-        NSDictionary *artByName = nil;
-        if ([manifest[@"artifacts"] isKindOfClass:[NSArray class]]) {
-            NSMutableDictionary *m = [NSMutableDictionary dictionary];
-            for (NSDictionary *a in (NSArray *)manifest[@"artifacts"]) {
-                if (![a isKindOfClass:[NSDictionary class]]) continue;
-                NSString *name = a[@"name"];
-                if ([name isKindOfClass:[NSString class]] && name.length) {
-                    m[name] = a;
-                }
-                NSString *verifyWarning = PXVerifyArtifact(backupDir, a);
-                if (verifyWarning.length) {
-                    [warnings addObject:[@"Restore artifact verification: " stringByAppendingString:verifyWarning]];
-                }
+        NSMutableDictionary<NSString *, NSString *> *groupArchiveNamesByIDBuilder =
+            [NSMutableDictionary dictionary];
+        for (NSDictionary *entry in (NSArray *)manifest[@"appGroups"]) {
+            NSString *groupID = entry[@"groupID"];
+            NSString *archiveName = entry[@"archive"];
+            if (groupID.length && archiveName.length) {
+                groupArchiveNamesByIDBuilder[groupID] = archiveName;
             }
-            artByName = m;
         }
+        NSDictionary<NSString *, NSString *> *groupArchiveNamesByID =
+            [groupArchiveNamesByIDBuilder copy];
 
-        // Validate data archive before wiping
-        NSString *dataArchive = [backupDir stringByAppendingPathComponent:@"data.tar.gz"];
-        if (![fm fileExistsAtPath:dataArchive]) {
-            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                               code:305
-                                           userInfo:@{NSLocalizedDescriptionKey: @"data.tar.gz missing"}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-            return;
-        }
-        NSDictionary *dataArt = artByName ? artByName[@"data.tar.gz"] : nil;
-        if ([dataArt isKindOfClass:[NSDictionary class]]) {
-            NSNumber *expectedSize = dataArt[@"size"];
-            NSString *expectedHash = dataArt[@"sha256"];
-            NSDictionary *attrs = [fm attributesOfItemAtPath:dataArchive error:nil];
-            NSNumber *size = attrs[NSFileSize];
-            if (expectedSize && size && [expectedSize longLongValue] > 0 && [size longLongValue] != [expectedSize longLongValue]) {
-                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                   code:314
-                                               userInfo:@{NSLocalizedDescriptionKey: @"data.tar.gz size mismatch"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                return;
-            }
-            if ([expectedHash isKindOfClass:[NSString class]] && expectedHash.length > 0) {
-                NSString *actual = PXHexString(PXFileSHA256(dataArchive));
-                if (actual.length && ![actual isEqualToString:expectedHash]) {
-                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                       code:315
-                                                   userInfo:@{NSLocalizedDescriptionKey: @"data.tar.gz sha256 mismatch"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                    return;
-                }
-            }
-        }
+        NSDictionary *dataInfo = manifest[@"data"];
+        NSString *dataArchiveName = dataInfo[@"archive"];
+        NSString *dataArchive =
+            [verifiedArtifacts pathForArtifactName:dataArchiveName];
 
         // Two-phase restore for data container: extract to staging first.
         NSString *stagingRoot = [NSString stringWithFormat:@"/tmp/weaponx_restore_%d", getpid()];
@@ -2149,8 +2131,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
         if (includeProfileAppData) {
             NSString *profileAppDataPath = [self _profileAppDataPathForBundleID:bundleID];
-            NSString *archivePath = [backupDir stringByAppendingPathComponent:@"profile_appdata.tar.gz"];
-            if (profileAppDataPath.length && [fm fileExistsAtPath:archivePath]) {
+            NSString *archiveName = profileAppData[@"archive"];
+            NSString *archivePath =
+                [verifiedArtifacts pathForArtifactName:archiveName];
+            if (profileAppDataPath.length && archivePath.length) {
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:profileAppDataPath isDirectory:&isDir] && isDir) {
                     [self _wipeDirectoryContents:profileAppDataPath];
@@ -2188,8 +2172,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
         if (includeGlobalSafari) {
             NSString *globalSafariPath = [self _globalSafariLibraryPath];
-            NSString *archivePath = [backupDir stringByAppendingPathComponent:@"global_safari.tar.gz"];
-            if (globalSafariPath.length && [fm fileExistsAtPath:archivePath]) {
+            NSString *archiveName = globalSafari[@"archive"];
+            NSString *archivePath =
+                [verifiedArtifacts pathForArtifactName:archiveName];
+            if (globalSafariPath.length && archivePath.length) {
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:globalSafariPath isDirectory:&isDir] && isDir) {
                     [self _wipeDirectoryContents:globalSafariPath];
@@ -2221,19 +2207,20 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // Wipe and restore each group
         for (AppGroupContainerInfo *info in groupContainers) {
+            NSString *archiveName = groupArchiveNamesByID[info.groupID];
+            NSString *archivePath =
+                [verifiedArtifacts pathForArtifactName:archiveName];
+            if (!archiveName.length || !archivePath.length) {
+                [warnings addObject:[NSString stringWithFormat:@"Missing manifest archive mapping for %@", info.groupID]];
+                continue;
+            }
+
             // Debug: group state before wipe
             PXDebugHeader(debugPre, [NSString stringWithFormat:@"Group Restore: %@", info.groupID ?: @""]);
             PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"groupPath=%@", info.path ?: @""]);
             PXDebugRun(runner, debugPre, @"ls group (before)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(info.path)]);
             [self _wipeDirectoryContents:info.path];
             PXDebugRun(runner, debugPre, @"ls group (after wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(info.path)]);
-
-            NSString *archiveName = [NSString stringWithFormat:@"%@.tar.gz", PXSanitizeFilenameComponent(info.groupID)];
-            NSString *archivePath = [[backupDir stringByAppendingPathComponent:@"groups"] stringByAppendingPathComponent:archiveName];
-            if (![fm fileExistsAtPath:archivePath]) {
-                [warnings addObject:[NSString stringWithFormat:@"Missing group archive for %@", info.groupID]];
-                continue;
-            }
 
             CommandResult *r = [self _tarExtract:tarPath archive:archivePath toDir:info.path];
             if (r.exitCode != 0) {
@@ -2274,11 +2261,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     continue;
                 }
 
-                NSString *archivePath = [backupDir stringByAppendingPathComponent:archive];
-                if (![fm fileExistsAtPath:archivePath]) {
-                    [warnings addObject:[NSString stringWithFormat:@"Missing system global archive for %@; skipping", subdir]];
-                    continue;
-                }
+                NSString *archivePath =
+                    [verifiedArtifacts pathForArtifactName:archive];
 
                 NSString *dest = [libBase stringByAppendingPathComponent:subdir];
                 [self _killRelatedProcessesForBundleID:bundleID];
@@ -2335,11 +2319,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSString *archiveRel = [it[@"archive"] isKindOfClass:[NSString class]] ? it[@"archive"] : nil;
                 if (!libraryRel.length || !archiveRel.length) continue;
 
-                NSString *src = [backupDir stringByAppendingPathComponent:archiveRel];
-                if (![fm fileExistsAtPath:src]) {
-                    [warnings addObject:[NSString stringWithFormat:@"Missing shared DB archive %@; skipping", archiveRel]];
-                    continue;
-                }
+                NSString *src =
+                    [verifiedArtifacts pathForArtifactName:archiveRel];
 
                 NSString *dest = [libBase stringByAppendingPathComponent:libraryRel];
                 NSString *destDir = [dest stringByDeletingLastPathComponent];
@@ -2371,9 +2352,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             includePrefs = [prefs[@"included"] boolValue];
         }
         if (includePrefs) {
-            NSString *prefBackup = [[backupDir stringByAppendingPathComponent:@"preferences"] stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
+            NSString *prefArchiveName = prefs[@"archive"];
+            NSString *prefBackup =
+                [verifiedArtifacts pathForArtifactName:prefArchiveName];
             NSString *prefDest = [self _preferencesPlistPathForBundleID:bundleID];
-            if ([fm fileExistsAtPath:prefBackup]) {
+            if (prefBackup.length) {
                 [runner run:[NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null || true", PXShellQuote(prefBackup), PXShellQuote(prefDest)]];
                 [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true", PXShellQuote(prefDest)]];
                 [runner run:[NSString stringWithFormat:@"chmod 644 %@ 2>/dev/null || true", PXShellQuote(prefDest)]];
@@ -2390,7 +2373,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             includeKeychain = [keychainInfo[@"included"] boolValue];
         }
         if (includeKeychain) {
-            NSString *keychainBackupPath = [backupDir stringByAppendingPathComponent:@"keychain.plist"];
+            NSString *keychainArchiveName = keychainInfo[@"archive"];
+            NSString *keychainBackupPath =
+                [verifiedArtifacts pathForArtifactName:keychainArchiveName];
             NSArray<NSString *> *groups = @[];
             if ([keychainInfo isKindOfClass:[NSDictionary class]] && [keychainInfo[@"groupsSelected"] isKindOfClass:[NSArray class]]) {
                 groups = keychainInfo[@"groupsSelected"];
