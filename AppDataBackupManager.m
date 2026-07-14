@@ -13,6 +13,7 @@
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
 #import "PXRestorePlan.h"
+#import "PXAppGroupRestoreTargetPlan.h"
 #import "PXMainDataStaging.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
@@ -65,6 +66,19 @@ static BOOL PXReadUnsignedIntegralSummaryNumber(id value,
         *numberOut = unsignedValue;
     }
     return YES;
+}
+
+static BOOL PXValidatedMainDataStagesAreEquivalent(PXValidatedMainDataStage *left,
+                                                    PXValidatedMainDataStage *right) {
+    if (![left isKindOfClass:[PXValidatedMainDataStage class]] ||
+        ![right isKindOfClass:[PXValidatedMainDataStage class]]) {
+        return NO;
+    }
+    return [left.treeSHA256 isEqualToString:right.treeSHA256] &&
+           left.entryCount == right.entryCount &&
+           left.regularFileCount == right.regularFileCount &&
+           left.directoryCount == right.directoryCount &&
+           left.regularFileBytes == right.regularFileBytes;
 }
 
 static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
@@ -2025,6 +2039,44 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPath=%@", tarPath]);
 
+        NSArray<NSString *> *entitledGroupIdentifiers = @[];
+        if (restorePlan.includesAppGroups && restorePlan.appGroupItems.count > 0) {
+            NSError *entitlementReadError = nil;
+            AppEntitlementsReader *entitlementReader = [[AppEntitlementsReader alloc] init];
+            id entitlementResult =
+                [entitlementReader applicationGroupsForBundleID:bundleID
+                                                           error:&entitlementReadError];
+            if (entitlementReadError || ![entitlementResult isKindOfClass:[NSArray class]]) {
+                NSError *err = [NSError errorWithDomain:PXAppGroupRestoreTargetPlanErrorDomain
+                                                   code:PXAppGroupRestoreTargetPlanErrorInvalidEntitlementSet
+                                               userInfo:@{
+                                                   NSLocalizedDescriptionKey: @"The signed App Group entitlement set could not be read safely.",
+                                                   PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.entitlements"
+                                               }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+            entitledGroupIdentifiers = [(NSArray *)entitlementResult copy];
+        }
+
+        NSError *appGroupTargetPlanError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXAppGroupRestoreTargetPlan *appGroupTargetPlan =
+            [PXAppGroupRestoreTargetPlan targetPlanForRestorePlan:restorePlan
+                                         entitledGroupIdentifiers:entitledGroupIdentifiers
+                                                            error:&appGroupTargetPlanError];
+        if (!appGroupTargetPlan) {
+            NSError *err = appGroupTargetPlanError ?:
+                [NSError errorWithDomain:PXAppGroupRestoreTargetPlanErrorDomain
+                                    code:PXAppGroupRestoreTargetPlanErrorInvalidInput
+                                userInfo:@{
+                                    NSLocalizedDescriptionKey: @"The App Group restore target plan could not be constructed.",
+                                    PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$"
+                                }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
         if (restorePlan.manifestWarningCount > 0) {
             [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)restorePlan.manifestWarningCount]];
         }
@@ -2040,21 +2092,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"chosenDataUUID=%@", dataUUID ?: @""]);
         PXDebugRun(runner, debugPre, @"du data", [NSString stringWithFormat:@"du -sk %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
         PXDebugRun(runner, debugPre, @"ls prefs", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote([dataContainerPath stringByAppendingPathComponent:@"Library/Preferences"]) ]);
-
-        // App Groups via entitlements (Option B)
-        NSArray<AppGroupContainerInfo *> *groupContainers = @[];
-        if (restorePlan.includesAppGroups) {
-            NSError *entErr = nil;
-            AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
-            NSArray<NSString *> *groupIDs = [reader applicationGroupsForBundleID:bundleID error:&entErr];
-            if (entErr) {
-                [warnings addObject:[NSString stringWithFormat:@"Entitlements read failed: %@", entErr.localizedDescription]];
-            }
-            if (groupIDs.count) {
-                AppGroupContainerResolver *resolver = [[AppGroupContainerResolver alloc] init];
-                groupContainers = [resolver resolveGroupContainersForGroupIDs:groupIDs];
-            }
-        }
 
         NSString *dataArchiveName = restorePlan.dataArchiveName;
         NSString *dataArchive = restorePlan.dataArchivePath;
@@ -2294,35 +2331,260 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
         }
 
-        // Wipe and restore each group
-        for (AppGroupContainerInfo *info in groupContainers) {
-            PXRestorePlanAppGroupItem *plannedGroup =
-                [restorePlan appGroupItemForIdentifier:info.groupID];
-            NSString *archivePath = plannedGroup.sourcePath;
-            if (!plannedGroup || !archivePath.length) {
-                [warnings addObject:[NSString stringWithFormat:@"Missing manifest archive mapping for %@", info.groupID]];
-                continue;
+        // Restore each exact physical App Group target from validated staged content.
+        NSUInteger appGroupTargetIndex = 0;
+        for (PXAppGroupRestoreTarget *target in appGroupTargetPlan.targets) {
+            appGroupTargetIndex++;
+            __attribute__((objc_precise_lifetime))
+            PXMainDataStagingWorkspace *retainedGroupWorkspace = nil;
+            __attribute__((objc_precise_lifetime))
+            PXValidatedMainDataStage *retainedGroupStage = nil;
+
+            NSMutableArray<NSNumber *> *targetMemberCounts =
+                [NSMutableArray arrayWithCapacity:target.planItems.count];
+            NSMutableArray<NSNumber *> *targetRegularFileBytes =
+                [NSMutableArray arrayWithCapacity:target.planItems.count];
+            for (PXRestorePlanAppGroupItem *plannedItem in target.planItems) {
+                NSString *archiveName = plannedItem.archiveName;
+                NSNumber *memberCountSummary =
+                    restorePlan.validatedArchives.memberCountsByArchiveName[archiveName];
+                NSNumber *regularByteSummary =
+                    restorePlan.validatedArchives.regularFileBytesByArchiveName[archiveName];
+                unsigned long long memberCountValue = 0;
+                unsigned long long regularByteValue = 0;
+                if (!PXReadUnsignedIntegralSummaryNumber(memberCountSummary, &memberCountValue) ||
+                    !PXReadUnsignedIntegralSummaryNumber(regularByteSummary, &regularByteValue) ||
+                    memberCountValue > NSUIntegerMax) {
+                    NSError *err = [NSError errorWithDomain:PXAppGroupRestoreTargetPlanErrorDomain
+                                                       code:PXAppGroupRestoreTargetPlanErrorInconsistentPlan
+                                                   userInfo:@{
+                                                       NSLocalizedDescriptionKey: @"The accepted App Group archive summary is inconsistent.",
+                                                       PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.appGroups"
+                                                   }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+                [targetMemberCounts addObject:@(memberCountValue)];
+                [targetRegularFileBytes addObject:@(regularByteValue)];
             }
 
-            // Debug: group state before wipe
-            PXDebugHeader(debugPre, [NSString stringWithFormat:@"Group Restore: %@", info.groupID ?: @""]);
-            PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"groupPath=%@", info.path ?: @""]);
-            PXDebugRun(runner, debugPre, @"ls group (before)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(info.path)]);
-            [self _wipeDirectoryContents:info.path];
-            PXDebugRun(runner, debugPre, @"ls group (after wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(info.path)]);
+            for (NSUInteger sourceIndex = 0; sourceIndex < target.planItems.count; sourceIndex++) {
+                PXRestorePlanAppGroupItem *plannedItem = target.planItems[sourceIndex];
+                NSString *archivePath = plannedItem.sourcePath;
+                NSUInteger memberCountValue =
+                    (NSUInteger)[targetMemberCounts[sourceIndex] unsignedLongLongValue];
+                unsigned long long regularByteValue =
+                    [targetRegularFileBytes[sourceIndex] unsignedLongLongValue];
 
-            CommandResult *r = [self _tarExtract:tarPath archive:archivePath toDir:info.path];
-            if (r.exitCode != 0) {
-                NSString *msg = r.stderrString.length ? r.stderrString : [NSString stringWithFormat:@"Failed to extract group %@", info.groupID];
-                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                   code:310
-                                               userInfo:@{NSLocalizedDescriptionKey: msg}];
+                NSError *workspaceError = nil;
+                __attribute__((objc_precise_lifetime))
+                PXMainDataStagingWorkspace *currentGroupWorkspace =
+                    [PXMainDataStagingWorkspace createWorkspaceWithError:&workspaceError];
+                if (!currentGroupWorkspace) {
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = workspaceError ?:
+                        [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                            code:PXMainDataStagingErrorWorkspaceCreationFailed
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"The private App Group staging workspace could not be created.",
+                                            PXMainDataStagingErrorFieldPathKey: @"$.workspace"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                NSError *emptyError = nil;
+                if (![currentGroupWorkspace validateEmptyDataDirectoryWithError:&emptyError]) {
+                    [currentGroupWorkspace cleanupWithError:nil];
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = emptyError ?:
+                        [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                            code:PXMainDataStagingErrorInvalidInput
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"The private App Group staging workspace failed empty validation.",
+                                            PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                CommandResult *extractResult =
+                    [self _tarExtract:tarPath
+                              archive:archivePath
+                                toDir:currentGroupWorkspace.dataPath];
+                if (extractResult.exitCode != 0) {
+                    [currentGroupWorkspace cleanupWithError:nil];
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                       code:310
+                                                   userInfo:@{
+                                                       NSLocalizedDescriptionKey: @"Failed to extract App Group archive to staging"
+                                                   }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                NSError *validationError = nil;
+                __attribute__((objc_precise_lifetime))
+                PXValidatedMainDataStage *currentGroupStage =
+                    [currentGroupWorkspace validatedStageWithExpectedLogicalMemberCount:memberCountValue
+                                                                 expectedRegularFileBytes:regularByteValue
+                                                                                     error:&validationError];
+                if (!currentGroupStage) {
+                    [currentGroupWorkspace cleanupWithError:nil];
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = validationError ?:
+                        [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                            code:PXMainDataStagingErrorInvalidInput
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"The extracted App Group stage failed validation.",
+                                            PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                if (!retainedGroupWorkspace) {
+                    retainedGroupWorkspace = currentGroupWorkspace;
+                    retainedGroupStage = currentGroupStage;
+                    continue;
+                }
+
+                if (!PXValidatedMainDataStagesAreEquivalent(retainedGroupStage, currentGroupStage)) {
+                    [currentGroupWorkspace cleanupWithError:nil];
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = [NSError errorWithDomain:PXAppGroupRestoreTargetPlanErrorDomain
+                                                       code:PXAppGroupRestoreTargetPlanErrorInconsistentPlan
+                                                   userInfo:@{
+                                                       NSLocalizedDescriptionKey: @"App Group archives for one physical target are inconsistent.",
+                                                       PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.appGroups"
+                                                   }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                NSError *duplicateCleanupError = nil;
+                if (![currentGroupWorkspace cleanupWithError:&duplicateCleanupError]) {
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = duplicateCleanupError ?:
+                        [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                            code:PXMainDataStagingErrorCleanupFailed
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"A duplicate App Group staging workspace could not be cleaned safely.",
+                                            PXMainDataStagingErrorFieldPathKey: @"$.workspace"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+            }
+
+            if (!retainedGroupWorkspace || !retainedGroupStage || target.planItems.count == 0) {
+                [retainedGroupWorkspace cleanupWithError:nil];
+                NSError *err = [NSError errorWithDomain:PXAppGroupRestoreTargetPlanErrorDomain
+                                                   code:PXAppGroupRestoreTargetPlanErrorInconsistentPlan
+                                               userInfo:@{
+                                                   NSLocalizedDescriptionKey: @"The accepted App Group restore target has no validated source.",
+                                                   PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.appGroups"
+                                               }];
                 dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
                 return;
             }
 
-            [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(info.path)]];
-            PXDebugRun(runner, debugPost, @"ls group (after extract)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(info.path)]);
+            BOOL targetRevalidated = target.canonicalPath.length > 0 && target.containerModels.count > 0;
+            PXDestructivePathValidator *groupTargetValidator = [[PXDestructivePathValidator alloc] init];
+            for (PXResolvedContainer *containerModel in target.containerModels) {
+                NSError *targetValidationError = nil;
+                NSString *revalidatedCanonicalPath =
+                    [groupTargetValidator validatedCanonicalPathForContainer:containerModel
+                                                                       error:&targetValidationError];
+                if (targetValidationError ||
+                    revalidatedCanonicalPath.length == 0 ||
+                    ![revalidatedCanonicalPath isEqualToString:target.canonicalPath]) {
+                    targetRevalidated = NO;
+                    break;
+                }
+            }
+            if (!targetRevalidated) {
+                [retainedGroupWorkspace cleanupWithError:nil];
+                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                   code:319
+                                               userInfo:@{
+                                                   NSLocalizedDescriptionKey: @"Exact App Group restore target could not be revalidated safely"
+                                               }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+
+            PXDebugHeader(debugPre, @"App Group Restore (Validated Stage -> Target)");
+            PXDebugAppendLine(debugPre,
+                              [NSString stringWithFormat:@"appGroupTargetIndex=%lu targetCount=%lu",
+                               (unsigned long)appGroupTargetIndex,
+                               (unsigned long)appGroupTargetPlan.targets.count]);
+            PXDebugAppendLine(debugPre,
+                              [NSString stringWithFormat:@"appGroupStagedEntryCount=%lu",
+                               (unsigned long)retainedGroupStage.entryCount]);
+
+            NSString *canonicalTargetPath = target.canonicalPath;
+            [self _wipeDirectoryContents:canonicalTargetPath];
+
+            BOOL shouldPreferGroupCpClone =
+                [tarPath isEqualToString:@"/usr/bin/tar"] ||
+                [tarPath isEqualToString:@"/bin/tar"];
+            CommandResult *groupCloneResult = nil;
+            if (!shouldPreferGroupCpClone) {
+                NSString *cloneCommand =
+                    [NSString stringWithFormat:@"%@ --xattrs --acls -cf - -C %@ . | %@ --xattrs --acls -xf - -C %@",
+                     PXShellQuote(tarPath),
+                     PXShellQuote(retainedGroupStage.dataPath),
+                     PXShellQuote(tarPath),
+                     PXShellQuote(canonicalTargetPath)];
+                groupCloneResult = [runner runAndCapture:cloneCommand];
+                PXDebugAppendLine(debugPre,
+                                  [NSString stringWithFormat:@"appGroupTarPipeCloneExit=%d",
+                                   (int)groupCloneResult.exitCode]);
+                if (groupCloneResult.stderrString.length) {
+                    PXDebugAppendLine(debugPre, @"appGroupTarPipeCloneStderrPresent=1");
+                }
+                if (groupCloneResult.exitCode != 0 ||
+                    (groupCloneResult.stderrString.length &&
+                     [groupCloneResult.stderrString containsString:@"XATTR support is not available"])) {
+                    shouldPreferGroupCpClone = YES;
+                }
+            } else {
+                PXDebugAppendLine(debugPre, @"appGroupTarPipeCloneSkipped=1");
+            }
+
+            if (shouldPreferGroupCpClone) {
+                NSString *fallbackCommand =
+                    [NSString stringWithFormat:@"cp -a %@/. %@/ 2>/dev/null",
+                     PXShellQuote(retainedGroupStage.dataPath),
+                     PXShellQuote(canonicalTargetPath)];
+                CommandResult *copyResult = [runner runAndCapture:fallbackCommand];
+                PXDebugAppendLine(debugPre,
+                                  [NSString stringWithFormat:@"appGroupCpCloneExit=%d",
+                                   (int)copyResult.exitCode]);
+                if (copyResult.stderrString.length) {
+                    PXDebugAppendLine(debugPre, @"appGroupCpCloneStderrPresent=1");
+                }
+                if (copyResult.exitCode != 0) {
+                    [retainedGroupWorkspace cleanupWithError:nil];
+                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                       code:310
+                                                   userInfo:@{
+                                                       NSLocalizedDescriptionKey: @"Failed to restore validated App Group stage"
+                                                   }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+            }
+
+            [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                         PXShellQuote(canonicalTargetPath)]];
+
+            NSError *groupCleanupError = nil;
+            if (![retainedGroupWorkspace cleanupWithError:&groupCleanupError]) {
+                [warnings addObject:@"App Group staging cleanup failed"];
+            }
         }
 
         // Restore generic system app global Library folders (if present)
