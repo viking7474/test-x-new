@@ -14,6 +14,7 @@
 #import "PXBackupArchiveValidator.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
+#import "PXOptionalRestoreStaging.h"
 #import "PXMainDataStaging.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
@@ -79,6 +80,18 @@ static BOOL PXValidatedMainDataStagesAreEquivalent(PXValidatedMainDataStage *lef
            left.regularFileCount == right.regularFileCount &&
            left.directoryCount == right.directoryCount &&
            left.regularFileBytes == right.regularFileBytes;
+}
+
+static BOOL PXCleanupOptionalFileWorkspaces(
+    NSArray<PXOptionalFileStagingWorkspace *> *workspaces) {
+    BOOL allCleaned = YES;
+    for (PXOptionalFileStagingWorkspace *workspace in workspaces) {
+        NSError *cleanupError = nil;
+        if (![workspace cleanupWithError:&cleanupError]) {
+            allCleaned = NO;
+        }
+    }
+    return allCleaned;
 }
 
 static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
@@ -1878,6 +1891,171 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     });
 }
 
+- (BOOL)_stageOptionalDirectoryArchiveName:(NSString *)archiveName
+                                sourcePath:(NSString *)sourcePath
+                               restorePlan:(PXRestorePlan *)restorePlan
+                                   tarPath:(NSString *)tarPath
+                               failureCode:(NSInteger)failureCode
+                        failureDescription:(NSString *)failureDescription
+                              workspaceOut:(PXMainDataStagingWorkspace **)workspaceOut
+                                  stageOut:(PXValidatedMainDataStage **)stageOut
+                                     error:(NSError **)error {
+    if (workspaceOut) {
+        *workspaceOut = nil;
+    }
+    if (stageOut) {
+        *stageOut = nil;
+    }
+    if (error) {
+        *error = nil;
+    }
+
+    NSNumber *memberCountSummary =
+        restorePlan.validatedArchives.memberCountsByArchiveName[archiveName];
+    NSNumber *regularByteSummary =
+        restorePlan.validatedArchives.regularFileBytesByArchiveName[archiveName];
+    unsigned long long memberCountValue = 0;
+    unsigned long long regularByteValue = 0;
+    if (![archiveName isKindOfClass:[NSString class]] || archiveName.length == 0 ||
+        ![sourcePath isKindOfClass:[NSString class]] || sourcePath.length == 0 ||
+        !PXReadUnsignedIntegralSummaryNumber(memberCountSummary, &memberCountValue) ||
+        !PXReadUnsignedIntegralSummaryNumber(regularByteSummary, &regularByteValue) ||
+        memberCountValue > NSUIntegerMax) {
+        if (error) {
+            *error = [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                         code:PXOptionalRestoreStagingErrorInconsistentPlan
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey: @"The accepted optional archive summary is inconsistent.",
+                                         PXOptionalRestoreStagingErrorFieldPathKey: @"$"
+                                     }];
+        }
+        return NO;
+    }
+
+    NSError *workspaceError = nil;
+    PXMainDataStagingWorkspace *workspace =
+        [PXMainDataStagingWorkspace createWorkspaceWithError:&workspaceError];
+    if (!workspace) {
+        if (error) {
+            *error = workspaceError ?: [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                                            code:PXMainDataStagingErrorWorkspaceCreationFailed
+                                                        userInfo:@{
+                                                            NSLocalizedDescriptionKey: @"The optional directory staging workspace could not be created.",
+                                                            PXMainDataStagingErrorFieldPathKey: @"$.workspace"
+                                                        }];
+        }
+        return NO;
+    }
+
+    NSError *emptyError = nil;
+    if (![workspace validateEmptyDataDirectoryWithError:&emptyError]) {
+        [workspace cleanupWithError:nil];
+        if (error) {
+            *error = emptyError ?: [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                                        code:PXMainDataStagingErrorInvalidInput
+                                                    userInfo:@{
+                                                        NSLocalizedDescriptionKey: @"The optional directory staging workspace failed empty validation.",
+                                                        PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                                    }];
+        }
+        return NO;
+    }
+
+    CommandResult *extractResult =
+        [self _tarExtract:tarPath archive:sourcePath toDir:workspace.dataPath];
+    if (extractResult.exitCode != 0) {
+        [workspace cleanupWithError:nil];
+        if (error) {
+            *error = [NSError errorWithDomain:PXBackupErrorDomain
+                                         code:failureCode
+                                     userInfo:@{NSLocalizedDescriptionKey: failureDescription}];
+        }
+        return NO;
+    }
+
+    NSError *validationError = nil;
+    PXValidatedMainDataStage *stage =
+        [workspace validatedStageWithExpectedLogicalMemberCount:(NSUInteger)memberCountValue
+                                        expectedRegularFileBytes:regularByteValue
+                                                            error:&validationError];
+    if (!stage) {
+        [workspace cleanupWithError:nil];
+        if (error) {
+            *error = validationError ?: [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                                             code:PXMainDataStagingErrorInvalidInput
+                                                         userInfo:@{
+                                                             NSLocalizedDescriptionKey: @"The optional directory stage failed validation.",
+                                                             PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                                         }];
+        }
+        return NO;
+    }
+
+    if (workspaceOut) {
+        *workspaceOut = workspace;
+    }
+    if (stageOut) {
+        *stageOut = stage;
+    }
+    return YES;
+}
+
+- (BOOL)_cloneOptionalDirectoryStageAtPath:(NSString *)stagePath
+                              destination:(NSString *)destination
+                                   tarPath:(NSString *)tarPath
+                                    runner:(CommandRunner *)runner
+                                 debugPath:(NSString *)debugPath
+                                debugLabel:(NSString *)debugLabel {
+    BOOL shouldUseCopy =
+        [tarPath isEqualToString:@"/usr/bin/tar"] ||
+        [tarPath isEqualToString:@"/bin/tar"];
+    CommandResult *tarCloneResult = nil;
+    if (!shouldUseCopy) {
+        NSString *cloneCommand =
+            [NSString stringWithFormat:@"%@ --xattrs --acls -cf - -C %@ . | %@ --xattrs --acls -xf - -C %@",
+             PXShellQuote(tarPath),
+             PXShellQuote(stagePath),
+             PXShellQuote(tarPath),
+             PXShellQuote(destination)];
+        tarCloneResult = [runner runAndCapture:cloneCommand];
+        PXDebugAppendLine(debugPath,
+                          [NSString stringWithFormat:@"%@TarPipeExit=%d",
+                           debugLabel,
+                           (int)tarCloneResult.exitCode]);
+        if (tarCloneResult.stderrString.length) {
+            PXDebugAppendLine(debugPath,
+                              [NSString stringWithFormat:@"%@TarPipeStderrPresent=1",
+                               debugLabel]);
+        }
+        if (tarCloneResult.exitCode != 0 ||
+            (tarCloneResult.stderrString.length &&
+             [tarCloneResult.stderrString containsString:@"XATTR support is not available"])) {
+            shouldUseCopy = YES;
+        }
+    } else {
+        PXDebugAppendLine(debugPath,
+                          [NSString stringWithFormat:@"%@TarPipeSkipped=1", debugLabel]);
+    }
+
+    if (!shouldUseCopy) {
+        return YES;
+    }
+    NSString *copyCommand =
+        [NSString stringWithFormat:@"cp -a %@/. %@/ 2>/dev/null",
+         PXShellQuote(stagePath),
+         PXShellQuote(destination)];
+    CommandResult *copyResult = [runner runAndCapture:copyCommand];
+    PXDebugAppendLine(debugPath,
+                      [NSString stringWithFormat:@"%@CpExit=%d",
+                       debugLabel,
+                       (int)copyResult.exitCode]);
+    if (copyResult.stderrString.length) {
+        PXDebugAppendLine(debugPath,
+                          [NSString stringWithFormat:@"%@CpStderrPresent=1", debugLabel]);
+    }
+    return copyResult.exitCode == 0;
+}
+
 - (void)restoreBackupAtDirectory:(NSString *)backupDir
                         bundleID:(NSString *)bundleID
                          appName:(NSString *)appName
@@ -2077,12 +2255,31 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return;
         }
 
+        NSString *activeProfileId = [self _activeProfileId];
+        NSError *optionalDestinationPlanError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXOptionalRestoreDestinationPlan *optionalDestinationPlan =
+            [PXOptionalRestoreDestinationPlan destinationPlanForRestorePlan:restorePlan
+                                                            bundleIdentifier:bundleID
+                                                     activeProfileIdentifier:activeProfileId
+                                                                       error:&optionalDestinationPlanError];
+        if (!optionalDestinationPlan) {
+            NSError *err = optionalDestinationPlanError ?:
+                [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                    code:PXOptionalRestoreStagingErrorInvalidInput
+                                userInfo:@{
+                                    NSLocalizedDescriptionKey: @"The optional Restore destination plan could not be constructed.",
+                                    PXOptionalRestoreStagingErrorFieldPathKey: @"$"
+                                }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
         if (restorePlan.manifestWarningCount > 0) {
             [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)restorePlan.manifestWarningCount]];
         }
 
         NSString *manifestProfileId = restorePlan.manifestProfileIdentifier;
-        NSString *activeProfileId = [self _activeProfileId];
         if (manifestProfileId.length && activeProfileId.length && ![manifestProfileId isEqualToString:activeProfileId]) {
             [warnings addObject:[NSString stringWithFormat:@"Backup profileId %@ != active profileId %@", manifestProfileId, activeProfileId]];
         }
@@ -2265,69 +2462,115 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // Restore profile redirected appdata (if present)
         if (restorePlan.includesProfileAppData) {
-            NSString *profileAppDataPath = [self _profileAppDataPathForBundleID:bundleID];
-            NSString *archivePath = restorePlan.profileAppDataSourcePath;
-            if (profileAppDataPath.length && archivePath.length) {
-                BOOL isDir = NO;
-                if ([fm fileExistsAtPath:profileAppDataPath isDirectory:&isDir] && isDir) {
-                    [self _wipeDirectoryContents:profileAppDataPath];
-                    CommandResult *r = [self _tarExtract:tarPath archive:archivePath toDir:profileAppDataPath];
-                    if (r.exitCode != 0) {
-                        NSString *msg = r.stderrString.length ? r.stderrString : @"Failed to restore profile appdata";
-                        NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                           code:307
-                                                       userInfo:@{NSLocalizedDescriptionKey: msg}];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                        return;
-                    }
-                    [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(profileAppDataPath)]];
-                } else {
-                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                       code:308
-                                                   userInfo:@{NSLocalizedDescriptionKey: @"Profile appdata directory missing"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                    return;
-                }
-            } else {
-                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                   code:309
-                                               userInfo:@{NSLocalizedDescriptionKey: @"Profile appdata archive missing"}];
+            PXMainDataStagingWorkspace *profileWorkspace = nil;
+            PXValidatedMainDataStage *profileStage = nil;
+            NSError *profileStageError = nil;
+            if (![self _stageOptionalDirectoryArchiveName:restorePlan.profileAppDataArchiveName
+                                               sourcePath:restorePlan.profileAppDataSourcePath
+                                              restorePlan:restorePlan
+                                                  tarPath:tarPath
+                                              failureCode:307
+                                       failureDescription:@"Failed to restore validated profile AppData stage"
+                                             workspaceOut:&profileWorkspace
+                                                 stageOut:&profileStage
+                                                    error:&profileStageError]) {
+                NSError *err = profileStageError;
                 dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
                 return;
+            }
+
+            NSError *profileDestinationError = nil;
+            NSString *profileDestination =
+                [optionalDestinationPlan revalidatedProfileAppDataPathWithError:&profileDestinationError];
+            if (!profileDestination) {
+                [profileWorkspace cleanupWithError:nil];
+                NSError *err = profileDestinationError ?:
+                    [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                        code:PXOptionalRestoreStagingErrorInvalidDestinationIdentity
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey: @"The profile AppData destination could not be revalidated.",
+                                        PXOptionalRestoreStagingErrorFieldPathKey: @"$.profileAppData.destination"
+                                    }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+
+            [self _wipeDirectoryContents:profileDestination];
+            if (![self _cloneOptionalDirectoryStageAtPath:profileStage.dataPath
+                                              destination:profileDestination
+                                                   tarPath:tarPath
+                                                    runner:runner
+                                                 debugPath:debugPre
+                                                debugLabel:@"profileOptionalStage"]) {
+                [profileWorkspace cleanupWithError:nil];
+                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                   code:307
+                                               userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated profile AppData stage"}];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+            [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                         PXShellQuote(profileDestination)]];
+            NSError *profileCleanupError = nil;
+            if (![profileWorkspace cleanupWithError:&profileCleanupError]) {
+                [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
         }
 
         // Restore global Safari library (if present)
         if (restorePlan.includesGlobalSafari) {
-            NSString *globalSafariPath = [self _globalSafariLibraryPath];
-            NSString *archivePath = restorePlan.globalSafariSourcePath;
-            if (globalSafariPath.length && archivePath.length) {
-                BOOL isDir = NO;
-                if ([fm fileExistsAtPath:globalSafariPath isDirectory:&isDir] && isDir) {
-                    [self _wipeDirectoryContents:globalSafariPath];
-                    CommandResult *r = [self _tarExtract:tarPath archive:archivePath toDir:globalSafariPath];
-                    if (r.exitCode != 0) {
-                        NSString *msg = r.stderrString.length ? r.stderrString : @"Failed to restore global Safari library";
-                        NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                           code:311
-                                                       userInfo:@{NSLocalizedDescriptionKey: msg}];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                        return;
-                    }
-                    [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(globalSafariPath)]];
-                } else {
-                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                       code:312
-                                                   userInfo:@{NSLocalizedDescriptionKey: @"Global Safari directory missing"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                    return;
-                }
-            } else {
-                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                   code:313
-                                               userInfo:@{NSLocalizedDescriptionKey: @"Global Safari archive missing"}];
+            PXMainDataStagingWorkspace *safariWorkspace = nil;
+            PXValidatedMainDataStage *safariStage = nil;
+            NSError *safariStageError = nil;
+            if (![self _stageOptionalDirectoryArchiveName:restorePlan.globalSafariArchiveName
+                                               sourcePath:restorePlan.globalSafariSourcePath
+                                              restorePlan:restorePlan
+                                                  tarPath:tarPath
+                                              failureCode:311
+                                       failureDescription:@"Failed to restore validated global Safari stage"
+                                             workspaceOut:&safariWorkspace
+                                                 stageOut:&safariStage
+                                                    error:&safariStageError]) {
+                NSError *err = safariStageError;
                 dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
                 return;
+            }
+
+            NSError *safariDestinationError = nil;
+            NSString *safariDestination =
+                [optionalDestinationPlan revalidatedGlobalSafariPathWithError:&safariDestinationError];
+            if (!safariDestination) {
+                [safariWorkspace cleanupWithError:nil];
+                NSError *err = safariDestinationError ?:
+                    [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                        code:PXOptionalRestoreStagingErrorInvalidDestinationIdentity
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey: @"The global Safari destination could not be revalidated.",
+                                        PXOptionalRestoreStagingErrorFieldPathKey: @"$.globalSafari.destination"
+                                    }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+
+            [self _wipeDirectoryContents:safariDestination];
+            if (![self _cloneOptionalDirectoryStageAtPath:safariStage.dataPath
+                                              destination:safariDestination
+                                                   tarPath:tarPath
+                                                    runner:runner
+                                                 debugPath:debugPre
+                                                debugLabel:@"safariOptionalStage"]) {
+                [safariWorkspace cleanupWithError:nil];
+                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                   code:311
+                                               userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated global Safari stage"}];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+            [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                         PXShellQuote(safariDestination)]];
+            NSError *safariCleanupError = nil;
+            if (![safariWorkspace cleanupWithError:&safariCleanupError]) {
+                [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
         }
 
@@ -2589,45 +2832,165 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // Restore generic system app global Library folders (if present)
         if (restorePlan.systemGlobalItems.count) {
-            NSString *libBase = [self _mobileLibraryBasePath];
             for (PXRestorePlanSystemGlobalItem *plannedItem in restorePlan.systemGlobalItems) {
                 NSString *subdir = plannedItem.librarySubdirectory;
-
-                // Avoid double-restoring Safari which is handled explicitly.
-                if ([bundleID isEqualToString:@"com.apple.mobilesafari"] && [subdir isEqualToString:@"Safari"]) {
+                if ([bundleID isEqualToString:@"com.apple.mobilesafari"] &&
+                    [subdir isEqualToString:@"Safari"] &&
+                    restorePlan.includesGlobalSafari) {
                     continue;
                 }
 
-                NSString *archivePath = plannedItem.sourcePath;
-
-                NSString *dest = [libBase stringByAppendingPathComponent:subdir];
-                [self _killRelatedProcessesForBundleID:bundleID];
-
-                // Quarantine existing directory to avoid detached DB crashes.
-                NSString *trash = [NSString stringWithFormat:@"%@.WeaponXTrash.%@", dest, PXTimestampSuffix()];
-                if ([fm fileExistsAtPath:dest]) {
-                    [runner run:[NSString stringWithFormat:@"mv %@ %@ 2>/dev/null || true", PXShellQuote(dest), PXShellQuote(trash)]];
-                }
-                [runner run:[NSString stringWithFormat:@"mkdir -p %@ 2>/dev/null || true", PXShellQuote(dest)]];
-
-                CommandResult *r = [self _tarExtract:tarPath archive:archivePath toDir:dest];
-                if (r.exitCode != 0) {
-                    NSString *msg = r.stderrString.length ? r.stderrString : [NSString stringWithFormat:@"Failed to restore system global library %@", subdir];
-                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                       code:318
-                                                   userInfo:@{NSLocalizedDescriptionKey: msg}];
+                NSString *plannedDestination =
+                    [optionalDestinationPlan systemGlobalPathForSubdirectory:subdir];
+                if (!plannedDestination.length) {
+                    NSError *err = [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                                       code:PXOptionalRestoreStagingErrorInconsistentPlan
+                                                   userInfo:@{
+                                                       NSLocalizedDescriptionKey: @"The system-global destination plan is inconsistent.",
+                                                       PXOptionalRestoreStagingErrorFieldPathKey: @"$"
+                                                   }];
                     dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
                     return;
                 }
-                [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dest)]];
+
+                PXMainDataStagingWorkspace *systemWorkspace = nil;
+                PXValidatedMainDataStage *systemStage = nil;
+                NSError *systemStageError = nil;
+                if (![self _stageOptionalDirectoryArchiveName:plannedItem.archiveName
+                                                   sourcePath:plannedItem.sourcePath
+                                                  restorePlan:restorePlan
+                                                      tarPath:tarPath
+                                                  failureCode:318
+                                           failureDescription:@"Failed to restore validated system-global stage"
+                                                 workspaceOut:&systemWorkspace
+                                                     stageOut:&systemStage
+                                                        error:&systemStageError]) {
+                    NSError *err = systemStageError;
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                NSError *destinationError = nil;
+                NSString *destination =
+                    [optionalDestinationPlan revalidatedSystemGlobalPathForSubdirectory:subdir
+                                                                                  error:&destinationError];
+                if (!destination) {
+                    [systemWorkspace cleanupWithError:nil];
+                    NSError *err = destinationError ?:
+                        [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                            code:PXOptionalRestoreStagingErrorInvalidDestinationIdentity
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"The system-global destination could not be revalidated.",
+                                            PXOptionalRestoreStagingErrorFieldPathKey: @"$"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                [self _killRelatedProcessesForBundleID:bundleID];
+                BOOL destinationExisted = [fm fileExistsAtPath:destination];
+                if (destinationExisted) {
+                    NSString *trash = [NSString stringWithFormat:@"%@.WeaponXTrash.%@",
+                                       destination,
+                                       PXTimestampSuffix()];
+                    CommandResult *moveResult =
+                        [runner runAndCapture:[NSString stringWithFormat:@"mv %@ %@ 2>/dev/null",
+                                               PXShellQuote(destination),
+                                               PXShellQuote(trash)]];
+                    if (moveResult.exitCode != 0) {
+                        [systemWorkspace cleanupWithError:nil];
+                        NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                           code:318
+                                                       userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated system-global stage"}];
+                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        return;
+                    }
+                }
+
+                CommandResult *mkdirResult =
+                    [runner runAndCapture:[NSString stringWithFormat:@"mkdir %@ 2>/dev/null",
+                                           PXShellQuote(destination)]];
+                if (mkdirResult.exitCode != 0) {
+                    [systemWorkspace cleanupWithError:nil];
+                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                       code:318
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated system-global stage"}];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+
+                if (![self _cloneOptionalDirectoryStageAtPath:systemStage.dataPath
+                                                  destination:destination
+                                                       tarPath:tarPath
+                                                        runner:runner
+                                                     debugPath:debugPre
+                                                    debugLabel:@"systemGlobalOptionalStage"]) {
+                    [systemWorkspace cleanupWithError:nil];
+                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                       code:318
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated system-global stage"}];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+                [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                             PXShellQuote(destination)]];
+                NSError *systemCleanupError = nil;
+                if (![systemWorkspace cleanupWithError:&systemCleanupError]) {
+                    [warnings addObject:@"Optional-directory staging cleanup failed"];
+                }
             }
         }
 
         // Restore shared system DBs (if present)
         if (restorePlan.sharedDatabaseItems.count) {
-            NSString *libBase = [self _mobileLibraryBasePath];
+            NSMutableArray<PXOptionalFileStagingWorkspace *> *sharedWorkspaces =
+                [NSMutableArray arrayWithCapacity:restorePlan.sharedDatabaseItems.count];
+            NSMutableArray<PXValidatedOptionalFileStage *> *sharedStages =
+                [NSMutableArray arrayWithCapacity:restorePlan.sharedDatabaseItems.count];
+            NSMutableArray<NSString *> *sharedDestinations =
+                [NSMutableArray arrayWithCapacity:restorePlan.sharedDatabaseItems.count];
 
-            // Stop common daemons that may hold these DBs.
+            for (PXRestorePlanSharedDatabaseItem *plannedItem in restorePlan.sharedDatabaseItems) {
+                NSError *fileStageError = nil;
+                PXOptionalFileStagingWorkspace *workspace =
+                    [PXOptionalFileStagingWorkspace workspaceByStagingSourceFileAtPath:plannedItem.sourcePath
+                                                                                 error:&fileStageError];
+                if (!workspace) {
+                    PXCleanupOptionalFileWorkspaces(sharedWorkspaces);
+                    NSError *err = fileStageError ?:
+                        [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                            code:PXOptionalRestoreStagingErrorInvalidInput
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"The shared database source could not be staged.",
+                                            PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+                [sharedWorkspaces addObject:workspace];
+                [sharedStages addObject:workspace.validatedStage];
+            }
+
+            for (PXRestorePlanSharedDatabaseItem *plannedItem in restorePlan.sharedDatabaseItems) {
+                NSError *destinationError = nil;
+                NSString *destination =
+                    [optionalDestinationPlan revalidatedSharedDatabasePathForRelativePath:plannedItem.libraryRelativePath
+                                                                                    error:&destinationError];
+                if (!destination) {
+                    PXCleanupOptionalFileWorkspaces(sharedWorkspaces);
+                    NSError *err = destinationError ?:
+                        [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                            code:PXOptionalRestoreStagingErrorInvalidDestinationIdentity
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey: @"A shared database destination could not be revalidated.",
+                                            PXOptionalRestoreStagingErrorFieldPathKey: @"$"
+                                        }];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+                [sharedDestinations addObject:destination];
+            }
+
             PXKillallByName(@"accountsd", SIGTERM);
             PXKillallByName(@"calaccessd", SIGTERM);
             PXKillallByName(@"imagent", SIGTERM);
@@ -2638,27 +3001,48 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             PXKillallByName(@"imagent", SIGKILL);
             PXKillallByName(@"MobileSMS", SIGKILL);
 
-            for (PXRestorePlanSharedDatabaseItem *plannedItem in restorePlan.sharedDatabaseItems) {
-                NSString *libraryRel = plannedItem.libraryRelativePath;
-                NSString *src = plannedItem.sourcePath;
-
-                NSString *dest = [libBase stringByAppendingPathComponent:libraryRel];
-                NSString *destDir = [dest stringByDeletingLastPathComponent];
-                [runner run:[NSString stringWithFormat:@"mkdir -p %@ 2>/dev/null || true", PXShellQuote(destDir)]];
-
-                NSString *trash = [NSString stringWithFormat:@"%@.WeaponXTrash.%@", dest, PXTimestampSuffix()];
-                if ([fm fileExistsAtPath:dest]) {
-                    [runner run:[NSString stringWithFormat:@"mv %@ %@ 2>/dev/null || true", PXShellQuote(dest), PXShellQuote(trash)]];
+            for (NSUInteger index = 0; index < restorePlan.sharedDatabaseItems.count; index++) {
+                NSString *destination = sharedDestinations[index];
+                PXValidatedOptionalFileStage *stage = sharedStages[index];
+                if ([fm fileExistsAtPath:destination]) {
+                    NSString *trash = [NSString stringWithFormat:@"%@.WeaponXTrash.%@",
+                                       destination,
+                                       PXTimestampSuffix()];
+                    CommandResult *moveResult =
+                        [runner runAndCapture:[NSString stringWithFormat:@"mv %@ %@ 2>/dev/null",
+                                               PXShellQuote(destination),
+                                               PXShellQuote(trash)]];
+                    if (moveResult.exitCode != 0) {
+                        PXCleanupOptionalFileWorkspaces(sharedWorkspaces);
+                        NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                           code:320
+                                                       userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional file"}];
+                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        return;
+                    }
                 }
-
-                [runner run:[NSString stringWithFormat:@"cp -a %@ %@ 2>/dev/null || true", PXShellQuote(src), PXShellQuote(dest)]];
-                [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dest)]];
-                [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(dest)]];
+                CommandResult *copyResult =
+                    [runner runAndCapture:[NSString stringWithFormat:@"cp -a %@ %@ 2>/dev/null",
+                                           PXShellQuote(stage.filePath),
+                                           PXShellQuote(destination)]];
+                if (copyResult.exitCode != 0) {
+                    PXCleanupOptionalFileWorkspaces(sharedWorkspaces);
+                    NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                       code:320
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional file"}];
+                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    return;
+                }
+                [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true",
+                             PXShellQuote(destination)]];
+                [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
+                             PXShellQuote(destination)]];
             }
 
+            if (!PXCleanupOptionalFileWorkspaces(sharedWorkspaces)) {
+                [warnings addObject:@"Optional-file staging cleanup failed"];
+            }
             [warnings addObject:@"Restored shared system DBs (this may affect multiple apps)"];
-
-            // Restart daemons best-effort.
             PXKillallByName(@"accountsd", SIGTERM);
             PXKillallByName(@"calaccessd", SIGTERM);
             PXKillallByName(@"imagent", SIGTERM);
@@ -2667,29 +3051,84 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // Preferences restore
         if (restorePlan.includesPreferences) {
-            NSString *prefBackup = restorePlan.preferencesSourcePath;
-            NSString *prefDest = [self _preferencesPlistPathForBundleID:bundleID];
-            if (prefBackup.length) {
-                [runner run:[NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null || true", PXShellQuote(prefBackup), PXShellQuote(prefDest)]];
-                [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true", PXShellQuote(prefDest)]];
-                [runner run:[NSString stringWithFormat:@"chmod 644 %@ 2>/dev/null || true", PXShellQuote(prefDest)]];
-                PXKillallByName(@"cfprefsd", SIGTERM);
-            } else {
-                [warnings addObject:@"Preferences archive missing; skipping"];
+            NSError *preferencesStageError = nil;
+            PXOptionalFileStagingWorkspace *preferencesWorkspace =
+                [PXOptionalFileStagingWorkspace workspaceByStagingSourceFileAtPath:restorePlan.preferencesSourcePath
+                                                                             error:&preferencesStageError];
+            if (!preferencesWorkspace) {
+                NSError *err = preferencesStageError ?:
+                    [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                        code:PXOptionalRestoreStagingErrorInvalidInput
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey: @"The Preferences source could not be staged.",
+                                        PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
+                                    }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+            NSError *preferencesDestinationError = nil;
+            NSString *preferencesDestination =
+                [optionalDestinationPlan revalidatedPreferencesPathWithError:&preferencesDestinationError];
+            if (!preferencesDestination) {
+                [preferencesWorkspace cleanupWithError:nil];
+                NSError *err = preferencesDestinationError ?:
+                    [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                        code:PXOptionalRestoreStagingErrorInvalidDestinationIdentity
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey: @"The Preferences destination could not be revalidated.",
+                                        PXOptionalRestoreStagingErrorFieldPathKey: @"$.preferences.destination"
+                                    }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+            CommandResult *copyResult =
+                [runner runAndCapture:[NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null",
+                                       PXShellQuote(preferencesWorkspace.validatedStage.filePath),
+                                       PXShellQuote(preferencesDestination)]];
+            if (copyResult.exitCode != 0) {
+                [preferencesWorkspace cleanupWithError:nil];
+                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                   code:320
+                                               userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional file"}];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+            [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true",
+                         PXShellQuote(preferencesDestination)]];
+            [runner run:[NSString stringWithFormat:@"chmod 644 %@ 2>/dev/null || true",
+                         PXShellQuote(preferencesDestination)]];
+            PXKillallByName(@"cfprefsd", SIGTERM);
+            NSError *preferencesCleanupError = nil;
+            if (![preferencesWorkspace cleanupWithError:&preferencesCleanupError]) {
+                [warnings addObject:@"Optional-file staging cleanup failed"];
             }
         }
 
-        // Keychain restore (warning-only on failure)
+        // Keychain restore (warning-only on execution failure)
         if (restorePlan.includesKeychain) {
-            NSString *keychainBackupPath = restorePlan.keychainSourcePath;
+            NSError *keychainStageError = nil;
+            PXOptionalFileStagingWorkspace *keychainWorkspace =
+                [PXOptionalFileStagingWorkspace workspaceByStagingSourceFileAtPath:restorePlan.keychainSourcePath
+                                                                             error:&keychainStageError];
+            if (!keychainWorkspace) {
+                NSError *err = keychainStageError ?:
+                    [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                        code:PXOptionalRestoreStagingErrorInvalidInput
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey: @"The Keychain input source could not be staged.",
+                                        PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
+                                    }];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
+            }
+
+            NSString *keychainBackupPath = keychainWorkspace.validatedStage.filePath;
             NSArray<NSString *> *groups = restorePlan.keychainGroups;
             NSString *method = restorePlan.keychainMethod;
             (void)method;
             BOOL shouldUseInApp = restorePlan.keychainUsesInAppMethod;
-
             BOOL ok = NO;
             if (shouldUseInApp) {
-                // Use app context so keychain access uses the app's original entitlements.
                 ok = [self _inAppKeychainRestoreForBundleID:bundleID
                                               containerPath:dataContainerPath
                                                      groups:groups
@@ -2704,12 +3143,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                            overwrite:YES
                                             warnings:warnings];
             }
-
             if (!ok) {
                 [warnings addObject:@"Keychain restore failed (continuing)" ];
             }
 
-            // Debug keychain list after restore
+            NSError *keychainCleanupError = nil;
+            if (![keychainWorkspace cleanupWithError:&keychainCleanupError]) {
+                [warnings addObject:@"Optional-file staging cleanup failed"];
+            }
+
             PXDebugHeader(debugKeychain, @"Keychain After Restore");
             PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"groups=%@", groups ?: @[]]);
             if (!shouldUseInApp) {
@@ -2734,8 +3176,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             PXDebugAppendLine(debugPost, [NSString stringWithFormat:@"chosenDataContainerPath=%@", dataContainerPath ?: @""]);
             PXDebugRun(runner, debugPost, @"du data", [NSString stringWithFormat:@"du -sk %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
             PXDebugRun(runner, debugPost, @"ls prefs", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote([dataContainerPath stringByAppendingPathComponent:@"Library/Preferences"]) ]);
-            NSString *prefDest = [self _preferencesPlistPathForBundleID:bundleID];
-            PXDebugRun(runner, debugPost, @"ls global prefs", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(prefDest)]);
+            NSString *prefDest = optionalDestinationPlan.preferencesPath;
+            if (prefDest.length) {
+                PXDebugRun(runner, debugPost, @"ls global prefs", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(prefDest)]);
+            }
 
             if ([lsDataPath isKindOfClass:[NSString class]] && lsDataPath.length && ![lsDataPath isEqualToString:dataContainerPath]) {
                 PXDebugHeader(debugPost, @"WARNING: Active Container Differs");
