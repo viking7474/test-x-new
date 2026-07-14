@@ -1765,6 +1765,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
             return;
         }
+
+        NSString *manifestBundleID = manifest[@"bundleID"];
+        if (![manifestBundleID isEqualToString:bundleID]) {
+            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                               code:304
+                                           userInfo:@{NSLocalizedDescriptionKey: @"Backup manifest bundle identifier does not match restore target"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
         NSMutableArray<NSString *> *warnings = [NSMutableArray array];
         NSFileManager *fm = [NSFileManager defaultManager];
         CommandRunner *runner = [CommandRunner shared];
@@ -1829,10 +1839,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *manifestProfileId = nil;
         if ([manifest[@"profileId"] isKindOfClass:[NSString class]]) {
             manifestProfileId = manifest[@"profileId"];
-        }
-        NSString *manifestBundleID = [manifest[@"bundleID"] isKindOfClass:[NSString class]] ? manifest[@"bundleID"] : nil;
-        if (manifestBundleID.length && ![manifestBundleID isEqualToString:bundleID]) {
-            [warnings addObject:[NSString stringWithFormat:@"Restore target bundle mismatch: backup bundle %@, requested bundle %@", manifestBundleID, bundleID]];
         }
         NSString *activeProfileId = [self _activeProfileId];
         if (manifestProfileId.length && activeProfileId.length && ![manifestProfileId isEqualToString:activeProfileId]) {
