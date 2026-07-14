@@ -10,6 +10,8 @@
 #import "AppEntitlementsReader.h"
 #import "AppGroupContainerResolver.h"
 #import "PXBackupManifestValidator.h"
+#import "PXDataContainerResolver.h"
+#import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
 #import "common/PXProcessKiller.h"
 #import "common/PXPaths.h"
@@ -18,6 +20,8 @@
 #import <notify.h>
 
 static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
+static NSString * const PXExactRestoreDestinationErrorDescription =
+    @"Exact application data container could not be resolved safely";
 
 static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
     if (![version isKindOfClass:[NSNumber class]]) {
@@ -26,6 +30,102 @@ static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
 
     NSInteger value = version.integerValue;
     return value == 2 || value == 3;
+}
+
+static BOOL PXResolveExactRestoreApplicationDataTarget(
+    NSString *bundleID,
+    PXResolvedContainer **containerOut,
+    NSString **canonicalPathOut,
+    NSError **error) {
+    if (containerOut) {
+        *containerOut = nil;
+    }
+    if (canonicalPathOut) {
+        *canonicalPathOut = nil;
+    }
+    if (error) {
+        *error = nil;
+    }
+
+    BOOL resolved = NO;
+    do {
+        if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
+            break;
+        }
+
+        PXDataContainerResolver *resolver = [[PXDataContainerResolver alloc] init];
+        PXDestructivePathValidator *validator = [[PXDestructivePathValidator alloc] init];
+
+        PXResolvedContainer *selectedModel = nil;
+        NSString *selectedCanonicalPath = nil;
+
+        NSError *rootfulResolverError = nil;
+        PXResolvedContainer *rootfulModel =
+            [resolver resolveApplicationDataContainerForIdentifier:bundleID
+                                                              root:PXResolvedContainerRootRootful
+                                                             error:&rootfulResolverError];
+        if (rootfulResolverError) {
+            break;
+        }
+        if (rootfulModel) {
+            NSError *rootfulValidationError = nil;
+            NSString *rootfulCanonicalPath =
+                [validator validatedCanonicalPathForContainer:rootfulModel
+                                                        error:&rootfulValidationError];
+            if (rootfulValidationError || rootfulCanonicalPath.length == 0) {
+                break;
+            }
+            selectedModel = rootfulModel;
+            selectedCanonicalPath = rootfulCanonicalPath;
+        }
+
+        NSError *rootlessResolverError = nil;
+        PXResolvedContainer *rootlessModel =
+            [resolver resolveApplicationDataContainerForIdentifier:bundleID
+                                                              root:PXResolvedContainerRootRootless
+                                                             error:&rootlessResolverError];
+        if (rootlessResolverError) {
+            break;
+        }
+        if (rootlessModel) {
+            NSError *rootlessValidationError = nil;
+            NSString *rootlessCanonicalPath =
+                [validator validatedCanonicalPathForContainer:rootlessModel
+                                                        error:&rootlessValidationError];
+            if (rootlessValidationError || rootlessCanonicalPath.length == 0) {
+                break;
+            }
+            if (!selectedModel) {
+                selectedModel = rootlessModel;
+                selectedCanonicalPath = rootlessCanonicalPath;
+            } else if (![selectedCanonicalPath isEqualToString:rootlessCanonicalPath]) {
+                break;
+            }
+        }
+
+        if (!selectedModel || selectedCanonicalPath.length == 0) {
+            break;
+        }
+
+        if (containerOut) {
+            *containerOut = selectedModel;
+        }
+        if (canonicalPathOut) {
+            *canonicalPathOut = selectedCanonicalPath;
+        }
+        resolved = YES;
+    } while (NO);
+
+    if (resolved) {
+        return YES;
+    }
+
+    if (error) {
+        *error = [NSError errorWithDomain:PXBackupErrorDomain
+                                     code:303
+                                 userInfo:@{NSLocalizedDescriptionKey: PXExactRestoreDestinationErrorDescription}];
+    }
+    return NO;
 }
 
 @implementation PXBackupResult
@@ -1775,6 +1875,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return;
         }
 
+        PXResolvedContainer *dataContainerModel = nil;
+        NSString *dataContainerPath = nil;
+        NSError *destinationError = nil;
+        if (!PXResolveExactRestoreApplicationDataTarget(bundleID,
+                                                        &dataContainerModel,
+                                                        &dataContainerPath,
+                                                        &destinationError)) {
+            NSError *err = destinationError ?: [NSError errorWithDomain:PXBackupErrorDomain
+                                                                    code:303
+                                                                userInfo:@{NSLocalizedDescriptionKey: PXExactRestoreDestinationErrorDescription}];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+        NSString *dataUUID = dataContainerModel.containerUUID;
+
         NSMutableArray<NSString *> *warnings = [NSMutableArray array];
         NSFileManager *fm = [NSFileManager defaultManager];
         CommandRunner *runner = [CommandRunner shared];
@@ -1843,82 +1958,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *activeProfileId = [self _activeProfileId];
         if (manifestProfileId.length && activeProfileId.length && ![manifestProfileId isEqualToString:activeProfileId]) {
             [warnings addObject:[NSString stringWithFormat:@"Backup profileId %@ != active profileId %@", manifestProfileId, activeProfileId]];
-        }
-
-        // Data container lookup:
-        // Prefer active container path (LaunchServices). Fall back to metadata scan.
-        NSString *manifestDataUUID = nil;
-        if ([manifest[@"data"] isKindOfClass:[NSDictionary class]] && [manifest[@"data"][@"uuid"] isKindOfClass:[NSString class]]) {
-            manifestDataUUID = manifest[@"data"][@"uuid"];
-        }
- 
-        NSString *dataUUID = nil;
-        NSString *dataContainerPath = nil;
-
-        // Prefer LaunchServices-reported container path (most reliable for the *active* container).
-        {
-            NSString *lsPath = PXDataContainerPathFromLaunchServices(bundleID);
-            BOOL isDir = NO;
-            if (lsPath.length && [fm fileExistsAtPath:lsPath isDirectory:&isDir] && isDir) {
-                dataContainerPath = lsPath;
-                dataUUID = lsPath.lastPathComponent;
-            }
-        }
-
-        NSArray<NSString *> *bases = @[
-            @"/var/mobile/Containers/Data/Application",
-            @"/private/var/mobile/Containers/Data/Application",
-            @"/containers/Data/Application",
-            @"/private/var/containers/Data/Application"
-        ];
-
-        // Scan bases for a container with matching metadata.
-        if (!dataContainerPath) {
-            for (NSString *base in bases) {
-                NSString *found = PXFindDataContainerUUIDByMetadata(fm, base, bundleID);
-                if (found.length) {
-                    dataUUID = found;
-                    dataContainerPath = [base stringByAppendingPathComponent:found];
-                    break;
-                }
-            }
-        }
-
-        // Fallback: use manifest containerPath/UUID if directory exists (useful after aggressive clears).
-        if (!dataContainerPath) {
-            NSString *p = nil;
-            if ([manifest[@"data"] isKindOfClass:[NSDictionary class]] && [manifest[@"data"][@"containerPath"] isKindOfClass:[NSString class]]) {
-                p = manifest[@"data"][@"containerPath"];
-            }
-            BOOL isDir = NO;
-            if (p.length && [fm fileExistsAtPath:p isDirectory:&isDir] && isDir) {
-                dataContainerPath = p;
-                dataUUID = p.lastPathComponent;
-                [warnings addObject:@"Using manifest containerPath for restore (fallback)" ];
-            }
-        }
-        if (!dataContainerPath && manifestDataUUID.length) {
-            for (NSString *base in bases) {
-                NSString *p = [base stringByAppendingPathComponent:manifestDataUUID];
-                BOOL isDir = NO;
-                if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir) {
-                    dataContainerPath = p;
-                    dataUUID = manifestDataUUID;
-                    [warnings addObject:@"Using manifest UUID for restore (fallback)" ];
-                    break;
-                }
-            }
-        }
-
-        if (!dataUUID.length || !dataContainerPath.length) {
-            NSString *hint = @"Data container not found. Ensure the app is installed and launched at least once (to create its data container).";
-            NSString *lsPath = PXDataContainerPathFromLaunchServices(bundleID) ?: @"";
-            NSString *detail = [NSString stringWithFormat:@"%@ (bundleID=%@ lsPath=%@ manifestUUID=%@)", hint, bundleID, lsPath, manifestDataUUID ?: @""];
-            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                               code:303
-                                           userInfo:@{NSLocalizedDescriptionKey: detail}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-            return;
         }
 
         PXDebugHeader(debugPre, @"Chosen Container");
@@ -2020,6 +2059,23 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"stagingData=%@", stagingData ?: @""]);
         PXDebugRun(runner, debugPre, @"du stagingData", [NSString stringWithFormat:@"du -sk %@ 2>/dev/null || true", PXShellQuote(stagingData)]);
         PXDebugRun(runner, debugPre, @"ls container (before wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
+
+        PXDestructivePathValidator *preMutationValidator = [[PXDestructivePathValidator alloc] init];
+        NSError *preMutationValidationError = nil;
+        NSString *preMutationCanonicalPath =
+            [preMutationValidator validatedCanonicalPathForContainer:dataContainerModel
+                                                               error:&preMutationValidationError];
+        if (preMutationValidationError ||
+            preMutationCanonicalPath.length == 0 ||
+            ![preMutationCanonicalPath isEqualToString:dataContainerPath]) {
+            [fm removeItemAtPath:stagingRoot error:nil];
+            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                               code:303
+                                           userInfo:@{NSLocalizedDescriptionKey: PXExactRestoreDestinationErrorDescription}];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
         [self _wipeDirectoryContents:dataContainerPath];
         PXDebugRun(runner, debugPre, @"ls container (after wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
         BOOL shouldPreferCpClone = NO;
