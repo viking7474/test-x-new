@@ -9,6 +9,7 @@
 
 #import "AppEntitlementsReader.h"
 #import "AppGroupContainerResolver.h"
+#import "PXBackupManifestValidator.h"
 #import "CommandRunner.h"
 #import "common/PXProcessKiller.h"
 #import "common/PXPaths.h"
@@ -17,6 +18,15 @@
 #import <notify.h>
 
 static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
+
+static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
+    if (![version isKindOfClass:[NSNumber class]]) {
+        return NO;
+    }
+
+    NSInteger value = version.integerValue;
+    return value == 2 || value == 3;
+}
 
 @implementation PXBackupResult
 @end
@@ -1098,6 +1108,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
 - (NSDictionary *)readManifestAtBackupDirectory:(NSString *)backupDir
                                           error:(NSError **)error {
+    if (error) {
+        *error = nil;
+    }
+
     NSString *manifest = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:manifest];
     if (![dict isKindOfClass:[NSDictionary class]]) {
@@ -1108,6 +1122,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
         return nil;
     }
+
+    NSError *validationError = nil;
+    if (![PXBackupManifestValidator validateManifestObject:dict error:&validationError]) {
+        if (error) {
+            *error = validationError;
+        }
+        return nil;
+    }
+
+    NSNumber *manifestVersion = dict[@"manifestVersion"];
+    if (!PXBackupManifestVersionIsSupported(manifestVersion)) {
+        if (error) {
+            *error = [NSError errorWithDomain:PXBackupErrorDomain
+                                         code:201
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Unsupported backup manifest version"}];
+        }
+        return nil;
+    }
+
     return dict;
 }
 
@@ -1721,6 +1754,17 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *manifestError = nil;
+        NSDictionary *manifest =
+            [self readManifestAtBackupDirectory:backupDir
+                                              error:&manifestError];
+        if (!manifest) {
+            NSError *err = manifestError ?: [NSError errorWithDomain:PXBackupErrorDomain
+                                                                  code:302
+                                                              userInfo:@{NSLocalizedDescriptionKey: @"Manifest missing or invalid"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
         NSMutableArray<NSString *> *warnings = [NSMutableArray array];
         NSFileManager *fm = [NSFileManager defaultManager];
         CommandRunner *runner = [CommandRunner shared];
@@ -1775,15 +1819,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPath=%@", tarPath]);
 
-        NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
-        NSDictionary *manifest = [NSDictionary dictionaryWithContentsOfFile:manifestPath];
-        if (![manifest isKindOfClass:[NSDictionary class]]) {
-            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                               code:302
-                                           userInfo:@{NSLocalizedDescriptionKey: @"Manifest missing or invalid"}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-            return;
-        }
         if ([manifest[@"warnings"] isKindOfClass:[NSArray class]] && [(NSArray *)manifest[@"warnings"] count] > 0) {
             [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)[(NSArray *)manifest[@"warnings"] count]]];
         }
