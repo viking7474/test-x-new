@@ -205,7 +205,226 @@ static BOOL PXResolveExactRestoreApplicationDataTarget(
 @implementation PXBackupResult
 @end
 
-@implementation PXRestoreResult
+static const PXRestoreComponent PXRestoreManagerCanonicalComponents[] = {
+    PXRestoreComponentApplicationData,
+    PXRestoreComponentProfileAppData,
+    PXRestoreComponentGlobalSafari,
+    PXRestoreComponentAppGroups,
+    PXRestoreComponentSystemGlobal,
+    PXRestoreComponentSharedSystemDatabases,
+    PXRestoreComponentPreferences,
+    PXRestoreComponentKeychain,
+};
+
+static NSArray<NSString *> *PXRestoreWarningsSuffix(NSArray<NSString *> *warnings,
+                                                     NSUInteger startIndex) {
+    if (![warnings isKindOfClass:[NSArray class]] || startIndex > warnings.count) {
+        return @[];
+    }
+    NSRange range = NSMakeRange(startIndex, warnings.count - startIndex);
+    return [[warnings subarrayWithRange:range] copy];
+}
+
+static PXRestoreRollbackStatus PXRestoreRollbackStatusFromFlags(BOOL rollbackPerformed,
+                                                                 BOOL rollbackComplete) {
+    if (!rollbackPerformed) {
+        return PXRestoreRollbackStatusNotPerformed;
+    }
+    return rollbackComplete
+        ? PXRestoreRollbackStatusCompleted
+        : PXRestoreRollbackStatusIncomplete;
+}
+
+static PXRestoreFailure *PXRestoreFailureSnapshotFromError(NSError *error) {
+    if (![error isKindOfClass:[NSError class]]) {
+        return nil;
+    }
+    return [[PXRestoreFailure alloc] initWithDomain:error.domain
+                                               code:error.code
+                                            message:error.localizedDescription];
+}
+
+@interface PXRestoreResultAccumulator : NSObject
+
+@property (nonatomic, assign, readonly) PXRestoreComponent requestedComponents;
+
+- (nullable instancetype)initWithRequestedComponents:(PXRestoreComponent)requestedComponents
+                                    plannedUnitCounts:(NSDictionary<NSNumber *, NSNumber *> *)plannedUnitCounts;
+- (BOOL)markComponentSucceeded:(PXRestoreComponent)component
+                       warnings:(NSArray<NSString *> *)warnings;
+- (BOOL)markComponentFailed:(PXRestoreComponent)component
+                    failure:(PXRestoreFailure *)failure
+             rollbackStatus:(PXRestoreRollbackStatus)rollbackStatus
+                   warnings:(NSArray<NSString *> *)warnings;
+- (BOOL)appendWarnings:(NSArray<NSString *> *)warnings
+           toComponent:(PXRestoreComponent)component;
+- (nullable PXRestoreResult *)resultWithAggregateWarnings:(NSArray<NSString *> *)warnings;
+
+@end
+
+@implementation PXRestoreResultAccumulator {
+    PXRestoreComponent _requestedComponents;
+    NSDictionary<NSNumber *, NSNumber *> *_plannedUnitCounts;
+    NSMutableDictionary<NSNumber *, NSNumber *> *_statuses;
+    NSMutableDictionary<NSNumber *, NSNumber *> *_rollbackStatuses;
+    NSMutableDictionary<NSNumber *, NSMutableArray<NSString *> *> *_componentWarnings;
+    NSMutableDictionary<NSNumber *, PXRestoreFailure *> *_failures;
+}
+
+- (nullable instancetype)initWithRequestedComponents:(PXRestoreComponent)requestedComponents
+                                    plannedUnitCounts:(NSDictionary<NSNumber *, NSNumber *> *)plannedUnitCounts {
+    if (((NSUInteger)requestedComponents & ~(NSUInteger)PXRestoreComponentAll) != 0 ||
+        (requestedComponents & PXRestoreComponentApplicationData) == 0 ||
+        ![plannedUnitCounts isKindOfClass:[NSDictionary class]] ||
+        plannedUnitCounts.count != 8) {
+        return nil;
+    }
+
+    NSMutableDictionary<NSNumber *, NSNumber *> *copiedCounts =
+        [NSMutableDictionary dictionaryWithCapacity:8];
+    NSMutableDictionary<NSNumber *, NSNumber *> *statuses =
+        [NSMutableDictionary dictionaryWithCapacity:8];
+    NSMutableDictionary<NSNumber *, NSNumber *> *rollbackStatuses =
+        [NSMutableDictionary dictionaryWithCapacity:8];
+    NSMutableDictionary<NSNumber *, NSMutableArray<NSString *> *> *componentWarnings =
+        [NSMutableDictionary dictionaryWithCapacity:8];
+
+    for (NSUInteger index = 0; index < 8; index++) {
+        PXRestoreComponent component = PXRestoreManagerCanonicalComponents[index];
+        NSNumber *key = @(component);
+        NSNumber *countNumber = plannedUnitCounts[key];
+        if (![countNumber isKindOfClass:[NSNumber class]]) {
+            return nil;
+        }
+        NSUInteger count = countNumber.unsignedIntegerValue;
+        BOOL requested = (requestedComponents & component) != 0;
+        if ((requested && (count == 0 || count > 4096)) ||
+            (!requested && count != 0)) {
+            return nil;
+        }
+        copiedCounts[key] = @(count);
+        statuses[key] = @(requested
+            ? PXRestoreComponentStatusNotAttempted
+            : PXRestoreComponentStatusSkipped);
+        rollbackStatuses[key] = @(PXRestoreRollbackStatusNotPerformed);
+        componentWarnings[key] = [NSMutableArray array];
+    }
+
+    self = [super init];
+    if (self) {
+        _requestedComponents = requestedComponents;
+        _plannedUnitCounts = [copiedCounts copy];
+        _statuses = statuses;
+        _rollbackStatuses = rollbackStatuses;
+        _componentWarnings = componentWarnings;
+        _failures = [NSMutableDictionary dictionaryWithCapacity:8];
+    }
+    return self;
+}
+
+- (PXRestoreComponent)requestedComponents {
+    return _requestedComponents;
+}
+
+- (BOOL)componentIsRequested:(PXRestoreComponent)component {
+    return component != 0 &&
+           ((NSUInteger)component & ((NSUInteger)component - 1)) == 0 &&
+           ((NSUInteger)component & ~(NSUInteger)PXRestoreComponentAll) == 0 &&
+           (_requestedComponents & component) != 0;
+}
+
+- (BOOL)replaceWarnings:(NSArray<NSString *> *)warnings
+            forComponent:(PXRestoreComponent)component {
+    if (![warnings isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+    NSMutableArray<NSString *> *copied = [NSMutableArray arrayWithCapacity:warnings.count];
+    for (id warning in warnings) {
+        if (![warning isKindOfClass:[NSString class]]) {
+            return NO;
+        }
+        [copied addObject:[(NSString *)warning copy]];
+    }
+    _componentWarnings[@(component)] = copied;
+    return YES;
+}
+
+- (BOOL)markComponentSucceeded:(PXRestoreComponent)component
+                       warnings:(NSArray<NSString *> *)warnings {
+    NSNumber *key = @(component);
+    if (![self componentIsRequested:component] ||
+        [_statuses[key] integerValue] != PXRestoreComponentStatusNotAttempted ||
+        ![self replaceWarnings:warnings forComponent:component]) {
+        return NO;
+    }
+    _statuses[key] = @(PXRestoreComponentStatusSucceeded);
+    _rollbackStatuses[key] = @(PXRestoreRollbackStatusNotPerformed);
+    [_failures removeObjectForKey:key];
+    return YES;
+}
+
+- (BOOL)markComponentFailed:(PXRestoreComponent)component
+                    failure:(PXRestoreFailure *)failure
+             rollbackStatus:(PXRestoreRollbackStatus)rollbackStatus
+                   warnings:(NSArray<NSString *> *)warnings {
+    NSNumber *key = @(component);
+    if (![self componentIsRequested:component] ||
+        ![failure isKindOfClass:[PXRestoreFailure class]] ||
+        (rollbackStatus != PXRestoreRollbackStatusNotPerformed &&
+         rollbackStatus != PXRestoreRollbackStatusCompleted &&
+         rollbackStatus != PXRestoreRollbackStatusIncomplete) ||
+        [_statuses[key] integerValue] != PXRestoreComponentStatusNotAttempted ||
+        ![self replaceWarnings:warnings forComponent:component]) {
+        return NO;
+    }
+    _statuses[key] = @(PXRestoreComponentStatusFailed);
+    _rollbackStatuses[key] = @(rollbackStatus);
+    _failures[key] = [failure copy];
+    return YES;
+}
+
+- (BOOL)appendWarnings:(NSArray<NSString *> *)warnings
+           toComponent:(PXRestoreComponent)component {
+    NSNumber *key = @(component);
+    if (![warnings isKindOfClass:[NSArray class]] || !_componentWarnings[key]) {
+        return NO;
+    }
+    for (id warning in warnings) {
+        if (![warning isKindOfClass:[NSString class]]) {
+            return NO;
+        }
+        [_componentWarnings[key] addObject:[(NSString *)warning copy]];
+    }
+    return YES;
+}
+
+- (nullable PXRestoreResult *)resultWithAggregateWarnings:(NSArray<NSString *> *)warnings {
+    NSMutableArray<PXRestoreComponentResult *> *results = [NSMutableArray arrayWithCapacity:8];
+    for (NSUInteger index = 0; index < 8; index++) {
+        PXRestoreComponent component = PXRestoreManagerCanonicalComponents[index];
+        NSNumber *key = @(component);
+        PXRestoreComponentStatus status = (PXRestoreComponentStatus)[_statuses[key] integerValue];
+        NSUInteger planned = [_plannedUnitCounts[key] unsignedIntegerValue];
+        NSUInteger committed = status == PXRestoreComponentStatusSucceeded ? planned : 0;
+        PXRestoreComponentResult *componentResult =
+            [[PXRestoreComponentResult alloc]
+                initWithComponent:component
+                           status:status
+                 plannedUnitCount:planned
+               committedUnitCount:committed
+                   rollbackStatus:(PXRestoreRollbackStatus)[_rollbackStatuses[key] integerValue]
+                         warnings:_componentWarnings[key]
+                          failure:_failures[key]];
+        if (!componentResult) {
+            return nil;
+        }
+        [results addObject:componentResult];
+    }
+    return [[PXRestoreResult alloc] initWithRequestedComponents:_requestedComponents
+                                               componentResults:results
+                                                       warnings:warnings];
+}
+
 @end
 
 @implementation AppDataBackupManager
@@ -2278,6 +2497,75 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return;
         }
 
+        NSMutableArray<PXRestorePlanSystemGlobalItem *> *effectiveSystemGlobalItemsBuilder =
+            [NSMutableArray arrayWithCapacity:restorePlan.systemGlobalItems.count];
+        for (PXRestorePlanSystemGlobalItem *plannedItem in restorePlan.systemGlobalItems) {
+            BOOL duplicateGlobalSafari =
+                [bundleID isEqualToString:@"com.apple.mobilesafari"] &&
+                [plannedItem.librarySubdirectory isEqualToString:@"Safari"] &&
+                restorePlan.includesGlobalSafari;
+            if (!duplicateGlobalSafari) {
+                [effectiveSystemGlobalItemsBuilder addObject:plannedItem];
+            }
+        }
+        NSArray<PXRestorePlanSystemGlobalItem *> *effectiveSystemGlobalItems =
+            [effectiveSystemGlobalItemsBuilder copy];
+
+        PXRestoreComponent requestedComponents = PXRestoreComponentApplicationData;
+        if (restorePlan.includesProfileAppData) requestedComponents |= PXRestoreComponentProfileAppData;
+        if (restorePlan.includesGlobalSafari) requestedComponents |= PXRestoreComponentGlobalSafari;
+        if (appGroupTargetPlan.targets.count > 0) requestedComponents |= PXRestoreComponentAppGroups;
+        if (effectiveSystemGlobalItems.count > 0) requestedComponents |= PXRestoreComponentSystemGlobal;
+        if (restorePlan.sharedDatabaseItems.count > 0) requestedComponents |= PXRestoreComponentSharedSystemDatabases;
+        if (restorePlan.includesPreferences) requestedComponents |= PXRestoreComponentPreferences;
+        if (restorePlan.includesKeychain) requestedComponents |= PXRestoreComponentKeychain;
+
+        NSDictionary<NSNumber *, NSNumber *> *plannedUnitCounts = @{
+            @(PXRestoreComponentApplicationData): @1,
+            @(PXRestoreComponentProfileAppData): @(restorePlan.includesProfileAppData ? 1 : 0),
+            @(PXRestoreComponentGlobalSafari): @(restorePlan.includesGlobalSafari ? 1 : 0),
+            @(PXRestoreComponentAppGroups): @(appGroupTargetPlan.targets.count),
+            @(PXRestoreComponentSystemGlobal): @(effectiveSystemGlobalItems.count),
+            @(PXRestoreComponentSharedSystemDatabases): @(restorePlan.sharedDatabaseItems.count),
+            @(PXRestoreComponentPreferences): @(restorePlan.includesPreferences ? 1 : 0),
+            @(PXRestoreComponentKeychain): @(restorePlan.includesKeychain ? 1 : 0),
+        };
+        __attribute__((objc_precise_lifetime))
+        PXRestoreResultAccumulator *resultAccumulator =
+            [[PXRestoreResultAccumulator alloc] initWithRequestedComponents:requestedComponents
+                                                          plannedUnitCounts:plannedUnitCounts];
+        if (!resultAccumulator) {
+            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                               code:321
+                                           userInfo:@{NSLocalizedDescriptionKey: @"Structured Restore result could not be constructed"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
+        void (^completeStructuredFailure)(PXRestoreComponent,
+                                          NSError *,
+                                          PXRestoreRollbackStatus,
+                                          NSUInteger) =
+            ^(PXRestoreComponent component,
+              NSError *err,
+              PXRestoreRollbackStatus rollbackStatus,
+              NSUInteger warningStart) {
+                PXRestoreFailure *failure = PXRestoreFailureSnapshotFromError(err);
+                NSArray<NSString *> *componentWarnings = PXRestoreWarningsSuffix(warnings, warningStart);
+                BOOL marked = failure &&
+                    [resultAccumulator markComponentFailed:component
+                                                   failure:failure
+                                            rollbackStatus:rollbackStatus
+                                                  warnings:componentWarnings];
+                PXRestoreResult *result = marked
+                    ? [resultAccumulator resultWithAggregateWarnings:warnings]
+                    : nil;
+                NSCAssert(result != nil, @"Post-boundary Restore failure must publish a structured result");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(result, err);
+                });
+            };
+
         if (restorePlan.manifestWarningCount > 0) {
             [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)restorePlan.manifestWarningCount]];
         }
@@ -2286,6 +2574,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (manifestProfileId.length && activeProfileId.length && ![manifestProfileId isEqualToString:activeProfileId]) {
             [warnings addObject:[NSString stringWithFormat:@"Backup profileId %@ != active profileId %@", manifestProfileId, activeProfileId]];
         }
+
+        NSUInteger applicationWarningStart = warnings.count;
 
         PXDebugHeader(debugPre, @"Chosen Container");
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"chosenDataContainerPath=%@", dataContainerPath ?: @""]);
@@ -2310,7 +2600,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                NSLocalizedDescriptionKey: @"The accepted main archive summary is invalid.",
                                                PXMainDataStagingErrorFieldPathKey: @"$.data"
                                            }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
         NSUInteger expectedLogicalMemberCount = (NSUInteger)logicalMemberValue;
@@ -2326,7 +2616,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                   NSLocalizedDescriptionKey: @"The private main-data staging workspace could not be created.",
                                                                   PXMainDataStagingErrorFieldPathKey: @"$.workspace"
                                                               }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
 
@@ -2339,7 +2629,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                     NSLocalizedDescriptionKey: @"The private main-data staging workspace failed empty validation.",
                                                                     PXMainDataStagingErrorFieldPathKey: @"$.data"
                                                                 }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
 
@@ -2352,7 +2642,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:316
                                            userInfo:@{NSLocalizedDescriptionKey: @"Failed to extract data archive to staging"}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
 
@@ -2370,7 +2660,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                         NSLocalizedDescriptionKey: @"The extracted main-data stage failed validation.",
                                                                         PXMainDataStagingErrorFieldPathKey: @"$.data"
                                                                     }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
 
@@ -2394,7 +2684,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:303
                                            userInfo:@{NSLocalizedDescriptionKey: PXExactRestoreDestinationErrorDescription}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
 
@@ -2413,7 +2703,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                     NSLocalizedDescriptionKey: @"The validated main-data stage changed before transaction commit.",
                                     PXMainDataStagingErrorFieldPathKey: @"$.data"
                                 }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
 
@@ -2431,7 +2721,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                            userInfo:@{
                                                NSLocalizedDescriptionKey: @"Failed to prepare transactional main-data commit"
                                            }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(PXRestoreComponentApplicationData, err, PXRestoreRollbackStatusNotPerformed, applicationWarningStart);
             return;
         }
         PXDebugAppendLine(debugPre,
@@ -2452,7 +2742,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                            userInfo:@{
                                                NSLocalizedDescriptionKey: @"Failed to commit validated main-data stage transactionally"
                                            }];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeStructuredFailure(
+                PXRestoreComponentApplicationData,
+                err,
+                PXRestoreRollbackStatusFromFlags(mainDataTransaction.rollbackPerformed,
+                                                 mainDataTransaction.rollbackComplete),
+                applicationWarningStart);
             return;
         }
         PXDebugAppendLine(debugPre, @"mainTransactionCommitted=1");
@@ -2470,6 +2765,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![mainDataWorkspace cleanupWithError:&mainDataCleanupError]) {
             [warnings addObject:@"Main-data staging cleanup failed"];
         }
+        NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentApplicationData
+                                                   warnings:PXRestoreWarningsSuffix(warnings, applicationWarningStart)],
+                  @"ApplicationData result state must be publishable");
 
         // Post-restore hygiene: refresh preferences daemon caches.
         // Some apps read state via cfprefsd and may not notice external file writes immediately.
@@ -2478,6 +2776,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Data container restored.
 
         // Restore profile redirected appdata (if present)
+        NSUInteger profileWarningStart = warnings.count;
         if (restorePlan.includesProfileAppData) {
             PXMainDataStagingWorkspace *profileWorkspace = nil;
             PXValidatedMainDataStage *profileStage = nil;
@@ -2492,7 +2791,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                  stageOut:&profileStage
                                                     error:&profileStageError]) {
                 NSError *err = profileStageError;
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentProfileAppData, err, PXRestoreRollbackStatusNotPerformed, profileWarningStart);
                 return;
             }
 
@@ -2508,7 +2807,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                         NSLocalizedDescriptionKey: @"The profile AppData destination could not be revalidated.",
                                         PXOptionalRestoreStagingErrorFieldPathKey: @"$.profileAppData.destination"
                                     }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentProfileAppData, err, PXRestoreRollbackStatusNotPerformed, profileWarningStart);
                 return;
             }
             NSError *profileItemError = nil;
@@ -2531,7 +2830,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:307
                                                userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated profile AppData stage transactionally"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(
+                    PXRestoreComponentProfileAppData,
+                    err,
+                    PXRestoreRollbackStatusFromFlags(profileTransaction.rollbackPerformed,
+                                                     profileTransaction.rollbackComplete),
+                    profileWarningStart);
                 return;
             }
             if (profileCleanupWarning) {
@@ -2543,9 +2847,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (!profileStagingCleaned) {
                 [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
+            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentProfileAppData
+                                                       warnings:PXRestoreWarningsSuffix(warnings, profileWarningStart)],
+                      @"ProfileAppData result state must be publishable");
         }
 
         // Restore global Safari library (if present)
+        NSUInteger safariWarningStart = warnings.count;
         if (restorePlan.includesGlobalSafari) {
             PXMainDataStagingWorkspace *safariWorkspace = nil;
             PXValidatedMainDataStage *safariStage = nil;
@@ -2560,7 +2868,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                  stageOut:&safariStage
                                                     error:&safariStageError]) {
                 NSError *err = safariStageError;
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentGlobalSafari, err, PXRestoreRollbackStatusNotPerformed, safariWarningStart);
                 return;
             }
 
@@ -2576,7 +2884,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                         NSLocalizedDescriptionKey: @"The global Safari destination could not be revalidated.",
                                         PXOptionalRestoreStagingErrorFieldPathKey: @"$.globalSafari.destination"
                                     }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentGlobalSafari, err, PXRestoreRollbackStatusNotPerformed, safariWarningStart);
                 return;
             }
             NSError *safariItemError = nil;
@@ -2599,7 +2907,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:311
                                                userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated global Safari stage transactionally"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(
+                    PXRestoreComponentGlobalSafari,
+                    err,
+                    PXRestoreRollbackStatusFromFlags(safariTransaction.rollbackPerformed,
+                                                     safariTransaction.rollbackComplete),
+                    safariWarningStart);
                 return;
             }
             if (safariCleanupWarning) {
@@ -2611,8 +2924,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (!safariStagingCleaned) {
                 [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
+            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentGlobalSafari
+                                                       warnings:PXRestoreWarningsSuffix(warnings, safariWarningStart)],
+                      @"GlobalSafari result state must be publishable");
         }
 
+        NSUInteger appGroupWarningStart = warnings.count;
         if (appGroupTargetPlan.targets.count > 0) {
             // Stage every exact physical App Group target before one transactional batch commit.
             __attribute__((objc_precise_lifetime))
@@ -2662,7 +2979,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                            NSLocalizedDescriptionKey: @"The accepted App Group archive summary is inconsistent.",
                                                            PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.appGroups"
                                                        }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
                     [targetMemberCounts addObject:@(memberCountValue)];
@@ -2691,7 +3008,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                 NSLocalizedDescriptionKey: @"The private App Group staging workspace could not be created.",
                                                 PXMainDataStagingErrorFieldPathKey: @"$.workspace"
                                             }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
 
@@ -2707,7 +3024,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                 NSLocalizedDescriptionKey: @"The private App Group staging workspace failed empty validation.",
                                                 PXMainDataStagingErrorFieldPathKey: @"$.data"
                                             }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
 
@@ -2724,7 +3041,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                        userInfo:@{
                                                            NSLocalizedDescriptionKey: @"Failed to extract App Group archive to staging"
                                                        }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
 
@@ -2745,7 +3062,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                 NSLocalizedDescriptionKey: @"The extracted App Group stage failed validation.",
                                                 PXMainDataStagingErrorFieldPathKey: @"$.data"
                                             }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
 
@@ -2765,7 +3082,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                            NSLocalizedDescriptionKey: @"App Group archives for one physical target are inconsistent.",
                                                            PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.appGroups"
                                                        }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
 
@@ -2780,7 +3097,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                 NSLocalizedDescriptionKey: @"A duplicate App Group staging workspace could not be cleaned safely.",
                                                 PXMainDataStagingErrorFieldPathKey: @"$.workspace"
                                             }];
-                        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                        completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
                 }
@@ -2794,7 +3111,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                        NSLocalizedDescriptionKey: @"The accepted App Group restore target has no validated source.",
                                                        PXAppGroupRestoreTargetPlanErrorFieldPathKey: @"$.appGroups"
                                                    }];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                     return;
                 }
 
@@ -2810,7 +3127,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                userInfo:@{
                                                    NSLocalizedDescriptionKey: @"Failed to commit validated App Group stages transactionally"
                                                }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                 return;
             }
 
@@ -2835,7 +3152,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                            ? @"Exact App Group restore target could not be revalidated safely"
                                                            : @"Failed to commit validated App Group stages transactionally"
                                                }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                 return;
             }
 
@@ -2864,7 +3181,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                userInfo:@{
                                                    NSLocalizedDescriptionKey: @"Failed to commit validated App Group stages transactionally"
                                                }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(
+                    PXRestoreComponentAppGroups,
+                    err,
+                    PXRestoreRollbackStatusFromFlags(appGroupTransaction.rollbackPerformed,
+                                                     appGroupTransaction.rollbackComplete),
+                    appGroupWarningStart);
                 return;
             }
 
@@ -2879,11 +3201,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (!appGroupStagingCleanupComplete) {
                 [warnings addObject:@"App Group staging cleanup failed"];
             }
+            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentAppGroups
+                                                       warnings:PXRestoreWarningsSuffix(warnings, appGroupWarningStart)],
+                      @"AppGroups result state must be publishable");
 
         }
 
         // Restore generic system app global Library folders (if present)
-        if (restorePlan.systemGlobalItems.count) {
+        NSUInteger systemGlobalWarningStart = warnings.count;
+        if (effectiveSystemGlobalItems.count > 0) {
             NSMutableArray<PXMainDataStagingWorkspace *> *systemWorkspaces = [NSMutableArray array];
             NSMutableArray<PXOptionalRestoreTransactionItem *> *systemItems = [NSMutableArray array];
             NSMutableArray<NSString *> *systemDestinations = [NSMutableArray array];
@@ -2895,13 +3221,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                 return complete;
             };
-            for (PXRestorePlanSystemGlobalItem *plannedItem in restorePlan.systemGlobalItems) {
+            for (PXRestorePlanSystemGlobalItem *plannedItem in effectiveSystemGlobalItems) {
                 NSString *subdir = plannedItem.librarySubdirectory;
-                if ([bundleID isEqualToString:@"com.apple.mobilesafari"] &&
-                    [subdir isEqualToString:@"Safari"] &&
-                    restorePlan.includesGlobalSafari) {
-                    continue;
-                }
                 PXMainDataStagingWorkspace *systemWorkspace = nil;
                 PXValidatedMainDataStage *systemStage = nil;
                 NSError *systemStageError = nil;
@@ -2916,7 +3237,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                         error:&systemStageError]) {
                     cleanupSystemWorkspaces();
                     NSError *err = systemStageError;
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(PXRestoreComponentSystemGlobal, err, PXRestoreRollbackStatusNotPerformed, systemGlobalWarningStart);
                     return;
                 }
                 NSError *destinationError = nil;
@@ -2936,7 +3257,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         [NSError errorWithDomain:PXBackupErrorDomain
                                             code:318
                                         userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated system-global stages transactionally"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(PXRestoreComponentSystemGlobal, err, PXRestoreRollbackStatusNotPerformed, systemGlobalWarningStart);
                     return;
                 }
                 [systemWorkspaces addObject:systemWorkspace];
@@ -2952,7 +3273,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                        code:318
                                                    userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated system-global stages transactionally"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(PXRestoreComponentSystemGlobal, err, PXRestoreRollbackStatusNotPerformed, systemGlobalWarningStart);
                     return;
                 }
                 [self _killRelatedProcessesForBundleID:bundleID];
@@ -2963,7 +3284,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                        code:318
                                                    userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore validated system-global stages transactionally"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(
+                        PXRestoreComponentSystemGlobal,
+                        err,
+                        PXRestoreRollbackStatusFromFlags(transaction.rollbackPerformed,
+                                                         transaction.rollbackComplete),
+                        systemGlobalWarningStart);
                     return;
                 }
                 if (cleanupWarning) {
@@ -2976,9 +3302,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                 if (!stagingCleaned) [warnings addObject:@"Optional-directory staging cleanup failed"];
             }
+            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentSystemGlobal
+                                                       warnings:PXRestoreWarningsSuffix(warnings, systemGlobalWarningStart)],
+                      @"SystemGlobal result state must be publishable");
         }
 
         // Restore shared system DBs (if present)
+        NSUInteger sharedDatabaseWarningStart = warnings.count;
         if (restorePlan.sharedDatabaseItems.count) {
             NSMutableArray<PXOptionalFileStagingWorkspace *> *sharedWorkspaces =
                 [NSMutableArray arrayWithCapacity:restorePlan.sharedDatabaseItems.count];
@@ -3000,7 +3330,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                             NSLocalizedDescriptionKey: @"The shared database source could not be staged.",
                                             PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
                                         }];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(PXRestoreComponentSharedSystemDatabases, err, PXRestoreRollbackStatusNotPerformed, sharedDatabaseWarningStart);
                     return;
                 }
                 NSError *destinationError = nil;
@@ -3020,7 +3350,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         [NSError errorWithDomain:PXBackupErrorDomain
                                             code:320
                                         userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional files transactionally"}];
-                    dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                    completeStructuredFailure(PXRestoreComponentSharedSystemDatabases, err, PXRestoreRollbackStatusNotPerformed, sharedDatabaseWarningStart);
                     return;
                 }
                 [sharedWorkspaces addObject:workspace];
@@ -3035,7 +3365,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:320
                                                userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional files transactionally"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentSharedSystemDatabases, err, PXRestoreRollbackStatusNotPerformed, sharedDatabaseWarningStart);
                 return;
             }
             PXKillallByName(@"accountsd", SIGTERM);
@@ -3057,7 +3387,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:320
                                                userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional files transactionally"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(
+                    PXRestoreComponentSharedSystemDatabases,
+                    err,
+                    PXRestoreRollbackStatusFromFlags(sharedTransaction.rollbackPerformed,
+                                                     sharedTransaction.rollbackComplete),
+                    sharedDatabaseWarningStart);
                 return;
             }
             if (sharedCleanupWarning) {
@@ -3072,6 +3407,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
             if (!sharedStagingCleaned) [warnings addObject:@"Optional-file staging cleanup failed"];
             [warnings addObject:@"Restored shared system DBs (this may affect multiple apps)"];
+            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentSharedSystemDatabases
+                                                       warnings:PXRestoreWarningsSuffix(warnings, sharedDatabaseWarningStart)],
+                      @"SharedSystemDatabases result state must be publishable");
             PXKillallByName(@"accountsd", SIGTERM);
             PXKillallByName(@"calaccessd", SIGTERM);
             PXKillallByName(@"imagent", SIGTERM);
@@ -3079,6 +3417,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         // Preferences restore
+        NSUInteger preferencesWarningStart = warnings.count;
         if (restorePlan.includesPreferences) {
             NSError *preferencesStageError = nil;
             PXOptionalFileStagingWorkspace *preferencesWorkspace =
@@ -3092,7 +3431,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                         NSLocalizedDescriptionKey: @"The Preferences source could not be staged.",
                                         PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
                                     }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentPreferences, err, PXRestoreRollbackStatusNotPerformed, preferencesWarningStart);
                 return;
             }
             NSError *preferencesDestinationError = nil;
@@ -3120,7 +3459,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:320
                                                userInfo:@{NSLocalizedDescriptionKey: @"Failed to restore staged optional file transactionally"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(
+                    PXRestoreComponentPreferences,
+                    err,
+                    PXRestoreRollbackStatusFromFlags(preferencesTransaction.rollbackPerformed,
+                                                     preferencesTransaction.rollbackComplete),
+                    preferencesWarningStart);
                 return;
             }
             if (preferencesCleanupWarning) {
@@ -3133,9 +3477,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 PXKillallByName(@"cfprefsd", SIGTERM);
             }
             if (!preferencesStagingCleaned) [warnings addObject:@"Optional-file staging cleanup failed"];
+            NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentPreferences
+                                                       warnings:PXRestoreWarningsSuffix(warnings, preferencesWarningStart)],
+                      @"Preferences result state must be publishable");
         }
 
         // Keychain restore (warning-only on execution failure)
+        NSUInteger keychainBranchWarningStart = warnings.count;
         if (restorePlan.includesKeychain) {
             NSError *keychainStageError = nil;
             PXOptionalFileStagingWorkspace *keychainWorkspace =
@@ -3149,7 +3497,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                         NSLocalizedDescriptionKey: @"The Keychain input source could not be staged.",
                                         PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
                                     }];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                completeStructuredFailure(PXRestoreComponentKeychain, err, PXRestoreRollbackStatusNotPerformed, keychainBranchWarningStart);
                 return;
             }
 
@@ -3158,6 +3506,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSString *method = restorePlan.keychainMethod;
             (void)method;
             BOOL shouldUseInApp = restorePlan.keychainUsesInAppMethod;
+            NSUInteger keychainExecutionWarningStart = warnings.count;
             BOOL ok = NO;
             if (shouldUseInApp) {
                 ok = [self _inAppKeychainRestoreForBundleID:bundleID
@@ -3181,6 +3530,23 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *keychainCleanupError = nil;
             if (![keychainWorkspace cleanupWithError:&keychainCleanupError]) {
                 [warnings addObject:@"Optional-file staging cleanup failed"];
+            }
+            NSArray<NSString *> *keychainWarnings =
+                PXRestoreWarningsSuffix(warnings, keychainExecutionWarningStart);
+            if (ok) {
+                NSCAssert([resultAccumulator markComponentSucceeded:PXRestoreComponentKeychain
+                                                           warnings:keychainWarnings],
+                          @"Keychain success result state must be publishable");
+            } else {
+                PXRestoreFailure *keychainFailure =
+                    [[PXRestoreFailure alloc] initWithDomain:PXBackupErrorDomain
+                                                       code:322
+                                                    message:@"Keychain restore failed"];
+                NSCAssert([resultAccumulator markComponentFailed:PXRestoreComponentKeychain
+                                                         failure:keychainFailure
+                                                  rollbackStatus:PXRestoreRollbackStatusNotPerformed
+                                                        warnings:keychainWarnings],
+                          @"Keychain failure result state must be publishable");
             }
 
             PXDebugHeader(debugKeychain, @"Keychain After Restore");
@@ -3219,6 +3585,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
         }
 
+        NSUInteger postVerificationWarningStart = warnings.count;
         NSString *metadataPath = [dataContainerPath stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
         if (![fm fileExistsAtPath:metadataPath]) {
             [warnings addObject:@"Post-restore verification: data container metadata plist is missing"];
@@ -3228,11 +3595,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![fm fileExistsAtPath:libraryPath isDirectory:&libraryIsDir] || !libraryIsDir) {
             [warnings addObject:@"Post-restore verification: Library directory missing after restore"];
         }
+        NSCAssert([resultAccumulator appendWarnings:PXRestoreWarningsSuffix(warnings, postVerificationWarningStart)
+                                          toComponent:PXRestoreComponentApplicationData],
+                  @"Post-verification warnings must attach to ApplicationData");
 
         [self _killRelatedProcessesForBundleID:bundleID];
 
-        PXRestoreResult *out = [[PXRestoreResult alloc] init];
-        out.warnings = warnings;
+        PXRestoreResult *out = [resultAccumulator resultWithAggregateWarnings:warnings];
+        NSCAssert(out != nil, @"Completed Restore must publish a structured result");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completion) {
                 completion(out, nil);

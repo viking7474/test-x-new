@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "PXRestoreResult.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -11,10 +12,6 @@ typedef NS_OPTIONS(NSUInteger, PXBackupOptions) {
 @interface PXBackupResult : NSObject
 @property (nonatomic, copy) NSString *backupDirectory;
 @property (nonatomic, copy) NSString *manifestPath;
-@property (nonatomic, copy) NSArray<NSString *> *warnings;
-@end
-
-@interface PXRestoreResult : NSObject
 @property (nonatomic, copy) NSArray<NSString *> *warnings;
 @end
 
