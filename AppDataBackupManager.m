@@ -12,6 +12,7 @@
 #import "PXBackupManifestValidator.h"
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
+#import "PXRestorePlan.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
@@ -1890,8 +1891,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
             return;
         }
-        NSString *dataUUID = dataContainerModel.containerUUID;
-
         NSError *artifactError = nil;
         PXVerifiedBackupArtifactSet *verifiedArtifacts =
             [PXBackupArtifactVerifier verifiedArtifactsForManifest:manifest
@@ -1925,6 +1924,31 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
             return;
         }
+
+        NSError *planError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXRestorePlan *restorePlan =
+            [PXRestorePlan planForManifest:manifest
+                 requestedBundleIdentifier:bundleID
+                   applicationDataContainer:dataContainerModel
+                        applicationDataPath:dataContainerPath
+                          verifiedArtifacts:verifiedArtifacts
+                          validatedArchives:validatedArchives
+                                      error:&planError];
+        if (!restorePlan) {
+            NSError *err = planError ?: [NSError errorWithDomain:PXRestorePlanErrorDomain
+                                                              code:PXRestorePlanErrorInvalidInput
+                                                          userInfo:@{
+                                                              NSLocalizedDescriptionKey: @"Restore plan construction failed",
+                                                              PXRestorePlanErrorFieldPathKey: @"$"
+                                                          }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
+        dataContainerModel = restorePlan.applicationDataContainer;
+        dataContainerPath = restorePlan.applicationDataPath;
+        NSString *dataUUID = restorePlan.applicationDataUUID;
 
         NSMutableArray<NSString *> *warnings = [NSMutableArray array];
         NSFileManager *fm = [NSFileManager defaultManager];
@@ -1980,17 +2004,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPath=%@", tarPath]);
 
-        if ([manifest[@"warnings"] isKindOfClass:[NSArray class]] && [(NSArray *)manifest[@"warnings"] count] > 0) {
-            [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)[(NSArray *)manifest[@"warnings"] count]]];
+        if (restorePlan.manifestWarningCount > 0) {
+            [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)restorePlan.manifestWarningCount]];
         }
 
         // Kill app before restore
         [self _killRelatedProcessesForBundleID:bundleID];
 
-        NSString *manifestProfileId = nil;
-        if ([manifest[@"profileId"] isKindOfClass:[NSString class]]) {
-            manifestProfileId = manifest[@"profileId"];
-        }
+        NSString *manifestProfileId = restorePlan.manifestProfileIdentifier;
         NSString *activeProfileId = [self _activeProfileId];
         if (manifestProfileId.length && activeProfileId.length && ![manifestProfileId isEqualToString:activeProfileId]) {
             [warnings addObject:[NSString stringWithFormat:@"Backup profileId %@ != active profileId %@", manifestProfileId, activeProfileId]];
@@ -2004,12 +2025,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // App Groups via entitlements (Option B)
         NSArray<AppGroupContainerInfo *> *groupContainers = @[];
-        NSDictionary *options = manifest[@"options"];
-        BOOL includeGroups = YES;
-        if ([options isKindOfClass:[NSDictionary class]] && [options[@"includeAppGroups"] respondsToSelector:@selector(boolValue)]) {
-            includeGroups = [options[@"includeAppGroups"] boolValue];
-        }
-        if (includeGroups) {
+        if (restorePlan.includesAppGroups) {
             NSError *entErr = nil;
             AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
             NSArray<NSString *> *groupIDs = [reader applicationGroupsForBundleID:bundleID error:&entErr];
@@ -2022,22 +2038,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
         }
 
-        NSMutableDictionary<NSString *, NSString *> *groupArchiveNamesByIDBuilder =
-            [NSMutableDictionary dictionary];
-        for (NSDictionary *entry in (NSArray *)manifest[@"appGroups"]) {
-            NSString *groupID = entry[@"groupID"];
-            NSString *archiveName = entry[@"archive"];
-            if (groupID.length && archiveName.length) {
-                groupArchiveNamesByIDBuilder[groupID] = archiveName;
-            }
-        }
-        NSDictionary<NSString *, NSString *> *groupArchiveNamesByID =
-            [groupArchiveNamesByIDBuilder copy];
-
-        NSDictionary *dataInfo = manifest[@"data"];
-        NSString *dataArchiveName = dataInfo[@"archive"];
-        NSString *dataArchive =
-            [verifiedArtifacts pathForArtifactName:dataArchiveName];
+        NSString *dataArchive = restorePlan.dataArchivePath;
 
         // Two-phase restore for data container: extract to staging first.
         NSString *stagingRoot = [NSString stringWithFormat:@"/tmp/weaponx_restore_%d", getpid()];
@@ -2143,16 +2144,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Data container restored.
 
         // Restore profile redirected appdata (if present)
-        NSDictionary *profileAppData = manifest[@"profileAppData"];
-        BOOL includeProfileAppData = NO;
-        if ([profileAppData isKindOfClass:[NSDictionary class]] && [profileAppData[@"included"] respondsToSelector:@selector(boolValue)]) {
-            includeProfileAppData = [profileAppData[@"included"] boolValue];
-        }
-        if (includeProfileAppData) {
+        if (restorePlan.includesProfileAppData) {
             NSString *profileAppDataPath = [self _profileAppDataPathForBundleID:bundleID];
-            NSString *archiveName = profileAppData[@"archive"];
-            NSString *archivePath =
-                [verifiedArtifacts pathForArtifactName:archiveName];
+            NSString *archivePath = restorePlan.profileAppDataSourcePath;
             if (profileAppDataPath.length && archivePath.length) {
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:profileAppDataPath isDirectory:&isDir] && isDir) {
@@ -2184,16 +2178,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         // Restore global Safari library (if present)
-        NSDictionary *globalSafari = manifest[@"globalSafari"];
-        BOOL includeGlobalSafari = NO;
-        if ([globalSafari isKindOfClass:[NSDictionary class]] && [globalSafari[@"included"] respondsToSelector:@selector(boolValue)]) {
-            includeGlobalSafari = [globalSafari[@"included"] boolValue];
-        }
-        if (includeGlobalSafari) {
+        if (restorePlan.includesGlobalSafari) {
             NSString *globalSafariPath = [self _globalSafariLibraryPath];
-            NSString *archiveName = globalSafari[@"archive"];
-            NSString *archivePath =
-                [verifiedArtifacts pathForArtifactName:archiveName];
+            NSString *archivePath = restorePlan.globalSafariSourcePath;
             if (globalSafariPath.length && archivePath.length) {
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:globalSafariPath isDirectory:&isDir] && isDir) {
@@ -2226,10 +2213,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // Wipe and restore each group
         for (AppGroupContainerInfo *info in groupContainers) {
-            NSString *archiveName = groupArchiveNamesByID[info.groupID];
-            NSString *archivePath =
-                [verifiedArtifacts pathForArtifactName:archiveName];
-            if (!archiveName.length || !archivePath.length) {
+            PXRestorePlanAppGroupItem *plannedGroup =
+                [restorePlan appGroupItemForIdentifier:info.groupID];
+            NSString *archivePath = plannedGroup.sourcePath;
+            if (!plannedGroup || !archivePath.length) {
                 [warnings addObject:[NSString stringWithFormat:@"Missing manifest archive mapping for %@", info.groupID]];
                 continue;
             }
@@ -2256,32 +2243,17 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         // Restore generic system app global Library folders (if present)
-        NSDictionary *systemGlobal = manifest[@"systemGlobalLibrary"];
-        BOOL includeSystemGlobal = NO;
-        NSArray *items = nil;
-        if ([systemGlobal isKindOfClass:[NSDictionary class]]) {
-            if ([systemGlobal[@"included"] respondsToSelector:@selector(boolValue)]) {
-                includeSystemGlobal = [systemGlobal[@"included"] boolValue];
-            }
-            if ([systemGlobal[@"items"] isKindOfClass:[NSArray class]]) {
-                items = systemGlobal[@"items"];
-            }
-        }
-        if (includeSystemGlobal && items.count) {
+        if (restorePlan.systemGlobalItems.count) {
             NSString *libBase = [self _mobileLibraryBasePath];
-            for (NSDictionary *it in (NSArray *)items) {
-                if (![it isKindOfClass:[NSDictionary class]]) continue;
-                NSString *subdir = [it[@"subdir"] isKindOfClass:[NSString class]] ? it[@"subdir"] : nil;
-                NSString *archive = [it[@"archive"] isKindOfClass:[NSString class]] ? it[@"archive"] : nil;
-                if (!subdir.length || !archive.length) continue;
+            for (PXRestorePlanSystemGlobalItem *plannedItem in restorePlan.systemGlobalItems) {
+                NSString *subdir = plannedItem.librarySubdirectory;
 
                 // Avoid double-restoring Safari which is handled explicitly.
                 if ([bundleID isEqualToString:@"com.apple.mobilesafari"] && [subdir isEqualToString:@"Safari"]) {
                     continue;
                 }
 
-                NSString *archivePath =
-                    [verifiedArtifacts pathForArtifactName:archive];
+                NSString *archivePath = plannedItem.sourcePath;
 
                 NSString *dest = [libBase stringByAppendingPathComponent:subdir];
                 [self _killRelatedProcessesForBundleID:bundleID];
@@ -2307,18 +2279,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         // Restore shared system DBs (if present)
-        NSDictionary *sharedDB = manifest[@"sharedSystemDB"];
-        BOOL includeSharedDB = NO;
-        NSArray *dbFiles = nil;
-        if ([sharedDB isKindOfClass:[NSDictionary class]]) {
-            if ([sharedDB[@"included"] respondsToSelector:@selector(boolValue)]) {
-                includeSharedDB = [sharedDB[@"included"] boolValue];
-            }
-            if ([sharedDB[@"files"] isKindOfClass:[NSArray class]]) {
-                dbFiles = sharedDB[@"files"];
-            }
-        }
-        if (includeSharedDB && dbFiles.count) {
+        if (restorePlan.sharedDatabaseItems.count) {
             NSString *libBase = [self _mobileLibraryBasePath];
 
             // Stop common daemons that may hold these DBs.
@@ -2332,14 +2293,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             PXKillallByName(@"imagent", SIGKILL);
             PXKillallByName(@"MobileSMS", SIGKILL);
 
-            for (NSDictionary *it in (NSArray *)dbFiles) {
-                if (![it isKindOfClass:[NSDictionary class]]) continue;
-                NSString *libraryRel = [it[@"libraryRel"] isKindOfClass:[NSString class]] ? it[@"libraryRel"] : nil;
-                NSString *archiveRel = [it[@"archive"] isKindOfClass:[NSString class]] ? it[@"archive"] : nil;
-                if (!libraryRel.length || !archiveRel.length) continue;
-
-                NSString *src =
-                    [verifiedArtifacts pathForArtifactName:archiveRel];
+            for (PXRestorePlanSharedDatabaseItem *plannedItem in restorePlan.sharedDatabaseItems) {
+                NSString *libraryRel = plannedItem.libraryRelativePath;
+                NSString *src = plannedItem.sourcePath;
 
                 NSString *dest = [libBase stringByAppendingPathComponent:libraryRel];
                 NSString *destDir = [dest stringByDeletingLastPathComponent];
@@ -2365,15 +2321,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         // Preferences restore
-        BOOL includePrefs = YES;
-        NSDictionary *prefs = manifest[@"preferences"];
-        if ([prefs isKindOfClass:[NSDictionary class]] && [prefs[@"included"] respondsToSelector:@selector(boolValue)]) {
-            includePrefs = [prefs[@"included"] boolValue];
-        }
-        if (includePrefs) {
-            NSString *prefArchiveName = prefs[@"archive"];
-            NSString *prefBackup =
-                [verifiedArtifacts pathForArtifactName:prefArchiveName];
+        if (restorePlan.includesPreferences) {
+            NSString *prefBackup = restorePlan.preferencesSourcePath;
             NSString *prefDest = [self _preferencesPlistPathForBundleID:bundleID];
             if (prefBackup.length) {
                 [runner run:[NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null || true", PXShellQuote(prefBackup), PXShellQuote(prefDest)]];
@@ -2386,21 +2335,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         // Keychain restore (warning-only on failure)
-        NSDictionary *keychainInfo = manifest[@"keychain"];
-        BOOL includeKeychain = NO;
-        if ([keychainInfo isKindOfClass:[NSDictionary class]] && [keychainInfo[@"included"] respondsToSelector:@selector(boolValue)]) {
-            includeKeychain = [keychainInfo[@"included"] boolValue];
-        }
-        if (includeKeychain) {
-            NSString *keychainArchiveName = keychainInfo[@"archive"];
-            NSString *keychainBackupPath =
-                [verifiedArtifacts pathForArtifactName:keychainArchiveName];
-            NSArray<NSString *> *groups = @[];
-            if ([keychainInfo isKindOfClass:[NSDictionary class]] && [keychainInfo[@"groupsSelected"] isKindOfClass:[NSArray class]]) {
-                groups = keychainInfo[@"groupsSelected"];
-            }
-            NSString *method = ([keychainInfo isKindOfClass:[NSDictionary class]] && [keychainInfo[@"method"] isKindOfClass:[NSString class]]) ? keychainInfo[@"method"] : @"";
-            BOOL shouldUseInApp = PXGroupsContainPlatformFamily(groups) || [method isEqualToString:@"in_app"];
+        if (restorePlan.includesKeychain) {
+            NSString *keychainBackupPath = restorePlan.keychainSourcePath;
+            NSArray<NSString *> *groups = restorePlan.keychainGroups;
+            NSString *method = restorePlan.keychainMethod;
+            (void)method;
+            BOOL shouldUseInApp = restorePlan.keychainUsesInAppMethod;
 
             BOOL ok = NO;
             if (shouldUseInApp) {
