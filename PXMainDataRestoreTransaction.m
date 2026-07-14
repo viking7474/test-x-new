@@ -135,11 +135,24 @@ static int PXMainDataRestoreDuplicateDescriptor(int descriptor) {
     return duplicate;
 }
 
+static BOOL PXMainDataRestoreSyncDescriptor(int descriptor) {
+    int result = -1;
+    do {
+        result = fsync(descriptor);
+    } while (result != 0 && errno == EINTR);
+    return result == 0;
+}
+
 static BOOL PXMainDataRestoreSyncDirectory(int descriptor) {
-    if (fsync(descriptor) == 0) {
-        return YES;
-    }
-    return errno == EINVAL || errno == ENOTSUP;
+    return PXMainDataRestoreSyncDescriptor(descriptor);
+}
+
+static BOOL PXMainDataRestoreStatIdentityMatches(const struct stat *expected,
+                                                 const struct stat *actual) {
+    return expected && actual &&
+           expected->st_dev == actual->st_dev &&
+           expected->st_ino == actual->st_ino &&
+           ((expected->st_mode & S_IFMT) == (actual->st_mode & S_IFMT));
 }
 
 static NSComparisonResult PXMainDataRestoreCompareRawNames(NSData *left, NSData *right) {
@@ -840,7 +853,7 @@ static BOOL PXMainDataRestoreWriteJournal(int transactionDescriptor,
                  PXMainDataRestoreWriteAll(journalDescriptor,
                                            journalData.bytes,
                                            journalData.length) &&
-                 fsync(journalDescriptor) == 0;
+                 PXMainDataRestoreSyncDescriptor(journalDescriptor);
     int closeResult = close(journalDescriptor);
     if (!wrote || closeResult != 0) {
         unlinkat(transactionDescriptor, temporaryName, 0);
@@ -1831,10 +1844,11 @@ static BOOL PXMainDataRestoreRecoverStaleTransactions(int targetDescriptor,
                                            @"$.destination",
                                            @"The exact main-data destination changed before transaction preparation.");
     }
+
     struct stat targetStat;
     memset(&targetStat, 0, sizeof(targetStat));
     if (fstat(targetDescriptor, &targetStat) != 0 || !S_ISDIR(targetStat.st_mode)) {
-        close(targetDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return PXMainDataRestoreFailObject(error,
                                            PXMainDataRestoreTransactionErrorFilesystemInspectionFailed,
                                            @"$.destination",
@@ -1844,14 +1858,137 @@ static BOOL PXMainDataRestoreRecoverStaleTransactions(int targetDescriptor,
     int lockDescriptor = open(canonicalPath.fileSystemRepresentation,
                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (lockDescriptor < 0 ||
-        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, lockDescriptor) ||
-        flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) {
+        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, lockDescriptor)) {
         PXMainDataRestoreCloseDescriptor(&lockDescriptor);
-        close(targetDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.destination",
+                                           @"The main-data transaction lock could not be bound safely.");
+    }
+
+    struct stat lockStat;
+    memset(&lockStat, 0, sizeof(lockStat));
+    if (fstat(lockDescriptor, &lockStat) != 0 ||
+        !S_ISDIR(targetStat.st_mode) ||
+        !S_ISDIR(lockStat.st_mode) ||
+        targetStat.st_dev != lockStat.st_dev ||
+        targetStat.st_ino != lockStat.st_ino) {
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.destination",
+                                           @"The main-data transaction lock does not protect the exact destination.");
+    }
+
+    if (flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) {
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return PXMainDataRestoreFailObject(error,
                                            PXMainDataRestoreTransactionErrorFilesystemInspectionFailed,
                                            @"$.destination",
                                            @"Another main-data transaction is already active for this destination.");
+    }
+
+    validationError = nil;
+    validatedPath = [validator validatedCanonicalPathForContainer:container
+                                                            error:&validationError];
+    struct stat targetLockedStat;
+    struct stat lockLockedStat;
+    memset(&targetLockedStat, 0, sizeof(targetLockedStat));
+    memset(&lockLockedStat, 0, sizeof(lockLockedStat));
+    if (validationError ||
+        validatedPath.length == 0 ||
+        ![validatedPath isEqualToString:canonicalPath] ||
+        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, targetDescriptor) ||
+        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, lockDescriptor) ||
+        fstat(targetDescriptor, &targetLockedStat) != 0 ||
+        fstat(lockDescriptor, &lockLockedStat) != 0 ||
+        !PXMainDataRestoreStatIdentityMatches(&targetStat, &targetLockedStat) ||
+        !PXMainDataRestoreStatIdentityMatches(&lockStat, &lockLockedStat) ||
+        !S_ISDIR(targetLockedStat.st_mode) ||
+        !S_ISDIR(lockLockedStat.st_mode) ||
+        targetLockedStat.st_dev != lockLockedStat.st_dev ||
+        targetLockedStat.st_ino != lockLockedStat.st_ino) {
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorDestinationValidationFailed,
+                                           @"$.destination",
+                                           @"The exact main-data destination changed before recovery preparation.");
+    }
+
+    int stageDescriptor = open(validatedStage.dataPath.fileSystemRepresentation,
+                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (stageDescriptor < 0 ||
+        !PXMainDataRestorePathMatchesDescriptor(validatedStage.dataPath, stageDescriptor)) {
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorFilesystemChanged,
+                                           @"$.stage",
+                                           @"The validated main-data stage changed before recovery preparation.");
+    }
+
+    struct stat stageStat;
+    memset(&stageStat, 0, sizeof(stageStat));
+    if (fstat(stageDescriptor, &stageStat) != 0 || !S_ISDIR(stageStat.st_mode)) {
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.stage",
+                                           @"The validated main-data stage could not be inspected.");
+    }
+    if (stageStat.st_dev != targetStat.st_dev) {
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorCrossDeviceBoundary,
+                                           @"$.stage",
+                                           @"The validated main-data stage is not on the destination filesystem.");
+    }
+
+    struct stat targetPreRecoveryStat;
+    struct stat lockPreRecoveryStat;
+    struct stat stagePreRecoveryStat;
+    memset(&targetPreRecoveryStat, 0, sizeof(targetPreRecoveryStat));
+    memset(&lockPreRecoveryStat, 0, sizeof(lockPreRecoveryStat));
+    memset(&stagePreRecoveryStat, 0, sizeof(stagePreRecoveryStat));
+    if (!PXMainDataRestorePathMatchesDescriptor(canonicalPath, targetDescriptor) ||
+        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, lockDescriptor) ||
+        !PXMainDataRestorePathMatchesDescriptor(validatedStage.dataPath, stageDescriptor) ||
+        fstat(targetDescriptor, &targetPreRecoveryStat) != 0 ||
+        fstat(lockDescriptor, &lockPreRecoveryStat) != 0 ||
+        fstat(stageDescriptor, &stagePreRecoveryStat) != 0 ||
+        !PXMainDataRestoreStatIdentityMatches(&targetStat, &targetPreRecoveryStat) ||
+        !PXMainDataRestoreStatIdentityMatches(&lockStat, &lockPreRecoveryStat) ||
+        !PXMainDataRestoreStatIdentityMatches(&stageStat, &stagePreRecoveryStat) ||
+        !S_ISDIR(targetPreRecoveryStat.st_mode) ||
+        !S_ISDIR(lockPreRecoveryStat.st_mode) ||
+        !S_ISDIR(stagePreRecoveryStat.st_mode) ||
+        targetPreRecoveryStat.st_dev != lockPreRecoveryStat.st_dev ||
+        targetPreRecoveryStat.st_ino != lockPreRecoveryStat.st_ino) {
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorFilesystemChanged,
+                                           @"$.transaction.preflight",
+                                           @"The main-data transaction identity changed before stale recovery.");
+    }
+    if (stagePreRecoveryStat.st_dev != targetPreRecoveryStat.st_dev) {
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
+        return PXMainDataRestoreFailObject(error,
+                                           PXMainDataRestoreTransactionErrorCrossDeviceBoundary,
+                                           @"$.stage",
+                                           @"The validated main-data stage crossed the destination filesystem boundary.");
     }
 
     NSUInteger recoveredCount = 0;
@@ -1859,58 +1996,54 @@ static BOOL PXMainDataRestoreRecoverStaleTransactions(int targetDescriptor,
                                                    &targetStat,
                                                    &recoveredCount,
                                                    error)) {
-        close(lockDescriptor);
-        close(targetDescriptor);
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return nil;
     }
 
     validationError = nil;
     validatedPath = [validator validatedCanonicalPathForContainer:container
                                                             error:&validationError];
+    struct stat targetPostRecoveryStat;
+    struct stat lockPostRecoveryStat;
+    struct stat stagePostRecoveryStat;
+    memset(&targetPostRecoveryStat, 0, sizeof(targetPostRecoveryStat));
+    memset(&lockPostRecoveryStat, 0, sizeof(lockPostRecoveryStat));
+    memset(&stagePostRecoveryStat, 0, sizeof(stagePostRecoveryStat));
     if (validationError ||
         validatedPath.length == 0 ||
         ![validatedPath isEqualToString:canonicalPath] ||
         !PXMainDataRestorePathMatchesDescriptor(canonicalPath, targetDescriptor) ||
-        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, lockDescriptor)) {
-        close(lockDescriptor);
-        close(targetDescriptor);
+        !PXMainDataRestorePathMatchesDescriptor(canonicalPath, lockDescriptor) ||
+        !PXMainDataRestorePathMatchesDescriptor(validatedStage.dataPath, stageDescriptor) ||
+        fstat(targetDescriptor, &targetPostRecoveryStat) != 0 ||
+        fstat(lockDescriptor, &lockPostRecoveryStat) != 0 ||
+        fstat(stageDescriptor, &stagePostRecoveryStat) != 0 ||
+        !PXMainDataRestoreStatIdentityMatches(&targetStat, &targetPostRecoveryStat) ||
+        !PXMainDataRestoreStatIdentityMatches(&lockStat, &lockPostRecoveryStat) ||
+        !PXMainDataRestoreStatIdentityMatches(&stageStat, &stagePostRecoveryStat) ||
+        !S_ISDIR(targetPostRecoveryStat.st_mode) ||
+        !S_ISDIR(lockPostRecoveryStat.st_mode) ||
+        !S_ISDIR(stagePostRecoveryStat.st_mode) ||
+        targetPostRecoveryStat.st_dev != lockPostRecoveryStat.st_dev ||
+        targetPostRecoveryStat.st_ino != lockPostRecoveryStat.st_ino) {
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return PXMainDataRestoreFailObject(error,
                                            PXMainDataRestoreTransactionErrorDestinationValidationFailed,
-                                           @"$.destination",
-                                           @"The exact main-data destination changed during transaction recovery.");
+                                           @"$.transaction.recovery",
+                                           @"The main-data transaction authority changed during stale recovery.");
     }
-
-    int stageDescriptor = open(validatedStage.dataPath.fileSystemRepresentation,
-                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (stageDescriptor < 0 ||
-        !PXMainDataRestorePathMatchesDescriptor(validatedStage.dataPath, stageDescriptor)) {
-        close(lockDescriptor);
-        close(targetDescriptor);
+    if (stagePostRecoveryStat.st_dev != targetPostRecoveryStat.st_dev) {
         PXMainDataRestoreCloseDescriptor(&stageDescriptor);
-        return PXMainDataRestoreFailObject(error,
-                                           PXMainDataRestoreTransactionErrorFilesystemChanged,
-                                           @"$.stage",
-                                           @"The validated main-data stage changed before transaction preparation.");
-    }
-    struct stat stageStat;
-    memset(&stageStat, 0, sizeof(stageStat));
-    if (fstat(stageDescriptor, &stageStat) != 0 || !S_ISDIR(stageStat.st_mode)) {
-        close(lockDescriptor);
-        close(targetDescriptor);
-        close(stageDescriptor);
-        return PXMainDataRestoreFailObject(error,
-                                           PXMainDataRestoreTransactionErrorFilesystemInspectionFailed,
-                                           @"$.stage",
-                                           @"The validated main-data stage could not be inspected.");
-    }
-    if (targetStat.st_dev != stageStat.st_dev) {
-        close(lockDescriptor);
-        close(targetDescriptor);
-        close(stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return PXMainDataRestoreFailObject(error,
                                            PXMainDataRestoreTransactionErrorCrossDeviceBoundary,
                                            @"$.stage",
-                                           @"The validated main-data stage is not on the destination filesystem.");
+                                           @"The validated main-data stage crossed the destination filesystem boundary during recovery.");
     }
 
     NSArray<PXMainDataRestoreEntry *> *originalEntries =
@@ -1922,9 +2055,9 @@ static BOOL PXMainDataRestoreRecoverStaleTransactions(int targetDescriptor,
                                         error,
                                         @"$.destination.entries");
     if (!originalEntries) {
-        close(lockDescriptor);
-        close(targetDescriptor);
-        close(stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return nil;
     }
     NSArray<PXMainDataRestoreEntry *> *stagedEntries =
@@ -1936,9 +2069,9 @@ static BOOL PXMainDataRestoreRecoverStaleTransactions(int targetDescriptor,
                                         error,
                                         @"$.stage.entries");
     if (!stagedEntries) {
-        close(lockDescriptor);
-        close(targetDescriptor);
-        close(stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&stageDescriptor);
+        PXMainDataRestoreCloseDescriptor(&lockDescriptor);
+        PXMainDataRestoreCloseDescriptor(&targetDescriptor);
         return nil;
     }
 
