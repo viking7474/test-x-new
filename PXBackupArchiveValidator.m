@@ -33,6 +33,12 @@ static const uint64_t PXArchiveMaximumInflatedBudget = UINT64_C(128) << 30;
 static const uint64_t PXArchiveMaximumRestoreInflatedBytes = UINT64_C(256) << 30;
 static const size_t PXTarBlockSize = 512;
 
+typedef NS_ENUM(NSUInteger, PXArchiveTarHeaderFormat) {
+    PXArchiveTarHeaderFormatLegacy = 0,
+    PXArchiveTarHeaderFormatPOSIXUstar = 1,
+    PXArchiveTarHeaderFormatGNU = 2,
+};
+
 @interface PXValidatedBackupArchiveSet ()
 @property (nonatomic, copy, readwrite) NSArray<NSString *> *archiveNames;
 @property (nonatomic, copy, readwrite)
@@ -438,6 +444,25 @@ static BOOL PXArchiveOpenRelativeFile(int rootDescriptor,
                              fieldPath,
                              @"The archive root descriptor could not be duplicated.");
     }
+    int descriptorFlags = fcntl(currentDescriptor, F_GETFD);
+    if (descriptorFlags < 0 ||
+        fcntl(currentDescriptor,
+              F_SETFD,
+              descriptorFlags | FD_CLOEXEC) < 0) {
+        close(currentDescriptor);
+        return PXArchiveFail(error,
+                             PXBackupArchiveValidatorErrorOpenFailed,
+                             fieldPath,
+                             @"The archive root descriptor could not be secured.");
+    }
+    int verifiedFlags = fcntl(currentDescriptor, F_GETFD);
+    if (verifiedFlags < 0 || (verifiedFlags & FD_CLOEXEC) == 0) {
+        close(currentDescriptor);
+        return PXArchiveFail(error,
+                             PXBackupArchiveValidatorErrorOpenFailed,
+                             fieldPath,
+                             @"The archive root descriptor close-on-exec state is invalid.");
+    }
 
     for (NSUInteger index = 0; index + 1 < components.count; index++) {
         const char *component = [components[index] fileSystemRepresentation];
@@ -600,27 +625,38 @@ static BOOL PXArchiveHeaderChecksumIsValid(const unsigned char *block) {
            (signedSum >= 0 && stored == (uint64_t)signedSum);
 }
 
-static BOOL PXArchiveMagicIsSupported(const unsigned char *block, BOOL *isUstar) {
+static BOOL PXArchiveClassifyHeaderFormat(const unsigned char *block,
+                                          PXArchiveTarHeaderFormat *formatOut) {
     const unsigned char *magic = block + 257;
-    BOOL empty = YES;
+    const unsigned char *version = block + 263;
+    BOOL legacy = YES;
     for (size_t index = 0; index < 6; index++) {
         if (magic[index] != 0) {
-            empty = NO;
+            legacy = NO;
             break;
         }
     }
-    if (empty) {
-        if (isUstar) {
-            *isUstar = NO;
+    if (legacy) {
+        if (formatOut) {
+            *formatOut = PXArchiveTarHeaderFormatLegacy;
         }
         return YES;
     }
-    BOOL ustar = memcmp(magic, "ustar", 5) == 0 &&
-                 (magic[5] == 0 || magic[5] == ' ');
-    if (isUstar) {
-        *isUstar = ustar;
+    if (memcmp(magic, "ustar\0", 6) == 0 &&
+        version[0] == '0' && version[1] == '0') {
+        if (formatOut) {
+            *formatOut = PXArchiveTarHeaderFormatPOSIXUstar;
+        }
+        return YES;
     }
-    return ustar;
+    if (memcmp(magic, "ustar ", 6) == 0 &&
+        version[0] == ' ' && version[1] == 0) {
+        if (formatOut) {
+            *formatOut = PXArchiveTarHeaderFormatGNU;
+        }
+        return YES;
+    }
+    return NO;
 }
 
 static BOOL PXArchiveDecimalUInt64(const unsigned char *bytes,
@@ -651,29 +687,6 @@ static NSString *PXArchiveStringFromUTF8Data(NSData *data) {
         return nil;
     }
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-}
-
-static BOOL PXArchivePAXKeyIsInert(NSString *key) {
-    if ([key isEqualToString:@"mtime"] ||
-        [key isEqualToString:@"atime"] ||
-        [key isEqualToString:@"ctime"] ||
-        [key isEqualToString:@"uid"] ||
-        [key isEqualToString:@"gid"] ||
-        [key isEqualToString:@"uname"] ||
-        [key isEqualToString:@"gname"] ||
-        [key isEqualToString:@"comment"] ||
-        [key isEqualToString:@"charset"] ||
-        [key isEqualToString:@"hdrcharset"]) {
-        return YES;
-    }
-    return ([key hasPrefix:@"SCHILY.xattr."] &&
-            key.length > [@"SCHILY.xattr." length]) ||
-           ([key hasPrefix:@"LIBARCHIVE.xattr."] &&
-            key.length > [@"LIBARCHIVE.xattr." length]) ||
-           ([key hasPrefix:@"SCHILY.acl."] &&
-            key.length > [@"SCHILY.acl." length]) ||
-           ([key hasPrefix:@"RHT.security."] &&
-            key.length > [@"RHT.security." length]);
 }
 
 static NSString *PXArchiveNormalizeMemberPath(NSString *input,
@@ -955,9 +968,6 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                                  fieldPath,
                                  @"A PAX record key is invalid.");
         }
-        NSData *valueData = [NSData dataWithBytes:bytes + equalsIndex + 1
-                                           length:(recordEnd - 1) - (equalsIndex + 1)];
-
         if ([key hasPrefix:@"GNU.sparse"]) {
             return PXArchiveFail(error,
                                  PXBackupArchiveValidatorErrorUnsupportedEntryType,
@@ -973,12 +983,6 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                                  fieldPath,
                                  @"Global PAX metadata may not override member identity.");
         }
-        if (!reserved && !PXArchivePAXKeyIsInert(key)) {
-            return PXArchiveFail(error,
-                                 PXBackupArchiveValidatorErrorInvalidExtendedHeader,
-                                 fieldPath,
-                                 @"A PAX metadata key has unsupported semantics.");
-        }
         if (!global && reserved) {
             if (known[key] != nil) {
                 return PXArchiveFail(error,
@@ -986,6 +990,8 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                                      fieldPath,
                                      @"A PAX override is duplicated.");
             }
+            NSData *valueData = [NSData dataWithBytes:bytes + equalsIndex + 1
+                                               length:(recordEnd - 1) - (equalsIndex + 1)];
             if ([key isEqualToString:@"size"]) {
                 uint64_t sizeValue = 0;
                 if (!PXArchiveDecimalUInt64(valueData.bytes,
@@ -1129,11 +1135,11 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
 }
 
 - (NSString *)headerPathFromBlock:(const unsigned char *)block
-                           ustar:(BOOL)ustar
+                          format:(PXArchiveTarHeaderFormat)format
                            error:(NSError **)error {
     NSData *nameData = PXArchiveBytesUntilNUL(block, 100);
     NSMutableData *combined = [NSMutableData data];
-    if (ustar) {
+    if (format == PXArchiveTarHeaderFormatPOSIXUstar) {
         NSData *prefixData = PXArchiveBytesUntilNUL(block + 345, 155);
         if (prefixData.length > 0) {
             [combined appendData:prefixData];
@@ -1166,17 +1172,20 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
 
     if (![path isEqualToString:@"."]) {
         NSArray<NSString *> *components = [path componentsSeparatedByString:@"/"];
-        NSMutableArray<NSString *> *parents = [NSMutableArray array];
+        NSMutableArray<NSString *> *parentComponents = [NSMutableArray array];
+        NSMutableArray<NSString *> *newParents = [NSMutableArray array];
         for (NSUInteger index = 0; index + 1 < components.count; index++) {
-            [parents addObject:components[index]];
-            NSString *parent = [parents componentsJoinedByString:@"/"];
+            [parentComponents addObject:components[index]];
+            NSString *parent = [parentComponents componentsJoinedByString:@"/"];
             if ([_regularPaths containsObject:parent]) {
                 return PXArchiveFail(error,
                                      PXBackupArchiveValidatorErrorDuplicateEntry,
                                      fieldPath,
                                      @"An archive member is nested beneath a regular file.");
             }
-            [_implicitDirectories addObject:parent];
+            if (![_implicitDirectories containsObject:parent]) {
+                [newParents addObject:parent];
+            }
         }
         if (!directory && [_implicitDirectories containsObject:path]) {
             return PXArchiveFail(error,
@@ -1184,6 +1193,16 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                                  fieldPath,
                                  @"A regular file conflicts with an existing parent path.");
         }
+        NSUInteger implicitCount = _implicitDirectories.count;
+        NSUInteger newParentCount = newParents.count;
+        if (newParentCount > NSUIntegerMax - implicitCount ||
+            implicitCount + newParentCount > PXArchiveMaximumLogicalMembers) {
+            return PXArchiveFail(error,
+                                 PXBackupArchiveValidatorErrorLimitExceeded,
+                                 fieldPath,
+                                 @"The archive implicit-directory limit was exceeded.");
+        }
+        [_implicitDirectories addObjectsFromArray:newParents];
     }
 
     _realTypesByPath[path] = directory ? @"d" : @"f";
@@ -1230,8 +1249,8 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                              headerPath,
                              @"An archive header checksum is invalid.");
     }
-    BOOL ustar = NO;
-    if (!PXArchiveMagicIsSupported(block, &ustar)) {
+    PXArchiveTarHeaderFormat format = PXArchiveTarHeaderFormatLegacy;
+    if (!PXArchiveClassifyHeaderFormat(block, &format)) {
         return PXArchiveFail(error,
                              PXBackupArchiveValidatorErrorInvalidHeader,
                              headerPath,
@@ -1305,7 +1324,9 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                              @"Set-user-ID and set-group-ID archive modes are unsupported.");
     }
 
-    NSString *headerMemberPath = [self headerPathFromBlock:block ustar:ustar error:error];
+    NSString *headerMemberPath = [self headerPathFromBlock:block
+                                                      format:format
+                                                       error:error];
     if (!headerMemberPath) {
         return NO;
     }
@@ -2015,47 +2036,49 @@ static BOOL PXArchiveCollectReferences(NSDictionary *manifest,
     }
 
     id systemObject = manifest[@"systemGlobalLibrary"];
-    if (![systemObject isKindOfClass:[NSDictionary class]]) {
-        return PXArchiveFail(error,
-                             PXBackupArchiveValidatorErrorInvalidInput,
-                             @"$.systemGlobalLibrary",
-                             @"The system-global archive section is invalid.");
-    }
-    NSDictionary *system = (NSDictionary *)systemObject;
-    BOOL systemIncluded = NO;
-    if (!PXArchiveExactBoolean(system[@"included"], &systemIncluded)) {
-        return PXArchiveFail(error,
-                             PXBackupArchiveValidatorErrorInvalidInput,
-                             @"$.systemGlobalLibrary.included",
-                             @"The system-global inclusion flag is invalid.");
-    }
-    id itemsObject = system[@"items"];
-    if (![itemsObject isKindOfClass:[NSArray class]]) {
-        return PXArchiveFail(error,
-                             PXBackupArchiveValidatorErrorInvalidInput,
-                             @"$.systemGlobalLibrary.items",
-                             @"The system-global archive items are invalid.");
-    }
-    if (systemIncluded) {
-        NSArray *items = (NSArray *)itemsObject;
-        for (NSUInteger index = 0; index < items.count; index++) {
-            NSString *entryPath = PXArchiveIndexedPath(@"$.systemGlobalLibrary.items", index);
-            id entryObject = items[index];
-            if (![entryObject isKindOfClass:[NSDictionary class]] ||
-                !PXArchiveAddReference(((NSDictionary *)entryObject)[@"archive"],
-                                       PXArchiveFieldPath(entryPath, @"archive"),
-                                       declarations,
-                                       verifiedArtifacts,
-                                       seen,
-                                       references,
-                                       error)) {
-                if (![entryObject isKindOfClass:[NSDictionary class]] && error && !*error) {
-                    PXArchiveFail(error,
-                                  PXBackupArchiveValidatorErrorInvalidInput,
-                                  entryPath,
-                                  @"A system-global archive entry is invalid.");
+    if (systemObject != nil) {
+        if (![systemObject isKindOfClass:[NSDictionary class]]) {
+            return PXArchiveFail(error,
+                                 PXBackupArchiveValidatorErrorInvalidInput,
+                                 @"$.systemGlobalLibrary",
+                                 @"The system-global archive section is invalid.");
+        }
+        NSDictionary *system = (NSDictionary *)systemObject;
+        BOOL systemIncluded = NO;
+        if (!PXArchiveExactBoolean(system[@"included"], &systemIncluded)) {
+            return PXArchiveFail(error,
+                                 PXBackupArchiveValidatorErrorInvalidInput,
+                                 @"$.systemGlobalLibrary.included",
+                                 @"The system-global inclusion flag is invalid.");
+        }
+        id itemsObject = system[@"items"];
+        if (![itemsObject isKindOfClass:[NSArray class]]) {
+            return PXArchiveFail(error,
+                                 PXBackupArchiveValidatorErrorInvalidInput,
+                                 @"$.systemGlobalLibrary.items",
+                                 @"The system-global archive items are invalid.");
+        }
+        if (systemIncluded) {
+            NSArray *items = (NSArray *)itemsObject;
+            for (NSUInteger index = 0; index < items.count; index++) {
+                NSString *entryPath = PXArchiveIndexedPath(@"$.systemGlobalLibrary.items", index);
+                id entryObject = items[index];
+                if (![entryObject isKindOfClass:[NSDictionary class]] ||
+                    !PXArchiveAddReference(((NSDictionary *)entryObject)[@"archive"],
+                                           PXArchiveFieldPath(entryPath, @"archive"),
+                                           declarations,
+                                           verifiedArtifacts,
+                                           seen,
+                                           references,
+                                           error)) {
+                    if (![entryObject isKindOfClass:[NSDictionary class]] && error && !*error) {
+                        PXArchiveFail(error,
+                                      PXBackupArchiveValidatorErrorInvalidInput,
+                                      entryPath,
+                                      @"A system-global archive entry is invalid.");
+                    }
+                    return NO;
                 }
-                return NO;
             }
         }
     }
