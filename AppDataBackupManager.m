@@ -13,6 +13,7 @@
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
 #import "PXRestorePlan.h"
+#import "PXMainDataStaging.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
@@ -25,6 +26,46 @@
 static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
 static NSString * const PXExactRestoreDestinationErrorDescription =
     @"Exact application data container could not be resolved safely";
+
+static BOOL PXReadUnsignedIntegralSummaryNumber(id value,
+                                                unsigned long long *numberOut) {
+    if (![value isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)value) != CFNumberGetTypeID()) {
+        return NO;
+    }
+    const char *type = [(NSNumber *)value objCType];
+    if (!type || !type[0]) {
+        return NO;
+    }
+    unsigned long long unsignedValue = 0;
+    switch (type[0]) {
+        case 'C':
+        case 'S':
+        case 'I':
+        case 'L':
+        case 'Q':
+            unsignedValue = [(NSNumber *)value unsignedLongLongValue];
+            break;
+        case 'c':
+        case 's':
+        case 'i':
+        case 'l':
+        case 'q': {
+            long long signedValue = [(NSNumber *)value longLongValue];
+            if (signedValue < 0) {
+                return NO;
+            }
+            unsignedValue = (unsigned long long)signedValue;
+            break;
+        }
+        default:
+            return NO;
+    }
+    if (numberOut) {
+        *numberOut = unsignedValue;
+    }
+    return YES;
+}
 
 static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
     if (![version isKindOfClass:[NSNumber class]]) {
@@ -616,32 +657,12 @@ static NSString *PXCleanSubdirName(NSString *s) {
     return [runner runAndCapture:fallback];
 }
 
-- (BOOL)_directoryHasRestoredContent:(NSString *)dirPath {
-    if (!dirPath.length) return NO;
-    NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dirPath error:nil];
-    for (NSString *item in items) {
-        if (![item isKindOfClass:[NSString class]] || !item.length) continue;
-        if ([item hasPrefix:@".com.apple"]) continue;
-        return YES;
-    }
-    return NO;
-}
-
 - (CommandResult *)_tarExtractDataArchive:(NSString *)tarPath
                                   archive:(NSString *)archivePath
                                     toDir:(NSString *)destDir
                                  warnings:(NSMutableArray<NSString *> *)warnings {
-    CommandResult *res = [self _tarExtract:tarPath archive:archivePath toDir:destDir];
-    if (res.exitCode == 0) {
-        return res;
-    }
-
-    NSString *stderrText = res.stderrString ?: @"";
-    if ([stderrText containsString:@"Cannot open: File exists"] && [self _directoryHasRestoredContent:destDir]) {
-        [warnings addObject:@"data.tar.gz extract reported 'File exists'; continuing because staging contains restored content"];
-        res.exitCode = 0;
-    }
-    return res;
+    (void)warnings;
+    return [self _tarExtract:tarPath archive:archivePath toDir:destDir];
 }
 
 - (NSString *)_preferencesDirectory {
@@ -2008,9 +2029,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             [warnings addObject:[NSString stringWithFormat:@"Backup manifest contains %lu warning(s); review manifest before relying on full fidelity restore", (unsigned long)restorePlan.manifestWarningCount]];
         }
 
-        // Kill app before restore
-        [self _killRelatedProcessesForBundleID:bundleID];
-
         NSString *manifestProfileId = restorePlan.manifestProfileIdentifier;
         NSString *activeProfileId = [self _activeProfileId];
         if (manifestProfileId.length && activeProfileId.length && ![manifestProfileId isEqualToString:activeProfileId]) {
@@ -2038,29 +2056,95 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
         }
 
+        NSString *dataArchiveName = restorePlan.dataArchiveName;
         NSString *dataArchive = restorePlan.dataArchivePath;
+        NSNumber *logicalMemberSummary =
+            restorePlan.validatedArchives.memberCountsByArchiveName[dataArchiveName];
+        NSNumber *regularFileByteSummary =
+            restorePlan.validatedArchives.regularFileBytesByArchiveName[dataArchiveName];
+        unsigned long long logicalMemberValue = 0;
+        unsigned long long expectedRegularFileBytes = 0;
+        if (!PXReadUnsignedIntegralSummaryNumber(logicalMemberSummary, &logicalMemberValue) ||
+            !PXReadUnsignedIntegralSummaryNumber(regularFileByteSummary, &expectedRegularFileBytes) ||
+            logicalMemberValue > NSUIntegerMax) {
+            NSError *err = [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                               code:PXMainDataStagingErrorInvalidInput
+                                           userInfo:@{
+                                               NSLocalizedDescriptionKey: @"The accepted main archive summary is invalid.",
+                                               PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                           }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+        NSUInteger expectedLogicalMemberCount = (NSUInteger)logicalMemberValue;
 
-        // Two-phase restore for data container: extract to staging first.
-        NSString *stagingRoot = [NSString stringWithFormat:@"/tmp/weaponx_restore_%d", getpid()];
-        NSString *stagingData = [stagingRoot stringByAppendingPathComponent:@"data"]; 
-        [fm removeItemAtPath:stagingRoot error:nil];
-        [fm createDirectoryAtPath:stagingData withIntermediateDirectories:YES attributes:nil error:nil];
-
-        CommandResult *stx = [self _tarExtractDataArchive:tarPath archive:dataArchive toDir:stagingData warnings:warnings];
-        if (stx.exitCode != 0) {
-            NSString *msg = stx.stderrString.length ? stx.stderrString : @"Failed to extract data archive to staging";
-            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                               code:316
-                                           userInfo:@{NSLocalizedDescriptionKey: msg}];
+        NSError *workspaceError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXMainDataStagingWorkspace *mainDataWorkspace =
+            [PXMainDataStagingWorkspace createWorkspaceWithError:&workspaceError];
+        if (!mainDataWorkspace) {
+            NSError *err = workspaceError ?: [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                                                  code:PXMainDataStagingErrorWorkspaceCreationFailed
+                                                              userInfo:@{
+                                                                  NSLocalizedDescriptionKey: @"The private main-data staging workspace could not be created.",
+                                                                  PXMainDataStagingErrorFieldPathKey: @"$.workspace"
+                                                              }];
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
             return;
         }
 
-        // Wipe data container contents and clone from staging via tar pipe.
-        PXDebugHeader(debugPre, @"Data Restore (Staging -> Container)");
-        PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"stagingData=%@", stagingData ?: @""]);
-        PXDebugRun(runner, debugPre, @"du stagingData", [NSString stringWithFormat:@"du -sk %@ 2>/dev/null || true", PXShellQuote(stagingData)]);
+        NSError *emptyStageError = nil;
+        if (![mainDataWorkspace validateEmptyDataDirectoryWithError:&emptyStageError]) {
+            [mainDataWorkspace cleanupWithError:nil];
+            NSError *err = emptyStageError ?: [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                                                    code:PXMainDataStagingErrorInvalidInput
+                                                                userInfo:@{
+                                                                    NSLocalizedDescriptionKey: @"The private main-data staging workspace failed empty validation.",
+                                                                    PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                                                }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
+        CommandResult *stx = [self _tarExtractDataArchive:tarPath
+                                                   archive:dataArchive
+                                                     toDir:mainDataWorkspace.dataPath
+                                                  warnings:warnings];
+        if (stx.exitCode != 0) {
+            [mainDataWorkspace cleanupWithError:nil];
+            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                               code:316
+                                           userInfo:@{NSLocalizedDescriptionKey: @"Failed to extract data archive to staging"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
+        NSError *stageValidationError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXValidatedMainDataStage *validatedStage =
+            [mainDataWorkspace validatedStageWithExpectedLogicalMemberCount:expectedLogicalMemberCount
+                                                     expectedRegularFileBytes:expectedRegularFileBytes
+                                                                         error:&stageValidationError];
+        if (!validatedStage) {
+            [mainDataWorkspace cleanupWithError:nil];
+            NSError *err = stageValidationError ?: [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                                                        code:PXMainDataStagingErrorInvalidInput
+                                                                    userInfo:@{
+                                                                        NSLocalizedDescriptionKey: @"The extracted main-data stage failed validation.",
+                                                                        PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                                                    }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
+        NSString *validatedStagingData = validatedStage.dataPath;
+        PXDebugHeader(debugPre, @"Data Restore (Validated Staging -> Container)");
+        PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"stagedEntryCount=%lu", (unsigned long)validatedStage.entryCount]);
+        PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"stagedRegularFileCount=%lu", (unsigned long)validatedStage.regularFileCount]);
         PXDebugRun(runner, debugPre, @"ls container (before wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
+
+        // The target process is not terminated until the complete staged tree is accepted.
+        [self _killRelatedProcessesForBundleID:bundleID];
 
         PXDestructivePathValidator *preMutationValidator = [[PXDestructivePathValidator alloc] init];
         NSError *preMutationValidationError = nil;
@@ -2070,7 +2154,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (preMutationValidationError ||
             preMutationCanonicalPath.length == 0 ||
             ![preMutationCanonicalPath isEqualToString:dataContainerPath]) {
-            [fm removeItemAtPath:stagingRoot error:nil];
+            [mainDataWorkspace cleanupWithError:nil];
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:303
                                            userInfo:@{NSLocalizedDescriptionKey: PXExactRestoreDestinationErrorDescription}];
@@ -2090,13 +2174,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (!shouldPreferCpClone) {
             NSString *cloneCmd = [NSString stringWithFormat:@"%@ --xattrs --acls -cf - -C %@ . | %@ --xattrs --acls -xf - -C %@",
                                   PXShellQuote(tarPath),
-                                  PXShellQuote(stagingData),
+                                  PXShellQuote(validatedStagingData),
                                   PXShellQuote(tarPath),
                                   PXShellQuote(dataContainerPath)];
             cloneRes = [runner runAndCapture:cloneCmd];
             PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPipeCloneExit=%d", (int)cloneRes.exitCode]);
             if (cloneRes.stderrString.length) {
-                PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPipeCloneStderr=%@", cloneRes.stderrString]);
+                PXDebugAppendLine(debugPre, @"tarPipeCloneStderrPresent=1");
             }
             if (cloneRes.exitCode != 0) {
                 shouldPreferCpClone = YES;
@@ -2111,21 +2195,18 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         if (shouldPreferCpClone) {
             NSString *fallbackCmd = [NSString stringWithFormat:@"cp -a %@/. %@/ 2>/dev/null",
-                                     PXShellQuote(stagingData),
+                                     PXShellQuote(validatedStagingData),
                                      PXShellQuote(dataContainerPath)];
             CommandResult *cpRes = [runner runAndCapture:fallbackCmd];
             PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"cpCloneExit=%d", (int)cpRes.exitCode]);
             if (cpRes.stderrString.length) {
-                PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"cpCloneStderr=%@", cpRes.stderrString]);
+                PXDebugAppendLine(debugPre, @"cpCloneStderrPresent=1");
             }
             if (cpRes.exitCode != 0) {
-                NSString *msg = (cloneRes && cloneRes.stderrString.length) ? cloneRes.stderrString : @"tar pipe clone failed";
-                if (cpRes.stderrString.length) {
-                    msg = [msg stringByAppendingFormat:@"; cp: %@", cpRes.stderrString];
-                }
+                [mainDataWorkspace cleanupWithError:nil];
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:317
-                                               userInfo:@{NSLocalizedDescriptionKey: msg}];
+                                               userInfo:@{NSLocalizedDescriptionKey: @"Failed to clone validated main-data stage"}];
                 dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
                 return;
             }
@@ -2134,12 +2215,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Ensure ownership is correct (some extraction/copy paths may produce root-owned files).
         [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]];
 
+        NSError *mainDataCleanupError = nil;
+        if (![mainDataWorkspace cleanupWithError:&mainDataCleanupError]) {
+            [warnings addObject:@"Main-data staging cleanup failed"];
+        }
+
         // Post-restore hygiene: refresh preferences daemon caches.
         // Some apps read state via cfprefsd and may not notice external file writes immediately.
         PXKillallByName(@"cfprefsd", SIGTERM);
-
-        // Cleanup staging best-effort
-        [fm removeItemAtPath:stagingRoot error:nil];
 
         // Data container restored.
 
