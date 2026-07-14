@@ -16,6 +16,7 @@
 #import "PXAppGroupRestoreTargetPlan.h"
 #import "PXOptionalRestoreStaging.h"
 #import "PXMainDataStaging.h"
+#import "PXMainDataRestoreTransaction.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
@@ -2371,11 +2372,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return;
         }
 
-        NSString *validatedStagingData = validatedStage.dataPath;
-        PXDebugHeader(debugPre, @"Data Restore (Validated Staging -> Container)");
+        PXDebugHeader(debugPre, @"Data Restore (Validated Staging -> Transactional Container Commit)");
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"stagedEntryCount=%lu", (unsigned long)validatedStage.entryCount]);
         PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"stagedRegularFileCount=%lu", (unsigned long)validatedStage.regularFileCount]);
-        PXDebugRun(runner, debugPre, @"ls container (before wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
+        PXDebugRun(runner, debugPre, @"ls container (before transaction)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
 
         // The target process is not terminated until the complete staged tree is accepted.
         [self _killRelatedProcessesForBundleID:bundleID];
@@ -2396,58 +2396,73 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return;
         }
 
-        [self _wipeDirectoryContents:dataContainerPath];
-        PXDebugRun(runner, debugPre, @"ls container (after wipe)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
-        BOOL shouldPreferCpClone = NO;
-        if ([tarPath isEqualToString:@"/usr/bin/tar"] || [tarPath isEqualToString:@"/bin/tar"]) {
-            // iOS system tar commonly lacks xattrs/acl support.
-            shouldPreferCpClone = YES;
+        NSError *preCommitStageValidationError = nil;
+        PXValidatedMainDataStage *preCommitValidatedStage =
+            [mainDataWorkspace validatedStageWithExpectedLogicalMemberCount:expectedLogicalMemberCount
+                                                    expectedRegularFileBytes:expectedRegularFileBytes
+                                                                        error:&preCommitStageValidationError];
+        if (!preCommitValidatedStage ||
+            !PXValidatedMainDataStagesAreEquivalent(validatedStage, preCommitValidatedStage)) {
+            [mainDataWorkspace cleanupWithError:nil];
+            NSError *err = preCommitStageValidationError ?:
+                [NSError errorWithDomain:PXMainDataStagingErrorDomain
+                                    code:PXMainDataStagingErrorFilesystemChanged
+                                userInfo:@{
+                                    NSLocalizedDescriptionKey: @"The validated main-data stage changed before transaction commit.",
+                                    PXMainDataStagingErrorFieldPathKey: @"$.data"
+                                }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
         }
 
-        CommandResult *cloneRes = nil;
-        if (!shouldPreferCpClone) {
-            NSString *cloneCmd = [NSString stringWithFormat:@"%@ --xattrs --acls -cf - -C %@ . | %@ --xattrs --acls -xf - -C %@",
-                                  PXShellQuote(tarPath),
-                                  PXShellQuote(validatedStagingData),
-                                  PXShellQuote(tarPath),
-                                  PXShellQuote(dataContainerPath)];
-            cloneRes = [runner runAndCapture:cloneCmd];
-            PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPipeCloneExit=%d", (int)cloneRes.exitCode]);
-            if (cloneRes.stderrString.length) {
-                PXDebugAppendLine(debugPre, @"tarPipeCloneStderrPresent=1");
-            }
-            if (cloneRes.exitCode != 0) {
-                shouldPreferCpClone = YES;
-            }
-            if (cloneRes.stderrString.length && [cloneRes.stderrString containsString:@"XATTR support is not available"]) {
-                // Even if tar returns exit=0, we will not get correct metadata.
-                shouldPreferCpClone = YES;
-            }
-        } else {
-            PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"tarPipeCloneSkipped=1 tarPath=%@", tarPath]);
+        NSError *mainTransactionPrepareError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXMainDataRestoreTransaction *mainDataTransaction =
+            [PXMainDataRestoreTransaction transactionForContainer:dataContainerModel
+                                                     canonicalPath:dataContainerPath
+                                                    validatedStage:preCommitValidatedStage
+                                                             error:&mainTransactionPrepareError];
+        if (!mainDataTransaction) {
+            [mainDataWorkspace cleanupWithError:nil];
+            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                               code:317
+                                           userInfo:@{
+                                               NSLocalizedDescriptionKey: @"Failed to prepare transactional main-data commit"
+                                           }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
         }
+        PXDebugAppendLine(debugPre,
+                          [NSString stringWithFormat:@"recoveredStaleMainTransactions=%lu",
+                           (unsigned long)mainDataTransaction.recoveredStaleTransactionCount]);
 
-        if (shouldPreferCpClone) {
-            NSString *fallbackCmd = [NSString stringWithFormat:@"cp -a %@/. %@/ 2>/dev/null",
-                                     PXShellQuote(validatedStagingData),
-                                     PXShellQuote(dataContainerPath)];
-            CommandResult *cpRes = [runner runAndCapture:fallbackCmd];
-            PXDebugAppendLine(debugPre, [NSString stringWithFormat:@"cpCloneExit=%d", (int)cpRes.exitCode]);
-            if (cpRes.stderrString.length) {
-                PXDebugAppendLine(debugPre, @"cpCloneStderrPresent=1");
-            }
-            if (cpRes.exitCode != 0) {
-                [mainDataWorkspace cleanupWithError:nil];
-                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                   code:317
-                                               userInfo:@{NSLocalizedDescriptionKey: @"Failed to clone validated main-data stage"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                return;
-            }
+        NSError *mainTransactionCleanupWarning = nil;
+        NSError *mainTransactionError = nil;
+        if (![mainDataTransaction commitWithCleanupWarning:&mainTransactionCleanupWarning
+                                                     error:&mainTransactionError]) {
+            [mainDataWorkspace cleanupWithError:nil];
+            PXDebugAppendLine(debugPre,
+                              [NSString stringWithFormat:@"mainTransactionRollbackPerformed=%d rollbackComplete=%d",
+                               mainDataTransaction.rollbackPerformed ? 1 : 0,
+                               mainDataTransaction.rollbackComplete ? 1 : 0]);
+            NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                               code:317
+                                           userInfo:@{
+                                               NSLocalizedDescriptionKey: @"Failed to commit validated main-data stage transactionally"
+                                           }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
         }
+        PXDebugAppendLine(debugPre, @"mainTransactionCommitted=1");
+        if (mainTransactionCleanupWarning) {
+            [warnings addObject:@"Main-data transaction cleanup failed; ownership correction was skipped"];
+        }
+        PXDebugRun(runner, debugPre, @"ls container (after transaction)", [NSString stringWithFormat:@"ls -la %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]);
 
-        // Ensure ownership is correct (some extraction/copy paths may produce root-owned files).
-        [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]];
+        // Never recurse through a retained private journal/quarantine workspace.
+        if (!mainTransactionCleanupWarning) {
+            [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]];
+        }
 
         NSError *mainDataCleanupError = nil;
         if (![mainDataWorkspace cleanupWithError:&mainDataCleanupError]) {
