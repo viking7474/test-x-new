@@ -11,6 +11,7 @@
 #import "AppGroupContainerResolver.h"
 #import "PXBackupManifestValidator.h"
 #import "PXBackupArtifactVerifier.h"
+#import "PXBackupArchiveValidator.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
@@ -1903,6 +1904,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                  NSLocalizedDescriptionKey: @"Backup artifact verification failed",
                                                                  PXBackupArtifactVerifierErrorFieldPathKey: @"$"
                                                              }];
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            return;
+        }
+
+        NSError *archiveError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXValidatedBackupArchiveSet *validatedArchives =
+            [PXBackupArchiveValidator validatedArchivesForManifest:manifest
+                                                   backupDirectory:backupDir
+                                                 verifiedArtifacts:verifiedArtifacts
+                                                             error:&archiveError];
+        if (!validatedArchives) {
+            NSError *err = archiveError ?: [NSError errorWithDomain:PXBackupArchiveValidatorErrorDomain
+                                                                code:PXBackupArchiveValidatorErrorInvalidInput
+                                                            userInfo:@{
+                                                                NSLocalizedDescriptionKey: @"Backup archive validation failed",
+                                                                PXBackupArchiveValidatorErrorFieldPathKey: @"$"
+                                                            }];
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
             return;
         }
