@@ -42,6 +42,7 @@ static const NSUInteger PXOptionalRestoreMaximumPathBytes = 4096;
 static const NSUInteger PXOptionalRestoreMaximumComponentBytes = 255;
 static const NSUInteger PXOptionalRestoreMaximumCleanupEntries = 500000;
 static const NSUInteger PXOptionalRestoreMaximumCleanupDepth = 2048;
+static const NSUInteger PXOptionalRestoreMaximumTreeDepth = 2048;
 static const NSUInteger PXOptionalRestoreMaximumJournalBytes = 128 * 1024 * 1024;
 static const NSUInteger PXOptionalRestoreMaximumStaleTransactionIdentifiers = 1;
 static const NSUInteger PXOptionalRestoreMaximumWorkspaceEntries = 8;
@@ -1296,6 +1297,7 @@ static NSData *PXOptionalRestoreRelativePath(NSData *parent, NSData *name) {
 @property (nonatomic, copy) NSArray<NSData *> *names;
 @property (nonatomic, assign) NSUInteger nextIndex;
 @property (nonatomic, copy) NSData *relativePath;
+@property (nonatomic, assign) NSUInteger depth;
 @property (nonatomic, assign) struct stat retainedStat;
 @end
 
@@ -1309,6 +1311,684 @@ static NSData *PXOptionalRestoreRelativePath(NSData *parent, NSData *name) {
     PXOptionalRestoreCloseDescriptor(&_descriptor);
 }
 @end
+
+static BOOL PXOptionalRestoreVerifierStableDirectoryStatsEqual(const struct stat *before,
+                                                                const struct stat *after) {
+    return before && after &&
+           before->st_dev == after->st_dev &&
+           before->st_ino == after->st_ino &&
+           before->st_mode == after->st_mode &&
+           before->st_mtimespec.tv_sec == after->st_mtimespec.tv_sec &&
+           before->st_mtimespec.tv_nsec == after->st_mtimespec.tv_nsec &&
+           before->st_ctimespec.tv_sec == after->st_ctimespec.tv_sec &&
+           before->st_ctimespec.tv_nsec == after->st_ctimespec.tv_nsec;
+}
+
+static BOOL PXOptionalRestoreVerifierStableFileStatsEqual(const struct stat *before,
+                                                           const struct stat *after) {
+    return before && after &&
+           before->st_dev == after->st_dev &&
+           before->st_ino == after->st_ino &&
+           before->st_mode == after->st_mode &&
+           before->st_nlink == after->st_nlink &&
+           before->st_size == after->st_size &&
+           before->st_mtimespec.tv_sec == after->st_mtimespec.tv_sec &&
+           before->st_mtimespec.tv_nsec == after->st_mtimespec.tv_nsec &&
+           before->st_ctimespec.tv_sec == after->st_ctimespec.tv_sec &&
+           before->st_ctimespec.tv_nsec == after->st_ctimespec.tv_nsec;
+}
+
+static BOOL PXOptionalRestoreVerifierNameIsStrictUTF8(NSData *nameData) {
+    if (![nameData isKindOfClass:[NSData class]] ||
+        nameData.length == 0 ||
+        nameData.length > PXOptionalRestoreMaximumComponentBytes) {
+        return NO;
+    }
+    const unsigned char *bytes = nameData.bytes;
+    for (NSUInteger index = 0; index < nameData.length; index++) {
+        unsigned char value = bytes[index];
+        if (value == 0 || value == '/' || value == '\\' ||
+            value < 0x20 || value == 0x7f) {
+            return NO;
+        }
+    }
+    if (PXOptionalRestoreRawNameEquals(nameData, @".") ||
+        PXOptionalRestoreRawNameEquals(nameData, @"..")) {
+        return NO;
+    }
+    NSString *decoded = [[NSString alloc] initWithData:nameData
+                                               encoding:NSUTF8StringEncoding];
+    if (!decoded) {
+        return NO;
+    }
+    NSData *roundTrip = [decoded dataUsingEncoding:NSUTF8StringEncoding
+                               allowLossyConversion:NO];
+    return roundTrip && [roundTrip isEqualToData:nameData];
+}
+
+static NSArray<NSData *> *PXOptionalRestoreVerifierReadDirectoryNames(
+    int descriptor,
+    NSUInteger maximumNameCount,
+    NSError **error) {
+    int enumerationDescriptor = PXOptionalRestoreDuplicateDescriptor(descriptor);
+    if (enumerationDescriptor < 0 || lseek(enumerationDescriptor, 0, SEEK_SET) < 0) {
+        if (enumerationDescriptor >= 0) {
+            close(enumerationDescriptor);
+        }
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.replacement",
+                                           @"The replacement directory could not be inspected safely.");
+    }
+    DIR *directory = fdopendir(enumerationDescriptor);
+    if (!directory) {
+        close(enumerationDescriptor);
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.replacement",
+                                           @"The replacement directory could not be inspected safely.");
+    }
+    NSMutableArray<NSData *> *names = [NSMutableArray array];
+    int enumerationError = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) {
+            enumerationError = errno;
+            break;
+        }
+        const char *name = entry->d_name;
+        if ((name[0] == '.' && name[1] == '\0') ||
+            (name[0] == '.' && name[1] == '.' && name[2] == '\0')) {
+            continue;
+        }
+        size_t length = strlen(name);
+        if (length == 0 || length > PXOptionalRestoreMaximumComponentBytes ||
+            names.count >= maximumNameCount) {
+            closedir(directory);
+            return PXOptionalRestoreFailObject(error,
+                                               PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                               @"$.replacement",
+                                               @"The replacement tree exceeds a fixed safety limit.");
+        }
+        [names addObject:[NSData dataWithBytes:name length:length]];
+    }
+    if (closedir(directory) != 0 && enumerationError == 0) {
+        enumerationError = errno ?: EIO;
+    }
+    if (enumerationError != 0) {
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.replacement",
+                                           @"The replacement directory could not be inspected safely.");
+    }
+    return [names sortedArrayUsingComparator:^NSComparisonResult(NSData *left, NSData *right) {
+        return PXOptionalRestoreCompareRawNames(left, right);
+    }];
+}
+
+static PXOptionalRestoreTreeFrame *PXOptionalRestoreCreateTreeFrame(
+    int descriptor,
+    NSData *relativePath,
+    NSUInteger depth,
+    NSUInteger maximumNameCount,
+    dev_t rootDevice,
+    const struct stat *expectedStat,
+    NSError **error) {
+    if (descriptor < 0 || !PXOptionalRestoreSetCloseOnExec(descriptor)) {
+        if (descriptor >= 0) {
+            close(descriptor);
+        }
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.replacement",
+                                           @"The replacement directory could not be inspected safely.");
+    }
+    struct stat before;
+    struct stat after;
+    memset(&before, 0, sizeof(before));
+    memset(&after, 0, sizeof(after));
+    if (fstat(descriptor, &before) != 0) {
+        close(descriptor);
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.replacement",
+                                           @"The replacement directory could not be inspected safely.");
+    }
+    if (expectedStat &&
+        !PXOptionalRestoreVerifierStableDirectoryStatsEqual(expectedStat, &before)) {
+        close(descriptor);
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                           @"$.replacement",
+                                           @"The replacement tree changed during verification.");
+    }
+    if (!S_ISDIR(before.st_mode) || before.st_dev != rootDevice ||
+        (before.st_mode & (S_ISUID | S_ISGID)) != 0) {
+        close(descriptor);
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                           @"$.replacement",
+                                           @"The replacement tree does not match the accepted stage.");
+    }
+    NSArray<NSData *> *names =
+        PXOptionalRestoreVerifierReadDirectoryNames(descriptor, maximumNameCount, error);
+    if (!names) {
+        close(descriptor);
+        return nil;
+    }
+    if (fstat(descriptor, &after) != 0) {
+        close(descriptor);
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                           @"$.replacement",
+                                           @"The replacement directory could not be inspected safely.");
+    }
+    if (!PXOptionalRestoreVerifierStableDirectoryStatsEqual(&before, &after)) {
+        close(descriptor);
+        return PXOptionalRestoreFailObject(error,
+                                           PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                           @"$.replacement",
+                                           @"The replacement tree changed during verification.");
+    }
+    PXOptionalRestoreTreeFrame *frame = [[PXOptionalRestoreTreeFrame alloc] init];
+    frame.descriptor = descriptor;
+    frame.names = names;
+    frame.nextIndex = 0;
+    frame.relativePath = relativePath;
+    frame.depth = depth;
+    frame.retainedStat = after;
+    return frame;
+}
+
+static void PXOptionalRestoreCloseTreeFrames(
+    NSMutableArray<PXOptionalRestoreTreeFrame *> *stack) {
+    for (PXOptionalRestoreTreeFrame *frame in stack) {
+        int descriptor = frame.descriptor;
+        frame.descriptor = -1;
+        if (descriptor >= 0) {
+            close(descriptor);
+        }
+    }
+    [stack removeAllObjects];
+}
+
+static BOOL PXOptionalRestoreVerifyDirectoryTree(
+    int rootDescriptor,
+    PXValidatedMainDataStage *expectedStage,
+    NSError **error) {
+    if (error) {
+        *error = nil;
+    }
+    if (rootDescriptor < 0 ||
+        ![expectedStage isKindOfClass:[PXValidatedMainDataStage class]] ||
+        !PXOptionalRestoreLowercaseSHA256IsValid(expectedStage.treeSHA256) ||
+        expectedStage.regularFileCount > expectedStage.entryCount ||
+        expectedStage.directoryCount > expectedStage.entryCount ||
+        expectedStage.regularFileCount > NSUIntegerMax - expectedStage.directoryCount ||
+        expectedStage.regularFileCount + expectedStage.directoryCount != expectedStage.entryCount ||
+        expectedStage.entryCount > PXOptionalRestoreMaximumAggregateEntries) {
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorInvalidInput,
+                                     @"$.replacement",
+                                     @"The replacement verification input is invalid.");
+    }
+
+    struct stat rootBefore;
+    struct stat traversalRootStat;
+    memset(&rootBefore, 0, sizeof(rootBefore));
+    memset(&traversalRootStat, 0, sizeof(traversalRootStat));
+    if (fstat(rootDescriptor, &rootBefore) != 0) {
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                     @"$.replacement",
+                                     @"The replacement root could not be inspected safely.");
+    }
+    if (!S_ISDIR(rootBefore.st_mode) ||
+        (rootBefore.st_mode & (S_ISUID | S_ISGID)) != 0) {
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                     @"$.replacement",
+                                     @"The replacement tree does not match the accepted stage.");
+    }
+
+    int traversalRoot = PXOptionalRestoreDuplicateDescriptor(rootDescriptor);
+    if (traversalRoot < 0 || fstat(traversalRoot, &traversalRootStat) != 0) {
+        if (traversalRoot >= 0) {
+            close(traversalRoot);
+        }
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                     @"$.replacement",
+                                     @"The replacement root could not be inspected safely.");
+    }
+    if (!PXOptionalRestoreVerifierStableDirectoryStatsEqual(&rootBefore,
+                                                             &traversalRootStat)) {
+        close(traversalRoot);
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                     @"$.replacement",
+                                     @"The replacement tree changed during verification.");
+    }
+
+    PXOptionalRestoreTreeFrame *rootFrame =
+        PXOptionalRestoreCreateTreeFrame(traversalRoot,
+                                         [NSData data],
+                                         0,
+                                         PXOptionalRestoreMaximumAggregateEntries,
+                                         rootBefore.st_dev,
+                                         &rootBefore,
+                                         error);
+    traversalRoot = -1;
+    if (!rootFrame) {
+        return NO;
+    }
+
+    NSMutableArray<PXOptionalRestoreTreeFrame *> *stack =
+        [NSMutableArray arrayWithObject:rootFrame];
+    NSUInteger enumeratedEntryCount = rootFrame.names.count;
+    NSUInteger entryCount = 0;
+    NSUInteger regularFileCount = 0;
+    NSUInteger directoryCount = 0;
+    unsigned long long regularFileBytes = 0;
+    CC_SHA256_CTX digestContext;
+    CC_SHA256_Init(&digestContext);
+    static const unsigned char domainPrefix[] = "PXMainDataStageTreeV1";
+    CC_SHA256_Update(&digestContext, domainPrefix, (CC_LONG)sizeof(domainPrefix));
+
+    while (stack.count > 0) {
+        PXOptionalRestoreTreeFrame *frame = stack.lastObject;
+        if (frame.nextIndex >= frame.names.count) {
+            struct stat finalDirectoryStat;
+            memset(&finalDirectoryStat, 0, sizeof(finalDirectoryStat));
+            struct stat retainedDirectoryStat = frame.retainedStat;
+            if (fstat(frame.descriptor, &finalDirectoryStat) != 0) {
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                             @"$.replacement",
+                                             @"The replacement directory could not be inspected safely.");
+            }
+            if (!PXOptionalRestoreVerifierStableDirectoryStatsEqual(&retainedDirectoryStat,
+                                                                     &finalDirectoryStat) ||
+                finalDirectoryStat.st_dev != rootBefore.st_dev ||
+                (finalDirectoryStat.st_mode & (S_ISUID | S_ISGID)) != 0) {
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                             @"$.replacement",
+                                             @"The replacement tree changed during verification.");
+            }
+            int completedDescriptor = frame.descriptor;
+            frame.descriptor = -1;
+            [stack removeLastObject];
+            if (close(completedDescriptor) != 0) {
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                             @"$.replacement",
+                                             @"The replacement directory could not be closed safely.");
+            }
+            continue;
+        }
+
+        NSData *nameData = frame.names[frame.nextIndex++];
+        if (nameData.length == 0 ||
+            nameData.length > PXOptionalRestoreMaximumComponentBytes) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                         @"$.replacement",
+                                         @"The replacement tree exceeds a fixed safety limit.");
+        }
+        if (!PXOptionalRestoreVerifierNameIsStrictUTF8(nameData)) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                         @"$.replacement",
+                                         @"The replacement tree does not match the accepted stage.");
+        }
+        if (frame.depth >= PXOptionalRestoreMaximumTreeDepth) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                         @"$.replacement",
+                                         @"The replacement tree exceeds a fixed safety limit.");
+        }
+        NSData *relativePath = PXOptionalRestoreRelativePath(frame.relativePath, nameData);
+        if (!relativePath || relativePath.length > UINT32_MAX) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                         @"$.replacement",
+                                         @"The replacement tree exceeds a fixed safety limit.");
+        }
+        NSUInteger entryDepth = frame.depth + 1;
+        if (entryDepth > PXOptionalRestoreMaximumTreeDepth ||
+            entryCount >= PXOptionalRestoreMaximumAggregateEntries) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                         @"$.replacement",
+                                         @"The replacement tree exceeds a fixed safety limit.");
+        }
+        entryCount++;
+
+        if ((entryDepth == 1 && PXOptionalRestoreNameIsContainerMetadata(nameData)) ||
+            PXOptionalRestoreRawNameHasPrefix(nameData,
+                                              PXOptionalRestoreTransactionPrefix)) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                         @"$.replacement",
+                                         @"The replacement tree does not match the accepted stage.");
+        }
+
+        char *entryName = PXOptionalRestoreCopyTerminatedName(nameData);
+        if (!entryName) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                         @"$.replacement",
+                                         @"The replacement tree exceeds a fixed safety limit.");
+        }
+        struct stat namespaceStat;
+        memset(&namespaceStat, 0, sizeof(namespaceStat));
+        if (fstatat(frame.descriptor,
+                    entryName,
+                    &namespaceStat,
+                    AT_SYMLINK_NOFOLLOW) != 0) {
+            free(entryName);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                         @"$.replacement",
+                                         @"A replacement entry could not be inspected safely.");
+        }
+        if (namespaceStat.st_dev != rootBefore.st_dev ||
+            (namespaceStat.st_mode & (S_ISUID | S_ISGID)) != 0) {
+            free(entryName);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                         @"$.replacement",
+                                         @"The replacement tree does not match the accepted stage.");
+        }
+
+        if (S_ISDIR(namespaceStat.st_mode)) {
+            int childDescriptor = openat(frame.descriptor,
+                                         entryName,
+                                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            free(entryName);
+            if (childDescriptor < 0 ||
+                !PXOptionalRestoreSetCloseOnExec(childDescriptor)) {
+                if (childDescriptor >= 0) {
+                    close(childDescriptor);
+                }
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                             @"$.replacement",
+                                             @"A replacement directory could not be opened safely.");
+            }
+            struct stat openedDirectoryStat;
+            memset(&openedDirectoryStat, 0, sizeof(openedDirectoryStat));
+            if (fstat(childDescriptor, &openedDirectoryStat) != 0) {
+                close(childDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                             @"$.replacement",
+                                             @"A replacement directory could not be inspected safely.");
+            }
+            if (!S_ISDIR(openedDirectoryStat.st_mode) ||
+                openedDirectoryStat.st_dev != namespaceStat.st_dev ||
+                openedDirectoryStat.st_ino != namespaceStat.st_ino ||
+                (openedDirectoryStat.st_mode & S_IFMT) !=
+                    (namespaceStat.st_mode & S_IFMT)) {
+                close(childDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                             @"$.replacement",
+                                             @"The replacement tree changed during verification.");
+            }
+            if (openedDirectoryStat.st_dev != rootBefore.st_dev ||
+                (openedDirectoryStat.st_mode & (S_ISUID | S_ISGID)) != 0) {
+                close(childDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                             @"$.replacement",
+                                             @"The replacement tree does not match the accepted stage.");
+            }
+            if (directoryCount == NSUIntegerMax) {
+                close(childDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                             @"$.replacement",
+                                             @"The replacement tree exceeds a fixed safety limit.");
+            }
+            directoryCount++;
+            PXOptionalRestoreHashTreeHeader(&digestContext,
+                                            'D',
+                                            relativePath,
+                                            openedDirectoryStat.st_mode,
+                                            0);
+            if (enumeratedEntryCount > PXOptionalRestoreMaximumAggregateEntries) {
+                close(childDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                             @"$.replacement",
+                                             @"The replacement tree exceeds a fixed safety limit.");
+            }
+            NSUInteger remainingEntryBudget =
+                PXOptionalRestoreMaximumAggregateEntries - enumeratedEntryCount;
+            PXOptionalRestoreTreeFrame *childFrame =
+                PXOptionalRestoreCreateTreeFrame(childDescriptor,
+                                                 relativePath,
+                                                 entryDepth,
+                                                 remainingEntryBudget,
+                                                 rootBefore.st_dev,
+                                                 &openedDirectoryStat,
+                                                 error);
+            childDescriptor = -1;
+            if (!childFrame) {
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return NO;
+            }
+            if (childFrame.names.count >
+                PXOptionalRestoreMaximumAggregateEntries - enumeratedEntryCount) {
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                             @"$.replacement",
+                                             @"The replacement tree exceeds a fixed safety limit.");
+            }
+            enumeratedEntryCount += childFrame.names.count;
+            [stack addObject:childFrame];
+            continue;
+        }
+
+        if (!S_ISREG(namespaceStat.st_mode) ||
+            namespaceStat.st_nlink != 1 ||
+            namespaceStat.st_size < 0) {
+            free(entryName);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                         @"$.replacement",
+                                         @"The replacement tree does not match the accepted stage.");
+        }
+
+        int fileDescriptor = openat(frame.descriptor,
+                                    entryName,
+                                    O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        free(entryName);
+        if (fileDescriptor < 0 || !PXOptionalRestoreSetCloseOnExec(fileDescriptor)) {
+            if (fileDescriptor >= 0) {
+                close(fileDescriptor);
+            }
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                         @"$.replacement",
+                                         @"A replacement file could not be opened safely.");
+        }
+        struct stat fileBefore;
+        memset(&fileBefore, 0, sizeof(fileBefore));
+        if (fstat(fileDescriptor, &fileBefore) != 0) {
+            close(fileDescriptor);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                         @"$.replacement",
+                                         @"A replacement file could not be inspected safely.");
+        }
+        if (!S_ISREG(fileBefore.st_mode) ||
+            fileBefore.st_dev != namespaceStat.st_dev ||
+            fileBefore.st_ino != namespaceStat.st_ino ||
+            (fileBefore.st_mode & S_IFMT) != (namespaceStat.st_mode & S_IFMT)) {
+            close(fileDescriptor);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                         @"$.replacement",
+                                         @"The replacement tree changed during verification.");
+        }
+        if (fileBefore.st_dev != rootBefore.st_dev ||
+            fileBefore.st_nlink != 1 ||
+            fileBefore.st_size < 0 ||
+            (fileBefore.st_mode & (S_ISUID | S_ISGID)) != 0) {
+            close(fileDescriptor);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                         @"$.replacement",
+                                         @"The replacement tree does not match the accepted stage.");
+        }
+        unsigned long long fileSize = (unsigned long long)fileBefore.st_size;
+        if (regularFileBytes > ULLONG_MAX - fileSize ||
+            regularFileCount == NSUIntegerMax) {
+            close(fileDescriptor);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                         @"$.replacement",
+                                         @"The replacement tree exceeds a fixed safety limit.");
+        }
+        regularFileCount++;
+        PXOptionalRestoreHashTreeHeader(&digestContext,
+                                        'F',
+                                        relativePath,
+                                        fileBefore.st_mode,
+                                        fileSize);
+        unsigned char buffer[PXOptionalRestoreStreamBufferSize];
+        unsigned long long bytesRead = 0;
+        BOOL readFailed = NO;
+        for (;;) {
+            ssize_t amount = read(fileDescriptor, buffer, sizeof(buffer));
+            if (amount < 0 && errno == EINTR) {
+                continue;
+            }
+            if (amount < 0) {
+                readFailed = YES;
+                break;
+            }
+            if (amount == 0) {
+                break;
+            }
+            if (bytesRead > ULLONG_MAX - (unsigned long long)amount) {
+                close(fileDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorEntryLimitExceeded,
+                                             @"$.replacement",
+                                             @"The replacement tree exceeds a fixed safety limit.");
+            }
+            bytesRead += (unsigned long long)amount;
+            if (bytesRead > fileSize) {
+                close(fileDescriptor);
+                PXOptionalRestoreCloseTreeFrames(stack);
+                return PXOptionalRestoreFail(error,
+                                             PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                             @"$.replacement",
+                                             @"The replacement tree changed during verification.");
+            }
+            CC_SHA256_Update(&digestContext, buffer, (CC_LONG)amount);
+        }
+        if (readFailed) {
+            close(fileDescriptor);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                         @"$.replacement",
+                                         @"A replacement file could not be read safely.");
+        }
+        struct stat fileAfter;
+        memset(&fileAfter, 0, sizeof(fileAfter));
+        if (fstat(fileDescriptor, &fileAfter) != 0) {
+            close(fileDescriptor);
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                         @"$.replacement",
+                                         @"A replacement file could not be inspected safely.");
+        }
+        int fileCloseResult = close(fileDescriptor);
+        fileDescriptor = -1;
+        if (fileCloseResult != 0) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                         @"$.replacement",
+                                         @"A replacement file could not be closed safely.");
+        }
+        if (bytesRead != fileSize ||
+            !PXOptionalRestoreVerifierStableFileStatsEqual(&fileBefore, &fileAfter)) {
+            PXOptionalRestoreCloseTreeFrames(stack);
+            return PXOptionalRestoreFail(error,
+                                         PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                         @"$.replacement",
+                                         @"The replacement tree changed during verification.");
+        }
+        regularFileBytes += fileSize;
+    }
+
+    struct stat rootAfter;
+    memset(&rootAfter, 0, sizeof(rootAfter));
+    if (fstat(rootDescriptor, &rootAfter) != 0) {
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorFilesystemInspectionFailed,
+                                     @"$.replacement",
+                                     @"The replacement root could not be inspected safely.");
+    }
+    if (!PXOptionalRestoreVerifierStableDirectoryStatsEqual(&rootBefore, &rootAfter) ||
+        !S_ISDIR(rootAfter.st_mode) ||
+        (rootAfter.st_mode & (S_ISUID | S_ISGID)) != 0) {
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorFilesystemChanged,
+                                     @"$.replacement",
+                                     @"The replacement tree changed during verification.");
+    }
+
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &digestContext);
+    NSString *treeSHA256 = PXOptionalRestoreLowercaseHexDigest(digest);
+    if (entryCount != expectedStage.entryCount ||
+        regularFileCount != expectedStage.regularFileCount ||
+        directoryCount != expectedStage.directoryCount ||
+        regularFileBytes != expectedStage.regularFileBytes ||
+        ![treeSHA256 isEqualToString:expectedStage.treeSHA256]) {
+        return PXOptionalRestoreFail(error,
+                                     PXOptionalRestoreTransactionErrorReplacementMismatch,
+                                     @"$.replacement",
+                                     @"The replacement tree does not match the accepted stage.");
+    }
+    return YES;
+}
 
 static BOOL PXOptionalRestoreDigestFileDescriptor(int descriptor,
                                                    unsigned long long maximumBytes,
