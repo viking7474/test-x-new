@@ -17,6 +17,7 @@
 #import "PXBackupArtifactWriter.h"
 #import "PXBackupManifestWriter.h"
 #import "PXBackupDirectoryPublisher.h"
+#import "PXBackupFailureCleanup.h"
 #import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
@@ -1746,11 +1747,51 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
-        NSError *initialWorkspaceIdentityError = nil;
-        if (![publicationWorkspace validateIdentityWithError:&initialWorkspaceIdentityError]) {
+        NSError *failureCleanupFactoryError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupFailureCleanup *failureCleanup =
+            [PXBackupFailureCleanup cleanupForWorkspace:publicationWorkspace
+                                             bundleLock:bundleLock
+                                                  error:&failureCleanupFactoryError];
+        if (!failureCleanup) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, initialWorkspaceIdentityError);
+                if (completion) completion(nil, failureCleanupFactoryError);
             });
+            return;
+        }
+        __block BOOL preservePublishedFailureWithoutCleanup = NO;
+        void (^completeBackupFailure)(NSError *) = ^(NSError *operationError) {
+            NSError *reportedError = operationError ?: [NSError
+                errorWithDomain:PXBackupErrorDomain
+                           code:108
+                       userInfo:@{
+                           NSLocalizedDescriptionKey: @"Backup failed without an error"
+                       }];
+            if (!preservePublishedFailureWithoutCleanup) {
+                NSError *cleanupError = nil;
+                if (![failureCleanup cleanupWithError:&cleanupError]) {
+                    reportedError = cleanupError ?: [NSError
+                        errorWithDomain:PXBackupErrorDomain
+                                   code:109
+                               userInfo:@{
+                                   NSLocalizedDescriptionKey: @"Backup failure cleanup failed without an error"
+                               }];
+                }
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, reportedError);
+            });
+        };
+        NSError *initialFailureCleanupIdentityError = nil;
+        NSError *initialWorkspaceIdentityError = nil;
+        NSError *initialCleanupStageError = nil;
+        if (![failureCleanup validateIdentityWithError:&initialFailureCleanupIdentityError]) {
+            initialCleanupStageError = initialFailureCleanupIdentityError;
+        } else if (![publicationWorkspace validateIdentityWithError:&initialWorkspaceIdentityError]) {
+            initialCleanupStageError = initialWorkspaceIdentityError;
+        }
+        if (initialCleanupStageError) {
+            completeBackupFailure(initialCleanupStageError);
             return;
         }
         NSError *artifactWriterError = nil;
@@ -1759,16 +1800,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             [PXBackupArtifactWriter writerForWorkspace:publicationWorkspace
                                                  error:&artifactWriterError];
         if (!artifactWriter) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, artifactWriterError);
-            });
+            completeBackupFailure(artifactWriterError);
             return;
         }
         NSError *initialArtifactWriterIdentityError = nil;
         if (![artifactWriter validateIdentityWithError:&initialArtifactWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, initialArtifactWriterIdentityError);
-            });
+            completeBackupFailure(initialArtifactWriterIdentityError);
             return;
         }
         NSError *manifestWriterError = nil;
@@ -1777,16 +1814,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             [PXBackupManifestWriter writerForWorkspace:publicationWorkspace
                                                   error:&manifestWriterError];
         if (!manifestWriter) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, manifestWriterError);
-            });
+            completeBackupFailure(manifestWriterError);
             return;
         }
         NSError *initialManifestWriterIdentityError = nil;
         if (![manifestWriter validateIdentityWithError:&initialManifestWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, initialManifestWriterIdentityError);
-            });
+            completeBackupFailure(initialManifestWriterIdentityError);
             return;
         }
         PXBackupArtifactPolicy *applicationDataArtifactPolicy =
@@ -1834,9 +1867,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (!policyConstructionValid) {
             NSError *err = PXBackupArtifactPolicyManagerError(
                 @"Backup artifact policy could not be constructed");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, err);
-            });
+            completeBackupFailure(err);
             return;
         }
         NSArray<PXBackupArtifactPolicy *> *canonicalArtifactPolicies = @[
@@ -1859,16 +1890,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                     timestamp:timestamp
                                                         error:&directoryPublisherError];
         if (!directoryPublisher) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, directoryPublisherError);
-            });
+            completeBackupFailure(directoryPublisherError);
             return;
         }
         NSError *initialDirectoryPublisherIdentityError = nil;
         if (![directoryPublisher validateIdentityWithError:&initialDirectoryPublisherIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, initialDirectoryPublisherIdentityError);
-            });
+            completeBackupFailure(initialDirectoryPublisherIdentityError);
             return;
         }
         NSMutableArray<PXVerifiedBackupArtifact *> *groupArtifactRecords =
@@ -1894,7 +1921,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:104
                                            userInfo:@{NSLocalizedDescriptionKey: mkErr.localizedDescription ?: @"Failed to create backup directory"}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            completeBackupFailure(err);
             return;
         }
         [fm createDirectoryAtPath:prefsDir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -1974,16 +2001,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 err,
                 &fatalPolicyError);
             if (!shouldContinue) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (completion) completion(nil, fatalPolicyError ?: err);
-                });
+                completeBackupFailure(fatalPolicyError ?: err);
                 return;
             }
             NSError *invariantError = PXBackupArtifactPolicyManagerError(
                 @"Backup artifact policy invariant failed");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, invariantError);
-            });
+            completeBackupFailure(invariantError);
             return;
         }
         NSString *dataArchivePath = dataArtifactRecord.filePath;
@@ -2046,9 +2069,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     nil,
                     &fatalPolicyError);
                 if (!shouldContinue) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (completion) completion(nil, fatalPolicyError);
-                    });
+                    completeBackupFailure(fatalPolicyError);
                     return;
                 }
                 continue;
@@ -2088,9 +2109,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         nil,
                         &fatalPolicyError);
                     if (!shouldContinue) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            if (completion) completion(nil, fatalPolicyError);
-                        });
+                        completeBackupFailure(fatalPolicyError);
                         return;
                     }
                 } else {
@@ -2128,9 +2147,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                             nil,
                             &fatalPolicyError);
                         if (!shouldContinue) {
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                if (completion) completion(nil, fatalPolicyError);
-                            });
+                            completeBackupFailure(fatalPolicyError);
                             return;
                         }
                     } else {
@@ -2168,9 +2185,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         nil,
                         &fatalPolicyError);
                     if (!shouldContinue) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            if (completion) completion(nil, fatalPolicyError);
-                        });
+                        completeBackupFailure(fatalPolicyError);
                         return;
                     }
                 }
@@ -2289,9 +2304,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     nil,
                     &fatalPolicyError);
                 if (!shouldContinue) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (completion) completion(nil, fatalPolicyError);
-                    });
+                    completeBackupFailure(fatalPolicyError);
                     return;
                 }
                 keychainBackupPath = nil;
@@ -2339,9 +2352,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     nil,
                     &fatalPolicyError);
                 if (!shouldContinue) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (completion) completion(nil, fatalPolicyError);
-                    });
+                    completeBackupFailure(fatalPolicyError);
                     return;
                 }
                 continue;
@@ -2412,9 +2423,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                             nil,
                             &fatalPolicyError);
                         if (!shouldContinue) {
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                if (completion) completion(nil, fatalPolicyError);
-                            });
+                            completeBackupFailure(fatalPolicyError);
                             return;
                         }
                     }
@@ -2448,9 +2457,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                    artifactWriter.artifactCount)) {
             NSError *err = PXBackupArtifactPolicyManagerError(
                 @"Backup artifact policy invariant failed");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, err);
-            });
+            completeBackupFailure(err);
             return;
         }
 
@@ -2536,25 +2543,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *err = manifestV4Error ?: [NSError errorWithDomain:PXBackupErrorDomain
                                                                    code:107
                                                                userInfo:@{NSLocalizedDescriptionKey: @"Manifest v4 could not be constructed"}];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, err);
-            });
+            completeBackupFailure(err);
             return;
         }
         NSDictionary<NSString *, id> *manifest = manifestSnapshot.manifestRepresentation;
         NSError *producedManifestValidationError = nil;
         if (![PXBackupManifestValidator validateManifestObject:manifest
                                                          error:&producedManifestValidationError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, producedManifestValidationError);
-            });
+            completeBackupFailure(producedManifestValidationError);
             return;
         }
         NSError *preManifestArtifactWriterIdentityError = nil;
         if (![artifactWriter validateIdentityWithError:&preManifestArtifactWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, preManifestArtifactWriterIdentityError);
-            });
+            completeBackupFailure(preManifestArtifactWriterIdentityError);
             return;
         }
 
@@ -2573,31 +2574,23 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         NSError *preManifestWorkspaceIdentityError = nil;
         if (![publicationWorkspace validateIdentityWithError:&preManifestWorkspaceIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, preManifestWorkspaceIdentityError);
-            });
+            completeBackupFailure(preManifestWorkspaceIdentityError);
             return;
         }
         NSError *preManifestBundleLockValidationError = nil;
         if (![bundleLock validateOwnershipWithError:&preManifestBundleLockValidationError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, preManifestBundleLockValidationError);
-            });
+            completeBackupFailure(preManifestBundleLockValidationError);
             return;
         }
         NSError *preWriteManifestWriterIdentityError = nil;
         if (![manifestWriter validateIdentityWithError:&preWriteManifestWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, preWriteManifestWriterIdentityError);
-            });
+            completeBackupFailure(preWriteManifestWriterIdentityError);
             return;
         }
         NSError *manifestWriteError = nil;
         if (![manifestWriter writeManifestSnapshot:manifestSnapshot
                                               error:&manifestWriteError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, manifestWriteError);
-            });
+            completeBackupFailure(manifestWriteError);
             return;
         }
         PXDebugRun(runner,
@@ -2608,53 +2601,49 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         NSError *finalManifestWriterIdentityError = nil;
         if (![manifestWriter validateIdentityWithError:&finalManifestWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, finalManifestWriterIdentityError);
-            });
+            completeBackupFailure(finalManifestWriterIdentityError);
             return;
         }
         NSError *finalWorkspaceIdentityError = nil;
         if (![publicationWorkspace validateIdentityWithError:&finalWorkspaceIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, finalWorkspaceIdentityError);
-            });
+            completeBackupFailure(finalWorkspaceIdentityError);
             return;
         }
         NSError *finalBundleLockValidationError = nil;
         if (![bundleLock validateOwnershipWithError:&finalBundleLockValidationError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, finalBundleLockValidationError);
-            });
+            completeBackupFailure(finalBundleLockValidationError);
             return;
         }
         NSError *finalArtifactWriterIdentityError = nil;
         if (![artifactWriter validateIdentityWithError:&finalArtifactWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, finalArtifactWriterIdentityError);
-            });
+            completeBackupFailure(finalArtifactWriterIdentityError);
             return;
         }
         NSError *prePublicationDirectoryPublisherIdentityError = nil;
         if (![directoryPublisher validateIdentityWithError:&prePublicationDirectoryPublisherIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, prePublicationDirectoryPublisherIdentityError);
-            });
+            completeBackupFailure(prePublicationDirectoryPublisherIdentityError);
             return;
         }
         NSError *directoryPublicationError = nil;
         if (![directoryPublisher publishWithArtifactWriter:artifactWriter
                                             manifestWriter:manifestWriter
                                                      error:&directoryPublicationError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, directoryPublicationError);
-            });
+            completeBackupFailure(directoryPublicationError);
             return;
         }
         NSError *postPublicationDirectoryPublisherIdentityError = nil;
+        NSError *failureCleanupDisarmError = nil;
+        NSError *postPublicationCleanupStageError = nil;
         if (![directoryPublisher validateIdentityWithError:&postPublicationDirectoryPublisherIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, postPublicationDirectoryPublisherIdentityError);
-            });
+            postPublicationCleanupStageError =
+                postPublicationDirectoryPublisherIdentityError;
+        } else if (![failureCleanup disarmAfterPublishedDirectory:directoryPublisher
+                                                            error:&failureCleanupDisarmError]) {
+            preservePublishedFailureWithoutCleanup = YES;
+            postPublicationCleanupStageError = failureCleanupDisarmError;
+        }
+        if (postPublicationCleanupStageError) {
+            completeBackupFailure(postPublicationCleanupStageError);
             return;
         }
         PXBackupResult *out = [[PXBackupResult alloc] init];
