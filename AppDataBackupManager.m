@@ -12,6 +12,7 @@
 #import "PXBackupManifestValidator.h"
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
+#import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
 #import "PXAppGroupRestoreTransaction.h"
@@ -1444,6 +1445,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if ([fm fileExistsAtPath:dir isDirectory:&isDir] && isDir) {
         NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:dir error:nil];
         for (NSString *item in items) {
+            if ([item hasPrefix:PXBackupPublicationPartialDirectoryPrefix]) {
+                continue;
+            }
             NSString *path = [dir stringByAppendingPathComponent:item];
             BOOL itemIsDir = NO;
             if ([fm fileExistsAtPath:path isDirectory:&itemIsDir] && itemIsDir) {
@@ -1461,6 +1465,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if (![legacyDir isEqualToString:dir] && [fm fileExistsAtPath:legacyDir isDirectory:&legacyIsDir] && legacyIsDir) {
         NSArray<NSString *> *legacyItems = [fm contentsOfDirectoryAtPath:legacyDir error:nil];
         for (NSString *item in legacyItems) {
+            if ([item hasPrefix:PXBackupPublicationPartialDirectoryPrefix]) {
+                continue;
+            }
             NSString *path = [legacyDir stringByAppendingPathComponent:item];
             BOOL itemIsDir = NO;
             if ([fm fileExistsAtPath:path isDirectory:&itemIsDir] && itemIsDir) {
@@ -1605,7 +1612,27 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         NSString *timestamp = [self _timestampString];
-        NSString *backupDir = [[[self _backupRoot] stringByAppendingPathComponent:bundleID] stringByAppendingPathComponent:timestamp];
+        NSString *backupRoot = [self _backupRoot];
+        NSError *workspaceError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupPublicationWorkspace *publicationWorkspace =
+            [PXBackupPublicationWorkspace createWorkspaceAtBackupRoot:backupRoot
+                                                     bundleIdentifier:bundleID
+                                                                error:&workspaceError];
+        if (!publicationWorkspace) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, workspaceError);
+            });
+            return;
+        }
+        NSError *initialWorkspaceIdentityError = nil;
+        if (![publicationWorkspace validateIdentityWithError:&initialWorkspaceIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, initialWorkspaceIdentityError);
+            });
+            return;
+        }
+        NSString *backupDir = publicationWorkspace.workspacePath;
         NSString *debugBefore = [backupDir stringByAppendingPathComponent:@"debug_before_backup.txt"];
         NSString *debugAfter = [backupDir stringByAppendingPathComponent:@"debug_after_backup.txt"];
         NSString *debugKeychain = [backupDir stringByAppendingPathComponent:@"debug_keychain.txt"];
@@ -2093,6 +2120,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             PXDebugRun(runner, debugAfter, @"cat manifest.plist", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote([backupDir stringByAppendingPathComponent:@"manifest.plist"]) ]);
         }
 
+        NSError *preManifestWorkspaceIdentityError = nil;
+        if (![publicationWorkspace validateIdentityWithError:&preManifestWorkspaceIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, preManifestWorkspaceIdentityError);
+            });
+            return;
+        }
         NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
         if (![manifest writeToFile:manifestPath atomically:YES]) {
             [warnings addObject:@"Failed to write manifest"];
@@ -2100,9 +2134,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(manifestPath)]];
         }
 
+        NSError *finalWorkspaceIdentityError = nil;
+        if (![publicationWorkspace validateIdentityWithError:&finalWorkspaceIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, finalWorkspaceIdentityError);
+            });
+            return;
+        }
         PXBackupResult *out = [[PXBackupResult alloc] init];
-        out.backupDirectory = backupDir;
-        out.manifestPath = manifestPath;
+        out.backupDirectory = publicationWorkspace.workspacePath;
+        out.manifestPath = [publicationWorkspace.workspacePath stringByAppendingPathComponent:@"manifest.plist"];
         out.warnings = warnings;
 
         dispatch_async(dispatch_get_main_queue(), ^{
