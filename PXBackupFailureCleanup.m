@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -32,6 +33,10 @@ static const NSUInteger PXBackupFailureCleanupMaximumComponentBytes = 255U;
 static const NSUInteger PXBackupFailureCleanupMaximumWorkspacePathBytes = 4096U;
 static const unsigned long long PXBackupFailureCleanupMaximumAccumulatedNameBytes =
     8ULL * 1024ULL * 1024ULL;
+static const char PXBackupFailureCleanupQuarantinePrefix[] =
+    ".weaponx-cleanup-quarantine-";
+static const NSUInteger PXBackupFailureCleanupQuarantineRandomByteCount = 16U;
+static const NSUInteger PXBackupFailureCleanupQuarantineAttemptLimit = 16U;
 
 #if defined(__APPLE__)
 #define PX_BACKUP_CLEANUP_MTIME_SEC(value) ((value).st_mtimespec.tv_sec)
@@ -49,6 +54,7 @@ typedef struct {
     NSUInteger visitedEntries;
     unsigned long long accumulatedNameBytes;
     NSUInteger removedEntries;
+    BOOL destructiveMutationOccurred;
     dev_t workspaceDevice;
 } PXBackupFailureCleanupTraversalState;
 
@@ -116,6 +122,276 @@ static BOOL PXBackupFailureCleanupStrictSync(int descriptor) {
     return result == 0;
 }
 
+
+typedef enum {
+    PXBackupFailureCleanupCaptureTypeRegularFile = 1,
+    PXBackupFailureCleanupCaptureTypeDirectory = 2,
+} PXBackupFailureCleanupCaptureType;
+
+static BOOL PXBackupFailureCleanupEntryIsAbsent(int parentDescriptor,
+                                                 const char *name);
+
+static BOOL PXBackupFailureCleanupMoveNoReplace(
+    int sourceParentDescriptor,
+    const char *sourceName,
+    int destinationParentDescriptor,
+    const char *destinationName,
+    int *failureErrnoOut) {
+    if (failureErrnoOut) *failureErrnoOut = 0;
+    if (sourceParentDescriptor < 0 || destinationParentDescriptor < 0 ||
+        !sourceName || sourceName[0] == '\0' ||
+        !destinationName || destinationName[0] == '\0') {
+        if (failureErrnoOut) *failureErrnoOut = EINVAL;
+        return NO;
+    }
+    int result = -1;
+    int failureErrno = 0;
+    do {
+        result = renameatx_np(sourceParentDescriptor,
+                              sourceName,
+                              destinationParentDescriptor,
+                              destinationName,
+                              RENAME_EXCL);
+        failureErrno = result == 0 ? 0 : errno;
+    } while (result < 0 && failureErrno == EINTR);
+    if (result == 0) return YES;
+    if (failureErrnoOut) *failureErrnoOut = failureErrno;
+    return NO;
+}
+
+static BOOL PXBackupFailureCleanupGenerateQuarantineName(
+    char *buffer,
+    size_t bufferSize) {
+    static const char lowercaseHex[] = "0123456789abcdef";
+    const size_t prefixLength = sizeof(PXBackupFailureCleanupQuarantinePrefix) - 1U;
+    const size_t suffixLength = PXBackupFailureCleanupQuarantineRandomByteCount * 2U;
+    const size_t requiredLength = prefixLength + suffixLength + 1U;
+    if (!buffer || bufferSize < requiredLength ||
+        requiredLength - 1U > PXBackupFailureCleanupMaximumComponentBytes) return NO;
+    unsigned char randomBytes[PXBackupFailureCleanupQuarantineRandomByteCount];
+    arc4random_buf(randomBytes, sizeof(randomBytes));
+    memcpy(buffer, PXBackupFailureCleanupQuarantinePrefix, prefixLength);
+    for (size_t index = 0; index < sizeof(randomBytes); index++) {
+        unsigned char byte = randomBytes[index];
+        buffer[prefixLength + (index * 2U)] = lowercaseHex[(byte >> 4U) & 0x0fU];
+        buffer[prefixLength + (index * 2U) + 1U] = lowercaseHex[byte & 0x0fU];
+    }
+    buffer[requiredLength - 1U] = '\0';
+    return YES;
+}
+
+static BOOL PXBackupFailureCleanupCapturedBindingValid(
+    int parentDescriptor,
+    const char *quarantineName,
+    int retainedDescriptor,
+    const struct stat *retainedIdentity,
+    PXBackupFailureCleanupCaptureType captureType,
+    dev_t expectedDevice,
+    BOOL requireWorkspaceMode,
+    struct stat *currentOut) {
+    if (parentDescriptor < 0 || retainedDescriptor < 0 ||
+        !quarantineName || quarantineName[0] == '\0' || !retainedIdentity) return NO;
+    struct stat namespaceStat;
+    struct stat descriptorStat;
+    if (fstatat(parentDescriptor,
+                quarantineName,
+                &namespaceStat,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        fstat(retainedDescriptor, &descriptorStat) != 0 ||
+        namespaceStat.st_dev != expectedDevice ||
+        descriptorStat.st_dev != expectedDevice ||
+        (namespaceStat.st_mode & (S_ISUID | S_ISGID)) != 0 ||
+        (descriptorStat.st_mode & (S_ISUID | S_ISGID)) != 0 ||
+        !PXBackupFailureCleanupStatIdentityMatches(&namespaceStat,
+                                                   &descriptorStat) ||
+        !PXBackupFailureCleanupStatIdentityMatches(retainedIdentity,
+                                                   &descriptorStat) ||
+        !PXBackupFailureCleanupDescriptorHasCloseOnExec(retainedDescriptor)) return NO;
+    if (captureType == PXBackupFailureCleanupCaptureTypeRegularFile) {
+        if (!S_ISREG(namespaceStat.st_mode) || !S_ISREG(descriptorStat.st_mode) ||
+            namespaceStat.st_nlink != 1 || descriptorStat.st_nlink != 1 ||
+            namespaceStat.st_mode != retainedIdentity->st_mode ||
+            descriptorStat.st_mode != retainedIdentity->st_mode ||
+            namespaceStat.st_size != retainedIdentity->st_size ||
+            descriptorStat.st_size != retainedIdentity->st_size ||
+            PX_BACKUP_CLEANUP_MTIME_SEC(namespaceStat) !=
+                PX_BACKUP_CLEANUP_MTIME_SEC(*retainedIdentity) ||
+            PX_BACKUP_CLEANUP_MTIME_NSEC(namespaceStat) !=
+                PX_BACKUP_CLEANUP_MTIME_NSEC(*retainedIdentity) ||
+            PX_BACKUP_CLEANUP_MTIME_SEC(descriptorStat) !=
+                PX_BACKUP_CLEANUP_MTIME_SEC(*retainedIdentity) ||
+            PX_BACKUP_CLEANUP_MTIME_NSEC(descriptorStat) !=
+                PX_BACKUP_CLEANUP_MTIME_NSEC(*retainedIdentity)) return NO;
+    } else if (captureType == PXBackupFailureCleanupCaptureTypeDirectory) {
+        if (!S_ISDIR(namespaceStat.st_mode) || !S_ISDIR(descriptorStat.st_mode) ||
+            (requireWorkspaceMode &&
+             ((namespaceStat.st_mode & 07777) != 0700 ||
+              (descriptorStat.st_mode & 07777) != 0700))) return NO;
+    } else {
+        return NO;
+    }
+    if (currentOut) *currentOut = descriptorStat;
+    return YES;
+}
+
+static BOOL PXBackupFailureCleanupRollbackCapturedMismatch(
+    int parentDescriptor,
+    const char *quarantineName,
+    const char *originalName) {
+    if (!PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, originalName)) {
+        return NO;
+    }
+    int rollbackErrno = 0;
+    if (!PXBackupFailureCleanupMoveNoReplace(parentDescriptor,
+                                             quarantineName,
+                                             parentDescriptor,
+                                             originalName,
+                                             &rollbackErrno) ||
+        !PXBackupFailureCleanupStrictSync(parentDescriptor) ||
+        !PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, quarantineName)) {
+        return NO;
+    }
+    struct stat restored;
+    return fstatat(parentDescriptor,
+                   originalName,
+                   &restored,
+                   AT_SYMLINK_NOFOLLOW) == 0;
+}
+
+static BOOL PXBackupFailureCleanupCaptureEntry(
+    int parentDescriptor,
+    const char *sourceName,
+    int retainedDescriptor,
+    const struct stat *retainedIdentity,
+    PXBackupFailureCleanupCaptureType captureType,
+    dev_t expectedDevice,
+    BOOL requireWorkspaceMode,
+    BOOL priorDestructiveMutation,
+    char **quarantineNameOut,
+    NSError **error) {
+    if (quarantineNameOut) *quarantineNameOut = NULL;
+    if (parentDescriptor < 0 || retainedDescriptor < 0 ||
+        !sourceName || sourceName[0] == '\0' || !retainedIdentity ||
+        !quarantineNameOut) {
+        PXBackupFailureCleanupSetError(
+            error,
+            PXBackupFailureCleanupErrorInvalidInput,
+            PXBackupFailureCleanupEntryField,
+            @"The cleanup capture inputs are invalid");
+        return NO;
+    }
+    const size_t quarantineCapacity =
+        sizeof(PXBackupFailureCleanupQuarantinePrefix) +
+        (PXBackupFailureCleanupQuarantineRandomByteCount * 2U);
+    char quarantineName[sizeof(PXBackupFailureCleanupQuarantinePrefix) +
+                        (PXBackupFailureCleanupQuarantineRandomByteCount * 2U)];
+    BOOL moved = NO;
+    int moveErrno = 0;
+    for (NSUInteger attempt = 0;
+         attempt < PXBackupFailureCleanupQuarantineAttemptLimit;
+         attempt++) {
+        if (!PXBackupFailureCleanupGenerateQuarantineName(quarantineName,
+                                                          quarantineCapacity)) {
+            PXBackupFailureCleanupSetError(
+                error,
+                priorDestructiveMutation
+                    ? PXBackupFailureCleanupErrorCleanupIncomplete
+                    : PXBackupFailureCleanupErrorLimitExceeded,
+                PXBackupFailureCleanupEntryField,
+                @"A private cleanup quarantine name could not be generated");
+            return NO;
+        }
+        moveErrno = 0;
+        if (PXBackupFailureCleanupMoveNoReplace(parentDescriptor,
+                                                sourceName,
+                                                parentDescriptor,
+                                                quarantineName,
+                                                &moveErrno)) {
+            moved = YES;
+            break;
+        }
+        if (moveErrno == EEXIST || moveErrno == ENOTEMPTY) continue;
+        PXBackupFailureCleanupSetError(
+            error,
+            priorDestructiveMutation
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorEntryChanged,
+            PXBackupFailureCleanupEntryField,
+            @"A cleanup entry changed before atomic capture");
+        return NO;
+    }
+    if (!moved) {
+        PXBackupFailureCleanupSetError(
+            error,
+            priorDestructiveMutation
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorRemovalFailed,
+            PXBackupFailureCleanupEntryField,
+            @"A private cleanup quarantine name could not be reserved");
+        return NO;
+    }
+    BOOL originalAbsent =
+        PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, sourceName);
+    BOOL exactCapture = originalAbsent &&
+        PXBackupFailureCleanupCapturedBindingValid(parentDescriptor,
+                                                   quarantineName,
+                                                   retainedDescriptor,
+                                                   retainedIdentity,
+                                                   captureType,
+                                                   expectedDevice,
+                                                   requireWorkspaceMode,
+                                                   NULL);
+    if (!exactCapture) {
+        BOOL rollbackSucceeded = originalAbsent &&
+            PXBackupFailureCleanupRollbackCapturedMismatch(parentDescriptor,
+                                                           quarantineName,
+                                                           sourceName);
+        PXBackupFailureCleanupSetError(
+            error,
+            (!rollbackSucceeded && priorDestructiveMutation)
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorEntryChanged,
+            PXBackupFailureCleanupEntryField,
+            rollbackSucceeded
+                ? @"A changed cleanup entry was restored without deletion"
+                : @"A changed cleanup entry could not be restored safely");
+        return NO;
+    }
+    size_t quarantineLength = strlen(quarantineName);
+    if (quarantineLength == 0 || quarantineLength > SIZE_MAX - 1U) {
+        BOOL rollbackSucceeded =
+            PXBackupFailureCleanupRollbackCapturedMismatch(parentDescriptor,
+                                                           quarantineName,
+                                                           sourceName);
+        PXBackupFailureCleanupSetError(
+            error,
+            (!rollbackSucceeded && priorDestructiveMutation)
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorLimitExceeded,
+            PXBackupFailureCleanupEntryField,
+            @"The private cleanup quarantine name exceeded fixed limits");
+        return NO;
+    }
+    char *retainedName = malloc(quarantineLength + 1U);
+    if (!retainedName) {
+        BOOL rollbackSucceeded =
+            PXBackupFailureCleanupRollbackCapturedMismatch(parentDescriptor,
+                                                           quarantineName,
+                                                           sourceName);
+        PXBackupFailureCleanupSetError(
+            error,
+            (!rollbackSucceeded && priorDestructiveMutation)
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorLimitExceeded,
+            PXBackupFailureCleanupEntryField,
+            @"The private cleanup quarantine name could not be retained");
+        return NO;
+    }
+    memcpy(retainedName, quarantineName, quarantineLength + 1U);
+    *quarantineNameOut = retainedName;
+    return YES;
+}
+
 static BOOL PXBackupFailureCleanupStringContainsNUL(NSString *value) {
     if (![value isKindOfClass:[NSString class]]) return YES;
     for (NSUInteger index = 0; index < value.length; index++) {
@@ -174,9 +450,15 @@ static BOOL PXBackupFailureCleanupValidateEntryName(const char *name,
            name[length] != '\0') {
         length += 1U;
     }
+    const size_t quarantinePrefixLength =
+        sizeof(PXBackupFailureCleanupQuarantinePrefix) - 1U;
     if (length == 0 || length > PXBackupFailureCleanupMaximumComponentBytes ||
         (length == 1U && name[0] == '.') ||
-        (length == 2U && name[0] == '.' && name[1] == '.')) return NO;
+        (length == 2U && name[0] == '.' && name[1] == '.') ||
+        (length >= quarantinePrefixLength &&
+         memcmp(name,
+                PXBackupFailureCleanupQuarantinePrefix,
+                quarantinePrefixLength) == 0)) return NO;
     for (size_t index = 0; index < length; index++) {
         unsigned char byte = (unsigned char)name[index];
         if (byte == '/' || byte == '\\' || byte < 0x20 || byte == 0x7f) return NO;
@@ -470,39 +752,80 @@ static BOOL PXBackupFailureCleanupRemoveRegularFile(
             @"The cleanup removal count overflowed");
         return NO;
     }
-    if (unlinkat(parentDescriptor, name, 0) != 0) {
+    char *quarantineName = NULL;
+    if (!PXBackupFailureCleanupCaptureEntry(
+            parentDescriptor,
+            name,
+            descriptor,
+            &descriptorStat,
+            PXBackupFailureCleanupCaptureTypeRegularFile,
+            state->workspaceDevice,
+            NO,
+            state->destructiveMutationOccurred || state->removedEntries > 0,
+            &quarantineName,
+            error)) {
+        close(descriptor);
+        return NO;
+    }
+    if (!PXBackupFailureCleanupCapturedBindingValid(
+            parentDescriptor,
+            quarantineName,
+            descriptor,
+            &descriptorStat,
+            PXBackupFailureCleanupCaptureTypeRegularFile,
+            state->workspaceDevice,
+            NO,
+            NULL)) {
+        free(quarantineName);
         close(descriptor);
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorRemovalFailed,
+            state->destructiveMutationOccurred || state->removedEntries > 0
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorEntryChanged,
             PXBackupFailureCleanupEntryField,
-            @"A verified cleanup file could not be removed");
+            @"A quarantined cleanup file changed before removal");
         return NO;
     }
-    state->removedEntries += 1U;
+    if (unlinkat(parentDescriptor, quarantineName, 0) != 0) {
+        free(quarantineName);
+        close(descriptor);
+        PXBackupFailureCleanupSetError(
+            error,
+            state->destructiveMutationOccurred || state->removedEntries > 0
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorRemovalFailed,
+            PXBackupFailureCleanupEntryField,
+            @"A quarantined cleanup file could not be removed");
+        return NO;
+    }
+    state->destructiveMutationOccurred = YES;
     struct stat unlinkedStat;
-    BOOL removed = PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, name) &&
-                   fstat(descriptor, &unlinkedStat) == 0 &&
-                   PXBackupFailureCleanupStatIdentityMatches(&descriptorStat,
-                                                             &unlinkedStat) &&
-                   unlinkedStat.st_nlink == 0;
+    BOOL removed =
+        PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, quarantineName) &&
+        fstat(descriptor, &unlinkedStat) == 0 &&
+        PXBackupFailureCleanupStatIdentityMatches(&descriptorStat,
+                                                  &unlinkedStat) &&
+        unlinkedStat.st_nlink == 0;
+    free(quarantineName);
     close(descriptor);
     if (!removed) {
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorEntryChanged,
+            PXBackupFailureCleanupErrorCleanupIncomplete,
             PXBackupFailureCleanupEntryField,
-            @"A cleanup file changed during removal");
+            @"A cleanup file removal could not be proven");
         return NO;
     }
     if (!PXBackupFailureCleanupStrictSync(parentDescriptor)) {
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorDurabilityFailed,
+            PXBackupFailureCleanupErrorCleanupIncomplete,
             PXBackupFailureCleanupDurabilityField,
             @"A cleanup file removal could not be synchronized");
         return NO;
     }
+    state->removedEntries += 1U;
     return YES;
 }
 
@@ -584,7 +907,9 @@ static BOOL PXBackupFailureCleanupRemoveSubdirectory(
         close(descriptor);
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorDurabilityFailed,
+            state->destructiveMutationOccurred || state->removedEntries > 0
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorDurabilityFailed,
             PXBackupFailureCleanupDurabilityField,
             @"A cleanup directory could not be synchronized");
         return NO;
@@ -610,9 +935,11 @@ static BOOL PXBackupFailureCleanupRemoveSubdirectory(
         close(descriptor);
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorEntryChanged,
+            state->destructiveMutationOccurred || state->removedEntries > 0
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorEntryChanged,
             PXBackupFailureCleanupEntryField,
-            @"A cleanup directory changed before removal");
+            @"A cleanup directory changed before atomic capture");
         return NO;
     }
     if (state->removedEntries == NSUIntegerMax) {
@@ -624,34 +951,88 @@ static BOOL PXBackupFailureCleanupRemoveSubdirectory(
             @"The cleanup removal count overflowed");
         return NO;
     }
-    if (unlinkat(parentDescriptor, name, AT_REMOVEDIR) != 0) {
+    char *quarantineName = NULL;
+    if (!PXBackupFailureCleanupCaptureEntry(
+            parentDescriptor,
+            name,
+            descriptor,
+            &descriptorStat,
+            PXBackupFailureCleanupCaptureTypeDirectory,
+            state->workspaceDevice,
+            NO,
+            state->destructiveMutationOccurred || state->removedEntries > 0,
+            &quarantineName,
+            error)) {
+        close(descriptor);
+        return NO;
+    }
+    BOOL capturedEmpty = NO;
+    NSError *capturedEmptyError = nil;
+    BOOL capturedValid =
+        PXBackupFailureCleanupCapturedBindingValid(
+            parentDescriptor,
+            quarantineName,
+            descriptor,
+            &descriptorStat,
+            PXBackupFailureCleanupCaptureTypeDirectory,
+            state->workspaceDevice,
+            NO,
+            NULL) &&
+        PXBackupFailureCleanupDirectoryIsEmpty(descriptor,
+                                               &capturedEmpty,
+                                               &capturedEmptyError) &&
+        capturedEmpty;
+    if (!capturedValid) {
+        free(quarantineName);
+        close(descriptor);
+        if (error) {
+            *error = capturedEmptyError;
+            if (!*error) {
+                PXBackupFailureCleanupSetError(
+                    error,
+                    state->destructiveMutationOccurred || state->removedEntries > 0
+                        ? PXBackupFailureCleanupErrorCleanupIncomplete
+                        : PXBackupFailureCleanupErrorEntryChanged,
+                    PXBackupFailureCleanupEntryField,
+                    @"A quarantined cleanup directory changed before removal");
+            }
+        }
+        return NO;
+    }
+    if (unlinkat(parentDescriptor, quarantineName, AT_REMOVEDIR) != 0) {
+        free(quarantineName);
         close(descriptor);
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorRemovalFailed,
+            state->destructiveMutationOccurred || state->removedEntries > 0
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorRemovalFailed,
             PXBackupFailureCleanupEntryField,
-            @"A verified cleanup directory could not be removed");
+            @"A quarantined cleanup directory could not be removed");
         return NO;
     }
-    state->removedEntries += 1U;
-    BOOL removed = PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, name);
+    state->destructiveMutationOccurred = YES;
+    BOOL removed =
+        PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, quarantineName);
+    free(quarantineName);
     close(descriptor);
     if (!removed) {
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorEntryChanged,
+            PXBackupFailureCleanupErrorCleanupIncomplete,
             PXBackupFailureCleanupEntryField,
-            @"A cleanup directory changed during removal");
+            @"A cleanup directory removal could not be proven");
         return NO;
     }
     if (!PXBackupFailureCleanupStrictSync(parentDescriptor)) {
         PXBackupFailureCleanupSetError(
             error,
-            PXBackupFailureCleanupErrorDurabilityFailed,
+            PXBackupFailureCleanupErrorCleanupIncomplete,
             PXBackupFailureCleanupDurabilityField,
             @"A cleanup directory removal could not be synchronized");
         return NO;
     }
+    state->removedEntries += 1U;
     return YES;
 }
 
@@ -772,11 +1153,46 @@ static BOOL PXBackupFailureCleanupRemoveExactEmptyWorkspace(
                                                 &empty,
                                                 &ignoredError) ||
         !empty ||
-        !PXBackupFailureCleanupStrictSync(workspaceDescriptor) ||
-        unlinkat(parentDescriptor, workspaceName, AT_REMOVEDIR) != 0 ||
-        !PXBackupFailureCleanupEntryIsAbsent(parentDescriptor, workspaceName) ||
-        !PXBackupFailureCleanupStrictSync(parentDescriptor)) return NO;
-    return YES;
+        !PXBackupFailureCleanupStrictSync(workspaceDescriptor)) return NO;
+    char *quarantineName = NULL;
+    if (!PXBackupFailureCleanupCaptureEntry(
+            parentDescriptor,
+            workspaceName,
+            workspaceDescriptor,
+            workspaceIdentity,
+            PXBackupFailureCleanupCaptureTypeDirectory,
+            expectedDevice,
+            YES,
+            NO,
+            &quarantineName,
+            &ignoredError)) return NO;
+    BOOL capturedEmpty = NO;
+    BOOL capturedValid =
+        PXBackupFailureCleanupCapturedBindingValid(
+            parentDescriptor,
+            quarantineName,
+            workspaceDescriptor,
+            workspaceIdentity,
+            PXBackupFailureCleanupCaptureTypeDirectory,
+            expectedDevice,
+            YES,
+            NULL) &&
+        PXBackupFailureCleanupDirectoryIsEmpty(workspaceDescriptor,
+                                               &capturedEmpty,
+                                               &ignoredError) &&
+        capturedEmpty;
+    if (!capturedValid ||
+        unlinkat(parentDescriptor, quarantineName, AT_REMOVEDIR) != 0) {
+        free(quarantineName);
+        return NO;
+    }
+    BOOL removed = PXBackupFailureCleanupEntryIsAbsent(parentDescriptor,
+                                                       quarantineName) &&
+                   PXBackupFailureCleanupEntryIsAbsent(parentDescriptor,
+                                                       workspaceName) &&
+                   PXBackupFailureCleanupStrictSync(parentDescriptor);
+    free(quarantineName);
+    return removed;
 }
 
 @interface PXBackupFailureCleanup () {
@@ -1253,6 +1669,22 @@ finish:
             @"The backup cleanup workspace could not be synchronized");
         return NO;
     }
+    NSError *rootLockError = nil;
+    if (![_bundleLock validateOwnershipWithError:&rootLockError] ||
+        !PXBackupFailureCleanupPathMatchesDescriptor(_parentPath,
+                                                     _parentDescriptor,
+                                                     &_parentIdentity,
+                                                     NO,
+                                                     NULL)) {
+        PXBackupFailureCleanupSetError(
+            error,
+            _removedEntryCount > 0 || state.destructiveMutationOccurred
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorLockValidationFailed,
+            PXBackupFailureCleanupLockField,
+            @"The cleanup authority changed before root capture");
+        return NO;
+    }
     NSData *workspaceNameData = nil;
     char *workspaceNameBytes = NULL;
     if (!PXBackupFailureCleanupValidateComponentString(_workspaceName,
@@ -1269,11 +1701,11 @@ finish:
         free(workspaceNameBytes);
         PXBackupFailureCleanupSetError(
             error,
-            _removedEntryCount > 0
+            _removedEntryCount > 0 || state.destructiveMutationOccurred
                 ? PXBackupFailureCleanupErrorCleanupIncomplete
                 : PXBackupFailureCleanupErrorWorkspaceChanged,
             PXBackupFailureCleanupWorkspaceField,
-            @"The backup cleanup workspace changed before root removal");
+            @"The backup cleanup workspace changed before root capture");
         return NO;
     }
     if (_removedEntryCount == NSUIntegerMax) {
@@ -1285,37 +1717,84 @@ finish:
             @"The cleanup removal count overflowed");
         return NO;
     }
-    if (unlinkat(_parentDescriptor, workspaceNameBytes, AT_REMOVEDIR) != 0) {
+    char *quarantineName = NULL;
+    NSError *captureError = nil;
+    if (!PXBackupFailureCleanupCaptureEntry(
+            _parentDescriptor,
+            workspaceNameBytes,
+            _workspaceDescriptor,
+            &_workspaceIdentity,
+            PXBackupFailureCleanupCaptureTypeDirectory,
+            _parentIdentity.st_dev,
+            YES,
+            _removedEntryCount > 0 || state.destructiveMutationOccurred,
+            &quarantineName,
+            &captureError)) {
+        free(workspaceNameBytes);
+        if (error) *error = captureError;
+        return NO;
+    }
+    BOOL capturedEmpty = NO;
+    NSError *capturedEmptyError = nil;
+    BOOL capturedValid =
+        PXBackupFailureCleanupCapturedBindingValid(
+            _parentDescriptor,
+            quarantineName,
+            _workspaceDescriptor,
+            &_workspaceIdentity,
+            PXBackupFailureCleanupCaptureTypeDirectory,
+            _parentIdentity.st_dev,
+            YES,
+            NULL) &&
+        PXBackupFailureCleanupDirectoryIsEmpty(_workspaceDescriptor,
+                                               &capturedEmpty,
+                                               &capturedEmptyError) &&
+        capturedEmpty;
+    if (!capturedValid) {
+        free(quarantineName);
+        free(workspaceNameBytes);
+        if (error) {
+            *error = capturedEmptyError;
+            if (!*error) {
+                PXBackupFailureCleanupSetError(
+                    error,
+                    PXBackupFailureCleanupErrorCleanupIncomplete,
+                    PXBackupFailureCleanupWorkspaceField,
+                    @"The quarantined backup workspace changed before removal");
+            }
+        }
+        return NO;
+    }
+    if (unlinkat(_parentDescriptor, quarantineName, AT_REMOVEDIR) != 0) {
+        free(quarantineName);
         free(workspaceNameBytes);
         PXBackupFailureCleanupSetError(
             error,
-            _removedEntryCount > 0
+            _removedEntryCount > 0 || state.destructiveMutationOccurred
                 ? PXBackupFailureCleanupErrorCleanupIncomplete
                 : PXBackupFailureCleanupErrorRemovalFailed,
             PXBackupFailureCleanupWorkspaceField,
-            @"The verified backup workspace could not be removed");
+            @"The quarantined backup workspace could not be removed");
+        return NO;
+    }
+    BOOL rootMutationOccurred = YES;
+    BOOL removed =
+        PXBackupFailureCleanupEntryIsAbsent(_parentDescriptor, quarantineName) &&
+        PXBackupFailureCleanupEntryIsAbsent(_parentDescriptor,
+                                            workspaceNameBytes);
+    free(quarantineName);
+    free(workspaceNameBytes);
+    if (!removed || !PXBackupFailureCleanupStrictSync(_parentDescriptor)) {
+        PXBackupFailureCleanupSetError(
+            error,
+            rootMutationOccurred
+                ? PXBackupFailureCleanupErrorCleanupIncomplete
+                : PXBackupFailureCleanupErrorRemovalFailed,
+            PXBackupFailureCleanupDurabilityField,
+            @"The backup workspace removal could not be proven durable");
         return NO;
     }
     _removedEntryCount += 1U;
-    if (!PXBackupFailureCleanupEntryIsAbsent(_parentDescriptor,
-                                             workspaceNameBytes)) {
-        free(workspaceNameBytes);
-        PXBackupFailureCleanupSetError(
-            error,
-            PXBackupFailureCleanupErrorCleanupIncomplete,
-            PXBackupFailureCleanupWorkspaceField,
-            @"The backup workspace namespace changed during root removal");
-        return NO;
-    }
-    free(workspaceNameBytes);
-    if (!PXBackupFailureCleanupStrictSync(_parentDescriptor)) {
-        PXBackupFailureCleanupSetError(
-            error,
-            PXBackupFailureCleanupErrorCleanupIncomplete,
-            PXBackupFailureCleanupDurabilityField,
-            @"The backup workspace removal could not be synchronized");
-        return NO;
-    }
     _cleaned = YES;
     close(_workspaceDescriptor);
     _workspaceDescriptor = -1;

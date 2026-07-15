@@ -1783,15 +1783,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
         };
         NSError *initialFailureCleanupIdentityError = nil;
-        NSError *initialWorkspaceIdentityError = nil;
-        NSError *initialCleanupStageError = nil;
         if (![failureCleanup validateIdentityWithError:&initialFailureCleanupIdentityError]) {
-            initialCleanupStageError = initialFailureCleanupIdentityError;
-        } else if (![publicationWorkspace validateIdentityWithError:&initialWorkspaceIdentityError]) {
-            initialCleanupStageError = initialWorkspaceIdentityError;
+            completeBackupFailure(initialFailureCleanupIdentityError);
+            return;
         }
-        if (initialCleanupStageError) {
-            completeBackupFailure(initialCleanupStageError);
+        NSError *initialWorkspaceIdentityError = nil;
+        if (![publicationWorkspace validateIdentityWithError:&initialWorkspaceIdentityError]) {
+            completeBackupFailure(initialWorkspaceIdentityError);
             return;
         }
         NSError *artifactWriterError = nil;
@@ -1799,13 +1797,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         PXBackupArtifactWriter *artifactWriter =
             [PXBackupArtifactWriter writerForWorkspace:publicationWorkspace
                                                  error:&artifactWriterError];
-        if (!artifactWriter) {
-            completeBackupFailure(artifactWriterError);
-            return;
-        }
         NSError *initialArtifactWriterIdentityError = nil;
-        if (![artifactWriter validateIdentityWithError:&initialArtifactWriterIdentityError]) {
-            completeBackupFailure(initialArtifactWriterIdentityError);
+        NSError *initialArtifactWriterStageError = nil;
+        if (!artifactWriter) {
+            initialArtifactWriterStageError = artifactWriterError;
+        } else if (![artifactWriter validateIdentityWithError:&initialArtifactWriterIdentityError]) {
+            initialArtifactWriterStageError = initialArtifactWriterIdentityError;
+        }
+        if (initialArtifactWriterStageError) {
+            completeBackupFailure(initialArtifactWriterStageError);
             return;
         }
         NSError *manifestWriterError = nil;
@@ -2643,7 +2643,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             postPublicationCleanupStageError = failureCleanupDisarmError;
         }
         if (postPublicationCleanupStageError) {
-            completeBackupFailure(postPublicationCleanupStageError);
+            (completeBackupFailure)(postPublicationCleanupStageError);
             return;
         }
         PXBackupResult *out = [[PXBackupResult alloc] init];
