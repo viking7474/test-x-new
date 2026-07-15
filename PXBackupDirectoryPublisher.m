@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -140,20 +141,32 @@ static BOOL PXBackupDirectoryStrictSync(int descriptor) {
     return result == 0;
 }
 
-static BOOL PXBackupDirectoryRenameEntry(int sourceParentDescriptor,
-                                         const char *sourceName,
-                                         int destinationParentDescriptor,
-                                         const char *destinationName) {
-    if (sourceParentDescriptor < 0 || !sourceName ||
-        destinationParentDescriptor < 0 || !destinationName) return NO;
+static BOOL PXBackupDirectoryRenameEntryNoReplace(
+    int sourceParentDescriptor,
+    const char *sourceName,
+    int destinationParentDescriptor,
+    const char *destinationName,
+    int *failureErrnoOut) {
+    if (failureErrnoOut) *failureErrnoOut = 0;
+    if (sourceParentDescriptor < 0 || !sourceName || sourceName[0] == '\0' ||
+        destinationParentDescriptor < 0 || !destinationName ||
+        destinationName[0] == '\0') {
+        if (failureErrnoOut) *failureErrnoOut = EINVAL;
+        return NO;
+    }
     int result = -1;
+    int failureErrno = 0;
     do {
-        result = renameat(sourceParentDescriptor,
-                          sourceName,
-                          destinationParentDescriptor,
-                          destinationName);
-    } while (result < 0 && errno == EINTR);
-    return result == 0;
+        result = renameatx_np(sourceParentDescriptor,
+                              sourceName,
+                              destinationParentDescriptor,
+                              destinationName,
+                              RENAME_EXCL);
+        failureErrno = result == 0 ? 0 : errno;
+    } while (result < 0 && failureErrno == EINTR);
+    if (result == 0) return YES;
+    if (failureErrnoOut) *failureErrnoOut = failureErrno;
+    return NO;
 }
 
 static BOOL PXBackupDirectoryStringContainsNUL(NSString *value) {
@@ -1062,6 +1075,8 @@ cleanup:
     BOOL accepted = NO;
     int finalDirectoryDescriptor = -1;
     int finalManifestDescriptor = -1;
+    int forwardRenameErrno = 0;
+    int rollbackRenameErrno = 0;
     NSError *originalError = nil;
     NSError *identityError = nil;
     NSError *lockError = nil;
@@ -1226,14 +1241,22 @@ cleanup:
                                   @"The publication filesystem identity changed before rename");
         goto cleanup;
     }
-    if (!PXBackupDirectoryRenameEntry(_parentDescriptor,
-                                      workspaceNameBytes,
-                                      _parentDescriptor,
-                                      publishedNameBytes)) {
-        PXBackupDirectorySetError(error,
-                                  PXBackupDirectoryPublisherErrorPublicationFailed,
-                                  PXBackupDirectoryPublisherFinalField,
-                                  @"The backup directory could not be published atomically");
+    if (!PXBackupDirectoryRenameEntryNoReplace(_parentDescriptor,
+                                               workspaceNameBytes,
+                                               _parentDescriptor,
+                                               publishedNameBytes,
+                                               &forwardRenameErrno)) {
+        BOOL destinationCollision =
+            forwardRenameErrno == EEXIST || forwardRenameErrno == ENOTEMPTY;
+        PXBackupDirectorySetError(
+            error,
+            destinationCollision
+                ? PXBackupDirectoryPublisherErrorFinalDirectoryAlreadyExists
+                : PXBackupDirectoryPublisherErrorPublicationFailed,
+            PXBackupDirectoryPublisherFinalField,
+            destinationCollision
+                ? @"The final backup directory already exists"
+                : @"The backup directory could not be published atomically");
         goto cleanup;
     }
     forwardRenamed = YES;
@@ -1396,10 +1419,11 @@ rollback:
                                                  &_workspaceIdentity,
                                                  _parentIdentity.st_dev,
                                                  NULL) ||
-        !PXBackupDirectoryRenameEntry(_parentDescriptor,
-                                      publishedNameBytes,
-                                      _parentDescriptor,
-                                      workspaceNameBytes) ||
+        !PXBackupDirectoryRenameEntryNoReplace(_parentDescriptor,
+                                               publishedNameBytes,
+                                               _parentDescriptor,
+                                               workspaceNameBytes,
+                                               &rollbackRenameErrno) ||
         !PXBackupDirectoryStrictSync(_parentDescriptor) ||
         !PXBackupDirectoryEntryIsAbsent(_parentDescriptor, publishedNameBytes) ||
         !PXBackupDirectoryDirectoryBindingValid(_parentDescriptor,
