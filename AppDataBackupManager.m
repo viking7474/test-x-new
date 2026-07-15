@@ -567,18 +567,20 @@ static NSString *PXBackupKeychainGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataBackupKeychainGroups_%@", bundleID ?: @""];
 }
 
-static NSArray<NSString *> *PXIncludedOptionNames(PXBackupOptions options) {
+static NSArray<NSString *> *PXIncludedOptionNames(PXBackupOptions options,
+                                                   BOOL preferencesIncluded) {
     NSMutableArray<NSString *> *out = [NSMutableArray arrayWithObject:@"DataContainer"];
     if (options & PXBackupOptionIncludeAppGroups) [out addObject:@"AppGroups"];
-    if (options & PXBackupOptionIncludePreferences) [out addObject:@"GlobalPreferences"];
+    if (preferencesIncluded) [out addObject:@"GlobalPreferences"];
     if (options & PXBackupOptionIncludeKeychain) [out addObject:@"Keychain"];
     return out;
 }
 
-static NSArray<NSString *> *PXExcludedOptionNames(PXBackupOptions options) {
+static NSArray<NSString *> *PXExcludedOptionNames(PXBackupOptions options,
+                                                   BOOL preferencesIncluded) {
     NSMutableArray<NSString *> *out = [NSMutableArray array];
     if (!(options & PXBackupOptionIncludeAppGroups)) [out addObject:@"AppGroups"];
-    if (!(options & PXBackupOptionIncludePreferences)) [out addObject:@"GlobalPreferences"];
+    if (!preferencesIncluded) [out addObject:@"GlobalPreferences"];
     if (!(options & PXBackupOptionIncludeKeychain)) [out addObject:@"Keychain"];
     return out;
 }
@@ -1808,13 +1810,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
         }
 
-        BOOL prefsIncluded = (options & PXBackupOptionIncludePreferences) != 0;
+        BOOL preferencesRequested =
+            (options & PXBackupOptionIncludePreferences) != 0;
+        NSString *preferencesRelativePath =
+            [NSString stringWithFormat:@"preferences/%@.plist", bundleID];
         NSString *prefSourcePath = [self _preferencesPlistPathForBundleID:bundleID];
-        NSString *prefDestPath = nil;
-        if (prefsIncluded) {
+        if (preferencesRequested) {
             if ([fm fileExistsAtPath:prefSourcePath]) {
-                NSString *preferencesRelativePath =
-                    [NSString stringWithFormat:@"preferences/%@.plist", bundleID];
                 NSError *preferencesArtifactError = nil;
                 preferencesArtifactRecord =
                     [artifactWriter writeArtifactAtRelativePath:preferencesRelativePath
@@ -1826,13 +1828,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         return copyResult && copyResult.exitCode == 0;
                     }
                                                           error:&preferencesArtifactError];
-                if (preferencesArtifactRecord) {
-                    prefDestPath = preferencesArtifactRecord.filePath;
-                }
             } else {
                 [warnings addObject:@"Global preferences plist not found (OK for most apps); skipping"];
             }
         }
+        BOOL preferencesIncluded = (preferencesArtifactRecord != nil);
 
         // Keychain backup
         BOOL keychainIncluded = (options & PXBackupOptionIncludeKeychain) != 0;
@@ -2100,8 +2100,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             @"backupMode": @"strict",
             @"sourceDataContainerPath": dataContainerPath ?: @"",
             @"sourceDataContainerUUID": dataUUID ?: @"",
-            @"includedOptions": PXIncludedOptionNames(options),
-            @"excludedOptions": PXExcludedOptionNames(options),
+            @"includedOptions": PXIncludedOptionNames(options,
+                                                       preferencesIncluded),
+            @"excludedOptions": PXExcludedOptionNames(options,
+                                                       preferencesIncluded),
             @"artifactCount": @(verifiedArtifactRecords.count),
             @"totalSize": @(totalArtifactSize),
             @"archiveChecksum": dataArtifactRecord.sha256 ?: @"",
@@ -2120,8 +2122,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             @"applicationGroups": groupIDs ?: @[],
             @"appGroups": groupManifests,
             @"preferences": @{
-                @"included": @(prefsIncluded),
-                @"archive": preferencesArtifactRecord.relativePath ?: @""
+                @"included": @(preferencesIncluded),
+                @"archive": preferencesIncluded
+                    ? preferencesArtifactRecord.relativePath
+                    : preferencesRelativePath
             },
             @"keychain": @{
                 @"included": @(keychainBackupPath != nil),
@@ -2150,7 +2154,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             @"artifacts": artifacts,
             @"options": @{
                 @"includeAppGroups": @((options & PXBackupOptionIncludeAppGroups) != 0),
-                @"includePreferences": @(prefsIncluded),
+                @"includePreferences": @(preferencesRequested),
                 @"includeKeychain": @(keychainIncluded)
             }
         };
