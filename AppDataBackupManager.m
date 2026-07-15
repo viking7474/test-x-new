@@ -13,6 +13,7 @@
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
 #import "PXBackupBundleLock.h"
+#import "PXBackupArtifactWriter.h"
 #import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
@@ -27,7 +28,6 @@
 #import "common/PXProcessKiller.h"
 #import "common/PXPaths.h"
 
-#import <CommonCrypto/CommonDigest.h>
 #import <notify.h>
 
 static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
@@ -567,62 +567,6 @@ static NSString *PXBackupKeychainGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataBackupKeychainGroups_%@", bundleID ?: @""];
 }
 
-static NSData *PXFileSHA256(NSString *path) {
-    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
-    if (!fh) return nil;
-    CC_SHA256_CTX ctx;
-    CC_SHA256_Init(&ctx);
-    for (;;) {
-        @autoreleasepool {
-            NSData *data = [fh readDataOfLength:(1024 * 1024)];
-            if (!data.length) {
-                break;
-            }
-            CC_SHA256_Update(&ctx, data.bytes, (CC_LONG)data.length);
-        }
-    }
-    [fh closeFile];
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256_Final(digest, &ctx);
-    return [NSData dataWithBytes:digest length:CC_SHA256_DIGEST_LENGTH];
-}
-
-static NSString *PXHexString(NSData *data) {
-    if (!data.length) return @"";
-    const unsigned char *bytes = data.bytes;
-    NSMutableString *out = [NSMutableString stringWithCapacity:data.length * 2];
-    for (NSUInteger i = 0; i < data.length; i++) {
-        [out appendFormat:@"%02x", bytes[i]];
-    }
-    return out;
-}
-
-static NSDictionary *PXArtifactInfo(NSString *path, NSString *name) {
-    if (!path.length) return nil;
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
-    NSNumber *size = attrs[NSFileSize];
-    NSData *sha = PXFileSHA256(path);
-    return @{
-        @"name": name ?: path.lastPathComponent ?: @"",
-        @"path": path,
-        @"size": size ?: @0,
-        @"sha256": sha ? PXHexString(sha) : @""
-    };
-}
-
-static unsigned long long PXArtifactsTotalSize(NSArray<NSDictionary *> *artifacts) {
-    unsigned long long total = 0;
-    for (NSDictionary *artifact in artifacts) {
-        if (![artifact isKindOfClass:[NSDictionary class]]) continue;
-        NSNumber *size = artifact[@"size"];
-        if ([size respondsToSelector:@selector(unsignedLongLongValue)]) {
-            total += [size unsignedLongLongValue];
-        }
-    }
-    return total;
-}
-
 static NSArray<NSString *> *PXIncludedOptionNames(PXBackupOptions options) {
     NSMutableArray<NSString *> *out = [NSMutableArray arrayWithObject:@"DataContainer"];
     if (options & PXBackupOptionIncludeAppGroups) [out addObject:@"AppGroups"];
@@ -637,31 +581,6 @@ static NSArray<NSString *> *PXExcludedOptionNames(PXBackupOptions options) {
     if (!(options & PXBackupOptionIncludePreferences)) [out addObject:@"GlobalPreferences"];
     if (!(options & PXBackupOptionIncludeKeychain)) [out addObject:@"Keychain"];
     return out;
-}
-
-static NSString *PXVerifyArtifact(NSString *backupDir, NSDictionary *artifact) {
-    if (!backupDir.length || ![artifact isKindOfClass:[NSDictionary class]]) return @"invalid artifact metadata";
-    NSString *name = [artifact[@"name"] isKindOfClass:[NSString class]] ? artifact[@"name"] : nil;
-    if (!name.length) return @"artifact missing name";
-    NSString *path = [backupDir stringByAppendingPathComponent:name];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        return [NSString stringWithFormat:@"artifact missing: %@", name];
-    }
-    NSNumber *expectedSize = artifact[@"size"];
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
-    NSNumber *actualSize = attrs[NSFileSize];
-    if ([expectedSize respondsToSelector:@selector(unsignedLongLongValue)] && [actualSize respondsToSelector:@selector(unsignedLongLongValue)] &&
-        [expectedSize unsignedLongLongValue] != [actualSize unsignedLongLongValue]) {
-        return [NSString stringWithFormat:@"artifact size mismatch: %@", name];
-    }
-    NSString *expectedHash = [artifact[@"sha256"] isKindOfClass:[NSString class]] ? artifact[@"sha256"] : nil;
-    if (expectedHash.length) {
-        NSString *actualHash = PXHexString(PXFileSHA256(path));
-        if (actualHash.length && ![actualHash isEqualToString:expectedHash]) {
-            return [NSString stringWithFormat:@"artifact sha256 mismatch: %@", name];
-        }
-    }
-    return nil;
 }
 
 static BOOL PXContainerUUIDMatchesBundleID(NSFileManager *fm, NSString *baseDir, NSString *uuid, NSString *bundleID) {
@@ -1659,6 +1578,35 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
+        NSError *artifactWriterError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupArtifactWriter *artifactWriter =
+            [PXBackupArtifactWriter writerForWorkspace:publicationWorkspace
+                                                 error:&artifactWriterError];
+        if (!artifactWriter) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, artifactWriterError);
+            });
+            return;
+        }
+        NSError *initialArtifactWriterIdentityError = nil;
+        if (![artifactWriter validateIdentityWithError:&initialArtifactWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, initialArtifactWriterIdentityError);
+            });
+            return;
+        }
+        NSMutableArray<PXVerifiedBackupArtifact *> *groupArtifactRecords =
+            [NSMutableArray array];
+        NSMutableArray<PXVerifiedBackupArtifact *> *systemGlobalArtifactRecords =
+            [NSMutableArray array];
+        NSMutableArray<PXVerifiedBackupArtifact *> *sharedDatabaseArtifactRecords =
+            [NSMutableArray array];
+        PXVerifiedBackupArtifact *profileArtifactRecord = nil;
+        PXVerifiedBackupArtifact *globalSafariArtifactRecord = nil;
+        PXVerifiedBackupArtifact *preferencesArtifactRecord = nil;
+        PXVerifiedBackupArtifact *keychainArtifactRecord = nil;
+
         NSString *backupDir = publicationWorkspace.workspacePath;
         NSString *debugBefore = [backupDir stringByAppendingPathComponent:@"debug_before_backup.txt"];
         NSString *debugAfter = [backupDir stringByAppendingPathComponent:@"debug_after_backup.txt"];
@@ -1719,16 +1667,33 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Ensure target app is not running while archiving.
         [self _killRelatedProcessesForBundleID:bundleID];
 
-        NSString *dataArchivePath = [backupDir stringByAppendingPathComponent:@"data.tar.gz"];
-        CommandResult *tarRes = [self _tarCreate:tarPath fromDir:dataContainerPath toArchive:dataArchivePath];
-        if (tarRes.exitCode != 0 || ![fm fileExistsAtPath:dataArchivePath]) {
-            NSString *msg = tarRes.stderrString.length ? tarRes.stderrString : @"tar failed for data container";
+        __block CommandResult *dataTarResult = nil;
+        NSError *dataArtifactError = nil;
+        PXVerifiedBackupArtifact *dataArtifactRecord =
+            [artifactWriter writeArtifactAtRelativePath:@"data.tar.gz"
+                                               producer:^BOOL(NSString *temporaryOutputPath) {
+                dataTarResult = [self _tarCreate:tarPath
+                                         fromDir:dataContainerPath
+                                       toArchive:temporaryOutputPath];
+                return dataTarResult && dataTarResult.exitCode == 0;
+            }
+                                                  error:&dataArtifactError];
+        if (!dataArtifactRecord) {
+            NSString *msg = nil;
+            if (!dataTarResult || dataTarResult.exitCode != 0) {
+                msg = dataTarResult.stderrString.length
+                    ? dataTarResult.stderrString
+                    : @"tar failed for data container";
+            } else {
+                msg = @"Failed to create verified data artifact";
+            }
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:105
                                            userInfo:@{NSLocalizedDescriptionKey: msg}];
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
             return;
         }
+        NSString *dataArchivePath = dataArtifactRecord.filePath;
 
         NSMutableArray<NSDictionary *> *groupManifests = [NSMutableArray array];
         NSArray<AppGroupContainerInfo *> *groupContainers = @[];
@@ -1766,18 +1731,27 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         for (AppGroupContainerInfo *info in groupContainers) {
             NSString *archiveName = [NSString stringWithFormat:@"%@.tar.gz", PXSanitizeFilenameComponent(info.groupID)];
-            NSString *archivePath = [groupsDir stringByAppendingPathComponent:archiveName];
-
-            CommandResult *r = [self _tarCreate:tarPath fromDir:info.path toArchive:archivePath];
-            if (r.exitCode != 0 || ![fm fileExistsAtPath:archivePath]) {
+            NSString *relativeArchivePath = [@"groups" stringByAppendingPathComponent:archiveName];
+            __block CommandResult *groupTarResult = nil;
+            NSError *groupArtifactError = nil;
+            PXVerifiedBackupArtifact *groupArtifact =
+                [artifactWriter writeArtifactAtRelativePath:relativeArchivePath
+                                                   producer:^BOOL(NSString *temporaryOutputPath) {
+                    groupTarResult = [self _tarCreate:tarPath
+                                              fromDir:info.path
+                                            toArchive:temporaryOutputPath];
+                    return groupTarResult && groupTarResult.exitCode == 0;
+                }
+                                                      error:&groupArtifactError];
+            if (!groupArtifact) {
                 [warnings addObject:[NSString stringWithFormat:@"Failed to archive group %@ (%@)", info.groupID, info.uuid]];
                 continue;
             }
-
+            [groupArtifactRecords addObject:groupArtifact];
             [groupManifests addObject:@{
                 @"groupID": info.groupID,
                 @"uuid": info.uuid,
-                @"archive": [@"groups" stringByAppendingPathComponent:archiveName]
+                @"archive": groupArtifact.relativePath,
             }];
         }
 
@@ -1787,11 +1761,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (profileAppDataPath.length) {
             BOOL isDir = NO;
             if ([fm fileExistsAtPath:profileAppDataPath isDirectory:&isDir] && isDir) {
-                profileAppDataArchivePath = [backupDir stringByAppendingPathComponent:@"profile_appdata.tar.gz"];
-                CommandResult *r = [self _tarCreate:tarPath fromDir:profileAppDataPath toArchive:profileAppDataArchivePath];
-                if (r.exitCode != 0 || ![fm fileExistsAtPath:profileAppDataArchivePath]) {
+                __block CommandResult *profileTarResult = nil;
+                NSError *profileArtifactError = nil;
+                profileArtifactRecord =
+                    [artifactWriter writeArtifactAtRelativePath:@"profile_appdata.tar.gz"
+                                                       producer:^BOOL(NSString *temporaryOutputPath) {
+                        profileTarResult = [self _tarCreate:tarPath
+                                                   fromDir:profileAppDataPath
+                                                 toArchive:temporaryOutputPath];
+                        return profileTarResult && profileTarResult.exitCode == 0;
+                    }
+                                                          error:&profileArtifactError];
+                if (!profileArtifactRecord) {
                     [warnings addObject:@"Failed to archive profile appdata; continuing" ];
-                    profileAppDataArchivePath = nil;
+                } else {
+                    profileAppDataArchivePath = profileArtifactRecord.filePath;
                 }
             }
         }
@@ -1804,11 +1788,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (globalSafariPath.length) {
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:globalSafariPath isDirectory:&isDir] && isDir) {
-                    globalSafariArchivePath = [backupDir stringByAppendingPathComponent:@"global_safari.tar.gz"];
-                    CommandResult *r = [self _tarCreate:tarPath fromDir:globalSafariPath toArchive:globalSafariArchivePath];
-                    if (r.exitCode != 0 || ![fm fileExistsAtPath:globalSafariArchivePath]) {
+                    __block CommandResult *safariTarResult = nil;
+                    NSError *safariArtifactError = nil;
+                    globalSafariArtifactRecord =
+                        [artifactWriter writeArtifactAtRelativePath:@"global_safari.tar.gz"
+                                                           producer:^BOOL(NSString *temporaryOutputPath) {
+                            safariTarResult = [self _tarCreate:tarPath
+                                                      fromDir:globalSafariPath
+                                                    toArchive:temporaryOutputPath];
+                            return safariTarResult && safariTarResult.exitCode == 0;
+                        }
+                                                              error:&safariArtifactError];
+                    if (!globalSafariArtifactRecord) {
                         [warnings addObject:@"Failed to archive global Safari library; continuing"];
-                        globalSafariArchivePath = nil;
+                    } else {
+                        globalSafariArchivePath = globalSafariArtifactRecord.filePath;
                     }
                 }
             }
@@ -1816,12 +1810,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         BOOL prefsIncluded = (options & PXBackupOptionIncludePreferences) != 0;
         NSString *prefSourcePath = [self _preferencesPlistPathForBundleID:bundleID];
-        NSString *prefDestPath = [prefsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
+        NSString *prefDestPath = nil;
         if (prefsIncluded) {
             if ([fm fileExistsAtPath:prefSourcePath]) {
-                NSString *cpCmd = [NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null || true", PXShellQuote(prefSourcePath), PXShellQuote(prefDestPath)];
-                [runner run:cpCmd];
-                [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(prefDestPath)]];
+                NSString *preferencesRelativePath =
+                    [NSString stringWithFormat:@"preferences/%@.plist", bundleID];
+                NSError *preferencesArtifactError = nil;
+                preferencesArtifactRecord =
+                    [artifactWriter writeArtifactAtRelativePath:preferencesRelativePath
+                                                       producer:^BOOL(NSString *temporaryOutputPath) {
+                        NSString *cpCmd = [NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null",
+                            PXShellQuote(prefSourcePath),
+                            PXShellQuote(temporaryOutputPath)];
+                        CommandResult *copyResult = [runner run:cpCmd];
+                        return copyResult && copyResult.exitCode == 0;
+                    }
+                                                          error:&preferencesArtifactError];
+                if (preferencesArtifactRecord) {
+                    prefDestPath = preferencesArtifactRecord.filePath;
+                }
             } else {
                 [warnings addObject:@"Global preferences plist not found (OK for most apps); skipping"];
             }
@@ -1830,10 +1837,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Keychain backup
         BOOL keychainIncluded = (options & PXBackupOptionIncludeKeychain) != 0;
         NSString *keychainBackupPath = nil;
-        NSString *keychainMethod = nil;
+        __block NSString *keychainMethod = nil;
         NSArray<NSString *> *selectedKeychainGroups = @[];
         if (keychainIncluded) {
-            keychainBackupPath = [backupDir stringByAppendingPathComponent:@"keychain.plist"];
             // Default selection: ALL groups from entitlements if no saved preference.
             id saved = [[NSUserDefaults standardUserDefaults] objectForKey:PXBackupKeychainGroupsKey(bundleID)];
             if ([saved isKindOfClass:[NSArray class]] && [(NSArray *)saved count] > 0) {
@@ -1884,40 +1890,52 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
             }
 
-            BOOL keychainSuccess = [self _backupKeychainForBundleID:bundleID
-                                                            groups:selectedKeychainGroups
-                                                            toFile:keychainBackupPath
-                                                          warnings:warnings];
-            if (!keychainSuccess) {
-                keychainBackupPath = nil; // Mark as not included if failed
-            } else {
-                keychainMethod = @"helper";
-                [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(keychainBackupPath)]];
-                PXDebugHeader(debugKeychain, @"Keychain Backup Result");
-                PXDebugAppendLine(debugKeychain, @"status=ok");
-                PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"archive=%@", keychainBackupPath]);
-                PXDebugRun(runner, debugKeychain, @"ls keychain.plist", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(keychainBackupPath)]);
-
-                // If helper cannot access restricted groups (e.g. *.platformFamily), fallback to in-app export.
-                NSUInteger count = PXKeychainPlistItemCount(keychainBackupPath);
-                PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"plistItems=%lu", (unsigned long)count]);
-                if (count == 0 && PXGroupsContainPlatformFamily(selectedKeychainGroups)) {
-                    PXDebugAppendLine(debugKeychain, @"helper returned 0 items; trying in-app export");
-                    BOOL inAppOK = [self _inAppKeychainBackupForBundleID:bundleID
-                                                           containerPath:dataContainerPath
-                                                                  groups:selectedKeychainGroups
-                                                                  toFile:keychainBackupPath
-                                                               debugPath:debugKeychain
-                                                                warnings:warnings];
-                    if (inAppOK) {
-                        keychainMethod = @"in_app";
-                        [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(keychainBackupPath)]];
-                        PXDebugRun(runner, debugKeychain, @"ls keychain.plist (after in-app)", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(keychainBackupPath)]);
-                        PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"plistItemsAfterInApp=%lu", (unsigned long)PXKeychainPlistItemCount(keychainBackupPath)]);
-                    } else {
-                        PXDebugAppendLine(debugKeychain, @"in-app export failed");
+            NSError *keychainArtifactError = nil;
+            keychainArtifactRecord =
+                [artifactWriter writeArtifactAtRelativePath:@"keychain.plist"
+                                                   producer:^BOOL(NSString *temporaryOutputPath) {
+                    BOOL keychainSuccess = [self _backupKeychainForBundleID:bundleID
+                                                                    groups:selectedKeychainGroups
+                                                                    toFile:temporaryOutputPath
+                                                                  warnings:warnings];
+                    if (!keychainSuccess) {
+                        return NO;
                     }
+                    keychainMethod = @"helper";
+                    [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]];
+                    PXDebugHeader(debugKeychain, @"Keychain Backup Result");
+                    PXDebugAppendLine(debugKeychain, @"status=ok");
+                    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"archive=%@", temporaryOutputPath]);
+                    PXDebugRun(runner, debugKeychain, @"ls keychain.plist", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]);
+
+                    // If helper cannot access restricted groups (e.g. *.platformFamily), fallback to in-app export.
+                    NSUInteger count = PXKeychainPlistItemCount(temporaryOutputPath);
+                    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"plistItems=%lu", (unsigned long)count]);
+                    if (count == 0 && PXGroupsContainPlatformFamily(selectedKeychainGroups)) {
+                        PXDebugAppendLine(debugKeychain, @"helper returned 0 items; trying in-app export");
+                        BOOL inAppOK = [self _inAppKeychainBackupForBundleID:bundleID
+                                                               containerPath:dataContainerPath
+                                                                      groups:selectedKeychainGroups
+                                                                      toFile:temporaryOutputPath
+                                                                   debugPath:debugKeychain
+                                                                    warnings:warnings];
+                        if (inAppOK) {
+                            keychainMethod = @"in_app";
+                            [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]];
+                            PXDebugRun(runner, debugKeychain, @"ls keychain.plist (after in-app)", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]);
+                            PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"plistItemsAfterInApp=%lu", (unsigned long)PXKeychainPlistItemCount(temporaryOutputPath)]);
+                        } else {
+                            PXDebugAppendLine(debugKeychain, @"in-app export failed");
+                        }
+                    }
+                    return YES;
                 }
+                                                      error:&keychainArtifactError];
+            if (keychainArtifactRecord) {
+                keychainBackupPath = keychainArtifactRecord.filePath;
+            } else {
+                keychainBackupPath = nil;
+                keychainMethod = nil;
             }
         }
 
@@ -1938,17 +1956,28 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
 
             NSString *archiveName = [NSString stringWithFormat:@"global_library_%@.tar.gz", PXSanitizeFilenameComponent(subdir)];
-            NSString *archivePath = [backupDir stringByAppendingPathComponent:archiveName];
-
             [self _killRelatedProcessesForBundleID:bundleID];
             PXDebugAppendLine(debugBefore, [NSString stringWithFormat:@"item=%@ path=%@", subdir, srcPath]);
-            CommandResult *r = [self _tarCreate:tarPath fromDir:srcPath toArchive:archivePath];
-            if (r.exitCode != 0 || ![fm fileExistsAtPath:archivePath]) {
+            __block CommandResult *systemTarResult = nil;
+            NSError *systemArtifactError = nil;
+            PXVerifiedBackupArtifact *systemArtifact =
+                [artifactWriter writeArtifactAtRelativePath:archiveName
+                                                   producer:^BOOL(NSString *temporaryOutputPath) {
+                    systemTarResult = [self _tarCreate:tarPath
+                                               fromDir:srcPath
+                                             toArchive:temporaryOutputPath];
+                    return systemTarResult && systemTarResult.exitCode == 0;
+                }
+                                                      error:&systemArtifactError];
+            if (!systemArtifact) {
                 [warnings addObject:[NSString stringWithFormat:@"Failed to archive system global library %@; continuing", subdir]];
                 continue;
             }
-
-            [systemGlobalManifests addObject:@{ @"subdir": subdir, @"archive": archiveName }];
+            [systemGlobalArtifactRecords addObject:systemArtifact];
+            [systemGlobalManifests addObject:@{
+                @"subdir": subdir,
+                @"archive": systemArtifact.relativePath,
+            }];
         }
 
         // Shared system DBs: back up for system apps (can impact multiple apps).
@@ -1973,7 +2002,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         continue;
                     }
                     NSString *dstRel = [@"shared_db" stringByAppendingPathComponent:bn];
-                    NSString *dst = [backupDir stringByAppendingPathComponent:dstRel];
 
                     // Best-effort stop associated daemons first.
                     [self _killRelatedProcessesForBundleID:bundleID];
@@ -1984,10 +2012,23 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     [NSThread sleepForTimeInterval:0.15];
 
                     PXDebugAppendLine(debugBefore, [NSString stringWithFormat:@"copy %@ -> %@", src, dstRel]);
-                    [runner run:[NSString stringWithFormat:@"cp -a %@ %@ 2>/dev/null || true", PXShellQuote(src), PXShellQuote(dst)]];
-                    [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(dst)]];
-                    if ([fm fileExistsAtPath:dst]) {
-                        [sharedSystemDBFiles addObject:@{ @"libraryRel": rel, @"archive": dstRel }];
+                    NSError *sharedArtifactError = nil;
+                    PXVerifiedBackupArtifact *sharedArtifact =
+                        [artifactWriter writeArtifactAtRelativePath:dstRel
+                                                           producer:^BOOL(NSString *temporaryOutputPath) {
+                            NSString *copyCommand = [NSString stringWithFormat:@"cp -a %@ %@ 2>/dev/null",
+                                PXShellQuote(src),
+                                PXShellQuote(temporaryOutputPath)];
+                            CommandResult *copyResult = [runner run:copyCommand];
+                            return copyResult && copyResult.exitCode == 0;
+                        }
+                                                              error:&sharedArtifactError];
+                    if (sharedArtifact) {
+                        [sharedDatabaseArtifactRecords addObject:sharedArtifact];
+                        [sharedSystemDBFiles addObject:@{
+                            @"libraryRel": rel,
+                            @"archive": sharedArtifact.relativePath,
+                        }];
                     }
                 }
             }
@@ -2003,54 +2044,37 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *iosVersion = device.systemVersion ?: @"";
         // profileId already computed above
 
-        NSMutableArray *artifacts = [NSMutableArray array];
-        NSDictionary *dataArtifact = PXArtifactInfo(dataArchivePath, @"data.tar.gz");
-        if (dataArtifact) [artifacts addObject:dataArtifact];
-        for (NSDictionary *g in groupManifests) {
-            NSString *rel = g[@"archive"]; // groups/<name>.tar.gz
-            if ([rel isKindOfClass:[NSString class]]) {
-                NSString *abs = [backupDir stringByAppendingPathComponent:(NSString *)rel];
-                NSDictionary *gi = PXArtifactInfo(abs, rel);
-                if (gi) [artifacts addObject:gi];
-            }
+        NSError *preManifestArtifactWriterIdentityError = nil;
+        if (![artifactWriter validateIdentityWithError:&preManifestArtifactWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, preManifestArtifactWriterIdentityError);
+            });
+            return;
         }
-        if (profileAppDataArchivePath) {
-            NSDictionary *a = PXArtifactInfo(profileAppDataArchivePath, @"profile_appdata.tar.gz");
-            if (a) [artifacts addObject:a];
-        }
-        if (globalSafariArchivePath) {
-            NSDictionary *a = PXArtifactInfo(globalSafariArchivePath, @"global_safari.tar.gz");
-            if (a) [artifacts addObject:a];
-        }
-        for (NSDictionary *g in systemGlobalManifests) {
-            NSString *rel = g[@"archive"]; // global_library_*.tar.gz
-            if ([rel isKindOfClass:[NSString class]] && rel.length) {
-                NSString *abs = [backupDir stringByAppendingPathComponent:(NSString *)rel];
-                NSDictionary *gi = PXArtifactInfo(abs, rel);
-                if (gi) [artifacts addObject:gi];
-            }
-        }
-        for (NSDictionary *d in sharedSystemDBFiles) {
-            NSString *rel = [d[@"archive"] isKindOfClass:[NSString class]] ? d[@"archive"] : nil;
-            if (!rel.length) continue;
-            NSString *abs = [backupDir stringByAppendingPathComponent:rel];
-            NSDictionary *di = PXArtifactInfo(abs, rel);
-            if (di) [artifacts addObject:di];
-        }
-        if (prefDestPath && [[NSFileManager defaultManager] fileExistsAtPath:prefDestPath]) {
-            NSDictionary *a = PXArtifactInfo(prefDestPath, [NSString stringWithFormat:@"preferences/%@.plist", bundleID]);
-            if (a) [artifacts addObject:a];
-        }
-        if (keychainBackupPath && [[NSFileManager defaultManager] fileExistsAtPath:keychainBackupPath]) {
-            NSDictionary *a = PXArtifactInfo(keychainBackupPath, @"keychain.plist");
-            if (a) [artifacts addObject:a];
-        }
+        NSMutableArray<PXVerifiedBackupArtifact *> *verifiedArtifactRecords =
+            [NSMutableArray array];
+        [verifiedArtifactRecords addObject:dataArtifactRecord];
+        [verifiedArtifactRecords addObjectsFromArray:groupArtifactRecords];
+        if (profileArtifactRecord) [verifiedArtifactRecords addObject:profileArtifactRecord];
+        if (globalSafariArtifactRecord) [verifiedArtifactRecords addObject:globalSafariArtifactRecord];
+        [verifiedArtifactRecords addObjectsFromArray:systemGlobalArtifactRecords];
+        [verifiedArtifactRecords addObjectsFromArray:sharedDatabaseArtifactRecords];
+        if (preferencesArtifactRecord) [verifiedArtifactRecords addObject:preferencesArtifactRecord];
+        if (keychainArtifactRecord) [verifiedArtifactRecords addObject:keychainArtifactRecord];
 
-        for (NSDictionary *artifact in artifacts) {
-            NSString *verifyWarning = PXVerifyArtifact(backupDir, artifact);
-            if (verifyWarning.length) {
-                [warnings addObject:[@"Backup artifact verification: " stringByAppendingString:verifyWarning]];
+        NSMutableArray<NSDictionary<NSString *, id> *> *artifacts =
+            [NSMutableArray arrayWithCapacity:verifiedArtifactRecords.count];
+        unsigned long long totalArtifactSize = 0;
+        for (PXVerifiedBackupArtifact *artifactRecord in verifiedArtifactRecords) {
+            if (totalArtifactSize > ULLONG_MAX - artifactRecord.size) {
+                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
+                                                   code:105
+                                               userInfo:@{NSLocalizedDescriptionKey: @"Backup artifact size overflow"}];
+                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+                return;
             }
+            totalArtifactSize += artifactRecord.size;
+            [artifacts addObject:artifactRecord.manifestRepresentation];
         }
 
         NSString *toolVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
@@ -2062,8 +2086,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (systemGlobalManifests.count || sharedSystemDBFiles.count) {
             [restoreNotes addObject:@"This backup includes system/global data that may affect more than one app."];
         }
-
-        unsigned long long totalArtifactSize = PXArtifactsTotalSize(artifacts);
 
         NSDictionary *manifest = @{
             @"manifestVersion": @3,
@@ -2080,9 +2102,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             @"sourceDataContainerUUID": dataUUID ?: @"",
             @"includedOptions": PXIncludedOptionNames(options),
             @"excludedOptions": PXExcludedOptionNames(options),
-            @"artifactCount": @(artifacts.count),
+            @"artifactCount": @(verifiedArtifactRecords.count),
             @"totalSize": @(totalArtifactSize),
-            @"archiveChecksum": dataArtifact[@"sha256"] ?: @"",
+            @"archiveChecksum": dataArtifactRecord.sha256 ?: @"",
             @"warnings": [warnings copy],
             @"restoreCompatibility": @{
                 @"targetBundleID": bundleID ?: @"",
@@ -2092,29 +2114,29 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             },
             @"data": @{
                 @"uuid": dataUUID,
-                @"archive": @"data.tar.gz",
+                @"archive": dataArtifactRecord.relativePath,
                 @"containerPath": dataContainerPath
             },
             @"applicationGroups": groupIDs ?: @[],
             @"appGroups": groupManifests,
             @"preferences": @{
                 @"included": @(prefsIncluded),
-                @"archive": [NSString stringWithFormat:@"preferences/%@.plist", bundleID]
+                @"archive": preferencesArtifactRecord.relativePath ?: @""
             },
             @"keychain": @{
                 @"included": @(keychainBackupPath != nil),
-                @"archive": keychainBackupPath ? @"keychain.plist" : @"",
+                @"archive": keychainArtifactRecord.relativePath ?: @"",
                 @"groupsSelected": selectedKeychainGroups ?: @[],
                 @"method": keychainMethod ?: @""
             },
             @"profileAppData": @{
                 @"included": @(profileAppDataArchivePath != nil),
-                @"archive": profileAppDataArchivePath ? @"profile_appdata.tar.gz" : @"",
+                @"archive": profileArtifactRecord.relativePath ?: @"",
                 @"path": profileAppDataPath ?: @""
             },
             @"globalSafari": @{
                 @"included": @(globalSafariArchivePath != nil),
-                @"archive": globalSafariArchivePath ? @"global_safari.tar.gz" : @"",
+                @"archive": globalSafariArtifactRecord.relativePath ?: @"",
                 @"path": globalSafariPath ?: @""
             },
             @"systemGlobalLibrary": @{
@@ -2179,6 +2201,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![bundleLock validateOwnershipWithError:&finalBundleLockValidationError]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(nil, finalBundleLockValidationError);
+            });
+            return;
+        }
+        NSError *finalArtifactWriterIdentityError = nil;
+        if (![artifactWriter validateIdentityWithError:&finalArtifactWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, finalArtifactWriterIdentityError);
             });
             return;
         }
