@@ -15,6 +15,7 @@
 #import "PXBackupArchiveValidator.h"
 #import "PXBackupBundleLock.h"
 #import "PXBackupArtifactWriter.h"
+#import "PXBackupManifestWriter.h"
 #import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
@@ -1769,6 +1770,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
+        NSError *manifestWriterError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupManifestWriter *manifestWriter =
+            [PXBackupManifestWriter writerForWorkspace:publicationWorkspace
+                                                  error:&manifestWriterError];
+        if (!manifestWriter) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, manifestWriterError);
+            });
+            return;
+        }
+        NSError *initialManifestWriterIdentityError = nil;
+        if (![manifestWriter validateIdentityWithError:&initialManifestWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, initialManifestWriterIdentityError);
+            });
+            return;
+        }
         PXBackupArtifactPolicy *applicationDataArtifactPolicy =
             [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindApplicationData];
         PXBackupArtifactPolicy *appGroupArtifactPolicy =
@@ -2391,13 +2410,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *iosVersion = device.systemVersion ?: @"";
         // profileId already computed above
 
-        NSError *preManifestArtifactWriterIdentityError = nil;
-        if (![artifactWriter validateIdentityWithError:&preManifestArtifactWriterIdentityError]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, preManifestArtifactWriterIdentityError);
-            });
-            return;
-        }
         NSMutableArray<PXVerifiedBackupArtifact *> *verifiedArtifactRecords =
             [NSMutableArray array];
         [verifiedArtifactRecords addObject:dataArtifactRecord];
@@ -2516,6 +2528,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
+        NSError *preManifestArtifactWriterIdentityError = nil;
+        if (![artifactWriter validateIdentityWithError:&preManifestArtifactWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, preManifestArtifactWriterIdentityError);
+            });
+            return;
+        }
 
         // Debug snapshot: after backup artifacts
         {
@@ -2528,7 +2547,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (keychainBackupPath) {
                 PXDebugRun(runner, debugAfter, @"ls keychain.plist", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(keychainBackupPath)]);
             }
-            PXDebugRun(runner, debugAfter, @"cat manifest.plist", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote([backupDir stringByAppendingPathComponent:@"manifest.plist"]) ]);
         }
 
         NSError *preManifestWorkspaceIdentityError = nil;
@@ -2545,13 +2563,34 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
-        NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
-        if (![manifest writeToFile:manifestPath atomically:YES]) {
-            [warnings addObject:@"Failed to write manifest"];
-        } else {
-            [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(manifestPath)]];
+        NSError *preWriteManifestWriterIdentityError = nil;
+        if (![manifestWriter validateIdentityWithError:&preWriteManifestWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, preWriteManifestWriterIdentityError);
+            });
+            return;
         }
+        NSError *manifestWriteError = nil;
+        if (![manifestWriter writeManifestSnapshot:manifestSnapshot
+                                              error:&manifestWriteError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, manifestWriteError);
+            });
+            return;
+        }
+        PXDebugRun(runner,
+                   debugAfter,
+                   @"cat manifest.plist",
+                   [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true",
+                    PXShellQuote(manifestWriter.manifestPath)]);
 
+        NSError *finalManifestWriterIdentityError = nil;
+        if (![manifestWriter validateIdentityWithError:&finalManifestWriterIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, finalManifestWriterIdentityError);
+            });
+            return;
+        }
         NSError *finalWorkspaceIdentityError = nil;
         if (![publicationWorkspace validateIdentityWithError:&finalWorkspaceIdentityError]) {
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -2575,7 +2614,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
         PXBackupResult *out = [[PXBackupResult alloc] init];
         out.backupDirectory = publicationWorkspace.workspacePath;
-        out.manifestPath = [publicationWorkspace.workspacePath stringByAppendingPathComponent:@"manifest.plist"];
+        out.manifestPath = manifestWriter.manifestPath;
         out.warnings = warnings;
 
         dispatch_async(dispatch_get_main_queue(), ^{
