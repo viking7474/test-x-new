@@ -81,19 +81,38 @@ static BOOL PXV4StringWithinLimit(NSString *value) {
     return bytes && bytes.length <= PXV4MaximumStringBytes;
 }
 
+static BOOL PXV4ReadRequiredString(id value, NSString **outValue) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSString *stringValue = (NSString *)value;
+    if (stringValue.length == 0 ||
+        !PXV4StringHasText(stringValue) ||
+        !PXV4StringWithinLimit(stringValue)) return NO;
+    if (outValue) *outValue = stringValue;
+    return YES;
+}
+
+static BOOL PXV4ReadOptionalString(id value, NSString **outValue) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSString *stringValue = (NSString *)value;
+    if (!PXV4StringWithinLimit(stringValue)) return NO;
+    if (outValue) *outValue = stringValue;
+    return YES;
+}
+
 static BOOL PXV4RequiredString(id value) {
-    return [value isKindOfClass:[NSString class]] &&
-           [(NSString *)value length] > 0 &&
-           PXV4StringHasText(value) && PXV4StringWithinLimit(value);
+    return PXV4ReadRequiredString(value, NULL);
 }
 
 static BOOL PXV4OptionalString(id value) {
-    return [value isKindOfClass:[NSString class]] && PXV4StringWithinLimit(value);
+    return PXV4ReadOptionalString(value, NULL);
 }
 
-static BOOL PXV4ExactBoolean(id value) {
-    return [value isKindOfClass:[NSNumber class]] &&
-           CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
+static BOOL PXV4ReadExactBoolean(id value, BOOL *outValue) {
+    if (![value isKindOfClass:[NSNumber class]]) return NO;
+    if (CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) return NO;
+    BOOL booleanValue = [(NSNumber *)value boolValue];
+    if (outValue) *outValue = booleanValue;
+    return YES;
 }
 
 static BOOL PXV4LowercaseDigest(id value) {
@@ -434,6 +453,7 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
     if (error) {
         *error = nil;
     }
+    @try {
     if (![fields isKindOfClass:[NSDictionary class]] ||
         ![verifiedArtifacts isKindOfClass:[NSArray class]]) {
         PXV4Fail(error, PXBackupManifestV4ErrorInvalidInput,
@@ -453,7 +473,9 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
     NSDictionary *snapshot = PXV4ImmutableSnapshot(fields, error);
     if (![snapshot isKindOfClass:[NSDictionary class]]) return PXV4FailureResult(error);
 
-    if (!PXV4RequiredString(snapshot[@"bundleID"]) ||
+    NSString *bundleIdentifier = nil;
+    NSString *backupMode = nil;
+    if (!PXV4ReadRequiredString(snapshot[@"bundleID"], &bundleIdentifier) ||
         !PXV4OptionalString(snapshot[@"appName"]) ||
         ![snapshot[@"createdAt"] isKindOfClass:[NSDate class]] ||
         !PXV4RequiredString(snapshot[@"timestamp"]) ||
@@ -461,7 +483,8 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
         !PXV4OptionalString(snapshot[@"toolVersion"]) ||
         !PXV4OptionalString(snapshot[@"toolBuild"]) ||
         !PXV4OptionalString(snapshot[@"profileId"]) ||
-        ![snapshot[@"backupMode"] isEqualToString:@"strict"] ||
+        !PXV4ReadRequiredString(snapshot[@"backupMode"], &backupMode) ||
+        ![backupMode isEqualToString:@"strict"] ||
         !PXV4OptionalString(snapshot[@"sourceDataContainerPath"]) ||
         !PXV4OptionalString(snapshot[@"sourceDataContainerUUID"]) ||
         ![snapshot[@"warnings"] isKindOfClass:[NSArray class]]) {
@@ -489,11 +512,18 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
     NSDictionary *shared = snapshot[@"sharedSystemDB"];
     NSDictionary *options = snapshot[@"options"];
 
+    NSString *restoreTargetBundleIdentifier = nil;
+    BOOL requiresSameBundleIdentifier = NO;
+    BOOL requiresInstalledContainer = NO;
     if (!PXV4ExactKeys(restore, @[@"targetBundleID", @"requiresSameBundleID",
                                   @"requiresInstalledAppContainer", @"notes"]) ||
-        ![restore[@"targetBundleID"] isEqualToString:snapshot[@"bundleID"]] ||
-        !PXV4ExactBoolean(restore[@"requiresSameBundleID"]) ||
-        !PXV4ExactBoolean(restore[@"requiresInstalledAppContainer"]) ||
+        !PXV4ReadRequiredString(restore[@"targetBundleID"],
+                                &restoreTargetBundleIdentifier) ||
+        ![restoreTargetBundleIdentifier isEqualToString:bundleIdentifier] ||
+        !PXV4ReadExactBoolean(restore[@"requiresSameBundleID"],
+                              &requiresSameBundleIdentifier) ||
+        !PXV4ReadExactBoolean(restore[@"requiresInstalledAppContainer"],
+                              &requiresInstalledContainer) ||
         ![restore[@"notes"] isKindOfClass:[NSArray class]] ||
         !PXV4ExactKeys(data, @[@"uuid", @"archive", @"containerPath"]) ||
         !PXV4RequiredString(data[@"uuid"]) || !PXV4SafeRelativePath(data[@"archive"]) ||
@@ -511,13 +541,20 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
                  @"$.fields", @"A manifest component is invalid");
         return PXV4FailureResult(error);
     }
-    for (id note in restore[@"notes"]) if (!PXV4RequiredString(note)) return PXV4FailureResult(error);
-    for (NSString *key in @[@"includeAppGroups", @"includePreferences", @"includeKeychain"]) {
-        if (!PXV4ExactBoolean(options[key])) {
-            PXV4Fail(error, PXBackupManifestV4ErrorInconsistentOptions,
-                     @"$.options", @"The requested options are invalid");
-            return PXV4FailureResult(error);
-        }
+    (void)requiresSameBundleIdentifier;
+    (void)requiresInstalledContainer;
+    for (id note in restore[@"notes"]) {
+        if (!PXV4RequiredString(note)) return PXV4FailureResult(error);
+    }
+    BOOL requestGroups = NO;
+    BOOL requestPreferences = NO;
+    BOOL requestKeychain = NO;
+    if (!PXV4ReadExactBoolean(options[@"includeAppGroups"], &requestGroups) ||
+        !PXV4ReadExactBoolean(options[@"includePreferences"], &requestPreferences) ||
+        !PXV4ReadExactBoolean(options[@"includeKeychain"], &requestKeychain)) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.options", @"The requested options are invalid");
+        return PXV4FailureResult(error);
     }
 
     NSMutableSet *applicationGroupSet = [NSMutableSet set];
@@ -645,36 +682,61 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
         }
         [successfulGroupIDs addObject:raw[@"groupID"]];
     }
-    BOOL requestGroups = [options[@"includeAppGroups"] boolValue];
-    if ((!requestGroups && appGroups.count != 0)) {
+    if (!requestGroups && appGroups.count != 0) {
         PXV4Fail(error, PXBackupManifestV4ErrorInconsistentOptions,
                  @"$.options.includeAppGroups", @"The App Group request is inconsistent");
         return PXV4FailureResult(error);
     }
 
-    BOOL prefsIncluded = [preferences[@"included"] boolValue];
-    if (!PXV4ExactBoolean(preferences[@"included"]) ||
-        !PXV4OptionalString(preferences[@"archive"]) ||
-        (prefsIncluded && !PXV4AddReference(references, records, preferences[@"archive"],
-                                             PXBackupArtifactKindPreferences,
-                                             @"$.preferences.archive", error)) ||
-        (!prefsIncluded && ![preferences[@"archive"] isEqualToString:@""])) return PXV4FailureResult(error);
-    if (![options[@"includePreferences"] boolValue] && prefsIncluded) {
+    BOOL preferencesIncluded = NO;
+    NSString *preferencesArchive = nil;
+    if (!PXV4ReadExactBoolean(preferences[@"included"], &preferencesIncluded) ||
+        !PXV4ReadOptionalString(preferences[@"archive"], &preferencesArchive)) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.preferences", @"The Preferences section is invalid");
+        return PXV4FailureResult(error);
+    }
+    if (preferencesIncluded) {
+        if (!PXV4AddReference(references, records, preferencesArchive,
+                              PXBackupArtifactKindPreferences,
+                              @"$.preferences.archive", error)) {
+            return PXV4FailureResult(error);
+        }
+    } else if (![preferencesArchive isEqualToString:@""]) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.preferences.archive", @"The Preferences section is invalid");
+        return PXV4FailureResult(error);
+    }
+    if (!requestPreferences && preferencesIncluded) {
         PXV4Fail(error, PXBackupManifestV4ErrorInconsistentOptions,
                  @"$.options.includePreferences", @"The Preferences request is inconsistent");
         return PXV4FailureResult(error);
     }
 
-    BOOL keychainIncluded = [keychain[@"included"] boolValue];
-    if (!PXV4ExactBoolean(keychain[@"included"]) ||
-        !PXV4OptionalString(keychain[@"archive"]) ||
-        !PXV4OptionalString(keychain[@"method"]) ||
-        ![keychain[@"groupsSelected"] isKindOfClass:[NSArray class]] ||
-        (keychainIncluded && (!PXV4RequiredString(keychain[@"method"]) ||
-          !PXV4AddReference(references, records, keychain[@"archive"],
-                            PXBackupArtifactKindKeychain, @"$.keychain.archive", error))) ||
-        (!keychainIncluded && (![(NSString *)keychain[@"archive"] isEqualToString:@""] ||
-                               ![(NSString *)keychain[@"method"] isEqualToString:@""]))) return PXV4FailureResult(error);
+    BOOL keychainIncluded = NO;
+    NSString *keychainArchive = nil;
+    NSString *keychainMethod = nil;
+    if (!PXV4ReadExactBoolean(keychain[@"included"], &keychainIncluded) ||
+        !PXV4ReadOptionalString(keychain[@"archive"], &keychainArchive) ||
+        !PXV4ReadOptionalString(keychain[@"method"], &keychainMethod) ||
+        ![keychain[@"groupsSelected"] isKindOfClass:[NSArray class]]) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.keychain", @"The Keychain section is invalid");
+        return PXV4FailureResult(error);
+    }
+    if (keychainIncluded) {
+        if (!PXV4ReadRequiredString(keychainMethod, NULL) ||
+            !PXV4AddReference(references, records, keychainArchive,
+                              PXBackupArtifactKindKeychain,
+                              @"$.keychain.archive", error)) {
+            return PXV4FailureResult(error);
+        }
+    } else if (![keychainArchive isEqualToString:@""] ||
+               ![keychainMethod isEqualToString:@""]) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.keychain", @"The Keychain section is invalid");
+        return PXV4FailureResult(error);
+    }
     NSMutableSet<NSString *> *selectedGroupSet = [NSMutableSet set];
     for (id group in keychain[@"groupsSelected"]) {
         if (!PXV4RequiredString(group) || [selectedGroupSet containsObject:group]) {
@@ -685,50 +747,97 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
         }
         [selectedGroupSet addObject:group];
     }
-    if (![options[@"includeKeychain"] boolValue] && keychainIncluded) {
+    if (!requestKeychain && keychainIncluded) {
         PXV4Fail(error, PXBackupManifestV4ErrorInconsistentOptions,
                  @"$.options.includeKeychain", @"The Keychain request is inconsistent");
         return PXV4FailureResult(error);
     }
 
-    NSArray *singleSections = @[profile, safari];
-    NSArray *singleKinds = @[@(PXBackupArtifactKindProfileAppData), @(PXBackupArtifactKindGlobalSafari)];
-    NSArray *singlePaths = @[@"$.profileAppData.archive", @"$.globalSafari.archive"];
-    for (NSUInteger index = 0; index < singleSections.count; index++) {
-        NSDictionary *section = singleSections[index];
-        BOOL included = [section[@"included"] boolValue];
-        if (!PXV4ExactBoolean(section[@"included"]) ||
-            !PXV4OptionalString(section[@"archive"]) || !PXV4OptionalString(section[@"path"]) ||
-            (included && (!PXV4RequiredString(section[@"path"]) ||
-             !PXV4AddReference(references, records, section[@"archive"],
-                               (PXBackupArtifactKind)[singleKinds[index] unsignedIntegerValue],
-                               singlePaths[index], error))) ||
-            (!included && ![section[@"archive"] isEqualToString:@""])) return PXV4FailureResult(error);
+    BOOL profileIncluded = NO;
+    NSString *profileArchive = nil;
+    NSString *profileRecordedPath = nil;
+    if (!PXV4ReadExactBoolean(profile[@"included"], &profileIncluded) ||
+        !PXV4ReadOptionalString(profile[@"archive"], &profileArchive) ||
+        !PXV4ReadOptionalString(profile[@"path"], &profileRecordedPath)) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.profileAppData", @"The profile AppData section is invalid");
+        return PXV4FailureResult(error);
+    }
+    if (profileIncluded) {
+        if (!PXV4ReadRequiredString(profileRecordedPath, NULL) ||
+            !PXV4AddReference(references, records, profileArchive,
+                              PXBackupArtifactKindProfileAppData,
+                              @"$.profileAppData.archive", error)) {
+            return PXV4FailureResult(error);
+        }
+    } else if (![profileArchive isEqualToString:@""]) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.profileAppData.archive", @"The profile AppData section is invalid");
+        return PXV4FailureResult(error);
+    }
+
+    BOOL safariIncluded = NO;
+    NSString *safariArchive = nil;
+    NSString *safariRecordedPath = nil;
+    if (!PXV4ReadExactBoolean(safari[@"included"], &safariIncluded) ||
+        !PXV4ReadOptionalString(safari[@"archive"], &safariArchive) ||
+        !PXV4ReadOptionalString(safari[@"path"], &safariRecordedPath)) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.globalSafari", @"The global Safari section is invalid");
+        return PXV4FailureResult(error);
+    }
+    if (safariIncluded) {
+        if (!PXV4ReadRequiredString(safariRecordedPath, NULL) ||
+            !PXV4AddReference(references, records, safariArchive,
+                              PXBackupArtifactKindGlobalSafari,
+                              @"$.globalSafari.archive", error)) {
+            return PXV4FailureResult(error);
+        }
+    } else if (![safariArchive isEqualToString:@""]) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.globalSafari.archive", @"The global Safari section is invalid");
+        return PXV4FailureResult(error);
     }
 
     NSArray *systemItems = system[@"items"];
-    if (!PXV4ExactBoolean(system[@"included"]) || ![systemItems isKindOfClass:[NSArray class]] ||
-        ([system[@"included"] boolValue] != (systemItems.count > 0))) return PXV4FailureResult(error);
+    BOOL systemIncluded = NO;
+    if (!PXV4ReadExactBoolean(system[@"included"], &systemIncluded) ||
+        ![systemItems isKindOfClass:[NSArray class]] ||
+        systemIncluded != (systemItems.count > 0)) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.systemGlobalLibrary", @"The system-global section is invalid");
+        return PXV4FailureResult(error);
+    }
     NSMutableSet *subdirs = [NSMutableSet set];
     for (id item in systemItems) {
         if (!PXV4ExactKeys(item, @[@"subdir", @"archive"]) ||
             !PXV4RequiredString(item[@"subdir"]) || [subdirs containsObject:item[@"subdir"]] ||
             !PXV4AddReference(references, records, item[@"archive"],
                               PXBackupArtifactKindSystemGlobal,
-                              @"$.systemGlobalLibrary.items.archive", error)) return PXV4FailureResult(error);
+                              @"$.systemGlobalLibrary.items.archive", error)) {
+            return PXV4FailureResult(error);
+        }
         [subdirs addObject:item[@"subdir"]];
     }
 
     NSArray *sharedFiles = shared[@"files"];
-    if (!PXV4ExactBoolean(shared[@"included"]) || ![sharedFiles isKindOfClass:[NSArray class]] ||
-        ([shared[@"included"] boolValue] != (sharedFiles.count > 0))) return PXV4FailureResult(error);
+    BOOL sharedIncluded = NO;
+    if (!PXV4ReadExactBoolean(shared[@"included"], &sharedIncluded) ||
+        ![sharedFiles isKindOfClass:[NSArray class]] ||
+        sharedIncluded != (sharedFiles.count > 0)) {
+        PXV4Fail(error, PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.sharedSystemDB", @"The shared database section is invalid");
+        return PXV4FailureResult(error);
+    }
     NSMutableSet *libraryPaths = [NSMutableSet set];
     for (id item in sharedFiles) {
         if (!PXV4ExactKeys(item, @[@"libraryRel", @"archive"]) ||
             !PXV4RequiredString(item[@"libraryRel"]) || [libraryPaths containsObject:item[@"libraryRel"]] ||
             !PXV4AddReference(references, records, item[@"archive"],
                               PXBackupArtifactKindSharedSystemDatabase,
-                              @"$.sharedSystemDB.files.archive", error)) return PXV4FailureResult(error);
+                              @"$.sharedSystemDB.files.archive", error)) {
+            return PXV4FailureResult(error);
+        }
         [libraryPaths addObject:item[@"libraryRel"]];
     }
 
@@ -742,7 +851,7 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
     NSMutableArray *excludedOptions = [NSMutableArray array];
     if (appGroups.count > 0) [includedOptions addObject:@"AppGroups"];
     else [excludedOptions addObject:@"AppGroups"];
-    if (prefsIncluded) [includedOptions addObject:@"GlobalPreferences"];
+    if (preferencesIncluded) [includedOptions addObject:@"GlobalPreferences"];
     else [excludedOptions addObject:@"GlobalPreferences"];
     if (keychainIncluded) [includedOptions addObject:@"Keychain"];
     else [excludedOptions addObject:@"Keychain"];
@@ -784,6 +893,14 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
     }
     if (error) *error = nil;
     return result;
+    } @catch (NSException *exception) {
+        (void)exception;
+        PXV4Fail(error,
+                 PXBackupManifestV4ErrorInvalidFieldValue,
+                 @"$.fields",
+                 @"A manifest field or component is invalid");
+        return nil;
+    }
 }
 
 - (instancetype)initWithBackupIdentifier:(NSString *)backupIdentifier
