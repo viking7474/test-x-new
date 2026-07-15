@@ -10,6 +10,7 @@
 #import "AppEntitlementsReader.h"
 #import "AppGroupContainerResolver.h"
 #import "PXBackupManifestValidator.h"
+#import "PXBackupManifestV4.h"
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
 #import "PXBackupBundleLock.h"
@@ -105,7 +106,7 @@ static BOOL PXBackupManifestVersionIsSupported(NSNumber *version) {
     }
 
     NSInteger value = version.integerValue;
-    return value == 2 || value == 3;
+    return value == 2 || value == 3 || value == 4;
 }
 
 static BOOL PXResolveExactRestoreApplicationDataTarget(
@@ -565,24 +566,6 @@ static NSString *PXDataContainerPathFromLaunchServices(NSString *bundleID) {
 
 static NSString *PXBackupKeychainGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataBackupKeychainGroups_%@", bundleID ?: @""];
-}
-
-static NSArray<NSString *> *PXIncludedOptionNames(PXBackupOptions options,
-                                                   BOOL preferencesIncluded) {
-    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithObject:@"DataContainer"];
-    if (options & PXBackupOptionIncludeAppGroups) [out addObject:@"AppGroups"];
-    if (preferencesIncluded) [out addObject:@"GlobalPreferences"];
-    if (options & PXBackupOptionIncludeKeychain) [out addObject:@"Keychain"];
-    return out;
-}
-
-static NSArray<NSString *> *PXExcludedOptionNames(PXBackupOptions options,
-                                                   BOOL preferencesIncluded) {
-    NSMutableArray<NSString *> *out = [NSMutableArray array];
-    if (!(options & PXBackupOptionIncludeAppGroups)) [out addObject:@"AppGroups"];
-    if (!preferencesIncluded) [out addObject:@"GlobalPreferences"];
-    if (!(options & PXBackupOptionIncludeKeychain)) [out addObject:@"Keychain"];
-    return out;
 }
 
 static NSError *PXBackupArtifactPolicyManagerError(NSString *description) {
@@ -1846,6 +1829,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             preferencesArtifactPolicy,
             keychainArtifactPolicy,
         ];
+        NSString *backupIdentifier = [NSUUID UUID].UUIDString.lowercaseString;
         NSMutableArray<PXVerifiedBackupArtifact *> *groupArtifactRecords =
             [NSMutableArray array];
         NSMutableArray<PXVerifiedBackupArtifact *> *systemGlobalArtifactRecords =
@@ -2436,21 +2420,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return;
         }
 
-        NSMutableArray<NSDictionary<NSString *, id> *> *artifacts =
-            [NSMutableArray arrayWithCapacity:verifiedArtifactRecords.count];
-        unsigned long long totalArtifactSize = 0;
-        for (PXVerifiedBackupArtifact *artifactRecord in verifiedArtifactRecords) {
-            if (totalArtifactSize > ULLONG_MAX - artifactRecord.size) {
-                NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
-                                                   code:105
-                                               userInfo:@{NSLocalizedDescriptionKey: @"Backup artifact size overflow"}];
-                dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
-                return;
-            }
-            totalArtifactSize += artifactRecord.size;
-            [artifacts addObject:artifactRecord.manifestRepresentation];
-        }
-
         NSString *toolVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
         NSString *toolBuild = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString *)kCFBundleVersionKey] ?: @"";
         NSMutableArray<NSString *> *restoreNotes = [NSMutableArray array];
@@ -2461,8 +2430,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             [restoreNotes addObject:@"This backup includes system/global data that may affect more than one app."];
         }
 
-        NSDictionary *manifest = @{
-            @"manifestVersion": @3,
+        NSDictionary<NSString *, id> *manifestFields = @{
             @"bundleID": bundleID,
             @"appName": appName ?: @"",
             @"createdAt": [NSDate date],
@@ -2474,24 +2442,17 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             @"backupMode": @"strict",
             @"sourceDataContainerPath": dataContainerPath ?: @"",
             @"sourceDataContainerUUID": dataUUID ?: @"",
-            @"includedOptions": PXIncludedOptionNames(options,
-                                                       preferencesIncluded),
-            @"excludedOptions": PXExcludedOptionNames(options,
-                                                       preferencesIncluded),
-            @"artifactCount": @(verifiedArtifactRecords.count),
-            @"totalSize": @(totalArtifactSize),
-            @"archiveChecksum": dataArtifactRecord.sha256 ?: @"",
             @"warnings": [warnings copy],
             @"restoreCompatibility": @{
                 @"targetBundleID": bundleID ?: @"",
                 @"requiresSameBundleID": @YES,
                 @"requiresInstalledAppContainer": @YES,
-                @"notes": restoreNotes
+                @"notes": restoreNotes,
             },
             @"data": @{
                 @"uuid": dataUUID,
                 @"archive": dataArtifactRecord.relativePath,
-                @"containerPath": dataContainerPath
+                @"containerPath": dataContainerPath,
             },
             @"applicationGroups": groupIDs ?: @[],
             @"appGroups": groupManifests,
@@ -2499,39 +2460,62 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 @"included": @(preferencesIncluded),
                 @"archive": preferencesIncluded
                     ? preferencesArtifactRecord.relativePath
-                    : preferencesRelativePath
+                    : @"",
             },
             @"keychain": @{
                 @"included": @(keychainBackupPath != nil),
                 @"archive": keychainArtifactRecord.relativePath ?: @"",
                 @"groupsSelected": selectedKeychainGroups ?: @[],
-                @"method": keychainMethod ?: @""
+                @"method": keychainMethod ?: @"",
             },
             @"profileAppData": @{
                 @"included": @(profileAppDataArchivePath != nil),
                 @"archive": profileArtifactRecord.relativePath ?: @"",
-                @"path": profileAppDataPath ?: @""
+                @"path": profileAppDataPath ?: @"",
             },
             @"globalSafari": @{
                 @"included": @(globalSafariArchivePath != nil),
                 @"archive": globalSafariArtifactRecord.relativePath ?: @"",
-                @"path": globalSafariPath ?: @""
+                @"path": globalSafariPath ?: @"",
             },
             @"systemGlobalLibrary": @{
                 @"included": @(systemGlobalManifests.count > 0),
-                @"items": systemGlobalManifests
+                @"items": systemGlobalManifests,
             },
             @"sharedSystemDB": @{
                 @"included": @(sharedSystemDBFiles.count > 0),
-                @"files": sharedSystemDBFiles
+                @"files": sharedSystemDBFiles,
             },
-            @"artifacts": artifacts,
             @"options": @{
                 @"includeAppGroups": @((options & PXBackupOptionIncludeAppGroups) != 0),
                 @"includePreferences": @(preferencesRequested),
-                @"includeKeychain": @(keychainIncluded)
-            }
+                @"includeKeychain": @(keychainIncluded),
+            },
         };
+        NSError *manifestV4Error = nil;
+        PXBackupManifestV4 *manifestSnapshot =
+            [PXBackupManifestV4 manifestWithBackupIdentifier:backupIdentifier
+                                                      fields:manifestFields
+                                           verifiedArtifacts:verifiedArtifactRecords
+                                                       error:&manifestV4Error];
+        if (!manifestSnapshot) {
+            NSError *err = manifestV4Error ?: [NSError errorWithDomain:PXBackupErrorDomain
+                                                                   code:107
+                                                               userInfo:@{NSLocalizedDescriptionKey: @"Manifest v4 could not be constructed"}];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, err);
+            });
+            return;
+        }
+        NSDictionary<NSString *, id> *manifest = manifestSnapshot.manifestRepresentation;
+        NSError *producedManifestValidationError = nil;
+        if (![PXBackupManifestValidator validateManifestObject:manifest
+                                                         error:&producedManifestValidationError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, producedManifestValidationError);
+            });
+            return;
+        }
 
         // Debug snapshot: after backup artifacts
         {

@@ -884,6 +884,445 @@ static BOOL PXManifestValidateSharedSystemDB(id value, NSError **error) {
     return YES;
 }
 
+
+
+static BOOL PXManifestPeekPositiveVersion(id value,
+                                          unsigned long long *magnitude) {
+    if (![value isKindOfClass:[NSNumber class]] || PXManifestIsExactBoolean(value)) return NO;
+    const char *type = [(NSNumber *)value objCType];
+    if (!type || !type[0] || type[1]) return NO;
+    unsigned long long result = 0;
+    switch (type[0]) {
+        case 'c': case 's': case 'i': case 'l': case 'q': {
+            long long signedValue = [(NSNumber *)value longLongValue];
+            if (signedValue <= 0) return NO;
+            result = (unsigned long long)signedValue;
+            break;
+        }
+        case 'C': case 'S': case 'I': case 'L': case 'Q':
+            result = [(NSNumber *)value unsignedLongLongValue];
+            if (result == 0) return NO;
+            break;
+        default:
+            return NO;
+    }
+    if (result > (unsigned long long)NSIntegerMax) return NO;
+    if (magnitude) *magnitude = result;
+    return YES;
+}
+
+static BOOL PXManifestValidateGraphObjectV4(id object,
+                                            NSUInteger depth,
+                                            NSUInteger *visited,
+                                            NSUInteger *dictionaryKeys,
+                                            NSUInteger *arrayItems,
+                                            NSHashTable *activeContainers,
+                                            NSError **error) {
+    if (*visited >= 500000) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInvalidFieldValue,
+                              @"$",
+                              @"The manifest v4 graph exceeds the visited-object limit.");
+    }
+    *visited += 1;
+    if ([object isKindOfClass:[NSString class]]) {
+        NSData *bytes = [(NSString *)object dataUsingEncoding:NSUTF8StringEncoding
+                                         allowLossyConversion:NO];
+        if (!bytes || bytes.length > 1024 * 1024 || PXManifestStringContainsNUL(object)) {
+            return PXManifestFail(error,
+                                  PXBackupManifestValidatorErrorInvalidFieldValue,
+                                  @"$",
+                                  @"The manifest v4 graph contains an invalid string.");
+        }
+        return YES;
+    }
+    if ([object isKindOfClass:[NSNumber class]] ||
+        [object isKindOfClass:[NSDate class]] ||
+        [object isKindOfClass:[NSData class]]) return YES;
+    BOOL dictionary = [object isKindOfClass:[NSDictionary class]];
+    BOOL array = [object isKindOfClass:[NSArray class]];
+    if (!dictionary && !array) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInvalidFieldType,
+                              @"$",
+                              @"The manifest v4 graph contains an unsupported value type.");
+    }
+    if (depth > 64 || [activeContainers containsObject:object]) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInvalidFieldValue,
+                              @"$",
+                              @"The manifest v4 graph exceeds depth limits or contains a cycle.");
+    }
+    [activeContainers addObject:object];
+    if (array) {
+        NSArray *values = object;
+        if (values.count > 500000 - *arrayItems) {
+            [activeContainers removeObject:object];
+            return PXManifestFail(error,
+                                  PXBackupManifestValidatorErrorInvalidFieldValue,
+                                  @"$",
+                                  @"The manifest v4 graph exceeds the array-item limit.");
+        }
+        *arrayItems += values.count;
+        for (id value in values) {
+            if (!PXManifestValidateGraphObjectV4(value, depth + 1, visited,
+                                                 dictionaryKeys, arrayItems,
+                                                 activeContainers, error)) {
+                [activeContainers removeObject:object];
+                return NO;
+            }
+        }
+    } else {
+        NSDictionary *values = object;
+        if (values.count > 100000 - *dictionaryKeys) {
+            [activeContainers removeObject:object];
+            return PXManifestFail(error,
+                                  PXBackupManifestValidatorErrorInvalidFieldValue,
+                                  @"$",
+                                  @"The manifest v4 graph exceeds the dictionary-key limit.");
+        }
+        *dictionaryKeys += values.count;
+        for (id key in values.allKeys) {
+            if (![key isKindOfClass:[NSString class]] ||
+                !PXManifestValidateGraphObjectV4(key, depth + 1, visited,
+                                                 dictionaryKeys, arrayItems,
+                                                 activeContainers, error) ||
+                !PXManifestValidateGraphObjectV4(values[key], depth + 1, visited,
+                                                 dictionaryKeys, arrayItems,
+                                                 activeContainers, error)) {
+                [activeContainers removeObject:object];
+                return NO;
+            }
+        }
+    }
+    [activeContainers removeObject:object];
+    return YES;
+}
+
+static BOOL PXManifestExactKeys(NSDictionary *dictionary,
+                                NSArray<NSString *> *keys,
+                                NSString *fieldPath,
+                                NSError **error) {
+    if (![dictionary isKindOfClass:[NSDictionary class]] ||
+        dictionary.count != keys.count ||
+        ![[NSSet setWithArray:dictionary.allKeys] isEqualToSet:[NSSet setWithArray:keys]]) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInconsistentField,
+                              fieldPath,
+                              @"The manifest field set is invalid.");
+    }
+    return YES;
+}
+
+static BOOL PXManifestV4CanonicalUUID(id value) {
+    if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] != 36) return NO;
+    NSString *text = value;
+    NSData *bytes = [text dataUsingEncoding:NSASCIIStringEncoding allowLossyConversion:NO];
+    if (!bytes || bytes.length != 36) return NO;
+    for (NSUInteger index = 0; index < 36; index++) {
+        unichar character = [text characterAtIndex:index];
+        if (index == 8 || index == 13 || index == 18 || index == 23) {
+            if (character != '-') return NO;
+        } else if (!((character >= '0' && character <= '9') ||
+                     (character >= 'a' && character <= 'f'))) return NO;
+    }
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:text];
+    return uuid && [uuid.UUIDString.lowercaseString isEqualToString:text];
+}
+
+static BOOL PXManifestV4Digest(id value) {
+    if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] != 64) return NO;
+    for (NSUInteger index = 0; index < 64; index++) {
+        unichar character = [(NSString *)value characterAtIndex:index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) return NO;
+    }
+    return YES;
+}
+
+static BOOL PXManifestV4RelativePath(id value) {
+    if (!PXManifestValidateRequiredString(value, @"$", NULL)) return NO;
+    NSString *path = value;
+    NSData *bytes = [path dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!bytes || bytes.length == 0 || bytes.length > 4096 ||
+        [path hasPrefix:@"/"] || [path hasSuffix:@"/"] || [path containsString:@"\\"]) return NO;
+    NSArray<NSString *> *components = [path componentsSeparatedByString:@"/"];
+    if (components.count == 0 || components.count > 32) return NO;
+    for (NSString *component in components) {
+        NSData *componentBytes = [component dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+        if (!componentBytes || componentBytes.length == 0 || componentBytes.length > 255 ||
+            [component isEqualToString:@"."] || [component isEqualToString:@".."] ||
+            [component isEqualToString:@".weaponx-backup.lock"] ||
+            [component isEqualToString:@"manifest.plist"] ||
+            [component hasPrefix:@".weaponx-backup-partial-"] ||
+            [component hasPrefix:@".weaponx-artifact-partial-"] ||
+            [component rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) return NO;
+    }
+    return YES;
+}
+
+static NSInteger PXManifestV4KindOrder(NSString *kind) {
+    NSArray *kinds = @[@"applicationData", @"appGroup", @"profileAppData",
+                       @"globalSafari", @"systemGlobal", @"sharedSystemDatabase",
+                       @"preferences", @"keychain"];
+    NSUInteger index = [kinds indexOfObject:kind];
+    return index == NSNotFound ? 0 : (NSInteger)index + 1;
+}
+
+static BOOL PXManifestV4PolicyMatches(NSDictionary *policy,
+                                      unsigned long long size,
+                                      NSInteger *kindOrder) {
+    if (![policy isKindOfClass:[NSDictionary class]] ||
+        policy.count != 4 ||
+        ![[NSSet setWithArray:policy.allKeys] isEqualToSet:
+          [NSSet setWithArray:@[@"kind", @"requirement", @"failureDisposition", @"emptyFilePolicy"]]]) return NO;
+    NSString *kind = policy[@"kind"];
+    NSInteger order = PXManifestV4KindOrder(kind);
+    if (order == 0) return NO;
+    NSString *requirement = policy[@"requirement"];
+    NSString *disposition = policy[@"failureDisposition"];
+    NSString *empty = policy[@"emptyFilePolicy"];
+    BOOL valid = NO;
+    switch (order) {
+        case 1:
+            valid = [requirement isEqualToString:@"required"] &&
+                    [disposition isEqualToString:@"abortBackup"] &&
+                    [empty isEqualToString:@"reject"];
+            break;
+        case 2: case 3: case 4: case 5:
+            valid = [requirement isEqualToString:@"optional"] &&
+                    [disposition isEqualToString:@"warnAndContinue"] &&
+                    [empty isEqualToString:@"reject"];
+            break;
+        case 6:
+            valid = [requirement isEqualToString:@"optional"] &&
+                    [disposition isEqualToString:@"continueWithoutWarning"] &&
+                    [empty isEqualToString:@"allow"];
+            break;
+        case 7: case 8:
+            valid = [requirement isEqualToString:@"optional"] &&
+                    [disposition isEqualToString:@"continueWithoutWarning"] &&
+                    [empty isEqualToString:@"reject"];
+            break;
+    }
+    if (!valid || (size == 0 && ![empty isEqualToString:@"allow"])) return NO;
+    if (kindOrder) *kindOrder = order;
+    return YES;
+}
+
+static BOOL PXManifestV4AddReference(NSMutableSet<NSString *> *references,
+                                     NSDictionary<NSString *, NSNumber *> *kindByName,
+                                     id name,
+                                     NSInteger expectedKind,
+                                     NSString *fieldPath,
+                                     NSError **error) {
+    if (!PXManifestV4RelativePath(name) || !kindByName[name]) {
+        return PXManifestFail(error, PXBackupManifestValidatorErrorInconsistentField,
+                              fieldPath, @"The artifact reference is missing.");
+    }
+    if (kindByName[name].integerValue != expectedKind) {
+        return PXManifestFail(error, PXBackupManifestValidatorErrorInconsistentField,
+                              fieldPath, @"The artifact reference policy is inconsistent.");
+    }
+    if ([references containsObject:name]) {
+        return PXManifestFail(error, PXBackupManifestValidatorErrorDuplicateEntry,
+                              fieldPath, @"The artifact reference is duplicated.");
+    }
+    [references addObject:name];
+    return YES;
+}
+
+static BOOL PXManifestValidateV4(NSDictionary *manifest, NSError **error) {
+    if (error && !*error) {
+        PXManifestFail(error,
+                       PXBackupManifestValidatorErrorInconsistentField,
+                       @"$",
+                       @"The manifest v4 structure is inconsistent.");
+    }
+    NSArray *rootKeys = @[
+        @"manifestVersion", @"schema", @"backupID", @"publication", @"bundleID",
+        @"appName", @"createdAt", @"timestamp", @"iosVersion", @"toolVersion",
+        @"toolBuild", @"profileId", @"backupMode", @"sourceDataContainerPath",
+        @"sourceDataContainerUUID", @"includedOptions", @"excludedOptions",
+        @"artifactCount", @"totalSize", @"archiveChecksum", @"warnings",
+        @"restoreCompatibility", @"data", @"applicationGroups", @"appGroups",
+        @"preferences", @"keychain", @"profileAppData", @"globalSafari",
+        @"systemGlobalLibrary", @"sharedSystemDB", @"artifacts", @"options"
+    ];
+    if (!PXManifestExactKeys(manifest, rootKeys, @"$", error)) return NO;
+    NSDictionary *schema = manifest[@"schema"];
+    NSDictionary *publication = manifest[@"publication"];
+    unsigned long long schemaRevision = 0;
+    if (!PXManifestExactKeys(schema, @[@"identifier", @"revision", @"digestAlgorithm"], @"$.schema", error) ||
+        !PXManifestValidateNonnegativeIntegral(schema[@"revision"],
+                                               @"$.schema.revision",
+                                               &schemaRevision,
+                                               error) ||
+        schemaRevision != 1 ||
+        ![schema[@"identifier"] isEqualToString:@"com.hydra.projectx.backup-manifest"] ||
+        ![schema[@"digestAlgorithm"] isEqualToString:@"sha256"] ||
+        !PXManifestExactKeys(publication, @[@"protocol", @"contentState"], @"$.publication", error) ||
+        ![publication[@"protocol"] isEqualToString:@"atomic-directory-v1"] ||
+        ![publication[@"contentState"] isEqualToString:@"complete"] ||
+        !PXManifestV4CanonicalUUID(manifest[@"backupID"]) ||
+        ![manifest[@"backupMode"] isEqualToString:@"strict"]) {
+        return PXManifestFail(error, PXBackupManifestValidatorErrorInvalidFieldValue,
+                              @"$", @"The manifest v4 schema metadata is invalid.");
+    }
+    if (!PXManifestValidateRequiredString(manifest[@"bundleID"], @"$.bundleID", error) ||
+        !PXManifestValidateOptionalString(manifest[@"appName"], @"$.appName", error) ||
+        ![manifest[@"createdAt"] isKindOfClass:[NSDate class]] ||
+        !PXManifestValidateRequiredString(manifest[@"timestamp"], @"$.timestamp", error) ||
+        !PXManifestValidateOptionalString(manifest[@"iosVersion"], @"$.iosVersion", error) ||
+        !PXManifestValidateOptionalString(manifest[@"toolVersion"], @"$.toolVersion", error) ||
+        !PXManifestValidateOptionalString(manifest[@"toolBuild"], @"$.toolBuild", error) ||
+        !PXManifestValidateOptionalString(manifest[@"profileId"], @"$.profileId", error) ||
+        !PXManifestValidateOptionalString(manifest[@"sourceDataContainerPath"], @"$.sourceDataContainerPath", error) ||
+        !PXManifestValidateOptionalString(manifest[@"sourceDataContainerUUID"], @"$.sourceDataContainerUUID", error) ||
+        !PXManifestValidateStringArray(manifest[@"warnings"], @"$.warnings", NO, NULL, error)) return NO;
+
+    NSDictionary *restore = manifest[@"restoreCompatibility"];
+    NSDictionary *data = manifest[@"data"];
+    NSArray *applicationGroups = manifest[@"applicationGroups"];
+    NSArray *appGroups = manifest[@"appGroups"];
+    NSDictionary *preferences = manifest[@"preferences"];
+    NSDictionary *keychain = manifest[@"keychain"];
+    NSDictionary *profile = manifest[@"profileAppData"];
+    NSDictionary *safari = manifest[@"globalSafari"];
+    NSDictionary *system = manifest[@"systemGlobalLibrary"];
+    NSDictionary *shared = manifest[@"sharedSystemDB"];
+    NSDictionary *options = manifest[@"options"];
+    if (!PXManifestExactKeys(restore, @[@"targetBundleID", @"requiresSameBundleID", @"requiresInstalledAppContainer", @"notes"], @"$.restoreCompatibility", error) ||
+        ![restore[@"targetBundleID"] isEqualToString:manifest[@"bundleID"]] ||
+        !PXManifestValidateBoolean(restore[@"requiresSameBundleID"], @"$.restoreCompatibility.requiresSameBundleID", error) ||
+        !PXManifestValidateBoolean(restore[@"requiresInstalledAppContainer"], @"$.restoreCompatibility.requiresInstalledAppContainer", error) ||
+        !PXManifestValidateStringArray(restore[@"notes"], @"$.restoreCompatibility.notes", NO, NULL, error) ||
+        !PXManifestExactKeys(data, @[@"uuid", @"archive", @"containerPath"], @"$.data", error) ||
+        !PXManifestValidateRequiredString(data[@"uuid"], @"$.data.uuid", error) ||
+        !PXManifestV4RelativePath(data[@"archive"]) ||
+        !PXManifestValidateRequiredString(data[@"containerPath"], @"$.data.containerPath", error) ||
+        !PXManifestValidateStringArray(applicationGroups, @"$.applicationGroups", YES, NULL, error) ||
+        ![appGroups isKindOfClass:[NSArray class]] ||
+        !PXManifestExactKeys(preferences, @[@"included", @"archive"], @"$.preferences", error) ||
+        !PXManifestExactKeys(keychain, @[@"included", @"archive", @"groupsSelected", @"method"], @"$.keychain", error) ||
+        !PXManifestExactKeys(profile, @[@"included", @"archive", @"path"], @"$.profileAppData", error) ||
+        !PXManifestExactKeys(safari, @[@"included", @"archive", @"path"], @"$.globalSafari", error) ||
+        !PXManifestExactKeys(system, @[@"included", @"items"], @"$.systemGlobalLibrary", error) ||
+        !PXManifestExactKeys(shared, @[@"included", @"files"], @"$.sharedSystemDB", error) ||
+        !PXManifestExactKeys(options, @[@"includeAppGroups", @"includePreferences", @"includeKeychain"], @"$.options", error)) return NO;
+    for (NSString *key in @[@"includeAppGroups", @"includePreferences", @"includeKeychain"]) {
+        if (!PXManifestValidateBoolean(options[key], PXManifestFieldPath(@"$.options", key), error)) return NO;
+    }
+
+    NSArray *artifacts = manifest[@"artifacts"];
+    if (![artifacts isKindOfClass:[NSArray class]] || artifacts.count < 1 || artifacts.count > 4096) {
+        return PXManifestFail(error, PXBackupManifestValidatorErrorInvalidFieldValue,
+                              @"$.artifacts", @"The artifacts section is invalid.");
+    }
+    NSMutableDictionary<NSString *, NSNumber *> *kindByName = [NSMutableDictionary dictionary];
+    NSMutableSet *paths = [NSMutableSet set];
+    unsigned long long actualTotal = 0;
+    NSInteger previousKind = 0;
+    NSUInteger requiredCount = 0, dataCount = 0, profileCount = 0, safariCount = 0, prefsCount = 0, keychainCount = 0;
+    NSString *dataChecksum = nil;
+    for (NSUInteger index = 0; index < artifacts.count; index++) {
+        NSDictionary *artifact = artifacts[index];
+        NSString *entryPath = PXManifestIndexedPath(@"$.artifacts", index);
+        if (!PXManifestExactKeys(artifact, @[@"name", @"path", @"size", @"sha256", @"policy"], entryPath, error) ||
+            !PXManifestV4RelativePath(artifact[@"name"]) ||
+            ![artifact[@"path"] isEqualToString:artifact[@"name"]] ||
+            !PXManifestV4Digest(artifact[@"sha256"]) || kindByName[artifact[@"name"]] ||
+            [paths containsObject:artifact[@"path"]]) return NO;
+        unsigned long long size = 0;
+        if (!PXManifestValidateNonnegativeIntegral(artifact[@"size"], PXManifestFieldPath(entryPath, @"size"), &size, error)) return NO;
+        NSInteger kind = 0;
+        if (!PXManifestV4PolicyMatches(artifact[@"policy"], size, &kind) || kind < previousKind) {
+            return PXManifestFail(error, PXBackupManifestValidatorErrorInconsistentField,
+                                  PXManifestFieldPath(entryPath, @"policy"), @"The artifact policy or order is invalid.");
+        }
+        previousKind = kind;
+        if (actualTotal > ULLONG_MAX - size) return PXManifestFail(error, PXBackupManifestValidatorErrorInvalidFieldValue, @"$.totalSize", @"The total artifact size overflowed.");
+        actualTotal += size;
+        NSString *requirement = artifact[@"policy"][@"requirement"];
+        if ([requirement isEqualToString:@"required"]) requiredCount += 1;
+        if (kind == 1) { dataCount += 1; dataChecksum = artifact[@"sha256"]; if (index != 0) return NO; }
+        if (kind == 3) profileCount += 1; if (kind == 4) safariCount += 1;
+        if (kind == 7) prefsCount += 1; if (kind == 8) keychainCount += 1;
+        kindByName[artifact[@"name"]] = @(kind); [paths addObject:artifact[@"path"]];
+    }
+    unsigned long long declaredCount = 0, declaredTotal = 0;
+    if (dataCount != 1 || requiredCount != 1 || profileCount > 1 || safariCount > 1 || prefsCount > 1 || keychainCount > 1 ||
+        !PXManifestValidateNonnegativeIntegral(manifest[@"artifactCount"], @"$.artifactCount", &declaredCount, error) ||
+        declaredCount != artifacts.count ||
+        !PXManifestValidateNonnegativeIntegral(manifest[@"totalSize"], @"$.totalSize", &declaredTotal, error) ||
+        declaredTotal != actualTotal || ![manifest[@"archiveChecksum"] isEqualToString:dataChecksum]) return NO;
+
+    NSMutableSet *references = [NSMutableSet set];
+    if (!PXManifestV4AddReference(references, kindByName, data[@"archive"], 1, @"$.data.archive", error)) return NO;
+    NSSet *applicationGroupSet = [NSSet setWithArray:applicationGroups];
+    NSMutableSet *groupIDs = [NSMutableSet set];
+    for (NSUInteger index = 0; index < appGroups.count; index++) {
+        NSDictionary *item = appGroups[index];
+        NSString *itemPath = PXManifestIndexedPath(@"$.appGroups", index);
+        if (!PXManifestExactKeys(item, @[@"groupID", @"uuid", @"archive"], itemPath, error) ||
+            !PXManifestValidateRequiredString(item[@"groupID"], PXManifestFieldPath(itemPath, @"groupID"), error) ||
+            !PXManifestValidateRequiredString(item[@"uuid"], PXManifestFieldPath(itemPath, @"uuid"), error) ||
+            ![applicationGroupSet containsObject:item[@"groupID"]] || [groupIDs containsObject:item[@"groupID"]] ||
+            !PXManifestV4AddReference(references, kindByName, item[@"archive"], 2, PXManifestFieldPath(itemPath, @"archive"), error)) return NO;
+        [groupIDs addObject:item[@"groupID"]];
+    }
+    if (![options[@"includeAppGroups"] boolValue] && appGroups.count != 0) return NO;
+    BOOL prefsIncluded = [preferences[@"included"] boolValue];
+    if (!PXManifestValidateBoolean(preferences[@"included"], @"$.preferences.included", error) ||
+        !PXManifestValidateOptionalString(preferences[@"archive"], @"$.preferences.archive", error) ||
+        (prefsIncluded && !PXManifestV4AddReference(references, kindByName, preferences[@"archive"], 7, @"$.preferences.archive", error)) ||
+        (!prefsIncluded && ![preferences[@"archive"] isEqualToString:@""]) ||
+        (![options[@"includePreferences"] boolValue] && prefsIncluded)) return NO;
+    BOOL keychainIncluded = [keychain[@"included"] boolValue];
+    if (!PXManifestValidateBoolean(keychain[@"included"], @"$.keychain.included", error) ||
+        !PXManifestValidateOptionalString(keychain[@"archive"], @"$.keychain.archive", error) ||
+        !PXManifestValidateOptionalString(keychain[@"method"], @"$.keychain.method", error) ||
+        !PXManifestValidateStringArray(keychain[@"groupsSelected"], @"$.keychain.groupsSelected", YES, NULL, error) ||
+        (keychainIncluded && (!PXManifestStringHasNonWhitespace(keychain[@"method"]) ||
+         !PXManifestV4AddReference(references, kindByName, keychain[@"archive"], 8, @"$.keychain.archive", error))) ||
+        (!keychainIncluded && (![(NSString *)keychain[@"archive"] isEqualToString:@""] || ![(NSString *)keychain[@"method"] isEqualToString:@""])) ||
+        (![options[@"includeKeychain"] boolValue] && keychainIncluded)) return NO;
+    NSArray *singleSections = @[profile, safari]; NSArray *singleKinds = @[@3, @4]; NSArray *singlePaths = @[@"$.profileAppData", @"$.globalSafari"];
+    for (NSUInteger index = 0; index < 2; index++) {
+        NSDictionary *section = singleSections[index]; BOOL included = [section[@"included"] boolValue]; NSString *path = singlePaths[index];
+        if (!PXManifestValidateBoolean(section[@"included"], PXManifestFieldPath(path, @"included"), error) ||
+            !PXManifestValidateOptionalString(section[@"archive"], PXManifestFieldPath(path, @"archive"), error) ||
+            !PXManifestValidateOptionalString(section[@"path"], PXManifestFieldPath(path, @"path"), error) ||
+            (included && (!PXManifestStringHasNonWhitespace(section[@"path"]) || !PXManifestV4AddReference(references, kindByName, section[@"archive"], [singleKinds[index] integerValue], PXManifestFieldPath(path, @"archive"), error))) ||
+            (!included && ![section[@"archive"] isEqualToString:@""])) return NO;
+    }
+    NSArray *systemItems = system[@"items"];
+    if (!PXManifestValidateBoolean(system[@"included"], @"$.systemGlobalLibrary.included", error) || ![systemItems isKindOfClass:[NSArray class]] || ([system[@"included"] boolValue] != (systemItems.count > 0))) return NO;
+    NSMutableSet *subdirs = [NSMutableSet set];
+    for (NSUInteger index = 0; index < systemItems.count; index++) {
+        NSDictionary *item = systemItems[index]; NSString *path = PXManifestIndexedPath(@"$.systemGlobalLibrary.items", index);
+        if (!PXManifestExactKeys(item, @[@"subdir", @"archive"], path, error) || !PXManifestValidateRequiredString(item[@"subdir"], PXManifestFieldPath(path, @"subdir"), error) || [subdirs containsObject:item[@"subdir"]] || !PXManifestV4AddReference(references, kindByName, item[@"archive"], 5, PXManifestFieldPath(path, @"archive"), error)) return NO;
+        [subdirs addObject:item[@"subdir"]];
+    }
+    NSArray *sharedFiles = shared[@"files"];
+    if (!PXManifestValidateBoolean(shared[@"included"], @"$.sharedSystemDB.included", error) || ![sharedFiles isKindOfClass:[NSArray class]] || ([shared[@"included"] boolValue] != (sharedFiles.count > 0))) return NO;
+    NSMutableSet *libraryRels = [NSMutableSet set];
+    for (NSUInteger index = 0; index < sharedFiles.count; index++) {
+        NSDictionary *item = sharedFiles[index]; NSString *path = PXManifestIndexedPath(@"$.sharedSystemDB.files", index);
+        if (!PXManifestExactKeys(item, @[@"libraryRel", @"archive"], path, error) || !PXManifestValidateRequiredString(item[@"libraryRel"], PXManifestFieldPath(path, @"libraryRel"), error) || [libraryRels containsObject:item[@"libraryRel"]] || !PXManifestV4AddReference(references, kindByName, item[@"archive"], 6, PXManifestFieldPath(path, @"archive"), error)) return NO;
+        [libraryRels addObject:item[@"libraryRel"]];
+    }
+    if (references.count != artifacts.count) return PXManifestFail(error, PXBackupManifestValidatorErrorInconsistentField, @"$.artifacts", @"The artifact reference coverage is incomplete.");
+    NSMutableArray *expectedIncluded = [NSMutableArray arrayWithObject:@"DataContainer"];
+    NSMutableArray *expectedExcluded = [NSMutableArray array];
+    if (appGroups.count) [expectedIncluded addObject:@"AppGroups"]; else [expectedExcluded addObject:@"AppGroups"];
+    if (prefsIncluded) [expectedIncluded addObject:@"GlobalPreferences"]; else [expectedExcluded addObject:@"GlobalPreferences"];
+    if (keychainIncluded) [expectedIncluded addObject:@"Keychain"]; else [expectedExcluded addObject:@"Keychain"];
+    if (![manifest[@"includedOptions"] isEqual:expectedIncluded] || ![manifest[@"excludedOptions"] isEqual:expectedExcluded]) return NO;
+    if (error) *error = nil;
+    return YES;
+}
+
 @implementation PXBackupManifestValidator
 
 + (BOOL)validateManifestObject:(nullable id)object
@@ -899,6 +1338,28 @@ static BOOL PXManifestValidateSharedSystemDB(id value, NSError **error) {
                               @"The manifest root must be a dictionary.");
     }
 
+    NSDictionary *manifest = (NSDictionary *)object;
+    unsigned long long versionMagnitude = 0;
+    BOOL hasPositiveVersion =
+        PXManifestPeekPositiveVersion(manifest[@"manifestVersion"],
+                                      &versionMagnitude);
+    if (hasPositiveVersion && versionMagnitude == 4) {
+        NSUInteger visitedV4 = 0;
+        NSUInteger dictionaryKeysV4 = 0;
+        NSUInteger arrayItemsV4 = 0;
+        NSHashTable *activeV4 =
+            [NSHashTable hashTableWithOptions:NSHashTableObjectPointerPersonality];
+        if (!PXManifestValidateGraphObjectV4(object,
+                                             1,
+                                             &visitedV4,
+                                             &dictionaryKeysV4,
+                                             &arrayItemsV4,
+                                             activeV4,
+                                             error)) {
+            return NO;
+        }
+        return PXManifestValidateV4(manifest, error);
+    }
     NSUInteger visited = 0;
     NSHashTable *activeContainers =
         [NSHashTable hashTableWithOptions:NSHashTableObjectPointerPersonality];
@@ -909,8 +1370,9 @@ static BOOL PXManifestValidateSharedSystemDB(id value, NSError **error) {
                                        error)) {
         return NO;
     }
-
-    NSDictionary *manifest = (NSDictionary *)object;
+    if (hasPositiveVersion && versionMagnitude != 2 && versionMagnitude != 3) {
+        return YES;
+    }
     NSArray<NSString *> *requiredRootKeys = @[
         @"manifestVersion",
         @"bundleID",
