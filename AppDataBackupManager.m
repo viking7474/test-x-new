@@ -12,6 +12,7 @@
 #import "PXBackupManifestValidator.h"
 #import "PXBackupArtifactVerifier.h"
 #import "PXBackupArchiveValidator.h"
+#import "PXBackupBundleLock.h"
 #import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
@@ -1543,6 +1544,26 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         CommandRunner *runner = [CommandRunner shared];
 
         NSString *profileId = [self _activeProfileId];
+        NSString *backupRoot = [self _backupRoot];
+        NSError *bundleLockError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupBundleLock *bundleLock =
+            [PXBackupBundleLock acquireLockAtBackupRoot:backupRoot
+                                       bundleIdentifier:bundleID
+                                                  error:&bundleLockError];
+        if (!bundleLock) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, bundleLockError);
+            });
+            return;
+        }
+        NSError *initialBundleLockValidationError = nil;
+        if (![bundleLock validateOwnershipWithError:&initialBundleLockValidationError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, initialBundleLockValidationError);
+            });
+            return;
+        }
 
         // Prefer jailbreak/Procursus tar first (often has xattrs/acl support); /usr/bin/tar on iOS may not.
         NSString *tarPath = [runner firstExistingPath:@[
@@ -1612,7 +1633,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
 
         NSString *timestamp = [self _timestampString];
-        NSString *backupRoot = [self _backupRoot];
+        NSError *preWorkspaceBundleLockValidationError = nil;
+        if (![bundleLock validateOwnershipWithError:&preWorkspaceBundleLockValidationError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, preWorkspaceBundleLockValidationError);
+            });
+            return;
+        }
         NSError *workspaceError = nil;
         __attribute__((objc_precise_lifetime))
         PXBackupPublicationWorkspace *publicationWorkspace =
@@ -2127,6 +2154,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
+        NSError *preManifestBundleLockValidationError = nil;
+        if (![bundleLock validateOwnershipWithError:&preManifestBundleLockValidationError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, preManifestBundleLockValidationError);
+            });
+            return;
+        }
         NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
         if (![manifest writeToFile:manifestPath atomically:YES]) {
             [warnings addObject:@"Failed to write manifest"];
@@ -2138,6 +2172,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![publicationWorkspace validateIdentityWithError:&finalWorkspaceIdentityError]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(nil, finalWorkspaceIdentityError);
+            });
+            return;
+        }
+        NSError *finalBundleLockValidationError = nil;
+        if (![bundleLock validateOwnershipWithError:&finalBundleLockValidationError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, finalBundleLockValidationError);
             });
             return;
         }
