@@ -18,6 +18,8 @@
 #import "PXBackupManifestWriter.h"
 #import "PXBackupDirectoryPublisher.h"
 #import "PXBackupFailureCleanup.h"
+#import "PXBackupDirectoryDiscovery.h"
+#import "PXBackupStaleWorkspaceCleanup.h"
 #import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
@@ -1529,57 +1531,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 }
 
 - (NSArray<NSString *> *)listBackupDirectoriesForBundleID:(NSString *)bundleID {
-    if (!bundleID.length) {
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
         return @[];
     }
-    NSString *dir = [[self _backupRoot] stringByAppendingPathComponent:bundleID];
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
-
-    BOOL isDir = NO;
-    if ([fm fileExistsAtPath:dir isDirectory:&isDir] && isDir) {
-        NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *item in items) {
-            if ([item hasPrefix:PXBackupPublicationPartialDirectoryPrefix]) {
-                continue;
-            }
-            NSString *path = [dir stringByAppendingPathComponent:item];
-            BOOL itemIsDir = NO;
-            if ([fm fileExistsAtPath:path isDirectory:&itemIsDir] && itemIsDir) {
-                NSString *manifest = [path stringByAppendingPathComponent:@"manifest.plist"];
-                if ([fm fileExistsAtPath:manifest]) {
-                    [dirs addObject:path];
-                }
-            }
-        }
+    NSString *currentRoot = [self _backupRoot];
+    NSString *legacyRoot = [PXWeaponXBasePath()
+        stringByAppendingPathComponent:@"Backups"];
+    NSMutableArray<NSString *> *roots = [NSMutableArray arrayWithObject:currentRoot];
+    if (![legacyRoot isEqualToString:currentRoot]) {
+        [roots addObject:legacyRoot];
     }
-
-    // Also include legacy global backups if present (so users can migrate smoothly)
-    NSString *legacyDir = [[PXWeaponXBasePath() stringByAppendingPathComponent:@"Backups"] stringByAppendingPathComponent:bundleID];
-    BOOL legacyIsDir = NO;
-    if (![legacyDir isEqualToString:dir] && [fm fileExistsAtPath:legacyDir isDirectory:&legacyIsDir] && legacyIsDir) {
-        NSArray<NSString *> *legacyItems = [fm contentsOfDirectoryAtPath:legacyDir error:nil];
-        for (NSString *item in legacyItems) {
-            if ([item hasPrefix:PXBackupPublicationPartialDirectoryPrefix]) {
-                continue;
-            }
-            NSString *path = [legacyDir stringByAppendingPathComponent:item];
-            BOOL itemIsDir = NO;
-            if ([fm fileExistsAtPath:path isDirectory:&itemIsDir] && itemIsDir) {
-                NSString *manifest = [path stringByAppendingPathComponent:@"manifest.plist"];
-                if ([fm fileExistsAtPath:manifest]) {
-                    [dirs addObject:path];
-                }
-            }
-        }
-    }
-
-    [dirs sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-        // Sort newest-first based on the last path component (timestamp folder convention).
-        return [b.lastPathComponent compare:a.lastPathComponent];
-    }];
-    return dirs;
+    NSError *discoveryError = nil;
+    NSArray<NSString *> *directories =
+        [PXBackupDirectoryDiscovery
+            discoverBackupDirectoriesAtBackupRoots:roots
+                                   bundleIdentifier:bundleID
+                                              error:&discoveryError];
+    (void)discoveryError;
+    return directories ?: @[];
 }
 
 - (NSDictionary *)readManifestAtBackupDirectory:(NSString *)backupDir
@@ -1656,6 +1625,41 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         if (![bundleLock validateOwnershipWithError:&initialBundleLockValidationError]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(nil, initialBundleLockValidationError);
+            });
+            return;
+        }
+        NSError *staleCleanupFactoryError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupStaleWorkspaceCleanup *staleWorkspaceCleanup =
+            [PXBackupStaleWorkspaceCleanup cleanupForBundleLock:bundleLock
+                                                          error:&staleCleanupFactoryError];
+        if (!staleWorkspaceCleanup) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, staleCleanupFactoryError);
+            });
+            return;
+        }
+        NSError *initialStaleCleanupIdentityError = nil;
+        if (![staleWorkspaceCleanup
+                validateIdentityWithError:&initialStaleCleanupIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, initialStaleCleanupIdentityError);
+            });
+            return;
+        }
+        NSError *staleCleanupExecutionError = nil;
+        if (![staleWorkspaceCleanup
+                removeStaleWorkspacesWithError:&staleCleanupExecutionError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, staleCleanupExecutionError);
+            });
+            return;
+        }
+        NSError *finalStaleCleanupIdentityError = nil;
+        if (![staleWorkspaceCleanup
+                validateIdentityWithError:&finalStaleCleanupIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, finalStaleCleanupIdentityError);
             });
             return;
         }
