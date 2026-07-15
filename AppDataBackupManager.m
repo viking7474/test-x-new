@@ -16,6 +16,7 @@
 #import "PXBackupBundleLock.h"
 #import "PXBackupArtifactWriter.h"
 #import "PXBackupManifestWriter.h"
+#import "PXBackupDirectoryPublisher.h"
 #import "PXBackupPublicationWorkspace.h"
 #import "PXRestorePlan.h"
 #import "PXAppGroupRestoreTargetPlan.h"
@@ -1849,6 +1850,27 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             keychainArtifactPolicy,
         ];
         NSString *backupIdentifier = [NSUUID UUID].UUIDString.lowercaseString;
+        NSError *directoryPublisherError = nil;
+        __attribute__((objc_precise_lifetime))
+        PXBackupDirectoryPublisher *directoryPublisher =
+            [PXBackupDirectoryPublisher publisherForWorkspace:publicationWorkspace
+                                                   bundleLock:bundleLock
+                                             backupIdentifier:backupIdentifier
+                                                    timestamp:timestamp
+                                                        error:&directoryPublisherError];
+        if (!directoryPublisher) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, directoryPublisherError);
+            });
+            return;
+        }
+        NSError *initialDirectoryPublisherIdentityError = nil;
+        if (![directoryPublisher validateIdentityWithError:&initialDirectoryPublisherIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, initialDirectoryPublisherIdentityError);
+            });
+            return;
+        }
         NSMutableArray<PXVerifiedBackupArtifact *> *groupArtifactRecords =
             [NSMutableArray array];
         NSMutableArray<PXVerifiedBackupArtifact *> *systemGlobalArtifactRecords =
@@ -2612,9 +2634,32 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
+        NSError *prePublicationDirectoryPublisherIdentityError = nil;
+        if (![directoryPublisher validateIdentityWithError:&prePublicationDirectoryPublisherIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, prePublicationDirectoryPublisherIdentityError);
+            });
+            return;
+        }
+        NSError *directoryPublicationError = nil;
+        if (![directoryPublisher publishWithArtifactWriter:artifactWriter
+                                            manifestWriter:manifestWriter
+                                                     error:&directoryPublicationError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, directoryPublicationError);
+            });
+            return;
+        }
+        NSError *postPublicationDirectoryPublisherIdentityError = nil;
+        if (![directoryPublisher validateIdentityWithError:&postPublicationDirectoryPublisherIdentityError]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, postPublicationDirectoryPublisherIdentityError);
+            });
+            return;
+        }
         PXBackupResult *out = [[PXBackupResult alloc] init];
-        out.backupDirectory = publicationWorkspace.workspacePath;
-        out.manifestPath = manifestWriter.manifestPath;
+        out.backupDirectory = directoryPublisher.publishedDirectoryPath;
+        out.manifestPath = directoryPublisher.publishedManifestPath;
         out.warnings = warnings;
 
         dispatch_async(dispatch_get_main_queue(), ^{
