@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "PXBackupArtifactPolicy.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -26,6 +27,7 @@ typedef NS_ERROR_ENUM(PXBackupArtifactWriterErrorDomain,
     PXBackupArtifactWriterErrorDurabilityFailed = 14,
     PXBackupArtifactWriterErrorFinalizationFailed = 15,
     PXBackupArtifactWriterErrorCleanupFailed = 16,
+    PXBackupArtifactWriterErrorPolicyRejected = 17,
 };
 
 typedef BOOL (^PXBackupArtifactProducer)(NSString *temporaryOutputPath);
@@ -37,6 +39,7 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, copy, readonly) NSString *filePath;
 @property (nonatomic, readonly) unsigned long long size;
 @property (nonatomic, copy, readonly) NSString *sha256;
+@property (nonatomic, strong, readonly) PXBackupArtifactPolicy *policy;
 @property (nonatomic, copy, readonly) NSDictionary<NSString *, id> *manifestRepresentation;
 
 - (instancetype)init NS_UNAVAILABLE;
@@ -54,6 +57,7 @@ __attribute__((objc_subclassing_restricted))
                                       error:(NSError **)error;
 
 - (nullable PXVerifiedBackupArtifact *)writeArtifactAtRelativePath:(NSString *)relativePath
+                                                            policy:(PXBackupArtifactPolicy *)policy
                                                           producer:(PXBackupArtifactProducer)producer
                                                              error:(NSError **)error;
 

@@ -585,6 +585,194 @@ static NSArray<NSString *> *PXExcludedOptionNames(PXBackupOptions options,
     return out;
 }
 
+static NSError *PXBackupArtifactPolicyManagerError(NSString *description) {
+    return [NSError errorWithDomain:PXBackupErrorDomain
+                               code:106
+                           userInfo:@{
+                               NSLocalizedDescriptionKey: description,
+                           }];
+}
+
+static BOOL PXBackupArtifactPolicyMatchesCanonicalKind(
+    PXBackupArtifactPolicy *policy,
+    PXBackupArtifactKind expectedKind) {
+    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]] ||
+        policy.kind != expectedKind) {
+        return NO;
+    }
+    switch (expectedKind) {
+        case PXBackupArtifactKindApplicationData:
+            return policy.requirement == PXBackupArtifactRequirementRequired &&
+                   policy.failureDisposition ==
+                       PXBackupArtifactFailureDispositionAbortBackup &&
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject;
+        case PXBackupArtifactKindAppGroup:
+        case PXBackupArtifactKindProfileAppData:
+        case PXBackupArtifactKindGlobalSafari:
+        case PXBackupArtifactKindSystemGlobal:
+            return policy.requirement == PXBackupArtifactRequirementOptional &&
+                   policy.failureDisposition ==
+                       PXBackupArtifactFailureDispositionWarnAndContinue &&
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject;
+        case PXBackupArtifactKindSharedSystemDatabase:
+            return policy.requirement == PXBackupArtifactRequirementOptional &&
+                   policy.failureDisposition ==
+                       PXBackupArtifactFailureDispositionContinueWithoutWarning &&
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyAllow;
+        case PXBackupArtifactKindPreferences:
+        case PXBackupArtifactKindKeychain:
+            return policy.requirement == PXBackupArtifactRequirementOptional &&
+                   policy.failureDisposition ==
+                       PXBackupArtifactFailureDispositionContinueWithoutWarning &&
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject;
+    }
+    return NO;
+}
+
+static BOOL PXBackupApplyArtifactFailurePolicy(
+    PXBackupArtifactPolicy *policy,
+    NSMutableArray<NSString *> *warnings,
+    NSString * _Nullable warning,
+    NSError * _Nullable fatalError,
+    NSError **fatalErrorOut) {
+    if (fatalErrorOut) {
+        *fatalErrorOut = nil;
+    }
+    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]]) {
+        if (fatalErrorOut) {
+            *fatalErrorOut = PXBackupArtifactPolicyManagerError(
+                @"Backup artifact policy invariant failed");
+        }
+        return NO;
+    }
+    switch (policy.failureDisposition) {
+        case PXBackupArtifactFailureDispositionAbortBackup:
+            if (![fatalError isKindOfClass:[NSError class]] || warning != nil) {
+                if (fatalErrorOut) {
+                    *fatalErrorOut = PXBackupArtifactPolicyManagerError(
+                        @"Backup artifact policy invariant failed");
+                }
+                return NO;
+            }
+            if (fatalErrorOut) {
+                *fatalErrorOut = fatalError;
+            }
+            return NO;
+        case PXBackupArtifactFailureDispositionWarnAndContinue:
+            if (![warnings isKindOfClass:[NSMutableArray class]] ||
+                ![warning isKindOfClass:[NSString class]] ||
+                warning.length == 0 || fatalError != nil) {
+                if (fatalErrorOut) {
+                    *fatalErrorOut = PXBackupArtifactPolicyManagerError(
+                        @"Backup artifact policy invariant failed");
+                }
+                return NO;
+            }
+            [warnings addObject:[warning copy]];
+            return YES;
+        case PXBackupArtifactFailureDispositionContinueWithoutWarning:
+            if (warning != nil || fatalError != nil) {
+                if (fatalErrorOut) {
+                    *fatalErrorOut = PXBackupArtifactPolicyManagerError(
+                        @"Backup artifact policy invariant failed");
+                }
+                return NO;
+            }
+            return YES;
+    }
+    if (fatalErrorOut) {
+        *fatalErrorOut = PXBackupArtifactPolicyManagerError(
+            @"Backup artifact policy invariant failed");
+    }
+    return NO;
+}
+
+static BOOL PXBackupAuditVerifiedArtifactPolicies(
+    NSArray<PXVerifiedBackupArtifact *> *verifiedArtifactRecords,
+    NSArray<PXBackupArtifactPolicy *> *canonicalArtifactPolicies,
+    NSUInteger writerArtifactCount) {
+    if (![verifiedArtifactRecords isKindOfClass:[NSArray class]] ||
+        ![canonicalArtifactPolicies isKindOfClass:[NSArray class]] ||
+        canonicalArtifactPolicies.count != 8 ||
+        verifiedArtifactRecords.count < 1 ||
+        verifiedArtifactRecords.count > 4096 ||
+        writerArtifactCount != verifiedArtifactRecords.count) {
+        return NO;
+    }
+    for (NSUInteger index = 0; index < canonicalArtifactPolicies.count; index++) {
+        PXBackupArtifactKind expectedKind =
+            (PXBackupArtifactKind)(PXBackupArtifactKindApplicationData + index);
+        if (!PXBackupArtifactPolicyMatchesCanonicalKind(
+                canonicalArtifactPolicies[index], expectedKind)) {
+            return NO;
+        }
+    }
+
+    NSUInteger applicationDataCount = 0;
+    NSUInteger requiredCount = 0;
+    NSUInteger profileCount = 0;
+    NSUInteger safariCount = 0;
+    NSUInteger preferencesCount = 0;
+    NSUInteger keychainCount = 0;
+    PXBackupArtifactKind previousKind = 0;
+
+    for (id value in verifiedArtifactRecords) {
+        if (![value isMemberOfClass:[PXVerifiedBackupArtifact class]]) {
+            return NO;
+        }
+        PXVerifiedBackupArtifact *record = value;
+        PXBackupArtifactPolicy *policy = record.policy;
+        if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]] ||
+            policy.kind < PXBackupArtifactKindApplicationData ||
+            policy.kind > PXBackupArtifactKindKeychain) {
+            return NO;
+        }
+        PXBackupArtifactPolicy *canonicalPolicy =
+            canonicalArtifactPolicies[(NSUInteger)policy.kind - 1];
+        if (policy != canonicalPolicy ||
+            ![policy isEqual:canonicalPolicy] ||
+            ![policy acceptsFileSize:record.size] ||
+            policy.kind < previousKind) {
+            return NO;
+        }
+        previousKind = policy.kind;
+        if (policy.requirement == PXBackupArtifactRequirementRequired) {
+            requiredCount += 1;
+        }
+        if (policy.kind == PXBackupArtifactKindApplicationData) {
+            applicationDataCount += 1;
+        } else if (policy.requirement != PXBackupArtifactRequirementOptional) {
+            return NO;
+        }
+        switch (policy.kind) {
+            case PXBackupArtifactKindProfileAppData:
+                profileCount += 1;
+                break;
+            case PXBackupArtifactKindGlobalSafari:
+                safariCount += 1;
+                break;
+            case PXBackupArtifactKindPreferences:
+                preferencesCount += 1;
+                break;
+            case PXBackupArtifactKindKeychain:
+                keychainCount += 1;
+                break;
+            default:
+                break;
+        }
+    }
+
+    PXVerifiedBackupArtifact *firstRecord = verifiedArtifactRecords.firstObject;
+    return applicationDataCount == 1 &&
+           requiredCount == 1 &&
+           firstRecord.policy.kind == PXBackupArtifactKindApplicationData &&
+           firstRecord.policy.requirement == PXBackupArtifactRequirementRequired &&
+           profileCount <= 1 &&
+           safariCount <= 1 &&
+           preferencesCount <= 1 &&
+           keychainCount <= 1;
+}
+
 static BOOL PXContainerUUIDMatchesBundleID(NSFileManager *fm, NSString *baseDir, NSString *uuid, NSString *bundleID) {
     if (!baseDir.length || !uuid.length || !bundleID.length) return NO;
     NSString *containerPath = [baseDir stringByAppendingPathComponent:uuid];
@@ -1598,6 +1786,66 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             });
             return;
         }
+        PXBackupArtifactPolicy *applicationDataArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindApplicationData];
+        PXBackupArtifactPolicy *appGroupArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindAppGroup];
+        PXBackupArtifactPolicy *profileAppDataArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindProfileAppData];
+        PXBackupArtifactPolicy *globalSafariArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindGlobalSafari];
+        PXBackupArtifactPolicy *systemGlobalArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindSystemGlobal];
+        PXBackupArtifactPolicy *sharedSystemDatabaseArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindSharedSystemDatabase];
+        PXBackupArtifactPolicy *preferencesArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindPreferences];
+        PXBackupArtifactPolicy *keychainArtifactPolicy =
+            [PXBackupArtifactPolicy policyForKind:PXBackupArtifactKindKeychain];
+
+        BOOL policyConstructionValid =
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                applicationDataArtifactPolicy,
+                PXBackupArtifactKindApplicationData) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                appGroupArtifactPolicy,
+                PXBackupArtifactKindAppGroup) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                profileAppDataArtifactPolicy,
+                PXBackupArtifactKindProfileAppData) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                globalSafariArtifactPolicy,
+                PXBackupArtifactKindGlobalSafari) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                systemGlobalArtifactPolicy,
+                PXBackupArtifactKindSystemGlobal) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                sharedSystemDatabaseArtifactPolicy,
+                PXBackupArtifactKindSharedSystemDatabase) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                preferencesArtifactPolicy,
+                PXBackupArtifactKindPreferences) &&
+            PXBackupArtifactPolicyMatchesCanonicalKind(
+                keychainArtifactPolicy,
+                PXBackupArtifactKindKeychain);
+        if (!policyConstructionValid) {
+            NSError *err = PXBackupArtifactPolicyManagerError(
+                @"Backup artifact policy could not be constructed");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, err);
+            });
+            return;
+        }
+        NSArray<PXBackupArtifactPolicy *> *canonicalArtifactPolicies = @[
+            applicationDataArtifactPolicy,
+            appGroupArtifactPolicy,
+            profileAppDataArtifactPolicy,
+            globalSafariArtifactPolicy,
+            systemGlobalArtifactPolicy,
+            sharedSystemDatabaseArtifactPolicy,
+            preferencesArtifactPolicy,
+            keychainArtifactPolicy,
+        ];
         NSMutableArray<PXVerifiedBackupArtifact *> *groupArtifactRecords =
             [NSMutableArray array];
         NSMutableArray<PXVerifiedBackupArtifact *> *systemGlobalArtifactRecords =
@@ -1673,6 +1921,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSError *dataArtifactError = nil;
         PXVerifiedBackupArtifact *dataArtifactRecord =
             [artifactWriter writeArtifactAtRelativePath:@"data.tar.gz"
+                                                 policy:applicationDataArtifactPolicy
                                                producer:^BOOL(NSString *temporaryOutputPath) {
                 dataTarResult = [self _tarCreate:tarPath
                                          fromDir:dataContainerPath
@@ -1692,7 +1941,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:105
                                            userInfo:@{NSLocalizedDescriptionKey: msg}];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, err); });
+            NSError *fatalPolicyError = nil;
+            BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                applicationDataArtifactPolicy,
+                warnings,
+                nil,
+                err,
+                &fatalPolicyError);
+            if (!shouldContinue) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (completion) completion(nil, fatalPolicyError ?: err);
+                });
+                return;
+            }
+            NSError *invariantError = PXBackupArtifactPolicyManagerError(
+                @"Backup artifact policy invariant failed");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, invariantError);
+            });
             return;
         }
         NSString *dataArchivePath = dataArtifactRecord.filePath;
@@ -1738,6 +2004,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *groupArtifactError = nil;
             PXVerifiedBackupArtifact *groupArtifact =
                 [artifactWriter writeArtifactAtRelativePath:relativeArchivePath
+                                                     policy:appGroupArtifactPolicy
                                                    producer:^BOOL(NSString *temporaryOutputPath) {
                     groupTarResult = [self _tarCreate:tarPath
                                               fromDir:info.path
@@ -1746,7 +2013,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                                                       error:&groupArtifactError];
             if (!groupArtifact) {
-                [warnings addObject:[NSString stringWithFormat:@"Failed to archive group %@ (%@)", info.groupID, info.uuid]];
+                NSError *fatalPolicyError = nil;
+                BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                    appGroupArtifactPolicy,
+                    warnings,
+                    [NSString stringWithFormat:@"Failed to archive group %@ (%@)", info.groupID, info.uuid],
+                    nil,
+                    &fatalPolicyError);
+                if (!shouldContinue) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(nil, fatalPolicyError);
+                    });
+                    return;
+                }
                 continue;
             }
             [groupArtifactRecords addObject:groupArtifact];
@@ -1767,6 +2046,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *profileArtifactError = nil;
                 profileArtifactRecord =
                     [artifactWriter writeArtifactAtRelativePath:@"profile_appdata.tar.gz"
+                                                         policy:profileAppDataArtifactPolicy
                                                        producer:^BOOL(NSString *temporaryOutputPath) {
                         profileTarResult = [self _tarCreate:tarPath
                                                    fromDir:profileAppDataPath
@@ -1775,7 +2055,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     }
                                                           error:&profileArtifactError];
                 if (!profileArtifactRecord) {
-                    [warnings addObject:@"Failed to archive profile appdata; continuing" ];
+                    NSError *fatalPolicyError = nil;
+                    BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                        profileAppDataArtifactPolicy,
+                        warnings,
+                        @"Failed to archive profile appdata; continuing",
+                        nil,
+                        &fatalPolicyError);
+                    if (!shouldContinue) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (completion) completion(nil, fatalPolicyError);
+                        });
+                        return;
+                    }
                 } else {
                     profileAppDataArchivePath = profileArtifactRecord.filePath;
                 }
@@ -1794,6 +2086,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     NSError *safariArtifactError = nil;
                     globalSafariArtifactRecord =
                         [artifactWriter writeArtifactAtRelativePath:@"global_safari.tar.gz"
+                                                             policy:globalSafariArtifactPolicy
                                                            producer:^BOOL(NSString *temporaryOutputPath) {
                             safariTarResult = [self _tarCreate:tarPath
                                                       fromDir:globalSafariPath
@@ -1802,7 +2095,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         }
                                                               error:&safariArtifactError];
                     if (!globalSafariArtifactRecord) {
-                        [warnings addObject:@"Failed to archive global Safari library; continuing"];
+                        NSError *fatalPolicyError = nil;
+                        BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                            globalSafariArtifactPolicy,
+                            warnings,
+                            @"Failed to archive global Safari library; continuing",
+                            nil,
+                            &fatalPolicyError);
+                        if (!shouldContinue) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (completion) completion(nil, fatalPolicyError);
+                            });
+                            return;
+                        }
                     } else {
                         globalSafariArchivePath = globalSafariArtifactRecord.filePath;
                     }
@@ -1820,6 +2125,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSError *preferencesArtifactError = nil;
                 preferencesArtifactRecord =
                     [artifactWriter writeArtifactAtRelativePath:preferencesRelativePath
+                                                         policy:preferencesArtifactPolicy
                                                        producer:^BOOL(NSString *temporaryOutputPath) {
                         NSString *cpCmd = [NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null",
                             PXShellQuote(prefSourcePath),
@@ -1828,6 +2134,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         return copyResult && copyResult.exitCode == 0;
                     }
                                                           error:&preferencesArtifactError];
+                if (!preferencesArtifactRecord) {
+                    NSError *fatalPolicyError = nil;
+                    BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                        preferencesArtifactPolicy,
+                        warnings,
+                        nil,
+                        nil,
+                        &fatalPolicyError);
+                    if (!shouldContinue) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (completion) completion(nil, fatalPolicyError);
+                        });
+                        return;
+                    }
+                }
             } else {
                 [warnings addObject:@"Global preferences plist not found (OK for most apps); skipping"];
             }
@@ -1893,6 +2214,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *keychainArtifactError = nil;
             keychainArtifactRecord =
                 [artifactWriter writeArtifactAtRelativePath:@"keychain.plist"
+                                                     policy:keychainArtifactPolicy
                                                    producer:^BOOL(NSString *temporaryOutputPath) {
                     BOOL keychainSuccess = [self _backupKeychainForBundleID:bundleID
                                                                     groups:selectedKeychainGroups
@@ -1934,6 +2256,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (keychainArtifactRecord) {
                 keychainBackupPath = keychainArtifactRecord.filePath;
             } else {
+                NSError *fatalPolicyError = nil;
+                BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                    keychainArtifactPolicy,
+                    warnings,
+                    nil,
+                    nil,
+                    &fatalPolicyError);
+                if (!shouldContinue) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(nil, fatalPolicyError);
+                    });
+                    return;
+                }
                 keychainBackupPath = nil;
                 keychainMethod = nil;
             }
@@ -1962,6 +2297,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSError *systemArtifactError = nil;
             PXVerifiedBackupArtifact *systemArtifact =
                 [artifactWriter writeArtifactAtRelativePath:archiveName
+                                                     policy:systemGlobalArtifactPolicy
                                                    producer:^BOOL(NSString *temporaryOutputPath) {
                     systemTarResult = [self _tarCreate:tarPath
                                                fromDir:srcPath
@@ -1970,7 +2306,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                                                       error:&systemArtifactError];
             if (!systemArtifact) {
-                [warnings addObject:[NSString stringWithFormat:@"Failed to archive system global library %@; continuing", subdir]];
+                NSError *fatalPolicyError = nil;
+                BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                    systemGlobalArtifactPolicy,
+                    warnings,
+                    [NSString stringWithFormat:@"Failed to archive system global library %@; continuing", subdir],
+                    nil,
+                    &fatalPolicyError);
+                if (!shouldContinue) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (completion) completion(nil, fatalPolicyError);
+                    });
+                    return;
+                }
                 continue;
             }
             [systemGlobalArtifactRecords addObject:systemArtifact];
@@ -2015,6 +2363,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     NSError *sharedArtifactError = nil;
                     PXVerifiedBackupArtifact *sharedArtifact =
                         [artifactWriter writeArtifactAtRelativePath:dstRel
+                                                             policy:sharedSystemDatabaseArtifactPolicy
                                                            producer:^BOOL(NSString *temporaryOutputPath) {
                             NSString *copyCommand = [NSString stringWithFormat:@"cp -a %@ %@ 2>/dev/null",
                                 PXShellQuote(src),
@@ -2029,6 +2378,20 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                             @"libraryRel": rel,
                             @"archive": sharedArtifact.relativePath,
                         }];
+                    } else {
+                        NSError *fatalPolicyError = nil;
+                        BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
+                            sharedSystemDatabaseArtifactPolicy,
+                            warnings,
+                            nil,
+                            nil,
+                            &fatalPolicyError);
+                        if (!shouldContinue) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (completion) completion(nil, fatalPolicyError);
+                            });
+                            return;
+                        }
                     }
                 }
             }
@@ -2061,6 +2424,17 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         [verifiedArtifactRecords addObjectsFromArray:sharedDatabaseArtifactRecords];
         if (preferencesArtifactRecord) [verifiedArtifactRecords addObject:preferencesArtifactRecord];
         if (keychainArtifactRecord) [verifiedArtifactRecords addObject:keychainArtifactRecord];
+
+        if (!PXBackupAuditVerifiedArtifactPolicies(verifiedArtifactRecords,
+                                                   canonicalArtifactPolicies,
+                                                   artifactWriter.artifactCount)) {
+            NSError *err = PXBackupArtifactPolicyManagerError(
+                @"Backup artifact policy invariant failed");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(nil, err);
+            });
+            return;
+        }
 
         NSMutableArray<NSDictionary<NSString *, id> *> *artifacts =
             [NSMutableArray arrayWithCapacity:verifiedArtifactRecords.count];

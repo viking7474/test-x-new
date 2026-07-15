@@ -26,6 +26,7 @@ static NSString * const PXBackupArtifactRelativePathField = @"$.artifact.relativ
 static NSString * const PXBackupArtifactParentField = @"$.artifact.parent";
 static NSString * const PXBackupArtifactTemporaryField = @"$.artifact.temporary";
 static NSString * const PXBackupArtifactPayloadField = @"$.artifact.payload";
+static NSString * const PXBackupArtifactPolicyField = @"$.artifact.policy";
 
 static const NSUInteger PXBackupArtifactMaximumArtifacts = 4096;
 static const NSUInteger PXBackupArtifactMaximumRelativePathBytes = 4096;
@@ -589,7 +590,8 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
 - (instancetype)initWithRelativePath:(NSString *)relativePath
                             filePath:(NSString *)filePath
                                 size:(unsigned long long)size
-                              sha256:(NSString *)sha256;
+                              sha256:(NSString *)sha256
+                              policy:(PXBackupArtifactPolicy *)policy;
 
 @end
 
@@ -598,19 +600,25 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     NSString *_filePath;
     unsigned long long _size;
     NSString *_sha256;
+    PXBackupArtifactPolicy *_policy;
     NSDictionary<NSString *, id> *_manifestRepresentation;
 }
 
 - (instancetype)initWithRelativePath:(NSString *)relativePath
                             filePath:(NSString *)filePath
                                 size:(unsigned long long)size
-                              sha256:(NSString *)sha256 {
+                              sha256:(NSString *)sha256
+                              policy:(PXBackupArtifactPolicy *)policy {
+    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]]) {
+        return nil;
+    }
     self = [super init];
     if (self) {
         _relativePath = [relativePath copy];
         _filePath = [filePath copy];
         _size = size;
         _sha256 = [sha256 copy];
+        _policy = policy;
         _manifestRepresentation = @{
             @"name": _relativePath,
             @"path": _filePath,
@@ -625,6 +633,7 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
 - (NSString *)filePath { return _filePath; }
 - (unsigned long long)size { return _size; }
 - (NSString *)sha256 { return _sha256; }
+- (PXBackupArtifactPolicy *)policy { return _policy; }
 - (NSDictionary<NSString *,id> *)manifestRepresentation {
     return _manifestRepresentation;
 }
@@ -645,7 +654,8 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     return self.size == other.size &&
            [self.relativePath isEqualToString:other.relativePath] &&
            [self.filePath isEqualToString:other.filePath] &&
-           [self.sha256 isEqualToString:other.sha256];
+           [self.sha256 isEqualToString:other.sha256] &&
+           [self.policy isEqual:other.policy];
 }
 
 - (NSUInteger)hash {
@@ -653,6 +663,7 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     value ^= self.filePath.hash + (NSUInteger)0x9e3779b9 + (value << 6) + (value >> 2);
     value ^= (NSUInteger)self.size + (NSUInteger)0x9e3779b9 + (value << 6) + (value >> 2);
     value ^= self.sha256.hash + (NSUInteger)0x9e3779b9 + (value << 6) + (value >> 2);
+    value ^= self.policy.hash + (NSUInteger)0x9e3779b9 + (value << 6) + (value >> 2);
     return value;
 }
 
@@ -1384,10 +1395,18 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
 }
 
 - (nullable PXVerifiedBackupArtifact *)writeArtifactAtRelativePath:(NSString *)relativePath
+                                                            policy:(PXBackupArtifactPolicy *)policy
                                                           producer:(PXBackupArtifactProducer)producer
                                                              error:(NSError **)error {
     if (error) {
         *error = nil;
+    }
+    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]]) {
+        PXBackupArtifactSetError(error,
+                                 PXBackupArtifactWriterErrorInvalidInput,
+                                 PXBackupArtifactPolicyField,
+                                 @"The artifact policy is invalid");
+        return nil;
     }
     if (!producer) {
         PXBackupArtifactSetError(error,
@@ -1674,6 +1693,13 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                                      @"The artifact digest could not be finalized");
             break;
         }
+        if (![policy acceptsFileSize:streamedBytes]) {
+            PXBackupArtifactSetError(&operationError,
+                                     PXBackupArtifactWriterErrorPolicyRejected,
+                                     PXBackupArtifactPolicyField,
+                                     @"The artifact output was rejected by policy");
+            break;
+        }
         if (!PXBackupArtifactStrictSync(payloadDescriptor)) {
             PXBackupArtifactSetError(&operationError,
                                      PXBackupArtifactWriterErrorDurabilityFailed,
@@ -1803,7 +1829,8 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
             initWithRelativePath:relativePath
                         filePath:finalFilePath
                             size:streamedBytes
-                          sha256:digestString];
+                          sha256:digestString
+                          policy:policy];
         if (!record) {
             PXBackupArtifactSetError(&operationError,
                                      PXBackupArtifactWriterErrorFinalizationFailed,
