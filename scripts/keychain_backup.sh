@@ -24,6 +24,20 @@ HELPER_TOOL_PATH="/Library/WeaponX/backup_helper"
 TEMP_DIR="/tmp/keychain_helper_$$"
 VERBOSE=0
 
+readonly PX_KEYCHAIN_EXIT_COMPLETED=0
+readonly PX_KEYCHAIN_EXIT_PARTIAL=10
+readonly PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS=20
+readonly PX_KEYCHAIN_EXIT_INVALID_INPUT=21
+readonly PX_KEYCHAIN_EXIT_ACCESS_DENIED=30
+readonly PX_KEYCHAIN_EXIT_OPERATION_FAILED=40
+readonly PX_KEYCHAIN_EXIT_PROTOCOL_FAILURE=50
+readonly PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE=60
+readonly PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE=61
+readonly PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE=62
+readonly PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE=63
+readonly PX_KEYCHAIN_EXIT_SIGNING_FAILURE=64
+readonly PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE=65
+
 # Optional subset of keychain groups (CSV) provided by caller.
 OVERRIDE_KEYCHAIN_GROUPS=""
 
@@ -57,6 +71,23 @@ log_verbose() {
     if [ "$VERBOSE" -eq 1 ]; then
         echo -e "[DEBUG] $1" >&2
     fi
+}
+
+normalize_helper_exit_status() {
+    local raw_status="$1"
+    case "$raw_status" in
+        "$PX_KEYCHAIN_EXIT_COMPLETED") return "$PX_KEYCHAIN_EXIT_COMPLETED" ;;
+        "$PX_KEYCHAIN_EXIT_PARTIAL") return "$PX_KEYCHAIN_EXIT_PARTIAL" ;;
+        "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS") return "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS" ;;
+        "$PX_KEYCHAIN_EXIT_INVALID_INPUT") return "$PX_KEYCHAIN_EXIT_INVALID_INPUT" ;;
+        "$PX_KEYCHAIN_EXIT_ACCESS_DENIED") return "$PX_KEYCHAIN_EXIT_ACCESS_DENIED" ;;
+        "$PX_KEYCHAIN_EXIT_OPERATION_FAILED") return "$PX_KEYCHAIN_EXIT_OPERATION_FAILED" ;;
+        "$PX_KEYCHAIN_EXIT_PROTOCOL_FAILURE") return "$PX_KEYCHAIN_EXIT_PROTOCOL_FAILURE" ;;
+        *)
+            log_error "Unrecognized helper exit status: $raw_status; normalized to $PX_KEYCHAIN_EXIT_OPERATION_FAILED"
+            return "$PX_KEYCHAIN_EXIT_OPERATION_FAILED"
+            ;;
+    esac
 }
 
 cleanup() {
@@ -210,7 +241,7 @@ extract_entitlements() {
     
     ldid_path=$(find_ldid) || {
         log_error "ldid not found. Please install ldid."
-        return 1
+        return "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
     }
     
     log_verbose "Using ldid: $ldid_path"
@@ -220,10 +251,10 @@ extract_entitlements() {
     
     if [ ! -s "$output_file" ]; then
         log_error "Failed to extract entitlements or app has no entitlements"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
     
-    return 0
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
 # === Parse keychain access groups from entitlements ===
@@ -425,11 +456,11 @@ generate_helper_entitlements() {
     # Verify file was created
     if [ ! -f "$output_file" ]; then
         log_error "Failed to create entitlements file: $output_file"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
     
     log_verbose "Entitlements file created successfully"
-    return 0
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
 # === Parse application groups from entitlements ===
@@ -476,19 +507,19 @@ resign_helper() {
     
     ldid_path=$(find_ldid) || {
         log_error "ldid not found"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
     }
     
     # Check if binary exists
     if [ ! -f "$binary_path" ]; then
         log_error "Binary not found at: $binary_path"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     fi
     
     # Check if entitlements file exists
     if [ ! -f "$ent_file" ]; then
         log_error "Entitlements file not found: $ent_file"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
     
     log_verbose "Resigning binary: $binary_path"
@@ -504,7 +535,7 @@ resign_helper() {
         if [ -n "$ldid_output" ]; then
             log_error "ldid output: $ldid_output"
         fi
-        return 1
+        return "$PX_KEYCHAIN_EXIT_SIGNING_FAILURE"
     fi
     
     # Verify signing worked
@@ -513,7 +544,7 @@ resign_helper() {
     fi
     
     log_verbose "Binary resigned successfully"
-    return 0
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
 # === Main functions ===
@@ -530,7 +561,7 @@ do_backup() {
     local app_binary
     app_binary=$(find_app_executable "$bundle_id") || {
         log_error "Could not find app with bundle ID: $bundle_id"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
     log_verbose "Found app: $app_binary"
     
@@ -540,7 +571,11 @@ do_backup() {
     # Extract entitlements
     log_info "Extracting entitlements..."
     local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file" || return 1
+    extract_entitlements "$app_binary" "$ent_file"
+    local entitlement_status=$?
+    if [ "$entitlement_status" -ne 0 ]; then
+        return "$entitlement_status"
+    fi
     
     # Parse keychain groups
     log_info "Parsing keychain access groups..."
@@ -555,7 +590,7 @@ do_backup() {
     
     if [ -z "$keychain_groups" ]; then
         log_error "No keychain-access-groups found in app entitlements"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
     log_info "Found keychain groups: $keychain_groups"
     
@@ -595,24 +630,28 @@ do_backup() {
     # Generate helper entitlements
     log_info "Generating helper entitlements..."
     local helper_ent="$TEMP_DIR/helper_ent.plist"
-    if ! generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"; then
+    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
+    local generation_status=$?
+    if [ "$generation_status" -ne 0 ]; then
         log_error "Failed to generate helper entitlements"
-        return 1
+        return "$generation_status"
     fi
     
     # Prepare working copy of helper tool
     local working_helper="$TEMP_DIR/backup_helper"
     if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
         log_error "Failed to copy helper tool to temp: $working_helper"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     fi
     chmod 755 "$working_helper"
     
     # Resign helper
     log_info "Resigning KeychainHelper..."
-    if ! resign_helper "$helper_ent" "$working_helper"; then
+    resign_helper "$helper_ent" "$working_helper"
+    local resign_status=$?
+    if [ "$resign_status" -ne 0 ]; then
         log_error "Failed to resign helper tool"
-        return 1
+        return "$resign_status"
     fi
     
     # Execute backup using the resigned copy
@@ -623,14 +662,16 @@ do_backup() {
     fi
     "$working_helper" "${helper_args[@]}"
     
+    local raw_exit_code=$?
+    normalize_helper_exit_status "$raw_exit_code"
     local exit_code=$?
-    if [ $exit_code -eq 0 ]; then
+    if [ "$exit_code" -eq "$PX_KEYCHAIN_EXIT_COMPLETED" ]; then
         log_info "Backup completed successfully: $backup_file"
     else
         log_error "Backup failed with exit code: $exit_code"
     fi
     
-    return $exit_code
+    return "$exit_code"
 }
 
 do_restore() {
@@ -643,7 +684,7 @@ do_restore() {
     
     if [ ! -f "$backup_file" ]; then
         log_error "Backup file not found: $backup_file"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
     fi
     
     # Find app executable and resign with its entitlements
@@ -651,14 +692,18 @@ do_restore() {
     local app_binary
     app_binary=$(find_app_executable "$bundle_id") || {
         log_error "Could not find app with bundle ID: $bundle_id"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
     
     mkdir -p "$TEMP_DIR"
     
     log_info "Extracting entitlements..."
     local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file" || return 1
+    extract_entitlements "$app_binary" "$ent_file"
+    local entitlement_status=$?
+    if [ "$entitlement_status" -ne 0 ]; then
+        return "$entitlement_status"
+    fi
     
     local keychain_groups
     keychain_groups=$(parse_keychain_groups "$ent_file")
@@ -687,17 +732,25 @@ do_restore() {
     
     local helper_ent="$TEMP_DIR/helper_ent.plist"
     generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
+    local generation_status=$?
+    if [ "$generation_status" -ne 0 ]; then
+        return "$generation_status"
+    fi
     
     # Prepare working copy of helper tool
     local working_helper="$TEMP_DIR/backup_helper"
     if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
         log_error "Failed to copy helper tool to temp: $working_helper"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     fi
     chmod 755 "$working_helper"
     
     log_info "Resigning KeychainHelper..."
-    resign_helper "$helper_ent" "$working_helper" || return 1
+    resign_helper "$helper_ent" "$working_helper"
+    local resign_status=$?
+    if [ "$resign_status" -ne 0 ]; then
+        return "$resign_status"
+    fi
     
     # Execute restore using the resigned copy
     log_info "Executing restore..."
@@ -715,14 +768,16 @@ do_restore() {
     fi
     "$working_helper" "${helper_args[@]}"
     
+    local raw_exit_code=$?
+    normalize_helper_exit_status "$raw_exit_code"
     local exit_code=$?
-    if [ $exit_code -eq 0 ]; then
+    if [ "$exit_code" -eq "$PX_KEYCHAIN_EXIT_COMPLETED" ]; then
         log_info "Restore completed successfully"
     else
         log_error "Restore failed with exit code: $exit_code"
     fi
     
-    return $exit_code
+    return "$exit_code"
 }
 
 do_wipe() {
@@ -735,13 +790,17 @@ do_wipe() {
     local app_binary
     app_binary=$(find_app_executable "$bundle_id") || {
         log_error "Could not find app with bundle ID: $bundle_id"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
     
     mkdir -p "$TEMP_DIR"
     
     local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file" || return 1
+    extract_entitlements "$app_binary" "$ent_file"
+    local entitlement_status=$?
+    if [ "$entitlement_status" -ne 0 ]; then
+        return "$entitlement_status"
+    fi
     
     local keychain_groups
     keychain_groups=$(parse_keychain_groups "$ent_file")
@@ -753,7 +812,7 @@ do_wipe() {
     
     if [ -z "$keychain_groups" ]; then
         log_error "No keychain-access-groups found"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
     
     log_warn "This will DELETE all keychain items for: $keychain_groups"
@@ -777,16 +836,24 @@ do_wipe() {
     
     local helper_ent="$TEMP_DIR/helper_ent.plist"
     generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
+    local generation_status=$?
+    if [ "$generation_status" -ne 0 ]; then
+        return "$generation_status"
+    fi
     
     # Prepare working copy
     local working_helper="$TEMP_DIR/backup_helper"
     if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
         log_error "Failed to copy helper"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     fi
     chmod 755 "$working_helper"
     
-    resign_helper "$helper_ent" "$working_helper" || return 1
+    resign_helper "$helper_ent" "$working_helper"
+    local resign_status=$?
+    if [ "$resign_status" -ne 0 ]; then
+        return "$resign_status"
+    fi
     
     local helper_args=("--action" "wipe" "--groups" "$keychain_groups")
     if [ "$VERBOSE" -eq 1 ]; then
@@ -794,6 +861,8 @@ do_wipe() {
     fi
     "$working_helper" "${helper_args[@]}"
     
+    local raw_exit_code=$?
+    normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
 
@@ -806,13 +875,17 @@ do_list() {
     local app_binary
     app_binary=$(find_app_executable "$bundle_id") || {
         log_error "Could not find app with bundle ID: $bundle_id"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
     
     mkdir -p "$TEMP_DIR"
     
     local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file" || return 1
+    extract_entitlements "$app_binary" "$ent_file"
+    local entitlement_status=$?
+    if [ "$entitlement_status" -ne 0 ]; then
+        return "$entitlement_status"
+    fi
     
     local keychain_groups
     keychain_groups=$(parse_keychain_groups "$ent_file")
@@ -824,7 +897,7 @@ do_list() {
     
     if [ -z "$keychain_groups" ]; then
         log_info "No keychain-access-groups found in app"
-        return 0
+        return "$PX_KEYCHAIN_EXIT_COMPLETED"
     fi
     
     local app_groups
@@ -846,16 +919,24 @@ do_list() {
     
     local helper_ent="$TEMP_DIR/helper_ent.plist"
     generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
+    local generation_status=$?
+    if [ "$generation_status" -ne 0 ]; then
+        return "$generation_status"
+    fi
     
     # Prepare working copy
     local working_helper="$TEMP_DIR/backup_helper"
     if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
         log_error "Failed to copy helper"
-        return 1
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     fi
     chmod 755 "$working_helper"
     
-    resign_helper "$helper_ent" "$working_helper" || return 1
+    resign_helper "$helper_ent" "$working_helper"
+    local resign_status=$?
+    if [ "$resign_status" -ne 0 ]; then
+        return "$resign_status"
+    fi
     
     local helper_args=("--action" "list" "--groups" "$keychain_groups")
     if [ "$VERBOSE" -eq 1 ]; then
@@ -863,6 +944,8 @@ do_list() {
     fi
     "$working_helper" "${helper_args[@]}"
     
+    local raw_exit_code=$?
+    normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
 
@@ -890,7 +973,7 @@ print_usage() {
 if [ ! -x "$HELPER_TOOL_PATH" ]; then
     log_error "KeychainHelper not found at: $HELPER_TOOL_PATH"
     log_error "Please ensure the WeaponX package is properly installed"
-    exit 1
+    exit "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
 fi
 
 # Parse global options
@@ -902,7 +985,7 @@ while [[ "$1" == --* ]]; do
             ;;
         --help|-h)
             print_usage
-            exit 0
+            exit "$PX_KEYCHAIN_EXIT_COMPLETED"
             ;;
         *)
             break
@@ -913,7 +996,7 @@ done
 # Require at least action and bundle ID
 if [ $# -lt 2 ]; then
     print_usage
-    exit 1
+    exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
 fi
 
 ACTION="$1"
@@ -925,7 +1008,7 @@ case "$ACTION" in
         if [ -z "$1" ]; then
             log_error "Backup file path required"
             print_usage
-            exit 1
+            exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
         fi
         shift_file="$1"
         shift
@@ -951,7 +1034,7 @@ case "$ACTION" in
         if [ -z "$1" ]; then
             log_error "Backup file path required"
             print_usage
-            exit 1
+            exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
         fi
         shift_file="$1"
         shift
@@ -1018,8 +1101,8 @@ case "$ACTION" in
     *)
         log_error "Unknown action: $ACTION"
         print_usage
-        exit 1
+        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
         ;;
 esac
 
-exit $?
+exit "$?"

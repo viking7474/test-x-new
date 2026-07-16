@@ -11,14 +11,18 @@
  * entitlements before running. Use the keychain_backup.sh wrapper script.
  *
  * Exit codes:
- *   0 - Success
- *   1 - Invalid arguments
- *   2 - Operation failed
- *   3 - Access denied (missing entitlements)
+ *   0  - Completed
+ *   10 - Partial
+ *   20 - Invalid arguments
+ *   21 - Invalid input
+ *   30 - Access denied
+ *   40 - Operation failed
+ *   50 - Structured-result protocol failure
  */
 
 #import <Foundation/Foundation.h>
 #import "KeychainBackupHelper.h"
+#import "PXKeychainHelperExitCode.h"
 #import "PXKeychainHelperResult.h"
 
 typedef NS_ENUM(NSInteger, PXHelperAction) {
@@ -151,6 +155,29 @@ static NSError *PXStructuredSyntheticError(PXKeychainBackupErrorCode code) {
     return [NSError errorWithDomain:PXKeychainBackupErrorDomain code:code userInfo:nil];
 }
 
+static PXKeychainHelperExitCode PXExitCodeForFatalError(PXKeychainHelperOperation operation,
+                                                         NSError *fatalError) {
+    if (![fatalError.domain isEqualToString:PXKeychainBackupErrorDomain]) {
+        return PXKeychainHelperExitCodeOperationFailed;
+    }
+
+    switch ((PXKeychainBackupErrorCode)fatalError.code) {
+        case PXKeychainBackupErrorInvalidArguments:
+        case PXKeychainBackupErrorNoAccessGroups:
+            return PXKeychainHelperExitCodeInvalidArguments;
+        case PXKeychainBackupErrorSecurityFramework:
+            return PXKeychainHelperExitCodeAccessDenied;
+        case PXKeychainBackupErrorFileIO:
+        case PXKeychainBackupErrorInvalidBackupFile:
+            return operation == PXKeychainHelperOperationRestore
+                ? PXKeychainHelperExitCodeInvalidInput
+                : PXKeychainHelperExitCodeOperationFailed;
+        case PXKeychainBackupErrorUnknown:
+            return PXKeychainHelperExitCodeOperationFailed;
+    }
+    return PXKeychainHelperExitCodeOperationFailed;
+}
+
 static PXKeychainHelperResult *PXCreateStructuredResult(PXKeychainHelperOperation operation,
                                                         PXKeychainHelperCompletion completion,
                                                         PXKeychainBackupResult *result,
@@ -198,6 +225,39 @@ static void PXEmitStructuredResult(PXKeychainHelperResult *result) {
     fflush(stdout);
 }
 
+static PXKeychainHelperExitCode PXFinalizeStructuredResult(
+    PXKeychainHelperResult *result,
+    PXKeychainHelperExitCode intendedExitCode) {
+    NSString *line = result.machineReadableLine;
+    BOOL compatible = result != nil &&
+                      line.length > PXKeychainHelperResultOutputPrefix.length &&
+                      [line hasPrefix:PXKeychainHelperResultOutputPrefix] &&
+                      [line rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location == NSNotFound;
+
+    if (compatible) {
+        switch (result.completion) {
+            case PXKeychainHelperCompletionCompleted:
+                compatible = intendedExitCode == PXKeychainHelperExitCodeCompleted;
+                break;
+            case PXKeychainHelperCompletionPartial:
+                compatible = intendedExitCode == PXKeychainHelperExitCodePartial;
+                break;
+            case PXKeychainHelperCompletionFailed:
+                compatible = intendedExitCode == PXKeychainHelperExitCodeInvalidArguments ||
+                             intendedExitCode == PXKeychainHelperExitCodeInvalidInput ||
+                             intendedExitCode == PXKeychainHelperExitCodeAccessDenied ||
+                             intendedExitCode == PXKeychainHelperExitCodeOperationFailed;
+                break;
+            default:
+                compatible = NO;
+                break;
+        }
+    }
+
+    PXEmitStructuredResult(compatible ? result : nil);
+    return compatible ? intendedExitCode : PXKeychainHelperExitCodeProtocolFailure;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         // Parse arguments.
@@ -208,7 +268,7 @@ int main(int argc, const char *argv[]) {
             
             if ([arg isEqualToString:@"--help"] || [arg isEqualToString:@"-h"]) {
                 printUsage(argv[0]);
-                return 0;
+                return PXKeychainHelperExitCodeCompleted;
             } else if ([arg isEqualToString:@"--verbose"] || [arg isEqualToString:@"-v"]) {
                 args[@"verbose"] = @YES;
             } else if ([arg isEqualToString:@"--overwrite"]) {
@@ -227,24 +287,26 @@ int main(int argc, const char *argv[]) {
         if (!actionStr.length) {
             logError(@"Missing required --action argument");
             printUsage(argv[0]);
-            PXEmitStructuredResult(PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
-                                                            PXKeychainHelperCompletionFailed,
-                                                            nil,
-                                                            0,
-                                                            PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
-            return 1;
+            return PXFinalizeStructuredResult(
+                PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
+                                         PXKeychainHelperCompletionFailed,
+                                         nil,
+                                         0,
+                                         PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
+                PXKeychainHelperExitCodeInvalidArguments);
         }
         
         PXHelperAction action = parseAction(actionStr);
         if (action == PXHelperActionUnknown) {
             logError(@"Unknown action: %@", actionStr);
             printUsage(argv[0]);
-            PXEmitStructuredResult(PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
-                                                            PXKeychainHelperCompletionFailed,
-                                                            nil,
-                                                            0,
-                                                            PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
-            return 1;
+            return PXFinalizeStructuredResult(
+                PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
+                                         PXKeychainHelperCompletionFailed,
+                                         nil,
+                                         0,
+                                         PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
+                PXKeychainHelperExitCodeInvalidArguments);
         }
         PXKeychainHelperOperation structuredOperation = PXStructuredOperationForAction(action);
         
@@ -263,21 +325,23 @@ int main(int argc, const char *argv[]) {
             case PXHelperActionBackup: {
                 if (!filePath.length) {
                     logError(@"--file is required for backup");
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
-                    return 1;
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
+                        PXKeychainHelperExitCodeInvalidArguments);
                 }
                 if (!groups.count) {
                     logError(@"--groups is required for backup");
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)));
-                    return 1;
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)),
+                        PXKeychainHelperExitCodeInvalidArguments);
                 }
                 
                 logVerbose(verbose, @"Starting keychain backup...");
@@ -288,12 +352,16 @@ int main(int argc, const char *argv[]) {
                 
                 if (!result) {
                     logError(@"Backup failed: %@", error.localizedDescription);
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown)));
-                    return 2;
+                    NSError *fatalError = error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown);
+                    PXKeychainHelperExitCode exitCode =
+                        PXExitCodeForFatalError(structuredOperation, fatalError);
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 fatalError),
+                        exitCode);
                 }
                 
                 logSuccess(@"Backup complete: %lu items processed, %lu succeeded, %lu failed",
@@ -305,23 +373,25 @@ int main(int argc, const char *argv[]) {
                     NSString *warning = PXSafeString(warningObj);
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
-                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                PXStructuredCompletionForResult(result),
-                                                                result,
-                                                                0,
-                                                                nil));
-                return 0;
+                PXKeychainHelperCompletion completion = PXStructuredCompletionForResult(result);
+                PXKeychainHelperExitCode exitCode = completion == PXKeychainHelperCompletionCompleted
+                    ? PXKeychainHelperExitCodeCompleted
+                    : PXKeychainHelperExitCodePartial;
+                return PXFinalizeStructuredResult(
+                    PXCreateStructuredResult(structuredOperation, completion, result, 0, nil),
+                    exitCode);
             }
                 
             case PXHelperActionRestore: {
                 if (!filePath.length) {
                     logError(@"--file is required for restore");
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
-                    return 1;
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
+                        PXKeychainHelperExitCodeInvalidArguments);
                 }
                 
                 logVerbose(verbose, @"Starting keychain restore (overwrite: %@)...",
@@ -332,12 +402,16 @@ int main(int argc, const char *argv[]) {
                 
                 if (!result) {
                     logError(@"Restore failed: %@", error.localizedDescription);
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown)));
-                    return 2;
+                    NSError *fatalError = error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown);
+                    PXKeychainHelperExitCode exitCode =
+                        PXExitCodeForFatalError(structuredOperation, fatalError);
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 fatalError),
+                        exitCode);
                 }
                 
                 logSuccess(@"Restore complete: %lu items processed, %lu succeeded, %lu failed",
@@ -353,23 +427,25 @@ int main(int argc, const char *argv[]) {
                     NSString *err = PXSafeString(errObj);
                     fprintf(stderr, "[ERR] %s\n", [err UTF8String] ?: "");
                 }
-                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                PXStructuredCompletionForResult(result),
-                                                                result,
-                                                                0,
-                                                                nil));
-                return 0;
+                PXKeychainHelperCompletion completion = PXStructuredCompletionForResult(result);
+                PXKeychainHelperExitCode exitCode = completion == PXKeychainHelperCompletionCompleted
+                    ? PXKeychainHelperExitCodeCompleted
+                    : PXKeychainHelperExitCodePartial;
+                return PXFinalizeStructuredResult(
+                    PXCreateStructuredResult(structuredOperation, completion, result, 0, nil),
+                    exitCode);
             }
                 
             case PXHelperActionWipe: {
                 if (!groups.count) {
                     logError(@"--groups is required for wipe");
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)));
-                    return 1;
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)),
+                        PXKeychainHelperExitCodeInvalidArguments);
                 }
                 
                 logVerbose(verbose, @"Starting keychain wipe...");
@@ -390,12 +466,16 @@ int main(int argc, const char *argv[]) {
 
                 if (!result) {
                     logError(@"Wipe failed: %@", error.localizedDescription);
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown)));
-                    return 2;
+                    NSError *fatalError = error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown);
+                    PXKeychainHelperExitCode exitCode =
+                        PXExitCodeForFatalError(structuredOperation, fatalError);
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 fatalError),
+                        exitCode);
                 }
 
                 for (id warningObj in result.warnings) {
@@ -403,33 +483,36 @@ int main(int argc, const char *argv[]) {
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
                 if (result.itemsFailed > 0 || result.warnings.count > 0) {
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXStructuredCompletionForResult(result),
-                                                                    result,
-                                                                    0,
-                                                                    nil));
-                    return 2;
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionPartial,
+                                                 result,
+                                                 0,
+                                                 nil),
+                        PXKeychainHelperExitCodePartial);
                 }
 
                 logSuccess(@"Wipe complete: %lu items deleted",
                           (unsigned long)result.itemsSucceeded);
-                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                PXStructuredCompletionForResult(result),
-                                                                result,
-                                                                0,
-                                                                nil));
-                return 0;
+                PXKeychainHelperCompletion completion = PXStructuredCompletionForResult(result);
+                PXKeychainHelperExitCode exitCode = completion == PXKeychainHelperCompletionCompleted
+                    ? PXKeychainHelperExitCodeCompleted
+                    : PXKeychainHelperExitCodePartial;
+                return PXFinalizeStructuredResult(
+                    PXCreateStructuredResult(structuredOperation, completion, result, 0, nil),
+                    exitCode);
             }
                 
             case PXHelperActionList: {
                 if (!groups.count) {
                     logError(@"--groups is required for list");
-                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                    PXKeychainHelperCompletionFailed,
-                                                                    nil,
-                                                                    0,
-                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)));
-                    return 1;
+                    return PXFinalizeStructuredResult(
+                        PXCreateStructuredResult(structuredOperation,
+                                                 PXKeychainHelperCompletionFailed,
+                                                 nil,
+                                                 0,
+                                                 PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)),
+                        PXKeychainHelperExitCodeInvalidArguments);
                 }
 
                 logVerbose(verbose, @"Diagnosing keychain access...");
@@ -460,21 +543,23 @@ int main(int argc, const char *argv[]) {
                            [svc UTF8String] ?: "",
                            [acc UTF8String] ?: "");
                 }
-                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
-                                                                PXKeychainHelperCompletionCompleted,
-                                                                nil,
-                                                                items.count,
-                                                                nil));
-                return 0;
+                return PXFinalizeStructuredResult(
+                    PXCreateStructuredResult(structuredOperation,
+                                             PXKeychainHelperCompletionCompleted,
+                                             nil,
+                                             items.count,
+                                             nil),
+                    PXKeychainHelperExitCodeCompleted);
             }
                 
             default:
-                PXEmitStructuredResult(PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
-                                                                PXKeychainHelperCompletionFailed,
-                                                                nil,
-                                                                0,
-                                                                PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
-                return 0;
+                return PXFinalizeStructuredResult(
+                    PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
+                                             PXKeychainHelperCompletionFailed,
+                                             nil,
+                                             0,
+                                             PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
+                    PXKeychainHelperExitCodeInvalidArguments);
         }
     }
 }
