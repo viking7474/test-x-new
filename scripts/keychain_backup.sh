@@ -64,6 +64,12 @@ readonly PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE=65
 
 # Optional subset of keychain groups (CSV) provided by caller.
 OVERRIDE_KEYCHAIN_GROUPS=""
+OVERRIDE_KEYCHAIN_GROUPS_PRESENT=0
+PX_REQUESTED_GROUPS_CSV=""
+PX_EFFECTIVE_GROUPS_CSV=""
+PX_EFFECTIVE_ENT_PATH=""
+PX_APP_IDENTIFIER=""
+PX_APP_GROUPS_CSV=""
 
 # === Color Output ===
 # Only use colors if running in a TTY (interactive terminal)
@@ -523,7 +529,7 @@ px_validate_workspace_identity() {
 px_workspace_child_path() {
     local name="$1"
     case "$name" in
-        app_ent.xml|helper_ent.plist|backup_helper|restore_input.plist) ;;
+        app_ent.xml|helper_ent.plist|backup_helper|signed_helper_ent.plist|restore_input.plist) ;;
         *) return 1 ;;
     esac
     PX_WORKSPACE_CHILD_PATH="$PX_WORKSPACE_PATH/$name"
@@ -569,7 +575,7 @@ px_validate_workspace_file() {
 px_cleanup_workspace() {
     px_validate_workspace_identity || return 1
     local name child failed=0
-    for name in restore_input.plist backup_helper helper_ent.plist app_ent.xml; do
+    for name in restore_input.plist signed_helper_ent.plist backup_helper helper_ent.plist app_ent.xml; do
         px_workspace_child_path "$name" || return 1
         child="$PX_WORKSPACE_CHILD_PATH"
         if [ -L "$child" ]; then
@@ -621,6 +627,7 @@ PX_TARGET_IS_SYSTEM=0
 PX_APP_ENT_PATH=""
 PX_HELPER_ENT_PATH=""
 PX_WORKING_HELPER_PATH=""
+PX_SIGNED_HELPER_ENT_PATH=""
 PX_RESTORE_INPUT_PATH=""
 PX_BACKUP_OUTPUT_PATH=""
 PX_BACKUP_OUTPUT_PARENT=""
@@ -628,6 +635,9 @@ PX_BACKUP_OUTPUT_EXISTED=0
 
 px_string_has_control_character() {
     local value="$1"
+    case "$value" in
+        *$'\n'*|*$'\r'*) return 0 ;;
+    esac
     printf '%s' "$value" | "$PX_GREP_PATH" -q '[[:cntrl:]]'
 }
 
@@ -892,6 +902,94 @@ extract_entitlements() {
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
+# === Canonical Keychain access-group authority ===
+PX_CANONICAL_GROUP_CSV=""
+
+px_group_value_is_valid() {
+    local group="$1"
+    [ -n "$group" ] || return 1
+    [ "${#group}" -le 512 ] || return 1
+    px_string_has_control_character "$group" && return 1
+    case "$group" in *,*) return 1 ;; esac
+    local trimmed
+    trimmed=$(printf '%s' "$group" | "$PX_SED_PATH" 's/^ *//;s/ *$//') || return 1
+    [ "$trimmed" = "$group" ] || return 1
+    return 0
+}
+
+px_group_csv_contains() {
+    local csv="$1"
+    local group="$2"
+    [ -n "$csv" ] || return 1
+    case ",$csv," in
+        *",$group,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+px_canonicalize_group_csv() {
+    local input="$1"
+    PX_CANONICAL_GROUP_CSV=""
+    [ -n "$input" ] || return 1
+    [ "${#input}" -le 8192 ] || return 1
+    px_string_has_control_character "$input" && return 1
+    case "$input" in ,*|*,|*,,*) return 1 ;; esac
+    local parts=()
+    IFS=',' read -ra parts <<< "$input"
+    [ "${#parts[@]}" -gt 0 ] && [ "${#parts[@]}" -le 128 ] || return 1
+    local part group result="" count=0
+    for part in "${parts[@]}"; do
+        group=$(printf '%s' "$part" | "$PX_SED_PATH" 's/^ *//;s/ *$//') || return 1
+        px_group_value_is_valid "$group" || return 1
+        if ! px_group_csv_contains "$result" "$group"; then
+            count=$((count + 1))
+            [ "$count" -le 128 ] || return 1
+            if [ -n "$result" ]; then result="$result,$group"; else result="$group"; fi
+            [ "${#result}" -le 8192 ] || return 1
+        fi
+    done
+    [ -n "$result" ] || return 1
+    PX_CANONICAL_GROUP_CSV="$result"
+    return 0
+}
+
+px_add_group_to_canonical_csv() {
+    local csv="$1"
+    local group="$2"
+    PX_CANONICAL_GROUP_CSV=""
+    px_group_value_is_valid "$group" || return 1
+    if [ -z "$csv" ]; then
+        PX_CANONICAL_GROUP_CSV="$group"
+        return 0
+    fi
+    px_canonicalize_group_csv "$csv" || return 1
+    local result="$PX_CANONICAL_GROUP_CSV"
+    if ! px_group_csv_contains "$result" "$group"; then
+        result="$result,$group"
+        [ "${#result}" -le 8192 ] || return 1
+        local entries=()
+        IFS=',' read -ra entries <<< "$result"
+        [ "${#entries[@]}" -le 128 ] || return 1
+    fi
+    PX_CANONICAL_GROUP_CSV="$result"
+    return 0
+}
+
+px_group_csv_is_subset() {
+    local requested="$1"
+    local effective="$2"
+    px_canonicalize_group_csv "$requested" || return 1
+    local canonical_requested="$PX_CANONICAL_GROUP_CSV"
+    px_canonicalize_group_csv "$effective" || return 1
+    local canonical_effective="$PX_CANONICAL_GROUP_CSV"
+    local groups=() group
+    IFS=',' read -ra groups <<< "$canonical_requested"
+    for group in "${groups[@]}"; do
+        px_group_csv_contains "$canonical_effective" "$group" || return 1
+    done
+    return 0
+}
+
 # === Parse keychain access groups from entitlements ===
 parse_keychain_groups() {
     local ent_file="$1"
@@ -899,7 +997,7 @@ parse_keychain_groups() {
     px_stat_snapshot "$ent_file" PX_PARSE_GROUPS_BEFORE || return 1
     local groups=""
     local in_groups=0
-    local line group
+    local line group group_count=0
     while IFS= read -r line; do
         if printf '%s' "$line" | "$PX_GREP_PATH" -q "keychain-access-groups"; then
             in_groups=1
@@ -912,16 +1010,16 @@ parse_keychain_groups() {
             fi
             if printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
                 group=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
-                if [ -n "$group" ]; then
-                    if [ -n "$groups" ]; then groups="$groups,$group"; else groups="$group"; fi
-                fi
+                px_group_value_is_valid "$group" || return 1
+                group_count=$((group_count + 1))
+                [ "$group_count" -le 128 ] || return 1
+                if [ -n "$groups" ]; then groups="$groups,$group"; else groups="$group"; fi
+                [ "${#groups}" -le 8192 ] || return 1
             fi
         fi
     done < "$ent_file"
     px_stat_snapshot "$ent_file" PX_PARSE_GROUPS_AFTER || return 1
     px_same_complete_snapshot PX_PARSE_GROUPS_BEFORE PX_PARSE_GROUPS_AFTER || return 1
-    [ "${#groups}" -le 65536 ] || return 1
-    px_string_has_control_character "$groups" && return 1
     printf '%s\n' "$groups"
 }
 
@@ -1236,8 +1334,19 @@ px_validate_backup_output_after_execution() {
 
 px_validate_helper_execution() {
     px_validate_workspace_identity || return 1
+    [ -n "$PX_HELPER_ENT_PATH" ] || return 1
+    [ -n "$PX_WORKING_HELPER_PATH" ] || return 1
+    [ -n "$PX_EFFECTIVE_ENT_PATH" ] || return 1
+    [ "$PX_EFFECTIVE_ENT_PATH" = "$PX_SIGNED_HELPER_ENT_PATH" ] || return 1
     px_validate_workspace_file "$PX_HELPER_ENT_PATH" 600 0 1 || return 1
     px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return 1
+    px_validate_workspace_file "$PX_EFFECTIVE_ENT_PATH" 600 0 1 || return 1
+    px_stat_snapshot "$PX_HELPER_ENT_PATH" PX_HELPER_ENT_LIVE || return 1
+    px_same_complete_snapshot PX_HELPER_ENT_AUTHORITY PX_HELPER_ENT_LIVE || return 1
+    px_stat_snapshot "$PX_WORKING_HELPER_PATH" PX_SIGNED_HELPER_LIVE || return 1
+    px_same_complete_snapshot PX_SIGNED_HELPER_AUTHORITY PX_SIGNED_HELPER_LIVE || return 1
+    px_stat_snapshot "$PX_EFFECTIVE_ENT_PATH" PX_EFFECTIVE_LIVE || return 1
+    px_same_complete_snapshot PX_EFFECTIVE_AUTHORITY PX_EFFECTIVE_LIVE || return 1
     return 0
 }
 
@@ -1262,26 +1371,91 @@ px_select_source_entitlement() {
     fi
 }
 
+px_prepare_requested_groups() {
+    local bundle_id="$1"
+    local source_groups selected_groups app_identifier app_groups
+    source_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+
+    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
+        px_canonicalize_group_csv "$OVERRIDE_KEYCHAIN_GROUPS" || return "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+        selected_groups="$PX_CANONICAL_GROUP_CSV"
+        log_info "Using caller-selected keychain groups"
+    elif [ -n "$source_groups" ]; then
+        px_canonicalize_group_csv "$source_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+        selected_groups="$PX_CANONICAL_GROUP_CSV"
+    else
+        selected_groups=""
+    fi
+
+    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    if [ -z "$app_identifier" ]; then
+        app_identifier="$bundle_id"
+    fi
+    px_group_value_is_valid "$app_identifier" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_add_group_to_canonical_csv "$selected_groups" "$app_identifier" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    PX_REQUESTED_GROUPS_CSV="$PX_CANONICAL_GROUP_CSV"
+    [ -n "$PX_REQUESTED_GROUPS_CSV" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+
+    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    PX_APP_IDENTIFIER="$app_identifier"
+    PX_APP_GROUPS_CSV="$app_groups"
+    px_select_source_entitlement "$app_identifier"
+    log_info "Requested groups validated"
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
+}
+
+px_extract_signed_helper_entitlements() {
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_HELPER_ENT_PATH" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_require_workspace_child_absent signed_helper_ent.plist || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    local signed_ent_file="$PX_WORKSPACE_CHILD_PATH"
+    px_stat_snapshot "$PX_WORKING_HELPER_PATH" PX_EFFECTIVE_HELPER_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    "$PX_LDID_PATH" -e "$PX_WORKING_HELPER_PATH" > "$signed_ent_file" 2>/dev/null
+    local extraction_status=$?
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$PX_WORKING_HELPER_PATH" PX_EFFECTIVE_HELPER_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_same_complete_snapshot PX_EFFECTIVE_HELPER_BEFORE PX_EFFECTIVE_HELPER_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$PX_WORKING_HELPER_PATH" PX_SIGNED_HELPER_AUTHORITY || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ "$extraction_status" -eq 0 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    "$PX_CHMOD_PATH" 600 "$signed_ent_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$signed_ent_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    local effective_groups
+    effective_groups=$(parse_keychain_groups "$signed_ent_file") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    [ -n "$effective_groups" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_canonicalize_group_csv "$effective_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    PX_EFFECTIVE_GROUPS_CSV="$PX_CANONICAL_GROUP_CSV"
+    px_group_csv_is_subset "$PX_REQUESTED_GROUPS_CSV" "$PX_EFFECTIVE_GROUPS_CSV" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+
+    PX_SIGNED_HELPER_ENT_PATH="$signed_ent_file"
+    PX_EFFECTIVE_ENT_PATH="$signed_ent_file"
+    px_stat_snapshot "$PX_EFFECTIVE_ENT_PATH" PX_EFFECTIVE_AUTHORITY || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    log_info "Signed helper access scope validated"
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
+}
+
 px_finish_signed_helper() {
-    local keychain_groups="$1"
-    local app_groups="$2"
-    local app_identifier="$3"
-    local source_ent_file="$4"
     local helper_ent="$PX_WORKSPACE_PATH/helper_ent.plist"
-    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_file"
+    generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$PX_APP_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_SOURCE_ENT_FOR_SYSTEM"
     local status=$?
     [ "$status" -eq 0 ] || return "$status"
     px_prepare_working_helper
     status=$?
     [ "$status" -eq 0 ] || return "$status"
     resign_helper "$PX_HELPER_ENT_PATH" "$PX_WORKING_HELPER_PATH"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    px_stat_snapshot "$PX_HELPER_ENT_PATH" PX_HELPER_ENT_AUTHORITY || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_extract_signed_helper_entitlements
     return $?
 }
 
 do_backup() {
     local bundle_id="$1"
     local backup_file="$2"
-    local override_groups="$3"
 
     log_info "Starting keychain backup"
     px_prepare_backup_output "$backup_file"
@@ -1293,42 +1467,29 @@ do_backup() {
     px_prepare_target_context "$bundle_id"
     local context_status=$?
     [ "$context_status" -eq 0 ] || return "$context_status"
-
-    local keychain_groups
-    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    if [ -n "$override_groups" ]; then
-        log_info "Using caller-selected keychain groups"
-        keychain_groups="$override_groups"
-    fi
-    if [ -z "$keychain_groups" ]; then
-        log_error "No keychain-access-groups found in app entitlements"
-        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    fi
-
-    local app_groups app_identifier
-    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    if [ -z "$app_identifier" ]; then
-        log_warn "No application-identifier found, using bundle ID"
-        app_identifier="$bundle_id"
-    fi
-    keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    px_select_source_entitlement "$app_identifier"
+    px_prepare_requested_groups "$bundle_id"
+    local group_status=$?
+    [ "$group_status" -eq 0 ] || return "$group_status"
 
     log_info "Preparing private signed helper..."
-    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    px_finish_signed_helper
     local helper_status=$?
     [ "$helper_status" -eq 0 ] || return "$helper_status"
     px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_revalidate_backup_output_before_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
-    local helper_args=("--action" "backup" "--file" "$PX_BACKUP_OUTPUT_PATH" "--groups" "$keychain_groups")
+    local helper_args=(
+        "--action" "backup"
+        "--file" "$PX_BACKUP_OUTPUT_PATH"
+        "--groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--requested-groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--effective-entitlements-file" "$PX_EFFECTIVE_ENT_PATH"
+    )
     if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
     "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
 
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_backup_output_after_execution "$raw_exit_code" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     local exit_code=$?
@@ -1344,7 +1505,6 @@ do_restore() {
     local bundle_id="$1"
     local restore_file="$2"
     local overwrite="$3"
-    local override_groups="$4"
 
     log_info "Starting keychain restore"
     px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
@@ -1356,34 +1516,29 @@ do_restore() {
     px_prepare_target_context "$bundle_id"
     local context_status=$?
     [ "$context_status" -eq 0 ] || return "$context_status"
-
-    local keychain_groups app_groups app_identifier
-    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    if [ -n "$override_groups" ]; then
-        log_info "Using caller-selected keychain groups"
-        keychain_groups="$override_groups"
-    fi
-    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ -n "$app_identifier" ] || app_identifier="$bundle_id"
-    keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    px_select_source_entitlement "$app_identifier"
+    px_prepare_requested_groups "$bundle_id"
+    local group_status=$?
+    [ "$group_status" -eq 0 ] || return "$group_status"
 
     log_info "Preparing private signed helper..."
-    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    px_finish_signed_helper
     local helper_status=$?
     [ "$helper_status" -eq 0 ] || return "$helper_status"
     px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$PX_RESTORE_INPUT_PATH" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
-    local helper_args=("--action" "restore" "--file" "$PX_RESTORE_INPUT_PATH")
+    local helper_args=(
+        "--action" "restore"
+        "--file" "$PX_RESTORE_INPUT_PATH"
+        "--requested-groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--effective-entitlements-file" "$PX_EFFECTIVE_ENT_PATH"
+    )
     if [ "$overwrite" = "--overwrite" ]; then helper_args+=("--overwrite"); fi
     if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
     "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
 
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$PX_RESTORE_INPUT_PATH" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     local exit_code=$?
@@ -1397,85 +1552,65 @@ do_restore() {
 
 do_wipe() {
     local bundle_id="$1"
-    local override_groups="$2"
 
     log_info "Starting keychain wipe"
     px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_prepare_target_context "$bundle_id"
     local context_status=$?
     [ "$context_status" -eq 0 ] || return "$context_status"
+    px_prepare_requested_groups "$bundle_id"
+    local group_status=$?
+    [ "$group_status" -eq 0 ] || return "$group_status"
 
-    local keychain_groups app_groups app_identifier
-    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    if [ -n "$override_groups" ]; then
-        log_info "Using caller-selected keychain groups"
-        keychain_groups="$override_groups"
-    fi
-    if [ -z "$keychain_groups" ]; then
-        log_error "No keychain-access-groups found"
-        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    fi
     log_warn "This will delete all Keychain items for the selected groups"
-    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ -n "$app_identifier" ] || app_identifier="$bundle_id"
-    keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    px_select_source_entitlement "$app_identifier"
-
-    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    px_finish_signed_helper
     local helper_status=$?
     [ "$helper_status" -eq 0 ] || return "$helper_status"
     px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
-    local helper_args=("--action" "wipe" "--groups" "$keychain_groups")
+    local helper_args=(
+        "--action" "wipe"
+        "--groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--requested-groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--effective-entitlements-file" "$PX_EFFECTIVE_ENT_PATH"
+    )
     if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
     "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
 
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
 
 do_list() {
     local bundle_id="$1"
-    local override_groups="$2"
 
     log_info "Listing keychain items"
     px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_prepare_target_context "$bundle_id"
     local context_status=$?
     [ "$context_status" -eq 0 ] || return "$context_status"
+    px_prepare_requested_groups "$bundle_id"
+    local group_status=$?
+    [ "$group_status" -eq 0 ] || return "$group_status"
 
-    local keychain_groups app_groups app_identifier
-    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    if [ -n "$override_groups" ]; then
-        log_info "Using caller-selected keychain groups"
-        keychain_groups="$override_groups"
-    fi
-    if [ -z "$keychain_groups" ]; then
-        log_info "No keychain-access-groups found in app"
-        return "$PX_KEYCHAIN_EXIT_COMPLETED"
-    fi
-    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ -n "$app_identifier" ] || app_identifier="$bundle_id"
-    keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    px_select_source_entitlement "$app_identifier"
-
-    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    px_finish_signed_helper
     local helper_status=$?
     [ "$helper_status" -eq 0 ] || return "$helper_status"
     px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
-    local helper_args=("--action" "list" "--groups" "$keychain_groups")
+    local helper_args=(
+        "--action" "list"
+        "--groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--requested-groups" "$PX_REQUESTED_GROUPS_CSV"
+        "--effective-entitlements-file" "$PX_EFFECTIVE_ENT_PATH"
+    )
     if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
     "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
 
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
@@ -1490,6 +1625,7 @@ print_usage() {
     echo "  list <bundleID>                   List keychain items"
     echo ""
     echo "Options:"
+    echo "  --groups CSV  Select canonical Keychain access groups"
     echo "  --overwrite   For restore: update one exact existing item in place; never delete"
     echo "  --verbose     Show detailed output"
     echo ""
@@ -1557,10 +1693,20 @@ case "$ACTION" in
         while [[ "$1" == --* ]]; do
             case "$1" in
                 --groups)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ] || [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                        log_error "Invalid or duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="$2"
                     shift 2
                     ;;
                 --groups=*)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
+                        log_error "Duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="${1#*=}"
                     shift 1
                     ;;
@@ -1569,7 +1715,8 @@ case "$ACTION" in
                     ;;
             esac
         done
-        do_backup "$BUNDLE_ID" "$shift_file" "$OVERRIDE_KEYCHAIN_GROUPS"
+        [ $# -eq 0 ] || { log_error "Unexpected backup argument"; exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"; }
+        do_backup "$BUNDLE_ID" "$shift_file"
         ;;
     restore)
         if [ -z "$1" ]; then
@@ -1589,10 +1736,20 @@ case "$ACTION" in
         while [[ "$1" == --* ]]; do
             case "$1" in
                 --groups)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ] || [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                        log_error "Invalid or duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="$2"
                     shift 2
                     ;;
                 --groups=*)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
+                        log_error "Duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="${1#*=}"
                     shift 1
                     ;;
@@ -1601,16 +1758,27 @@ case "$ACTION" in
                     ;;
             esac
         done
-        do_restore "$BUNDLE_ID" "$shift_file" "$restore_overwrite" "$OVERRIDE_KEYCHAIN_GROUPS"
+        [ $# -eq 0 ] || { log_error "Unexpected restore argument"; exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"; }
+        do_restore "$BUNDLE_ID" "$shift_file" "$restore_overwrite"
         ;;
     wipe)
         while [[ "$1" == --* ]]; do
             case "$1" in
                 --groups)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ] || [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                        log_error "Invalid or duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="$2"
                     shift 2
                     ;;
                 --groups=*)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
+                        log_error "Duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="${1#*=}"
                     shift 1
                     ;;
@@ -1619,16 +1787,27 @@ case "$ACTION" in
                     ;;
             esac
         done
-        do_wipe "$BUNDLE_ID" "$OVERRIDE_KEYCHAIN_GROUPS"
+        [ $# -eq 0 ] || { log_error "Unexpected wipe argument"; exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"; }
+        do_wipe "$BUNDLE_ID"
         ;;
     list)
         while [[ "$1" == --* ]]; do
             case "$1" in
                 --groups)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ] || [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                        log_error "Invalid or duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="$2"
                     shift 2
                     ;;
                 --groups=*)
+                    if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
+                        log_error "Duplicate --groups option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_KEYCHAIN_GROUPS_PRESENT=1
                     OVERRIDE_KEYCHAIN_GROUPS="${1#*=}"
                     shift 1
                     ;;
@@ -1637,7 +1816,8 @@ case "$ACTION" in
                     ;;
             esac
         done
-        do_list "$BUNDLE_ID" "$OVERRIDE_KEYCHAIN_GROUPS"
+        [ $# -eq 0 ] || { log_error "Unexpected list argument"; exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"; }
+        do_list "$BUNDLE_ID"
         ;;
     *)
         log_error "Unknown action: $ACTION"

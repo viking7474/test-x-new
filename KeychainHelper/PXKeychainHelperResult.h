@@ -31,6 +31,9 @@ typedef NS_ERROR_ENUM(PXKeychainHelperResultErrorDomain,
     PXKeychainHelperResultErrorLimitExceeded = 6,
     PXKeychainHelperResultErrorSerializationFailed = 7,
     PXKeychainHelperResultErrorInternalInvariantFailed = 8,
+    PXKeychainHelperResultErrorInvalidAccessGroups = 9,
+    PXKeychainHelperResultErrorDuplicateAccessGroup = 10,
+    PXKeychainHelperResultErrorAccessGroupRelationInvalid = 11,
 };
 
 __attribute__((objc_subclassing_restricted))
@@ -45,6 +48,8 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, readonly) NSUInteger skippedCount;
 @property (nonatomic, readonly) NSUInteger warningCount;
 @property (nonatomic, readonly) NSUInteger errorCount;
+@property (nonatomic, copy, readonly) NSArray<NSString *> *requestedAccessGroups;
+@property (nonatomic, copy, readonly) NSArray<NSString *> *effectiveAccessGroups;
 @property (nonatomic, readonly) BOOL fatalErrorPresent;
 @property (nonatomic, copy, readonly) NSString *fatalErrorDomain;
 @property (nonatomic, readonly) NSInteger fatalErrorCode;
@@ -59,6 +64,8 @@ __attribute__((objc_subclassing_restricted))
                                 skippedCount:(NSUInteger)skippedCount
                                 warningCount:(NSUInteger)warningCount
                                   errorCount:(NSUInteger)errorCount
+                       requestedAccessGroups:(NSArray<NSString *> *)requestedAccessGroups
+                       effectiveAccessGroups:(NSArray<NSString *> *)effectiveAccessGroups
                                   fatalError:(NSError * _Nullable)fatalError
                                        error:(NSError * _Nullable * _Nullable)error;
 

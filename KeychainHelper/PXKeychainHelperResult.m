@@ -1,16 +1,20 @@
 #import "PXKeychainHelperResult.h"
 #import <CoreFoundation/CoreFoundation.h>
 
-NSInteger const PXKeychainHelperResultSchemaVersion = 1;
-NSString * const PXKeychainHelperResultOutputPrefix = @"PXKEYCHAIN_HELPER_RESULT_V1=";
+NSInteger const PXKeychainHelperResultSchemaVersion = 2;
+NSString * const PXKeychainHelperResultOutputPrefix = @"PXKEYCHAIN_HELPER_RESULT_V2=";
 NSErrorDomain const PXKeychainHelperResultErrorDomain = @"com.hydra.projectx.keychain-helper-result";
 NSString * const PXKeychainHelperResultErrorFieldPathKey = @"fieldPath";
 
 static const NSUInteger PXKeychainHelperResultMaximumCount = 1000000;
 static const NSUInteger PXKeychainHelperResultMaximumFatalDomainBytes = 255;
-static const NSUInteger PXKeychainHelperResultMaximumBinaryPlistBytes = 16 * 1024;
-static const NSUInteger PXKeychainHelperResultMaximumBase64Bytes = 24 * 1024;
-static const NSUInteger PXKeychainHelperResultMaximumOutputLineBytes = 25 * 1024;
+static const NSUInteger PXKeychainHelperResultMaximumAccessGroupsPerArray = 128;
+static const NSUInteger PXKeychainHelperResultMaximumAccessGroupBytes = 512;
+static const NSUInteger PXKeychainHelperResultMaximumAccessGroupArrayBytes = 8 * 1024;
+static const NSUInteger PXKeychainHelperResultMaximumCombinedAccessGroupBytes = 16 * 1024;
+static const NSUInteger PXKeychainHelperResultMaximumBinaryPlistBytes = 32 * 1024;
+static const NSUInteger PXKeychainHelperResultMaximumBase64Bytes = 48 * 1024;
+static const NSUInteger PXKeychainHelperResultMaximumOutputLineBytes = 50 * 1024;
 
 static void PXKeychainHelperResultSetError(NSError **error,
                                             PXKeychainHelperResultErrorCode code,
@@ -74,6 +78,19 @@ static BOOL PXKeychainHelperResultCountsFitAttempted(NSUInteger attemptedCount,
     return skippedCount <= remaining;
 }
 
+static BOOL PXKeychainHelperResultAddWithoutOverflow(NSUInteger left,
+                                                      NSUInteger right,
+                                                      NSUInteger limit,
+                                                      NSUInteger *sumOut) {
+    if (left > limit || right > limit || right > limit - left) {
+        return NO;
+    }
+    if (sumOut) {
+        *sumOut = left + right;
+    }
+    return YES;
+}
+
 static BOOL PXKeychainHelperResultFatalDomainIsValid(NSString *domain,
                                                       NSUInteger *byteCountOut) {
     if (![domain isKindOfClass:[NSString class]] || domain.length == 0) {
@@ -101,6 +118,117 @@ static BOOL PXKeychainHelperResultFatalDomainIsValid(NSString *domain,
     return YES;
 }
 
+static BOOL PXKeychainHelperResultAccessGroupStringIsValid(NSString *group,
+                                                            NSUInteger *byteCountOut) {
+    if (![group isKindOfClass:[NSString class]] || group.length == 0) {
+        return NO;
+    }
+    NSData *utf8 = [group dataUsingEncoding:NSUTF8StringEncoding
+                       allowLossyConversion:NO];
+    if (!utf8 || utf8.length == 0 ||
+        utf8.length > PXKeychainHelperResultMaximumAccessGroupBytes) {
+        return NO;
+    }
+    NSString *roundTrip = [[NSString alloc] initWithData:utf8
+                                                 encoding:NSUTF8StringEncoding];
+    if (!roundTrip || ![roundTrip isEqualToString:group]) {
+        return NO;
+    }
+    unichar nulCharacter = 0;
+    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
+    if ([group rangeOfString:nulString].location != NSNotFound ||
+        [group rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound ||
+        [group rangeOfString:@","].location != NSNotFound) {
+        return NO;
+    }
+    NSCharacterSet *edgeWhitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    if (![[group stringByTrimmingCharactersInSet:edgeWhitespace] isEqualToString:group]) {
+        return NO;
+    }
+    if (byteCountOut) {
+        *byteCountOut = utf8.length;
+    }
+    return YES;
+}
+
+static NSArray<NSString *> *PXKeychainHelperResultValidatedGroupSnapshot(
+    id value,
+    NSString *fieldPath,
+    NSUInteger *byteCountOut,
+    NSError **error) {
+    if (![value isKindOfClass:[NSArray class]]) {
+        PXKeychainHelperResultSetError(error,
+                                       PXKeychainHelperResultErrorInvalidAccessGroups,
+                                       fieldPath,
+                                       @"The access-group field must be an array.");
+        return nil;
+    }
+    NSArray *input = (NSArray *)value;
+    if (input.count > PXKeychainHelperResultMaximumAccessGroupsPerArray) {
+        PXKeychainHelperResultSetError(error,
+                                       PXKeychainHelperResultErrorLimitExceeded,
+                                       fieldPath,
+                                       @"The access-group array exceeds the fixed count limit.");
+        return nil;
+    }
+
+    NSMutableArray<NSString *> *snapshot = [NSMutableArray arrayWithCapacity:input.count];
+    NSMutableSet<NSString *> *seen = [NSMutableSet setWithCapacity:input.count];
+    NSUInteger totalBytes = 0;
+    for (NSUInteger index = 0; index < input.count; index++) {
+        id candidate = input[index];
+        NSString *elementPath = [NSString stringWithFormat:@"%@[%lu]",
+                                 fieldPath,
+                                 (unsigned long)index];
+        NSUInteger groupBytes = 0;
+        if (!PXKeychainHelperResultAccessGroupStringIsValid(candidate, &groupBytes)) {
+            PXKeychainHelperResultSetError(error,
+                                           PXKeychainHelperResultErrorInvalidAccessGroups,
+                                           elementPath,
+                                           @"An access-group element is invalid.");
+            return nil;
+        }
+        NSString *immutableGroup = [(NSString *)candidate copy];
+        if ([seen containsObject:immutableGroup]) {
+            PXKeychainHelperResultSetError(error,
+                                           PXKeychainHelperResultErrorDuplicateAccessGroup,
+                                           elementPath,
+                                           @"The access-group array contains a duplicate.");
+            return nil;
+        }
+        NSUInteger nextTotal = 0;
+        if (!PXKeychainHelperResultAddWithoutOverflow(totalBytes,
+                                                      groupBytes,
+                                                      PXKeychainHelperResultMaximumAccessGroupArrayBytes,
+                                                      &nextTotal)) {
+            PXKeychainHelperResultSetError(error,
+                                           PXKeychainHelperResultErrorLimitExceeded,
+                                           fieldPath,
+                                           @"The access-group array exceeds the fixed byte limit.");
+            return nil;
+        }
+        totalBytes = nextTotal;
+        [seen addObject:immutableGroup];
+        [snapshot addObject:immutableGroup];
+    }
+    if (byteCountOut) {
+        *byteCountOut = totalBytes;
+    }
+    return [snapshot copy];
+}
+
+static BOOL PXKeychainHelperResultRequestedGroupsAreSubset(
+    NSArray<NSString *> *requestedAccessGroups,
+    NSArray<NSString *> *effectiveAccessGroups) {
+    NSSet<NSString *> *effectiveSet = [NSSet setWithArray:effectiveAccessGroups];
+    for (NSString *group in requestedAccessGroups) {
+        if (![effectiveSet containsObject:group]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
 static BOOL PXKeychainHelperResultIsNumber(id value) {
     return [value isKindOfClass:[NSNumber class]] &&
            CFGetTypeID((__bridge CFTypeRef)value) == CFNumberGetTypeID();
@@ -121,10 +249,12 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
     NSUInteger skippedCount,
     NSUInteger warningCount,
     NSUInteger errorCount,
+    NSArray<NSString *> *requestedAccessGroups,
+    NSArray<NSString *> *effectiveAccessGroups,
     BOOL fatalErrorPresent,
     NSString *fatalErrorDomain,
     NSInteger fatalErrorCode) {
-    if (![representation isKindOfClass:[NSDictionary class]] || representation.count != 10) {
+    if (![representation isKindOfClass:[NSDictionary class]] || representation.count != 11) {
         return NO;
     }
     NSSet<NSString *> *rootKeys = [NSSet setWithArray:@[
@@ -138,6 +268,7 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         @"warningCount",
         @"errorCount",
         @"fatalError",
+        @"accessGroups",
     ]];
     if (![[NSSet setWithArray:representation.allKeys] isEqualToSet:rootKeys]) {
         return NO;
@@ -153,6 +284,7 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
     NSNumber *warningNumber = representation[@"warningCount"];
     NSNumber *errorNumber = representation[@"errorCount"];
     NSDictionary<NSString *, id> *fatalRepresentation = representation[@"fatalError"];
+    NSDictionary<NSString *, id> *accessGroupsRepresentation = representation[@"accessGroups"];
 
     if (!PXKeychainHelperResultIsNumber(schemaNumber) ||
         schemaNumber.integerValue != PXKeychainHelperResultSchemaVersion ||
@@ -171,7 +303,9 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         !PXKeychainHelperResultIsNumber(errorNumber) ||
         errorNumber.unsignedIntegerValue != errorCount ||
         ![fatalRepresentation isKindOfClass:[NSDictionary class]] ||
-        fatalRepresentation.count != 3) {
+        fatalRepresentation.count != 3 ||
+        ![accessGroupsRepresentation isKindOfClass:[NSDictionary class]] ||
+        accessGroupsRepresentation.count != 2) {
         return NO;
     }
 
@@ -180,19 +314,30 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         @"domain",
         @"code",
     ]];
-    if (![[NSSet setWithArray:fatalRepresentation.allKeys] isEqualToSet:fatalKeys]) {
+    NSSet<NSString *> *accessGroupKeys = [NSSet setWithArray:@[
+        @"requested",
+        @"effective",
+    ]];
+    if (![[NSSet setWithArray:fatalRepresentation.allKeys] isEqualToSet:fatalKeys] ||
+        ![[NSSet setWithArray:accessGroupsRepresentation.allKeys] isEqualToSet:accessGroupKeys]) {
         return NO;
     }
 
     NSNumber *presentNumber = fatalRepresentation[@"present"];
     NSString *domain = fatalRepresentation[@"domain"];
     NSNumber *codeNumber = fatalRepresentation[@"code"];
+    NSArray *requestedRepresentation = accessGroupsRepresentation[@"requested"];
+    NSArray *effectiveRepresentation = accessGroupsRepresentation[@"effective"];
     return PXKeychainHelperResultIsBoolean(presentNumber) &&
            presentNumber.boolValue == fatalErrorPresent &&
            [domain isKindOfClass:[NSString class]] &&
            [domain isEqualToString:fatalErrorDomain] &&
            PXKeychainHelperResultIsNumber(codeNumber) &&
-           codeNumber.integerValue == fatalErrorCode;
+           codeNumber.integerValue == fatalErrorCode &&
+           [requestedRepresentation isKindOfClass:[NSArray class]] &&
+           [requestedRepresentation isEqualToArray:requestedAccessGroups] &&
+           [effectiveRepresentation isKindOfClass:[NSArray class]] &&
+           [effectiveRepresentation isEqualToArray:effectiveAccessGroups];
 }
 
 @interface PXKeychainHelperResult ()
@@ -205,6 +350,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                         skippedCount:(NSUInteger)skippedCount
                         warningCount:(NSUInteger)warningCount
                           errorCount:(NSUInteger)errorCount
+               requestedAccessGroups:(NSArray<NSString *> *)requestedAccessGroups
+               effectiveAccessGroups:(NSArray<NSString *> *)effectiveAccessGroups
                    fatalErrorPresent:(BOOL)fatalErrorPresent
                     fatalErrorDomain:(NSString *)fatalErrorDomain
                       fatalErrorCode:(NSInteger)fatalErrorCode
@@ -223,6 +370,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                        skippedCount:(NSUInteger)skippedCount
                        warningCount:(NSUInteger)warningCount
                          errorCount:(NSUInteger)errorCount
+              requestedAccessGroups:(NSArray<NSString *> *)requestedAccessGroups
+              effectiveAccessGroups:(NSArray<NSString *> *)effectiveAccessGroups
                          fatalError:(NSError *)fatalError
                               error:(NSError **)error {
     if (error) {
@@ -310,6 +459,44 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         return nil;
     }
 
+    NSUInteger requestedBytes = 0;
+    NSArray<NSString *> *immutableRequested = PXKeychainHelperResultValidatedGroupSnapshot(
+        requestedAccessGroups,
+        @"$.accessGroups.requested",
+        &requestedBytes,
+        error);
+    if (!immutableRequested) {
+        return nil;
+    }
+    NSUInteger effectiveBytes = 0;
+    NSArray<NSString *> *immutableEffective = PXKeychainHelperResultValidatedGroupSnapshot(
+        effectiveAccessGroups,
+        @"$.accessGroups.effective",
+        &effectiveBytes,
+        error);
+    if (!immutableEffective) {
+        return nil;
+    }
+    NSUInteger combinedBytes = 0;
+    if (!PXKeychainHelperResultAddWithoutOverflow(requestedBytes,
+                                                  effectiveBytes,
+                                                  PXKeychainHelperResultMaximumCombinedAccessGroupBytes,
+                                                  &combinedBytes)) {
+        PXKeychainHelperResultSetError(error,
+                                       PXKeychainHelperResultErrorLimitExceeded,
+                                       @"$.accessGroups",
+                                       @"The combined access-group fields exceed the fixed byte limit.");
+        return nil;
+    }
+    (void)combinedBytes;
+    if (!PXKeychainHelperResultRequestedGroupsAreSubset(immutableRequested, immutableEffective)) {
+        PXKeychainHelperResultSetError(error,
+                                       PXKeychainHelperResultErrorAccessGroupRelationInvalid,
+                                       @"$.accessGroups.requested",
+                                       @"The requested access-group set is not contained in the effective set.");
+        return nil;
+    }
+
     BOOL fatalErrorPresent = fatalError != nil;
     NSString *fatalErrorDomain = @"";
     NSInteger fatalErrorCode = 0;
@@ -334,12 +521,16 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         fatalErrorCode = fatalError.code;
     }
 
-    NSDictionary<NSString *, id> *fatalRepresentation = @{
+    NSDictionary<NSString *, id> *fatalRepresentation = [@{
         @"present": @(fatalErrorPresent),
         @"domain": [fatalErrorDomain copy],
         @"code": @(fatalErrorCode),
-    };
-    NSDictionary<NSString *, id> *snapshot = @{
+    } copy];
+    NSDictionary<NSString *, id> *accessGroupsRepresentation = [@{
+        @"requested": [immutableRequested copy],
+        @"effective": [immutableEffective copy],
+    } copy];
+    NSDictionary<NSString *, id> *snapshot = [@{
         @"schemaVersion": @(PXKeychainHelperResultSchemaVersion),
         @"operation": [operationString copy],
         @"completion": [completionString copy],
@@ -349,9 +540,9 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         @"skippedCount": @(skippedCount),
         @"warningCount": @(warningCount),
         @"errorCount": @(errorCount),
-        @"fatalError": [fatalRepresentation copy],
-    };
-    snapshot = [snapshot copy];
+        @"fatalError": fatalRepresentation,
+        @"accessGroups": accessGroupsRepresentation,
+    } copy];
 
     if (!PXKeychainHelperResultRepresentationMatchesState(snapshot,
                                                            operation,
@@ -362,6 +553,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                                                            skippedCount,
                                                            warningCount,
                                                            errorCount,
+                                                           immutableRequested,
+                                                           immutableEffective,
                                                            fatalErrorPresent,
                                                            fatalErrorDomain,
                                                            fatalErrorCode)) {
@@ -433,6 +626,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                                                            skippedCount,
                                                            warningCount,
                                                            errorCount,
+                                                           immutableRequested,
+                                                           immutableEffective,
                                                            fatalErrorPresent,
                                                            fatalErrorDomain,
                                                            fatalErrorCode)) {
@@ -476,6 +671,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                                                skippedCount:skippedCount
                                                warningCount:warningCount
                                                  errorCount:errorCount
+                                      requestedAccessGroups:immutableRequested
+                                      effectiveAccessGroups:immutableEffective
                                           fatalErrorPresent:fatalErrorPresent
                                            fatalErrorDomain:fatalErrorDomain
                                              fatalErrorCode:fatalErrorCode
@@ -498,6 +695,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                         skippedCount:(NSUInteger)skippedCount
                         warningCount:(NSUInteger)warningCount
                           errorCount:(NSUInteger)errorCount
+               requestedAccessGroups:(NSArray<NSString *> *)requestedAccessGroups
+               effectiveAccessGroups:(NSArray<NSString *> *)effectiveAccessGroups
                    fatalErrorPresent:(BOOL)fatalErrorPresent
                     fatalErrorDomain:(NSString *)fatalErrorDomain
                       fatalErrorCode:(NSInteger)fatalErrorCode
@@ -514,6 +713,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
         _skippedCount = skippedCount;
         _warningCount = warningCount;
         _errorCount = errorCount;
+        _requestedAccessGroups = [requestedAccessGroups copy];
+        _effectiveAccessGroups = [effectiveAccessGroups copy];
         _fatalErrorPresent = fatalErrorPresent;
         _fatalErrorDomain = [fatalErrorDomain copy];
         _fatalErrorCode = fatalErrorCode;
@@ -545,6 +746,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
            self.skippedCount == other.skippedCount &&
            self.warningCount == other.warningCount &&
            self.errorCount == other.errorCount &&
+           [self.requestedAccessGroups isEqualToArray:other.requestedAccessGroups] &&
+           [self.effectiveAccessGroups isEqualToArray:other.effectiveAccessGroups] &&
            self.fatalErrorPresent == other.fatalErrorPresent &&
            [self.fatalErrorDomain isEqualToString:other.fatalErrorDomain] &&
            self.fatalErrorCode == other.fatalErrorCode &&
@@ -555,6 +758,8 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
 - (NSUInteger)hash {
     NSUInteger value = self.propertyListRepresentation.hash;
     value ^= self.machineReadableLine.hash;
+    value ^= self.requestedAccessGroups.hash;
+    value ^= self.effectiveAccessGroups.hash;
     value ^= self.fatalErrorDomain.hash;
     value ^= (NSUInteger)self.schemaVersion;
     value ^= (NSUInteger)self.operation;

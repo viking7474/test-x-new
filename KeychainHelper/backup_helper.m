@@ -1,12 +1,6 @@
 /**
  * backup_helper - iOS Keychain Backup/Restore CLI Tool
  *
- * Usage:
- *   backup_helper --action backup --target <bundleID> --file <path>
- *   backup_helper --action restore --file <path> [--overwrite]
- *   backup_helper --action wipe --target <bundleID>
- *   backup_helper --action list --target <bundleID>
- *
  * This tool must be resigned with the target app's keychain-access-groups
  * entitlements before running. Use the keychain_backup.sh wrapper script.
  *
@@ -21,6 +15,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <sys/stat.h>
 #import "KeychainBackupHelper.h"
 #import "PXKeychainHelperExitCode.h"
 #import "PXKeychainHelperResult.h"
@@ -33,19 +28,27 @@ typedef NS_ENUM(NSInteger, PXHelperAction) {
     PXHelperActionList,
 };
 
+static const NSUInteger PXHelperMaximumAccessGroups = 128;
+static const NSUInteger PXHelperMaximumAccessGroupBytes = 512;
+static const NSUInteger PXHelperMaximumAccessGroupCSVBytes = 8 * 1024;
+static const NSUInteger PXHelperMaximumEntitlementsFileBytes = 64 * 1024;
+static const NSUInteger PXHelperMaximumPathBytes = 4 * 1024;
+
 static void printUsage(const char *progname) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s --action backup --file <path> [--groups <group1,group2,...>]\n", progname);
-    fprintf(stderr, "  %s --action restore --file <path> [--overwrite]\n", progname);
-    fprintf(stderr, "  %s --action wipe --groups <group1,group2,...>\n", progname);
-    fprintf(stderr, "  %s --action list --groups <group1,group2,...>\n", progname);
+    fprintf(stderr, "  %s --action backup --file <path> --groups <groups> --requested-groups <groups> --effective-entitlements-file <path>\n", progname);
+    fprintf(stderr, "  %s --action restore --file <path> --requested-groups <groups> --effective-entitlements-file <path> [--overwrite]\n", progname);
+    fprintf(stderr, "  %s --action wipe --groups <groups> --requested-groups <groups> --effective-entitlements-file <path>\n", progname);
+    fprintf(stderr, "  %s --action list --groups <groups> --requested-groups <groups> --effective-entitlements-file <path>\n", progname);
     fprintf(stderr, "\nOptions:\n");
-    fprintf(stderr, "  --action <action>   Action to perform: backup, restore, wipe, list\n");
-    fprintf(stderr, "  --file <path>       Path to backup/restore file (plist format)\n");
-    fprintf(stderr, "  --groups <groups>   Comma-separated list of keychain access groups\n");
-    fprintf(stderr, "  --overwrite         For restore: update one exact existing item in place; never delete\n");
-    fprintf(stderr, "  --verbose           Print detailed progress information\n");
-    fprintf(stderr, "  --help              Show this help message\n");
+    fprintf(stderr, "  --action <action>                     Action: backup, restore, wipe, list\n");
+    fprintf(stderr, "  --file <path>                         Backup/restore plist path\n");
+    fprintf(stderr, "  --groups <groups>                     Canonical operational access groups\n");
+    fprintf(stderr, "  --requested-groups <groups>           Canonical requested access-group report\n");
+    fprintf(stderr, "  --effective-entitlements-file <path>  Signed-helper entitlement snapshot\n");
+    fprintf(stderr, "  --overwrite                           Restore exact existing items in place\n");
+    fprintf(stderr, "  --verbose                             Print detailed progress information\n");
+    fprintf(stderr, "  --help                                Show this help message\n");
 }
 
 static PXHelperAction parseAction(NSString *actionStr) {
@@ -54,19 +57,6 @@ static PXHelperAction parseAction(NSString *actionStr) {
     if ([actionStr isEqualToString:@"wipe"]) return PXHelperActionWipe;
     if ([actionStr isEqualToString:@"list"]) return PXHelperActionList;
     return PXHelperActionUnknown;
-}
-
-static NSArray<NSString *> *parseGroups(NSString *groupsStr) {
-    if (!groupsStr.length) return @[];
-    NSArray *parts = [groupsStr componentsSeparatedByString:@","];
-    NSMutableArray *groups = [NSMutableArray array];
-    for (NSString *part in parts) {
-        NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (trimmed.length) {
-            [groups addObject:trimmed];
-        }
-    }
-    return groups;
 }
 
 static void logVerbose(BOOL verbose, NSString *format, ...) {
@@ -98,53 +88,258 @@ static NSString *PXHexStringFromData(NSData *data) {
     if (![data isKindOfClass:[NSData class]] || data.length == 0) return @"";
     const unsigned char *bytes = (const unsigned char *)data.bytes;
     NSUInteger len = data.length;
-    // Cap to avoid huge logs
     NSUInteger maxLen = MIN(len, 32);
     NSMutableString *hex = [NSMutableString stringWithCapacity:maxLen * 2];
     for (NSUInteger i = 0; i < maxLen; i++) {
         [hex appendFormat:@"%02x", bytes[i]];
     }
     if (len > maxLen) {
-        [hex appendString:@"..." ];
+        [hex appendString:@"..."];
     }
     return hex;
 }
 
-static NSString *PXSafeString(id v) {
-    if (!v || v == (id)kCFNull) return @"";
-    if ([v isKindOfClass:[NSString class]]) return (NSString *)v;
-    if ([v isKindOfClass:[NSData class]]) {
-        NSString *s = [[NSString alloc] initWithData:(NSData *)v encoding:NSUTF8StringEncoding];
-        if (s.length) return s;
-        return [NSString stringWithFormat:@"<data:%@>", PXHexStringFromData((NSData *)v)];
+static NSString *PXSafeString(id value) {
+    if (!value || value == (id)kCFNull) return @"";
+    if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    if ([value isKindOfClass:[NSData class]]) {
+        NSString *string = [[NSString alloc] initWithData:(NSData *)value encoding:NSUTF8StringEncoding];
+        if (string.length) return string;
+        return [NSString stringWithFormat:@"<data:%@>", PXHexStringFromData((NSData *)value)];
     }
-    if ([v respondsToSelector:@selector(stringValue)]) {
-        NSString *s = [v performSelector:@selector(stringValue)];
-        if ([s isKindOfClass:[NSString class]] && s.length) return s;
+    if ([value respondsToSelector:@selector(stringValue)]) {
+        NSString *string = [value performSelector:@selector(stringValue)];
+        if ([string isKindOfClass:[NSString class]] && string.length) return string;
     }
-    return [[v description] ?: @"" copy];
+    return [[value description] ?: @"" copy];
+}
+
+static BOOL PXHelperAddWithoutOverflow(NSUInteger left,
+                                       NSUInteger right,
+                                       NSUInteger limit,
+                                       NSUInteger *sumOut) {
+    if (left > limit || right > limit || right > limit - left) {
+        return NO;
+    }
+    if (sumOut) {
+        *sumOut = left + right;
+    }
+    return YES;
+}
+
+static BOOL PXHelperAccessGroupIsValid(NSString *group, NSUInteger *byteCountOut) {
+    if (![group isKindOfClass:[NSString class]] || group.length == 0) {
+        return NO;
+    }
+    NSData *utf8 = [group dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!utf8 || utf8.length == 0 || utf8.length > PXHelperMaximumAccessGroupBytes) {
+        return NO;
+    }
+    NSString *roundTrip = [[NSString alloc] initWithData:utf8 encoding:NSUTF8StringEncoding];
+    if (!roundTrip || ![roundTrip isEqualToString:group]) {
+        return NO;
+    }
+    unichar nulCharacter = 0;
+    NSString *nulString = [NSString stringWithCharacters:&nulCharacter length:1];
+    if ([group rangeOfString:nulString].location != NSNotFound ||
+        [group rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound ||
+        [group rangeOfString:@","].location != NSNotFound) {
+        return NO;
+    }
+    if (![[group stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+          isEqualToString:group]) {
+        return NO;
+    }
+    if (byteCountOut) {
+        *byteCountOut = utf8.length;
+    }
+    return YES;
+}
+
+static NSArray<NSString *> *PXCanonicalAccessGroupsFromCSV(NSString *csv,
+                                                            NSError **error) {
+    if (error) *error = nil;
+    if (![csv isKindOfClass:[NSString class]] || csv.length == 0) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidArguments
+                                            userInfo:nil];
+        return nil;
+    }
+    NSData *csvBytes = [csv dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!csvBytes || csvBytes.length == 0 || csvBytes.length > PXHelperMaximumAccessGroupCSVBytes ||
+        [csv rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidArguments
+                                            userInfo:nil];
+        return nil;
+    }
+
+    NSArray<NSString *> *parts = [csv componentsSeparatedByString:@","];
+    if (parts.count == 0 || parts.count > PXHelperMaximumAccessGroups) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidArguments
+                                            userInfo:nil];
+        return nil;
+    }
+    NSMutableArray<NSString *> *groups = [NSMutableArray arrayWithCapacity:parts.count];
+    NSMutableSet<NSString *> *seen = [NSMutableSet setWithCapacity:parts.count];
+    NSUInteger totalBytes = 0;
+    for (NSString *part in parts) {
+        NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSUInteger groupBytes = 0;
+        if (!PXHelperAccessGroupIsValid(trimmed, &groupBytes)) {
+            if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                    code:PXKeychainBackupErrorInvalidArguments
+                                                userInfo:nil];
+            return nil;
+        }
+        NSUInteger nextTotal = 0;
+        if (!PXHelperAddWithoutOverflow(totalBytes,
+                                        groupBytes,
+                                        PXHelperMaximumAccessGroupCSVBytes,
+                                        &nextTotal)) {
+            if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                    code:PXKeychainBackupErrorInvalidArguments
+                                                userInfo:nil];
+            return nil;
+        }
+        totalBytes = nextTotal;
+        NSString *immutableGroup = [trimmed copy];
+        if (![seen containsObject:immutableGroup]) {
+            [seen addObject:immutableGroup];
+            [groups addObject:immutableGroup];
+        }
+    }
+    if (groups.count == 0 || groups.count > PXHelperMaximumAccessGroups) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidArguments
+                                            userInfo:nil];
+        return nil;
+    }
+    return [groups copy];
+}
+
+static NSArray<NSString *> *PXEffectiveAccessGroupsFromEntitlementsFile(NSString *filePath,
+                                                                         NSError **error) {
+    if (error) *error = nil;
+    if (![filePath isKindOfClass:[NSString class]] || filePath.length == 0) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+    NSData *pathBytes = [filePath dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!pathBytes || pathBytes.length == 0 || pathBytes.length > PXHelperMaximumPathBytes ||
+        [filePath rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+
+    struct stat fileStatus;
+    if (lstat(filePath.fileSystemRepresentation, &fileStatus) != 0 ||
+        !S_ISREG(fileStatus.st_mode) || fileStatus.st_size <= 0 ||
+        (unsigned long long)fileStatus.st_size > PXHelperMaximumEntitlementsFileBytes) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfFile:filePath options:0 error:&readError];
+    if (!data || readError || data.length == 0 || data.length > PXHelperMaximumEntitlementsFileBytes ||
+        data.length != (NSUInteger)fileStatus.st_size) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+
+    NSPropertyListFormat format = NSPropertyListOpenStepFormat;
+    NSError *plistError = nil;
+    id plist = [NSPropertyListSerialization propertyListWithData:data
+                                                         options:NSPropertyListImmutable
+                                                          format:&format
+                                                           error:&plistError];
+    if (plistError || ![plist isKindOfClass:[NSDictionary class]]) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+    id rawGroups = ((NSDictionary *)plist)[@"keychain-access-groups"];
+    if (![rawGroups isKindOfClass:[NSArray class]] || [(NSArray *)rawGroups count] == 0 ||
+        [(NSArray *)rawGroups count] > PXHelperMaximumAccessGroups) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+
+    NSMutableArray<NSString *> *groups = [NSMutableArray arrayWithCapacity:[(NSArray *)rawGroups count]];
+    NSMutableSet<NSString *> *seen = [NSMutableSet setWithCapacity:[(NSArray *)rawGroups count]];
+    NSUInteger totalBytes = 0;
+    for (id value in (NSArray *)rawGroups) {
+        NSUInteger groupBytes = 0;
+        if (!PXHelperAccessGroupIsValid(value, &groupBytes)) {
+            if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                    code:PXKeychainBackupErrorInvalidBackupFile
+                                                userInfo:nil];
+            return nil;
+        }
+        NSUInteger nextTotal = 0;
+        if (!PXHelperAddWithoutOverflow(totalBytes,
+                                        groupBytes,
+                                        PXHelperMaximumAccessGroupCSVBytes,
+                                        &nextTotal)) {
+            if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                    code:PXKeychainBackupErrorInvalidBackupFile
+                                                userInfo:nil];
+            return nil;
+        }
+        totalBytes = nextTotal;
+        NSString *immutableGroup = [(NSString *)value copy];
+        if (![seen containsObject:immutableGroup]) {
+            [seen addObject:immutableGroup];
+            [groups addObject:immutableGroup];
+        }
+    }
+    if (groups.count == 0) {
+        if (error) *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                                code:PXKeychainBackupErrorInvalidBackupFile
+                                            userInfo:nil];
+        return nil;
+    }
+    return [groups copy];
+}
+
+static BOOL PXRequestedGroupsAreSubsetOfEffectiveGroups(
+    NSArray<NSString *> *requested,
+    NSArray<NSString *> *effective) {
+    NSSet<NSString *> *effectiveSet = [NSSet setWithArray:effective];
+    for (NSString *group in requested) {
+        if (![effectiveSet containsObject:group]) {
+            return NO;
+        }
+    }
+    return YES;
 }
 
 static PXKeychainHelperOperation PXStructuredOperationForAction(PXHelperAction action) {
     switch (action) {
-        case PXHelperActionBackup:
-            return PXKeychainHelperOperationBackup;
-        case PXHelperActionRestore:
-            return PXKeychainHelperOperationRestore;
-        case PXHelperActionWipe:
-            return PXKeychainHelperOperationWipe;
-        case PXHelperActionList:
-            return PXKeychainHelperOperationList;
-        case PXHelperActionUnknown:
-            return PXKeychainHelperOperationUnknown;
+        case PXHelperActionBackup: return PXKeychainHelperOperationBackup;
+        case PXHelperActionRestore: return PXKeychainHelperOperationRestore;
+        case PXHelperActionWipe: return PXKeychainHelperOperationWipe;
+        case PXHelperActionList: return PXKeychainHelperOperationList;
+        case PXHelperActionUnknown: return PXKeychainHelperOperationUnknown;
     }
     return PXKeychainHelperOperationUnknown;
 }
 
 static PXKeychainHelperCompletion PXStructuredCompletionForResult(PXKeychainBackupResult *result) {
-    if (!result) {
-        return PXKeychainHelperCompletionFailed;
-    }
+    if (!result) return PXKeychainHelperCompletionFailed;
     if (result.itemsFailed > 0 || result.warnings.count > 0 || result.errors.count > 0) {
         return PXKeychainHelperCompletionPartial;
     }
@@ -160,7 +355,6 @@ static PXKeychainHelperExitCode PXExitCodeForFatalError(PXKeychainHelperOperatio
     if (![fatalError.domain isEqualToString:PXKeychainBackupErrorDomain]) {
         return PXKeychainHelperExitCodeOperationFailed;
     }
-
     switch ((PXKeychainBackupErrorCode)fatalError.code) {
         case PXKeychainBackupErrorInvalidArguments:
         case PXKeychainBackupErrorNoAccessGroups:
@@ -178,11 +372,14 @@ static PXKeychainHelperExitCode PXExitCodeForFatalError(PXKeychainHelperOperatio
     return PXKeychainHelperExitCodeOperationFailed;
 }
 
-static PXKeychainHelperResult *PXCreateStructuredResult(PXKeychainHelperOperation operation,
-                                                        PXKeychainHelperCompletion completion,
-                                                        PXKeychainBackupResult *result,
-                                                        NSUInteger listCount,
-                                                        NSError *fatalError) {
+static PXKeychainHelperResult *PXCreateStructuredResult(
+    PXKeychainHelperOperation operation,
+    PXKeychainHelperCompletion completion,
+    PXKeychainBackupResult *result,
+    NSUInteger listCount,
+    NSArray<NSString *> *requestedAccessGroups,
+    NSArray<NSString *> *effectiveAccessGroups,
+    NSError *fatalError) {
     NSUInteger attemptedCount = 0;
     NSUInteger succeededCount = 0;
     NSUInteger failedCount = 0;
@@ -210,6 +407,8 @@ static PXKeychainHelperResult *PXCreateStructuredResult(PXKeychainHelperOperatio
                                        skippedCount:0
                                        warningCount:warningCount
                                          errorCount:errorCount
+                              requestedAccessGroups:requestedAccessGroups ?: @[]
+                              effectiveAccessGroups:effectiveAccessGroups ?: @[]
                                          fatalError:fatalError
                                               error:&constructionError];
     (void)constructionError;
@@ -219,7 +418,7 @@ static PXKeychainHelperResult *PXCreateStructuredResult(PXKeychainHelperOperatio
 static void PXEmitStructuredResult(PXKeychainHelperResult *result) {
     NSString *line = result.machineReadableLine;
     if (!line.length) {
-        line = @"PXKEYCHAIN_HELPER_RESULT_V1=INVALID";
+        line = @"PXKEYCHAIN_HELPER_RESULT_V2=INVALID";
     }
     fprintf(stdout, "%s\n", [line UTF8String] ?: "");
     fflush(stdout);
@@ -233,7 +432,6 @@ static PXKeychainHelperExitCode PXFinalizeStructuredResult(
                       line.length > PXKeychainHelperResultOutputPrefix.length &&
                       [line hasPrefix:PXKeychainHelperResultOutputPrefix] &&
                       [line rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location == NSNotFound;
-
     if (compatible) {
         switch (result.completion) {
             case PXKeychainHelperCompletionCompleted:
@@ -253,206 +451,279 @@ static PXKeychainHelperExitCode PXFinalizeStructuredResult(
                 break;
         }
     }
-
     PXEmitStructuredResult(compatible ? result : nil);
     return compatible ? intendedExitCode : PXKeychainHelperExitCodeProtocolFailure;
 }
 
+static PXKeychainHelperExitCode PXFinalizeFailure(
+    PXKeychainHelperOperation operation,
+    PXKeychainHelperExitCode exitCode,
+    NSArray<NSString *> *requestedAccessGroups,
+    NSArray<NSString *> *effectiveAccessGroups,
+    PXKeychainBackupErrorCode errorCode) {
+    return PXFinalizeStructuredResult(
+        PXCreateStructuredResult(operation,
+                                 PXKeychainHelperCompletionFailed,
+                                 nil,
+                                 0,
+                                 requestedAccessGroups ?: @[],
+                                 effectiveAccessGroups ?: @[],
+                                 PXStructuredSyntheticError(errorCode)),
+        exitCode);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        // Parse arguments.
-        NSMutableDictionary *args = [NSMutableDictionary dictionary];
-        
+        NSMutableDictionary<NSString *, id> *args = [NSMutableDictionary dictionary];
+        NSMutableSet<NSString *> *seenOptions = [NSMutableSet set];
+        NSSet<NSString *> *valueOptions = [NSSet setWithArray:@[
+            @"action",
+            @"file",
+            @"groups",
+            @"requested-groups",
+            @"effective-entitlements-file",
+        ]];
+        BOOL argumentParseFailed = NO;
+
         for (int i = 1; i < argc; i++) {
-            NSString *arg = @(argv[i]);
-            
-            if ([arg isEqualToString:@"--help"] || [arg isEqualToString:@"-h"]) {
+            NSString *argument = @(argv[i]);
+            if ([argument isEqualToString:@"--help"] || [argument isEqualToString:@"-h"]) {
                 printUsage(argv[0]);
                 return PXKeychainHelperExitCodeCompleted;
-            } else if ([arg isEqualToString:@"--verbose"] || [arg isEqualToString:@"-v"]) {
-                args[@"verbose"] = @YES;
-            } else if ([arg isEqualToString:@"--overwrite"]) {
-                args[@"overwrite"] = @YES;
-            } else if ([arg hasPrefix:@"--"] && i + 1 < argc) {
-                NSString *key = [arg substringFromIndex:2];
-                NSString *value = @(argv[++i]);
-                args[key] = value;
             }
+            if ([argument isEqualToString:@"--verbose"] || [argument isEqualToString:@"-v"] ||
+                [argument isEqualToString:@"--overwrite"]) {
+                NSString *key = [argument isEqualToString:@"--overwrite"] ? @"overwrite" : @"verbose";
+                if ([seenOptions containsObject:key]) {
+                    argumentParseFailed = YES;
+                    break;
+                }
+                [seenOptions addObject:key];
+                args[key] = @YES;
+                continue;
+            }
+            if (![argument hasPrefix:@"--"]) {
+                argumentParseFailed = YES;
+                break;
+            }
+            NSString *key = [argument substringFromIndex:2];
+            if (![valueOptions containsObject:key] || [seenOptions containsObject:key] ||
+                i + 1 >= argc) {
+                argumentParseFailed = YES;
+                break;
+            }
+            NSString *value = @(argv[i + 1]);
+            [seenOptions addObject:key];
+            args[key] = value;
+            i++;
         }
-        
-        BOOL verbose = [args[@"verbose"] boolValue];
-        
-        // Validate action.
-        NSString *actionStr = args[@"action"];
-        if (!actionStr.length) {
+
+        NSString *actionString = args[@"action"];
+        PXHelperAction action = parseAction(actionString);
+        PXKeychainHelperOperation structuredOperation = PXStructuredOperationForAction(action);
+        NSArray<NSString *> *emptyGroups = @[];
+        if (argumentParseFailed) {
+            logError(@"Invalid or duplicate command-line argument");
+            return PXFinalizeFailure(structuredOperation,
+                                     PXKeychainHelperExitCodeInvalidArguments,
+                                     emptyGroups,
+                                     emptyGroups,
+                                     PXKeychainBackupErrorInvalidArguments);
+        }
+        if (!actionString.length) {
             logError(@"Missing required --action argument");
             printUsage(argv[0]);
-            return PXFinalizeStructuredResult(
-                PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
-                                         PXKeychainHelperCompletionFailed,
-                                         nil,
-                                         0,
-                                         PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
-                PXKeychainHelperExitCodeInvalidArguments);
+            return PXFinalizeFailure(PXKeychainHelperOperationUnknown,
+                                     PXKeychainHelperExitCodeInvalidArguments,
+                                     emptyGroups,
+                                     emptyGroups,
+                                     PXKeychainBackupErrorInvalidArguments);
         }
-        
-        PXHelperAction action = parseAction(actionStr);
         if (action == PXHelperActionUnknown) {
-            logError(@"Unknown action: %@", actionStr);
+            logError(@"Unknown action");
             printUsage(argv[0]);
-            return PXFinalizeStructuredResult(
-                PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
-                                         PXKeychainHelperCompletionFailed,
-                                         nil,
-                                         0,
-                                         PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
-                PXKeychainHelperExitCodeInvalidArguments);
+            return PXFinalizeFailure(PXKeychainHelperOperationUnknown,
+                                     PXKeychainHelperExitCodeInvalidArguments,
+                                     emptyGroups,
+                                     emptyGroups,
+                                     PXKeychainBackupErrorInvalidArguments);
         }
-        PXKeychainHelperOperation structuredOperation = PXStructuredOperationForAction(action);
-        
+
+        NSString *requestedCSV = args[@"requested-groups"];
+        NSString *effectiveEntitlementsPath = args[@"effective-entitlements-file"];
+        if (![requestedCSV isKindOfClass:[NSString class]] ||
+            ![effectiveEntitlementsPath isKindOfClass:[NSString class]]) {
+            logError(@"Missing required group-report metadata");
+            return PXFinalizeFailure(structuredOperation,
+                                     PXKeychainHelperExitCodeInvalidArguments,
+                                     emptyGroups,
+                                     emptyGroups,
+                                     PXKeychainBackupErrorInvalidArguments);
+        }
+
+        NSError *metadataError = nil;
+        NSArray<NSString *> *requestedAccessGroups =
+            PXCanonicalAccessGroupsFromCSV(requestedCSV, &metadataError);
+        if (!requestedAccessGroups) {
+            logError(@"Invalid requested access-group metadata");
+            return PXFinalizeFailure(structuredOperation,
+                                     PXKeychainHelperExitCodeInvalidArguments,
+                                     emptyGroups,
+                                     emptyGroups,
+                                     PXKeychainBackupErrorInvalidArguments);
+        }
+        NSArray<NSString *> *effectiveAccessGroups =
+            PXEffectiveAccessGroupsFromEntitlementsFile(effectiveEntitlementsPath, &metadataError);
+        if (!effectiveAccessGroups ||
+            !PXRequestedGroupsAreSubsetOfEffectiveGroups(requestedAccessGroups, effectiveAccessGroups)) {
+            logError(@"Invalid effective access-group metadata");
+            return PXFinalizeFailure(structuredOperation,
+                                     PXKeychainHelperExitCodeInvalidInput,
+                                     emptyGroups,
+                                     emptyGroups,
+                                     PXKeychainBackupErrorInvalidBackupFile);
+        }
+
         NSString *filePath = args[@"file"];
-        NSArray<NSString *> *groups = parseGroups(args[@"groups"]);
+        NSString *operationalCSV = args[@"groups"];
+        NSArray<NSString *> *operationalGroups = nil;
+        if (action == PXHelperActionRestore && operationalCSV != nil) {
+            logError(@"Restore does not accept operational access groups");
+            return PXFinalizeFailure(structuredOperation,
+                                     PXKeychainHelperExitCodeInvalidArguments,
+                                     requestedAccessGroups,
+                                     effectiveAccessGroups,
+                                     PXKeychainBackupErrorInvalidArguments);
+        }
+        if (action == PXHelperActionBackup || action == PXHelperActionWipe || action == PXHelperActionList) {
+            operationalGroups = PXCanonicalAccessGroupsFromCSV(operationalCSV, &metadataError);
+            if (!operationalGroups ||
+                ![operationalGroups isEqualToArray:requestedAccessGroups]) {
+                logError(@"Operational access groups do not match requested metadata");
+                return PXFinalizeFailure(structuredOperation,
+                                         PXKeychainHelperExitCodeInvalidArguments,
+                                         requestedAccessGroups,
+                                         effectiveAccessGroups,
+                                         PXKeychainBackupErrorInvalidArguments);
+            }
+        }
+
+        BOOL verbose = [args[@"verbose"] boolValue];
         BOOL overwrite = [args[@"overwrite"] boolValue];
-        
-        logVerbose(verbose, @"Action: %@", actionStr);
-        logVerbose(verbose, @"File: %@", filePath ?: @"(none)");
-        logVerbose(verbose, @"Groups: %@", [groups componentsJoinedByString:@", "] ?: @"(none)");
-        
+        logVerbose(verbose, @"Group-report metadata accepted");
+
         NSError *error = nil;
         PXKeychainBackupResult *result = nil;
-        
         switch (action) {
             case PXHelperActionBackup: {
                 if (!filePath.length) {
                     logError(@"--file is required for backup");
-                    return PXFinalizeStructuredResult(
-                        PXCreateStructuredResult(structuredOperation,
-                                                 PXKeychainHelperCompletionFailed,
-                                                 nil,
-                                                 0,
-                                                 PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
-                        PXKeychainHelperExitCodeInvalidArguments);
+                    return PXFinalizeFailure(structuredOperation,
+                                             PXKeychainHelperExitCodeInvalidArguments,
+                                             requestedAccessGroups,
+                                             effectiveAccessGroups,
+                                             PXKeychainBackupErrorInvalidArguments);
                 }
-                if (!groups.count) {
-                    logError(@"--groups is required for backup");
-                    return PXFinalizeStructuredResult(
-                        PXCreateStructuredResult(structuredOperation,
-                                                 PXKeychainHelperCompletionFailed,
-                                                 nil,
-                                                 0,
-                                                 PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)),
-                        PXKeychainHelperExitCodeInvalidArguments);
-                }
-                
                 logVerbose(verbose, @"Starting keychain backup...");
                 result = [KeychainBackupHelper backupKeychainToFile:filePath
-                                                       accessGroups:groups
+                                                       accessGroups:operationalGroups
                                                         itemClasses:PXKeychainItemClassAll
                                                               error:&error];
-                
                 if (!result) {
                     logError(@"Backup failed: %@", error.localizedDescription);
                     NSError *fatalError = error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown);
-                    PXKeychainHelperExitCode exitCode =
-                        PXExitCodeForFatalError(structuredOperation, fatalError);
+                    PXKeychainHelperExitCode exitCode = PXExitCodeForFatalError(structuredOperation, fatalError);
                     return PXFinalizeStructuredResult(
                         PXCreateStructuredResult(structuredOperation,
                                                  PXKeychainHelperCompletionFailed,
                                                  nil,
                                                  0,
+                                                 requestedAccessGroups,
+                                                 effectiveAccessGroups,
                                                  fatalError),
                         exitCode);
                 }
-                
                 logSuccess(@"Backup complete: %lu items processed, %lu succeeded, %lu failed",
-                          (unsigned long)result.itemsProcessed,
-                          (unsigned long)result.itemsSucceeded,
-                          (unsigned long)result.itemsFailed);
-                
-                for (id warningObj in result.warnings) {
-                    NSString *warning = PXSafeString(warningObj);
+                           (unsigned long)result.itemsProcessed,
+                           (unsigned long)result.itemsSucceeded,
+                           (unsigned long)result.itemsFailed);
+                for (id warningObject in result.warnings) {
+                    NSString *warning = PXSafeString(warningObject);
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
                 PXKeychainHelperCompletion completion = PXStructuredCompletionForResult(result);
                 PXKeychainHelperExitCode exitCode = completion == PXKeychainHelperCompletionCompleted
-                    ? PXKeychainHelperExitCodeCompleted
-                    : PXKeychainHelperExitCodePartial;
+                    ? PXKeychainHelperExitCodeCompleted : PXKeychainHelperExitCodePartial;
                 return PXFinalizeStructuredResult(
-                    PXCreateStructuredResult(structuredOperation, completion, result, 0, nil),
+                    PXCreateStructuredResult(structuredOperation,
+                                             completion,
+                                             result,
+                                             0,
+                                             requestedAccessGroups,
+                                             effectiveAccessGroups,
+                                             nil),
                     exitCode);
             }
-                
+
             case PXHelperActionRestore: {
                 if (!filePath.length) {
                     logError(@"--file is required for restore");
-                    return PXFinalizeStructuredResult(
-                        PXCreateStructuredResult(structuredOperation,
-                                                 PXKeychainHelperCompletionFailed,
-                                                 nil,
-                                                 0,
-                                                 PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
-                        PXKeychainHelperExitCodeInvalidArguments);
+                    return PXFinalizeFailure(structuredOperation,
+                                             PXKeychainHelperExitCodeInvalidArguments,
+                                             requestedAccessGroups,
+                                             effectiveAccessGroups,
+                                             PXKeychainBackupErrorInvalidArguments);
                 }
-                
                 logVerbose(verbose, @"Starting keychain restore (overwrite requested: %@)...",
-                          overwrite ? @"YES" : @"NO");
+                           overwrite ? @"YES" : @"NO");
                 result = [KeychainBackupHelper restoreKeychainFromFile:filePath
                                                              overwrite:overwrite
                                                                  error:&error];
-                
                 if (!result) {
                     logError(@"Restore failed: %@", error.localizedDescription);
                     NSError *fatalError = error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown);
-                    PXKeychainHelperExitCode exitCode =
-                        PXExitCodeForFatalError(structuredOperation, fatalError);
+                    PXKeychainHelperExitCode exitCode = PXExitCodeForFatalError(structuredOperation, fatalError);
                     return PXFinalizeStructuredResult(
                         PXCreateStructuredResult(structuredOperation,
                                                  PXKeychainHelperCompletionFailed,
                                                  nil,
                                                  0,
+                                                 requestedAccessGroups,
+                                                 effectiveAccessGroups,
                                                  fatalError),
                         exitCode);
                 }
-                
                 logSuccess(@"Restore complete: %lu items processed, %lu succeeded, %lu failed",
-                          (unsigned long)result.itemsProcessed,
-                          (unsigned long)result.itemsSucceeded,
-                          (unsigned long)result.itemsFailed);
-                
-                for (id warningObj in result.warnings) {
-                    NSString *warning = PXSafeString(warningObj);
+                           (unsigned long)result.itemsProcessed,
+                           (unsigned long)result.itemsSucceeded,
+                           (unsigned long)result.itemsFailed);
+                for (id warningObject in result.warnings) {
+                    NSString *warning = PXSafeString(warningObject);
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
-                for (id errObj in result.errors) {
-                    NSString *err = PXSafeString(errObj);
-                    fprintf(stderr, "[ERR] %s\n", [err UTF8String] ?: "");
+                for (id errorObject in result.errors) {
+                    NSString *itemError = PXSafeString(errorObject);
+                    fprintf(stderr, "[ERR] %s\n", [itemError UTF8String] ?: "");
                 }
                 PXKeychainHelperCompletion completion = PXStructuredCompletionForResult(result);
                 PXKeychainHelperExitCode exitCode = completion == PXKeychainHelperCompletionCompleted
-                    ? PXKeychainHelperExitCodeCompleted
-                    : PXKeychainHelperExitCodePartial;
+                    ? PXKeychainHelperExitCodeCompleted : PXKeychainHelperExitCodePartial;
                 return PXFinalizeStructuredResult(
-                    PXCreateStructuredResult(structuredOperation, completion, result, 0, nil),
+                    PXCreateStructuredResult(structuredOperation,
+                                             completion,
+                                             result,
+                                             0,
+                                             requestedAccessGroups,
+                                             effectiveAccessGroups,
+                                             nil),
                     exitCode);
             }
-                
+
             case PXHelperActionWipe: {
-                if (!groups.count) {
-                    logError(@"--groups is required for wipe");
-                    return PXFinalizeStructuredResult(
-                        PXCreateStructuredResult(structuredOperation,
-                                                 PXKeychainHelperCompletionFailed,
-                                                 nil,
-                                                 0,
-                                                 PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)),
-                        PXKeychainHelperExitCodeInvalidArguments);
-                }
-                
                 logVerbose(verbose, @"Starting keychain wipe...");
-                result = [KeychainBackupHelper wipeKeychainForAccessGroups:groups
+                result = [KeychainBackupHelper wipeKeychainForAccessGroups:operationalGroups
                                                                itemClasses:PXKeychainItemClassAll
                                                                      error:&error];
-                
                 NSUInteger processed = result ? result.itemsProcessed : 0;
                 NSUInteger succeeded = result ? result.itemsSucceeded : 0;
                 NSUInteger failed = result ? result.itemsFailed : 0;
@@ -463,103 +734,88 @@ int main(int argc, const char *argv[]) {
                         (unsigned long)succeeded,
                         (unsigned long)failed,
                         (unsigned long)warningCount);
-
                 if (!result) {
                     logError(@"Wipe failed: %@", error.localizedDescription);
                     NSError *fatalError = error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown);
-                    PXKeychainHelperExitCode exitCode =
-                        PXExitCodeForFatalError(structuredOperation, fatalError);
+                    PXKeychainHelperExitCode exitCode = PXExitCodeForFatalError(structuredOperation, fatalError);
                     return PXFinalizeStructuredResult(
                         PXCreateStructuredResult(structuredOperation,
                                                  PXKeychainHelperCompletionFailed,
                                                  nil,
                                                  0,
+                                                 requestedAccessGroups,
+                                                 effectiveAccessGroups,
                                                  fatalError),
                         exitCode);
                 }
-
-                for (id warningObj in result.warnings) {
-                    NSString *warning = PXSafeString(warningObj);
+                for (id warningObject in result.warnings) {
+                    NSString *warning = PXSafeString(warningObject);
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
-                if (result.itemsFailed > 0 || result.warnings.count > 0) {
-                    return PXFinalizeStructuredResult(
-                        PXCreateStructuredResult(structuredOperation,
-                                                 PXKeychainHelperCompletionPartial,
-                                                 result,
-                                                 0,
-                                                 nil),
-                        PXKeychainHelperExitCodePartial);
-                }
-
-                logSuccess(@"Wipe complete: %lu items deleted",
-                          (unsigned long)result.itemsSucceeded);
                 PXKeychainHelperCompletion completion = PXStructuredCompletionForResult(result);
                 PXKeychainHelperExitCode exitCode = completion == PXKeychainHelperCompletionCompleted
-                    ? PXKeychainHelperExitCodeCompleted
-                    : PXKeychainHelperExitCodePartial;
+                    ? PXKeychainHelperExitCodeCompleted : PXKeychainHelperExitCodePartial;
+                if (completion == PXKeychainHelperCompletionCompleted) {
+                    logSuccess(@"Wipe complete: %lu items deleted", (unsigned long)result.itemsSucceeded);
+                }
                 return PXFinalizeStructuredResult(
-                    PXCreateStructuredResult(structuredOperation, completion, result, 0, nil),
+                    PXCreateStructuredResult(structuredOperation,
+                                             completion,
+                                             result,
+                                             0,
+                                             requestedAccessGroups,
+                                             effectiveAccessGroups,
+                                             nil),
                     exitCode);
             }
-                
-            case PXHelperActionList: {
-                if (!groups.count) {
-                    logError(@"--groups is required for list");
-                    return PXFinalizeStructuredResult(
-                        PXCreateStructuredResult(structuredOperation,
-                                                 PXKeychainHelperCompletionFailed,
-                                                 nil,
-                                                 0,
-                                                 PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)),
-                        PXKeychainHelperExitCodeInvalidArguments);
-                }
 
+            case PXHelperActionList: {
                 logVerbose(verbose, @"Diagnosing keychain access...");
                 if (verbose) {
-                    NSArray<NSDictionary *> *diag = [KeychainBackupHelper diagnoseKeychainAccessForGroups:groups
-                                                                                           itemClasses:PXKeychainItemClassAll];
-                    for (NSDictionary *d in diag) {
+                    NSArray<NSDictionary *> *diagnostics =
+                        [KeychainBackupHelper diagnoseKeychainAccessForGroups:operationalGroups
+                                                                  itemClasses:PXKeychainItemClassAll];
+                    for (NSDictionary *diagnostic in diagnostics) {
                         fprintf(stdout, "[DIAG] group=%s class=%s status=%d (%s) count=%lu\n",
-                                [[d[@"accessGroup"] description] UTF8String] ?: "",
-                                [[d[@"class"] description] UTF8String] ?: "",
-                                [d[@"status"] intValue],
-                                [[d[@"statusDesc"] description] UTF8String] ?: "",
-                                (unsigned long)[d[@"count"] unsignedIntegerValue]);
+                                [[diagnostic[@"accessGroup"] description] UTF8String] ?: "",
+                                [[diagnostic[@"class"] description] UTF8String] ?: "",
+                                [diagnostic[@"status"] intValue],
+                                [[diagnostic[@"statusDesc"] description] UTF8String] ?: "",
+                                (unsigned long)[diagnostic[@"count"] unsignedIntegerValue]);
                     }
                 }
-
                 logVerbose(verbose, @"Listing keychain items...");
-                NSArray<NSDictionary *> *items = [KeychainBackupHelper listKeychainItemsForAccessGroups:groups
-                                                                                             itemClasses:PXKeychainItemClassAll];
-                
+                NSArray<NSDictionary *> *items =
+                    [KeychainBackupHelper listKeychainItemsForAccessGroups:operationalGroups
+                                                                itemClasses:PXKeychainItemClassAll];
                 fprintf(stdout, "Found %lu keychain items:\n", (unsigned long)items.count);
                 for (NSDictionary *item in items) {
-                    NSString *cls = PXSafeString(item[@"class"]);
-                    NSString *svc = PXSafeString(item[@"service"]);
-                    NSString *acc = PXSafeString(item[@"account"]);
+                    NSString *itemClass = PXSafeString(item[@"class"]);
+                    NSString *service = PXSafeString(item[@"service"]);
+                    NSString *account = PXSafeString(item[@"account"]);
                     fprintf(stdout, "  - [%s] %s/%s\n",
-                           cls.length ? [cls UTF8String] : "?",
-                           [svc UTF8String] ?: "",
-                           [acc UTF8String] ?: "");
+                            itemClass.length ? [itemClass UTF8String] : "?",
+                            [service UTF8String] ?: "",
+                            [account UTF8String] ?: "");
                 }
                 return PXFinalizeStructuredResult(
                     PXCreateStructuredResult(structuredOperation,
                                              PXKeychainHelperCompletionCompleted,
                                              nil,
                                              items.count,
+                                             requestedAccessGroups,
+                                             effectiveAccessGroups,
                                              nil),
                     PXKeychainHelperExitCodeCompleted);
             }
-                
-            default:
-                return PXFinalizeStructuredResult(
-                    PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
-                                             PXKeychainHelperCompletionFailed,
-                                             nil,
-                                             0,
-                                             PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)),
-                    PXKeychainHelperExitCodeInvalidArguments);
+
+            case PXHelperActionUnknown:
+                break;
         }
+        return PXFinalizeFailure(PXKeychainHelperOperationUnknown,
+                                 PXKeychainHelperExitCodeInvalidArguments,
+                                 emptyGroups,
+                                 emptyGroups,
+                                 PXKeychainBackupErrorInvalidArguments);
     }
 }
