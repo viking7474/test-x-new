@@ -31,6 +31,7 @@
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
 #import "CommandRunner.h"
+#import "PXKeychainHelperInvocationResult.h"
 #import "common/PXProcessKiller.h"
 #import "common/PXPaths.h"
 
@@ -39,6 +40,9 @@
 static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
 static NSString * const PXExactRestoreDestinationErrorDescription =
     @"Exact application data container could not be resolved safely";
+static const NSTimeInterval PXKeychainHelperInvocationTimeoutSeconds = 300.0;
+static const NSUInteger PXKeychainHelperInvocationOutputLimitBytes = 1024 * 1024;
+static const NSUInteger PXKeychainBackupPlistMaximumBytes = 64 * 1024 * 1024;
 
 static BOOL PXReadUnsignedIntegralSummaryNumber(id value,
                                                 unsigned long long *numberOut) {
@@ -1091,14 +1095,138 @@ static BOOL PXGroupsContainPlatformFamily(NSArray<NSString *> *groups) {
     return NO;
 }
 
-static NSUInteger PXKeychainPlistItemCount(NSString *plistPath) {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-    if (![d isKindOfClass:[NSDictionary class]]) return 0;
-    id items = d[@"items"];
-    if ([items isKindOfClass:[NSArray class]]) {
-        return [(NSArray *)items count];
+static BOOL PXKeychainPlistItemCount(NSString *plistPath,
+                                       NSUInteger *countOut) {
+    if (countOut) {
+        *countOut = 0;
     }
-    return 0;
+    if (![plistPath isKindOfClass:[NSString class]] || plistPath.length == 0) {
+        return NO;
+    }
+    NSError *attributeError = nil;
+    NSDictionary<NSFileAttributeKey, id> *attributes =
+        [[NSFileManager defaultManager] attributesOfItemAtPath:plistPath
+                                                         error:&attributeError];
+    NSNumber *sizeNumber = attributes[NSFileSize];
+    NSString *fileType = attributes[NSFileType];
+    if (attributeError ||
+        ![fileType isEqualToString:NSFileTypeRegular] ||
+        ![sizeNumber isKindOfClass:[NSNumber class]] ||
+        sizeNumber.unsignedLongLongValue == 0 ||
+        sizeNumber.unsignedLongLongValue > PXKeychainBackupPlistMaximumBytes) {
+        return NO;
+    }
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfFile:plistPath
+                                         options:NSDataReadingMappedIfSafe
+                                           error:&readError];
+    if (!data || readError ||
+        data.length != sizeNumber.unsignedLongLongValue ||
+        data.length > PXKeychainBackupPlistMaximumBytes) {
+        return NO;
+    }
+    NSError *parseError = nil;
+    id root = [NSPropertyListSerialization propertyListWithData:data
+                                                        options:NSPropertyListImmutable
+                                                         format:NULL
+                                                          error:&parseError];
+    if (parseError || ![root isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    id items = ((NSDictionary *)root)[@"items"];
+    if (![items isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+    if (countOut) {
+        *countOut = [(NSArray *)items count];
+    }
+    return YES;
+}
+
+static NSString *PXKeychainInvocationOutcomeName(
+    PXKeychainHelperInvocationStatus status) {
+    switch (status) {
+        case PXKeychainHelperInvocationStatusCompleted: return @"completed";
+        case PXKeychainHelperInvocationStatusPartial: return @"partial";
+        case PXKeychainHelperInvocationStatusHelperFailed: return @"helper_failed";
+        case PXKeychainHelperInvocationStatusProtocolFailed: return @"protocol_failed";
+        case PXKeychainHelperInvocationStatusWrapperFailed: return @"wrapper_failed";
+        case PXKeychainHelperInvocationStatusProcessFailed: return @"process_failed";
+    }
+    return @"unknown";
+}
+
+static NSString *PXKeychainOperationName(PXKeychainHelperOperation operation) {
+    switch (operation) {
+        case PXKeychainHelperOperationBackup: return @"backup";
+        case PXKeychainHelperOperationRestore: return @"restore";
+        case PXKeychainHelperOperationWipe: return @"wipe";
+        case PXKeychainHelperOperationList: return @"list";
+        case PXKeychainHelperOperationUnknown: return @"unknown";
+    }
+    return @"unknown";
+}
+
+static void PXDebugAppendKeychainInvocationSummary(
+    NSString *debugPath,
+    PXKeychainHelperInvocationResult *invocation) {
+    if (![invocation isKindOfClass:[PXKeychainHelperInvocationResult class]]) {
+        PXDebugAppendLine(debugPath, @"managerOutcome=unavailable");
+        return;
+    }
+    PXKeychainHelperResult *result = invocation.helperResult;
+    PXDebugAppendLine(debugPath,
+        [NSString stringWithFormat:@"operation=%@ managerOutcome=%@ exitCode=%ld diagnosticOutputTruncated=%d",
+         PXKeychainOperationName(invocation.expectedOperation),
+         PXKeychainInvocationOutcomeName(invocation.status),
+         (long)invocation.exitCode,
+         invocation.diagnosticOutputTruncated ? 1 : 0]);
+    if (!result) {
+        return;
+    }
+    PXDebugAppendLine(debugPath,
+        [NSString stringWithFormat:@"attemptedCount=%lu succeededCount=%lu failedCount=%lu skippedCount=%lu warningCount=%lu errorCount=%lu",
+         (unsigned long)result.attemptedCount,
+         (unsigned long)result.succeededCount,
+         (unsigned long)result.failedCount,
+         (unsigned long)result.skippedCount,
+         (unsigned long)result.warningCount,
+         (unsigned long)result.errorCount]);
+    PXDebugAppendLine(debugPath,
+        [NSString stringWithFormat:@"requestedGroupCount=%lu effectiveGroupCount=%lu additionalEffectiveGroupCount=%lu",
+         (unsigned long)result.requestedAccessGroups.count,
+         (unsigned long)result.effectiveAccessGroups.count,
+         (unsigned long)invocation.additionalEffectiveAccessGroupCount]);
+}
+
+static void PXAppendKeychainInvocationCommonWarnings(
+    NSMutableArray<NSString *> *warnings,
+    PXKeychainHelperInvocationResult *invocation) {
+    if (![warnings isKindOfClass:[NSMutableArray class]] ||
+        ![invocation isKindOfClass:[PXKeychainHelperInvocationResult class]]) {
+        return;
+    }
+    if (invocation.diagnosticOutputTruncated) {
+        [warnings addObject:@"Keychain helper diagnostic output was truncated"];
+    }
+    if (invocation.additionalEffectiveAccessGroupCount > 0) {
+        [warnings addObject:[NSString stringWithFormat:
+            @"Keychain helper used %lu additional effective access group(s)",
+            (unsigned long)invocation.additionalEffectiveAccessGroupCount]];
+    }
+}
+
+static NSString *PXKeychainPartialSummary(NSString *operation,
+                                           PXKeychainHelperResult *result) {
+    return [NSString stringWithFormat:
+        @"Keychain %@ partially completed: attempted=%lu succeeded=%lu failed=%lu skipped=%lu warnings=%lu errors=%lu",
+        operation,
+        (unsigned long)result.attemptedCount,
+        (unsigned long)result.succeededCount,
+        (unsigned long)result.failedCount,
+        (unsigned long)result.skippedCount,
+        (unsigned long)result.warningCount,
+        (unsigned long)result.errorCount];
 }
 
 static BOOL PXOpenApplication(NSString *bundleID) {
@@ -1399,95 +1527,73 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     return YES;
 }
 
-- (BOOL)_backupKeychainForBundleID:(NSString *)bundleID
-                            groups:(NSArray<NSString *> *)groups
-                            toFile:(NSString *)backupFile
-                          warnings:(NSMutableArray<NSString *> *)warnings {
+- (PXKeychainHelperInvocationResult *)_runKeychainWrapperWithArguments:(NSArray<NSString *> *)arguments
+                                                      expectedOperation:(PXKeychainHelperOperation)expectedOperation
+                                                 expectedAccessGroups:(NSArray<NSString *> *)expectedAccessGroups {
     NSString *scriptPath = [self _keychainBackupScriptPath];
-    if (!scriptPath) {
-        [warnings addObject:@"Keychain backup script not found; skipping keychain backup"];
-        return NO;
+    if (!scriptPath.length ||
+        ![arguments isKindOfClass:[NSArray class]] ||
+        arguments.count == 0 ||
+        ![expectedAccessGroups isKindOfClass:[NSArray class]] ||
+        expectedAccessGroups.count == 0) {
+        return nil;
     }
-    
-    CommandRunner *runner = [CommandRunner shared];
-    NSString *groupsArg = groups.count ? [NSString stringWithFormat:@" --groups %@", PXShellQuote([groups componentsJoinedByString:@","])] : @"";
-    NSString *cmd = [NSString stringWithFormat:@"%@ backup %@ %@%@",
-                     PXShellQuote(scriptPath),
-                     PXShellQuote(bundleID),
-                     PXShellQuote(backupFile),
-                     groupsArg];
-    
-    CommandResult *res = [runner runAndCapture:cmd];
-    if (res.exitCode != 0) {
-        NSString *stderrMsg = res.stderrString.length ? res.stderrString : @"";
-        NSString *stdoutMsg = res.stdoutString.length ? res.stdoutString : @"";
-        NSMutableString *msg = [NSMutableString stringWithString:@"Keychain backup failed"]; 
-        if (stderrMsg.length) {
-            [msg appendFormat:@"\nstderr: %@", stderrMsg];
-        }
-        if (stdoutMsg.length) {
-            [msg appendFormat:@"\nstdout: %@", stdoutMsg];
-        }
-        [warnings addObject:[NSString stringWithFormat:@"Keychain backup: %@", msg]];
-        return NO;
-    }
-    
-    return [[NSFileManager defaultManager] fileExistsAtPath:backupFile];
+    CommandResult *commandResult = [[CommandRunner shared]
+        runExecutableAndCapture:scriptPath
+                      arguments:arguments
+                     timeoutSec:PXKeychainHelperInvocationTimeoutSeconds
+                 maxOutputBytes:PXKeychainHelperInvocationOutputLimitBytes];
+    NSError *invocationError = nil;
+    PXKeychainHelperInvocationResult *invocation =
+        [PXKeychainHelperInvocationResult resultWithCommandResult:commandResult
+                                                expectedOperation:expectedOperation
+                                   expectedRequestedAccessGroups:expectedAccessGroups
+                                                            error:&invocationError];
+    (void)invocationError;
+    return invocation;
 }
 
-- (BOOL)_restoreKeychainForBundleID:(NSString *)bundleID
-                             groups:(NSArray<NSString *> *)groups
-                           fromFile:(NSString *)backupFile
-                          overwrite:(BOOL)overwrite
-                           warnings:(NSMutableArray<NSString *> *)warnings {
-    NSString *scriptPath = [self _keychainBackupScriptPath];
-    if (!scriptPath) {
-        [warnings addObject:@"Keychain backup script not found; skipping keychain restore"];
-        return NO;
+- (PXKeychainHelperInvocationResult *)_runKeychainBackupForBundleID:(NSString *)bundleID
+                                                            groups:(NSArray<NSString *> *)groups
+                                                            toFile:(NSString *)backupFile {
+    if (!bundleID.length || !backupFile.length || groups.count == 0) {
+        return nil;
     }
-    
-    if (![[NSFileManager defaultManager] fileExistsAtPath:backupFile]) {
-        [warnings addObject:@"Keychain backup file not found; skipping keychain restore"];
-        return NO;
+    NSString *csv = [groups componentsJoinedByString:@","];
+    NSArray<NSString *> *arguments = @[
+        @"backup",
+        bundleID,
+        backupFile,
+        @"--groups",
+        csv,
+    ];
+    return [self _runKeychainWrapperWithArguments:arguments
+                                expectedOperation:PXKeychainHelperOperationBackup
+                               expectedAccessGroups:groups];
+}
+
+- (PXKeychainHelperInvocationResult *)_runKeychainRestoreForBundleID:(NSString *)bundleID
+                                                             groups:(NSArray<NSString *> *)groups
+                                                           fromFile:(NSString *)backupFile
+                                                          overwrite:(BOOL)overwrite {
+    if (!bundleID.length || !backupFile.length || groups.count == 0 ||
+        ![[NSFileManager defaultManager] fileExistsAtPath:backupFile]) {
+        return nil;
     }
-    
-    CommandRunner *runner = [CommandRunner shared];
-    NSString *overwriteArg = overwrite ? @"--overwrite" : @"";
-    NSString *groupsArg = groups.count ? [NSString stringWithFormat:@" --groups %@", PXShellQuote([groups componentsJoinedByString:@","])] : @"";
-    NSString *cmd = [NSString stringWithFormat:@"%@ restore %@ %@ %@%@",
-                     PXShellQuote(scriptPath),
-                     PXShellQuote(bundleID),
-                     PXShellQuote(backupFile),
-                     overwriteArg,
-                     groupsArg];
-    
-    CommandResult *res = [runner runAndCapture:cmd];
-    // Store last keychain restore output for debugging
-    NSDictionary *report = @{
-        @"bundleID": bundleID ?: @"",
-        @"groups": groups ?: @[],
-        @"cmd": cmd ?: @"",
-        @"exitCode": @(res.exitCode),
-        @"stdout": res.stdoutString ?: @"",
-        @"stderr": res.stderrString ?: @"",
-    };
-    [[NSUserDefaults standardUserDefaults] setObject:report forKey:[NSString stringWithFormat:@"PXKeychainRestoreResult_%@", bundleID]];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-    if (res.exitCode != 0) {
-        NSString *stderrMsg = res.stderrString.length ? res.stderrString : @"";
-        NSString *stdoutMsg = res.stdoutString.length ? res.stdoutString : @"";
-        NSMutableString *msg = [NSMutableString stringWithString:@"Keychain restore failed"]; 
-        if (stderrMsg.length) {
-            [msg appendFormat:@"\nstderr: %@", stderrMsg];
-        }
-        if (stdoutMsg.length) {
-            [msg appendFormat:@"\nstdout: %@", stdoutMsg];
-        }
-        [warnings addObject:[NSString stringWithFormat:@"Keychain restore: %@", msg]];
-        return NO;
+    NSString *csv = [groups componentsJoinedByString:@","];
+    NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithObjects:
+        @"restore",
+        bundleID,
+        backupFile,
+        nil];
+    if (overwrite) {
+        [arguments addObject:@"--overwrite"];
     }
-    
-    return YES;
+    [arguments addObject:@"--groups"];
+    [arguments addObject:csv];
+    return [self _runKeychainWrapperWithArguments:[arguments copy]
+                                expectedOperation:PXKeychainHelperOperationRestore
+                               expectedAccessGroups:groups];
 }
 
 - (NSString *)_backupRoot {
@@ -2242,43 +2348,91 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
             }
 
-            // Debug: list keychain items before backup
-            {
-                PXDebugHeader(debugKeychain, @"Keychain Before Backup");
-                PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"selectedGroups=%@", selectedKeychainGroups ?: @[]]);
-                NSString *scriptPath = [runner firstExistingPath:@[@"/Library/WeaponX/keychain_backup.sh",
-                                                                  @"/var/jb/Library/WeaponX/keychain_backup.sh",
-                                                                  @"/private/var/jb/Library/WeaponX/keychain_backup.sh"]];
-                if (scriptPath.length && selectedKeychainGroups.count) {
-                    NSString *csv = [selectedKeychainGroups componentsJoinedByString:@","];
-                    PXDebugRun(runner, debugKeychain, @"list", [NSString stringWithFormat:@"%@ list %@ --groups %@", PXShellQuote(scriptPath), PXShellQuote(bundleID), PXShellQuote(csv)]);
-                }
+            NSError *canonicalGroupError = nil;
+            NSArray<NSString *> *canonicalGroups =
+                [PXKeychainHelperInvocationResult
+                    canonicalAccessGroupsFromArray:selectedKeychainGroups ?: @[]
+                                                error:&canonicalGroupError];
+            (void)canonicalGroupError;
+            if (!canonicalGroups) {
+                selectedKeychainGroups = @[];
+                [warnings addObject:@"Keychain access groups were invalid; skipping helper backup"];
+            } else {
+                selectedKeychainGroups = canonicalGroups;
             }
+            PXDebugHeader(debugKeychain, @"Keychain Before Backup");
+            PXDebugAppendLine(debugKeychain,
+                [NSString stringWithFormat:@"selectedGroupCount=%lu",
+                 (unsigned long)selectedKeychainGroups.count]);
 
             NSError *keychainArtifactError = nil;
             keychainArtifactRecord =
                 [artifactWriter writeArtifactAtRelativePath:@"keychain.plist"
                                                      policy:keychainArtifactPolicy
                                                    producer:^BOOL(NSString *temporaryOutputPath) {
-                    BOOL keychainSuccess = [self _backupKeychainForBundleID:bundleID
-                                                                    groups:selectedKeychainGroups
-                                                                    toFile:temporaryOutputPath
-                                                                  warnings:warnings];
-                    if (!keychainSuccess) {
+                    if (selectedKeychainGroups.count == 0) {
                         return NO;
                     }
-                    keychainMethod = @"helper";
-                    [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]];
+                    PXKeychainHelperInvocationResult *invocation =
+                        [self _runKeychainBackupForBundleID:bundleID
+                                                    groups:selectedKeychainGroups
+                                                    toFile:temporaryOutputPath];
                     PXDebugHeader(debugKeychain, @"Keychain Backup Result");
-                    PXDebugAppendLine(debugKeychain, @"status=ok");
-                    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"archive=%@", temporaryOutputPath]);
-                    PXDebugRun(runner, debugKeychain, @"ls keychain.plist", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]);
+                    PXDebugAppendKeychainInvocationSummary(debugKeychain, invocation);
+                    if (!invocation) {
+                        [warnings addObject:@"Keychain helper could not be invoked"];
+                        return NO;
+                    }
+                    PXAppendKeychainInvocationCommonWarnings(warnings, invocation);
+                    PXKeychainHelperResult *helperResult = invocation.helperResult;
+                    BOOL completed = invocation.status == PXKeychainHelperInvocationStatusCompleted;
+                    BOOL partial = invocation.status == PXKeychainHelperInvocationStatusPartial;
+                    if (!completed && !partial) {
+                        switch (invocation.status) {
+                            case PXKeychainHelperInvocationStatusHelperFailed:
+                                [warnings addObject:[NSString stringWithFormat:
+                                    @"Keychain helper failed with exit code %ld",
+                                    (long)invocation.exitCode]];
+                                break;
+                            case PXKeychainHelperInvocationStatusProcessFailed:
+                                [warnings addObject:@"Keychain helper process failed"];
+                                break;
+                            case PXKeychainHelperInvocationStatusWrapperFailed:
+                                [warnings addObject:[NSString stringWithFormat:
+                                    @"Keychain wrapper failed with exit code %ld",
+                                    (long)invocation.exitCode]];
+                                break;
+                            case PXKeychainHelperInvocationStatusProtocolFailed:
+                                [warnings addObject:@"Keychain helper result was invalid"];
+                                break;
+                            case PXKeychainHelperInvocationStatusCompleted:
+                            case PXKeychainHelperInvocationStatusPartial:
+                                break;
+                        }
+                        return NO;
+                    }
+                    if (partial) {
+                        [warnings addObject:PXKeychainPartialSummary(@"backup", helperResult)];
+                    }
 
-                    // If helper cannot access restricted groups (e.g. *.platformFamily), fallback to in-app export.
-                    NSUInteger count = PXKeychainPlistItemCount(temporaryOutputPath);
-                    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"plistItems=%lu", (unsigned long)count]);
-                    if (count == 0 && PXGroupsContainPlatformFamily(selectedKeychainGroups)) {
-                        PXDebugAppendLine(debugKeychain, @"helper returned 0 items; trying in-app export");
+                    NSUInteger plistItemCount = 0;
+                    if (!helperResult ||
+                        !PXKeychainPlistItemCount(temporaryOutputPath, &plistItemCount) ||
+                        plistItemCount != helperResult.succeededCount) {
+                        [warnings addObject:@"Keychain backup output did not match the verified helper result"];
+                        return NO;
+                    }
+                    PXDebugAppendLine(debugKeychain,
+                        [NSString stringWithFormat:@"plistItemCount=%lu",
+                         (unsigned long)plistItemCount]);
+                    keychainMethod = @"helper";
+                    [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
+                                 PXShellQuote(temporaryOutputPath)]];
+
+                    if (plistItemCount == 0 &&
+                        PXGroupsContainPlatformFamily(selectedKeychainGroups)) {
+                        PXDebugAppendLine(debugKeychain,
+                                          @"zeroItemFallbackAttempted=1");
                         BOOL inAppOK = [self _inAppKeychainBackupForBundleID:bundleID
                                                                containerPath:dataContainerPath
                                                                       groups:selectedKeychainGroups
@@ -2286,13 +2440,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                    debugPath:debugKeychain
                                                                     warnings:warnings];
                         if (inAppOK) {
+                            NSUInteger replacementCount = 0;
+                            if (!PXKeychainPlistItemCount(temporaryOutputPath,
+                                                         &replacementCount)) {
+                                [warnings addObject:@"In-app Keychain backup output could not be verified"];
+                                return NO;
+                            }
                             keychainMethod = @"in_app";
-                            [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]];
-                            PXDebugRun(runner, debugKeychain, @"ls keychain.plist (after in-app)", [NSString stringWithFormat:@"ls -lh %@ 2>/dev/null || true", PXShellQuote(temporaryOutputPath)]);
-                            PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"plistItemsAfterInApp=%lu", (unsigned long)PXKeychainPlistItemCount(temporaryOutputPath)]);
-                        } else {
-                            PXDebugAppendLine(debugKeychain, @"in-app export failed");
+                            [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
+                                         PXShellQuote(temporaryOutputPath)]];
+                            PXDebugAppendLine(debugKeychain,
+                                [NSString stringWithFormat:@"inAppPlistItemCount=%lu",
+                                 (unsigned long)replacementCount]);
+                            return YES;
                         }
+                        PXDebugAppendLine(debugKeychain, @"zeroItemFallbackSucceeded=0");
+                    }
+                    if (partial && helperResult.succeededCount == 0) {
+                        [warnings addObject:@"Keychain partial backup produced no usable items"];
+                        return NO;
                     }
                     return YES;
                 }
@@ -4074,28 +4240,107 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
             NSString *keychainBackupPath = keychainWorkspace.validatedStage.filePath;
             NSArray<NSString *> *groups = restorePlan.keychainGroups;
-            NSString *method = restorePlan.keychainMethod;
-            (void)method;
             BOOL shouldUseInApp = restorePlan.keychainUsesInAppMethod;
             NSUInteger keychainExecutionWarningStart = warnings.count;
-            BOOL ok = NO;
+            BOOL keychainComponentSucceeded = NO;
+            NSInteger keychainFailureCode = 0;
+            NSString *keychainFailureMessage = nil;
+            PXKeychainHelperInvocationResult *invocation = nil;
+
+            PXDebugHeader(debugKeychain, @"Keychain Restore Result");
             if (shouldUseInApp) {
-                ok = [self _inAppKeychainRestoreForBundleID:bundleID
-                                              containerPath:dataContainerPath
-                                                     groups:groups
-                                                   fromFile:keychainBackupPath
-                                                  overwrite:YES
-                                                  debugPath:debugKeychain
-                                                   warnings:warnings];
+                BOOL inAppSucceeded =
+                    [self _inAppKeychainRestoreForBundleID:bundleID
+                                             containerPath:dataContainerPath
+                                                    groups:groups
+                                                  fromFile:keychainBackupPath
+                                                 overwrite:YES
+                                                 debugPath:debugKeychain
+                                                  warnings:warnings];
+                keychainComponentSucceeded = inAppSucceeded;
+                PXDebugAppendLine(debugKeychain,
+                    inAppSucceeded
+                        ? @"operation=restore managerOutcome=completed method=in_app"
+                        : @"operation=restore managerOutcome=helper_failed method=in_app");
+                if (!inAppSucceeded) {
+                    [warnings addObject:@"In-app Keychain restore failed (continuing)"];
+                    keychainFailureCode = 322;
+                    keychainFailureMessage = @"Keychain helper operation failed";
+                }
             } else {
-                ok = [self _restoreKeychainForBundleID:bundleID
-                                              groups:groups
-                                            fromFile:keychainBackupPath
-                                           overwrite:YES
-                                            warnings:warnings];
-            }
-            if (!ok) {
-                [warnings addObject:@"Keychain restore failed (continuing)" ];
+                NSError *canonicalGroupError = nil;
+                NSArray<NSString *> *canonicalGroups =
+                    [PXKeychainHelperInvocationResult
+                        canonicalAccessGroupsFromArray:groups ?: @[]
+                                                    error:&canonicalGroupError];
+                (void)canonicalGroupError;
+                if (!canonicalGroups) {
+                    [warnings addObject:@"Keychain helper result could not be verified"];
+                    keychainFailureCode = 324;
+                    keychainFailureMessage = @"Keychain helper result could not be verified";
+                    PXDebugAppendLine(debugKeychain,
+                                      @"operation=restore managerOutcome=protocol_failed");
+                } else {
+                    invocation = [self _runKeychainRestoreForBundleID:bundleID
+                                                               groups:canonicalGroups
+                                                             fromFile:keychainBackupPath
+                                                            overwrite:YES];
+                    PXDebugAppendKeychainInvocationSummary(debugKeychain, invocation);
+                    if (!invocation) {
+                        [warnings addObject:@"Keychain helper could not be invoked"];
+                        keychainFailureCode = 324;
+                        keychainFailureMessage = @"Keychain helper result could not be verified";
+                    } else {
+                        PXAppendKeychainInvocationCommonWarnings(warnings, invocation);
+                        PXKeychainHelperResult *helperResult = invocation.helperResult;
+                        switch (invocation.status) {
+                            case PXKeychainHelperInvocationStatusCompleted:
+                                keychainComponentSucceeded = YES;
+                                break;
+                            case PXKeychainHelperInvocationStatusPartial: {
+                                [warnings addObject:PXKeychainPartialSummary(@"restore", helperResult)];
+                                BOOL warningOnlyPartial = helperResult &&
+                                    helperResult.failedCount == 0 &&
+                                    helperResult.skippedCount == 0 &&
+                                    helperResult.errorCount == 0 &&
+                                    helperResult.attemptedCount == helperResult.succeededCount &&
+                                    helperResult.warningCount > 0;
+                                if (warningOnlyPartial) {
+                                    keychainComponentSucceeded = YES;
+                                } else {
+                                    [warnings addObject:@"Keychain restore partially completed; some Keychain items may have been changed"];
+                                    keychainFailureCode = 323;
+                                    keychainFailureMessage = @"Keychain restore partially completed";
+                                }
+                                break;
+                            }
+                            case PXKeychainHelperInvocationStatusHelperFailed:
+                                [warnings addObject:[NSString stringWithFormat:
+                                    @"Keychain helper failed with exit code %ld",
+                                    (long)invocation.exitCode]];
+                                keychainFailureCode = 322;
+                                keychainFailureMessage = @"Keychain helper operation failed";
+                                break;
+                            case PXKeychainHelperInvocationStatusProtocolFailed:
+                                [warnings addObject:@"Keychain helper result was invalid"];
+                                keychainFailureCode = 324;
+                                keychainFailureMessage = @"Keychain helper result could not be verified";
+                                break;
+                            case PXKeychainHelperInvocationStatusWrapperFailed:
+                                [warnings addObject:[NSString stringWithFormat:
+                                    @"Keychain wrapper failed with exit code %ld",
+                                    (long)invocation.exitCode]];
+                                keychainFailureCode = 324;
+                                keychainFailureMessage = @"Keychain helper result could not be verified";
+                                break;
+                            case PXKeychainHelperInvocationStatusProcessFailed:
+                                [warnings addObject:@"Keychain helper process failed"];
+                                keychainFailureCode = 324;
+                                keychainFailureMessage = @"Keychain helper result could not be verified";
+                                break;
+                        }
+                    }
+                }
             }
 
             NSError *keychainCleanupError = nil;
@@ -4104,7 +4349,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
             NSArray<NSString *> *keychainWarnings =
                 PXRestoreWarningsSuffix(warnings, keychainExecutionWarningStart);
-            if (ok) {
+            if (keychainComponentSucceeded) {
                 BOOL keychainSuccessResultMarked =
                     [resultAccumulator markComponentSucceeded:PXRestoreComponentKeychain
                                                       warnings:keychainWarnings];
@@ -4112,10 +4357,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                           @"Keychain success result state must be publishable");
                 (void)keychainSuccessResultMarked;
             } else {
+                if (keychainFailureCode == 0 || keychainFailureMessage.length == 0) {
+                    keychainFailureCode = 324;
+                    keychainFailureMessage = @"Keychain helper result could not be verified";
+                }
                 PXRestoreFailure *keychainFailure =
                     [[PXRestoreFailure alloc] initWithDomain:PXBackupErrorDomain
-                                                       code:322
-                                                    message:@"Keychain restore failed"];
+                                                       code:keychainFailureCode
+                                                    message:keychainFailureMessage];
                 BOOL keychainFailureResultMarked =
                     [resultAccumulator markComponentFailed:PXRestoreComponentKeychain
                                                    failure:keychainFailure
@@ -4124,20 +4373,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSCAssert(keychainFailureResultMarked,
                           @"Keychain failure result state must be publishable");
                 (void)keychainFailureResultMarked;
-            }
-
-            PXDebugHeader(debugKeychain, @"Keychain After Restore");
-            PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"groups=%@", groups ?: @[]]);
-            if (!shouldUseInApp) {
-                NSString *scriptPath = [runner firstExistingPath:@[@"/Library/WeaponX/keychain_backup.sh",
-                                                                  @"/var/jb/Library/WeaponX/keychain_backup.sh",
-                                                                  @"/private/var/jb/Library/WeaponX/keychain_backup.sh"]];
-                if (scriptPath.length && groups.count) {
-                    NSString *csv = [groups componentsJoinedByString:@","];
-                    PXDebugRun(runner, debugKeychain, @"list", [NSString stringWithFormat:@"%@ list %@ --groups %@", PXShellQuote(scriptPath), PXShellQuote(bundleID), PXShellQuote(csv)]);
-                }
-            } else {
-                PXDebugAppendLine(debugKeychain, @"post-restore list skipped (used in-app keychain method)" );
             }
         }
 

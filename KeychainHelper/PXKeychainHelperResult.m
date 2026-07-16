@@ -340,6 +340,77 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
            [effectiveRepresentation isEqualToArray:effectiveAccessGroups];
 }
 
+static BOOL PXKeychainHelperOperationFromString(NSString *value,
+                                                  PXKeychainHelperOperation *operationOut) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    PXKeychainHelperOperation operation = PXKeychainHelperOperationUnknown;
+    if ([value isEqualToString:@"unknown"]) operation = PXKeychainHelperOperationUnknown;
+    else if ([value isEqualToString:@"backup"]) operation = PXKeychainHelperOperationBackup;
+    else if ([value isEqualToString:@"restore"]) operation = PXKeychainHelperOperationRestore;
+    else if ([value isEqualToString:@"wipe"]) operation = PXKeychainHelperOperationWipe;
+    else if ([value isEqualToString:@"list"]) operation = PXKeychainHelperOperationList;
+    else return NO;
+    if (operationOut) *operationOut = operation;
+    return YES;
+}
+
+static BOOL PXKeychainHelperCompletionFromString(NSString *value,
+                                                   PXKeychainHelperCompletion *completionOut) {
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    PXKeychainHelperCompletion completion = PXKeychainHelperCompletionFailed;
+    if ([value isEqualToString:@"failed"]) completion = PXKeychainHelperCompletionFailed;
+    else if ([value isEqualToString:@"completed"]) completion = PXKeychainHelperCompletionCompleted;
+    else if ([value isEqualToString:@"partial"]) completion = PXKeychainHelperCompletionPartial;
+    else return NO;
+    if (completionOut) *completionOut = completion;
+    return YES;
+}
+
+static BOOL PXKeychainHelperResultReadSignedInteger(id value,
+                                                     NSInteger *integerOut) {
+    if (!PXKeychainHelperResultIsNumber(value) ||
+        CFNumberIsFloatType((__bridge CFNumberRef)value)) return NO;
+    int64_t parsed = 0;
+    if (!CFNumberGetValue((__bridge CFNumberRef)value, kCFNumberSInt64Type, &parsed) ||
+        parsed < (int64_t)NSIntegerMin ||
+        parsed > (int64_t)NSIntegerMax) return NO;
+    if (integerOut) *integerOut = (NSInteger)parsed;
+    return YES;
+}
+
+static BOOL PXKeychainHelperResultReadUnsignedCount(id value,
+                                                     NSUInteger *countOut) {
+    if (!PXKeychainHelperResultIsNumber(value) ||
+        CFNumberIsFloatType((__bridge CFNumberRef)value)) return NO;
+    int64_t parsed = 0;
+    if (!CFNumberGetValue((__bridge CFNumberRef)value, kCFNumberSInt64Type, &parsed) ||
+        parsed < 0 || (uint64_t)parsed > (uint64_t)NSUIntegerMax) return NO;
+    if (countOut) *countOut = (NSUInteger)parsed;
+    return YES;
+}
+
+static BOOL PXKeychainHelperResultDictionaryHasExactKeys(id value,
+                                                          NSArray<NSString *> *keys) {
+    if (![value isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *dictionary = value;
+    return dictionary.count == keys.count &&
+        [[NSSet setWithArray:dictionary.allKeys] isEqualToSet:[NSSet setWithArray:keys]];
+}
+
+static NSString *PXKeychainHelperResultDecoderFieldPath(NSError *constructionError) {
+    NSString *path = constructionError.userInfo[PXKeychainHelperResultErrorFieldPathKey];
+    if (![path isKindOfClass:[NSString class]]) return @"$";
+    if ([path hasPrefix:@"$.accessGroups.requested"]) return @"$.accessGroups.requested";
+    if ([path hasPrefix:@"$.accessGroups.effective"]) return @"$.accessGroups.effective";
+    if ([path hasPrefix:@"$.accessGroups"]) return @"$.accessGroups";
+    if ([path hasPrefix:@"$.fatalError"]) return @"$.fatalError";
+    if ([path hasPrefix:@"$.counts"]) return @"$.counts";
+    if ([path isEqualToString:@"$.schemaVersion"] ||
+        [path isEqualToString:@"$.operation"] ||
+        [path isEqualToString:@"$.completion"]) return path;
+    return @"$";
+}
+
 @interface PXKeychainHelperResult ()
 
 - (instancetype)px_initWithOperation:(PXKeychainHelperOperation)operation
@@ -683,6 +754,165 @@ static BOOL PXKeychainHelperResultRepresentationMatchesState(
                                        PXKeychainHelperResultErrorInternalInvariantFailed,
                                        @"$",
                                        @"The immutable helper result could not be initialized.");
+    }
+    return result;
+}
+
++ (instancetype)resultFromMachineReadableLine:(NSString *)machineReadableLine
+                                                 error:(NSError **)error {
+    if (error) *error = nil;
+    if (![machineReadableLine isKindOfClass:[NSString class]] || machineReadableLine.length == 0) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorInvalidMachineReadableLine,
+                                       @"$", @"The helper result line is invalid.");
+        return nil;
+    }
+    NSData *lineBytes = [machineReadableLine dataUsingEncoding:NSUTF8StringEncoding
+                                          allowLossyConversion:NO];
+    if (!lineBytes || lineBytes.length == 0 ||
+        lineBytes.length > PXKeychainHelperResultMaximumOutputLineBytes ||
+        [machineReadableLine rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location != NSNotFound) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorInvalidMachineReadableLine,
+                                       @"$", @"The helper result line violates the fixed framing contract.");
+        return nil;
+    }
+    NSRange prefix = [machineReadableLine rangeOfString:PXKeychainHelperResultOutputPrefix];
+    if (prefix.location != 0 || prefix.length != PXKeychainHelperResultOutputPrefix.length) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorInvalidMachineReadableLine,
+                                       @"$", @"The helper result line has an invalid prefix.");
+        return nil;
+    }
+    NSRange suffixRange = NSMakeRange(PXKeychainHelperResultOutputPrefix.length,
+                                      machineReadableLine.length - PXKeychainHelperResultOutputPrefix.length);
+    if (suffixRange.length == 0 ||
+        [machineReadableLine rangeOfString:PXKeychainHelperResultOutputPrefix
+                                  options:0 range:suffixRange].location != NSNotFound) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorInvalidMachineReadableLine,
+                                       @"$", @"The helper result line has ambiguous framing.");
+        return nil;
+    }
+    NSString *base64 = [machineReadableLine substringWithRange:suffixRange];
+    NSData *base64Bytes = [base64 dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!base64Bytes || base64Bytes.length == 0 ||
+        base64Bytes.length > PXKeychainHelperResultMaximumBase64Bytes ||
+        [base64 rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorInvalidMachineReadableLine,
+                                       @"$", @"The encoded helper result is invalid.");
+        return nil;
+    }
+    NSData *binaryPlist = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
+    if (!binaryPlist || binaryPlist.length == 0 ||
+        binaryPlist.length > PXKeychainHelperResultMaximumBinaryPlistBytes) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorDeserializationFailed,
+                                       @"$", @"The encoded helper result could not be decoded.");
+        return nil;
+    }
+    NSError *readError = nil;
+    NSPropertyListFormat format = NSPropertyListOpenStepFormat;
+    id decodedObject = [NSPropertyListSerialization propertyListWithData:binaryPlist
+                                                                  options:NSPropertyListImmutable
+                                                                   format:&format error:&readError];
+    if (readError || format != NSPropertyListBinaryFormat_v1_0 ||
+        ![decodedObject isKindOfClass:[NSDictionary class]]) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorDeserializationFailed,
+                                       @"$", @"The helper result property list is invalid.");
+        return nil;
+    }
+    NSDictionary<NSString *, id> *representation = decodedObject;
+    NSArray<NSString *> *rootKeys = @[@"schemaVersion", @"operation", @"completion",
+        @"attemptedCount", @"succeededCount", @"failedCount", @"skippedCount",
+        @"warningCount", @"errorCount", @"fatalError", @"accessGroups"];
+    if (!PXKeychainHelperResultDictionaryHasExactKeys(representation, rootKeys)) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$", @"The helper result graph is not canonical.");
+        return nil;
+    }
+    NSInteger schemaVersion = 0;
+    if (!PXKeychainHelperResultReadSignedInteger(representation[@"schemaVersion"], &schemaVersion) ||
+        schemaVersion != PXKeychainHelperResultSchemaVersion) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.schemaVersion", @"The helper result schema version is invalid.");
+        return nil;
+    }
+    PXKeychainHelperOperation operation = PXKeychainHelperOperationUnknown;
+    if (!PXKeychainHelperOperationFromString(representation[@"operation"], &operation)) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.operation", @"The helper result operation is invalid.");
+        return nil;
+    }
+    PXKeychainHelperCompletion completion = PXKeychainHelperCompletionFailed;
+    if (!PXKeychainHelperCompletionFromString(representation[@"completion"], &completion)) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.completion", @"The helper result completion is invalid.");
+        return nil;
+    }
+    NSUInteger attemptedCount=0, succeededCount=0, failedCount=0, skippedCount=0;
+    NSUInteger warningCount=0, errorCount=0;
+    if (!PXKeychainHelperResultReadUnsignedCount(representation[@"attemptedCount"], &attemptedCount) ||
+        !PXKeychainHelperResultReadUnsignedCount(representation[@"succeededCount"], &succeededCount) ||
+        !PXKeychainHelperResultReadUnsignedCount(representation[@"failedCount"], &failedCount) ||
+        !PXKeychainHelperResultReadUnsignedCount(representation[@"skippedCount"], &skippedCount) ||
+        !PXKeychainHelperResultReadUnsignedCount(representation[@"warningCount"], &warningCount) ||
+        !PXKeychainHelperResultReadUnsignedCount(representation[@"errorCount"], &errorCount)) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.counts", @"A helper result count is invalid.");
+        return nil;
+    }
+    NSDictionary *fatalGraph = representation[@"fatalError"];
+    if (!PXKeychainHelperResultDictionaryHasExactKeys(fatalGraph, @[@"present", @"domain", @"code"])) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.fatalError", @"The fatal error graph is invalid.");
+        return nil;
+    }
+    id presentValue = fatalGraph[@"present"];
+    NSString *fatalDomain = fatalGraph[@"domain"];
+    NSInteger fatalCode = 0;
+    if (!PXKeychainHelperResultIsBoolean(presentValue) ||
+        ![fatalDomain isKindOfClass:[NSString class]] ||
+        !PXKeychainHelperResultReadSignedInteger(fatalGraph[@"code"], &fatalCode)) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.fatalError", @"The fatal error fields are invalid.");
+        return nil;
+    }
+    NSDictionary *groupGraph = representation[@"accessGroups"];
+    if (!PXKeychainHelperResultDictionaryHasExactKeys(groupGraph, @[@"requested", @"effective"])) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.accessGroups", @"The access-group graph is invalid.");
+        return nil;
+    }
+    id requestedGroups = groupGraph[@"requested"];
+    id effectiveGroups = groupGraph[@"effective"];
+    if (![requestedGroups isKindOfClass:[NSArray class]]) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.accessGroups.requested", @"The requested access-group array is invalid.");
+        return nil;
+    }
+    if (![effectiveGroups isKindOfClass:[NSArray class]]) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$.accessGroups.effective", @"The effective access-group array is invalid.");
+        return nil;
+    }
+    NSError *fatalError = [presentValue boolValue]
+        ? [NSError errorWithDomain:fatalDomain code:fatalCode userInfo:nil] : nil;
+    NSError *constructionError = nil;
+    PXKeychainHelperResult *result = [PXKeychainHelperResult
+        resultWithOperation:operation completion:completion attemptedCount:attemptedCount
+        succeededCount:succeededCount failedCount:failedCount skippedCount:skippedCount
+        warningCount:warningCount errorCount:errorCount
+        requestedAccessGroups:requestedGroups effectiveAccessGroups:effectiveGroups
+        fatalError:fatalError error:&constructionError];
+    if (!result) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+            PXKeychainHelperResultDecoderFieldPath(constructionError),
+            @"The helper result graph failed canonical reconstruction.");
+        return nil;
+    }
+    NSData *canonicalLineBytes = [result.machineReadableLine dataUsingEncoding:NSUTF8StringEncoding
+                                                          allowLossyConversion:NO];
+    if (![result.propertyListRepresentation isEqualToDictionary:representation] ||
+        !canonicalLineBytes || ![canonicalLineBytes isEqualToData:lineBytes]) {
+        PXKeychainHelperResultSetError(error, PXKeychainHelperResultErrorNoncanonicalRepresentation,
+                                       @"$", @"The helper result is not in canonical form.");
+        return nil;
     }
     return result;
 }

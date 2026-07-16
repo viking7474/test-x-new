@@ -17,7 +17,7 @@ TOOL_NAME = WeaponXDaemon backup_helper
 
 
 # App files
-ProjectX_FILES = $(wildcard *.m) $(wildcard common/*.m)
+ProjectX_FILES = $(wildcard *.m) $(wildcard common/*.m) KeychainHelper/PXKeychainHelperResult.m
 ProjectX_RESOURCE_DIRS = Assets.xcassets
 ProjectX_RESOURCE_FILES = Info.plist Icon.png LaunchScreen.storyboard
 ProjectX_PRIVATE_FRAMEWORKS = FrontBoardServices SpringBoardServices BackBoardServices StoreKitUI MobileCoreServices

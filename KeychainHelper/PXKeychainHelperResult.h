@@ -34,6 +34,9 @@ typedef NS_ERROR_ENUM(PXKeychainHelperResultErrorDomain,
     PXKeychainHelperResultErrorInvalidAccessGroups = 9,
     PXKeychainHelperResultErrorDuplicateAccessGroup = 10,
     PXKeychainHelperResultErrorAccessGroupRelationInvalid = 11,
+    PXKeychainHelperResultErrorInvalidMachineReadableLine = 12,
+    PXKeychainHelperResultErrorDeserializationFailed = 13,
+    PXKeychainHelperResultErrorNoncanonicalRepresentation = 14,
 };
 
 __attribute__((objc_subclassing_restricted))
@@ -68,6 +71,9 @@ __attribute__((objc_subclassing_restricted))
                        effectiveAccessGroups:(NSArray<NSString *> *)effectiveAccessGroups
                                   fatalError:(NSError * _Nullable)fatalError
                                        error:(NSError * _Nullable * _Nullable)error;
+
++ (nullable instancetype)resultFromMachineReadableLine:(NSString *)machineReadableLine
+                                                 error:(NSError * _Nullable * _Nullable)error;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
