@@ -961,7 +961,7 @@ print_usage() {
     echo "  list <bundleID>                   List keychain items"
     echo ""
     echo "Options:"
-    echo "  --overwrite   For restore: request replacement; existing duplicates are preserved"
+    echo "  --overwrite   For restore: update one exact existing item in place; never delete"
     echo "  --verbose     Show detailed output"
     echo ""
     echo "Example:"

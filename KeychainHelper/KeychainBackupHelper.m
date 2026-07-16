@@ -1,5 +1,8 @@
 #import "KeychainBackupHelper.h"
+#import "PXKeychainItemIdentity.h"
 #import <Security/Security.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <math.h>
 
 NSString * const PXKeychainBackupErrorDomain = @"com.hydra.projectx.keychain";
 
@@ -90,6 +93,382 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
         ];
     });
     return excluded;
+}
+
+typedef NS_ENUM(NSInteger, PXRestoreItemOutcome) {
+    PXRestoreItemOutcomeSucceeded = 1,
+    PXRestoreItemOutcomeFailedWarning = 2,
+    PXRestoreItemOutcomeFailedError = 3,
+};
+
+static BOOL PXRestoreValueIsExactString(id value) {
+    return [value isKindOfClass:[NSString class]] &&
+           CFGetTypeID((__bridge CFTypeRef)value) == CFStringGetTypeID();
+}
+
+static BOOL PXRestoreValueIsExactData(id value) {
+    return [value isKindOfClass:[NSData class]] &&
+           CFGetTypeID((__bridge CFTypeRef)value) == CFDataGetTypeID();
+}
+
+static BOOL PXRestoreValueIsExactNumber(id value) {
+    return [value isKindOfClass:[NSNumber class]] &&
+           CFGetTypeID((__bridge CFTypeRef)value) == CFNumberGetTypeID();
+}
+
+static CFTypeRef PXCanonicalSecurityClassForSerializedValue(id value) {
+    if (!PXRestoreValueIsExactString(value)) {
+        return NULL;
+    }
+
+    CFStringRef serializedClass = (__bridge CFStringRef)value;
+    CFStringRef candidates[] = {
+        kSecClassGenericPassword,
+        kSecClassInternetPassword,
+        kSecClassCertificate,
+        kSecClassKey,
+        kSecClassIdentity,
+    };
+    CFTypeRef resolvedClass = NULL;
+    NSUInteger matchCount = 0;
+    for (NSUInteger index = 0; index < sizeof(candidates) / sizeof(candidates[0]); index++) {
+        if (CFEqual(serializedClass, candidates[index])) {
+            resolvedClass = candidates[index];
+            matchCount++;
+        }
+    }
+    return matchCount == 1 ? resolvedClass : NULL;
+}
+
+static BOOL PXSerializedClassMetadataIsConsistent(NSDictionary *item,
+                                                   CFTypeRef canonicalClass) {
+    id classMetadata = item[@"_class"];
+    if (!classMetadata) {
+        return YES;
+    }
+    if (!PXRestoreValueIsExactString(classMetadata)) {
+        return NO;
+    }
+    NSString *expectedName = PXKeychainClassName(canonicalClass);
+    return [(__bridge NSString *)classMetadata isEqualToString:expectedName];
+}
+
+static BOOL PXDecodeRestoreValue(id serializedValue,
+                                 id *decodedValueOut) {
+    if (!serializedValue || !decodedValueOut) {
+        return NO;
+    }
+
+    id decodedValue = serializedValue;
+    if ([serializedValue isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *wrapped = (NSDictionary *)serializedValue;
+        id typeValue = wrapped[@"_type"];
+        if (typeValue) {
+            if (!PXRestoreValueIsExactString(typeValue)) {
+                return NO;
+            }
+            NSString *type = (NSString *)typeValue;
+            if ([type isEqualToString:@"data"]) {
+                id base64Value = wrapped[@"_base64"];
+                if (!PXRestoreValueIsExactString(base64Value)) {
+                    return NO;
+                }
+                NSData *data = [[NSData alloc] initWithBase64EncodedString:(NSString *)base64Value
+                                                                   options:0];
+                if (!data) {
+                    return NO;
+                }
+                decodedValue = data;
+            } else if ([type isEqualToString:@"date"]) {
+                id timestampValue = wrapped[@"_timestamp"];
+                if (!PXRestoreValueIsExactNumber(timestampValue)) {
+                    return NO;
+                }
+                double timestamp = [(NSNumber *)timestampValue doubleValue];
+                if (!isfinite(timestamp)) {
+                    return NO;
+                }
+                NSDate *date = [NSDate dateWithTimeIntervalSince1970:timestamp];
+                if (!date) {
+                    return NO;
+                }
+                decodedValue = date;
+            }
+        }
+    }
+
+    *decodedValueOut = decodedValue;
+    return YES;
+}
+
+static NSDictionary *PXCreateRestoreAddQuery(NSDictionary *item) {
+    if (![item isKindOfClass:[NSDictionary class]] || item.count > 256) {
+        return nil;
+    }
+
+    id serializedClass = item[@"_secClass"];
+    CFTypeRef canonicalClass = PXCanonicalSecurityClassForSerializedValue(serializedClass);
+    if (!canonicalClass || !PXSerializedClassMetadataIsConsistent(item, canonicalClass)) {
+        return nil;
+    }
+
+    NSSet<NSString *> *excluded = PXExcludedRestoreAttributes();
+    NSMutableDictionary *addQuery = [NSMutableDictionary dictionaryWithCapacity:item.count];
+    addQuery[(__bridge id)kSecClass] = (__bridge id)canonicalClass;
+
+    for (id keyObject in item) {
+        if (!PXRestoreValueIsExactString(keyObject)) {
+            return nil;
+        }
+        NSString *key = (NSString *)keyObject;
+        if ([key hasPrefix:@"_"] ||
+            [key isEqualToString:(__bridge NSString *)kSecClass] ||
+            [excluded containsObject:key]) {
+            continue;
+        }
+
+        id decodedValue = nil;
+        if (!PXDecodeRestoreValue(item[key], &decodedValue) || !decodedValue) {
+            return nil;
+        }
+        addQuery[key] = decodedValue;
+    }
+
+    return [NSDictionary dictionaryWithDictionary:addQuery];
+}
+
+static PXKeychainItemIdentity *PXCreateRestoreIdentity(NSDictionary *addQuery,
+                                                        NSError **error) {
+    return [PXKeychainItemIdentity identityForSecurityItemAttributes:addQuery
+                                                               error:error];
+}
+
+static OSStatus PXCopyUniquePersistentReferenceForIdentity(
+    PXKeychainItemIdentity *identity,
+    NSData **persistentReferenceOut) {
+    if (persistentReferenceOut) {
+        *persistentReferenceOut = nil;
+    }
+    if (![identity isKindOfClass:[PXKeychainItemIdentity class]] ||
+        !persistentReferenceOut) {
+        return errSecParam;
+    }
+
+    @try {
+        NSDictionary *matchQuery = identity.matchQuery;
+        if (![matchQuery isKindOfClass:[NSDictionary class]] ||
+            matchQuery.count == 0 || matchQuery.count > 10) {
+            return errSecParam;
+        }
+
+        NSMutableDictionary *lookupQuery =
+            [NSMutableDictionary dictionaryWithDictionary:matchQuery];
+        lookupQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+        lookupQuery[(__bridge id)kSecReturnPersistentRef] = @YES;
+        PXAddAuthUIFlags(lookupQuery);
+
+        CFTypeRef rawResult = NULL;
+        OSStatus lookupStatus = SecItemCopyMatching((__bridge CFDictionaryRef)lookupQuery,
+                                                     &rawResult);
+        id lookupResult = rawResult ? CFBridgingRelease(rawResult) : nil;
+        if (lookupStatus != errSecSuccess) {
+            return lookupStatus;
+        }
+
+        NSData *persistentReference = nil;
+        if (PXRestoreValueIsExactData(lookupResult)) {
+            persistentReference = (NSData *)lookupResult;
+        } else if ([lookupResult isKindOfClass:[NSArray class]] &&
+                   CFGetTypeID((__bridge CFTypeRef)lookupResult) == CFArrayGetTypeID()) {
+            NSArray *matches = (NSArray *)lookupResult;
+            if (matches.count == 0) {
+                return errSecItemNotFound;
+            }
+            if (matches.count != 1) {
+                return errSecDuplicateItem;
+            }
+            id onlyMatch = matches.firstObject;
+            if (!PXRestoreValueIsExactData(onlyMatch)) {
+                return errSecDecode;
+            }
+            persistentReference = (NSData *)onlyMatch;
+        } else if (!lookupResult) {
+            return errSecItemNotFound;
+        } else {
+            return errSecDecode;
+        }
+
+        if (persistentReference.length == 0) {
+            return errSecDecode;
+        }
+        NSData *snapshot = [[NSData alloc] initWithData:persistentReference];
+        if (!snapshot || snapshot.length == 0 ||
+            ![snapshot isEqualToData:persistentReference]) {
+            return errSecDecode;
+        }
+
+        *persistentReferenceOut = snapshot;
+        return errSecSuccess;
+    } @catch (__unused NSException *exception) {
+        return errSecDecode;
+    }
+}
+
+static NSDictionary *PXCreateUpdateAttributesFromAddQuery(
+    NSDictionary *addQuery,
+    PXKeychainItemIdentity *identity) {
+    if (![addQuery isKindOfClass:[NSDictionary class]] ||
+        ![identity isKindOfClass:[PXKeychainItemIdentity class]] ||
+        addQuery.count == 0 || addQuery.count > 256) {
+        return nil;
+    }
+
+    @try {
+        NSMutableDictionary *updateAttributes =
+            [NSMutableDictionary dictionaryWithDictionary:addQuery];
+
+        NSArray *alwaysExcludedKeys = @[
+            (__bridge id)kSecClass,
+            (__bridge id)kSecAttrAccessGroup,
+            (__bridge id)kSecAttrSynchronizable,
+            (__bridge id)kSecAttrAccessControl,
+            (__bridge id)kSecAttrCreationDate,
+            (__bridge id)kSecAttrModificationDate,
+            (__bridge id)kSecAttrPersistentReference,
+            (__bridge id)kSecMatchLimit,
+            (__bridge id)kSecReturnAttributes,
+            (__bridge id)kSecReturnData,
+            (__bridge id)kSecReturnRef,
+            (__bridge id)kSecReturnPersistentRef,
+            (__bridge id)kSecUseAuthenticationUI,
+            (__bridge id)kSecUseOperationPrompt,
+            (__bridge id)kSecValueRef,
+            (__bridge id)kSecValuePersistentRef,
+        ];
+        for (id key in alwaysExcludedKeys) {
+            [updateAttributes removeObjectForKey:key];
+        }
+        for (id key in PXExcludedRestoreAttributes()) {
+            [updateAttributes removeObjectForKey:key];
+        }
+        for (id key in identity.identityAttributeNames) {
+            if (!PXRestoreValueIsExactString(key)) {
+                return nil;
+            }
+            [updateAttributes removeObjectForKey:key];
+        }
+
+        return [NSDictionary dictionaryWithDictionary:updateAttributes];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
+static OSStatus PXUpdateExistingRestoreItem(NSData *persistentReference,
+                                             NSDictionary *updateAttributes) {
+    if (!PXRestoreValueIsExactData(persistentReference) ||
+        persistentReference.length == 0 ||
+        ![updateAttributes isKindOfClass:[NSDictionary class]] ||
+        updateAttributes.count == 0) {
+        return errSecParam;
+    }
+
+    @try {
+        NSMutableDictionary *updateQuery = [@{
+            (__bridge id)kSecValuePersistentRef: persistentReference,
+        } mutableCopy];
+        PXAddAuthUIFlags(updateQuery);
+        return SecItemUpdate((__bridge CFDictionaryRef)updateQuery,
+                             (__bridge CFDictionaryRef)updateAttributes);
+    } @catch (__unused NSException *exception) {
+        return errSecParam;
+    }
+}
+
+static PXRestoreItemOutcome PXProcessRestoreItem(NSDictionary *item,
+                                                  BOOL overwrite,
+                                                  NSString **diagnosticOut) {
+    if (diagnosticOut) {
+        *diagnosticOut = nil;
+    }
+
+    @try {
+        NSDictionary *addQuery = PXCreateRestoreAddQuery(item);
+        if (!addQuery) {
+            if (diagnosticOut) {
+                *diagnosticOut = @"A Keychain restore item could not be decoded safely.";
+            }
+            return PXRestoreItemOutcomeFailedError;
+        }
+
+        OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+        if (addStatus == errSecSuccess) {
+            return PXRestoreItemOutcomeSucceeded;
+        }
+        if (addStatus != errSecDuplicateItem) {
+            if (diagnosticOut) {
+                *diagnosticOut = [NSString stringWithFormat:@"Keychain restore add failed (status=%d).",
+                                  (int)addStatus];
+            }
+            return PXRestoreItemOutcomeFailedError;
+        }
+
+        if (!overwrite) {
+            if (diagnosticOut) {
+                *diagnosticOut = @"An existing Keychain item was preserved because overwrite was not requested.";
+            }
+            return PXRestoreItemOutcomeFailedWarning;
+        }
+
+        NSError *identityError = nil;
+        PXKeychainItemIdentity *identity = PXCreateRestoreIdentity(addQuery, &identityError);
+        if (!identity) {
+            if (diagnosticOut) {
+                *diagnosticOut = [NSString stringWithFormat:@"Exact Keychain item identity could not be constructed (code=%ld).",
+                                  (long)identityError.code];
+            }
+            return PXRestoreItemOutcomeFailedError;
+        }
+
+        NSData *persistentReference = nil;
+        OSStatus lookupStatus =
+            PXCopyUniquePersistentReferenceForIdentity(identity, &persistentReference);
+        if (lookupStatus != errSecSuccess) {
+            if (diagnosticOut) {
+                *diagnosticOut = [NSString stringWithFormat:@"Exact Keychain item lookup failed (status=%d).",
+                                  (int)lookupStatus];
+            }
+            return PXRestoreItemOutcomeFailedError;
+        }
+
+        NSDictionary *updateAttributes =
+            PXCreateUpdateAttributesFromAddQuery(addQuery, identity);
+        if (!updateAttributes) {
+            if (diagnosticOut) {
+                *diagnosticOut = @"Exact Keychain item update attributes could not be created safely.";
+            }
+            return PXRestoreItemOutcomeFailedError;
+        }
+        if (updateAttributes.count == 0) {
+            return PXRestoreItemOutcomeSucceeded;
+        }
+
+        OSStatus updateStatus =
+            PXUpdateExistingRestoreItem(persistentReference, updateAttributes);
+        if (updateStatus == errSecSuccess) {
+            return PXRestoreItemOutcomeSucceeded;
+        }
+        if (diagnosticOut) {
+            *diagnosticOut = [NSString stringWithFormat:@"Exact Keychain item update failed (status=%d).",
+                              (int)updateStatus];
+        }
+        return PXRestoreItemOutcomeFailedError;
+    } @catch (__unused NSException *exception) {
+        if (diagnosticOut) {
+            *diagnosticOut = @"A Keychain restore item could not be processed safely.";
+        }
+        return PXRestoreItemOutcomeFailedError;
+    }
 }
 
 #pragma mark - Implementation
@@ -316,8 +695,7 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
         }
         return nil;
     }
-    
-    // Read backup file.
+
     NSData *plistData = [NSData dataWithContentsOfFile:filePath];
     if (!plistData.length) {
         if (error) {
@@ -327,7 +705,7 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
         }
         return nil;
     }
-    
+
     NSError *parseError = nil;
     NSDictionary *backup = [NSPropertyListSerialization propertyListWithData:plistData
                                                                      options:NSPropertyListImmutable
@@ -342,7 +720,7 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
         }
         return nil;
     }
-    
+
     NSArray *items = backup[@"items"];
     if (![items isKindOfClass:[NSArray class]]) {
         if (error) {
@@ -352,87 +730,36 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
         }
         return nil;
     }
-    
+
     PXKeychainBackupResult *result = [[PXKeychainBackupResult alloc] init];
     NSMutableArray<NSString *> *warnings = [NSMutableArray array];
     NSMutableArray<NSString *> *errors = [NSMutableArray array];
-    NSSet<NSString *> *excluded = PXExcludedRestoreAttributes();
 
-    for (NSDictionary *item in items) {
-        if (![item isKindOfClass:[NSDictionary class]]) continue;
-        result.itemsProcessed++;
-        
-        // Get the security class.
-        id secClassValue = item[@"_secClass"];
-        if (!secClassValue) {
-            [warnings addObject:@"Item missing _secClass"];
-            result.itemsFailed++;
+    for (id itemObject in items) {
+        if (![itemObject isKindOfClass:[NSDictionary class]]) {
             continue;
         }
-        
-        // Build the add query.
-        NSMutableDictionary *addQuery = [NSMutableDictionary dictionary];
-        addQuery[(__bridge id)kSecClass] = secClassValue;
-        
-        for (NSString *key in item) {
-            if ([key hasPrefix:@"_"]) continue; // Skip metadata keys
-            if ([excluded containsObject:key]) continue;
-            
-            id value = item[key];
-            
-            // Decode special types.
-            if ([value isKindOfClass:[NSDictionary class]]) {
-                NSDictionary *wrapped = (NSDictionary *)value;
-                NSString *type = wrapped[@"_type"];
-                
-                if ([type isEqualToString:@"data"]) {
-                    NSString *base64 = wrapped[@"_base64"];
-                    if (base64) {
-                        value = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
-                    }
-                } else if ([type isEqualToString:@"date"]) {
-                    NSNumber *timestamp = wrapped[@"_timestamp"];
-                    if (timestamp) {
-                        value = [NSDate dateWithTimeIntervalSince1970:[timestamp doubleValue]];
-                    }
-                }
-            }
-            
-            if (value) {
-                addQuery[key] = value;
-            }
-        }
-        
-        // Add the item.
-        // Ensure we can restore synchronizable items.
-        if (addQuery[(__bridge id)kSecAttrSynchronizable]) {
-            // Nothing else to do; keep value as-is.
-        }
-        OSStatus status = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
-        
-        if (status == errSecSuccess) {
-            result.itemsSucceeded++;
-        } else if (status == errSecDuplicateItem) {
-            NSString *duplicateWarning = overwrite
-                ? [NSString stringWithFormat:@"Overwrite requested but existing item was preserved pending safe per-item replacement: %@",
-                   addQuery[(__bridge id)kSecAttrAccount] ?: @"unknown"]
-                : [NSString stringWithFormat:@"Item already exists; existing item was preserved: %@",
-                   addQuery[(__bridge id)kSecAttrAccount] ?: @"unknown"];
-            [warnings addObject:duplicateWarning];
-            result.itemsFailed++;
-        } else {
-            NSString *acct = addQuery[(__bridge id)kSecAttrAccount];
-            NSString *svc = addQuery[(__bridge id)kSecAttrService];
-            NSString *grp = addQuery[(__bridge id)kSecAttrAccessGroup];
-            [errors addObject:[NSString stringWithFormat:@"Failed to add item (acct=%@ svc=%@ group=%@): %@",
-                              acct ?: @"",
-                              svc ?: @"",
-                              grp ?: @"",
-                              PXSecurityErrorDescription(status)]];
-            result.itemsFailed++;
+
+        result.itemsProcessed++;
+        NSString *diagnostic = nil;
+        PXRestoreItemOutcome outcome = PXProcessRestoreItem((NSDictionary *)itemObject,
+                                                            overwrite,
+                                                            &diagnostic);
+        switch (outcome) {
+            case PXRestoreItemOutcomeSucceeded:
+                result.itemsSucceeded++;
+                break;
+            case PXRestoreItemOutcomeFailedWarning:
+                result.itemsFailed++;
+                [warnings addObject:diagnostic ?: @"An existing Keychain item was preserved."];
+                break;
+            case PXRestoreItemOutcomeFailedError:
+                result.itemsFailed++;
+                [errors addObject:diagnostic ?: @"A Keychain restore item failed safely."];
+                break;
         }
     }
-    
+
     result.warnings = warnings;
     result.errors = errors;
     return result;

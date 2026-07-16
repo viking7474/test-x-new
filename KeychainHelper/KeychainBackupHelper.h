@@ -35,7 +35,7 @@ typedef NS_OPTIONS(NSUInteger, PXKeychainItemClass) {
 @end
 
 /// Helper class for keychain backup, restore, and wipe operations.
-/// Uses SecItem APIs (SecItemCopyMatching, SecItemAdd, SecItemDelete).
+/// Uses SecItem APIs (SecItemCopyMatching, SecItemAdd, SecItemUpdate, SecItemDelete).
 @interface KeychainBackupHelper : NSObject
 
 /// Backup all keychain items matching the specified access groups to a plist file.
@@ -51,9 +51,9 @@ typedef NS_OPTIONS(NSUInteger, PXKeychainItemClass) {
 
 /// Restore keychain items from a backup plist file.
 /// @param filePath The path to the backup plist file.
-/// @param overwrite Retained for compatibility. Restore never pre-deletes access-group/class contents.
-/// Duplicate existing items are preserved and reported as item failures.
-/// Safe replacement awaits future per-item identity/upsert support.
+/// @param overwrite If NO, new items are added and exact existing duplicates are preserved and reported as item failures.
+/// If YES, new items are added and an existing item is updated in place only after exact identity construction
+/// and unique target resolution. Restore never deletes an item and does not guarantee every duplicate can be updated.
 /// @param error On failure, contains the error information.
 /// @return Result object with statistics, or nil on critical failure.
 + (PXKeychainBackupResult *_Nullable)restoreKeychainFromFile:(NSString *)filePath
