@@ -29,6 +29,11 @@ typedef NS_ENUM(NSUInteger, PXBackupArtifactEmptyFilePolicy) {
     PXBackupArtifactEmptyFilePolicyAllow = 2,
 };
 
+typedef NS_ENUM(NSUInteger, PXBackupArtifactDataProtectionRequirement) {
+    PXBackupArtifactDataProtectionRequirementUnspecified = 1,
+    PXBackupArtifactDataProtectionRequirementComplete = 2,
+};
+
 __attribute__((objc_subclassing_restricted))
 @interface PXBackupArtifactPolicy : NSObject <NSCopying>
 
@@ -36,6 +41,9 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, readonly) PXBackupArtifactRequirement requirement;
 @property (nonatomic, readonly) PXBackupArtifactFailureDisposition failureDisposition;
 @property (nonatomic, readonly) PXBackupArtifactEmptyFilePolicy emptyFilePolicy;
+@property (nonatomic, readonly) NSUInteger requiredPOSIXMode;
+@property (nonatomic, readonly)
+    PXBackupArtifactDataProtectionRequirement dataProtectionRequirement;
 
 + (nullable instancetype)policyForKind:(PXBackupArtifactKind)kind;
 

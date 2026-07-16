@@ -1,4 +1,5 @@
 #import "PXBackupArtifactVerifier.h"
+#import "PXFileProtection.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
@@ -44,6 +45,7 @@ NSString * const PXBackupArtifactVerifierErrorFieldPathKey =
         _expectedSize = expectedSize;
         _expectedDigest = [expectedDigest copy];
         _originalIndex = originalIndex;
+        _requiresCompleteProtection = requiresCompleteProtection;
     }
     return self;
 }
@@ -621,6 +623,8 @@ static BOOL PXArtifactVerifyDeclaration(
     NSString *namePath = PXArtifactFieldPath(entryPath, @"name");
     NSString *sizePath = PXArtifactFieldPath(entryPath, @"size");
     NSString *digestPath = PXArtifactFieldPath(entryPath, @"sha256");
+    NSString *protectionPath = PXArtifactFieldPath(
+        PXArtifactFieldPath(entryPath, @"policy"), @"dataProtection");
 
     int fileDescriptor = -1;
     if (!PXArtifactOpenRelativeFile(rootDescriptor,
@@ -655,6 +659,15 @@ static BOOL PXArtifactVerifyDeclaration(
                               @"The artifact size does not match the manifest.");
     }
 
+    if (declaration.requiresCompleteProtection &&
+        !PXVerifyCompleteFileProtectionOnDescriptor(fileDescriptor, NULL)) {
+        close(fileDescriptor);
+        return PXArtifactFail(error,
+                              PXBackupArtifactVerifierErrorProtectionInvalid,
+                              protectionPath,
+                              @"The artifact protection policy is invalid.");
+    }
+
     NSString *actualDigest = nil;
     if (!PXArtifactHashDescriptor(fileDescriptor,
                                   &actualDigest,
@@ -665,12 +678,20 @@ static BOOL PXArtifactVerifyDeclaration(
     }
 
     struct stat afterStatus;
-    if (fstat(fileDescriptor, &afterStatus) != 0) {
+    BOOL finalProtectionValid =
+        !declaration.requiresCompleteProtection ||
+        PXVerifyCompleteFileProtectionOnDescriptor(fileDescriptor, NULL);
+    if (fstat(fileDescriptor, &afterStatus) != 0 || !finalProtectionValid) {
         close(fileDescriptor);
         return PXArtifactFail(error,
-                              PXBackupArtifactVerifierErrorFilesystemInspectionFailed,
-                              namePath,
-                              @"The artifact could not be inspected after verification.");
+                              declaration.requiresCompleteProtection
+                                  ? PXBackupArtifactVerifierErrorProtectionInvalid
+                                  : PXBackupArtifactVerifierErrorFilesystemInspectionFailed,
+                              declaration.requiresCompleteProtection
+                                  ? protectionPath : namePath,
+                              declaration.requiresCompleteProtection
+                                  ? @"The artifact protection policy is invalid."
+                                  : @"The artifact could not be inspected after verification.");
     }
     close(fileDescriptor);
 
@@ -780,6 +801,18 @@ static BOOL PXArtifactAddRequiredReference(
     }
 
     NSArray *artifactEntries = (NSArray *)artifactsValue;
+    NSDictionary *schema = [manifest[@"schema"] isKindOfClass:[NSDictionary class]]
+        ? manifest[@"schema"] : nil;
+    uint64_t schemaRevision = 0;
+    if (!schema ||
+        !PXArtifactReadUnsignedIntegral(schema[@"revision"], 2, &schemaRevision) ||
+        (schemaRevision != 1 && schemaRevision != 2)) {
+        PXArtifactFail(error,
+                       PXBackupArtifactVerifierErrorInconsistentManifest,
+                       @"$.schema.revision",
+                       @"The manifest schema revision is invalid.");
+        return nil;
+    }
     NSMutableArray<PXBackupArtifactDeclaration *> *declarations =
         [NSMutableArray arrayWithCapacity:artifactEntries.count];
     NSMutableDictionary<NSString *, PXBackupArtifactDeclaration *>
@@ -841,12 +874,30 @@ static BOOL PXArtifactAddRequiredReference(
             return nil;
         }
 
+        NSDictionary *policy =
+            [entry[@"policy"] isKindOfClass:[NSDictionary class]]
+                ? entry[@"policy"] : nil;
+        BOOL requiresCompleteProtection = schemaRevision == 2 &&
+            [policy[@"kind"] isEqualToString:@"keychain"];
+        if (schemaRevision == 2 &&
+            ((!requiresCompleteProtection &&
+              ![policy[@"dataProtection"] isEqualToString:@"unspecified"]) ||
+             (requiresCompleteProtection &&
+              (![policy[@"dataProtection"] isEqualToString:@"complete"] ||
+               ![policy[@"posixMode"] isEqualToString:@"0600"])))) {
+            PXArtifactFail(error,
+                           PXBackupArtifactVerifierErrorInconsistentManifest,
+                           PXArtifactFieldPath(entryPath, @"policy"),
+                           @"The artifact protection declaration is invalid.");
+            return nil;
+        }
         PXBackupArtifactDeclaration *declaration =
             [[PXBackupArtifactDeclaration alloc]
                 initWithName:name
                 expectedSize:expectedSize
                 expectedDigest:(NSString *)digestValue
-                originalIndex:index];
+                originalIndex:index
+                requiresCompleteProtection:requiresCompleteProtection];
         [declarations addObject:declaration];
         declarationsByName[name] = declaration;
 

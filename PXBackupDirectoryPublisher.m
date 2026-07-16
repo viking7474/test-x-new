@@ -4,6 +4,7 @@
 #import "PXBackupArtifactWriter.h"
 #import "PXBackupManifestWriter.h"
 #import "PXBackupManifestValidator.h"
+#import "PXFileProtection.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
@@ -30,6 +31,7 @@ static NSString * const PXBackupDirectoryPublisherWorkspaceField = @"$.publicati
 static NSString * const PXBackupDirectoryPublisherFinalField = @"$.publication.finalDirectory";
 static NSString * const PXBackupDirectoryPublisherManifestField = @"$.publication.manifest";
 static NSString * const PXBackupDirectoryPublisherSnapshotField = @"$.publication.snapshot";
+static NSString * const PXBackupDirectoryPublisherProtectionField = @"$.artifacts.protection";
 
 static const NSUInteger PXBackupDirectoryMaximumPathBytes = 4096U;
 static const NSUInteger PXBackupDirectoryMaximumComponentBytes = 255U;
@@ -592,6 +594,151 @@ static BOOL PXBackupDirectoryManifestMatches(
     return YES;
 }
 
+static BOOL PXBackupDirectoryExactBoolean(id value, BOOL *resultOut) {
+    if (![value isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) return NO;
+    if (resultOut) *resultOut = [(NSNumber *)value boolValue];
+    return YES;
+}
+
+static BOOL PXBackupDirectorySafeRelativePath(NSString *relativePath) {
+    NSData *pathData = PXBackupDirectoryLosslessUTF8Data(
+        relativePath, PXBackupDirectoryMaximumPathBytes, NO);
+    if (!pathData || relativePath.length == 0 ||
+        [relativePath hasPrefix:@"/"] || [relativePath hasSuffix:@"/"]) return NO;
+    NSArray<NSString *> *components =
+        [relativePath componentsSeparatedByString:@"/"];
+    if (components.count == 0 || components.count > 32) return NO;
+    for (NSString *component in components) {
+        if ([component isEqualToString:@"."] ||
+            [component isEqualToString:@".."] ||
+            !PXBackupDirectoryValidateSafeComponent(component, NULL)) return NO;
+    }
+    return [[components componentsJoinedByString:@"/"]
+        isEqualToString:relativePath];
+}
+
+static BOOL PXBackupDirectoryResolveProtectedArtifact(
+    NSDictionary *manifest,
+    BOOL *requiredOut,
+    NSString **relativePathOut) {
+    if (requiredOut) *requiredOut = NO;
+    if (relativePathOut) *relativePathOut = nil;
+    NSDictionary *schema = [manifest[@"schema"] isKindOfClass:[NSDictionary class]]
+        ? manifest[@"schema"] : nil;
+    unsigned long long revision = 0;
+    if (!schema ||
+        !PXBackupDirectoryReadUnsignedIntegral(schema[@"revision"], &revision) ||
+        (revision != 1 && revision != 2)) return NO;
+    if (revision == 1) return YES;
+    NSDictionary *keychain = [manifest[@"keychain"] isKindOfClass:[NSDictionary class]]
+        ? manifest[@"keychain"] : nil;
+    BOOL included = NO;
+    if (!keychain ||
+        !PXBackupDirectoryExactBoolean(keychain[@"included"], &included)) return NO;
+    if (!included) return YES;
+    NSString *archive = [keychain[@"archive"] isKindOfClass:[NSString class]]
+        ? keychain[@"archive"] : nil;
+    if (!PXBackupDirectorySafeRelativePath(archive)) return NO;
+    NSArray *artifacts = [manifest[@"artifacts"] isKindOfClass:[NSArray class]]
+        ? manifest[@"artifacts"] : nil;
+    NSUInteger matches = 0;
+    for (id value in artifacts) {
+        if (![value isKindOfClass:[NSDictionary class]]) return NO;
+        NSDictionary *artifact = value;
+        NSDictionary *policy = [artifact[@"policy"] isKindOfClass:[NSDictionary class]]
+            ? artifact[@"policy"] : nil;
+        if ([artifact[@"name"] isEqualToString:archive] &&
+            [artifact[@"path"] isEqualToString:archive] &&
+            [policy[@"kind"] isEqualToString:@"keychain"] &&
+            [policy[@"posixMode"] isEqualToString:@"0600"] &&
+            [policy[@"dataProtection"] isEqualToString:@"complete"] &&
+            [policy[@"failureDisposition"] isEqualToString:@"warnAndContinue"]) {
+            matches += 1;
+        }
+    }
+    if (matches != 1) return NO;
+    if (requiredOut) *requiredOut = YES;
+    if (relativePathOut) *relativePathOut = [archive copy];
+    return YES;
+}
+
+static int PXBackupDirectoryOpenRelativeFile(int rootDescriptor,
+                                             NSString *relativePath) {
+    if (rootDescriptor < 0 ||
+        !PXBackupDirectorySafeRelativePath(relativePath)) return -1;
+    NSArray<NSString *> *components =
+        [relativePath componentsSeparatedByString:@"/"];
+    int currentDescriptor = rootDescriptor;
+    BOOL ownsCurrent = NO;
+    for (NSUInteger index = 0; index + 1 < components.count; index++) {
+        NSData *data = PXBackupDirectoryLosslessUTF8Data(
+            components[index], PXBackupDirectoryMaximumComponentBytes, NO);
+        char *name = PXBackupDirectoryCopyCString(data);
+        if (!name) {
+            if (ownsCurrent) close(currentDescriptor);
+            return -1;
+        }
+        int next = openat(currentDescriptor, name,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        free(name);
+        struct stat status;
+        BOOL valid = next >= 0 &&
+                     PXBackupDirectoryDescriptorHasCloseOnExec(next) &&
+                     fstat(next, &status) == 0 && S_ISDIR(status.st_mode);
+        if (!valid) {
+            if (next >= 0) close(next);
+            if (ownsCurrent) close(currentDescriptor);
+            return -1;
+        }
+        if (ownsCurrent) close(currentDescriptor);
+        currentDescriptor = next;
+        ownsCurrent = YES;
+    }
+    NSData *data = PXBackupDirectoryLosslessUTF8Data(
+        components.lastObject, PXBackupDirectoryMaximumComponentBytes, NO);
+    char *name = PXBackupDirectoryCopyCString(data);
+    if (!name) {
+        if (ownsCurrent) close(currentDescriptor);
+        return -1;
+    }
+    int descriptor = openat(currentDescriptor, name,
+                            O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    free(name);
+    if (ownsCurrent) close(currentDescriptor);
+    if (descriptor < 0 ||
+        !PXBackupDirectoryDescriptorHasCloseOnExec(descriptor)) {
+        if (descriptor >= 0) close(descriptor);
+        return -1;
+    }
+    return descriptor;
+}
+
+static BOOL PXBackupDirectoryVerifyProtectedArtifact(
+    int rootDescriptor,
+    NSString *relativePath,
+    const struct stat *expectedIdentity,
+    struct stat *identityOut,
+    int *descriptorOut) {
+    if (descriptorOut) *descriptorOut = -1;
+    int descriptor = PXBackupDirectoryOpenRelativeFile(rootDescriptor,
+                                                       relativePath);
+    struct stat status;
+    BOOL valid = descriptor >= 0 &&
+        PXVerifyCompleteFileProtectionOnDescriptor(descriptor, NULL) &&
+        fstat(descriptor, &status) == 0 &&
+        (!expectedIdentity ||
+         PXBackupDirectoryStatIdentityMatches(expectedIdentity, &status));
+    if (!valid) {
+        if (descriptor >= 0) close(descriptor);
+        return NO;
+    }
+    if (identityOut) *identityOut = status;
+    if (descriptorOut) *descriptorOut = descriptor;
+    else close(descriptor);
+    return YES;
+}
+
 @interface PXBackupDirectoryPublisher ()
 
 - (instancetype)initWithWorkspace:(PXBackupPublicationWorkspace *)workspace
@@ -1075,6 +1222,7 @@ cleanup:
     BOOL accepted = NO;
     int finalDirectoryDescriptor = -1;
     int finalManifestDescriptor = -1;
+    int protectedArtifactDescriptor = -1;
     int forwardRenameErrno = 0;
     int rollbackRenameErrno = 0;
     NSError *originalError = nil;
@@ -1088,14 +1236,18 @@ cleanup:
     NSData *manifestData = nil;
     NSDictionary *parsedManifest = nil;
     NSError *validationError = nil;
+    NSString *protectedArtifactRelativePath = nil;
+    BOOL protectedArtifactRequired = NO;
     struct stat finalNamespaceIdentity;
     struct stat finalDirectoryIdentity;
     struct stat finalManifestIdentity;
     struct stat stableManifestIdentity;
+    struct stat protectedArtifactIdentity;
     memset(&finalNamespaceIdentity, 0, sizeof(finalNamespaceIdentity));
     memset(&finalDirectoryIdentity, 0, sizeof(finalDirectoryIdentity));
     memset(&finalManifestIdentity, 0, sizeof(finalManifestIdentity));
     memset(&stableManifestIdentity, 0, sizeof(stableManifestIdentity));
+    memset(&protectedArtifactIdentity, 0, sizeof(protectedArtifactIdentity));
 
     if (!PXBackupDirectoryValidateSafeComponent(_workspaceName,
                                                 &workspaceNameData) ||
@@ -1200,6 +1352,29 @@ cleanup:
                                   @"The accepted manifest does not match publication identity");
         goto cleanup;
     }
+    if (!PXBackupDirectoryResolveProtectedArtifact(
+            manifestRepresentation,
+            &protectedArtifactRequired,
+            &protectedArtifactRelativePath)) {
+        PXBackupDirectorySetError(error,
+                                  PXBackupDirectoryPublisherErrorProtectedArtifactInvalid,
+                                  PXBackupDirectoryPublisherProtectionField,
+                                  @"The protected artifact declaration is invalid");
+        goto cleanup;
+    }
+    if (protectedArtifactRequired &&
+        !PXBackupDirectoryVerifyProtectedArtifact(
+            _workspaceDescriptor,
+            protectedArtifactRelativePath,
+            NULL,
+            &protectedArtifactIdentity,
+            &protectedArtifactDescriptor)) {
+        PXBackupDirectorySetError(error,
+                                  PXBackupDirectoryPublisherErrorProtectedArtifactInvalid,
+                                  PXBackupDirectoryPublisherProtectionField,
+                                  @"The protected artifact failed pre-publication verification");
+        goto cleanup;
+    }
     if (!PXBackupDirectoryEntryIsAbsent(_parentDescriptor, publishedNameBytes)) {
         PXBackupDirectorySetError(error,
                                   PXBackupDirectoryPublisherErrorFinalDirectoryAlreadyExists,
@@ -1240,6 +1415,48 @@ cleanup:
                                   PXBackupDirectoryPublisherFinalField,
                                   @"The publication filesystem identity changed before rename");
         goto cleanup;
+    }
+    artifactError = nil;
+    if (![artifactWriter validateIdentityWithError:&artifactError]) {
+        BOOL protectionFailure =
+            [artifactError.domain isEqualToString:PXBackupArtifactWriterErrorDomain] &&
+            artifactError.code == PXBackupArtifactWriterErrorProtectionFailed;
+        PXBackupDirectorySetError(
+            error,
+            protectionFailure
+                ? PXBackupDirectoryPublisherErrorProtectedArtifactInvalid
+                : PXBackupDirectoryPublisherErrorArtifactWriterValidationFailed,
+            protectionFailure
+                ? PXBackupDirectoryPublisherProtectionField
+                : PXBackupDirectoryPublisherWorkspaceField,
+            protectionFailure
+                ? @"The protected artifact failed final writer validation"
+                : @"The artifact writer failed final publication validation");
+        goto cleanup;
+    }
+    if (protectedArtifactRequired) {
+        struct stat retainedProtectedIdentity;
+        int namespaceProtectedDescriptor = -1;
+        BOOL retainedValid =
+            PXVerifyCompleteFileProtectionOnDescriptor(
+                protectedArtifactDescriptor, NULL) &&
+            fstat(protectedArtifactDescriptor, &retainedProtectedIdentity) == 0 &&
+            PXBackupDirectoryStatIdentityMatches(&protectedArtifactIdentity,
+                                                 &retainedProtectedIdentity) &&
+            PXBackupDirectoryVerifyProtectedArtifact(
+                _workspaceDescriptor,
+                protectedArtifactRelativePath,
+                &protectedArtifactIdentity,
+                NULL,
+                &namespaceProtectedDescriptor);
+        if (namespaceProtectedDescriptor >= 0) close(namespaceProtectedDescriptor);
+        if (!retainedValid) {
+            PXBackupDirectorySetError(error,
+                                      PXBackupDirectoryPublisherErrorProtectedArtifactInvalid,
+                                      PXBackupDirectoryPublisherProtectionField,
+                                      @"The protected artifact failed pre-rename verification");
+            goto cleanup;
+        }
     }
     if (!PXBackupDirectoryRenameEntryNoReplace(_parentDescriptor,
                                                workspaceNameBytes,
@@ -1358,6 +1575,34 @@ cleanup:
                                   @"The published manifest does not match its accepted snapshot");
         goto rollback;
     }
+    if (protectedArtifactRequired) {
+        BOOL finalDeclarationRequired = NO;
+        NSString *finalProtectedPath = nil;
+        struct stat finalProtectedIdentity;
+        int finalProtectedDescriptor = -1;
+        BOOL finalProtectedValid =
+            PXBackupDirectoryResolveProtectedArtifact(parsedManifest,
+                                                      &finalDeclarationRequired,
+                                                      &finalProtectedPath) &&
+            finalDeclarationRequired &&
+            [finalProtectedPath isEqualToString:protectedArtifactRelativePath] &&
+            PXBackupDirectoryVerifyProtectedArtifact(
+                finalDirectoryDescriptor,
+                finalProtectedPath,
+                &protectedArtifactIdentity,
+                &finalProtectedIdentity,
+                &finalProtectedDescriptor) &&
+            PXVerifyCompleteFileProtectionOnDescriptor(
+                protectedArtifactDescriptor, NULL);
+        if (finalProtectedDescriptor >= 0) close(finalProtectedDescriptor);
+        if (!finalProtectedValid) {
+            PXBackupDirectorySetError(error,
+                                      PXBackupDirectoryPublisherErrorProtectedArtifactInvalid,
+                                      PXBackupDirectoryPublisherProtectionField,
+                                      @"The published protected artifact is invalid");
+            goto rollback;
+        }
+    }
     if (!PXBackupDirectoryPathMatchesDescriptor(_parentPath,
                                                 _parentDescriptor,
                                                 &_parentIdentity,
@@ -1442,6 +1687,7 @@ rollback:
     if (error) *error = originalError;
 
 cleanup:
+    if (protectedArtifactDescriptor >= 0) close(protectedArtifactDescriptor);
     if (finalManifestDescriptor >= 0) close(finalManifestDescriptor);
     if (finalDirectoryDescriptor >= 0) close(finalDirectoryDescriptor);
     free(workspaceNameBytes);

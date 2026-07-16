@@ -1,5 +1,6 @@
 #import "PXOptionalRestoreStaging.h"
 #import "PXRestorePlan.h"
+#import "PXFileProtection.h"
 #import <CommonCrypto/CommonDigest.h>
 
 #include <dirent.h>
@@ -1569,6 +1570,81 @@ static BOOL PXOptionalCleanupDirectoryContents(int descriptor,
                                             }];
     }
     return nil;
+}
+
+- (BOOL)applyCompleteFileProtectionWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (self.isCleaned || self.ownershipLost ||
+        self.parentDescriptor < 0 || self.rootDescriptor < 0 ||
+        self.payloadDescriptor < 0 || self.rootBasename.length == 0) {
+        return PXOptionalFail(error,
+                              PXOptionalRestoreStagingErrorProtectionFailed,
+                              @"$.source.protection",
+                              @"The staged file protection precondition is invalid.");
+    }
+    char *rootName = PXOptionalCopyComponentRepresentation(self.rootBasename);
+    if (!rootName) {
+        return PXOptionalFail(error,
+                              PXOptionalRestoreStagingErrorProtectionFailed,
+                              @"$.source.protection",
+                              @"The staged file protection precondition is invalid.");
+    }
+    struct stat parentStatus;
+    struct stat rootDescriptorStatus;
+    struct stat rootNamespaceStatus;
+    struct stat payloadBefore;
+    struct stat payloadNamespaceBefore;
+    BOOL initialValid =
+        fstat(self.parentDescriptor, &parentStatus) == 0 &&
+        PXOptionalIdentityMatchesBasic(self.parentIdentity, &parentStatus) &&
+        fstat(self.rootDescriptor, &rootDescriptorStatus) == 0 &&
+        PXOptionalIdentityMatchesBasic(self.rootIdentity, &rootDescriptorStatus) &&
+        fstatat(self.parentDescriptor, rootName, &rootNamespaceStatus,
+                AT_SYMLINK_NOFOLLOW) == 0 &&
+        PXOptionalIdentityMatchesBasic(self.rootIdentity, &rootNamespaceStatus) &&
+        fstat(self.payloadDescriptor, &payloadBefore) == 0 &&
+        PXOptionalIdentityMatchesBasic(self.payloadIdentity, &payloadBefore) &&
+        fstatat(self.rootDescriptor, "payload", &payloadNamespaceBefore,
+                AT_SYMLINK_NOFOLLOW) == 0 &&
+        PXOptionalIdentityMatchesBasic(self.payloadIdentity,
+                                       &payloadNamespaceBefore) &&
+        payloadBefore.st_nlink == 1 &&
+        payloadBefore.st_uid == geteuid() &&
+        payloadBefore.st_gid == getegid() &&
+        S_ISREG(payloadBefore.st_mode);
+    free(rootName);
+    if (!initialValid ||
+        !PXApplyCompleteFileProtectionToDescriptor(self.payloadDescriptor,
+                                                   NULL)) {
+        return PXOptionalFail(error,
+                              PXOptionalRestoreStagingErrorProtectionFailed,
+                              @"$.source.protection",
+                              @"The staged file protection could not be applied.");
+    }
+    struct stat payloadAfter;
+    struct stat payloadNamespaceAfter;
+    BOOL finalValid =
+        PXVerifyCompleteFileProtectionOnDescriptor(self.payloadDescriptor,
+                                                   NULL) &&
+        fstat(self.payloadDescriptor, &payloadAfter) == 0 &&
+        PXOptionalIdentityMatchesBasic(self.payloadIdentity, &payloadAfter) &&
+        payloadBefore.st_size == payloadAfter.st_size &&
+        fstatat(self.rootDescriptor, "payload", &payloadNamespaceAfter,
+                AT_SYMLINK_NOFOLLOW) == 0 &&
+        PXOptionalIdentityMatchesBasic(PXOptionalIdentityFromStat(&payloadAfter),
+                                       &payloadNamespaceAfter) &&
+        payloadAfter.st_nlink == 1 &&
+        payloadAfter.st_uid == geteuid() &&
+        payloadAfter.st_gid == getegid() &&
+        (payloadAfter.st_mode & 07777) == 0600;
+    if (!finalValid) {
+        return PXOptionalFail(error,
+                              PXOptionalRestoreStagingErrorProtectionFailed,
+                              @"$.source.protection",
+                              @"The staged file protection could not be verified.");
+    }
+    self.payloadIdentity = PXOptionalIdentityFromStat(&payloadAfter);
+    return YES;
 }
 
 - (BOOL)cleanupWithError:(NSError **)error {

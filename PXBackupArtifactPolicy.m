@@ -5,7 +5,9 @@
 - (instancetype)initWithKind:(PXBackupArtifactKind)kind
                  requirement:(PXBackupArtifactRequirement)requirement
           failureDisposition:(PXBackupArtifactFailureDisposition)failureDisposition
-             emptyFilePolicy:(PXBackupArtifactEmptyFilePolicy)emptyFilePolicy;
+             emptyFilePolicy:(PXBackupArtifactEmptyFilePolicy)emptyFilePolicy
+           requiredPOSIXMode:(NSUInteger)requiredPOSIXMode
+   dataProtectionRequirement:(PXBackupArtifactDataProtectionRequirement)dataProtectionRequirement;
 
 @end
 
@@ -14,6 +16,8 @@
     PXBackupArtifactRequirement _requirement;
     PXBackupArtifactFailureDisposition _failureDisposition;
     PXBackupArtifactEmptyFilePolicy _emptyFilePolicy;
+    NSUInteger _requiredPOSIXMode;
+    PXBackupArtifactDataProtectionRequirement _dataProtectionRequirement;
 }
 
 + (nullable instancetype)policyForKind:(PXBackupArtifactKind)kind {
@@ -22,6 +26,9 @@
         PXBackupArtifactFailureDispositionContinueWithoutWarning;
     PXBackupArtifactEmptyFilePolicy emptyFilePolicy =
         PXBackupArtifactEmptyFilePolicyReject;
+    NSUInteger requiredPOSIXMode = 0600;
+    PXBackupArtifactDataProtectionRequirement dataProtectionRequirement =
+        PXBackupArtifactDataProtectionRequirementUnspecified;
 
     switch (kind) {
         case PXBackupArtifactKindApplicationData:
@@ -44,11 +51,17 @@
             emptyFilePolicy = PXBackupArtifactEmptyFilePolicyAllow;
             break;
         case PXBackupArtifactKindPreferences:
-        case PXBackupArtifactKindKeychain:
             requirement = PXBackupArtifactRequirementOptional;
             failureDisposition =
                 PXBackupArtifactFailureDispositionContinueWithoutWarning;
             emptyFilePolicy = PXBackupArtifactEmptyFilePolicyReject;
+            break;
+        case PXBackupArtifactKindKeychain:
+            requirement = PXBackupArtifactRequirementOptional;
+            failureDisposition = PXBackupArtifactFailureDispositionWarnAndContinue;
+            emptyFilePolicy = PXBackupArtifactEmptyFilePolicyReject;
+            dataProtectionRequirement =
+                PXBackupArtifactDataProtectionRequirementComplete;
             break;
         default:
             return nil;
@@ -57,19 +70,25 @@
     return [[PXBackupArtifactPolicy alloc] initWithKind:kind
                          requirement:requirement
                   failureDisposition:failureDisposition
-                     emptyFilePolicy:emptyFilePolicy];
+                     emptyFilePolicy:emptyFilePolicy
+                   requiredPOSIXMode:requiredPOSIXMode
+           dataProtectionRequirement:dataProtectionRequirement];
 }
 
 - (instancetype)initWithKind:(PXBackupArtifactKind)kind
                  requirement:(PXBackupArtifactRequirement)requirement
           failureDisposition:(PXBackupArtifactFailureDisposition)failureDisposition
-             emptyFilePolicy:(PXBackupArtifactEmptyFilePolicy)emptyFilePolicy {
+             emptyFilePolicy:(PXBackupArtifactEmptyFilePolicy)emptyFilePolicy
+           requiredPOSIXMode:(NSUInteger)requiredPOSIXMode
+   dataProtectionRequirement:(PXBackupArtifactDataProtectionRequirement)dataProtectionRequirement {
     self = [super init];
     if (self) {
         _kind = kind;
         _requirement = requirement;
         _failureDisposition = failureDisposition;
         _emptyFilePolicy = emptyFilePolicy;
+        _requiredPOSIXMode = requiredPOSIXMode;
+        _dataProtectionRequirement = dataProtectionRequirement;
     }
     return self;
 }
@@ -80,6 +99,10 @@
     return _failureDisposition;
 }
 - (PXBackupArtifactEmptyFilePolicy)emptyFilePolicy { return _emptyFilePolicy; }
+- (NSUInteger)requiredPOSIXMode { return _requiredPOSIXMode; }
+- (PXBackupArtifactDataProtectionRequirement)dataProtectionRequirement {
+    return _dataProtectionRequirement;
+}
 
 - (BOOL)acceptsFileSize:(unsigned long long)fileSize {
     return fileSize > 0 ||
@@ -102,7 +125,9 @@
     return self.kind == other.kind &&
            self.requirement == other.requirement &&
            self.failureDisposition == other.failureDisposition &&
-           self.emptyFilePolicy == other.emptyFilePolicy;
+           self.emptyFilePolicy == other.emptyFilePolicy &&
+           self.requiredPOSIXMode == other.requiredPOSIXMode &&
+           self.dataProtectionRequirement == other.dataProtectionRequirement;
 }
 
 - (NSUInteger)hash {
@@ -112,6 +137,10 @@
     value ^= (NSUInteger)self.failureDisposition + (NSUInteger)0x9e3779b9 +
              (value << 6) + (value >> 2);
     value ^= (NSUInteger)self.emptyFilePolicy + (NSUInteger)0x9e3779b9 +
+             (value << 6) + (value >> 2);
+    value ^= self.requiredPOSIXMode + (NSUInteger)0x9e3779b9 +
+             (value << 6) + (value >> 2);
+    value ^= (NSUInteger)self.dataProtectionRequirement + (NSUInteger)0x9e3779b9 +
              (value << 6) + (value >> 2);
     return value;
 }

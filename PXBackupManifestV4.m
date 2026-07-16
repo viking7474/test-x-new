@@ -7,7 +7,7 @@
 NSInteger const PXBackupManifestV4Version = 4;
 NSString * const PXBackupManifestV4SchemaIdentifier =
     @"com.hydra.projectx.backup-manifest";
-NSInteger const PXBackupManifestV4SchemaRevision = 1;
+NSInteger const PXBackupManifestV4SchemaRevision = 2;
 NSString * const PXBackupManifestV4DigestAlgorithm = @"sha256";
 NSString * const PXBackupManifestV4PublicationProtocol = @"atomic-directory-v1";
 NSString * const PXBackupManifestV4ContentStateComplete = @"complete";
@@ -640,7 +640,24 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
         NSString *requirement = PXV4RequirementString(policy.requirement);
         NSString *disposition = PXV4DispositionString(policy.failureDisposition);
         NSString *empty = PXV4EmptyString(policy.emptyFilePolicy);
-        if (!kind || !requirement || !disposition || !empty) return PXV4FailureResult(error);
+        NSString *posixMode = policy.requiredPOSIXMode == 0600 ? @"0600" : nil;
+        NSString *dataProtection = nil;
+        switch (policy.dataProtectionRequirement) {
+            case PXBackupArtifactDataProtectionRequirementUnspecified:
+                dataProtection = @"unspecified";
+                break;
+            case PXBackupArtifactDataProtectionRequirementComplete:
+                dataProtection = @"complete";
+                break;
+        }
+        if (!kind || !requirement || !disposition || !empty ||
+            !posixMode || !dataProtection || !record.protectionVerified ||
+            (policy.kind == PXBackupArtifactKindKeychain &&
+             ![dataProtection isEqualToString:@"complete"]) ||
+            (policy.kind != PXBackupArtifactKindKeychain &&
+             ![dataProtection isEqualToString:@"unspecified"])) {
+            return PXV4FailureResult(error);
+        }
         NSDictionary *declaration = @{
             @"name": record.relativePath,
             @"path": record.relativePath,
@@ -651,6 +668,8 @@ static PXBackupManifestV4 *PXV4FailureResult(NSError **error) {
                 @"requirement": requirement,
                 @"failureDisposition": disposition,
                 @"emptyFilePolicy": empty,
+                @"posixMode": posixMode,
+                @"dataProtection": dataProtection,
             },
         };
         records[record.relativePath] = record;

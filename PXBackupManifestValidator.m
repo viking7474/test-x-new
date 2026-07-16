@@ -1095,15 +1095,25 @@ static NSInteger PXManifestV4KindOrder(NSString *kind) {
 }
 
 static BOOL PXManifestV4PolicyMatches(NSDictionary *policy,
-                                      unsigned long long size,
-                                      NSInteger *kindOrder,
-                                      BOOL *requiredOut) {
-    if (![policy isKindOfClass:[NSDictionary class]] ||
-        policy.count != 4 ||
-        ![[NSSet setWithArray:policy.allKeys] isEqualToSet:
-          [NSSet setWithArray:@[@"kind", @"requirement", @"failureDisposition", @"emptyFilePolicy"]]]) {
-        return NO;
-    }
+                                       unsigned long long schemaRevision,
+                                       unsigned long long size,
+                                       NSInteger *kindOrder,
+                                       BOOL *requiredOut) {
+    if (![policy isKindOfClass:[NSDictionary class]]) return NO;
+    NSSet *revisionOneKeys = [NSSet setWithArray:@[
+        @"kind", @"requirement", @"failureDisposition", @"emptyFilePolicy"
+    ]];
+    NSSet *revisionTwoKeys = [NSSet setWithArray:@[
+        @"kind", @"requirement", @"failureDisposition", @"emptyFilePolicy",
+        @"posixMode", @"dataProtection"
+    ]];
+    NSSet *actualKeys = [NSSet setWithArray:policy.allKeys];
+    if ((schemaRevision == 1 &&
+         (policy.count != 4 || ![actualKeys isEqualToSet:revisionOneKeys])) ||
+        (schemaRevision == 2 &&
+         (policy.count != 6 || ![actualKeys isEqualToSet:revisionTwoKeys])) ||
+        (schemaRevision != 1 && schemaRevision != 2)) return NO;
+
     NSString *kind = nil;
     NSString *requirement = nil;
     NSString *disposition = nil;
@@ -1111,9 +1121,16 @@ static BOOL PXManifestV4PolicyMatches(NSDictionary *policy,
     if (!PXManifestV4ReadString(policy[@"kind"], NO, &kind) ||
         !PXManifestV4ReadString(policy[@"requirement"], NO, &requirement) ||
         !PXManifestV4ReadString(policy[@"failureDisposition"], NO, &disposition) ||
-        !PXManifestV4ReadString(policy[@"emptyFilePolicy"], NO, &empty)) {
-        return NO;
-    }
+        !PXManifestV4ReadString(policy[@"emptyFilePolicy"], NO, &empty)) return NO;
+
+    NSString *posixMode = nil;
+    NSString *dataProtection = nil;
+    if (schemaRevision == 2 &&
+        (!PXManifestV4ReadString(policy[@"posixMode"], NO, &posixMode) ||
+         !PXManifestV4ReadString(policy[@"dataProtection"], NO,
+                                 &dataProtection) ||
+         ![posixMode isEqualToString:@"0600"])) return NO;
+
     NSInteger order = PXManifestV4KindOrder(kind);
     if (order == 0) return NO;
     BOOL valid = NO;
@@ -1133,62 +1150,30 @@ static BOOL PXManifestV4PolicyMatches(NSDictionary *policy,
                     [disposition isEqualToString:@"continueWithoutWarning"] &&
                     [empty isEqualToString:@"allow"];
             break;
-        case 7: case 8:
+        case 7:
             valid = [requirement isEqualToString:@"optional"] &&
                     [disposition isEqualToString:@"continueWithoutWarning"] &&
                     [empty isEqualToString:@"reject"];
             break;
+        case 8:
+            valid = [requirement isEqualToString:@"optional"] &&
+                    [disposition isEqualToString:
+                        schemaRevision == 1
+                            ? @"continueWithoutWarning"
+                            : @"warnAndContinue"] &&
+                    [empty isEqualToString:@"reject"];
+            break;
+    }
+    if (schemaRevision == 2) {
+        BOOL complete = order == 8;
+        valid = valid &&
+            [dataProtection isEqualToString:
+                complete ? @"complete" : @"unspecified"];
     }
     if (!valid || (size == 0 && ![empty isEqualToString:@"allow"])) return NO;
     if (kindOrder) *kindOrder = order;
     if (requiredOut) *requiredOut = [requirement isEqualToString:@"required"];
     return YES;
-}
-
-static BOOL PXManifestV4AddReference(NSMutableSet<NSString *> *references,
-                                     NSDictionary<NSString *, NSNumber *> *kindByName,
-                                     id name,
-                                     NSInteger expectedKind,
-                                     NSString *fieldPath,
-                                     NSError **error) {
-    if (!PXManifestV4RelativePath(name)) {
-        return PXManifestFail(error,
-                              PXBackupManifestValidatorErrorInvalidFieldType,
-                              fieldPath,
-                              @"The artifact reference is invalid.");
-    }
-    NSString *typedName = (NSString *)name;
-    NSNumber *kindNumber = kindByName[typedName];
-    if (![kindNumber isKindOfClass:[NSNumber class]]) {
-        return PXManifestFail(error,
-                              PXBackupManifestValidatorErrorInconsistentField,
-                              fieldPath,
-                              @"The artifact reference is missing.");
-    }
-    if (kindNumber.integerValue != expectedKind) {
-        return PXManifestFail(error,
-                              PXBackupManifestValidatorErrorInconsistentField,
-                              fieldPath,
-                              @"The artifact reference policy is inconsistent.");
-    }
-    if ([references containsObject:typedName]) {
-        return PXManifestFail(error,
-                              PXBackupManifestValidatorErrorDuplicateEntry,
-                              fieldPath,
-                              @"The artifact reference is duplicated.");
-    }
-    [references addObject:typedName];
-    return YES;
-}
-
-static BOOL PXManifestV4FailureResult(NSError **error) {
-    if (error && !*error) {
-        PXManifestFail(error,
-                       PXBackupManifestValidatorErrorInconsistentField,
-                       @"$",
-                       @"The manifest v4 structure is invalid.");
-    }
-    return NO;
 }
 
 static BOOL PXManifestValidateV4(NSDictionary *manifest, NSError **error) {
@@ -1240,7 +1225,7 @@ static BOOL PXManifestValidateV4(NSDictionary *manifest, NSError **error) {
                                                error)) {
         return PXManifestV4FailureResult(error);
     }
-    if (schemaRevision != 1 ||
+    if ((schemaRevision != 1 && schemaRevision != 2) ||
         ![schemaIdentifier isEqualToString:@"com.hydra.projectx.backup-manifest"] ||
         ![digestAlgorithm isEqualToString:@"sha256"] ||
         ![publicationProtocol isEqualToString:@"atomic-directory-v1"] ||

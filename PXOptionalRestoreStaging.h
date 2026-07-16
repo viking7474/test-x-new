@@ -24,6 +24,7 @@ typedef NS_ENUM(NSInteger, PXOptionalRestoreStagingErrorCode) {
     PXOptionalRestoreStagingErrorLimitExceeded = 14,
     PXOptionalRestoreStagingErrorCleanupFailed = 15,
     PXOptionalRestoreStagingErrorInconsistentPlan = 16,
+    PXOptionalRestoreStagingErrorProtectionFailed = 17,
 };
 
 __attribute__((objc_subclassing_restricted))
@@ -43,6 +44,8 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, strong, readonly) PXValidatedOptionalFileStage *validatedStage;
 + (nullable instancetype)workspaceByStagingSourceFileAtPath:(NSString *)sourcePath
                                                      error:(NSError * _Nullable * _Nullable)error;
+- (BOOL)applyCompleteFileProtectionWithError:
+    (NSError * _Nullable * _Nullable)error;
 - (BOOL)cleanupWithError:(NSError * _Nullable * _Nullable)error;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

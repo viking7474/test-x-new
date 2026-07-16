@@ -22,6 +22,7 @@ typedef NS_ENUM(NSInteger, PXBackupArtifactVerifierErrorCode) {
     PXBackupArtifactVerifierErrorDigestMismatch = 11,
     PXBackupArtifactVerifierErrorFilesystemChanged = 12,
     PXBackupArtifactVerifierErrorInconsistentManifest = 13,
+    PXBackupArtifactVerifierErrorProtectionInvalid = 14,
 };
 
 __attribute__((objc_subclassing_restricted))

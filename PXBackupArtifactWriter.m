@@ -1,5 +1,6 @@
 #import "PXBackupArtifactWriter.h"
 #import "PXBackupPublicationWorkspace.h"
+#import "PXFileProtection.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
@@ -27,6 +28,7 @@ static NSString * const PXBackupArtifactParentField = @"$.artifact.parent";
 static NSString * const PXBackupArtifactTemporaryField = @"$.artifact.temporary";
 static NSString * const PXBackupArtifactPayloadField = @"$.artifact.payload";
 static NSString * const PXBackupArtifactPolicyField = @"$.artifact.policy";
+static NSString * const PXBackupArtifactProtectionField = @"$.artifact.payload.protection";
 
 static const NSUInteger PXBackupArtifactMaximumArtifacts = 4096;
 static const NSUInteger PXBackupArtifactMaximumRelativePathBytes = 4096;
@@ -154,6 +156,49 @@ static BOOL PXBackupArtifactStrictSync(int descriptor) {
     return result == 0;
 }
 
+static BOOL PXBackupArtifactSetMode(int descriptor, mode_t mode) {
+    if (descriptor < 0) return NO;
+    int result = -1;
+    do {
+        result = fchmod(descriptor, mode);
+    } while (result < 0 && errno == EINTR);
+    return result == 0;
+}
+
+static BOOL PXBackupArtifactProtectedStatMatchesPolicy(
+    const struct stat *status,
+    PXBackupArtifactPolicy *policy) {
+    return status &&
+           [policy isMemberOfClass:[PXBackupArtifactPolicy class]] &&
+           S_ISREG(status->st_mode) &&
+           status->st_nlink == 1 &&
+           status->st_uid == geteuid() &&
+           status->st_gid == getegid() &&
+           (status->st_mode & (S_ISUID | S_ISGID)) == 0 &&
+           (status->st_mode & 07777) == (mode_t)policy.requiredPOSIXMode;
+}
+
+static BOOL PXBackupArtifactVerifyDescriptorForPolicy(
+    int descriptor,
+    PXBackupArtifactPolicy *policy,
+    struct stat *statusOut) {
+    if (descriptor < 0 ||
+        ![policy isMemberOfClass:[PXBackupArtifactPolicy class]] ||
+        !PXBackupArtifactDescriptorHasCloseOnExec(descriptor)) return NO;
+    if (policy.dataProtectionRequirement ==
+        PXBackupArtifactDataProtectionRequirementComplete) {
+        if (!PXVerifyCompleteFileProtectionOnDescriptor(descriptor, NULL)) return NO;
+    } else if (policy.dataProtectionRequirement !=
+               PXBackupArtifactDataProtectionRequirementUnspecified) {
+        return NO;
+    }
+    struct stat status;
+    if (fstat(descriptor, &status) != 0 ||
+        !PXBackupArtifactProtectedStatMatchesPolicy(&status, policy)) return NO;
+    if (statusOut) *statusOut = status;
+    return YES;
+}
+
 static BOOL PXBackupArtifactStringContainsNull(NSString *value) {
     for (NSUInteger index = 0; index < value.length; index++) {
         if ([value characterAtIndex:index] == 0) {
@@ -185,6 +230,64 @@ static char *PXBackupArtifactCopyCString(NSData *data) {
     }
     result[data.length] = '\0';
     return result;
+}
+
+static int PXBackupArtifactOpenRelativeFile(int rootDescriptor,
+                                            NSString *relativePath,
+                                            int accessMode) {
+    if (rootDescriptor < 0 ||
+        ![relativePath isKindOfClass:[NSString class]] ||
+        relativePath.length == 0 ||
+        (accessMode != O_RDONLY && accessMode != O_RDWR)) return -1;
+    NSArray<NSString *> *components =
+        [relativePath componentsSeparatedByString:@"/"];
+    if (components.count == 0 ||
+        components.count > PXBackupArtifactMaximumRelativeDepth) return -1;
+    int currentDescriptor = rootDescriptor;
+    BOOL ownsCurrentDescriptor = NO;
+    for (NSUInteger index = 0; index + 1 < components.count; index++) {
+        NSData *componentData = PXBackupArtifactLosslessUTF8Data(components[index]);
+        char *componentName = PXBackupArtifactCopyCString(componentData);
+        if (!componentName || componentName[0] == '\0') {
+            free(componentName);
+            if (ownsCurrentDescriptor) close(currentDescriptor);
+            return -1;
+        }
+        int nextDescriptor = openat(currentDescriptor,
+                                    componentName,
+                                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        free(componentName);
+        struct stat status;
+        BOOL valid = nextDescriptor >= 0 &&
+                     PXBackupArtifactDescriptorHasCloseOnExec(nextDescriptor) &&
+                     fstat(nextDescriptor, &status) == 0 &&
+                     S_ISDIR(status.st_mode);
+        if (!valid) {
+            if (nextDescriptor >= 0) close(nextDescriptor);
+            if (ownsCurrentDescriptor) close(currentDescriptor);
+            return -1;
+        }
+        if (ownsCurrentDescriptor) close(currentDescriptor);
+        currentDescriptor = nextDescriptor;
+        ownsCurrentDescriptor = YES;
+    }
+    NSData *finalData = PXBackupArtifactLosslessUTF8Data(components.lastObject);
+    char *finalName = PXBackupArtifactCopyCString(finalData);
+    if (!finalName || finalName[0] == '\0') {
+        free(finalName);
+        if (ownsCurrentDescriptor) close(currentDescriptor);
+        return -1;
+    }
+    int descriptor = openat(currentDescriptor,
+                            finalName,
+                            accessMode | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    free(finalName);
+    if (ownsCurrentDescriptor) close(currentDescriptor);
+    if (descriptor < 0 || !PXBackupArtifactDescriptorHasCloseOnExec(descriptor)) {
+        if (descriptor >= 0) close(descriptor);
+        return -1;
+    }
+    return descriptor;
 }
 
 static NSString *PXBackupArtifactAppendComponent(NSString *parent,
@@ -591,7 +694,11 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                             filePath:(NSString *)filePath
                                 size:(unsigned long long)size
                               sha256:(NSString *)sha256
-                              policy:(PXBackupArtifactPolicy *)policy;
+                              policy:(PXBackupArtifactPolicy *)policy
+                          descriptor:(int)descriptor
+                            identity:(const struct stat *)identity;
+- (BOOL)validateRetainedDescriptor;
+- (const struct stat *)identityPointer;
 
 @end
 
@@ -601,24 +708,39 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     unsigned long long _size;
     NSString *_sha256;
     PXBackupArtifactPolicy *_policy;
+    BOOL _protectionVerified;
     NSDictionary<NSString *, id> *_manifestRepresentation;
+    int _descriptor;
+    struct stat _identity;
 }
 
 - (instancetype)initWithRelativePath:(NSString *)relativePath
                             filePath:(NSString *)filePath
                                 size:(unsigned long long)size
                               sha256:(NSString *)sha256
-                              policy:(PXBackupArtifactPolicy *)policy {
-    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]]) {
+                              policy:(PXBackupArtifactPolicy *)policy
+                          descriptor:(int)descriptor
+                            identity:(const struct stat *)identity {
+    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]] ||
+        descriptor < 0 || !identity ||
+        !PXBackupArtifactVerifyDescriptorForPolicy(descriptor, policy, NULL)) {
+        if (descriptor >= 0) close(descriptor);
         return nil;
     }
     self = [super init];
-    if (self) {
+    if (!self) {
+        close(descriptor);
+        return nil;
+    }
+    {
         _relativePath = [relativePath copy];
         _filePath = [filePath copy];
         _size = size;
         _sha256 = [sha256 copy];
         _policy = policy;
+        _protectionVerified = YES;
+        _descriptor = descriptor;
+        _identity = *identity;
         _manifestRepresentation = @{
             @"name": _relativePath,
             @"path": _filePath,
@@ -634,8 +756,18 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
 - (unsigned long long)size { return _size; }
 - (NSString *)sha256 { return _sha256; }
 - (PXBackupArtifactPolicy *)policy { return _policy; }
+- (BOOL)protectionVerified { return _protectionVerified; }
 - (NSDictionary<NSString *,id> *)manifestRepresentation {
     return _manifestRepresentation;
+}
+- (const struct stat *)identityPointer { return &_identity; }
+- (BOOL)validateRetainedDescriptor {
+    struct stat current;
+    return _descriptor >= 0 &&
+           PXBackupArtifactVerifyDescriptorForPolicy(_descriptor,
+                                                     _policy,
+                                                     &current) &&
+           PXBackupArtifactStableFileStatMatches(&_identity, &current);
 }
 
 - (id)copyWithZone:(NSZone *)zone {
@@ -667,6 +799,13 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     return value;
 }
 
+- (void)dealloc {
+    if (_descriptor >= 0) {
+        close(_descriptor);
+        _descriptor = -1;
+    }
+}
+
 @end
 
 @interface PXBackupArtifactWriter ()
@@ -685,6 +824,7 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     struct stat _workspaceIdentity;
     NSMutableSet<NSString *> *_acceptedPaths;
     NSMutableSet<NSString *> *_acceptedNormalizedAliases;
+    NSMutableArray<PXVerifiedBackupArtifact *> *_acceptedArtifacts;
     NSUInteger _artifactCount;
 }
 
@@ -791,8 +931,11 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                  workspaceIdentity:(const struct stat *)workspaceIdentity {
     NSMutableSet<NSString *> *acceptedPaths = [NSMutableSet set];
     NSMutableSet<NSString *> *acceptedAliases = [NSMutableSet set];
+    NSMutableArray<PXVerifiedBackupArtifact *> *acceptedArtifacts =
+        [NSMutableArray array];
     NSString *copiedWorkspacePath = [workspacePath copy];
-    if (!acceptedPaths || !acceptedAliases || !copiedWorkspacePath) {
+    if (!acceptedPaths || !acceptedAliases || !acceptedArtifacts ||
+        !copiedWorkspacePath) {
         return nil;
     }
     self = [super init];
@@ -803,6 +946,7 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
         _workspaceIdentity = *workspaceIdentity;
         _acceptedPaths = acceptedPaths;
         _acceptedNormalizedAliases = acceptedAliases;
+        _acceptedArtifacts = acceptedArtifacts;
         _artifactCount = 0;
     }
     return self;
@@ -846,6 +990,36 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                                  PXBackupArtifactWorkspaceField,
                                  @"The writer workspace identity changed");
         return NO;
+    }
+    for (PXVerifiedBackupArtifact *artifact in _acceptedArtifacts) {
+        if (![artifact isMemberOfClass:[PXVerifiedBackupArtifact class]] ||
+            !artifact.protectionVerified ||
+            ![artifact validateRetainedDescriptor]) {
+            PXBackupArtifactSetError(error,
+                                     PXBackupArtifactWriterErrorProtectionFailed,
+                                     PXBackupArtifactProtectionField,
+                                     @"An accepted artifact protection invariant is invalid");
+            return NO;
+        }
+        int namespaceDescriptor =
+            PXBackupArtifactOpenRelativeFile(_workspaceDescriptor,
+                                             artifact.relativePath,
+                                             O_RDONLY);
+        struct stat namespaceStatus;
+        BOOL namespaceValid = namespaceDescriptor >= 0 &&
+            PXBackupArtifactVerifyDescriptorForPolicy(namespaceDescriptor,
+                                                      artifact.policy,
+                                                      &namespaceStatus) &&
+            PXBackupArtifactStableFileStatMatches([artifact identityPointer],
+                                                  &namespaceStatus);
+        if (namespaceDescriptor >= 0) close(namespaceDescriptor);
+        if (!namespaceValid) {
+            PXBackupArtifactSetError(error,
+                                     PXBackupArtifactWriterErrorProtectionFailed,
+                                     PXBackupArtifactProtectionField,
+                                     @"An accepted artifact protection invariant is invalid");
+            return NO;
+        }
     }
     return YES;
 }
@@ -1401,7 +1575,16 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     if (error) {
         *error = nil;
     }
-    if (![policy isMemberOfClass:[PXBackupArtifactPolicy class]]) {
+    PXBackupArtifactPolicy *canonicalPolicy =
+        [policy isMemberOfClass:[PXBackupArtifactPolicy class]]
+            ? [PXBackupArtifactPolicy policyForKind:policy.kind]
+            : nil;
+    if (!canonicalPolicy || ![policy isEqual:canonicalPolicy] ||
+        policy.requiredPOSIXMode != 0600 ||
+        (policy.dataProtectionRequirement !=
+             PXBackupArtifactDataProtectionRequirementUnspecified &&
+         policy.dataProtectionRequirement !=
+             PXBackupArtifactDataProtectionRequirementComplete)) {
         PXBackupArtifactSetError(error,
                                  PXBackupArtifactWriterErrorInvalidInput,
                                  PXBackupArtifactPolicyField,
@@ -1503,6 +1686,7 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     BOOL finalRenamed = NO;
     BOOL temporaryRemoved = NO;
     int payloadDescriptor = -1;
+    int retainedArtifactDescriptor = -1;
     NSString *digestString = nil;
     unsigned long long streamedBytes = 0;
     PXVerifiedBackupArtifact *record = nil;
@@ -1592,9 +1776,15 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                                      @"The producer output is invalid");
             break;
         }
+        int payloadAccessMode =
+            policy.dataProtectionRequirement ==
+                    PXBackupArtifactDataProtectionRequirementComplete
+                ? O_RDWR
+                : O_RDONLY;
         payloadDescriptor = openat(temporary.descriptor,
                                    PXBackupArtifactPayloadName,
-                                   O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+                                   payloadAccessMode | O_NONBLOCK |
+                                       O_NOFOLLOW | O_CLOEXEC);
         if (payloadDescriptor < 0) {
             PXBackupArtifactSetError(&operationError,
                                      PXBackupArtifactWriterErrorOutputInvalid,
@@ -1602,27 +1792,51 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                                      @"The producer output could not be opened safely");
             break;
         }
-        if (fchmod(payloadDescriptor, 0600) != 0 ||
-            fstat(payloadDescriptor, &payloadIdentity) != 0 ||
-            !S_ISREG(payloadIdentity.st_mode) ||
-            payloadIdentity.st_nlink != 1 ||
-            (payloadIdentity.st_mode & (S_ISUID | S_ISGID)) != 0 ||
-            (payloadIdentity.st_mode & 07777) != 0600 ||
+        struct stat preProtectionStatus;
+        if (fstat(payloadDescriptor, &preProtectionStatus) != 0 ||
+            !S_ISREG(preProtectionStatus.st_mode) ||
+            preProtectionStatus.st_nlink != 1 ||
+            preProtectionStatus.st_uid != geteuid() ||
+            preProtectionStatus.st_gid != getegid() ||
+            (preProtectionStatus.st_mode & (S_ISUID | S_ISGID)) != 0 ||
+            preProtectionStatus.st_dev != _workspaceIdentity.st_dev ||
+            preProtectionStatus.st_size < 0 ||
+            (unsigned long long)preProtectionStatus.st_size >
+                PXBackupArtifactMaximumFileBytes ||
+            !PXBackupArtifactStatIdentityMatches(&payloadNamespaceStat,
+                                                &preProtectionStatus) ||
+            !PXBackupArtifactDescriptorHasCloseOnExec(payloadDescriptor)) {
+            PXBackupArtifactSetError(&operationError,
+                                     PXBackupArtifactWriterErrorOutputInvalid,
+                                     PXBackupArtifactPayloadField,
+                                     @"The producer output is invalid");
+            break;
+        }
+        BOOL protectionApplied = NO;
+        if (policy.dataProtectionRequirement ==
+            PXBackupArtifactDataProtectionRequirementComplete) {
+            protectionApplied =
+                PXApplyCompleteFileProtectionToDescriptor(payloadDescriptor, NULL);
+        } else {
+            protectionApplied =
+                PXBackupArtifactSetMode(payloadDescriptor,
+                                        (mode_t)policy.requiredPOSIXMode);
+        }
+        if (!protectionApplied ||
+            !PXBackupArtifactVerifyDescriptorForPolicy(payloadDescriptor,
+                                                       policy,
+                                                       &payloadIdentity) ||
             payloadIdentity.st_dev != _workspaceIdentity.st_dev ||
             payloadIdentity.st_size < 0 ||
             (unsigned long long)payloadIdentity.st_size >
                 PXBackupArtifactMaximumFileBytes ||
-            !PXBackupArtifactStatIdentityMatches(&payloadNamespaceStat,
+            !PXBackupArtifactStatIdentityMatches(&preProtectionStatus,
                                                 &payloadIdentity) ||
-            !PXBackupArtifactDescriptorHasCloseOnExec(payloadDescriptor)) {
+            preProtectionStatus.st_size != payloadIdentity.st_size) {
             PXBackupArtifactSetError(&operationError,
-                                     (payloadIdentity.st_size >= 0 &&
-                                      (unsigned long long)payloadIdentity.st_size >
-                                          PXBackupArtifactMaximumFileBytes)
-                                         ? PXBackupArtifactWriterErrorLimitExceeded
-                                         : PXBackupArtifactWriterErrorOutputInvalid,
-                                     PXBackupArtifactPayloadField,
-                                     @"The producer output is invalid");
+                                     PXBackupArtifactWriterErrorProtectionFailed,
+                                     PXBackupArtifactProtectionField,
+                                     @"The artifact protection policy could not be enforced");
             break;
         }
         payloadIdentityKnown = YES;
@@ -1721,7 +1935,9 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
         }
         struct stat payloadNamespaceRevalidation;
         struct stat preRenameDescriptorStat;
-        if (fstat(payloadDescriptor, &preRenameDescriptorStat) != 0 ||
+        if (!PXBackupArtifactVerifyDescriptorForPolicy(payloadDescriptor,
+                                                       policy,
+                                                       &preRenameDescriptorStat) ||
             !PXBackupArtifactStableFileStatMatches(&payloadIdentity,
                                                    &preRenameDescriptorStat) ||
             fstatat(temporary.descriptor,
@@ -1730,7 +1946,10 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                     AT_SYMLINK_NOFOLLOW) != 0 ||
             !S_ISREG(payloadNamespaceRevalidation.st_mode) ||
             payloadNamespaceRevalidation.st_nlink != 1 ||
-            (payloadNamespaceRevalidation.st_mode & 07777) != 0600 ||
+            payloadNamespaceRevalidation.st_uid != geteuid() ||
+            payloadNamespaceRevalidation.st_gid != getegid() ||
+            (payloadNamespaceRevalidation.st_mode & 07777) !=
+                (mode_t)policy.requiredPOSIXMode ||
             !PXBackupArtifactStatIdentityMatches(&payloadNamespaceRevalidation,
                                                 &payloadIdentity) ||
             fstatat(parent.descriptor,
@@ -1762,7 +1981,10 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                     AT_SYMLINK_NOFOLLOW) != 0 ||
             !S_ISREG(finalNamespaceStat.st_mode) ||
             finalNamespaceStat.st_nlink != 1 ||
-            (finalNamespaceStat.st_mode & 07777) != 0600 ||
+            finalNamespaceStat.st_uid != geteuid() ||
+            finalNamespaceStat.st_gid != getegid() ||
+            (finalNamespaceStat.st_mode & 07777) !=
+                (mode_t)policy.requiredPOSIXMode ||
             finalNamespaceStat.st_dev != _workspaceIdentity.st_dev ||
             !PXBackupArtifactStatIdentityMatches(&finalNamespaceStat,
                                                 &payloadIdentity)) {
@@ -1770,6 +1992,45 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                                      PXBackupArtifactWriterErrorFilesystemChanged,
                                      PXBackupArtifactField,
                                      @"The finalized artifact identity is invalid");
+            break;
+        }
+        if (!PXBackupArtifactVerifyDescriptorForPolicy(payloadDescriptor,
+                                                       policy,
+                                                       NULL)) {
+            PXBackupArtifactSetError(&operationError,
+                                     PXBackupArtifactWriterErrorProtectionFailed,
+                                     PXBackupArtifactProtectionField,
+                                     @"The finalized artifact protection is invalid");
+            break;
+        }
+        int finalizedDescriptor = openat(parent.descriptor,
+                                         finalNameCString,
+                                         O_RDONLY | O_NONBLOCK |
+                                             O_NOFOLLOW | O_CLOEXEC);
+        struct stat finalizedDescriptorStat;
+        BOOL finalizedProtectionValid = finalizedDescriptor >= 0 &&
+            PXBackupArtifactVerifyDescriptorForPolicy(finalizedDescriptor,
+                                                      policy,
+                                                      &finalizedDescriptorStat) &&
+            PXBackupArtifactStatIdentityMatches(&payloadIdentity,
+                                                &finalizedDescriptorStat) &&
+            payloadIdentity.st_size == finalizedDescriptorStat.st_size;
+        if (finalizedDescriptor >= 0) close(finalizedDescriptor);
+        if (!finalizedProtectionValid) {
+            PXBackupArtifactSetError(&operationError,
+                                     PXBackupArtifactWriterErrorProtectionFailed,
+                                     PXBackupArtifactProtectionField,
+                                     @"The finalized artifact protection is invalid");
+            break;
+        }
+        payloadIdentity = finalizedDescriptorStat;
+        retainedArtifactDescriptor =
+            PXBackupArtifactDuplicateDescriptor(payloadDescriptor);
+        if (retainedArtifactDescriptor < 0) {
+            PXBackupArtifactSetError(&operationError,
+                                     PXBackupArtifactWriterErrorProtectionFailed,
+                                     PXBackupArtifactProtectionField,
+                                     @"The finalized artifact protection authority could not be retained");
             break;
         }
         if (!PXBackupArtifactStrictSync(parent.descriptor)) {
@@ -1830,7 +2091,10 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                         filePath:finalFilePath
                             size:streamedBytes
                           sha256:digestString
-                          policy:policy];
+                          policy:policy
+                      descriptor:retainedArtifactDescriptor
+                        identity:&payloadIdentity];
+        retainedArtifactDescriptor = -1;
         if (!record) {
             PXBackupArtifactSetError(&operationError,
                                      PXBackupArtifactWriterErrorFinalizationFailed,
@@ -1843,6 +2107,10 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
     if (payloadDescriptor >= 0) {
         close(payloadDescriptor);
         payloadDescriptor = -1;
+    }
+    if (!record && retainedArtifactDescriptor >= 0) {
+        close(retainedArtifactDescriptor);
+        retainedArtifactDescriptor = -1;
     }
     if (!record) {
         BOOL cleanupSucceeded =
@@ -1874,6 +2142,7 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
         [relativePath precomposedStringWithCanonicalMapping]];
     [_acceptedNormalizedAliases addObject:
         [relativePath decomposedStringWithCanonicalMapping]];
+    [_acceptedArtifacts addObject:record];
     _artifactCount += 1;
     free(finalNameCString);
     return record;

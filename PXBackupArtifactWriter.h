@@ -28,6 +28,7 @@ typedef NS_ERROR_ENUM(PXBackupArtifactWriterErrorDomain,
     PXBackupArtifactWriterErrorFinalizationFailed = 15,
     PXBackupArtifactWriterErrorCleanupFailed = 16,
     PXBackupArtifactWriterErrorPolicyRejected = 17,
+    PXBackupArtifactWriterErrorProtectionFailed = 18,
 };
 
 typedef BOOL (^PXBackupArtifactProducer)(NSString *temporaryOutputPath);
@@ -40,6 +41,7 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, readonly) unsigned long long size;
 @property (nonatomic, copy, readonly) NSString *sha256;
 @property (nonatomic, strong, readonly) PXBackupArtifactPolicy *policy;
+@property (nonatomic, readonly) BOOL protectionVerified;
 @property (nonatomic, copy, readonly) NSDictionary<NSString *, id> *manifestRepresentation;
 
 - (instancetype)init NS_UNAVAILABLE;

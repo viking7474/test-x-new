@@ -30,6 +30,7 @@ typedef NS_ERROR_ENUM(PXBackupDirectoryPublisherErrorDomain,
     PXBackupDirectoryPublisherErrorManifestValidationFailed = 16,
     PXBackupDirectoryPublisherErrorSnapshotMismatch = 17,
     PXBackupDirectoryPublisherErrorRollbackFailed = 18,
+    PXBackupDirectoryPublisherErrorProtectedArtifactInvalid = 19,
 };
 
 __attribute__((objc_subclassing_restricted))

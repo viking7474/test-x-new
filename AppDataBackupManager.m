@@ -30,6 +30,7 @@
 #import "PXMainDataRestoreTransaction.h"
 #import "PXDataContainerResolver.h"
 #import "PXDestructivePathValidator.h"
+#import "PXFileProtection.h"
 #import "CommandRunner.h"
 #import "PXKeychainHelperInvocationResult.h"
 #import "common/PXProcessKiller.h"
@@ -37,12 +38,83 @@
 
 #import <notify.h>
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
 static NSString * const PXExactRestoreDestinationErrorDescription =
     @"Exact application data container could not be resolved safely";
 static const NSTimeInterval PXKeychainHelperInvocationTimeoutSeconds = 300.0;
 static const NSUInteger PXKeychainHelperInvocationOutputLimitBytes = 1024 * 1024;
 static const NSUInteger PXKeychainBackupPlistMaximumBytes = 64 * 1024 * 1024;
+
+static BOOL PXProtectOwnedKeychainTemporaryFileAtPath(NSString *filePath) {
+    if (![filePath isKindOfClass:[NSString class]] || filePath.length == 0) {
+        return NO;
+    }
+    NSData *pathData = [filePath dataUsingEncoding:NSUTF8StringEncoding
+                              allowLossyConversion:NO];
+    if (!pathData || pathData.length == 0 || pathData.length > 4096 ||
+        memchr(pathData.bytes, 0, pathData.length) != NULL) {
+        return NO;
+    }
+    char *pathBytes = calloc(pathData.length + 1, 1);
+    if (!pathBytes) return NO;
+    memcpy(pathBytes, pathData.bytes, pathData.length);
+    struct stat namespaceBefore;
+    int statResult = -1;
+    do {
+        statResult = lstat(pathBytes, &namespaceBefore);
+    } while (statResult < 0 && errno == EINTR);
+    if (statResult != 0 || !S_ISREG(namespaceBefore.st_mode) ||
+        namespaceBefore.st_nlink != 1 ||
+        namespaceBefore.st_uid != geteuid() ||
+        namespaceBefore.st_gid != getegid()) {
+        free(pathBytes);
+        return NO;
+    }
+    int descriptor = -1;
+    do {
+        descriptor = open(pathBytes,
+                          O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    } while (descriptor < 0 && errno == EINTR);
+    if (descriptor < 0) {
+        free(pathBytes);
+        return NO;
+    }
+    struct stat descriptorBefore;
+    BOOL valid = fstat(descriptor, &descriptorBefore) == 0 &&
+        descriptorBefore.st_dev == namespaceBefore.st_dev &&
+        descriptorBefore.st_ino == namespaceBefore.st_ino &&
+        S_ISREG(descriptorBefore.st_mode) &&
+        descriptorBefore.st_nlink == 1 &&
+        descriptorBefore.st_uid == geteuid() &&
+        descriptorBefore.st_gid == getegid() &&
+        PXApplyCompleteFileProtectionToDescriptor(descriptor, NULL) &&
+        PXVerifyCompleteFileProtectionOnDescriptor(descriptor, NULL);
+    struct stat descriptorAfter;
+    struct stat namespaceAfter;
+    if (valid) {
+        valid = fstat(descriptor, &descriptorAfter) == 0 &&
+            descriptorAfter.st_dev == descriptorBefore.st_dev &&
+            descriptorAfter.st_ino == descriptorBefore.st_ino &&
+            descriptorAfter.st_size == descriptorBefore.st_size &&
+            lstat(pathBytes, &namespaceAfter) == 0 &&
+            namespaceAfter.st_dev == descriptorAfter.st_dev &&
+            namespaceAfter.st_ino == descriptorAfter.st_ino &&
+            namespaceAfter.st_nlink == 1 &&
+            namespaceAfter.st_uid == geteuid() &&
+            namespaceAfter.st_gid == getegid() &&
+            (namespaceAfter.st_mode & 07777) == 0600;
+    }
+    close(descriptor);
+    free(pathBytes);
+    return valid;
+}
 
 static BOOL PXReadUnsignedIntegralSummaryNumber(id value,
                                                 unsigned long long *numberOut) {
@@ -1413,6 +1485,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         return NO;
     }
 
+    if (!PXProtectOwnedKeychainTemporaryFileAtPath(outPath)) {
+        [warnings addObject:@"In-app keychain backup export protection failed"];
+        [self _killRelatedProcessesForBundleID:bundleID];
+        [fm removeItemAtPath:outPath error:nil];
+        return NO;
+    }
     [fm removeItemAtPath:destFile error:nil];
     if (![fm copyItemAtPath:outPath toPath:destFile error:nil]) {
         [warnings addObject:@"In-app keychain backup: failed to copy export to destination" ];
@@ -1455,6 +1533,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
     if (![fm copyItemAtPath:srcFile toPath:inPath error:nil]) {
         [warnings addObject:@"In-app keychain restore: failed to stage import file" ];
+        return NO;
+    }
+    if (!PXProtectOwnedKeychainTemporaryFileAtPath(inPath)) {
+        [fm removeItemAtPath:inPath error:nil];
+        [warnings addObject:@"In-app keychain restore import protection failed"];
         return NO;
     }
 
@@ -2426,8 +2509,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         [NSString stringWithFormat:@"plistItemCount=%lu",
                          (unsigned long)plistItemCount]);
                     keychainMethod = @"helper";
-                    [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
-                                 PXShellQuote(temporaryOutputPath)]];
 
                     if (plistItemCount == 0 &&
                         PXGroupsContainPlatformFamily(selectedKeychainGroups)) {
@@ -2447,8 +2528,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                 return NO;
                             }
                             keychainMethod = @"in_app";
-                            [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
-                                         PXShellQuote(temporaryOutputPath)]];
                             PXDebugAppendLine(debugKeychain,
                                 [NSString stringWithFormat:@"inAppPlistItemCount=%lu",
                                  (unsigned long)replacementCount]);
@@ -2467,10 +2546,18 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 keychainBackupPath = keychainArtifactRecord.filePath;
             } else {
                 NSError *fatalPolicyError = nil;
+                BOOL protectionFailure =
+                    [keychainArtifactError.domain
+                        isEqualToString:PXBackupArtifactWriterErrorDomain] &&
+                    keychainArtifactError.code ==
+                        PXBackupArtifactWriterErrorProtectionFailed;
+                NSString *safeKeychainWarning = protectionFailure
+                    ? @"Keychain backup could not be protected and was omitted"
+                    : @"Keychain backup could not be created and was omitted";
                 BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
                     keychainArtifactPolicy,
                     warnings,
-                    nil,
+                    safeKeychainWarning,
                     nil,
                     &fatalPolicyError);
                 if (!shouldContinue) {
@@ -4235,6 +4322,26 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                         PXOptionalRestoreStagingErrorFieldPathKey: @"$.source"
                                     }];
                 completeStructuredFailure(PXRestoreComponentKeychain, err, PXRestoreRollbackStatusNotPerformed, keychainBranchWarningStart);
+                return;
+            }
+
+            NSError *keychainProtectionError = nil;
+            if (![keychainWorkspace
+                    applyCompleteFileProtectionWithError:&keychainProtectionError]) {
+                [keychainWorkspace cleanupWithError:nil];
+                NSError *err = keychainProtectionError ?:
+                    [NSError errorWithDomain:PXOptionalRestoreStagingErrorDomain
+                                        code:PXOptionalRestoreStagingErrorProtectionFailed
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey:
+                                            @"The staged Keychain input could not be protected.",
+                                        PXOptionalRestoreStagingErrorFieldPathKey:
+                                            @"$.source.protection"
+                                    }];
+                completeStructuredFailure(PXRestoreComponentKeychain,
+                                          err,
+                                          PXRestoreRollbackStatusNotPerformed,
+                                          keychainBranchWarningStart);
                 return;
             }
 
