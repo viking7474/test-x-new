@@ -358,39 +358,6 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
     NSMutableArray<NSString *> *errors = [NSMutableArray array];
     NSSet<NSString *> *excluded = PXExcludedRestoreAttributes();
 
-    // If overwrite, wipe target groups/classes up-front to avoid duplicate items
-    // due to incomplete per-item delete queries.
-    if (overwrite) {
-        NSArray<NSString *> *groups = [backup[@"accessGroups"] isKindOfClass:[NSArray class]] ? backup[@"accessGroups"] : @[];
-        NSMutableSet *classes = [NSMutableSet set];
-        for (NSDictionary *item in items) {
-            if (![item isKindOfClass:[NSDictionary class]]) continue;
-            id secClassValue = item[@"_secClass"];
-            if (secClassValue) {
-                [classes addObject:secClassValue];
-            }
-        }
-
-        for (NSString *group in groups) {
-            if (![group isKindOfClass:[NSString class]] || group.length == 0) continue;
-            for (id secClassValue in classes) {
-                if (!secClassValue) continue;
-                NSMutableDictionary *q = [NSMutableDictionary dictionary];
-                q[(__bridge id)kSecClass] = secClassValue;
-                q[(__bridge id)kSecAttrAccessGroup] = group;
-                // Include synchronizable items too.
-                q[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
-                OSStatus st = SecItemDelete((__bridge CFDictionaryRef)q);
-                if (st != errSecSuccess && st != errSecItemNotFound) {
-                    [warnings addObject:[NSString stringWithFormat:@"Pre-wipe failed for %@/%@: %@",
-                                         group,
-                                         secClassValue,
-                                         PXSecurityErrorDescription(st)]];
-                }
-            }
-        }
-    }
-    
     for (NSDictionary *item in items) {
         if (![item isKindOfClass:[NSDictionary class]]) continue;
         result.itemsProcessed++;
@@ -436,8 +403,6 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
             }
         }
         
-        // If overwrite mode, we already performed a group-wide pre-wipe.
-        
         // Add the item.
         // Ensure we can restore synchronizable items.
         if (addQuery[(__bridge id)kSecAttrSynchronizable]) {
@@ -447,9 +412,13 @@ static NSSet<NSString *> *PXExcludedRestoreAttributes(void) {
         
         if (status == errSecSuccess) {
             result.itemsSucceeded++;
-        } else if (status == errSecDuplicateItem && !overwrite) {
-            [warnings addObject:[NSString stringWithFormat:@"Item already exists: %@", 
-                               addQuery[(__bridge id)kSecAttrAccount] ?: @"unknown"]];
+        } else if (status == errSecDuplicateItem) {
+            NSString *duplicateWarning = overwrite
+                ? [NSString stringWithFormat:@"Overwrite requested but existing item was preserved pending safe per-item replacement: %@",
+                   addQuery[(__bridge id)kSecAttrAccount] ?: @"unknown"]
+                : [NSString stringWithFormat:@"Item already exists; existing item was preserved: %@",
+                   addQuery[(__bridge id)kSecAttrAccount] ?: @"unknown"];
+            [warnings addObject:duplicateWarning];
             result.itemsFailed++;
         } else {
             NSString *acct = addQuery[(__bridge id)kSecAttrAccount];

@@ -51,7 +51,9 @@ typedef NS_OPTIONS(NSUInteger, PXKeychainItemClass) {
 
 /// Restore keychain items from a backup plist file.
 /// @param filePath The path to the backup plist file.
-/// @param overwrite If YES, delete existing items before restore.
+/// @param overwrite Retained for compatibility. Restore never pre-deletes access-group/class contents.
+/// Duplicate existing items are preserved and reported as item failures.
+/// Safe replacement awaits future per-item identity/upsert support.
 /// @param error On failure, contains the error information.
 /// @return Result object with statistics, or nil on critical failure.
 + (PXKeychainBackupResult *_Nullable)restoreKeychainFromFile:(NSString *)filePath

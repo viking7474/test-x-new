@@ -43,7 +43,7 @@ static void printUsage(const char *progname) {
     fprintf(stderr, "  --action <action>   Action to perform: backup, restore, wipe, list\n");
     fprintf(stderr, "  --file <path>       Path to backup/restore file (plist format)\n");
     fprintf(stderr, "  --groups <groups>   Comma-separated list of keychain access groups\n");
-    fprintf(stderr, "  --overwrite         For restore: delete existing items first\n");
+    fprintf(stderr, "  --overwrite         For restore: request replacement; existing duplicates are preserved\n");
     fprintf(stderr, "  --verbose           Print detailed progress information\n");
     fprintf(stderr, "  --help              Show this help message\n");
 }
@@ -394,7 +394,7 @@ int main(int argc, const char *argv[]) {
                         PXKeychainHelperExitCodeInvalidArguments);
                 }
                 
-                logVerbose(verbose, @"Starting keychain restore (overwrite: %@)...",
+                logVerbose(verbose, @"Starting keychain restore (overwrite requested: %@)...",
                           overwrite ? @"YES" : @"NO");
                 result = [KeychainBackupHelper restoreKeychainFromFile:filePath
                                                              overwrite:overwrite
