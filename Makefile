@@ -38,7 +38,7 @@ WeaponXDaemon_CODESIGN_FLAGS = -Sent.plist
 WeaponXDaemon_LDFLAGS = -framework IOKit
 
 # Keychain Helper Tool - CLI for backup/restore/wipe keychain items
-backup_helper_FILES = KeychainHelper/backup_helper.m KeychainHelper/KeychainBackupHelper.m KeychainHelper/PXKeychainHelperResult.m
+backup_helper_FILES = KeychainHelper/backup_helper.m KeychainHelper/KeychainBackupHelper.m KeychainHelper/PXKeychainHelperResult.m KeychainHelper/PXKeychainItemIdentity.m
 backup_helper_CFLAGS = -fobjc-arc -Wno-error=unused-variable
 backup_helper_FRAMEWORKS = Foundation Security
 backup_helper_INSTALL_PATH = /Library/WeaponX
