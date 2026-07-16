@@ -59,6 +59,17 @@ typedef struct {
     dev_t workspaceDevice;
 } PXBackupStaleWorkspaceCleanupTraversalState;
 
+typedef enum {
+    PXBackupStaleWorkspaceCleanupDirectoryReadModeStrictRecursiveNames = 1,
+    PXBackupStaleWorkspaceCleanupDirectoryReadModeRawTopLevelReservedClassification = 2,
+} PXBackupStaleWorkspaceCleanupDirectoryReadMode;
+
+typedef enum {
+    PXBackupStaleWorkspaceCleanupRawTopLevelNameNonreserved = 0,
+    PXBackupStaleWorkspaceCleanupRawTopLevelNameExactReserved = 1,
+    PXBackupStaleWorkspaceCleanupRawTopLevelNameMalformedReserved = 2,
+} PXBackupStaleWorkspaceCleanupRawTopLevelNameClassification;
+
 static void PXBackupStaleWorkspaceCleanupSetError(
     NSError **error,
     PXBackupStaleWorkspaceCleanupErrorCode code,
@@ -259,6 +270,17 @@ static BOOL PXBackupStaleWorkspaceCleanupRollbackCapturedMismatch(
                    AT_SYMLINK_NOFOLLOW) == 0;
 }
 
+static PXBackupStaleWorkspaceCleanupErrorCode
+PXBackupStaleWorkspaceCleanupPostCaptureErrorCode(
+    BOOL rollbackSucceeded,
+    BOOL priorDestructiveMutation,
+    PXBackupStaleWorkspaceCleanupErrorCode operationSpecificCode) {
+    if (rollbackSucceeded) return operationSpecificCode;
+    return priorDestructiveMutation
+        ? PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete
+        : PXBackupStaleWorkspaceCleanupErrorRollbackFailed;
+}
+
 static BOOL PXBackupStaleWorkspaceCleanupCaptureEntry(
     int parentDescriptor,
     const char *sourceName,
@@ -349,9 +371,10 @@ static BOOL PXBackupStaleWorkspaceCleanupCaptureEntry(
                                                            sourceName);
         PXBackupStaleWorkspaceCleanupSetError(
             error,
-            (!rollbackSucceeded && priorDestructiveMutation)
-                ? PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete
-                : PXBackupStaleWorkspaceCleanupErrorEntryChanged,
+            PXBackupStaleWorkspaceCleanupPostCaptureErrorCode(
+                rollbackSucceeded,
+                priorDestructiveMutation,
+                PXBackupStaleWorkspaceCleanupErrorEntryChanged),
             PXBackupStaleWorkspaceCleanupEntryField,
             rollbackSucceeded
                 ? @"A changed cleanup entry was restored without deletion"
@@ -366,9 +389,10 @@ static BOOL PXBackupStaleWorkspaceCleanupCaptureEntry(
                                                            sourceName);
         PXBackupStaleWorkspaceCleanupSetError(
             error,
-            (!rollbackSucceeded && priorDestructiveMutation)
-                ? PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete
-                : PXBackupStaleWorkspaceCleanupErrorLimitExceeded,
+            PXBackupStaleWorkspaceCleanupPostCaptureErrorCode(
+                rollbackSucceeded,
+                priorDestructiveMutation,
+                PXBackupStaleWorkspaceCleanupErrorLimitExceeded),
             PXBackupStaleWorkspaceCleanupEntryField,
             @"The private cleanup quarantine name exceeded fixed limits");
         return NO;
@@ -381,9 +405,10 @@ static BOOL PXBackupStaleWorkspaceCleanupCaptureEntry(
                                                            sourceName);
         PXBackupStaleWorkspaceCleanupSetError(
             error,
-            (!rollbackSucceeded && priorDestructiveMutation)
-                ? PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete
-                : PXBackupStaleWorkspaceCleanupErrorLimitExceeded,
+            PXBackupStaleWorkspaceCleanupPostCaptureErrorCode(
+                rollbackSucceeded,
+                priorDestructiveMutation,
+                PXBackupStaleWorkspaceCleanupErrorLimitExceeded),
             PXBackupStaleWorkspaceCleanupEntryField,
             @"The private cleanup quarantine name could not be retained");
         return NO;
@@ -440,21 +465,40 @@ static BOOL PXBackupStaleWorkspaceCleanupValidateComponentString(NSString *compo
     return YES;
 }
 
-static BOOL PXBackupStaleWorkspaceCleanupValidateEntryName(const char *name,
-                                                     NSUInteger *lengthOut,
-                                                     NSData **dataOut) {
-    if (lengthOut) *lengthOut = 0;
-    if (dataOut) *dataOut = nil;
+static BOOL PXBackupStaleWorkspaceCleanupReadBoundedRawNameLength(
+    const char *name,
+    NSUInteger *lengthOut,
+    BOOL *exceedsComponentLimitOut) {
+    if (lengthOut) *lengthOut = 0U;
+    if (exceedsComponentLimitOut) *exceedsComponentLimitOut = NO;
     if (!name) return NO;
-    size_t length = 0;
+    size_t length = 0U;
     while (length <= PXBackupStaleWorkspaceCleanupMaximumComponentBytes &&
            name[length] != '\0') {
         length += 1U;
     }
-    if (length == 0 || length > PXBackupStaleWorkspaceCleanupMaximumComponentBytes ||
+    if (length == 0U) return NO;
+    if (length > PXBackupStaleWorkspaceCleanupMaximumComponentBytes) {
+        if (lengthOut) {
+            *lengthOut = PXBackupStaleWorkspaceCleanupMaximumComponentBytes + 1U;
+        }
+        if (exceedsComponentLimitOut) *exceedsComponentLimitOut = YES;
+        return YES;
+    }
+    if (lengthOut) *lengthOut = (NSUInteger)length;
+    return YES;
+}
+
+static BOOL PXBackupStaleWorkspaceCleanupValidateStrictRecursiveEntryName(
+    const char *name,
+    NSUInteger length,
+    NSData **dataOut) {
+    if (dataOut) *dataOut = nil;
+    if (!name || length == 0U ||
+        length > PXBackupStaleWorkspaceCleanupMaximumComponentBytes ||
         (length == 1U && name[0] == '.') ||
         (length == 2U && name[0] == '.' && name[1] == '.')) return NO;
-    for (size_t index = 0; index < length; index++) {
+    for (NSUInteger index = 0U; index < length; index++) {
         unsigned char byte = (unsigned char)name[index];
         if (byte == '/' || byte == '\\' || byte < 0x20 || byte == 0x7f) return NO;
     }
@@ -465,9 +509,70 @@ static BOOL PXBackupStaleWorkspaceCleanupValidateEntryName(const char *name,
                               allowLossyConversion:NO];
     if (!string || !roundTrip || ![roundTrip isEqualToData:data] ||
         PXBackupStaleWorkspaceCleanupStringContainsControl(string)) return NO;
-    if (lengthOut) *lengthOut = (NSUInteger)length;
     if (dataOut) *dataOut = data;
     return YES;
+}
+
+static BOOL PXBackupStaleWorkspaceCleanupRawNameHasPrefix(
+    const char *name,
+    NSUInteger length,
+    const char *prefix,
+    size_t prefixLength) {
+    return name && prefix && length >= prefixLength &&
+        memcmp(name, prefix, prefixLength) == 0;
+}
+
+static PXBackupStaleWorkspaceCleanupRawTopLevelNameClassification
+PXBackupStaleWorkspaceCleanupClassifyRawTopLevelName(
+    const char *name,
+    NSUInteger length) {
+    const size_t partialPrefixLength =
+        sizeof(PXBackupStaleWorkspaceCleanupPartialPrefix) - 1U;
+    const size_t quarantinePrefixLength =
+        sizeof(PXBackupStaleWorkspaceCleanupQuarantinePrefix) - 1U;
+    BOOL partialPrefix = PXBackupStaleWorkspaceCleanupRawNameHasPrefix(
+        name,
+        length,
+        PXBackupStaleWorkspaceCleanupPartialPrefix,
+        partialPrefixLength);
+    BOOL quarantinePrefix = PXBackupStaleWorkspaceCleanupRawNameHasPrefix(
+        name,
+        length,
+        PXBackupStaleWorkspaceCleanupQuarantinePrefix,
+        quarantinePrefixLength);
+    if (!partialPrefix && !quarantinePrefix) {
+        return PXBackupStaleWorkspaceCleanupRawTopLevelNameNonreserved;
+    }
+    if (partialPrefix) {
+        if (length != partialPrefixLength + 6U) {
+            return PXBackupStaleWorkspaceCleanupRawTopLevelNameMalformedReserved;
+        }
+        for (NSUInteger index = (NSUInteger)partialPrefixLength;
+             index < length;
+             index++) {
+            unsigned char byte = (unsigned char)name[index];
+            BOOL alphanumeric = (byte >= '0' && byte <= '9') ||
+                (byte >= 'A' && byte <= 'Z') ||
+                (byte >= 'a' && byte <= 'z');
+            if (!alphanumeric) {
+                return PXBackupStaleWorkspaceCleanupRawTopLevelNameMalformedReserved;
+            }
+        }
+        return PXBackupStaleWorkspaceCleanupRawTopLevelNameExactReserved;
+    }
+    if (length != quarantinePrefixLength + 32U) {
+        return PXBackupStaleWorkspaceCleanupRawTopLevelNameMalformedReserved;
+    }
+    for (NSUInteger index = (NSUInteger)quarantinePrefixLength;
+         index < length;
+         index++) {
+        unsigned char byte = (unsigned char)name[index];
+        if (!((byte >= '0' && byte <= '9') ||
+              (byte >= 'a' && byte <= 'f'))) {
+            return PXBackupStaleWorkspaceCleanupRawTopLevelNameMalformedReserved;
+        }
+    }
+    return PXBackupStaleWorkspaceCleanupRawTopLevelNameExactReserved;
 }
 
 static char *PXBackupStaleWorkspaceCleanupCopyCString(NSData *data) {
@@ -562,12 +667,16 @@ static BOOL PXBackupStaleWorkspaceCleanupReadDirectory(
     int descriptor,
     PXBackupStaleWorkspaceCleanupTraversalState *state,
     BOOL collectNames,
+    PXBackupStaleWorkspaceCleanupDirectoryReadMode readMode,
     NSArray<NSData *> **namesOut,
     BOOL *emptyOut,
     NSError **error) {
     if (namesOut) *namesOut = nil;
     if (emptyOut) *emptyOut = NO;
-    if (descriptor < 0 || (collectNames && !state)) {
+    BOOL supportedMode =
+        readMode == PXBackupStaleWorkspaceCleanupDirectoryReadModeStrictRecursiveNames ||
+        readMode == PXBackupStaleWorkspaceCleanupDirectoryReadModeRawTopLevelReservedClassification;
+    if (descriptor < 0 || (collectNames && (!state || !supportedMode))) {
         PXBackupStaleWorkspaceCleanupSetError(
             error,
             PXBackupStaleWorkspaceCleanupErrorTraversalFailed,
@@ -604,27 +713,33 @@ static BOOL PXBackupStaleWorkspaceCleanupReadDirectory(
             if (errno != 0) valid = NO;
             break;
         }
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0) continue;
-        empty = NO;
-        if (!collectNames) continue;
-        NSUInteger nameLength = 0;
-        NSData *nameData = nil;
-        if (!PXBackupStaleWorkspaceCleanupValidateEntryName(entry->d_name,
-                                                     &nameLength,
-                                                     &nameData)) {
+        NSUInteger nameLength = 0U;
+        BOOL exceedsComponentLimit = NO;
+        if (!PXBackupStaleWorkspaceCleanupReadBoundedRawNameLength(
+                entry->d_name,
+                &nameLength,
+                &exceedsComponentLimit)) {
             PXBackupStaleWorkspaceCleanupSetError(
                 error,
-                PXBackupStaleWorkspaceCleanupErrorUnsafeReservedEntry,
+                PXBackupStaleWorkspaceCleanupErrorTraversalFailed,
                 PXBackupStaleWorkspaceCleanupEntryField,
-                @"The cleanup tree contains an unsafe entry name");
+                @"The cleanup directory contains an unreadable entry name");
             valid = NO;
             break;
         }
+        if (!exceedsComponentLimit &&
+            ((nameLength == 1U && entry->d_name[0] == '.') ||
+             (nameLength == 2U && entry->d_name[0] == '.' &&
+              entry->d_name[1] == '.'))) {
+            continue;
+        }
+        empty = NO;
+        if (!collectNames) continue;
         if (state->visitedEntries >=
                 PXBackupStaleWorkspaceCleanupMaximumVisitedEntries ||
-            nameLength > ULLONG_MAX - state->accumulatedNameBytes ||
-            state->accumulatedNameBytes + nameLength >
+            (unsigned long long)nameLength >
+                ULLONG_MAX - state->accumulatedNameBytes ||
+            state->accumulatedNameBytes + (unsigned long long)nameLength >
                 PXBackupStaleWorkspaceCleanupMaximumAccumulatedNameBytes) {
             PXBackupStaleWorkspaceCleanupSetError(
                 error,
@@ -635,7 +750,75 @@ static BOOL PXBackupStaleWorkspaceCleanupReadDirectory(
             break;
         }
         state->visitedEntries += 1U;
-        state->accumulatedNameBytes += nameLength;
+        state->accumulatedNameBytes += (unsigned long long)nameLength;
+
+        if (readMode ==
+                PXBackupStaleWorkspaceCleanupDirectoryReadModeStrictRecursiveNames) {
+            NSData *nameData = nil;
+            if (exceedsComponentLimit ||
+                !PXBackupStaleWorkspaceCleanupValidateStrictRecursiveEntryName(
+                    entry->d_name,
+                    nameLength,
+                    &nameData)) {
+                PXBackupStaleWorkspaceCleanupSetError(
+                    error,
+                    PXBackupStaleWorkspaceCleanupErrorUnsafeReservedEntry,
+                    PXBackupStaleWorkspaceCleanupEntryField,
+                    @"The cleanup tree contains an unsafe entry name");
+                valid = NO;
+                break;
+            }
+            [names addObject:nameData];
+            continue;
+        }
+
+        PXBackupStaleWorkspaceCleanupRawTopLevelNameClassification classification =
+            PXBackupStaleWorkspaceCleanupClassifyRawTopLevelName(
+                entry->d_name,
+                nameLength);
+        if (classification ==
+                PXBackupStaleWorkspaceCleanupRawTopLevelNameNonreserved) {
+            if (exceedsComponentLimit) {
+                PXBackupStaleWorkspaceCleanupSetError(
+                    error,
+                    PXBackupStaleWorkspaceCleanupErrorLimitExceeded,
+                    PXBackupStaleWorkspaceCleanupEntryField,
+                    @"A top-level cleanup name exceeds fixed limits");
+                valid = NO;
+                break;
+            }
+            continue;
+        }
+        if (classification ==
+                PXBackupStaleWorkspaceCleanupRawTopLevelNameMalformedReserved ||
+            exceedsComponentLimit) {
+            PXBackupStaleWorkspaceCleanupSetError(
+                error,
+                PXBackupStaleWorkspaceCleanupErrorReservedNameInvalid,
+                PXBackupStaleWorkspaceCleanupEntryField,
+                @"A reserved stale-workspace name is malformed");
+            valid = NO;
+            break;
+        }
+        if (names.count >= PXBackupStaleWorkspaceCleanupMaximumTopLevelCandidates) {
+            PXBackupStaleWorkspaceCleanupSetError(
+                error,
+                PXBackupStaleWorkspaceCleanupErrorLimitExceeded,
+                PXBackupStaleWorkspaceCleanupEntryField,
+                @"The stale-workspace candidate limit was exceeded");
+            valid = NO;
+            break;
+        }
+        NSData *nameData = [NSData dataWithBytes:entry->d_name length:nameLength];
+        if (![nameData isKindOfClass:[NSData class]]) {
+            PXBackupStaleWorkspaceCleanupSetError(
+                error,
+                PXBackupStaleWorkspaceCleanupErrorLimitExceeded,
+                PXBackupStaleWorkspaceCleanupEntryField,
+                @"A reserved stale-workspace name could not be retained");
+            valid = NO;
+            break;
+        }
         [names addObject:nameData];
     }
     if (closedir(directory) != 0 && valid) valid = NO;
@@ -657,25 +840,44 @@ static BOOL PXBackupStaleWorkspaceCleanupReadDirectory(
 static BOOL PXBackupStaleWorkspaceCleanupDirectoryIsEmpty(int descriptor,
                                                     BOOL *emptyOut,
                                                     NSError **error) {
-    return PXBackupStaleWorkspaceCleanupReadDirectory(descriptor,
-                                               NULL,
-                                               NO,
-                                               NULL,
-                                               emptyOut,
-                                               error);
+    return PXBackupStaleWorkspaceCleanupReadDirectory(
+        descriptor,
+        NULL,
+        NO,
+        PXBackupStaleWorkspaceCleanupDirectoryReadModeStrictRecursiveNames,
+        NULL,
+        emptyOut,
+        error);
 }
 
-static BOOL PXBackupStaleWorkspaceCleanupScanEntryNames(
+static BOOL PXBackupStaleWorkspaceCleanupScanStrictRecursiveEntryNames(
     int descriptor,
     PXBackupStaleWorkspaceCleanupTraversalState *state,
     NSArray<NSData *> **namesOut,
     NSError **error) {
-    return PXBackupStaleWorkspaceCleanupReadDirectory(descriptor,
-                                               state,
-                                               YES,
-                                               namesOut,
-                                               NULL,
-                                               error);
+    return PXBackupStaleWorkspaceCleanupReadDirectory(
+        descriptor,
+        state,
+        YES,
+        PXBackupStaleWorkspaceCleanupDirectoryReadModeStrictRecursiveNames,
+        namesOut,
+        NULL,
+        error);
+}
+
+static BOOL PXBackupStaleWorkspaceCleanupScanRawTopLevelReservedNames(
+    int descriptor,
+    PXBackupStaleWorkspaceCleanupTraversalState *state,
+    NSArray<NSData *> **namesOut,
+    NSError **error) {
+    return PXBackupStaleWorkspaceCleanupReadDirectory(
+        descriptor,
+        state,
+        YES,
+        PXBackupStaleWorkspaceCleanupDirectoryReadModeRawTopLevelReservedClassification,
+        namesOut,
+        NULL,
+        error);
 }
 
 static BOOL PXBackupStaleWorkspaceCleanupRemoveDirectoryContents(
@@ -1062,10 +1264,11 @@ static BOOL PXBackupStaleWorkspaceCleanupRemoveDirectoryContents(
         return NO;
     }
     NSArray<NSData *> *names = nil;
-    if (!PXBackupStaleWorkspaceCleanupScanEntryNames(descriptor,
-                                              state,
-                                              &names,
-                                              error)) return NO;
+    if (!PXBackupStaleWorkspaceCleanupScanStrictRecursiveEntryNames(
+            descriptor,
+            state,
+            &names,
+            error)) return NO;
     for (NSData *nameData in names) {
         char *name = PXBackupStaleWorkspaceCleanupCopyCString(nameData);
         if (!name) {
@@ -1135,62 +1338,6 @@ typedef struct {
     int descriptor;
     struct stat identity;
 } PXBackupStaleWorkspaceCandidate;
-
-static BOOL PXBackupStaleWorkspaceCleanupBytesHavePrefix(NSData *data,
-                                                          const char *prefix,
-                                                          size_t prefixLength) {
-    return [data isKindOfClass:[NSData class]] && data.length >= prefixLength &&
-        memcmp(data.bytes, prefix, prefixLength) == 0;
-}
-
-static BOOL PXBackupStaleWorkspaceCleanupExactPartialName(NSData *data) {
-    const size_t prefixLength =
-        sizeof(PXBackupStaleWorkspaceCleanupPartialPrefix) - 1U;
-    if (![data isKindOfClass:[NSData class]] ||
-        data.length != prefixLength + 6U ||
-        !PXBackupStaleWorkspaceCleanupBytesHavePrefix(
-            data,
-            PXBackupStaleWorkspaceCleanupPartialPrefix,
-            prefixLength)) return NO;
-    const unsigned char *bytes = data.bytes;
-    for (NSUInteger index = (NSUInteger)prefixLength; index < data.length; index++) {
-        unsigned char byte = bytes[index];
-        BOOL alphanumeric = (byte >= '0' && byte <= '9') ||
-            (byte >= 'A' && byte <= 'Z') ||
-            (byte >= 'a' && byte <= 'z');
-        if (!alphanumeric) return NO;
-    }
-    return YES;
-}
-
-static BOOL PXBackupStaleWorkspaceCleanupExactQuarantineName(NSData *data) {
-    const size_t prefixLength =
-        sizeof(PXBackupStaleWorkspaceCleanupQuarantinePrefix) - 1U;
-    if (![data isKindOfClass:[NSData class]] ||
-        data.length != prefixLength + 32U ||
-        !PXBackupStaleWorkspaceCleanupBytesHavePrefix(
-            data,
-            PXBackupStaleWorkspaceCleanupQuarantinePrefix,
-            prefixLength)) return NO;
-    const unsigned char *bytes = data.bytes;
-    for (NSUInteger index = (NSUInteger)prefixLength; index < data.length; index++) {
-        unsigned char byte = bytes[index];
-        if (!((byte >= '0' && byte <= '9') ||
-              (byte >= 'a' && byte <= 'f'))) return NO;
-    }
-    return YES;
-}
-
-static BOOL PXBackupStaleWorkspaceCleanupReservedPrefix(NSData *data) {
-    return PXBackupStaleWorkspaceCleanupBytesHavePrefix(
-               data,
-               PXBackupStaleWorkspaceCleanupPartialPrefix,
-               sizeof(PXBackupStaleWorkspaceCleanupPartialPrefix) - 1U) ||
-        PXBackupStaleWorkspaceCleanupBytesHavePrefix(
-               data,
-               PXBackupStaleWorkspaceCleanupQuarantinePrefix,
-               sizeof(PXBackupStaleWorkspaceCleanupQuarantinePrefix) - 1U);
-}
 
 static NSComparisonResult PXBackupStaleWorkspaceCleanupCompareData(NSData *left,
                                                                     NSData *right) {
@@ -1443,7 +1590,7 @@ static NSError *PXBackupStaleWorkspaceCleanupErrorOrMissing(NSError *candidate) 
         validationState.workspaceDevice = _bundleIdentity.st_dev;
         NSArray<NSData *> *names = nil;
         NSError *scanError = nil;
-        if (!PXBackupStaleWorkspaceCleanupScanEntryNames(
+        if (!PXBackupStaleWorkspaceCleanupScanRawTopLevelReservedNames(
                 _bundleDescriptor,
                 &validationState,
                 &names,
@@ -1451,15 +1598,13 @@ static NSError *PXBackupStaleWorkspaceCleanupErrorOrMissing(NSError *candidate) 
             if (error) *error = PXBackupStaleWorkspaceCleanupErrorOrMissing(scanError);
             return NO;
         }
-        for (NSData *nameData in names) {
-            if (PXBackupStaleWorkspaceCleanupReservedPrefix(nameData)) {
-                PXBackupStaleWorkspaceCleanupSetError(
-                    error,
-                    PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete,
-                    PXBackupStaleWorkspaceCleanupEntryField,
-                    @"Reserved stale-cleanup evidence remains after cleanup");
-                return NO;
-            }
+        if (names.count > 0U) {
+            PXBackupStaleWorkspaceCleanupSetError(
+                error,
+                PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete,
+                PXBackupStaleWorkspaceCleanupEntryField,
+                @"Reserved stale-cleanup evidence remains after cleanup");
+            return NO;
         }
     }
     if (error) *error = nil;
@@ -1489,7 +1634,7 @@ static NSError *PXBackupStaleWorkspaceCleanupErrorOrMissing(NSError *candidate) 
     state.workspaceDevice = _bundleIdentity.st_dev;
     NSArray<NSData *> *allNames = nil;
     NSError *scanError = nil;
-    if (!PXBackupStaleWorkspaceCleanupScanEntryNames(
+    if (!PXBackupStaleWorkspaceCleanupScanRawTopLevelReservedNames(
             _bundleDescriptor,
             &state,
             &allNames,
@@ -1523,21 +1668,6 @@ static NSError *PXBackupStaleWorkspaceCleanupErrorOrMissing(NSError *candidate) 
     BOOL preflightValid = YES;
     NSError *preflightError = nil;
     for (NSData *nameData in sortedNames) {
-        BOOL exactPartial = PXBackupStaleWorkspaceCleanupExactPartialName(nameData);
-        BOOL exactQuarantine =
-            PXBackupStaleWorkspaceCleanupExactQuarantineName(nameData);
-        BOOL reservedPrefix =
-            PXBackupStaleWorkspaceCleanupReservedPrefix(nameData);
-        if (reservedPrefix && !exactPartial && !exactQuarantine) {
-            PXBackupStaleWorkspaceCleanupSetError(
-                &preflightError,
-                PXBackupStaleWorkspaceCleanupErrorReservedNameInvalid,
-                PXBackupStaleWorkspaceCleanupEntryField,
-                @"A reserved stale-workspace name is malformed");
-            preflightValid = NO;
-            break;
-        }
-        if (!exactPartial && !exactQuarantine) continue;
         if (candidateCount >= PXBackupStaleWorkspaceCleanupMaximumTopLevelCandidates) {
             PXBackupStaleWorkspaceCleanupSetError(
                 &preflightError,
@@ -1749,7 +1879,7 @@ static NSError *PXBackupStaleWorkspaceCleanupErrorOrMissing(NSError *candidate) 
     finalState.workspaceDevice = _bundleIdentity.st_dev;
     NSArray<NSData *> *finalNames = nil;
     NSError *finalError = nil;
-    if (!PXBackupStaleWorkspaceCleanupScanEntryNames(
+    if (!PXBackupStaleWorkspaceCleanupScanRawTopLevelReservedNames(
             _bundleDescriptor,
             &finalState,
             &finalNames,
@@ -1758,16 +1888,14 @@ static NSError *PXBackupStaleWorkspaceCleanupErrorOrMissing(NSError *candidate) 
         if (error) *error = PXBackupStaleWorkspaceCleanupErrorOrMissing(finalError);
         return NO;
     }
-    for (NSData *nameData in finalNames) {
-        if (PXBackupStaleWorkspaceCleanupReservedPrefix(nameData)) {
-            _cleanupFailed = YES;
-            PXBackupStaleWorkspaceCleanupSetError(
-                error,
-                PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete,
-                PXBackupStaleWorkspaceCleanupEntryField,
-                @"Reserved stale-workspace evidence remains after cleanup");
-            return NO;
-        }
+    if (finalNames.count > 0U) {
+        _cleanupFailed = YES;
+        PXBackupStaleWorkspaceCleanupSetError(
+            error,
+            PXBackupStaleWorkspaceCleanupErrorCleanupIncomplete,
+            PXBackupStaleWorkspaceCleanupEntryField,
+            @"Reserved stale-workspace evidence remains after cleanup");
+        return NO;
     }
     NSError *finalLockError = nil;
     if (![_bundleLock validateOwnershipWithError:&finalLockError] ||
