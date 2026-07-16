@@ -19,10 +19,34 @@
 
 # Removed 'set -e' for better error handling - we handle errors explicitly
 
+# === Fixed shell environment ===
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/var/jb/usr/bin:/var/jb/bin:/private/preboot/jb/usr/bin:/private/preboot/jb/bin"
+export PATH
+IFS=$' \t\n'
+export -n IFS 2>/dev/null || true
+unset CDPATH ENV BASH_ENV GLOBIGNORE
+LC_ALL=C
+LANG=C
+export LC_ALL LANG
+umask 077
+
 # === Configuration ===
-HELPER_TOOL_PATH="/Library/WeaponX/backup_helper"
-TEMP_DIR="/tmp/keychain_helper_$$"
+readonly HELPER_TOOL_PATH="/Library/WeaponX/backup_helper"
+readonly PX_WORKSPACE_PARENT="/private/var/tmp"
+readonly PX_WORKSPACE_PREFIX=".weaponx-keychain-helper."
 VERBOSE=0
+
+PX_WORKSPACE_PATH=""
+PX_WORKSPACE_DEVICE=""
+PX_WORKSPACE_INODE=""
+PX_WORKSPACE_UID=""
+PX_WORKSPACE_GID=""
+PX_WORKSPACE_MODE=""
+PX_WORKSPACE_LINKS=""
+PX_WORKSPACE_PARENT_DEVICE=""
+PX_WORKSPACE_PARENT_INODE=""
+PX_WORKSPACE_ACTIVE=0
+PX_WORKSPACE_CREATE_ATTEMPTED=0
 
 readonly PX_KEYCHAIN_EXIT_COMPLETED=0
 readonly PX_KEYCHAIN_EXIT_PARTIAL=10
@@ -73,6 +97,248 @@ log_verbose() {
     fi
 }
 
+PX_STAT_PATH=""
+PX_MKTEMP_PATH=""
+PX_CP_PATH=""
+PX_CMP_PATH=""
+PX_CHMOD_PATH=""
+PX_RM_PATH=""
+PX_RMDIR_PATH=""
+PX_PLUTIL_PATH=""
+PX_LDID_PATH=""
+PX_GREP_PATH=""
+PX_SED_PATH=""
+PX_METADATA_READY=0
+PX_DEPENDENCIES_READY=0
+
+px_mode_is_safe_executable() {
+    local mode="$1"
+    case "$mode" in
+        ""|*[!0-7]*) return 1 ;;
+    esac
+    local mode_value=$((8#$mode))
+    [ $((mode_value & 0022)) -eq 0 ]
+}
+
+px_bootstrap_stat() {
+    local candidates=(
+        "/usr/bin/stat"
+        "/bin/stat"
+        "/var/jb/usr/bin/stat"
+        "/private/preboot/jb/usr/bin/stat"
+    )
+    local candidate parent basename physical_parent resolved output
+    local device inode uid gid mode size links mtime ctime extra
+    for candidate in "${candidates[@]}"; do
+        [ -f "$candidate" ] || continue
+        [ ! -L "$candidate" ] || continue
+        [ -x "$candidate" ] || continue
+        [ -s "$candidate" ] || continue
+        parent="${candidate%/*}"
+        basename="${candidate##*/}"
+        physical_parent=$(cd -P "$parent" 2>/dev/null && pwd -P) || continue
+        resolved="${physical_parent%/}/$basename"
+        [ -f "$resolved" ] || continue
+        [ ! -L "$resolved" ] || continue
+        [ -x "$resolved" ] || continue
+        output=$("$resolved" -f '%d|%i|%u|%g|%Lp|%z|%l|%m|%c' "$resolved" 2>/dev/null) || continue
+        case "$output" in *$'\n'*|*$'\r'*) continue ;; esac
+        IFS='|' read -r device inode uid gid mode size links mtime ctime extra <<< "$output"
+        [ -z "$extra" ] || continue
+        [ -n "$device" ] && [ -n "$inode" ] && [ -n "$uid" ] && [ -n "$gid" ] || continue
+        [ -n "$size" ] && [ -n "$links" ] && [ -n "$mtime" ] && [ -n "$ctime" ] || continue
+        case "$device:$inode:$uid:$gid:$size:$links:$mtime:$ctime" in
+            *[!0-9:]*|::*|:*:) continue ;;
+        esac
+        [ "$uid" -eq 0 ] || continue
+        [ "$size" -gt 0 ] || continue
+        px_mode_is_safe_executable "$mode" || continue
+        PX_STAT_PATH="$resolved"
+        return 0
+    done
+    return 1
+}
+
+px_valid_snapshot_prefix() {
+    local prefix="$1"
+    [ -n "$prefix" ] && [ "${#prefix}" -le 64 ] || return 1
+    case "$prefix" in
+        PX_*) ;;
+        *) return 1 ;;
+    esac
+    case "$prefix" in
+        *[!A-Z0-9_]*) return 1 ;;
+    esac
+    return 0
+}
+
+px_stat_snapshot() {
+    local path="$1"
+    local prefix="$2"
+    [ "$PX_METADATA_READY" -eq 1 ] || return 1
+    [ -n "$path" ] || return 1
+    px_valid_snapshot_prefix "$prefix" || return 1
+    local output device inode uid gid mode size links mtime ctime extra
+    output=$("$PX_STAT_PATH" -f '%d|%i|%u|%g|%Lp|%z|%l|%m|%c' "$path" 2>/dev/null) || return 1
+    case "$output" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    IFS='|' read -r device inode uid gid mode size links mtime ctime extra <<< "$output"
+    [ -z "$extra" ] || return 1
+    [ -n "$device" ] && [ -n "$inode" ] && [ -n "$uid" ] && [ -n "$gid" ] || return 1
+    [ -n "$size" ] && [ -n "$links" ] && [ -n "$mtime" ] && [ -n "$ctime" ] || return 1
+    case "$device:$inode:$uid:$gid:$size:$links:$mtime:$ctime" in
+        *[!0-9:]*|::*|:*:) return 1 ;;
+    esac
+    case "$mode" in ""|*[!0-7]*) return 1 ;; esac
+    printf -v "${prefix}_DEVICE" '%s' "$device"
+    printf -v "${prefix}_INODE" '%s' "$inode"
+    printf -v "${prefix}_UID" '%s' "$uid"
+    printf -v "${prefix}_GID" '%s' "$gid"
+    printf -v "${prefix}_MODE" '%s' "$mode"
+    printf -v "${prefix}_SIZE" '%s' "$size"
+    printf -v "${prefix}_LINKS" '%s' "$links"
+    printf -v "${prefix}_MTIME" '%s' "$mtime"
+    printf -v "${prefix}_CTIME" '%s' "$ctime"
+    return 0
+}
+
+px_same_identity() {
+    px_valid_snapshot_prefix "$1" || return 1
+    px_valid_snapshot_prefix "$2" || return 1
+    local left="$1"
+    local right="$2"
+    local field left_value right_value
+    for field in DEVICE INODE UID GID MODE LINKS; do
+        eval "left_value=\${${left}_${field}}"
+        eval "right_value=\${${right}_${field}}"
+        [ "$left_value" = "$right_value" ] || return 1
+    done
+    return 0
+}
+
+px_same_complete_snapshot() {
+    px_valid_snapshot_prefix "$1" || return 1
+    px_valid_snapshot_prefix "$2" || return 1
+    local left="$1"
+    local right="$2"
+    px_same_identity "$left" "$right" || return 1
+    local field left_value right_value
+    for field in SIZE MTIME CTIME; do
+        eval "left_value=\${${left}_${field}}"
+        eval "right_value=\${${right}_${field}}"
+        [ "$left_value" = "$right_value" ] || return 1
+    done
+    return 0
+}
+
+px_physical_directory() {
+    local directory="$1"
+    [ -n "$directory" ] || return 1
+    case "$directory" in /*) ;; *) return 1 ;; esac
+    case "$directory" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    [ "${#directory}" -le 4096 ] || return 1
+    local physical
+    physical=$(cd -P "$directory" 2>/dev/null && pwd -P) || return 1
+    case "$physical" in /*) ;; *) return 1 ;; esac
+    PX_PHYSICAL_DIRECTORY="$physical"
+    return 0
+}
+
+px_resolve_trusted_utility() {
+    local variable_name="$1"
+    shift
+    local candidate parent basename resolved
+    for candidate in "$@"; do
+        case "$candidate" in /*) ;; *) continue ;; esac
+        [ ! -L "$candidate" ] || continue
+        parent="${candidate%/*}"
+        basename="${candidate##*/}"
+        px_physical_directory "$parent" || continue
+        resolved="${PX_PHYSICAL_DIRECTORY%/}/$basename"
+        [ -f "$resolved" ] || continue
+        [ ! -L "$resolved" ] || continue
+        [ -x "$resolved" ] || continue
+        [ -s "$resolved" ] || continue
+        px_stat_snapshot "$resolved" PX_UTILITY || continue
+        px_stat_snapshot "$PX_PHYSICAL_DIRECTORY" PX_UTILITY_PARENT || continue
+        [ "$PX_UTILITY_UID" -eq 0 ] || continue
+        [ "$PX_UTILITY_PARENT_UID" -eq 0 ] || continue
+        px_mode_is_safe_executable "$PX_UTILITY_MODE" || continue
+        px_mode_is_safe_executable "$PX_UTILITY_PARENT_MODE" || continue
+        printf -v "$variable_name" '%s' "$resolved"
+        return 0
+    done
+    return 1
+}
+
+px_initialize_metadata_boundary() {
+    [ "$PX_METADATA_READY" -eq 0 ] || return 0
+    px_bootstrap_stat || return 1
+    PX_METADATA_READY=1
+    px_stat_snapshot "$PX_STAT_PATH" PX_STAT_SELF || return 1
+    [ "$PX_STAT_SELF_UID" -eq 0 ] || return 1
+    [ "$PX_STAT_SELF_SIZE" -gt 0 ] || return 1
+    px_mode_is_safe_executable "$PX_STAT_SELF_MODE" || return 1
+    px_physical_directory "${PX_STAT_PATH%/*}" || return 1
+    px_stat_snapshot "$PX_PHYSICAL_DIRECTORY" PX_STAT_PARENT || return 1
+    [ "$PX_STAT_PARENT_UID" -eq 0 ] || return 1
+    px_mode_is_safe_executable "$PX_STAT_PARENT_MODE" || return 1
+    readonly PX_STAT_PATH
+    return 0
+}
+
+px_resolve_trusted_dependencies() {
+    [ "$PX_DEPENDENCIES_READY" -eq 0 ] || return 0
+    px_resolve_trusted_utility PX_MKTEMP_PATH \
+        /usr/bin/mktemp /bin/mktemp /var/jb/usr/bin/mktemp /private/preboot/jb/usr/bin/mktemp || return 1
+    px_resolve_trusted_utility PX_CP_PATH \
+        /bin/cp /usr/bin/cp /var/jb/bin/cp /var/jb/usr/bin/cp /private/preboot/jb/bin/cp || return 1
+    px_resolve_trusted_utility PX_CMP_PATH \
+        /usr/bin/cmp /bin/cmp /var/jb/usr/bin/cmp /private/preboot/jb/usr/bin/cmp || return 1
+    px_resolve_trusted_utility PX_CHMOD_PATH \
+        /bin/chmod /usr/bin/chmod /var/jb/bin/chmod /private/preboot/jb/bin/chmod || return 1
+    px_resolve_trusted_utility PX_RM_PATH \
+        /bin/rm /usr/bin/rm /var/jb/bin/rm /private/preboot/jb/bin/rm || return 1
+    px_resolve_trusted_utility PX_RMDIR_PATH \
+        /bin/rmdir /usr/bin/rmdir /var/jb/bin/rmdir /private/preboot/jb/bin/rmdir || return 1
+    px_resolve_trusted_utility PX_PLUTIL_PATH \
+        /usr/bin/plutil /var/jb/usr/bin/plutil /private/preboot/jb/usr/bin/plutil /bin/plutil || return 1
+    px_resolve_trusted_utility PX_LDID_PATH \
+        /usr/bin/ldid /var/jb/usr/bin/ldid /private/preboot/jb/usr/bin/ldid /bin/ldid || return 1
+    px_resolve_trusted_utility PX_GREP_PATH \
+        /usr/bin/grep /bin/grep /var/jb/usr/bin/grep /private/preboot/jb/usr/bin/grep || return 1
+    px_resolve_trusted_utility PX_SED_PATH \
+        /usr/bin/sed /bin/sed /var/jb/usr/bin/sed /private/preboot/jb/usr/bin/sed || return 1
+    readonly PX_MKTEMP_PATH PX_CP_PATH PX_CMP_PATH PX_CHMOD_PATH PX_RM_PATH PX_RMDIR_PATH
+    readonly PX_PLUTIL_PATH PX_LDID_PATH PX_GREP_PATH PX_SED_PATH
+    PX_DEPENDENCIES_READY=1
+    return 0
+}
+
+px_validate_installed_helper() {
+    case "$HELPER_TOOL_PATH" in /*) ;; *) return 1 ;; esac
+    [ -f "$HELPER_TOOL_PATH" ] || return 1
+    [ ! -L "$HELPER_TOOL_PATH" ] || return 1
+    [ -x "$HELPER_TOOL_PATH" ] || return 1
+    [ -s "$HELPER_TOOL_PATH" ] || return 1
+    local parent="${HELPER_TOOL_PATH%/*}"
+    local basename="${HELPER_TOOL_PATH##*/}"
+    px_physical_directory "$parent" || return 1
+    local resolved="${PX_PHYSICAL_DIRECTORY%/}/$basename"
+    [ -f "$resolved" ] || return 1
+    [ ! -L "$resolved" ] || return 1
+    [ -x "$resolved" ] || return 1
+    px_stat_snapshot "$resolved" PX_INSTALLED_HELPER || return 1
+    px_stat_snapshot "$PX_PHYSICAL_DIRECTORY" PX_INSTALLED_HELPER_PARENT || return 1
+    [ "$PX_INSTALLED_HELPER_UID" -eq 0 ] || return 1
+    [ "$PX_INSTALLED_HELPER_PARENT_UID" -eq 0 ] || return 1
+    [ "$PX_INSTALLED_HELPER_LINKS" -eq 1 ] || return 1
+    [ "$PX_INSTALLED_HELPER_SIZE" -gt 0 ] || return 1
+    px_mode_is_safe_executable "$PX_INSTALLED_HELPER_MODE" || return 1
+    px_mode_is_safe_executable "$PX_INSTALLED_HELPER_PARENT_MODE" || return 1
+    PX_INSTALLED_HELPER_PATH="$resolved"
+    return 0
+}
+
 normalize_helper_exit_status() {
     local raw_status="$1"
     case "$raw_status" in
@@ -90,241 +356,598 @@ normalize_helper_exit_status() {
     esac
 }
 
-cleanup() {
-    if [ -d "$TEMP_DIR" ]; then
-        rm -rf "$TEMP_DIR"
+px_mode_is_exact() {
+    local actual="$1"
+    local expected="$2"
+    while [ "${actual#0}" != "$actual" ]; do actual="${actual#0}"; done
+    while [ "${expected#0}" != "$expected" ]; do expected="${expected#0}"; done
+    [ "$actual" = "$expected" ]
+}
+
+px_parent_has_safe_sticky_semantics() {
+    local mode="$1"
+    case "$mode" in ""|*[!0-7]*) return 1 ;; esac
+    local value=$((8#$mode))
+    if [ $((value & 0022)) -ne 0 ]; then
+        [ $((value & 01000)) -ne 0 ] || return 1
     fi
+    return 0
 }
 
-trap cleanup EXIT
+px_directory_is_empty() (
+    local directory="$1"
+    shopt -s nullglob dotglob
+    local entries=("$directory"/*)
+    [ "${#entries[@]}" -eq 0 ]
+)
 
-# === Find ldid binary ===
+px_workspace_path_has_authority() {
+    local path="$1"
+    [ -n "$path" ] && [ "${#path}" -le 4096 ] || return 1
+    px_string_has_control_character "$path" && return 1
+    case "$path" in
+        "$PX_WORKSPACE_PARENT/$PX_WORKSPACE_PREFIX"????????) ;;
+        *) return 1 ;;
+    esac
+    local basename="${path##*/}"
+    case "$basename" in */*|""|.|..) return 1 ;; esac
+    [ "${path%/*}" = "$PX_WORKSPACE_PARENT" ] || return 1
+    return 0
+}
+
+px_validate_workspace_parent() {
+    [ -d "$PX_WORKSPACE_PARENT" ] || return 1
+    [ ! -L "$PX_WORKSPACE_PARENT" ] || return 1
+    [ -x "$PX_WORKSPACE_PARENT" ] || return 1
+    px_physical_directory "$PX_WORKSPACE_PARENT" || return 1
+    [ "$PX_PHYSICAL_DIRECTORY" = "$PX_WORKSPACE_PARENT" ] || return 1
+    px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_CURRENT || return 1
+    [ "$PX_WORKSPACE_PARENT_CURRENT_UID" -eq 0 ] || return 1
+    px_parent_has_safe_sticky_semantics "$PX_WORKSPACE_PARENT_CURRENT_MODE" || return 1
+    return 0
+}
+
+px_discard_unactivated_workspace() {
+    local path="$1"
+    px_workspace_path_has_authority "$path" || return 1
+    if [ -L "$path" ]; then
+        "$PX_RM_PATH" -f "$path" >/dev/null 2>&1 || return 1
+        return 0
+    fi
+    if [ -d "$path" ]; then
+        px_directory_is_empty "$path" || return 1
+        "$PX_RMDIR_PATH" "$path" >/dev/null 2>&1 || return 1
+        return 0
+    fi
+    if [ -e "$path" ]; then
+        return 1
+    fi
+    return 0
+}
+
+px_create_workspace() {
+    [ "$PX_WORKSPACE_CREATE_ATTEMPTED" -eq 0 ] || return 1
+    PX_WORKSPACE_CREATE_ATTEMPTED=1
+    px_validate_workspace_parent || return 1
+    px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_BEFORE || return 1
+
+    local created
+    created=$("$PX_MKTEMP_PATH" -d "$PX_WORKSPACE_PARENT/$PX_WORKSPACE_PREFIX"XXXXXXXX 2>/dev/null) || return 1
+    case "$created" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    if ! px_workspace_path_has_authority "$created"; then
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if [ -L "$created" ] || [ ! -d "$created" ]; then
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    px_stat_snapshot "$created" PX_WORKSPACE_NEW || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    if ! px_mode_is_exact "$PX_WORKSPACE_NEW_MODE" 700; then
+        "$PX_CHMOD_PATH" 700 "$created" >/dev/null 2>&1 || {
+            px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+            return 1
+        }
+        px_stat_snapshot "$created" PX_WORKSPACE_NEW || {
+            px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+            return 1
+        }
+    fi
+
+    [ "$PX_WORKSPACE_NEW_UID" -eq "$EUID" ] || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    px_mode_is_exact "$PX_WORKSPACE_NEW_MODE" 700 || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    [ "$PX_WORKSPACE_NEW_DEVICE" = "$PX_WORKSPACE_PARENT_BEFORE_DEVICE" ] || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    px_directory_is_empty "$created" || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    px_validate_workspace_parent || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_AFTER || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+    px_same_identity PX_WORKSPACE_PARENT_BEFORE PX_WORKSPACE_PARENT_AFTER || {
+        px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        return 1
+    }
+
+    PX_WORKSPACE_PATH="$created"
+    PX_WORKSPACE_DEVICE="$PX_WORKSPACE_NEW_DEVICE"
+    PX_WORKSPACE_INODE="$PX_WORKSPACE_NEW_INODE"
+    PX_WORKSPACE_UID="$PX_WORKSPACE_NEW_UID"
+    PX_WORKSPACE_GID="$PX_WORKSPACE_NEW_GID"
+    PX_WORKSPACE_MODE="$PX_WORKSPACE_NEW_MODE"
+    PX_WORKSPACE_LINKS="$PX_WORKSPACE_NEW_LINKS"
+    PX_WORKSPACE_PARENT_DEVICE="$PX_WORKSPACE_PARENT_AFTER_DEVICE"
+    PX_WORKSPACE_PARENT_INODE="$PX_WORKSPACE_PARENT_AFTER_INODE"
+    PX_WORKSPACE_ACTIVE=1
+    return 0
+}
+
+px_validate_workspace_identity() {
+    [ "$PX_WORKSPACE_ACTIVE" -eq 1 ] || return 1
+    px_workspace_path_has_authority "$PX_WORKSPACE_PATH" || return 1
+    [ -d "$PX_WORKSPACE_PATH" ] || return 1
+    [ ! -L "$PX_WORKSPACE_PATH" ] || return 1
+    px_validate_workspace_parent || return 1
+    px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_LIVE || return 1
+    [ "$PX_WORKSPACE_PARENT_LIVE_DEVICE" = "$PX_WORKSPACE_PARENT_DEVICE" ] || return 1
+    [ "$PX_WORKSPACE_PARENT_LIVE_INODE" = "$PX_WORKSPACE_PARENT_INODE" ] || return 1
+    px_stat_snapshot "$PX_WORKSPACE_PATH" PX_WORKSPACE_LIVE || return 1
+    [ "$PX_WORKSPACE_LIVE_DEVICE" = "$PX_WORKSPACE_DEVICE" ] || return 1
+    [ "$PX_WORKSPACE_LIVE_INODE" = "$PX_WORKSPACE_INODE" ] || return 1
+    [ "$PX_WORKSPACE_LIVE_UID" = "$PX_WORKSPACE_UID" ] || return 1
+    [ "$PX_WORKSPACE_LIVE_GID" = "$PX_WORKSPACE_GID" ] || return 1
+    [ "$PX_WORKSPACE_LIVE_LINKS" = "$PX_WORKSPACE_LINKS" ] || return 1
+    [ "$PX_WORKSPACE_LIVE_UID" -eq "$EUID" ] || return 1
+    px_mode_is_exact "$PX_WORKSPACE_LIVE_MODE" 700 || return 1
+    return 0
+}
+
+px_workspace_child_path() {
+    local name="$1"
+    case "$name" in
+        app_ent.xml|helper_ent.plist|backup_helper|restore_input.plist) ;;
+        *) return 1 ;;
+    esac
+    PX_WORKSPACE_CHILD_PATH="$PX_WORKSPACE_PATH/$name"
+    return 0
+}
+
+px_require_workspace_child_absent() {
+    local name="$1"
+    px_validate_workspace_identity || return 1
+    px_workspace_child_path "$name" || return 1
+    [ ! -e "$PX_WORKSPACE_CHILD_PATH" ] || return 1
+    [ ! -L "$PX_WORKSPACE_CHILD_PATH" ] || return 1
+    return 0
+}
+
+px_validate_workspace_file() {
+    local path="$1"
+    local expected_mode="$2"
+    local require_executable="$3"
+    local require_nonzero="$4"
+    px_validate_workspace_identity || return 1
+    [ "${path%/*}" = "$PX_WORKSPACE_PATH" ] || return 1
+    local name="${path##*/}"
+    px_workspace_child_path "$name" || return 1
+    [ "$path" = "$PX_WORKSPACE_CHILD_PATH" ] || return 1
+    [ -f "$path" ] || return 1
+    [ ! -L "$path" ] || return 1
+    if [ "$require_executable" -eq 1 ]; then
+        [ -x "$path" ] || return 1
+    fi
+    px_stat_snapshot "$path" PX_WORKSPACE_FILE || return 1
+    [ "$PX_WORKSPACE_FILE_DEVICE" = "$PX_WORKSPACE_DEVICE" ] || return 1
+    [ "$PX_WORKSPACE_FILE_UID" -eq "$EUID" ] || return 1
+    [ "$PX_WORKSPACE_FILE_LINKS" -eq 1 ] || return 1
+    px_mode_is_exact "$PX_WORKSPACE_FILE_MODE" "$expected_mode" || return 1
+    if [ "$require_nonzero" -eq 1 ]; then
+        [ "$PX_WORKSPACE_FILE_SIZE" -gt 0 ] || return 1
+    fi
+    px_validate_workspace_identity || return 1
+    return 0
+}
+
+px_cleanup_workspace() {
+    px_validate_workspace_identity || return 1
+    local name child failed=0
+    for name in restore_input.plist backup_helper helper_ent.plist app_ent.xml; do
+        px_workspace_child_path "$name" || return 1
+        child="$PX_WORKSPACE_CHILD_PATH"
+        if [ -L "$child" ]; then
+            "$PX_RM_PATH" -f "$child" >/dev/null 2>&1 || failed=1
+        elif [ -f "$child" ]; then
+            "$PX_RM_PATH" -f "$child" >/dev/null 2>&1 || failed=1
+        elif [ -e "$child" ]; then
+            failed=1
+        fi
+    done
+    [ "$failed" -eq 0 ] || return 1
+    px_validate_workspace_identity || return 1
+    px_directory_is_empty "$PX_WORKSPACE_PATH" || return 1
+    "$PX_RMDIR_PATH" "$PX_WORKSPACE_PATH" >/dev/null 2>&1 || return 1
+    PX_WORKSPACE_ACTIVE=0
+    PX_WORKSPACE_PATH=""
+    return 0
+}
+
+px_exit_trap() {
+    local original_status=$?
+    trap - EXIT
+    if [ "$PX_WORKSPACE_ACTIVE" -eq 1 ]; then
+        if ! px_cleanup_workspace; then
+            log_error "Temporary workspace cleanup failed (original status: $original_status)"
+            exit "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        fi
+    fi
+    exit "$original_status"
+}
+
+trap px_exit_trap EXIT
+
+# === Trusted ldid/plutil accessors ===
 find_ldid() {
-    local paths=(
-        "/usr/bin/ldid"
-        "/var/jb/usr/bin/ldid"
-        "/private/preboot/jb/usr/bin/ldid"
-        "/bin/ldid"
-    )
-    
-    for path in "${paths[@]}"; do
-        if [ -x "$path" ]; then
-            echo "$path"
-            return 0
-        fi
-    done
-    
-    return 1
+    [ "$PX_DEPENDENCIES_READY" -eq 1 ] || return 1
+    printf '%s\n' "$PX_LDID_PATH"
 }
 
-# === Find plutil binary ===
 find_plutil() {
-    local paths=(
-        "/usr/bin/plutil"
-        "/var/jb/usr/bin/plutil"
-        "/bin/plutil"
-    )
-    
-    for path in "${paths[@]}"; do
-        if [ -x "$path" ]; then
-            echo "$path"
-            return 0
-        fi
-    done
-    
-    return 1
+    [ "$PX_DEPENDENCIES_READY" -eq 1 ] || return 1
+    printf '%s\n' "$PX_PLUTIL_PATH"
 }
 
-# === Find app executable path from bundle ID ===
+# === Path and target validation ===
+PX_TARGET_PATH=""
+PX_TARGET_APP_BUNDLE=""
+PX_TARGET_IS_SYSTEM=0
+PX_APP_ENT_PATH=""
+PX_HELPER_ENT_PATH=""
+PX_WORKING_HELPER_PATH=""
+PX_RESTORE_INPUT_PATH=""
+PX_BACKUP_OUTPUT_PATH=""
+PX_BACKUP_OUTPUT_PARENT=""
+PX_BACKUP_OUTPUT_EXISTED=0
+
+px_string_has_control_character() {
+    local value="$1"
+    printf '%s' "$value" | "$PX_GREP_PATH" -q '[[:cntrl:]]'
+}
+
+px_validate_bundle_id() {
+    local bundle_id="$1"
+    [ -n "$bundle_id" ] || return 1
+    [ "${#bundle_id}" -le 255 ] || return 1
+    px_string_has_control_character "$bundle_id" && return 1
+    case "$bundle_id" in
+        *'/'*|*'\\'*|*[!A-Za-z0-9._-]*|.|..|-*) return 1 ;;
+        [A-Za-z0-9]*) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+px_validate_safe_basename() {
+    local basename="$1"
+    [ -n "$basename" ] || return 1
+    [ "${#basename}" -le 255 ] || return 1
+    px_string_has_control_character "$basename" && return 1
+    case "$basename" in
+        */*|*'\\'*|.|..|-*) return 1 ;;
+    esac
+    return 0
+}
+
+px_validate_absolute_path_lexical() {
+    local path="$1"
+    [ -n "$path" ] || return 1
+    [ "${#path}" -le 4096 ] || return 1
+    case "$path" in /*) ;; *) return 1 ;; esac
+    px_string_has_control_character "$path" && return 1
+    local basename="${path##*/}"
+    px_validate_safe_basename "$basename" || return 1
+    local parent="${path%/*}"
+    [ -n "$parent" ] || parent="/"
+    PX_PATH_PARENT="$parent"
+    PX_PATH_BASENAME="$basename"
+    return 0
+}
+
+px_canonicalize_existing_file() {
+    local path="$1"
+    px_validate_absolute_path_lexical "$path" || return 1
+    local raw_parent="$PX_PATH_PARENT"
+    local basename="$PX_PATH_BASENAME"
+    px_physical_directory "$raw_parent" || return 1
+    local physical_parent="$PX_PHYSICAL_DIRECTORY"
+    local canonical="${physical_parent%/}/$basename"
+    [ -f "$canonical" ] || return 1
+    [ ! -L "$canonical" ] || return 1
+    [ -r "$canonical" ] || return 1
+    px_stat_snapshot "$physical_parent" PX_CANONICAL_PARENT || return 1
+    px_stat_snapshot "$canonical" PX_CANONICAL_FILE || return 1
+    [ "$PX_CANONICAL_FILE_SIZE" -gt 0 ] || return 1
+    PX_CANONICAL_PATH="$canonical"
+    PX_CANONICAL_PARENT_PATH="$physical_parent"
+    return 0
+}
+
+px_canonicalize_output_path() {
+    local path="$1"
+    px_validate_absolute_path_lexical "$path" || return 1
+    local raw_parent="$PX_PATH_PARENT"
+    local basename="$PX_PATH_BASENAME"
+    px_physical_directory "$raw_parent" || return 1
+    local physical_parent="$PX_PHYSICAL_DIRECTORY"
+    [ -d "$physical_parent" ] || return 1
+    [ -w "$physical_parent" ] || return 1
+    px_stat_snapshot "$physical_parent" PX_OUTPUT_PARENT_INITIAL || return 1
+    local canonical="${physical_parent%/}/$basename"
+    [ ! -L "$canonical" ] || return 1
+    if [ -e "$canonical" ]; then
+        [ -f "$canonical" ] || return 1
+        [ -w "$canonical" ] || return 1
+        px_stat_snapshot "$canonical" PX_OUTPUT_FILE_INITIAL || return 1
+        PX_BACKUP_OUTPUT_EXISTED=1
+    else
+        PX_BACKUP_OUTPUT_EXISTED=0
+    fi
+    PX_CANONICAL_OUTPUT_PATH="$canonical"
+    PX_CANONICAL_OUTPUT_PARENT="$physical_parent"
+    return 0
+}
+
+px_owner_is_app_trusted() {
+    local uid="$1"
+    [ "$uid" -eq 0 ] || [ "$uid" -eq 501 ]
+}
+
+px_validate_app_directory() {
+    local directory="$1"
+    [ -d "$directory" ] || return 1
+    [ ! -L "$directory" ] || return 1
+    [ -x "$directory" ] || return 1
+    px_stat_snapshot "$directory" PX_APP_DIRECTORY || return 1
+    px_owner_is_app_trusted "$PX_APP_DIRECTORY_UID" || return 1
+    px_mode_is_safe_executable "$PX_APP_DIRECTORY_MODE" || return 1
+    return 0
+}
+
+px_validate_info_plist() {
+    local plist="$1"
+    [ -f "$plist" ] || return 1
+    [ ! -L "$plist" ] || return 1
+    [ -r "$plist" ] || return 1
+    px_stat_snapshot "$plist" PX_INFO_PLIST || return 1
+    px_owner_is_app_trusted "$PX_INFO_PLIST_UID" || return 1
+    px_mode_is_safe_executable "$PX_INFO_PLIST_MODE" || return 1
+    [ "$PX_INFO_PLIST_LINKS" -eq 1 ] || return 1
+    [ "$PX_INFO_PLIST_SIZE" -gt 0 ] || return 1
+    [ "$PX_INFO_PLIST_SIZE" -le 16777216 ] || return 1
+    return 0
+}
+
+px_read_info_value() {
+    local plist="$1"
+    local key="$2"
+    px_validate_info_plist "$plist" || return 1
+    px_stat_snapshot "$plist" PX_INFO_BEFORE || return 1
+    local value
+    value=$("$PX_PLUTIL_PATH" -key "$key" "$plist" 2>/dev/null)
+    local status=$?
+    px_stat_snapshot "$plist" PX_INFO_AFTER || return 1
+    px_same_complete_snapshot PX_INFO_BEFORE PX_INFO_AFTER || return 1
+    [ "$status" -eq 0 ] || return 1
+    [ -n "$value" ] || return 1
+    [ "${#value}" -le 4096 ] || return 1
+    px_string_has_control_character "$value" && return 1
+    PX_PLIST_VALUE="$value"
+    return 0
+}
+
+px_validate_target_executable() {
+    local target="$1"
+    [ -f "$target" ] || return 1
+    [ ! -L "$target" ] || return 1
+    [ -x "$target" ] || return 1
+    px_stat_snapshot "$target" PX_TARGET_CANDIDATE || return 1
+    px_owner_is_app_trusted "$PX_TARGET_CANDIDATE_UID" || return 1
+    px_mode_is_safe_executable "$PX_TARGET_CANDIDATE_MODE" || return 1
+    [ "$PX_TARGET_CANDIDATE_LINKS" -eq 1 ] || return 1
+    [ "$PX_TARGET_CANDIDATE_SIZE" -gt 0 ] || return 1
+    return 0
+}
+
+px_consider_app_bundle() {
+    local app_dir="$1"
+    local bundle_id="$2"
+    local is_system="$3"
+    px_validate_app_directory "$app_dir" || return 1
+    local info_plist="$app_dir/Info.plist"
+    px_validate_info_plist "$info_plist" || return 1
+    px_read_info_value "$info_plist" CFBundleIdentifier || return 1
+    local found_bundle_id="$PX_PLIST_VALUE"
+    [ "$found_bundle_id" = "$bundle_id" ] || return 1
+    px_read_info_value "$info_plist" CFBundleExecutable || return 1
+    local executable_name="$PX_PLIST_VALUE"
+    px_validate_safe_basename "$executable_name" || return 1
+    local target="$app_dir/$executable_name"
+    px_validate_target_executable "$target" || return 1
+
+    PX_TARGET_PATH="$target"
+    PX_TARGET_APP_BUNDLE="$app_dir"
+    PX_TARGET_IS_SYSTEM="$is_system"
+    PX_TARGET_DEVICE="$PX_TARGET_CANDIDATE_DEVICE"
+    PX_TARGET_INODE="$PX_TARGET_CANDIDATE_INODE"
+    PX_TARGET_UID="$PX_TARGET_CANDIDATE_UID"
+    PX_TARGET_GID="$PX_TARGET_CANDIDATE_GID"
+    PX_TARGET_MODE="$PX_TARGET_CANDIDATE_MODE"
+    PX_TARGET_SIZE="$PX_TARGET_CANDIDATE_SIZE"
+    PX_TARGET_LINKS="$PX_TARGET_CANDIDATE_LINKS"
+    PX_TARGET_MTIME="$PX_TARGET_CANDIDATE_MTIME"
+    PX_TARGET_CTIME="$PX_TARGET_CANDIDATE_CTIME"
+    return 0
+}
+
 find_app_executable() {
     local bundle_id="$1"
-    
-    log_verbose "Searching for app with bundle ID: $bundle_id"
-    
-    # === 1. Check system apps in /Applications ===
-    local system_app_paths=(
+    px_validate_bundle_id "$bundle_id" || return 1
+    PX_TARGET_PATH=""
+    local raw_root root app_dir uuid_dir
+    local system_roots=(
         "/Applications"
         "/var/jb/Applications"
         "/private/preboot/jb/Applications"
     )
-    
-    for base_path in "${system_app_paths[@]}"; do
-        if [ ! -d "$base_path" ]; then
-            continue
-        fi
-        
-        for app_dir in "$base_path"/*.app; do
-            if [ ! -d "$app_dir" ]; then
-                continue
-            fi
-            
-            local info_plist="$app_dir/Info.plist"
-            if [ ! -f "$info_plist" ]; then
-                continue
-            fi
-            
-            # Extract CFBundleIdentifier
-            local found_bundle_id
-            found_bundle_id=$(plutil -key CFBundleIdentifier "$info_plist" 2>/dev/null || true)
-            
-            if [ "$found_bundle_id" = "$bundle_id" ]; then
-                # Found matching app, get executable name
-                local exe_name
-                exe_name=$(plutil -key CFBundleExecutable "$info_plist" 2>/dev/null || true)
-                
-                if [ -n "$exe_name" ] && [ -f "$app_dir/$exe_name" ]; then
-                    log_verbose "Found system app: $app_dir/$exe_name"
-                    echo "$app_dir/$exe_name"
-                    return 0
-                fi
-            fi
+    for raw_root in "${system_roots[@]}"; do
+        [ -e "$raw_root" ] || continue
+        px_physical_directory "$raw_root" || continue
+        root="$PX_PHYSICAL_DIRECTORY"
+        px_validate_app_directory "$root" || continue
+        for app_dir in "$root"/*.app; do
+            [ -d "$app_dir" ] || continue
+            [ ! -L "$app_dir" ] || continue
+            px_consider_app_bundle "$app_dir" "$bundle_id" 1 && return 0
         done
     done
-    
-    # === 2. Check App Store apps in /var/containers/Bundle/Application ===
-    local bundle_paths=(
+
+    local bundle_roots=(
         "/var/containers/Bundle/Application"
         "/var/mobile/Containers/Bundle/Application"
         "/private/var/containers/Bundle/Application"
     )
-    
-    for base_path in "${bundle_paths[@]}"; do
-        if [ ! -d "$base_path" ]; then
-            continue
-        fi
-        
-        # Search through all app UUIDs
-        for uuid_dir in "$base_path"/*; do
-            if [ ! -d "$uuid_dir" ]; then
-                continue
-            fi
-            
-            # Find .app directory
+    for raw_root in "${bundle_roots[@]}"; do
+        [ -e "$raw_root" ] || continue
+        px_physical_directory "$raw_root" || continue
+        root="$PX_PHYSICAL_DIRECTORY"
+        px_validate_app_directory "$root" || continue
+        for uuid_dir in "$root"/*; do
+            [ -d "$uuid_dir" ] || continue
+            [ ! -L "$uuid_dir" ] || continue
+            px_validate_app_directory "$uuid_dir" || continue
             for app_dir in "$uuid_dir"/*.app; do
-                if [ ! -d "$app_dir" ]; then
-                    continue
-                fi
-                
-                # Check Info.plist for bundle ID
-                local info_plist="$app_dir/Info.plist"
-                if [ ! -f "$info_plist" ]; then
-                    continue
-                fi
-                
-                # Extract CFBundleIdentifier
-                local found_bundle_id
-                found_bundle_id=$(plutil -key CFBundleIdentifier "$info_plist" 2>/dev/null || true)
-                
-                if [ "$found_bundle_id" = "$bundle_id" ]; then
-                    # Found matching app, get executable name
-                    local exe_name
-                    exe_name=$(plutil -key CFBundleExecutable "$info_plist" 2>/dev/null || true)
-                    
-                    if [ -n "$exe_name" ] && [ -f "$app_dir/$exe_name" ]; then
-                        log_verbose "Found App Store app: $app_dir/$exe_name"
-                        echo "$app_dir/$exe_name"
-                        return 0
-                    fi
-                fi
+                [ -d "$app_dir" ] || continue
+                [ ! -L "$app_dir" ] || continue
+                px_consider_app_bundle "$app_dir" "$bundle_id" 0 && return 0
             done
         done
     done
-    
     return 1
+}
+
+px_validate_target_unchanged() {
+    [ -n "$PX_TARGET_PATH" ] || return 1
+    px_validate_target_executable "$PX_TARGET_PATH" || return 1
+    [ "$PX_TARGET_CANDIDATE_DEVICE" = "$PX_TARGET_DEVICE" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_INODE" = "$PX_TARGET_INODE" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_UID" = "$PX_TARGET_UID" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_GID" = "$PX_TARGET_GID" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_MODE" = "$PX_TARGET_MODE" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_SIZE" = "$PX_TARGET_SIZE" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_LINKS" = "$PX_TARGET_LINKS" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_MTIME" = "$PX_TARGET_MTIME" ] || return 1
+    [ "$PX_TARGET_CANDIDATE_CTIME" = "$PX_TARGET_CTIME" ] || return 1
+    return 0
 }
 
 # === Extract entitlements from app ===
 extract_entitlements() {
     local app_binary="$1"
     local output_file="$2"
-    local ldid_path
-    
-    ldid_path=$(find_ldid) || {
-        log_error "ldid not found. Please install ldid."
-        return "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
-    }
-    
-    log_verbose "Using ldid: $ldid_path"
-    log_verbose "Extracting entitlements from: $app_binary"
-    
-    "$ldid_path" -e "$app_binary" > "$output_file" 2>/dev/null
-    
-    if [ ! -s "$output_file" ]; then
-        log_error "Failed to extract entitlements or app has no entitlements"
-        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    fi
-    
+    [ "$app_binary" = "$PX_TARGET_PATH" ] || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_workspace_child_path app_ent.xml || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ "$output_file" = "$PX_WORKSPACE_CHILD_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ ! -e "$output_file" ] && [ ! -L "$output_file" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_target_unchanged || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    px_stat_snapshot "$app_binary" PX_TARGET_EXTRACT_BEFORE || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+
+    "$PX_LDID_PATH" -e "$app_binary" > "$output_file" 2>/dev/null
+    local extract_status=$?
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$app_binary" PX_TARGET_EXTRACT_AFTER || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    px_same_complete_snapshot PX_TARGET_EXTRACT_BEFORE PX_TARGET_EXTRACT_AFTER || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    [ "$extract_status" -eq 0 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    PX_APP_ENT_PATH="$output_file"
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
 # === Parse keychain access groups from entitlements ===
 parse_keychain_groups() {
     local ent_file="$1"
-    local plutil_path
-    
-    plutil_path=$(find_plutil) || {
-        log_error "plutil not found"
-        return 1
-    }
-    
-    # Try to extract keychain-access-groups array
-    # plutil -extract keychain-access-groups xml1 -o - "$ent_file"
-    
-    # Use grep/sed as fallback for extracting groups
+    px_validate_workspace_file "$ent_file" 600 0 1 || return 1
+    px_stat_snapshot "$ent_file" PX_PARSE_GROUPS_BEFORE || return 1
     local groups=""
     local in_groups=0
-    
+    local line group
     while IFS= read -r line; do
-        if echo "$line" | grep -q "keychain-access-groups"; then
+        if printf '%s' "$line" | "$PX_GREP_PATH" -q "keychain-access-groups"; then
             in_groups=1
             continue
         fi
-        
         if [ "$in_groups" -eq 1 ]; then
-            if echo "$line" | grep -q "</array>"; then
+            if printf '%s' "$line" | "$PX_GREP_PATH" -q "</array>"; then
                 in_groups=0
                 continue
             fi
-            
-            if echo "$line" | grep -q "<string>"; then
-                local group
-                group=$(echo "$line" | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
+            if printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
+                group=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
                 if [ -n "$group" ]; then
-                    if [ -n "$groups" ]; then
-                        groups="$groups,$group"
-                    else
-                        groups="$group"
-                    fi
+                    if [ -n "$groups" ]; then groups="$groups,$group"; else groups="$group"; fi
                 fi
             fi
         fi
     done < "$ent_file"
-    
-    echo "$groups"
+    px_stat_snapshot "$ent_file" PX_PARSE_GROUPS_AFTER || return 1
+    px_same_complete_snapshot PX_PARSE_GROUPS_BEFORE PX_PARSE_GROUPS_AFTER || return 1
+    [ "${#groups}" -le 65536 ] || return 1
+    px_string_has_control_character "$groups" && return 1
+    printf '%s\n' "$groups"
 }
 
 # === Parse application-identifier from entitlements ===
 parse_app_identifier() {
     local ent_file="$1"
+    px_validate_workspace_file "$ent_file" 600 0 1 || return 1
+    px_stat_snapshot "$ent_file" PX_PARSE_IDENTIFIER_BEFORE || return 1
     local identifier=""
-    
-    # Look for application-identifier key and extract the string value
     local found_key=0
+    local line
     while IFS= read -r line; do
-        if echo "$line" | grep -q "application-identifier"; then
+        if printf '%s' "$line" | "$PX_GREP_PATH" -q "application-identifier"; then
             found_key=1
             continue
         fi
-        
-        if [ "$found_key" -eq 1 ]; then
-            if echo "$line" | grep -q "<string>"; then
-                identifier=$(echo "$line" | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
-                break
-            fi
+        if [ "$found_key" -eq 1 ] && printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
+            identifier=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
+            break
         fi
     done < "$ent_file"
-    
-    echo "$identifier"
+    px_stat_snapshot "$ent_file" PX_PARSE_IDENTIFIER_AFTER || return 1
+    px_same_complete_snapshot PX_PARSE_IDENTIFIER_BEFORE PX_PARSE_IDENTIFIER_AFTER || return 1
+    [ "${#identifier}" -le 4096 ] || return 1
+    px_string_has_control_character "$identifier" && return 1
+    printf '%s\n' "$identifier"
 }
 
 # === Ensure a group exists in a CSV list ===
@@ -336,7 +959,7 @@ ensure_group_in_csv() {
         return 0
     fi
     # Normalize: remove any surrounding whitespace
-    group="$(echo "$group" | sed 's/^ *//;s/ *$//')"
+    group="$(echo "$group" | "$PX_SED_PATH" 's/^ *//;s/ *$//')"
     if [ -z "$group" ]; then
         echo "$csv"
         return 0
@@ -352,423 +975,416 @@ ensure_group_in_csv() {
 }
 
 # === Generate entitlements plist for helper tool ===
-# For system apps, we copy the full entitlements and add our extras
-# For App Store apps, we generate minimal entitlements
+# For system apps, copy the accepted entitlement snapshot and retain existing policy.
 generate_helper_entitlements() {
     local keychain_groups="$1"
     local app_groups="$2"
     local output_file="$3"
     local app_identifier="$4"
-    local source_ent_file="$5"  # Optional: full entitlements file from target app
-    
-    log_verbose "Generating entitlements to: $output_file"
-    log_verbose "Keychain groups: $keychain_groups"
-    log_verbose "App identifier: $app_identifier"
-    log_verbose "Source entitlements: $source_ent_file"
-    
-    # Check if this is a system app (use full entitlements)
-    if [ -n "$source_ent_file" ] && [ -f "$source_ent_file" ]; then
-        log_verbose "Using full entitlements from target app (system app mode)"
-        
-        # Copy source entitlements and inject our security overrides
-        # We'll modify the plist to add no-sandbox and no-container
-        cp "$source_ent_file" "$output_file"
-        
-        # Add our security entitlements using plutil if available
-        local plutil_path
-        plutil_path=$(find_plutil) || true
-        
-        if [ -n "$plutil_path" ]; then
-            # Add security entitlements
-            "$plutil_path" -replace "com.apple.private.security.no-sandbox" -bool true "$output_file" 2>/dev/null || true
-            "$plutil_path" -replace "com.apple.private.security.no-container" -bool true "$output_file" 2>/dev/null || true
-            "$plutil_path" -replace "com.apple.private.security.container-required" -bool false "$output_file" 2>/dev/null || true
-            
-            log_verbose "Injected security entitlements via plutil"
-        else
-            log_warn "plutil not available, using source entitlements as-is"
-        fi
+    local source_ent_file="$5"
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_require_workspace_child_absent helper_ent.plist || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ "$output_file" = "$PX_WORKSPACE_CHILD_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ "${#keychain_groups}" -le 65536 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    [ "${#app_groups}" -le 65536 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    [ "${#app_identifier}" -le 4096 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_string_has_control_character "$keychain_groups" && return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_string_has_control_character "$app_groups" && return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_string_has_control_character "$app_identifier" && return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+
+    if [ -n "$source_ent_file" ]; then
+        [ "$source_ent_file" = "$PX_APP_ENT_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        px_validate_workspace_file "$source_ent_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        "$PX_CP_PATH" "$source_ent_file" "$output_file" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        px_same_complete_snapshot PX_SOURCE_ENT_BEFORE PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        "$PX_CMP_PATH" "$source_ent_file" "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+        px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+        "$PX_PLUTIL_PATH" -replace "com.apple.private.security.no-sandbox" -bool true "$output_file" 2>/dev/null || true
+        "$PX_PLUTIL_PATH" -replace "com.apple.private.security.no-container" -bool true "$output_file" 2>/dev/null || true
+        "$PX_PLUTIL_PATH" -replace "com.apple.private.security.container-required" -bool false "$output_file" 2>/dev/null || true
     else
-        log_verbose "Generating custom entitlements (App Store app mode)"
-        
-        # Use printf to avoid heredoc CRLF issues
         {
             printf '<?xml version="1.0" encoding="UTF-8"?>\n'
             printf '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
             printf '<plist version="1.0">\n'
             printf '<dict>\n'
-            
-            # Platform application - required for system-level access
             printf '    <key>platform-application</key>\n'
             printf '    <true/>\n'
-            
-            # Application identifier - critical for keychain access matching
             if [ -n "$app_identifier" ]; then
                 printf '    <key>application-identifier</key>\n'
                 printf '    <string>%s</string>\n' "$app_identifier"
             fi
-            
-            # Security entitlements
             printf '    <key>com.apple.private.security.no-sandbox</key>\n'
             printf '    <true/>\n'
             printf '    <key>com.apple.private.security.no-container</key>\n'
             printf '    <true/>\n'
             printf '    <key>com.apple.private.security.container-required</key>\n'
             printf '    <false/>\n'
-            
-            # Keychain specific entitlements
             printf '    <key>com.apple.keystore.access-keychain-keys</key>\n'
             printf '    <true/>\n'
             printf '    <key>com.apple.keystore.device</key>\n'
             printf '    <true/>\n'
-            
-            # Add keychain-access-groups
             if [ -n "$keychain_groups" ]; then
                 printf '    <key>keychain-access-groups</key>\n'
                 printf '    <array>\n'
-                
                 IFS=',' read -ra GROUPS <<< "$keychain_groups"
+                local group
                 for group in "${GROUPS[@]}"; do
                     printf '        <string>%s</string>\n' "$group"
                 done
-                
                 printf '    </array>\n'
             fi
-            
-            # Add application-groups if present
             if [ -n "$app_groups" ]; then
                 printf '    <key>com.apple.security.application-groups</key>\n'
                 printf '    <array>\n'
-                
                 IFS=',' read -ra GROUPS <<< "$app_groups"
+                local group
                 for group in "${GROUPS[@]}"; do
                     printf '        <string>%s</string>\n' "$group"
                 done
-                
                 printf '    </array>\n'
             fi
-            
             printf '</dict>\n'
             printf '</plist>\n'
-        } > "$output_file"
+        } > "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
-    
-    # Verify file was created
-    if [ ! -f "$output_file" ]; then
-        log_error "Failed to create entitlements file: $output_file"
-        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    fi
-    
-    log_verbose "Entitlements file created successfully"
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ -f "$output_file" ] && [ ! -L "$output_file" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    PX_HELPER_ENT_PATH="$output_file"
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
-# === Parse application groups from entitlements ===
+# === Parse application groups from the accepted entitlement snapshot ===
 parse_app_groups() {
     local ent_file="$1"
+    px_validate_workspace_file "$ent_file" 600 0 1 || return 1
+    px_stat_snapshot "$ent_file" PX_PARSE_APP_GROUPS_BEFORE || return 1
     local groups=""
     local in_groups=0
-    
+    local line group
     while IFS= read -r line; do
-        if echo "$line" | grep -q "com.apple.security.application-groups"; then
+        if printf '%s' "$line" | "$PX_GREP_PATH" -q "com.apple.security.application-groups"; then
             in_groups=1
             continue
         fi
-        
         if [ "$in_groups" -eq 1 ]; then
-            if echo "$line" | grep -q "</array>"; then
+            if printf '%s' "$line" | "$PX_GREP_PATH" -q "</array>"; then
                 in_groups=0
                 continue
             fi
-            
-            if echo "$line" | grep -q "<string>"; then
-                local group
-                group=$(echo "$line" | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
+            if printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
+                group=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
                 if [ -n "$group" ]; then
-                    if [ -n "$groups" ]; then
-                        groups="$groups,$group"
-                    else
-                        groups="$group"
-                    fi
+                    if [ -n "$groups" ]; then groups="$groups,$group"; else groups="$group"; fi
                 fi
             fi
         fi
     done < "$ent_file"
-    
-    echo "$groups"
+    px_stat_snapshot "$ent_file" PX_PARSE_APP_GROUPS_AFTER || return 1
+    px_same_complete_snapshot PX_PARSE_APP_GROUPS_BEFORE PX_PARSE_APP_GROUPS_AFTER || return 1
+    [ "${#groups}" -le 65536 ] || return 1
+    px_string_has_control_character "$groups" && return 1
+    printf '%s\n' "$groups"
 }
 
-# === Resign helper tool with new entitlements ===
-# Usage: resign_helper <entitlements_file> <target_binary>
-resign_helper() {
-    local ent_file="$1"
-    local binary_path="$2"
-    local ldid_path
-    
-    ldid_path=$(find_ldid) || {
-        log_error "ldid not found"
-        return "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
-    }
-    
-    # Check if binary exists
-    if [ ! -f "$binary_path" ]; then
-        log_error "Binary not found at: $binary_path"
-        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    fi
-    
-    # Check if entitlements file exists
-    if [ ! -f "$ent_file" ]; then
-        log_error "Entitlements file not found: $ent_file"
-        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    fi
-    
-    log_verbose "Resigning binary: $binary_path"
-    log_verbose "With entitlements: $ent_file"
-    
-    # Run ldid and capture any errors
-    local ldid_output
-    ldid_output=$("$ldid_path" -S"$ent_file" "$binary_path" 2>&1)
-    local exit_code=$?
-    
-    if [ $exit_code -ne 0 ]; then
-        log_error "ldid failed with exit code $exit_code"
-        if [ -n "$ldid_output" ]; then
-            log_error "ldid output: $ldid_output"
-        fi
-        return "$PX_KEYCHAIN_EXIT_SIGNING_FAILURE"
-    fi
-    
-    # Verify signing worked
-    if [ ! -x "$binary_path" ]; then
-        chmod +x "$binary_path"
-    fi
-    
-    log_verbose "Binary resigned successfully"
+px_prepare_working_helper() {
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_require_workspace_child_absent backup_helper || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    local destination="$PX_WORKSPACE_CHILD_PATH"
+    px_stat_snapshot "$PX_INSTALLED_HELPER_PATH" PX_HELPER_SOURCE_BEFORE || return "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
+    px_same_complete_snapshot PX_INSTALLED_HELPER PX_HELPER_SOURCE_BEFORE || return "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
+    "$PX_CP_PATH" "$PX_INSTALLED_HELPER_PATH" "$destination" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$PX_INSTALLED_HELPER_PATH" PX_HELPER_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
+    px_same_complete_snapshot PX_HELPER_SOURCE_BEFORE PX_HELPER_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
+    "$PX_CMP_PATH" "$PX_INSTALLED_HELPER_PATH" "$destination" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    "$PX_CHMOD_PATH" 700 "$destination" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$destination" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    PX_WORKING_HELPER_PATH="$destination"
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
+# === Resign the private working helper only ===
+resign_helper() {
+    local ent_file="$1"
+    local binary_path="$2"
+    [ "$ent_file" = "$PX_HELPER_ENT_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ "$binary_path" = "$PX_WORKING_HELPER_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$ent_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$binary_path" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$ent_file" PX_SIGN_ENT_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$binary_path" PX_SIGN_HELPER_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    "$PX_LDID_PATH" -S"$ent_file" "$binary_path" >/dev/null 2>&1
+    local sign_status=$?
+    [ "$sign_status" -eq 0 ] || return "$PX_KEYCHAIN_EXIT_SIGNING_FAILURE"
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$ent_file" PX_SIGN_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_same_complete_snapshot PX_SIGN_ENT_BEFORE PX_SIGN_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ -f "$binary_path" ] && [ ! -L "$binary_path" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    "$PX_CHMOD_PATH" 700 "$binary_path" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$binary_path" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
+}
+
+px_prepare_restore_snapshot() {
+    local source_path="$1"
+    px_canonicalize_existing_file "$source_path" || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    local canonical_source="$PX_CANONICAL_PATH"
+    local canonical_parent="$PX_CANONICAL_PARENT_PATH"
+    px_stat_snapshot "$canonical_source" PX_RESTORE_SOURCE_BEFORE || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    px_stat_snapshot "$canonical_parent" PX_RESTORE_PARENT_BEFORE || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    px_require_workspace_child_absent restore_input.plist || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    local snapshot="$PX_WORKSPACE_CHILD_PATH"
+    "$PX_CP_PATH" "$canonical_source" "$snapshot" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$canonical_source" PX_RESTORE_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    px_stat_snapshot "$canonical_parent" PX_RESTORE_PARENT_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    px_same_complete_snapshot PX_RESTORE_SOURCE_BEFORE PX_RESTORE_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    px_same_identity PX_RESTORE_PARENT_BEFORE PX_RESTORE_PARENT_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    "$PX_CMP_PATH" "$canonical_source" "$snapshot" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    "$PX_CHMOD_PATH" 600 "$snapshot" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$snapshot" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    PX_RESTORE_INPUT_PATH="$snapshot"
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
+}
+
+px_prepare_backup_output() {
+    local output_path="$1"
+    px_canonicalize_output_path "$output_path" || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
+    PX_BACKUP_OUTPUT_PATH="$PX_CANONICAL_OUTPUT_PATH"
+    PX_BACKUP_OUTPUT_PARENT="$PX_CANONICAL_OUTPUT_PARENT"
+    PX_BACKUP_PARENT_DEVICE="$PX_OUTPUT_PARENT_INITIAL_DEVICE"
+    PX_BACKUP_PARENT_INODE="$PX_OUTPUT_PARENT_INITIAL_INODE"
+    PX_BACKUP_PARENT_UID="$PX_OUTPUT_PARENT_INITIAL_UID"
+    PX_BACKUP_PARENT_GID="$PX_OUTPUT_PARENT_INITIAL_GID"
+    PX_BACKUP_PARENT_MODE="$PX_OUTPUT_PARENT_INITIAL_MODE"
+    PX_BACKUP_PARENT_LINKS="$PX_OUTPUT_PARENT_INITIAL_LINKS"
+    if [ "$PX_BACKUP_OUTPUT_EXISTED" -eq 1 ]; then
+        PX_BACKUP_FILE_DEVICE="$PX_OUTPUT_FILE_INITIAL_DEVICE"
+        PX_BACKUP_FILE_INODE="$PX_OUTPUT_FILE_INITIAL_INODE"
+        PX_BACKUP_FILE_UID="$PX_OUTPUT_FILE_INITIAL_UID"
+        PX_BACKUP_FILE_GID="$PX_OUTPUT_FILE_INITIAL_GID"
+        PX_BACKUP_FILE_MODE="$PX_OUTPUT_FILE_INITIAL_MODE"
+        PX_BACKUP_FILE_SIZE="$PX_OUTPUT_FILE_INITIAL_SIZE"
+        PX_BACKUP_FILE_LINKS="$PX_OUTPUT_FILE_INITIAL_LINKS"
+        PX_BACKUP_FILE_MTIME="$PX_OUTPUT_FILE_INITIAL_MTIME"
+        PX_BACKUP_FILE_CTIME="$PX_OUTPUT_FILE_INITIAL_CTIME"
+    fi
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
+}
+
+px_backup_parent_is_unchanged() {
+    [ -d "$PX_BACKUP_OUTPUT_PARENT" ] || return 1
+    [ -w "$PX_BACKUP_OUTPUT_PARENT" ] || return 1
+    px_stat_snapshot "$PX_BACKUP_OUTPUT_PARENT" PX_BACKUP_PARENT_LIVE || return 1
+    [ "$PX_BACKUP_PARENT_LIVE_DEVICE" = "$PX_BACKUP_PARENT_DEVICE" ] || return 1
+    [ "$PX_BACKUP_PARENT_LIVE_INODE" = "$PX_BACKUP_PARENT_INODE" ] || return 1
+    [ "$PX_BACKUP_PARENT_LIVE_UID" = "$PX_BACKUP_PARENT_UID" ] || return 1
+    [ "$PX_BACKUP_PARENT_LIVE_GID" = "$PX_BACKUP_PARENT_GID" ] || return 1
+    [ "$PX_BACKUP_PARENT_LIVE_MODE" = "$PX_BACKUP_PARENT_MODE" ] || return 1
+    [ "$PX_BACKUP_PARENT_LIVE_LINKS" = "$PX_BACKUP_PARENT_LINKS" ] || return 1
+    return 0
+}
+
+px_revalidate_backup_output_before_execution() {
+    px_backup_parent_is_unchanged || return 1
+    [ ! -L "$PX_BACKUP_OUTPUT_PATH" ] || return 1
+    if [ "$PX_BACKUP_OUTPUT_EXISTED" -eq 1 ]; then
+        [ -f "$PX_BACKUP_OUTPUT_PATH" ] || return 1
+        px_stat_snapshot "$PX_BACKUP_OUTPUT_PATH" PX_BACKUP_FILE_LIVE || return 1
+        [ "$PX_BACKUP_FILE_LIVE_DEVICE" = "$PX_BACKUP_FILE_DEVICE" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_INODE" = "$PX_BACKUP_FILE_INODE" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_UID" = "$PX_BACKUP_FILE_UID" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_GID" = "$PX_BACKUP_FILE_GID" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_MODE" = "$PX_BACKUP_FILE_MODE" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_SIZE" = "$PX_BACKUP_FILE_SIZE" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_LINKS" = "$PX_BACKUP_FILE_LINKS" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_MTIME" = "$PX_BACKUP_FILE_MTIME" ] || return 1
+        [ "$PX_BACKUP_FILE_LIVE_CTIME" = "$PX_BACKUP_FILE_CTIME" ] || return 1
+    else
+        [ ! -e "$PX_BACKUP_OUTPUT_PATH" ] || return 1
+    fi
+    return 0
+}
+
+px_validate_backup_output_after_execution() {
+    local raw_status="$1"
+    px_backup_parent_is_unchanged || return 1
+    [ ! -L "$PX_BACKUP_OUTPUT_PATH" ] || return 1
+    if [ -e "$PX_BACKUP_OUTPUT_PATH" ]; then
+        [ -f "$PX_BACKUP_OUTPUT_PATH" ] || return 1
+        px_stat_snapshot "$PX_BACKUP_OUTPUT_PATH" PX_BACKUP_OUTPUT_AFTER || return 1
+        if [ "$raw_status" -eq "$PX_KEYCHAIN_EXIT_COMPLETED" ] ||
+           [ "$raw_status" -eq "$PX_KEYCHAIN_EXIT_PARTIAL" ]; then
+            [ "$PX_BACKUP_OUTPUT_AFTER_SIZE" -gt 0 ] || return 1
+        fi
+    elif [ "$raw_status" -eq "$PX_KEYCHAIN_EXIT_COMPLETED" ] ||
+         [ "$raw_status" -eq "$PX_KEYCHAIN_EXIT_PARTIAL" ]; then
+        return 1
+    fi
+    return 0
+}
+
+px_validate_helper_execution() {
+    px_validate_workspace_identity || return 1
+    px_validate_workspace_file "$PX_HELPER_ENT_PATH" 600 0 1 || return 1
+    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return 1
+    return 0
+}
+
 # === Main functions ===
+px_prepare_target_context() {
+    local bundle_id="$1"
+    find_app_executable "$bundle_id" || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    local ent_file="$PX_WORKSPACE_PATH/app_ent.xml"
+    extract_entitlements "$PX_TARGET_PATH" "$ent_file"
+    return $?
+}
+
+px_select_source_entitlement() {
+    local app_identifier="$1"
+    PX_SOURCE_ENT_FOR_SYSTEM=""
+    if [ "$PX_TARGET_IS_SYSTEM" -eq 1 ]; then
+        PX_SOURCE_ENT_FOR_SYSTEM="$PX_APP_ENT_PATH"
+    else
+        case "$app_identifier" in
+            com.apple.*) PX_SOURCE_ENT_FOR_SYSTEM="$PX_APP_ENT_PATH" ;;
+        esac
+    fi
+}
+
+px_finish_signed_helper() {
+    local keychain_groups="$1"
+    local app_groups="$2"
+    local app_identifier="$3"
+    local source_ent_file="$4"
+    local helper_ent="$PX_WORKSPACE_PATH/helper_ent.plist"
+    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_file"
+    local status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    px_prepare_working_helper
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    resign_helper "$PX_HELPER_ENT_PATH" "$PX_WORKING_HELPER_PATH"
+    return $?
+}
 
 do_backup() {
     local bundle_id="$1"
     local backup_file="$2"
     local override_groups="$3"
-    
-    log_info "Starting keychain backup for: $bundle_id"
-    
-    # Find app executable
-    log_info "Locating app executable..."
-    local app_binary
-    app_binary=$(find_app_executable "$bundle_id") || {
-        log_error "Could not find app with bundle ID: $bundle_id"
-        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
-    }
-    log_verbose "Found app: $app_binary"
-    
-    # Create temp directory
-    mkdir -p "$TEMP_DIR"
-    
-    # Extract entitlements
-    log_info "Extracting entitlements..."
-    local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file"
-    local entitlement_status=$?
-    if [ "$entitlement_status" -ne 0 ]; then
-        return "$entitlement_status"
-    fi
-    
-    # Parse keychain groups
-    log_info "Parsing keychain access groups..."
-    local keychain_groups
-    keychain_groups=$(parse_keychain_groups "$ent_file")
 
-    # If caller provided a subset, use it.
+    log_info "Starting keychain backup"
+    px_prepare_backup_output "$backup_file"
+    local path_status=$?
+    [ "$path_status" -eq 0 ] || return "$path_status"
+    px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    log_info "Locating target application..."
+    px_prepare_target_context "$bundle_id"
+    local context_status=$?
+    [ "$context_status" -eq 0 ] || return "$context_status"
+
+    local keychain_groups
+    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     if [ -n "$override_groups" ]; then
-        log_info "Using override keychain groups: $override_groups"
+        log_info "Using caller-selected keychain groups"
         keychain_groups="$override_groups"
     fi
-    
     if [ -z "$keychain_groups" ]; then
         log_error "No keychain-access-groups found in app entitlements"
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
-    log_info "Found keychain groups: $keychain_groups"
-    
-    # Parse app groups (optional)
-    local app_groups
-    app_groups=$(parse_app_groups "$ent_file")
-    
-    # Parse application-identifier (critical for keychain access)
-    local app_identifier
-    app_identifier=$(parse_app_identifier "$ent_file")
-    if [ -n "$app_identifier" ]; then
-        log_info "Found application-identifier: $app_identifier"
-    else
+
+    local app_groups app_identifier
+    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    if [ -z "$app_identifier" ]; then
         log_warn "No application-identifier found, using bundle ID"
         app_identifier="$bundle_id"
     fi
-
-    # Include the app's default keychain access group (application-identifier).
-    # Many apps store keychain items under this group even if it is not listed in keychain-access-groups.
     keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    log_info "Final keychain groups: $keychain_groups"
-    
-    # Detect if this is a system/Apple app that needs full entitlements
-    # Check: 1) In /Applications, OR 2) Bundle ID starts with com.apple.
-    local is_system_app=0
-    local source_ent_for_system=""
-    if echo "$app_binary" | grep -q "^/Applications/"; then
-        is_system_app=1
-        source_ent_for_system="$ent_file"
-        log_info "Detected system app (by path) - will use full entitlements"
-    elif echo "$app_identifier" | grep -q "^com\.apple\."; then
-        is_system_app=1
-        source_ent_for_system="$ent_file"
-        log_info "Detected Apple app (by identifier) - will use full entitlements"
-    fi
-    
-    # Generate helper entitlements
-    log_info "Generating helper entitlements..."
-    local helper_ent="$TEMP_DIR/helper_ent.plist"
-    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
-    local generation_status=$?
-    if [ "$generation_status" -ne 0 ]; then
-        log_error "Failed to generate helper entitlements"
-        return "$generation_status"
-    fi
-    
-    # Prepare working copy of helper tool
-    local working_helper="$TEMP_DIR/backup_helper"
-    if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
-        log_error "Failed to copy helper tool to temp: $working_helper"
-        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    fi
-    chmod 755 "$working_helper"
-    
-    # Resign helper
-    log_info "Resigning KeychainHelper..."
-    resign_helper "$helper_ent" "$working_helper"
-    local resign_status=$?
-    if [ "$resign_status" -ne 0 ]; then
-        log_error "Failed to resign helper tool"
-        return "$resign_status"
-    fi
-    
-    # Execute backup using the resigned copy
-    log_info "Executing backup..."
-    local helper_args=("--action" "backup" "--file" "$backup_file" "--groups" "$keychain_groups")
-    if [ "$VERBOSE" -eq 1 ]; then
-        helper_args+=("--verbose")
-    fi
-    "$working_helper" "${helper_args[@]}"
-    
+    px_select_source_entitlement "$app_identifier"
+
+    log_info "Preparing private signed helper..."
+    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    local helper_status=$?
+    [ "$helper_status" -eq 0 ] || return "$helper_status"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_revalidate_backup_output_before_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    local helper_args=("--action" "backup" "--file" "$PX_BACKUP_OUTPUT_PATH" "--groups" "$keychain_groups")
+    if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
+    "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_backup_output_after_execution "$raw_exit_code" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     local exit_code=$?
     if [ "$exit_code" -eq "$PX_KEYCHAIN_EXIT_COMPLETED" ]; then
-        log_info "Backup completed successfully: $backup_file"
+        log_info "Backup completed successfully"
     else
         log_error "Backup failed with exit code: $exit_code"
     fi
-    
     return "$exit_code"
 }
 
 do_restore() {
     local bundle_id="$1"
-    local backup_file="$2"
+    local restore_file="$2"
     local overwrite="$3"
     local override_groups="$4"
-    
-    log_info "Starting keychain restore for: $bundle_id"
-    
-    if [ ! -f "$backup_file" ]; then
-        log_error "Backup file not found: $backup_file"
-        return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
-    fi
-    
-    # Find app executable and resign with its entitlements
-    log_info "Locating app executable..."
-    local app_binary
-    app_binary=$(find_app_executable "$bundle_id") || {
-        log_error "Could not find app with bundle ID: $bundle_id"
-        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
-    }
-    
-    mkdir -p "$TEMP_DIR"
-    
-    log_info "Extracting entitlements..."
-    local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file"
-    local entitlement_status=$?
-    if [ "$entitlement_status" -ne 0 ]; then
-        return "$entitlement_status"
-    fi
-    
-    local keychain_groups
-    keychain_groups=$(parse_keychain_groups "$ent_file")
 
+    log_info "Starting keychain restore"
+    px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_prepare_restore_snapshot "$restore_file"
+    local snapshot_status=$?
+    [ "$snapshot_status" -eq 0 ] || return "$snapshot_status"
+
+    log_info "Locating target application..."
+    px_prepare_target_context "$bundle_id"
+    local context_status=$?
+    [ "$context_status" -eq 0 ] || return "$context_status"
+
+    local keychain_groups app_groups app_identifier
+    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     if [ -n "$override_groups" ]; then
-        log_info "Using override keychain groups: $override_groups"
+        log_info "Using caller-selected keychain groups"
         keychain_groups="$override_groups"
     fi
-    local app_groups
-    app_groups=$(parse_app_groups "$ent_file")
-    local app_identifier
-    app_identifier=$(parse_app_identifier "$ent_file")
-    [ -z "$app_identifier" ] && app_identifier="$bundle_id"
-
-    # Always include the default app keychain group.
+    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ -n "$app_identifier" ] || app_identifier="$bundle_id"
     keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    
-    # Detect system/Apple app
-    local source_ent_for_system=""
-    if echo "$app_binary" | grep -q "^/Applications/"; then
-        source_ent_for_system="$ent_file"
-    elif echo "$app_identifier" | grep -q "^com\.apple\."; then
-        source_ent_for_system="$ent_file"
-        log_info "Detected Apple app - will use full entitlements"
-    fi
-    
-    local helper_ent="$TEMP_DIR/helper_ent.plist"
-    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
-    local generation_status=$?
-    if [ "$generation_status" -ne 0 ]; then
-        return "$generation_status"
-    fi
-    
-    # Prepare working copy of helper tool
-    local working_helper="$TEMP_DIR/backup_helper"
-    if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
-        log_error "Failed to copy helper tool to temp: $working_helper"
-        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    fi
-    chmod 755 "$working_helper"
-    
-    log_info "Resigning KeychainHelper..."
-    resign_helper "$helper_ent" "$working_helper"
-    local resign_status=$?
-    if [ "$resign_status" -ne 0 ]; then
-        return "$resign_status"
-    fi
-    
-    # Execute restore using the resigned copy
-    log_info "Executing restore..."
-    local extra_args=""
-    if [ "$overwrite" = "--overwrite" ]; then
-        extra_args="--overwrite"
-    fi
-    
-    local helper_args=("--action" "restore" "--file" "$backup_file")
-    if [ -n "$extra_args" ]; then
-        helper_args+=("$extra_args")
-    fi
-    if [ "$VERBOSE" -eq 1 ]; then
-        helper_args+=("--verbose")
-    fi
-    "$working_helper" "${helper_args[@]}"
-    
+    px_select_source_entitlement "$app_identifier"
+
+    log_info "Preparing private signed helper..."
+    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    local helper_status=$?
+    [ "$helper_status" -eq 0 ] || return "$helper_status"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_RESTORE_INPUT_PATH" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    local helper_args=("--action" "restore" "--file" "$PX_RESTORE_INPUT_PATH")
+    if [ "$overwrite" = "--overwrite" ]; then helper_args+=("--overwrite"); fi
+    if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
+    "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_RESTORE_INPUT_PATH" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     local exit_code=$?
     if [ "$exit_code" -eq "$PX_KEYCHAIN_EXIT_COMPLETED" ]; then
@@ -776,92 +1392,48 @@ do_restore() {
     else
         log_error "Restore failed with exit code: $exit_code"
     fi
-    
     return "$exit_code"
 }
 
 do_wipe() {
     local bundle_id="$1"
     local override_groups="$2"
-    
-    log_info "Starting keychain wipe for: $bundle_id"
-    
-    # Find app and get entitlements
-    local app_binary
-    app_binary=$(find_app_executable "$bundle_id") || {
-        log_error "Could not find app with bundle ID: $bundle_id"
-        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
-    }
-    
-    mkdir -p "$TEMP_DIR"
-    
-    local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file"
-    local entitlement_status=$?
-    if [ "$entitlement_status" -ne 0 ]; then
-        return "$entitlement_status"
-    fi
-    
-    local keychain_groups
-    keychain_groups=$(parse_keychain_groups "$ent_file")
 
+    log_info "Starting keychain wipe"
+    px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_prepare_target_context "$bundle_id"
+    local context_status=$?
+    [ "$context_status" -eq 0 ] || return "$context_status"
+
+    local keychain_groups app_groups app_identifier
+    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     if [ -n "$override_groups" ]; then
-        log_info "Using override keychain groups: $override_groups"
+        log_info "Using caller-selected keychain groups"
         keychain_groups="$override_groups"
     fi
-    
     if [ -z "$keychain_groups" ]; then
         log_error "No keychain-access-groups found"
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     fi
-    
-    log_warn "This will DELETE all keychain items for: $keychain_groups"
-    
-    local app_groups
-    app_groups=$(parse_app_groups "$ent_file")
-    local app_identifier
-    app_identifier=$(parse_app_identifier "$ent_file")
-    [ -z "$app_identifier" ] && app_identifier="$bundle_id"
-
-    # Always include the default app keychain group.
+    log_warn "This will delete all Keychain items for the selected groups"
+    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ -n "$app_identifier" ] || app_identifier="$bundle_id"
     keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    
-    # Detect system/Apple app
-    local source_ent_for_system=""
-    if echo "$app_binary" | grep -q "^/Applications/"; then
-        source_ent_for_system="$ent_file"
-    elif echo "$app_identifier" | grep -q "^com\.apple\."; then
-        source_ent_for_system="$ent_file"
-    fi
-    
-    local helper_ent="$TEMP_DIR/helper_ent.plist"
-    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
-    local generation_status=$?
-    if [ "$generation_status" -ne 0 ]; then
-        return "$generation_status"
-    fi
-    
-    # Prepare working copy
-    local working_helper="$TEMP_DIR/backup_helper"
-    if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
-        log_error "Failed to copy helper"
-        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    fi
-    chmod 755 "$working_helper"
-    
-    resign_helper "$helper_ent" "$working_helper"
-    local resign_status=$?
-    if [ "$resign_status" -ne 0 ]; then
-        return "$resign_status"
-    fi
-    
+    px_select_source_entitlement "$app_identifier"
+
+    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    local helper_status=$?
+    [ "$helper_status" -eq 0 ] || return "$helper_status"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
     local helper_args=("--action" "wipe" "--groups" "$keychain_groups")
-    if [ "$VERBOSE" -eq 1 ]; then
-        helper_args+=("--verbose")
-    fi
-    "$working_helper" "${helper_args[@]}"
-    
+    if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
+    "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
@@ -869,87 +1441,44 @@ do_wipe() {
 do_list() {
     local bundle_id="$1"
     local override_groups="$2"
-    
-    log_info "Listing keychain items for: $bundle_id"
-    
-    local app_binary
-    app_binary=$(find_app_executable "$bundle_id") || {
-        log_error "Could not find app with bundle ID: $bundle_id"
-        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
-    }
-    
-    mkdir -p "$TEMP_DIR"
-    
-    local ent_file="$TEMP_DIR/app_ent.xml"
-    extract_entitlements "$app_binary" "$ent_file"
-    local entitlement_status=$?
-    if [ "$entitlement_status" -ne 0 ]; then
-        return "$entitlement_status"
-    fi
-    
-    local keychain_groups
-    keychain_groups=$(parse_keychain_groups "$ent_file")
 
+    log_info "Listing keychain items"
+    px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_prepare_target_context "$bundle_id"
+    local context_status=$?
+    [ "$context_status" -eq 0 ] || return "$context_status"
+
+    local keychain_groups app_groups app_identifier
+    keychain_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     if [ -n "$override_groups" ]; then
-        log_info "Using override keychain groups: $override_groups"
+        log_info "Using caller-selected keychain groups"
         keychain_groups="$override_groups"
     fi
-    
     if [ -z "$keychain_groups" ]; then
         log_info "No keychain-access-groups found in app"
         return "$PX_KEYCHAIN_EXIT_COMPLETED"
     fi
-    
-    local app_groups
-    app_groups=$(parse_app_groups "$ent_file")
-    local app_identifier
-    app_identifier=$(parse_app_identifier "$ent_file")
-    [ -z "$app_identifier" ] && app_identifier="$bundle_id"
-
-    # Always include the default app keychain group.
+    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ -n "$app_identifier" ] || app_identifier="$bundle_id"
     keychain_groups=$(ensure_group_in_csv "$keychain_groups" "$app_identifier")
-    
-    # Detect system/Apple app
-    local source_ent_for_system=""
-    if echo "$app_binary" | grep -q "^/Applications/"; then
-        source_ent_for_system="$ent_file"
-    elif echo "$app_identifier" | grep -q "^com\.apple\."; then
-        source_ent_for_system="$ent_file"
-    fi
-    
-    local helper_ent="$TEMP_DIR/helper_ent.plist"
-    generate_helper_entitlements "$keychain_groups" "$app_groups" "$helper_ent" "$app_identifier" "$source_ent_for_system"
-    local generation_status=$?
-    if [ "$generation_status" -ne 0 ]; then
-        return "$generation_status"
-    fi
-    
-    # Prepare working copy
-    local working_helper="$TEMP_DIR/backup_helper"
-    if ! cp "$HELPER_TOOL_PATH" "$working_helper"; then
-        log_error "Failed to copy helper"
-        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    fi
-    chmod 755 "$working_helper"
-    
-    resign_helper "$helper_ent" "$working_helper"
-    local resign_status=$?
-    if [ "$resign_status" -ne 0 ]; then
-        return "$resign_status"
-    fi
-    
+    px_select_source_entitlement "$app_identifier"
+
+    px_finish_signed_helper "$keychain_groups" "$app_groups" "$app_identifier" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    local helper_status=$?
+    [ "$helper_status" -eq 0 ] || return "$helper_status"
+    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
     local helper_args=("--action" "list" "--groups" "$keychain_groups")
-    if [ "$VERBOSE" -eq 1 ]; then
-        helper_args+=("--verbose")
-    fi
-    "$working_helper" "${helper_args[@]}"
-    
+    if [ "$VERBOSE" -eq 1 ]; then helper_args+=("--verbose"); fi
+    "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$PX_WORKING_HELPER_PATH" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
-
-# === Entry Point ===
 
 print_usage() {
     echo "Usage: $0 <action> <bundleID> [options]"
@@ -969,11 +1498,18 @@ print_usage() {
     echo "  $0 restore com.game.app /var/tmp/game_keychain.plist --overwrite"
 }
 
-# Check helper tool exists
-if [ ! -x "$HELPER_TOOL_PATH" ]; then
-    log_error "KeychainHelper not found at: $HELPER_TOOL_PATH"
-    log_error "Please ensure the WeaponX package is properly installed"
+# Initialize the trusted metadata and dependency boundary before external work.
+if ! px_initialize_metadata_boundary; then
+    log_error "Trusted filesystem metadata utility is unavailable"
+    exit "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
+fi
+if ! px_validate_installed_helper; then
+    log_error "Installed Keychain helper failed safety validation"
     exit "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
+fi
+if ! px_resolve_trusted_dependencies; then
+    log_error "A required trusted utility is unavailable"
+    exit "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
 fi
 
 # Parse global options
@@ -1002,6 +1538,11 @@ fi
 ACTION="$1"
 BUNDLE_ID="$2"
 shift 2
+
+if ! px_validate_bundle_id "$BUNDLE_ID"; then
+    log_error "Invalid bundle identifier"
+    exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+fi
 
 case "$ACTION" in
     backup)
