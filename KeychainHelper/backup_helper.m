@@ -19,6 +19,7 @@
 
 #import <Foundation/Foundation.h>
 #import "KeychainBackupHelper.h"
+#import "PXKeychainHelperResult.h"
 
 typedef NS_ENUM(NSInteger, PXHelperAction) {
     PXHelperActionUnknown = 0,
@@ -120,6 +121,83 @@ static NSString *PXSafeString(id v) {
     return [[v description] ?: @"" copy];
 }
 
+static PXKeychainHelperOperation PXStructuredOperationForAction(PXHelperAction action) {
+    switch (action) {
+        case PXHelperActionBackup:
+            return PXKeychainHelperOperationBackup;
+        case PXHelperActionRestore:
+            return PXKeychainHelperOperationRestore;
+        case PXHelperActionWipe:
+            return PXKeychainHelperOperationWipe;
+        case PXHelperActionList:
+            return PXKeychainHelperOperationList;
+        case PXHelperActionUnknown:
+            return PXKeychainHelperOperationUnknown;
+    }
+    return PXKeychainHelperOperationUnknown;
+}
+
+static PXKeychainHelperCompletion PXStructuredCompletionForResult(PXKeychainBackupResult *result) {
+    if (!result) {
+        return PXKeychainHelperCompletionFailed;
+    }
+    if (result.itemsFailed > 0 || result.warnings.count > 0 || result.errors.count > 0) {
+        return PXKeychainHelperCompletionPartial;
+    }
+    return PXKeychainHelperCompletionCompleted;
+}
+
+static NSError *PXStructuredSyntheticError(PXKeychainBackupErrorCode code) {
+    return [NSError errorWithDomain:PXKeychainBackupErrorDomain code:code userInfo:nil];
+}
+
+static PXKeychainHelperResult *PXCreateStructuredResult(PXKeychainHelperOperation operation,
+                                                        PXKeychainHelperCompletion completion,
+                                                        PXKeychainBackupResult *result,
+                                                        NSUInteger listCount,
+                                                        NSError *fatalError) {
+    NSUInteger attemptedCount = 0;
+    NSUInteger succeededCount = 0;
+    NSUInteger failedCount = 0;
+    NSUInteger warningCount = 0;
+    NSUInteger errorCount = 0;
+    if (operation == PXKeychainHelperOperationList &&
+        completion == PXKeychainHelperCompletionCompleted) {
+        attemptedCount = listCount;
+        succeededCount = listCount;
+    } else if (result) {
+        attemptedCount = result.itemsProcessed;
+        succeededCount = result.itemsSucceeded;
+        failedCount = result.itemsFailed;
+        warningCount = result.warnings.count;
+        errorCount = result.errors.count;
+    }
+
+    NSError *constructionError = nil;
+    PXKeychainHelperResult *structuredResult =
+        [PXKeychainHelperResult resultWithOperation:operation
+                                         completion:completion
+                                     attemptedCount:attemptedCount
+                                     succeededCount:succeededCount
+                                        failedCount:failedCount
+                                       skippedCount:0
+                                       warningCount:warningCount
+                                         errorCount:errorCount
+                                         fatalError:fatalError
+                                              error:&constructionError];
+    (void)constructionError;
+    return structuredResult;
+}
+
+static void PXEmitStructuredResult(PXKeychainHelperResult *result) {
+    NSString *line = result.machineReadableLine;
+    if (!line.length) {
+        line = @"PXKEYCHAIN_HELPER_RESULT_V1=INVALID";
+    }
+    fprintf(stdout, "%s\n", [line UTF8String] ?: "");
+    fflush(stdout);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         // Parse arguments.
@@ -149,6 +227,11 @@ int main(int argc, const char *argv[]) {
         if (!actionStr.length) {
             logError(@"Missing required --action argument");
             printUsage(argv[0]);
+            PXEmitStructuredResult(PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
+                                                            PXKeychainHelperCompletionFailed,
+                                                            nil,
+                                                            0,
+                                                            PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
             return 1;
         }
         
@@ -156,8 +239,14 @@ int main(int argc, const char *argv[]) {
         if (action == PXHelperActionUnknown) {
             logError(@"Unknown action: %@", actionStr);
             printUsage(argv[0]);
+            PXEmitStructuredResult(PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
+                                                            PXKeychainHelperCompletionFailed,
+                                                            nil,
+                                                            0,
+                                                            PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
             return 1;
         }
+        PXKeychainHelperOperation structuredOperation = PXStructuredOperationForAction(action);
         
         NSString *filePath = args[@"file"];
         NSArray<NSString *> *groups = parseGroups(args[@"groups"]);
@@ -174,10 +263,20 @@ int main(int argc, const char *argv[]) {
             case PXHelperActionBackup: {
                 if (!filePath.length) {
                     logError(@"--file is required for backup");
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
                     return 1;
                 }
                 if (!groups.count) {
                     logError(@"--groups is required for backup");
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)));
                     return 1;
                 }
                 
@@ -189,6 +288,11 @@ int main(int argc, const char *argv[]) {
                 
                 if (!result) {
                     logError(@"Backup failed: %@", error.localizedDescription);
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown)));
                     return 2;
                 }
                 
@@ -201,12 +305,22 @@ int main(int argc, const char *argv[]) {
                     NSString *warning = PXSafeString(warningObj);
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
-                break;
+                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                PXStructuredCompletionForResult(result),
+                                                                result,
+                                                                0,
+                                                                nil));
+                return 0;
             }
                 
             case PXHelperActionRestore: {
                 if (!filePath.length) {
                     logError(@"--file is required for restore");
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
                     return 1;
                 }
                 
@@ -218,6 +332,11 @@ int main(int argc, const char *argv[]) {
                 
                 if (!result) {
                     logError(@"Restore failed: %@", error.localizedDescription);
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown)));
                     return 2;
                 }
                 
@@ -234,12 +353,22 @@ int main(int argc, const char *argv[]) {
                     NSString *err = PXSafeString(errObj);
                     fprintf(stderr, "[ERR] %s\n", [err UTF8String] ?: "");
                 }
-                break;
+                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                PXStructuredCompletionForResult(result),
+                                                                result,
+                                                                0,
+                                                                nil));
+                return 0;
             }
                 
             case PXHelperActionWipe: {
                 if (!groups.count) {
                     logError(@"--groups is required for wipe");
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)));
                     return 1;
                 }
                 
@@ -261,6 +390,11 @@ int main(int argc, const char *argv[]) {
 
                 if (!result) {
                     logError(@"Wipe failed: %@", error.localizedDescription);
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    error ?: PXStructuredSyntheticError(PXKeychainBackupErrorUnknown)));
                     return 2;
                 }
 
@@ -269,17 +403,32 @@ int main(int argc, const char *argv[]) {
                     fprintf(stderr, "[WARN] %s\n", [warning UTF8String] ?: "");
                 }
                 if (result.itemsFailed > 0 || result.warnings.count > 0) {
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXStructuredCompletionForResult(result),
+                                                                    result,
+                                                                    0,
+                                                                    nil));
                     return 2;
                 }
 
                 logSuccess(@"Wipe complete: %lu items deleted",
                           (unsigned long)result.itemsSucceeded);
-                break;
+                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                PXStructuredCompletionForResult(result),
+                                                                result,
+                                                                0,
+                                                                nil));
+                return 0;
             }
                 
             case PXHelperActionList: {
                 if (!groups.count) {
                     logError(@"--groups is required for list");
+                    PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                    PXKeychainHelperCompletionFailed,
+                                                                    nil,
+                                                                    0,
+                                                                    PXStructuredSyntheticError(PXKeychainBackupErrorNoAccessGroups)));
                     return 1;
                 }
 
@@ -311,13 +460,21 @@ int main(int argc, const char *argv[]) {
                            [svc UTF8String] ?: "",
                            [acc UTF8String] ?: "");
                 }
-                break;
+                PXEmitStructuredResult(PXCreateStructuredResult(structuredOperation,
+                                                                PXKeychainHelperCompletionCompleted,
+                                                                nil,
+                                                                items.count,
+                                                                nil));
+                return 0;
             }
                 
             default:
-                break;
+                PXEmitStructuredResult(PXCreateStructuredResult(PXKeychainHelperOperationUnknown,
+                                                                PXKeychainHelperCompletionFailed,
+                                                                nil,
+                                                                0,
+                                                                PXStructuredSyntheticError(PXKeychainBackupErrorInvalidArguments)));
+                return 0;
         }
-        
-        return 0;
     }
 }
