@@ -3,6 +3,7 @@
 #import "AppDataBackupManager.h"
 #import "BackupKeychainGroupsViewController.h"
 #import <objc/message.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
@@ -86,6 +87,318 @@ static NSString *PXBackupAlertTitleForOutcome(PXBackupAlertOutcome outcome) {
 @property (nonatomic, copy) NSString *pendingAlertMessage;
 @property (nonatomic, copy) NSString *pendingCopyPath;
 @end
+
+typedef NS_OPTIONS(NSUInteger, PXAdvancedDataScope) {
+    PXAdvancedDataScopeAppGroups = 1 << 0,
+    PXAdvancedDataScopePreferences = 1 << 1,
+    PXAdvancedDataScopeKeychain = 1 << 2,
+    PXAdvancedDataScopeProfileAppData = 1 << 3,
+    PXAdvancedDataScopeGlobalSafari = 1 << 4,
+    PXAdvancedDataScopeSystemGlobal = 1 << 5,
+    PXAdvancedDataScopeSharedSystemDatabases = 1 << 6,
+};
+
+static const PXAdvancedDataScope PXAdvancedDataScopeAll =
+    PXAdvancedDataScopeAppGroups |
+    PXAdvancedDataScopePreferences |
+    PXAdvancedDataScopeKeychain |
+    PXAdvancedDataScopeProfileAppData |
+    PXAdvancedDataScopeGlobalSafari |
+    PXAdvancedDataScopeSystemGlobal |
+    PXAdvancedDataScopeSharedSystemDatabases;
+
+static const PXAdvancedDataScope PXAdvancedDataScopePresentationOrder[] = {
+    PXAdvancedDataScopeProfileAppData,
+    PXAdvancedDataScopeGlobalSafari,
+    PXAdvancedDataScopeAppGroups,
+    PXAdvancedDataScopeSystemGlobal,
+    PXAdvancedDataScopeSharedSystemDatabases,
+    PXAdvancedDataScopePreferences,
+    PXAdvancedDataScopeKeychain,
+};
+
+static NSString *PXAdvancedDataScopeDisplayName(PXAdvancedDataScope scope) {
+    switch (scope) {
+        case PXAdvancedDataScopeProfileAppData:
+            return @"Profile App Data";
+        case PXAdvancedDataScopeGlobalSafari:
+            return @"Global Safari";
+        case PXAdvancedDataScopeAppGroups:
+            return @"App Groups";
+        case PXAdvancedDataScopeSystemGlobal:
+            return @"System Global";
+        case PXAdvancedDataScopeSharedSystemDatabases:
+            return @"Shared System Databases";
+        case PXAdvancedDataScopePreferences:
+            return @"Global Preferences";
+        case PXAdvancedDataScopeKeychain:
+            return @"Keychain";
+        default:
+            return nil;
+    }
+}
+
+static NSString *PXAdvancedDataScopeList(PXAdvancedDataScope scopes) {
+    if (((NSUInteger)scopes & ~(NSUInteger)PXAdvancedDataScopeAll) != 0) {
+        return nil;
+    }
+    if (scopes == 0) {
+        return @"";
+    }
+
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithCapacity:7];
+    NSUInteger scopeCount =
+        sizeof(PXAdvancedDataScopePresentationOrder) /
+        sizeof(PXAdvancedDataScopePresentationOrder[0]);
+    for (NSUInteger index = 0; index < scopeCount; index++) {
+        PXAdvancedDataScope scope = PXAdvancedDataScopePresentationOrder[index];
+        if ((scopes & scope) == 0) {
+            continue;
+        }
+        NSString *name = PXAdvancedDataScopeDisplayName(scope);
+        if (name.length == 0) {
+            return nil;
+        }
+        [lines addObject:[NSString stringWithFormat:@"- %@", name]];
+    }
+    return [lines componentsJoinedByString:@"\n"];
+}
+
+static PXBackupOptions PXKnownDirectBackupOptions(void) {
+    return PXBackupOptionIncludeAppGroups |
+           PXBackupOptionIncludePreferences |
+           PXBackupOptionIncludeKeychain;
+}
+
+static BOOL PXBackupOptionsAreKnown(PXBackupOptions options) {
+    return ((NSUInteger)options & ~(NSUInteger)PXKnownDirectBackupOptions()) == 0;
+}
+
+static PXAdvancedDataScope PXAdvancedDataScopesForBackupOptions(PXBackupOptions options) {
+    if (!PXBackupOptionsAreKnown(options)) {
+        return (PXAdvancedDataScope)(PXAdvancedDataScopeAll + 1);
+    }
+
+    PXAdvancedDataScope scopes = 0;
+    if ((options & PXBackupOptionIncludeAppGroups) != 0) {
+        scopes |= PXAdvancedDataScopeAppGroups;
+    }
+    if ((options & PXBackupOptionIncludePreferences) != 0) {
+        scopes |= PXAdvancedDataScopePreferences;
+    }
+    if ((options & PXBackupOptionIncludeKeychain) != 0) {
+        scopes |= PXAdvancedDataScopeKeychain;
+    }
+    return scopes;
+}
+
+static BOOL PXReadExactManifestBoolean(id value, BOOL *resultOut) {
+    if (resultOut == NULL || value == nil ||
+        CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) {
+        return NO;
+    }
+    *resultOut = [(NSNumber *)value boolValue];
+    return YES;
+}
+
+static BOOL PXReadSupportedManifestVersion(id value, NSUInteger *versionOut) {
+    if (versionOut == NULL || ![value isKindOfClass:[NSNumber class]] ||
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) {
+        return NO;
+    }
+    double raw = [(NSNumber *)value doubleValue];
+    NSUInteger version = [(NSNumber *)value unsignedIntegerValue];
+    if (raw != (double)version || version < 2 || version > 5) {
+        return NO;
+    }
+    *versionOut = version;
+    return YES;
+}
+
+static BOOL PXReadIncludedManifestSection(id value, BOOL *includedOut) {
+    if (![value isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    return PXReadExactManifestBoolean([(NSDictionary *)value objectForKey:@"included"],
+                                      includedOut);
+}
+
+static BOOL PXAdvancedDataScopesForValidatedManifest(NSDictionary *manifest,
+                                                     NSString *expectedBundleIdentifier,
+                                                     PXAdvancedDataScope *scopesOut) {
+    if (scopesOut == NULL ||
+        ![manifest isKindOfClass:[NSDictionary class]] ||
+        ![expectedBundleIdentifier isKindOfClass:[NSString class]] ||
+        expectedBundleIdentifier.length == 0) {
+        return NO;
+    }
+
+    NSUInteger manifestVersion = 0;
+    if (!PXReadSupportedManifestVersion(manifest[@"manifestVersion"], &manifestVersion)) {
+        return NO;
+    }
+    (void)manifestVersion;
+
+    id bundleIdentifierValue = manifest[@"bundleID"];
+    if (![bundleIdentifierValue isKindOfClass:[NSString class]] ||
+        [(NSString *)bundleIdentifierValue length] == 0 ||
+        ![(NSString *)bundleIdentifierValue isEqualToString:expectedBundleIdentifier]) {
+        return NO;
+    }
+
+    id appGroups = manifest[@"appGroups"];
+    if (![appGroups isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+
+    BOOL profileIncluded = NO;
+    BOOL safariIncluded = NO;
+    BOOL preferencesIncluded = NO;
+    BOOL keychainIncluded = NO;
+    if (!PXReadIncludedManifestSection(manifest[@"profileAppData"], &profileIncluded) ||
+        !PXReadIncludedManifestSection(manifest[@"globalSafari"], &safariIncluded) ||
+        !PXReadIncludedManifestSection(manifest[@"preferences"], &preferencesIncluded) ||
+        !PXReadIncludedManifestSection(manifest[@"keychain"], &keychainIncluded)) {
+        return NO;
+    }
+
+    BOOL systemIncluded = NO;
+    id systemSection = manifest[@"systemGlobalLibrary"];
+    if (systemSection != nil) {
+        if (![systemSection isKindOfClass:[NSDictionary class]] ||
+            !PXReadExactManifestBoolean([(NSDictionary *)systemSection objectForKey:@"included"],
+                                        &systemIncluded)) {
+            return NO;
+        }
+        id items = [(NSDictionary *)systemSection objectForKey:@"items"];
+        if (![items isKindOfClass:[NSArray class]] ||
+            systemIncluded != ([(NSArray *)items count] > 0)) {
+            return NO;
+        }
+    }
+
+    BOOL sharedIncluded = NO;
+    id sharedSection = manifest[@"sharedSystemDB"];
+    if (sharedSection != nil) {
+        if (![sharedSection isKindOfClass:[NSDictionary class]] ||
+            !PXReadExactManifestBoolean([(NSDictionary *)sharedSection objectForKey:@"included"],
+                                        &sharedIncluded)) {
+            return NO;
+        }
+        id files = [(NSDictionary *)sharedSection objectForKey:@"files"];
+        if (![files isKindOfClass:[NSArray class]] ||
+            sharedIncluded != ([(NSArray *)files count] > 0)) {
+            return NO;
+        }
+    }
+
+    PXAdvancedDataScope scopes = 0;
+    if (profileIncluded) scopes |= PXAdvancedDataScopeProfileAppData;
+    if (safariIncluded) scopes |= PXAdvancedDataScopeGlobalSafari;
+    if ([(NSArray *)appGroups count] > 0) scopes |= PXAdvancedDataScopeAppGroups;
+    if (systemIncluded) scopes |= PXAdvancedDataScopeSystemGlobal;
+    if (sharedIncluded) scopes |= PXAdvancedDataScopeSharedSystemDatabases;
+    if (preferencesIncluded) scopes |= PXAdvancedDataScopePreferences;
+    if (keychainIncluded) scopes |= PXAdvancedDataScopeKeychain;
+
+    *scopesOut = scopes;
+    return YES;
+}
+
+static NSDictionary *PXImmutableManifestConfirmationSnapshot(NSDictionary *manifest) {
+    if (![manifest isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+
+    NSError *serializationError = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:manifest
+                                                               format:NSPropertyListBinaryFormat_v1_0
+                                                              options:0
+                                                                error:&serializationError];
+    if (data.length == 0 || serializationError != nil) {
+        return nil;
+    }
+
+    NSError *deserializationError = nil;
+    id snapshot = [NSPropertyListSerialization propertyListWithData:data
+                                                            options:NSPropertyListImmutable
+                                                             format:NULL
+                                                              error:&deserializationError];
+    if (deserializationError != nil || ![snapshot isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+    return snapshot;
+}
+
+static NSString *PXBackupConfirmationTitle(PXAdvancedDataScope scopes) {
+    return scopes == 0 ? @"Confirm Backup" : @"Confirm Advanced Backup";
+}
+
+static NSString *PXBackupConfirmationActionTitle(PXAdvancedDataScope scopes) {
+    return scopes == 0 ? @"Backup" : @"Back Up Advanced Data";
+}
+
+static NSString *PXBackupConfirmationMessage(NSString *application,
+                                              PXAdvancedDataScope scopes) {
+    if (![application isKindOfClass:[NSString class]] || application.length == 0 ||
+        ((NSUInteger)scopes & ~(NSUInteger)PXAdvancedDataScopeAll) != 0) {
+        return nil;
+    }
+    if (scopes == 0) {
+        return [NSString stringWithFormat:@"Back up Application Data for %@?", application];
+    }
+    NSString *scopeList = PXAdvancedDataScopeList(scopes);
+    if (scopeList.length == 0) {
+        return nil;
+    }
+    return [NSString stringWithFormat:
+        @"Back up Application Data for %@ together with these advanced scopes:\n\n%@\n\n"
+        @"Advanced scopes may contain shared or sensitive data. Continue?",
+        application,
+        scopeList];
+}
+
+static NSString *PXRestoreConfirmationTitle(PXAdvancedDataScope scopes) {
+    return scopes == 0 ? @"Confirm Restore" : @"Confirm Advanced Restore";
+}
+
+static NSString *PXRestoreConfirmationActionTitle(PXAdvancedDataScope scopes) {
+    return scopes == 0 ? @"Restore" : @"Restore Advanced Data";
+}
+
+static NSString *PXRestoreConfirmationMessage(NSString *application,
+                                               PXAdvancedDataScope scopes) {
+    if (![application isKindOfClass:[NSString class]] || application.length == 0 ||
+        ((NSUInteger)scopes & ~(NSUInteger)PXAdvancedDataScopeAll) != 0) {
+        return nil;
+    }
+    if (scopes == 0) {
+        return [NSString stringWithFormat:
+            @"Restore Application Data for %@? This replaces the current app data and cannot be undone.",
+            application];
+    }
+    NSString *scopeList = PXAdvancedDataScopeList(scopes);
+    if (scopeList.length == 0) {
+        return nil;
+    }
+    return [NSString stringWithFormat:
+        @"Restore Application Data for %@ together with these advanced scopes:\n\n%@\n\n"
+        @"Advanced scopes may replace shared or sensitive data and can affect other apps or system services. This operation cannot be undone. Continue?",
+        application,
+        scopeList];
+}
+
+static NSString *PXUsableErrorDescription(NSError *error) {
+    if (![error isKindOfClass:[NSError class]]) {
+        return nil;
+    }
+    id description = error.localizedDescription;
+    if (![description isKindOfClass:[NSString class]] ||
+        [(NSString *)description length] == 0) {
+        return nil;
+    }
+    return description;
+}
 
 typedef NS_ENUM(NSUInteger, PXRestoreAlertOutcome) {
     PXRestoreAlertOutcomeSuccessful = 1,
@@ -890,34 +1203,60 @@ static void PXAttemptBringProjectXToFront(void) {
 
 - (void)backupButtonTapped {
     NSString *appIdentifier = self.appName ?: self.bundleID ?: @"this app";
-    
-    // Show a confirmation alert first
-    UIAlertController *confirmAlert = [UIAlertController alertControllerWithTitle:@"Confirm Backup"
-                                                                      message:[NSString stringWithFormat:@"Are you sure you want to backup data for %@?", appIdentifier]
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-    
-    [confirmAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-     [confirmAlert addAction:[UIAlertAction actionWithTitle:@"Backup" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        // Show processing alert
-        UIAlertController *processingAlert = [UIAlertController alertControllerWithTitle:@"Backing Up"
-                                                                          message:@"Please wait while we backup your app data..."
-                                                                   preferredStyle:UIAlertControllerStyleAlert];
+
+    PXBackupOptions options = 0;
+    BOOL includeGroups = self.includeGroupsSwitch.on;
+    BOOL includePreferences = self.includePrefsSwitch.on;
+    BOOL includeKeychain = self.includeKeychainSwitch.on;
+    if (includeGroups) {
+        options |= PXBackupOptionIncludeAppGroups;
+    }
+    if (includePreferences) {
+        options |= PXBackupOptionIncludePreferences;
+    }
+    if (includeKeychain) {
+        options |= PXBackupOptionIncludeKeychain;
+    }
+    if (!PXBackupOptionsAreKnown(options)) {
+        return;
+    }
+
+    PXAdvancedDataScope advancedScopes =
+        PXAdvancedDataScopesForBackupOptions(options);
+    NSString *confirmationTitle = PXBackupConfirmationTitle(advancedScopes);
+    NSString *confirmationMessage =
+        PXBackupConfirmationMessage(appIdentifier, advancedScopes);
+    NSString *confirmationActionTitle =
+        PXBackupConfirmationActionTitle(advancedScopes);
+    if (confirmationTitle.length == 0 ||
+        confirmationMessage.length == 0 ||
+        confirmationActionTitle.length == 0) {
+        return;
+    }
+
+    PXBackupOptions capturedOptions = options;
+    UIAlertController *confirmAlert =
+        [UIAlertController alertControllerWithTitle:confirmationTitle
+                                            message:confirmationMessage
+                                     preferredStyle:UIAlertControllerStyleAlert];
+
+    [confirmAlert addAction:
+        [UIAlertAction actionWithTitle:@"Cancel"
+                                 style:UIAlertActionStyleCancel
+                               handler:nil]];
+    [confirmAlert addAction:
+        [UIAlertAction actionWithTitle:confirmationActionTitle
+                                 style:UIAlertActionStyleDefault
+                               handler:^(__unused UIAlertAction * _Nonnull action) {
+        UIAlertController *processingAlert =
+            [UIAlertController alertControllerWithTitle:@"Backing Up"
+                                                message:@"Please wait while we backup your app data..."
+                                         preferredStyle:UIAlertControllerStyleAlert];
         [self presentViewController:processingAlert animated:YES completion:nil];
-        
-        PXBackupOptions options = 0;
-        if (self.includeGroupsSwitch.on) {
-            options |= PXBackupOptionIncludeAppGroups;
-        }
-        if (self.includePrefsSwitch.on) {
-            options |= PXBackupOptionIncludePreferences;
-        }
-        if (self.includeKeychainSwitch.on) {
-            options |= PXBackupOptionIncludeKeychain;
-        }
 
          [[AppDataBackupManager shared] createBackupForBundleID:self.bundleID
                                                        appName:self.appName
-                                                       options:options
+                                                       options:capturedOptions
                                                     completion:^(PXBackupResult *result, NSError *error) {
              [processingAlert dismissViewControllerAnimated:YES completion:^{
                  PXBackupAlertOutcome outcome = PXBackupAlertOutcomeForResult(result, error);
@@ -953,59 +1292,149 @@ static void PXAttemptBringProjectXToFront(void) {
                                                     copyPath:copyPath];
              }];
          }];
-      }]];
-    
+    }]];
+
     [self presentViewController:confirmAlert animated:YES completion:nil];
 }
 
 - (void)restoreButtonTapped {
     NSString *appIdentifier = self.appName ?: self.bundleID ?: @"this app";
-    
-    // Show a confirmation alert first with warning
-    UIAlertController *confirmAlert = [UIAlertController alertControllerWithTitle:@"Confirm Restore"
-                                                                      message:[NSString stringWithFormat:@"⚠️ Warning: This will replace the current data for %@ with backup data. This operation cannot be undone.\n\nAre you sure you want to continue?", appIdentifier]
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-    
-    [confirmAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [confirmAlert addAction:[UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        NSArray<NSString *> *backups = [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:self.bundleID];
-        if (!backups.count) {
-            UIAlertController *noAlert = [UIAlertController alertControllerWithTitle:@"No Backups Found"
-                                                                            message:@"No backups were found for this bundle ID. Create a backup first."
-                                                                     preferredStyle:UIAlertControllerStyleAlert];
-            [noAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:noAlert animated:YES completion:nil];
-            return;
+    NSString *bundleIdentifier = [self.bundleID copy];
+    NSString *applicationName = [self.appName copy];
+    if (bundleIdentifier.length == 0) {
+        return;
+    }
+
+    NSArray<NSString *> *backups =
+        [[AppDataBackupManager shared] listBackupDirectoriesForBundleID:bundleIdentifier];
+    if (!backups.count) {
+        UIAlertController *noAlert =
+            [UIAlertController alertControllerWithTitle:@"No Backups Found"
+                                                message:@"No backups were found for this bundle ID. Create a backup first."
+                                         preferredStyle:UIAlertControllerStyleAlert];
+        [noAlert addAction:
+            [UIAlertAction actionWithTitle:@"OK"
+                                     style:UIAlertActionStyleDefault
+                                   handler:nil]];
+        [self presentViewController:noAlert animated:YES completion:nil];
+        return;
+    }
+
+    UIAlertController *picker =
+        [UIAlertController alertControllerWithTitle:@"Select Backup"
+                                            message:nil
+                                     preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSUInteger limit = MIN((NSUInteger)10, backups.count);
+    for (NSUInteger i = 0; i < limit; i++) {
+        NSString *dir = backups[i];
+        NSString *title = dir.lastPathComponent;
+        NSError *mErr = nil;
+        NSDictionary *manifest =
+            [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir
+                                                                    error:&mErr];
+        if ([manifest isKindOfClass:[NSDictionary class]]) {
+            NSString *ts = manifest[@"timestamp"];
+            if ([ts isKindOfClass:[NSString class]] && ts.length) {
+                title = ts;
+            }
         }
 
-        UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Select Backup"
-                                                                        message:nil
-                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
+        [picker addAction:
+            [UIAlertAction actionWithTitle:title
+                                     style:UIAlertActionStyleDefault
+                                   handler:^(__unused UIAlertAction * _Nonnull action) {
+            NSError *selectionError = nil;
+            NSDictionary *selectedManifest =
+                [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir
+                                                                        error:&selectionError];
+            PXAdvancedDataScope selectedScopes = 0;
+            BOOL scopesValid =
+                PXAdvancedDataScopesForValidatedManifest(selectedManifest,
+                                                         bundleIdentifier,
+                                                         &selectedScopes);
+            NSDictionary *confirmedManifestSnapshot = scopesValid
+                ? PXImmutableManifestConfirmationSnapshot(selectedManifest)
+                : nil;
+            NSString *confirmationTitle = scopesValid
+                ? PXRestoreConfirmationTitle(selectedScopes)
+                : nil;
+            NSString *confirmationMessage = scopesValid
+                ? PXRestoreConfirmationMessage(appIdentifier, selectedScopes)
+                : nil;
+            NSString *confirmationActionTitle = scopesValid
+                ? PXRestoreConfirmationActionTitle(selectedScopes)
+                : nil;
 
-        NSUInteger limit = MIN((NSUInteger)10, backups.count);
-        for (NSUInteger i = 0; i < limit; i++) {
-            NSString *dir = backups[i];
-            NSString *title = dir.lastPathComponent;
-            NSError *mErr = nil;
-            NSDictionary *manifest = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:&mErr];
-            if ([manifest isKindOfClass:[NSDictionary class]]) {
-                NSString *ts = manifest[@"timestamp"]; 
-                if ([ts isKindOfClass:[NSString class]] && ts.length) {
-                    title = ts;
-                }
+            if (!scopesValid ||
+                confirmedManifestSnapshot == nil ||
+                confirmationTitle.length == 0 ||
+                confirmationMessage.length == 0 ||
+                confirmationActionTitle.length == 0) {
+                NSString *unavailableMessage =
+                    PXUsableErrorDescription(selectionError) ?:
+                    @"The selected backup could not be validated for Restore.";
+                UIAlertController *unavailableAlert =
+                    [UIAlertController alertControllerWithTitle:@"Restore Unavailable"
+                                                        message:unavailableMessage
+                                                 preferredStyle:UIAlertControllerStyleAlert];
+                [unavailableAlert addAction:
+                    [UIAlertAction actionWithTitle:@"OK"
+                                             style:UIAlertActionStyleDefault
+                                           handler:nil]];
+                [self presentViewController:unavailableAlert animated:YES completion:nil];
+                return;
             }
 
-            [picker addAction:[UIAlertAction actionWithTitle:title
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:^(UIAlertAction * _Nonnull action) {
-                UIAlertController *processingAlert = [UIAlertController alertControllerWithTitle:@"Restoring"
-                                                                                         message:@"Please wait while we restore your app data..."
-                                                                                  preferredStyle:UIAlertControllerStyleAlert];
+            PXAdvancedDataScope confirmedScopes = selectedScopes;
+            UIAlertController *confirmAlert =
+                [UIAlertController alertControllerWithTitle:confirmationTitle
+                                                    message:confirmationMessage
+                                             preferredStyle:UIAlertControllerStyleAlert];
+            [confirmAlert addAction:
+                [UIAlertAction actionWithTitle:@"Cancel"
+                                         style:UIAlertActionStyleCancel
+                                       handler:nil]];
+            [confirmAlert addAction:
+                [UIAlertAction actionWithTitle:confirmationActionTitle
+                                         style:UIAlertActionStyleDestructive
+                                       handler:^(__unused UIAlertAction * _Nonnull confirmAction) {
+                NSError *currentManifestError = nil;
+                NSDictionary *currentManifest =
+                    [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir
+                                                                            error:&currentManifestError];
+                PXAdvancedDataScope currentScopes = 0;
+                BOOL currentScopesValid =
+                    PXAdvancedDataScopesForValidatedManifest(currentManifest,
+                                                             bundleIdentifier,
+                                                             &currentScopes);
+                BOOL selectionUnchanged =
+                    currentScopesValid &&
+                    [currentManifest isEqual:confirmedManifestSnapshot] &&
+                    currentScopes == confirmedScopes;
+                if (!selectionUnchanged) {
+                    UIAlertController *changedAlert =
+                        [UIAlertController alertControllerWithTitle:@"Restore Selection Changed"
+                                                            message:@"The selected backup changed after confirmation. Select it again and review its scopes before restoring."
+                                                     preferredStyle:UIAlertControllerStyleAlert];
+                    [changedAlert addAction:
+                        [UIAlertAction actionWithTitle:@"OK"
+                                                 style:UIAlertActionStyleDefault
+                                               handler:nil]];
+                    [self presentViewController:changedAlert animated:YES completion:nil];
+                    return;
+                }
+                (void)currentManifestError;
+
+                UIAlertController *processingAlert =
+                    [UIAlertController alertControllerWithTitle:@"Restoring"
+                                                        message:@"Please wait while we restore your app data..."
+                                                 preferredStyle:UIAlertControllerStyleAlert];
                 [self presentViewController:processingAlert animated:YES completion:nil];
 
                  [[AppDataBackupManager shared] restoreBackupAtDirectory:dir
-                                                                bundleID:self.bundleID
-                                                                 appName:self.appName
+                                                                bundleID:bundleIdentifier
+                                                                 appName:applicationName
                                                               completion:^(PXRestoreResult *result, NSError *error) {
                      [processingAlert dismissViewControllerAnimated:YES completion:^{
                          BOOL validResult = PXRestoreResultIsValidForPresentation(result);
@@ -1073,18 +1502,25 @@ static void PXAttemptBringProjectXToFront(void) {
                                                             copyPath:nil];
                      }];
                  }];
-             }]];
-        }
+            }]];
 
-        [picker addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-            picker.popoverPresentationController.sourceView = self.view;
-            picker.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width/2.0, self.view.bounds.size.height, 1, 1);
-        }
-        [self presentViewController:picker animated:YES completion:nil];
-    }]];
-    
-    [self presentViewController:confirmAlert animated:YES completion:nil];
+            [self presentViewController:confirmAlert animated:YES completion:nil];
+        }]];
+    }
+
+    [picker addAction:
+        [UIAlertAction actionWithTitle:@"Cancel"
+                                 style:UIAlertActionStyleCancel
+                               handler:nil]];
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        picker.popoverPresentationController.sourceView = self.view;
+        picker.popoverPresentationController.sourceRect =
+            CGRectMake(self.view.bounds.size.width / 2.0,
+                       self.view.bounds.size.height,
+                       1,
+                       1);
+    }
+    [self presentViewController:picker animated:YES completion:nil];
 }
 
 @end
