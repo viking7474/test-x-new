@@ -358,6 +358,177 @@ static void PXAppendRestoreWarnings(NSMutableString *message,
     }
 }
 
+static const PXRestoreComponent PXRestorePresentationComponentOrder[] = {
+    PXRestoreComponentApplicationData,
+    PXRestoreComponentProfileAppData,
+    PXRestoreComponentGlobalSafari,
+    PXRestoreComponentAppGroups,
+    PXRestoreComponentSystemGlobal,
+    PXRestoreComponentSharedSystemDatabases,
+    PXRestoreComponentPreferences,
+    PXRestoreComponentKeychain,
+};
+
+static NSString *PXRestoreComponentDisplayName(PXRestoreComponent component) {
+    switch (component) {
+        case PXRestoreComponentApplicationData:
+            return @"Application Data";
+        case PXRestoreComponentProfileAppData:
+            return @"Profile App Data";
+        case PXRestoreComponentGlobalSafari:
+            return @"Global Safari";
+        case PXRestoreComponentAppGroups:
+            return @"App Groups";
+        case PXRestoreComponentSystemGlobal:
+            return @"System Global";
+        case PXRestoreComponentSharedSystemDatabases:
+            return @"Shared System Databases";
+        case PXRestoreComponentPreferences:
+            return @"Preferences";
+        case PXRestoreComponentKeychain:
+            return @"Keychain";
+        default:
+            return nil;
+    }
+}
+
+static NSString *PXRestoreComponentStatusDisplayName(PXRestoreComponentStatus status) {
+    switch (status) {
+        case PXRestoreComponentStatusSucceeded:
+            return @"Succeeded";
+        case PXRestoreComponentStatusSkipped:
+            return @"Skipped";
+        case PXRestoreComponentStatusNotAttempted:
+            return @"Not Attempted";
+        case PXRestoreComponentStatusFailed:
+            return @"Failed";
+        default:
+            return nil;
+    }
+}
+
+static NSString *PXRestoreRollbackDisplayName(PXRestoreRollbackStatus rollbackStatus) {
+    switch (rollbackStatus) {
+        case PXRestoreRollbackStatusNotPerformed:
+            return @"Rollback Not Performed";
+        case PXRestoreRollbackStatusCompleted:
+            return @"Rollback Completed";
+        case PXRestoreRollbackStatusIncomplete:
+            return @"Rollback Incomplete";
+        default:
+            return nil;
+    }
+}
+
+static NSString *PXRestoreUnitProgressDescription(NSUInteger committedUnitCount,
+                                                   NSUInteger plannedUnitCount) {
+    NSString *unitLabel = plannedUnitCount == 1 ? @"unit" : @"units";
+    return [NSString stringWithFormat:@"%lu/%lu %@",
+            (unsigned long)committedUnitCount,
+            (unsigned long)plannedUnitCount,
+            unitLabel];
+}
+
+static NSString *PXRestoreWarningCountDescription(NSUInteger warningCount) {
+    if (warningCount == 0) {
+        return nil;
+    }
+    if (warningCount == 1) {
+        return @"1 warning";
+    }
+    return [NSString stringWithFormat:@"%lu warnings", (unsigned long)warningCount];
+}
+
+static NSString *PXRestoreComponentResultEntry(PXRestoreComponentResult *componentResult) {
+    if ([componentResult class] != [PXRestoreComponentResult class]) {
+        return nil;
+    }
+
+    NSString *componentName = PXRestoreComponentDisplayName(componentResult.component);
+    NSString *statusName = PXRestoreComponentStatusDisplayName(componentResult.status);
+    if (componentName.length == 0 || statusName.length == 0) {
+        return nil;
+    }
+
+    if (componentResult.status == PXRestoreComponentStatusSkipped) {
+        return [NSString stringWithFormat:@"- %@: %@", componentName, statusName];
+    }
+
+    NSString *unitProgress =
+        PXRestoreUnitProgressDescription(componentResult.committedUnitCount,
+                                         componentResult.plannedUnitCount);
+    if (unitProgress.length == 0) {
+        return nil;
+    }
+
+    NSMutableArray<NSString *> *details = [NSMutableArray arrayWithObject:unitProgress];
+    if (componentResult.status == PXRestoreComponentStatusFailed) {
+        NSString *rollbackName = PXRestoreRollbackDisplayName(componentResult.rollbackStatus);
+        id failure = componentResult.failure;
+        id failureMessage = [failure class] == [PXRestoreFailure class]
+            ? [(PXRestoreFailure *)failure message]
+            : nil;
+        if (rollbackName.length == 0 ||
+            ![failureMessage isKindOfClass:[NSString class]] ||
+            [(NSString *)failureMessage length] == 0) {
+            return nil;
+        }
+        [details addObject:rollbackName];
+
+        NSString *warningCount =
+            PXRestoreWarningCountDescription(componentResult.warnings.count);
+        if (warningCount.length > 0) {
+            [details addObject:warningCount];
+        }
+
+        NSString *statusLine = [NSString stringWithFormat:@"- %@: %@ (%@)",
+                                componentName,
+                                statusName,
+                                [details componentsJoinedByString:@"; "]];
+        NSString *failureLine = [NSString stringWithFormat:@"  Failure: %@", failureMessage];
+        return [NSString stringWithFormat:@"%@\n%@", statusLine, failureLine];
+    }
+
+    NSString *warningCount =
+        PXRestoreWarningCountDescription(componentResult.warnings.count);
+    if (warningCount.length > 0) {
+        [details addObject:warningCount];
+    }
+    return [NSString stringWithFormat:@"- %@: %@ (%@)",
+            componentName,
+            statusName,
+            [details componentsJoinedByString:@"; "]];
+}
+
+static NSString *PXRestoreComponentResultsSection(PXRestoreResult *result) {
+    if (!PXRestoreResultIsValidForPresentation(result)) {
+        return nil;
+    }
+
+    NSMutableArray<NSString *> *entries = [NSMutableArray arrayWithCapacity:8];
+    NSUInteger componentCount =
+        sizeof(PXRestorePresentationComponentOrder) /
+        sizeof(PXRestorePresentationComponentOrder[0]);
+    for (NSUInteger index = 0; index < componentCount; index++) {
+        PXRestoreComponent component = PXRestorePresentationComponentOrder[index];
+        PXRestoreComponentResult *componentResult =
+            [result componentResultForComponent:component];
+        NSString *entry = PXRestoreComponentResultEntry(componentResult);
+        if (entry.length == 0) {
+            return nil;
+        }
+        [entries addObject:entry];
+    }
+
+    if (entries.count != 8) {
+        return nil;
+    }
+    NSString *header = @"Component Results:";
+    return [NSString stringWithFormat:@"\n\n%@\n%@",
+            header,
+            [entries componentsJoinedByString:@"\n"]];
+}
+
 @implementation AppDataBackupRestoreViewController
 
 static void PXAttemptBringProjectXToFront(void) {
@@ -883,6 +1054,14 @@ static void PXAttemptBringProjectXToFront(void) {
                              default:
                                  message = [NSMutableString stringWithString:failureMessage];
                                  break;
+                         }
+
+                         if (validResult) {
+                             NSString *componentSection =
+                                 PXRestoreComponentResultsSection(result);
+                             if (componentSection.length > 0) {
+                                 [message appendString:componentSection];
+                             }
                          }
 
                          if (validResult && result.warnings.count > 0) {
