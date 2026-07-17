@@ -16,6 +16,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Audit backup/restore hardening invariants
+        run: |
+          python3 scripts/audit_backup_restore_hardening.py --self-test
+          python3 scripts/audit_backup_restore_hardening.py
+
       - name: Install build dependencies
         run: |
           brew update
