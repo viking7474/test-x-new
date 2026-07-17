@@ -69,6 +69,25 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
                                           error:(NSError **)error;
 - (PXClearComponentResult *)_keychainComponentForPlan:(PXKeychainClearPlan *)plan
                                           passResults:(NSArray<NSNumber *> *)passResults;
+
+- (void)performFullCleanup:(NSString *)bundleID;
+- (void)performAggressiveCleanupFor:(NSString *)bundleID;
+- (void)completelyWipeContainer:(NSString *)containerPath;
+- (BOOL)securelyWipeFile:(NSString *)path;
+- (void)fixPermissionsAndRemovePath:(NSString *)path;
+- (void)fixPermissionsForPath:(NSString *)path;
+- (void)clearAppCache:(NSString *)bundleID;
+- (void)clearAppPreferences:(NSString *)bundleID;
+- (void)clearAppCookies:(NSString *)bundleID;
+- (void)clearAppWebKitData:(NSString *)bundleID;
+- (void)clearAppGroupData:(NSString *)bundleID;
+- (void)clearPluginKitData:(NSString *)bundleID;
+- (void)_internalClearEncryptedData:(NSString *)bundleID;
+- (void)secureDataWipe:(NSString *)bundleID;
+- (void)clearAppKeychain:(NSString *)bundleID;
+- (void)clearKeychainData:(NSString *)bundleID;
+- (void)clearKeychainItemsForBundleID:(NSString *)bundleID;
+- (void)universalKeychainWipeForBundleID:(NSString *)bundleID;
 @end
 
 @interface PXKeychainClearPlan : NSObject {

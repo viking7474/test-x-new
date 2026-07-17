@@ -15,13 +15,10 @@
 
 #pragma mark - Comprehensive Cleanup Methods
 
-- (void)performFullCleanup:(NSString *)bundleID;
 - (void)performSecondaryCleanup:(NSString *)bundleID;
-- (void)performAggressiveCleanupFor:(NSString *)bundleID;
 - (void)completeAppDataWipe:(NSString *)bundleID;
 
 #pragma mark - Enhanced Container Cleaning
-- (void)completelyWipeContainer:(NSString *)containerPath;
 - (void)cleanIconStatePlist:(NSString *)bundleID;
 - (void)cleanSiriAnalyticsDatabase:(NSString *)bundleID;
 - (void)cleanLaunchServicesDatabase:(NSString *)bundleID;
@@ -29,16 +26,9 @@
 
 #pragma mark - Standard App Data Cleaning
 - (void)clearAppData:(NSString *)bundleID;
-- (void)clearAppCache:(NSString *)bundleID;
-- (void)clearAppPreferences:(NSString *)bundleID;
-- (void)clearAppCookies:(NSString *)bundleID;
-- (void)clearAppWebKitData:(NSString *)bundleID;
-- (void)clearAppKeychain:(NSString *)bundleID;
-- (void)clearAppGroupData:(NSString *)bundleID;
 - (void)clearAppReceiptData:(NSString *)bundleID withBundleUUID:(NSString *)bundleUUID;
 
 #pragma mark - System Storage Cleaning
-- (void)clearKeychainData:(NSString *)bundleID;
 - (void)clearSharedContainers:(NSString *)bundleID;
 - (void)clearUserDefaults:(NSString *)bundleID;
 - (void)clearSQLiteDatabases:(NSString *)bundleID;
@@ -75,7 +65,6 @@
 - (void)clearBinaryPlists:(NSString *)bundleID;
 - (void)clearEncryptedData:(NSString *)bundleID;
 - (void)clearJailbreakDetectionLogs:(NSString *)bundleID;
-- (void)clearPluginKitData:(NSString *)bundleID;
 - (void)clearURLCredentialsForBundleID:(NSString *)bundleID;
 - (void)clearSpotlightIndexes:(NSString *)bundleID;
 
@@ -95,17 +84,10 @@
 - (void)clearSharedStorage:(NSString *)bundleID;
 - (void)clearAppStateData:(NSString *)bundleID;
 - (void)_internalClearAppStateData:(NSString *)bundleID;
-- (void)_internalClearEncryptedData:(NSString *)bundleID;
 
 #pragma mark - Security Methods
-- (BOOL)securelyWipeFile:(NSString *)path;
-- (void)secureDataWipe:(NSString *)bundleID;
 - (BOOL)verifyDataCleared:(NSString *)bundleID;
 - (NSDictionary *)getDataUsage:(NSString *)bundleID;
-- (void)fixPermissionsAndRemovePath:(NSString *)path;
-- (void)fixPermissionsForPath:(NSString *)path;
-- (void)clearKeychainItemsForBundleID:(NSString *)bundleID;
-- (void)universalKeychainWipeForBundleID:(NSString *)bundleID;
 
 #pragma mark - Container Discovery Methods
 - (NSString *)findDataContainerUUIDForBundleID:(NSString *)bundleID;
