@@ -15,6 +15,66 @@ static NSString *PXBackupKeychainGroupsKey(NSString *bundleID) {
 
 static NSString * const PXBackupKeychainGroupsSavedNotification = @"com.hydra.projectx.backupKeychainGroupsSaved";
 
+typedef NS_ENUM(NSUInteger, PXBackupAlertOutcome) {
+    PXBackupAlertOutcomeSuccessful = 1,
+    PXBackupAlertOutcomeCompletedWithWarnings = 2,
+    PXBackupAlertOutcomeFailed = 3,
+};
+
+static BOOL PXBackupResultIsValidForPresentation(PXBackupResult *result) {
+    if (![result isKindOfClass:[PXBackupResult class]]) {
+        return NO;
+    }
+
+    id backupDirectory = result.backupDirectory;
+    if (![backupDirectory isKindOfClass:[NSString class]] || [(NSString *)backupDirectory length] == 0) {
+        return NO;
+    }
+
+    id manifestPath = result.manifestPath;
+    if (![manifestPath isKindOfClass:[NSString class]] || [(NSString *)manifestPath length] == 0) {
+        return NO;
+    }
+
+    id warningsValue = result.warnings;
+    if (![warningsValue isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+
+    for (id warning in (NSArray *)warningsValue) {
+        if (![warning isKindOfClass:[NSString class]] || [(NSString *)warning length] == 0) {
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+static PXBackupAlertOutcome PXBackupAlertOutcomeForResult(PXBackupResult *result, NSError *error) {
+    if (error != nil) {
+        return PXBackupAlertOutcomeFailed;
+    }
+    if (!PXBackupResultIsValidForPresentation(result)) {
+        return PXBackupAlertOutcomeFailed;
+    }
+    if (result.warnings.count > 0) {
+        return PXBackupAlertOutcomeCompletedWithWarnings;
+    }
+    return PXBackupAlertOutcomeSuccessful;
+}
+
+static NSString *PXBackupAlertTitleForOutcome(PXBackupAlertOutcome outcome) {
+    switch (outcome) {
+        case PXBackupAlertOutcomeSuccessful:
+            return @"Backup Successful";
+        case PXBackupAlertOutcomeCompletedWithWarnings:
+            return @"Backup Completed with Warnings";
+        case PXBackupAlertOutcomeFailed:
+        default:
+            return @"Backup Failed";
+    }
+}
+
 @interface AppDataBackupRestoreViewController ()
 @property (nonatomic, strong) UILabel *appLabel;
 @property (nonatomic, strong) UISwitch *includeGroupsSwitch;
@@ -418,26 +478,37 @@ static void PXAttemptBringProjectXToFront(void) {
                                                        options:options
                                                     completion:^(PXBackupResult *result, NSError *error) {
              [processingAlert dismissViewControllerAnimated:YES completion:^{
-                 if (error) {
-                     UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"Backup Failed"
-                                                                                      message:error.localizedDescription ?: @"Unknown error"
-                                                                               preferredStyle:UIAlertControllerStyleAlert];
-                     [errAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                     [self _presentResultAlertBestEffortWithTitle:@"Backup Failed"
-                                                         message:error.localizedDescription ?: @"Unknown error"
-                                                        copyPath:nil];
-                     return;
+                 PXBackupAlertOutcome outcome = PXBackupAlertOutcomeForResult(result, error);
+                 NSString *title = PXBackupAlertTitleForOutcome(outcome);
+                 NSString *message = nil;
+                 NSString *copyPath = nil;
+
+                 if (outcome == PXBackupAlertOutcomeFailed) {
+                     NSString *errorDescription = nil;
+                     if ([error isKindOfClass:[NSError class]] && error.localizedDescription.length > 0) {
+                         errorDescription = error.localizedDescription;
+                     }
+                     message = errorDescription ?: @"Backup failed without a valid result.";
+                 } else if (outcome == PXBackupAlertOutcomeSuccessful ||
+                            outcome == PXBackupAlertOutcomeCompletedWithWarnings) {
+                     NSMutableString *msg = [NSMutableString stringWithFormat:@"Backup created for %@.\n\nPath:\n%@",
+                                             appIdentifier,
+                                             result.backupDirectory];
+                     if (outcome == PXBackupAlertOutcomeCompletedWithWarnings) {
+                         [msg appendString:@"\n\nWarnings:\n"];
+                         for (NSString *warning in result.warnings) {
+                             [msg appendFormat:@"- %@\n", warning];
+                         }
+                     }
+                     message = msg;
+                     copyPath = result.backupDirectory;
+                 } else {
+                     message = @"Backup failed without a valid result.";
                  }
 
-                NSMutableString *msg = [NSMutableString stringWithFormat:@"Backup created for %@.\n\nPath:\n%@", appIdentifier, result.backupDirectory ?: @"(unknown)"];
-                if (result.warnings.count) {
-                    [msg appendString:@"\n\nWarnings:\n"]; 
-                    for (NSString *w in result.warnings) {
-                        [msg appendFormat:@"- %@\n", w];
-                    }
-                }
-
-                 [self _presentResultAlertBestEffortWithTitle:@"Backup Complete" message:msg copyPath:result.backupDirectory];
+                 [self _presentResultAlertBestEffortWithTitle:title
+                                                     message:message
+                                                    copyPath:copyPath];
              }];
          }];
       }]];
