@@ -669,7 +669,10 @@ static BOOL PXBackupArtifactPolicyMatchesCanonicalKind(
             return policy.requirement == PXBackupArtifactRequirementRequired &&
                    policy.failureDisposition ==
                        PXBackupArtifactFailureDispositionAbortBackup &&
-                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject;
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject &&
+                   policy.requiredPOSIXMode == 0600 &&
+                   policy.dataProtectionRequirement ==
+                       PXBackupArtifactDataProtectionRequirementUnspecified;
         case PXBackupArtifactKindAppGroup:
         case PXBackupArtifactKindProfileAppData:
         case PXBackupArtifactKindGlobalSafari:
@@ -677,18 +680,34 @@ static BOOL PXBackupArtifactPolicyMatchesCanonicalKind(
             return policy.requirement == PXBackupArtifactRequirementOptional &&
                    policy.failureDisposition ==
                        PXBackupArtifactFailureDispositionWarnAndContinue &&
-                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject;
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject &&
+                   policy.requiredPOSIXMode == 0600 &&
+                   policy.dataProtectionRequirement ==
+                       PXBackupArtifactDataProtectionRequirementUnspecified;
         case PXBackupArtifactKindSharedSystemDatabase:
             return policy.requirement == PXBackupArtifactRequirementOptional &&
                    policy.failureDisposition ==
                        PXBackupArtifactFailureDispositionContinueWithoutWarning &&
-                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyAllow;
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyAllow &&
+                   policy.requiredPOSIXMode == 0600 &&
+                   policy.dataProtectionRequirement ==
+                       PXBackupArtifactDataProtectionRequirementUnspecified;
         case PXBackupArtifactKindPreferences:
-        case PXBackupArtifactKindKeychain:
             return policy.requirement == PXBackupArtifactRequirementOptional &&
                    policy.failureDisposition ==
                        PXBackupArtifactFailureDispositionContinueWithoutWarning &&
-                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject;
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject &&
+                   policy.requiredPOSIXMode == 0600 &&
+                   policy.dataProtectionRequirement ==
+                       PXBackupArtifactDataProtectionRequirementUnspecified;
+        case PXBackupArtifactKindKeychain:
+            return policy.requirement == PXBackupArtifactRequirementOptional &&
+                   policy.failureDisposition ==
+                       PXBackupArtifactFailureDispositionWarnAndContinue &&
+                   policy.emptyFilePolicy == PXBackupArtifactEmptyFilePolicyReject &&
+                   policy.requiredPOSIXMode == 0600 &&
+                   policy.dataProtectionRequirement ==
+                       PXBackupArtifactDataProtectionRequirementComplete;
     }
     return NO;
 }
