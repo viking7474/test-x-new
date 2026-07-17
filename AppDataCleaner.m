@@ -88,6 +88,39 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 - (void)clearKeychainData:(NSString *)bundleID;
 - (void)clearKeychainItemsForBundleID:(NSString *)bundleID;
 - (void)universalKeychainWipeForBundleID:(NSString *)bundleID;
+
+- (void)performSecondaryCleanup:(NSString *)bundleID;
+- (void)clearAppData:(NSString *)bundleID;
+- (void)clearSharedContainers:(NSString *)bundleID;
+- (void)clearUserDefaults:(NSString *)bundleID;
+- (void)clearSQLiteDatabases:(NSString *)bundleID;
+- (void)clearPrivateVarData:(NSString *)bundleID;
+- (void)clearDeviceDatabase:(NSString *)bundleID;
+- (void)clearInstallationLogs:(NSString *)bundleID;
+- (void)clearNetworkConfigurations:(NSString *)bundleID;
+- (void)clearCarrierData:(NSString *)bundleID;
+- (void)clearNetworkData:(NSString *)bundleID;
+- (void)clearDNSCache:(NSString *)bundleID;
+- (void)clearCrashReports:(NSString *)bundleID;
+- (void)clearDiagnosticData:(NSString *)bundleID;
+- (void)clearBluetoothData:(NSString *)bundleID;
+- (void)clearPushNotificationData:(NSString *)bundleID;
+- (void)clearThumbnailCache:(NSString *)bundleID;
+- (void)clearWebCache:(NSString *)bundleID;
+- (void)clearGameData:(NSString *)bundleID;
+- (void)clearTemporaryFiles:(NSString *)bundleID;
+- (void)clearBinaryPlists:(NSString *)bundleID;
+- (void)clearEncryptedData:(NSString *)bundleID;
+- (void)clearJailbreakDetectionLogs:(NSString *)bundleID;
+- (void)clearSpotlightData:(NSString *)bundleID;
+- (void)clearSiriData:(NSString *)bundleID;
+- (void)clearSystemLoggerData:(NSString *)bundleID;
+- (void)clearASLLogs:(NSString *)bundleID;
+- (void)clearPasteboardData:(NSString *)bundleID;
+- (void)clearURLCache:(NSString *)bundleID;
+- (void)clearBackgroundAssets:(NSString *)bundleID;
+- (void)clearSharedStorage:(NSString *)bundleID;
+- (void)clearAppStateData:(NSString *)bundleID;
 @end
 
 @interface PXKeychainClearPlan : NSObject {

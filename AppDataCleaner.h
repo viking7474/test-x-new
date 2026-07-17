@@ -15,7 +15,6 @@
 
 #pragma mark - Comprehensive Cleanup Methods
 
-- (void)performSecondaryCleanup:(NSString *)bundleID;
 - (void)completeAppDataWipe:(NSString *)bundleID;
 
 #pragma mark - Enhanced Container Cleaning
@@ -25,64 +24,33 @@
 - (void)refreshSystemServices;
 
 #pragma mark - Standard App Data Cleaning
-- (void)clearAppData:(NSString *)bundleID;
 - (void)clearAppReceiptData:(NSString *)bundleID withBundleUUID:(NSString *)bundleUUID;
 
 #pragma mark - System Storage Cleaning
-- (void)clearSharedContainers:(NSString *)bundleID;
-- (void)clearUserDefaults:(NSString *)bundleID;
-- (void)clearSQLiteDatabases:(NSString *)bundleID;
 
 #pragma mark - Hidden Storage Cleaning
-- (void)clearPrivateVarData:(NSString *)bundleID;
 - (void)clearSystemLogs:(NSString *)bundleID;
-- (void)clearDeviceDatabase:(NSString *)bundleID;
-- (void)clearInstallationLogs:(NSString *)bundleID;
 
 #pragma mark - Network & Carrier Cleaning
-- (void)clearNetworkConfigurations:(NSString *)bundleID;
-- (void)clearCarrierData:(NSString *)bundleID;
-- (void)clearNetworkData:(NSString *)bundleID;
-- (void)clearDNSCache:(NSString *)bundleID;
 
 #pragma mark - Additional Storage Cleaning
-- (void)clearCrashReports:(NSString *)bundleID;
-- (void)clearDiagnosticData:(NSString *)bundleID;
 - (void)clearICloudData:(NSString *)bundleID;
-- (void)clearBluetoothData:(NSString *)bundleID;
-- (void)clearPushNotificationData:(NSString *)bundleID;
 - (void)clearMediaData:(NSString *)bundleID;
 - (void)clearHealthData:(NSString *)bundleID;
 - (void)clearSafariData:(NSString *)bundleID;
 
 #pragma mark - Cache & Residual Cleaning
-- (void)clearThumbnailCache:(NSString *)bundleID;
-- (void)clearWebCache:(NSString *)bundleID;
-- (void)clearGameData:(NSString *)bundleID;
-- (void)clearTemporaryFiles:(NSString *)bundleID;
 
 #pragma mark - Advanced Cleaning Methods
-- (void)clearBinaryPlists:(NSString *)bundleID;
-- (void)clearEncryptedData:(NSString *)bundleID;
-- (void)clearJailbreakDetectionLogs:(NSString *)bundleID;
 - (void)clearURLCredentialsForBundleID:(NSString *)bundleID;
 - (void)clearSpotlightIndexes:(NSString *)bundleID;
 
 #pragma mark - System Integration
-- (void)clearSpotlightData:(NSString *)bundleID;
-- (void)clearSiriData:(NSString *)bundleID;
-- (void)clearSystemLoggerData:(NSString *)bundleID;
-- (void)clearASLLogs:(NSString *)bundleID;
 
 #pragma mark - Data Persistence
 - (void)clearClipboard;
-- (void)clearPasteboardData:(NSString *)bundleID;
-- (void)clearURLCache:(NSString *)bundleID;
-- (void)clearBackgroundAssets:(NSString *)bundleID;
 
 #pragma mark - State Management
-- (void)clearSharedStorage:(NSString *)bundleID;
-- (void)clearAppStateData:(NSString *)bundleID;
 - (void)_internalClearAppStateData:(NSString *)bundleID;
 
 #pragma mark - Security Methods
