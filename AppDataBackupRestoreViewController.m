@@ -87,6 +87,277 @@ static NSString *PXBackupAlertTitleForOutcome(PXBackupAlertOutcome outcome) {
 @property (nonatomic, copy) NSString *pendingCopyPath;
 @end
 
+typedef NS_ENUM(NSUInteger, PXRestoreAlertOutcome) {
+    PXRestoreAlertOutcomeSuccessful = 1,
+    PXRestoreAlertOutcomeCompletedWithWarnings = 2,
+    PXRestoreAlertOutcomeCompletedWithComponentFailures = 3,
+    PXRestoreAlertOutcomeFailed = 4,
+    PXRestoreAlertOutcomeFailedWithCompletedRollback = 5,
+    PXRestoreAlertOutcomeFailedWithIncompleteRollback = 6,
+};
+
+static BOOL PXRestoreWarningArrayIsValidForPresentation(id value) {
+    if (![value isKindOfClass:[NSArray class]]) {
+        return NO;
+    }
+    for (id warning in (NSArray *)value) {
+        if (![warning isKindOfClass:[NSString class]] || [(NSString *)warning length] == 0) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL PXRestoreComponentIsKnownSingleBitForPresentation(PXRestoreComponent component) {
+    NSUInteger value = (NSUInteger)component;
+    return value != 0 &&
+           (value & (value - 1)) == 0 &&
+           (value & ~(NSUInteger)PXRestoreComponentAll) == 0;
+}
+
+static BOOL PXRestoreRollbackStatusIsKnownForPresentation(PXRestoreRollbackStatus rollbackStatus) {
+    switch (rollbackStatus) {
+        case PXRestoreRollbackStatusNotPerformed:
+        case PXRestoreRollbackStatusCompleted:
+        case PXRestoreRollbackStatusIncomplete:
+            return YES;
+    }
+    return NO;
+}
+
+static BOOL PXRestoreResultIsValidForPresentation(PXRestoreResult *result) {
+    if (result == nil || [result class] != [PXRestoreResult class]) {
+        return NO;
+    }
+
+    id componentResultsValue = result.componentResults;
+    if (![componentResultsValue isKindOfClass:[NSArray class]] ||
+        [(NSArray *)componentResultsValue count] != 8) {
+        return NO;
+    }
+    if (!PXRestoreWarningArrayIsValidForPresentation(result.warnings)) {
+        return NO;
+    }
+
+    PXRestoreComponent requestedComponents = result.requestedComponents;
+    if (requestedComponents == 0 ||
+        ((NSUInteger)requestedComponents & ~(NSUInteger)PXRestoreComponentAll) != 0 ||
+        (requestedComponents & PXRestoreComponentApplicationData) == 0) {
+        return NO;
+    }
+
+    PXRestoreComponent observedSucceeded = 0;
+    PXRestoreComponent observedSkipped = 0;
+    PXRestoreComponent observedNotAttempted = 0;
+    PXRestoreComponent observedFailed = 0;
+    PXRestoreComponent seenComponents = 0;
+    BOOL observedIncompleteRollback = NO;
+
+    for (id value in (NSArray *)componentResultsValue) {
+        if ([value class] != [PXRestoreComponentResult class]) {
+            return NO;
+        }
+        PXRestoreComponentResult *componentResult = value;
+        PXRestoreComponent component = componentResult.component;
+        if (!PXRestoreComponentIsKnownSingleBitForPresentation(component) ||
+            (seenComponents & component) != 0) {
+            return NO;
+        }
+        seenComponents |= component;
+
+        if (!PXRestoreWarningArrayIsValidForPresentation(componentResult.warnings)) {
+            return NO;
+        }
+        id failure = componentResult.failure;
+        if (failure != nil && [failure class] != [PXRestoreFailure class]) {
+            return NO;
+        }
+
+        BOOL requested = (requestedComponents & component) != 0;
+        switch (componentResult.status) {
+            case PXRestoreComponentStatusSkipped:
+                if (requested ||
+                    componentResult.plannedUnitCount != 0 ||
+                    componentResult.committedUnitCount != 0 ||
+                    componentResult.rollbackStatus != PXRestoreRollbackStatusNotPerformed ||
+                    componentResult.warnings.count != 0 ||
+                    failure != nil) {
+                    return NO;
+                }
+                observedSkipped |= component;
+                break;
+
+            case PXRestoreComponentStatusNotAttempted:
+                if (!requested ||
+                    componentResult.plannedUnitCount < 1 ||
+                    componentResult.committedUnitCount != 0 ||
+                    componentResult.rollbackStatus != PXRestoreRollbackStatusNotPerformed ||
+                    failure != nil) {
+                    return NO;
+                }
+                observedNotAttempted |= component;
+                break;
+
+            case PXRestoreComponentStatusSucceeded:
+                if (!requested ||
+                    componentResult.plannedUnitCount < 1 ||
+                    componentResult.committedUnitCount != componentResult.plannedUnitCount ||
+                    componentResult.rollbackStatus != PXRestoreRollbackStatusNotPerformed ||
+                    failure != nil) {
+                    return NO;
+                }
+                observedSucceeded |= component;
+                break;
+
+            case PXRestoreComponentStatusFailed:
+                if (!requested ||
+                    componentResult.plannedUnitCount < 1 ||
+                    componentResult.committedUnitCount != 0 ||
+                    failure == nil ||
+                    !PXRestoreRollbackStatusIsKnownForPresentation(componentResult.rollbackStatus)) {
+                    return NO;
+                }
+                observedFailed |= component;
+                if (componentResult.rollbackStatus == PXRestoreRollbackStatusIncomplete) {
+                    observedIncompleteRollback = YES;
+                }
+                break;
+
+            default:
+                return NO;
+        }
+    }
+
+    if (seenComponents != PXRestoreComponentAll) {
+        return NO;
+    }
+
+    PXRestoreComponent succeededComponents = result.succeededComponents;
+    PXRestoreComponent skippedComponents = result.skippedComponents;
+    PXRestoreComponent notAttemptedComponents = result.notAttemptedComponents;
+    PXRestoreComponent failedComponents = result.failedComponents;
+    PXRestoreComponent aggregateUnion =
+        succeededComponents |
+        skippedComponents |
+        notAttemptedComponents |
+        failedComponents;
+    BOOL masksAreKnown =
+        (((NSUInteger)succeededComponents & ~(NSUInteger)PXRestoreComponentAll) == 0) &&
+        (((NSUInteger)skippedComponents & ~(NSUInteger)PXRestoreComponentAll) == 0) &&
+        (((NSUInteger)notAttemptedComponents & ~(NSUInteger)PXRestoreComponentAll) == 0) &&
+        (((NSUInteger)failedComponents & ~(NSUInteger)PXRestoreComponentAll) == 0);
+    BOOL masksAreDisjoint =
+        (succeededComponents & skippedComponents) == 0 &&
+        (succeededComponents & notAttemptedComponents) == 0 &&
+        (succeededComponents & failedComponents) == 0 &&
+        (skippedComponents & notAttemptedComponents) == 0 &&
+        (skippedComponents & failedComponents) == 0 &&
+        (notAttemptedComponents & failedComponents) == 0;
+    PXRestoreComponent expectedSkipped =
+        (PXRestoreComponent)((NSUInteger)PXRestoreComponentAll &
+                             ~(NSUInteger)requestedComponents);
+
+    if (!masksAreKnown ||
+        !masksAreDisjoint ||
+        aggregateUnion != PXRestoreComponentAll ||
+        succeededComponents != observedSucceeded ||
+        skippedComponents != observedSkipped ||
+        notAttemptedComponents != observedNotAttempted ||
+        failedComponents != observedFailed ||
+        requestedComponents != (succeededComponents |
+                                notAttemptedComponents |
+                                failedComponents) ||
+        skippedComponents != expectedSkipped) {
+        return NO;
+    }
+
+    if (result.hasWarnings != (result.warnings.count > 0) ||
+        result.hasFailures != (failedComponents != 0) ||
+        result.hasIncompleteRollback != observedIncompleteRollback ||
+        result.allRequestedComponentsSucceeded !=
+            (succeededComponents == requestedComponents)) {
+        return NO;
+    }
+
+    return YES;
+}
+
+static BOOL PXRestoreResultHasCompletedRollback(PXRestoreResult *result) {
+    for (PXRestoreComponentResult *componentResult in result.componentResults) {
+        if (componentResult.status == PXRestoreComponentStatusFailed &&
+            componentResult.rollbackStatus == PXRestoreRollbackStatusCompleted) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL PXRestoreResultHasIncompleteRollback(PXRestoreResult *result) {
+    for (PXRestoreComponentResult *componentResult in result.componentResults) {
+        if (componentResult.status == PXRestoreComponentStatusFailed &&
+            componentResult.rollbackStatus == PXRestoreRollbackStatusIncomplete) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static PXRestoreAlertOutcome PXRestoreAlertOutcomeForResult(PXRestoreResult *result,
+                                                             NSError *error) {
+    BOOL validResult = PXRestoreResultIsValidForPresentation(result);
+    if (validResult && PXRestoreResultHasIncompleteRollback(result)) {
+        return PXRestoreAlertOutcomeFailedWithIncompleteRollback;
+    }
+    if (validResult && PXRestoreResultHasCompletedRollback(result)) {
+        return PXRestoreAlertOutcomeFailedWithCompletedRollback;
+    }
+    if (error != nil) {
+        return PXRestoreAlertOutcomeFailed;
+    }
+    if (!validResult) {
+        return PXRestoreAlertOutcomeFailed;
+    }
+    if (result.hasFailures) {
+        return PXRestoreAlertOutcomeCompletedWithComponentFailures;
+    }
+    if (!result.allRequestedComponentsSucceeded) {
+        return PXRestoreAlertOutcomeFailed;
+    }
+    if (result.hasWarnings) {
+        return PXRestoreAlertOutcomeCompletedWithWarnings;
+    }
+    return PXRestoreAlertOutcomeSuccessful;
+}
+
+static NSString *PXRestoreAlertTitleForOutcome(PXRestoreAlertOutcome outcome) {
+    switch (outcome) {
+        case PXRestoreAlertOutcomeSuccessful:
+            return @"Restore Successful";
+        case PXRestoreAlertOutcomeCompletedWithWarnings:
+            return @"Restore Completed with Warnings";
+        case PXRestoreAlertOutcomeCompletedWithComponentFailures:
+            return @"Restore Completed with Component Failures";
+        case PXRestoreAlertOutcomeFailedWithCompletedRollback:
+            return @"Restore Failed: Component Rollback Completed";
+        case PXRestoreAlertOutcomeFailedWithIncompleteRollback:
+            return @"Restore Failed: Rollback Incomplete";
+        case PXRestoreAlertOutcomeFailed:
+        default:
+            return @"Restore Failed";
+    }
+}
+
+static void PXAppendRestoreWarnings(NSMutableString *message,
+                                    NSArray<NSString *> *warnings) {
+    if (warnings.count == 0) {
+        return;
+    }
+    [message appendString:@"\n\nWarnings:\n"];
+    for (NSString *warning in warnings) {
+        [message appendFormat:@"- %@\n", warning];
+    }
+}
+
 @implementation AppDataBackupRestoreViewController
 
 static void PXAttemptBringProjectXToFront(void) {
@@ -566,26 +837,61 @@ static void PXAttemptBringProjectXToFront(void) {
                                                                  appName:self.appName
                                                               completion:^(PXRestoreResult *result, NSError *error) {
                      [processingAlert dismissViewControllerAnimated:YES completion:^{
-                         if (error) {
-                             UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"Restore Failed"
-                                                                                              message:error.localizedDescription ?: @"Unknown error"
-                                                                                       preferredStyle:UIAlertControllerStyleAlert];
-                             [errAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                             [self _presentResultAlertBestEffortWithTitle:@"Restore Failed"
-                                                                 message:error.localizedDescription ?: @"Unknown error"
-                                                                copyPath:nil];
-                             return;
+                         BOOL validResult = PXRestoreResultIsValidForPresentation(result);
+                         PXRestoreAlertOutcome outcome = PXRestoreAlertOutcomeForResult(result, error);
+                         NSString *title = PXRestoreAlertTitleForOutcome(outcome);
+                         NSMutableString *message = nil;
+
+                         NSString *errorDescription = nil;
+                         if ([error isKindOfClass:[NSError class]]) {
+                             id localizedDescription = [(NSError *)error localizedDescription];
+                             if ([localizedDescription isKindOfClass:[NSString class]] &&
+                                 [(NSString *)localizedDescription length] > 0) {
+                                 errorDescription = localizedDescription;
+                             }
+                         }
+                         NSString *failureMessage =
+                             errorDescription ?: @"Restore failed without a valid result.";
+
+                         switch (outcome) {
+                             case PXRestoreAlertOutcomeSuccessful:
+                             case PXRestoreAlertOutcomeCompletedWithWarnings:
+                                 message = [NSMutableString stringWithFormat:
+                                     @"Data for %@ has been restored.",
+                                     appIdentifier];
+                                 break;
+
+                             case PXRestoreAlertOutcomeCompletedWithComponentFailures:
+                                 message = [NSMutableString stringWithFormat:
+                                     @"Restore processing for %@ completed, but one or more requested components failed.",
+                                     appIdentifier];
+                                 break;
+
+                             case PXRestoreAlertOutcomeFailedWithCompletedRollback:
+                                 message = [NSMutableString stringWithString:failureMessage];
+                                 [message appendString:
+                                     @"\n\nThe failed component reported a completed rollback. Components restored earlier were not rolled back."];
+                                 break;
+
+                             case PXRestoreAlertOutcomeFailedWithIncompleteRollback:
+                                 message = [NSMutableString stringWithString:failureMessage];
+                                 [message appendString:
+                                     @"\n\nRollback did not complete safely. Some data may remain changed."];
+                                 break;
+
+                             case PXRestoreAlertOutcomeFailed:
+                             default:
+                                 message = [NSMutableString stringWithString:failureMessage];
+                                 break;
                          }
 
-                        NSMutableString *msg = [NSMutableString stringWithFormat:@"Data for %@ has been restored.", appIdentifier];
-                        if (result.warnings.count) {
-                            [msg appendString:@"\n\nWarnings:\n"]; 
-                            for (NSString *w in result.warnings) {
-                                [msg appendFormat:@"- %@\n", w];
-                            }
-                        }
+                         if (validResult && result.warnings.count > 0) {
+                             PXAppendRestoreWarnings(message, result.warnings);
+                         }
 
-                         [self _presentResultAlertBestEffortWithTitle:@"Restore Complete" message:msg copyPath:nil];
+                         [self _presentResultAlertBestEffortWithTitle:title
+                                                             message:message
+                                                            copyPath:nil];
                      }];
                  }];
              }]];
