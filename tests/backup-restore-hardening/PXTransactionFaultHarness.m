@@ -1337,14 +1337,14 @@ static BOOL PXFIDigestTreeDirectory(NSString *root,
         if (!pathBytes || pathBytes.length > UINT32_MAX) return NO;
         NSString *absolute = [root stringByAppendingPathComponent:childRelative];
         struct stat value; memset(&value, 0, sizeof(value));
-        if (lstat(absolute.fileSystemRepresentation, &value) != 0 || value.st_nlink != 1 ||
+        if (lstat(absolute.fileSystemRepresentation, &value) != 0 ||
             (value.st_mode & (S_ISUID | S_ISGID)) != 0) return NO;
         unsigned char type = 0;
         uint64_t size = 0;
         if (S_ISDIR(value.st_mode)) {
             type = 'D';
             (*directoryCount)++;
-        } else if (S_ISREG(value.st_mode) && value.st_size >= 0) {
+        } else if (S_ISREG(value.st_mode) && value.st_nlink == 1 && value.st_size >= 0) {
             type = 'F';
             size = (uint64_t)value.st_size;
             (*regularFileCount)++;
