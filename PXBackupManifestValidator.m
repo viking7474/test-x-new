@@ -1176,6 +1176,52 @@ static BOOL PXManifestV4PolicyMatches(NSDictionary *policy,
     return YES;
 }
 
+static BOOL PXManifestV4AddReference(NSMutableSet<NSString *> *references,
+                                     NSDictionary<NSString *, NSNumber *> *kindByName,
+                                     id name,
+                                     NSInteger expectedKind,
+                                     NSString *fieldPath,
+                                     NSError **error) {
+    if (!PXManifestV4RelativePath(name)) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInvalidFieldType,
+                              fieldPath,
+                              @"The artifact reference is invalid.");
+    }
+    NSString *typedName = (NSString *)name;
+    NSNumber *kindNumber = kindByName[typedName];
+    if (![kindNumber isKindOfClass:[NSNumber class]]) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInconsistentField,
+                              fieldPath,
+                              @"The artifact reference is missing.");
+    }
+    if (kindNumber.integerValue != expectedKind) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorInconsistentField,
+                              fieldPath,
+                              @"The artifact reference policy is inconsistent.");
+    }
+    if ([references containsObject:typedName]) {
+        return PXManifestFail(error,
+                              PXBackupManifestValidatorErrorDuplicateEntry,
+                              fieldPath,
+                              @"The artifact reference is duplicated.");
+    }
+    [references addObject:typedName];
+    return YES;
+}
+
+static BOOL PXManifestV4FailureResult(NSError **error) {
+    if (error && !*error) {
+        PXManifestFail(error,
+                       PXBackupManifestValidatorErrorInconsistentField,
+                       @"$",
+                       @"The manifest v4 structure is invalid.");
+    }
+    return NO;
+}
+
 static BOOL PXManifestValidateV4(NSDictionary *manifest, NSError **error) {
     NSArray *rootKeys = @[
         @"manifestVersion", @"schema", @"backupID", @"publication", @"bundleID",
@@ -1399,6 +1445,7 @@ static BOOL PXManifestValidateV4(NSDictionary *manifest, NSError **error) {
         NSInteger kind = 0;
         BOOL required = NO;
         if (!PXManifestV4PolicyMatches(artifact[@"policy"],
+                                       schemaRevision,
                                        size,
                                        &kind,
                                        &required) ||
