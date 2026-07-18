@@ -571,7 +571,7 @@ static NSArray<NSDictionary *> *PXFixtureLoadCases(NSString *metadataPath,
         [archiveNames addObject:archiveName];
         [checksumNames addObject:archiveName];
     }
-    if (![PXFixtureValidateChecksumFile(root, checksumNames, message)]) {
+    if (!PXFixtureValidateChecksumFile(root, checksumNames, message)) {
         return nil;
     }
     if (rootOut) {
