@@ -45,6 +45,7 @@ static NSString * const PXDashboardRRSAppsKey = @"PXDashboardRRSApps";
 static NSString * const PXDashboardFakeOptionsKey = @"PXDashboardFakeOptions";
 static NSString * const PXDashboardFakePreviewKey = @"PXDashboardFakePreview";
 static NSString * const PXDashboardRestoreOrderKey = @"PXDashboardRestoreOrder";
+static NSString * const PXDashboardRRSMetadataKey = @"PXDashboardRRSMetadata";
 static NSString * const PXDashboardRestoreIndexKeyPrefix = @"PXDashboardRestoreIndex_";
 static NSString * const PXDashboardRestoreEndKeyPrefix = @"PXDashboardRestoreEnd_";
 
@@ -6135,26 +6136,65 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return [NSString stringWithFormat:@"%@ + %@ + %@", profileName, appName ?: bundleID ?: @"App", [fmt stringFromDate:date ?: [NSDate date]]];
 }
 
-- (void)updateRRSManifestAtBackupDirectory:(NSString *)backupDir bundleID:(NSString *)bundleID appName:(NSString *)appName note:(NSString *)note {
-    NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
-    NSMutableDictionary *manifest = [NSMutableDictionary dictionaryWithContentsOfFile:manifestPath];
-    if (!manifest) return;
-    NSDate *now = [NSDate date];
-    NSString *trimmed = [note stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    manifest[@"rrsNote"] = trimmed.length ? trimmed : [self rrsFallbackNoteForBundleID:bundleID appName:appName date:now];
-    manifest[@"backupIPAddress"] = [NetworkManager getCurrentLocalIPAddress] ?: @"";
-    if (!manifest[@"restoreAt"]) manifest[@"restoreAt"] = @"";
-    if (!manifest[@"restoreCount"]) manifest[@"restoreCount"] = @0;
-    [manifest writeToFile:manifestPath atomically:YES];
+- (NSMutableDictionary<NSString *, NSDictionary *> *)mutableRRSMetadataStore {
+    NSDictionary *stored = [[NSUserDefaults standardUserDefaults] dictionaryForKey:PXDashboardRRSMetadataKey];
+    return [stored isKindOfClass:[NSDictionary class]]
+        ? [stored mutableCopy]
+        : [NSMutableDictionary dictionary];
 }
 
-- (void)markRRSManifestRestoredAtBackupDirectory:(NSString *)backupDir {
-    NSString *manifestPath = [backupDir stringByAppendingPathComponent:@"manifest.plist"];
-    NSMutableDictionary *manifest = [NSMutableDictionary dictionaryWithContentsOfFile:manifestPath];
-    if (!manifest) return;
-    manifest[@"restoreAt"] = [NSDate date];
-    manifest[@"restoreCount"] = @([manifest[@"restoreCount"] integerValue] + 1);
-    [manifest writeToFile:manifestPath atomically:YES];
+- (NSDictionary *)rrsMetadataForBackupDirectory:(NSString *)backupDir {
+    if (!backupDir.length) return @{};
+    NSDictionary *stored = [[NSUserDefaults standardUserDefaults] dictionaryForKey:PXDashboardRRSMetadataKey];
+    id metadata = stored[backupDir];
+    return [metadata isKindOfClass:[NSDictionary class]] ? metadata : @{};
+}
+
+- (BOOL)updateRRSMetadataAtBackupDirectory:(NSString *)backupDir bundleID:(NSString *)bundleID appName:(NSString *)appName note:(NSString *)note {
+    if (!backupDir.length) return NO;
+    NSError *manifestError = nil;
+    NSDictionary *manifest = [[AppDataBackupManager shared] readManifestAtBackupDirectory:backupDir error:&manifestError];
+    if (!manifest || ![manifest[@"bundleID"] isEqualToString:bundleID]) {
+        return NO;
+    }
+    NSDate *now = [NSDate date];
+    NSString *trimmed = [note stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableDictionary *metadata = [[self rrsMetadataForBackupDirectory:backupDir] mutableCopy];
+    metadata[@"rrsNote"] = trimmed.length ? trimmed : [self rrsFallbackNoteForBundleID:bundleID appName:appName date:now];
+    metadata[@"backupIPAddress"] = [NetworkManager getCurrentLocalIPAddress] ?: @"";
+    if (!metadata[@"restoreAt"]) metadata[@"restoreAt"] = @"";
+    if (!metadata[@"restoreCount"]) metadata[@"restoreCount"] = @0;
+
+    NSMutableDictionary *store = [self mutableRRSMetadataStore];
+    store[backupDir] = [metadata copy];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[store copy] forKey:PXDashboardRRSMetadataKey];
+    [defaults synchronize];
+    NSDictionary *persistedStore = [defaults dictionaryForKey:PXDashboardRRSMetadataKey];
+    return [persistedStore[backupDir] isEqualToDictionary:metadata];
+}
+
+- (void)markRRSRestoredAtBackupDirectory:(NSString *)backupDir {
+    if (!backupDir.length) return;
+    NSMutableDictionary *metadata = [[self rrsMetadataForBackupDirectory:backupDir] mutableCopy];
+    metadata[@"restoreAt"] = [NSDate date];
+    metadata[@"restoreCount"] = @([metadata[@"restoreCount"] integerValue] + 1);
+    NSMutableDictionary *store = [self mutableRRSMetadataStore];
+    store[backupDir] = [metadata copy];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[store copy] forKey:PXDashboardRRSMetadataKey];
+    [defaults synchronize];
+}
+
+- (void)removeRRSMetadataForBackupDirectories:(NSArray<NSString *> *)backupDirs {
+    if (!backupDirs.count) return;
+    NSMutableDictionary *store = [self mutableRRSMetadataStore];
+    for (NSString *backupDir in backupDirs) {
+        if (backupDir.length) [store removeObjectForKey:backupDir];
+    }
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[store copy] forKey:PXDashboardRRSMetadataKey];
+    [defaults synchronize];
 }
 
 - (void)refreshDashboardSelectionLabels {
@@ -6403,7 +6443,18 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (void)saveRRSThenResetTapped {
     if (!self.selectedRRSAppIDs.count) { [self showDashboardMessage:@"Thiếu app lưu RRS" message:@"Hãy chọn ít nhất một app trong Chọn App lưu RRS."]; return; }
     [self showProgressHUDWithTitle:@"Lưu RRS..."];
-    [self backupApps:self.selectedRRSAppIDs index:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings) {
+    NSArray<NSString *> *apps = [self.selectedRRSAppIDs copy];
+    [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
+        if (savedCount != apps.count) {
+            [self hideProgressHUD];
+            NSString *detail = warnings.count ? [warnings componentsJoinedByString:@"\n"] : @"Không tạo được file RRS hợp lệ.";
+            [self showDashboardMessage:@"Lưu RRS thất bại"
+                               message:[NSString stringWithFormat:@"Đã lưu %lu/%lu app. Reset Data đã được hủy để tránh mất dữ liệu.\n\n%@",
+                                        (unsigned long)savedCount,
+                                        (unsigned long)apps.count,
+                                        detail]];
+            return;
+        }
         [self performResetAndPrepareNextProfileWithWarnings:warnings];
     }];
 }
@@ -6424,17 +6475,37 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }];
 }
 
-- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings))completion {
-    if (index >= apps.count) { completion(warnings); return; }
+- (void)backupApps:(NSArray<NSString *> *)apps
+             index:(NSUInteger)index
+        savedCount:(NSUInteger)savedCount
+          warnings:(NSMutableArray<NSString *> *)warnings
+        completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion {
+    if (index >= apps.count) { completion(warnings, savedCount); return; }
     NSString *bundleID = apps[index];
     NSString *name = [self displayNameForBundleID:bundleID];
     [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Backup %@", name]];
     PXBackupOptions options = PXBackupOptionIncludeAppGroups | PXBackupOptionIncludePreferences;
     [[AppDataBackupManager shared] createBackupForBundleID:bundleID appName:name options:options completion:^(PXBackupResult *result, NSError *error) {
-        if (error) [warnings addObject:[NSString stringWithFormat:@"Backup %@: %@", name, error.localizedDescription ?: @"failed"]];
-        if (result.backupDirectory.length) [self updateRRSManifestAtBackupDirectory:result.backupDirectory bundleID:bundleID appName:name note:self.rrsNoteTextField.text ?: @""];
+        BOOL saved = NO;
+        if (error) {
+            [warnings addObject:[NSString stringWithFormat:@"Backup %@: %@", name, error.localizedDescription ?: @"failed"]];
+        } else if (!result.backupDirectory.length) {
+            [warnings addObject:[NSString stringWithFormat:@"Backup %@: không nhận được thư mục backup đã publish", name]];
+        } else {
+            saved = [self updateRRSMetadataAtBackupDirectory:result.backupDirectory
+                                                    bundleID:bundleID
+                                                     appName:name
+                                                        note:self.rrsNoteTextField.text ?: @""];
+            if (!saved) {
+                [warnings addObject:[NSString stringWithFormat:@"Backup %@: không thể lưu metadata RRS", name]];
+            }
+        }
         if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-        [self backupApps:apps index:index + 1 warnings:warnings completion:completion];
+        [self backupApps:apps
+                   index:index + 1
+              savedCount:savedCount + (saved ? 1 : 0)
+                warnings:warnings
+              completion:completion];
     }];
 }
 
@@ -6475,7 +6546,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self refreshDashboardSelectionLabels];
                 NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", newProfile.profileId, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
                 [self showDashboardMessage:@"Hoàn tất" message:msg];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [self killEnabledAppsAndRespring];
                 });
             });
@@ -6546,9 +6617,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             NSError *err = nil;
             NSDictionary *m = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:&err];
             if (!m) continue;
+            NSDictionary *metadata = [self rrsMetadataForBackupDirectory:dir];
             NSString *bundleID = m[@"bundleID"] ?: dir.stringByDeletingLastPathComponent.lastPathComponent;
             NSDate *created = [m[@"createdAt"] isKindOfClass:[NSDate class]] ? m[@"createdAt"] : nil;
-            id restored = m[@"restoreAt"];
+            id restored = metadata[@"restoreAt"];
             NSString *restoreText = @"(null)";
             if ([restored isKindOfClass:[NSDate class]]) restoreText = [self rrsShortDateString:restored];
             else if ([restored isKindOfClass:[NSString class]] && [restored length]) restoreText = restored;
@@ -6558,9 +6630,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 @"dir": dir,
                 @"bundleID": m[@"bundleID"] ?: bundleID,
                 @"appName": m[@"appName"] ?: [self displayNameForBundleID:bundleID],
-                @"note": m[@"rrsNote"] ?: [self rrsFallbackNoteForBundleID:bundleID appName:m[@"appName"] date:created],
+                @"note": metadata[@"rrsNote"] ?: [self rrsFallbackNoteForBundleID:bundleID appName:m[@"appName"] date:created],
                 @"checksum": checksum,
-                @"ip": m[@"backupIPAddress"] ?: @"",
+                @"ip": metadata[@"backupIPAddress"] ?: @"",
                 @"size": [self rrsFormattedSize:m[@"totalSize"] ?: @0],
                 @"backupDate": [self rrsShortDateString:created],
                 @"restoreDate": restoreText
@@ -6635,7 +6707,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:manifestBundleID appName:manifestAppName completion:^(PXRestoreResult *result, NSError *error) {
             if (error) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", manifestAppName, error.localizedDescription ?: @"failed"]];
             if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-            [self markRRSManifestRestoredAtBackupDirectory:dir];
+            [self markRRSRestoredAtBackupDirectory:dir];
             [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
         }];
     }];
@@ -6651,6 +6723,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     vc.onDelete = ^(NSArray<NSString *> *dirs) {
         NSFileManager *fm = [NSFileManager defaultManager];
         for (NSString *dir in dirs) [fm removeItemAtPath:dir error:nil];
+        [weakSelf removeRRSMetadataForBackupDirectories:dirs];
     };
     vc.onSaveAndRestore = ^(NSString *backupDir) {
         if (!backupDir.length) { [weakSelf showDashboardMessage:@"Thiếu RRS" message:@"Không tìm thấy file RRS để restore."]; return; }
@@ -6678,7 +6751,17 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSArray *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
     if (!apps.count) { [self showDashboardMessage:@"Thiếu app" message:@"Hãy chọn app lưu RRS hoặc app reset trước."]; return; }
     [self showProgressHUDWithTitle:@"Lưu RRS..."];
-    [self backupApps:apps index:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings) {
+    [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
+        if (savedCount != apps.count) {
+            [self hideProgressHUD];
+            NSString *detail = warnings.count ? [warnings componentsJoinedByString:@"\n"] : @"Không tạo được file RRS hợp lệ.";
+            [self showDashboardMessage:@"Lưu RRS thất bại"
+                               message:[NSString stringWithFormat:@"Đã lưu %lu/%lu app. Restore đã được hủy.\n\n%@",
+                                        (unsigned long)savedCount,
+                                        (unsigned long)apps.count,
+                                        detail]];
+            return;
+        }
         [self restoreBackupDirectoryAfterClearingManifestApp:backupDir warnings:[warnings mutableCopy]];
     }];
 }
@@ -6700,12 +6783,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [[AppDataBackupManager shared] restoreBackupAtDirectory:backupDir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *restoreError) {
             if (restoreError) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", appName, restoreError.localizedDescription ?: @"failed"]];
             if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-            [self markRRSManifestRestoredAtBackupDirectory:backupDir];
+            [self markRRSRestoredAtBackupDirectory:backupDir];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self hideProgressHUD];
                 NSString *msg = [NSString stringWithFormat:@"Đã restore %@.%@", appName, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
                 [self showDashboardMessage:@"Restore xong" message:msg];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [self killEnabledAppsAndRespring];
                 });
             });
