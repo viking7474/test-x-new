@@ -901,7 +901,10 @@ def run_self_test() -> Tuple[int, int]:
     tests.equal(r011_tar[r011_real_offset + 156 : r011_real_offset + 157], b"0", "R011 real header at physical one")
     tests.equal(r012_tar[156:157], b"x", "R012 metadata header at physical zero")
 
-    with tempfile.TemporaryDirectory(prefix="px-fixture-selftest-") as temporary:
+    temporary_parent = Path(tempfile.gettempdir()).resolve(strict=True)
+    if not _all_ancestors_real(temporary_parent):
+        raise FixtureError("self-test temporary parent must resolve to a real directory")
+    with tempfile.TemporaryDirectory(prefix="px-fixture-selftest-", dir=str(temporary_parent)) as temporary:
         root = Path(temporary)
         first = root / "corpus-a"
         second = root / "corpus-b"

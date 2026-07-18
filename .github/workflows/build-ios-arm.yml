@@ -24,8 +24,9 @@ jobs:
       - name: Build and run malicious archive fixtures
         run: |
           set -euo pipefail
-          FIXTURE_ROOT="$RUNNER_TEMP/px-archive-fixtures"
-          FIXTURE_BIN="$RUNNER_TEMP/px-archive-fixture-tests"
+          RUNNER_TEMP_REAL="$(cd "$RUNNER_TEMP" && pwd -P)"
+          FIXTURE_ROOT="$RUNNER_TEMP_REAL/px-archive-fixtures"
+          FIXTURE_BIN="$RUNNER_TEMP_REAL/px-archive-fixture-tests"
           python3 tests/backup-restore-hardening/generate_archive_fixtures.py --self-test
           python3 tests/backup-restore-hardening/generate_archive_fixtures.py --output "$FIXTURE_ROOT"
           xcrun clang -fobjc-arc -fblocks -fmodules -Wno-deprecated-declarations -I. \
