@@ -435,6 +435,11 @@ def remove_range(text: str, start: int, end: int) -> str:
     return text[:start] + text[end:]
 
 
+def source_newline(source: SourceFile) -> str:
+    """Return the source's native newline so self-test mutations work after any checkout normalization."""
+    return "\r\n" if "\r\n" in source.text else "\n"
+
+
 def extract_c_functions(source: SourceFile, name: str) -> Tuple[CFunctionRecord, ...]:
     records: List[CFunctionRecord] = []
     pattern = re.compile(r"\b" + re.escape(name) + r"\s*\(")
@@ -1514,16 +1519,18 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     tests: List[Tuple[str, str, Mapping[str, SourceFile], str]] = []
 
     header = base["AppDataCleaner.h"]
+    header_newline = source_newline(header)
     insert_point = header.text.rfind("@end")
     tests.append(("task61-public", "API",
-                  replace_source_text(base, header.path, header.text[:insert_point] + "- (void)performFullCleanup:(NSString *)bundleID;\r\n" + header.text[insert_point:]),
+                  replace_source_text(base, header.path, header.text[:insert_point] + f"- (void)performFullCleanup:(NSString *)bundleID;{header_newline}" + header.text[insert_point:]),
                   "BRH-API-REMOVED-PUBLIC-PERFORMFULLCLEANUP"))
     tests.append(("task62-public", "API",
-                  replace_source_text(base, header.path, header.text[:insert_point] + "- (void)clearAppData:(NSString *)bundleID;\r\n" + header.text[insert_point:]),
+                  replace_source_text(base, header.path, header.text[:insert_point] + f"- (void)clearAppData:(NSString *)bundleID;{header_newline}" + header.text[insert_point:]),
                   "BRH-API-REMOVED-PUBLIC-CLEARAPPDATA"))
 
     cleaner = base["AppDataCleaner.m"]
-    private_line = "- (void)performFullCleanup:(NSString *)bundleID;\r\n"
+    cleaner_newline = source_newline(cleaner)
+    private_line = f"- (void)performFullCleanup:(NSString *)bundleID;{cleaner_newline}"
     tests.append(("private-declaration", "API",
                   replace_source_text(base, cleaner.path, cleaner.text.replace(private_line, "", 1)),
                   "BRH-API-REMOVED-PRIVATE-PERFORMFULLCLEANUP"))
@@ -1540,14 +1547,14 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
 
     qtn_mutated = method_replacement(cleaner, "performFullCleanup:",
                                      lambda text: text.replace("PXLogQuarantinedLegacyClearSelector(_cmd);",
-                                                               "[[NSFileManager defaultManager] removeItemAtPath:bundleID error:nil];\r\n    PXLogQuarantinedLegacyClearSelector(_cmd);"))
+                                                               f"[[NSFileManager defaultManager] removeItemAtPath:bundleID error:nil];{cleaner_newline}    PXLogQuarantinedLegacyClearSelector(_cmd);"))
     tests.append(("quarantine-filesystem", "QTN", replace_source_text(base, cleaner.path, qtn_mutated),
                   "BRH-QTN-SHAPE-PERFORMFULLCLEANUP"))
     secure_mutated = method_replacement(cleaner, "securelyWipeFile:", lambda text: text.replace("return NO;", "return YES;"))
     tests.append(("secure-return", "QTN", replace_source_text(base, cleaner.path, secure_mutated),
                   "BRH-QTN-SECURE-RETURN"))
     logger_mutated = cleaner.text.replace("NSStringFromSelector(selector));",
-                                          "NSStringFromSelector(selector));\r\n    NSLog(@\"%@\", bundleID);", 1)
+                                          f"NSStringFromSelector(selector));{cleaner_newline}    NSLog(@\"%@\", bundleID);", 1)
     tests.append(("logger-privacy", "QTN", replace_source_text(base, cleaner.path, logger_mutated),
                   "BRH-QTN-LOGGER-PRIVACY"))
 
@@ -1558,27 +1565,36 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
                   "BRH-ALS-MAP-CLEARAPPDATA"))
     second_send = method_replacement(cleaner, "clearAppData:",
                                      lambda text: text.replace("[self completeAppDataWipe:bundleID];",
-                                                               "[self completeAppDataWipe:bundleID];\r\n    [self clearSystemLogs:bundleID];"))
+                                                               f"[self completeAppDataWipe:bundleID];{cleaner_newline}    [self clearSystemLogs:bundleID];"))
     tests.append(("alias-second-send", "ALS", replace_source_text(base, cleaner.path, second_send),
                   "BRH-ALS-SINGLE-CLEARAPPDATA"))
 
-    data_mask = cleaner.text.replace("    PXClearScopePluginKitData;\r\n\r\nstatic const PXClearScope PXMigratedFullClearScopes",
-                                     "    PXClearScopePluginKitData |\r\n    PXClearScopeKeychain;\r\n\r\nstatic const PXClearScope PXMigratedFullClearScopes", 1)
+    data_mask = cleaner.text.replace(
+        f"    PXClearScopePluginKitData;{cleaner_newline}{cleaner_newline}static const PXClearScope PXMigratedFullClearScopes",
+        f"    PXClearScopePluginKitData |{cleaner_newline}    PXClearScopeKeychain;{cleaner_newline}{cleaner_newline}static const PXClearScope PXMigratedFullClearScopes",
+        1,
+    )
     tests.append(("data-mask-keychain", "CLR", replace_source_text(base, cleaner.path, data_mask),
                   "BRH-CLR-DATA-MASK"))
-    full_mask = cleaner.text.replace("    PXClearScopePluginKitData |\r\n    PXClearScopeKeychain;",
-                                     "    PXClearScopePluginKitData;", 1)
+    full_mask = cleaner.text.replace(
+        f"    PXClearScopePluginKitData |{cleaner_newline}    PXClearScopeKeychain;",
+        "    PXClearScopePluginKitData;",
+        1,
+    )
     tests.append(("full-mask-no-keychain", "CLR", replace_source_text(base, cleaner.path, full_mask),
                   "BRH-CLR-FULL-MASK"))
-    precedence = cleaner.text.replace("@(PXClearScopeApplicationData),\r\n                    @(PXClearScopeExtensionData)",
-                                      "@(PXClearScopeExtensionData),\r\n                    @(PXClearScopeApplicationData)", 1)
+    precedence = cleaner.text.replace(
+        f"@(PXClearScopeApplicationData),{cleaner_newline}                    @(PXClearScopeExtensionData)",
+        f"@(PXClearScopeExtensionData),{cleaner_newline}                    @(PXClearScopeApplicationData)",
+        1,
+    )
     tests.append(("failure-precedence", "CLR", replace_source_text(base, cleaner.path, precedence),
                   "BRH-CLR-FAILURE-PRECEDENCE"))
 
-    chmod_mutation = cleaner.text + '\r\nstatic NSString *PXMutation = @"chmod -R 777 /tmp/x";\r\n'
+    chmod_mutation = cleaner.text + f'{cleaner_newline}static NSString *PXMutation = @"chmod -R 777 /tmp/x";{cleaner_newline}'
     tests.append(("chmod-recursive", "PERM", replace_source_text(base, cleaner.path, chmod_mutation),
                   "BRH-PERM-CHMOD-RECURSIVE"))
-    marker_mutation = cleaner.text + '\r\nstatic NSString *PXMarkerMutation = @"touch /tmp/.initialized";\r\n'
+    marker_mutation = cleaner.text + f'{cleaner_newline}static NSString *PXMarkerMutation = @"touch /tmp/.initialized";{cleaner_newline}'
     tests.append(("marker-touch", "PERM", replace_source_text(base, cleaner.path, marker_mutation),
                   "BRH-PERM-MARKER-TOUCH"))
 
@@ -1597,8 +1613,9 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     tests.append(("shell-exit-code", "KEY", replace_source_text(base, shell.path, shell_exit),
                   "BRH-KEY-EXIT-PARITY"))
     helper = base["KeychainHelper/KeychainBackupHelper.m"]
+    helper_newline = source_newline(helper)
     delete_mutation = helper.text.replace("OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);",
-                                          "SecItemDelete((__bridge CFDictionaryRef)addQuery);\r\n        OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);", 1)
+                                          f"SecItemDelete((__bridge CFDictionaryRef)addQuery);{helper_newline}        OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);", 1)
     tests.append(("restore-delete", "KEY", replace_source_text(base, helper.path, delete_mutation),
                   "BRH-KEY-RESTORE-NO-DELETE"))
 

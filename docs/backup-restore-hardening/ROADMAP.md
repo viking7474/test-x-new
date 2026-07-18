@@ -24,47 +24,55 @@ Roadmap này chỉ là chỉ mục. Agent không được triển khai một m�
 - TASK-1.8 — Migrate ExtensionData and PluginKitData clear through exact installed extension identity, exact metadata resolution and canonical validation. **COMPLETED**
 - TASK-1.8A — Restore TASK-1.2 resolver input compatibility and clean TASK-1.8 report gates. **COMPLETED**
 - TASK-1.9 — Migrate app-group clear through signed entitlement identity, exact typed resolution and canonical validation. **COMPLETED**
-- TASK-1.10 — Integrate keychain clear result correctly. **READY**
-- TASK-1.11 — Remove unsafe permission and marker-file behavior. **LOCKED**
-- TASK-1.12 — Quarantine ambiguous legacy clear APIs. **LOCKED**
+- TASK-1.10 — Integrate keychain clear result correctly. **COMPLETED**
+- TASK-1.11 — Remove unsafe permission and marker-file behavior. **COMPLETED**
+- TASK-1.12 — Quarantine ambiguous legacy clear APIs. **COMPLETED**
 
 ## Phase 2 — Restore Preflight and Transaction
 
-- TASK-2.1 — Add manifest schema validator. **LOCKED**
-- TASK-2.2 — Enforce supported manifest versions. **LOCKED**
-- TASK-2.3 — Enforce exact bundle identifier match. **LOCKED**
-- TASK-2.4 — Remove manifest path and UUID destination fallback. **LOCKED**
-- TASK-2.5 — Add common artifact verifier. **LOCKED**
-- TASK-2.6 — Add archive-entry safety validator. **LOCKED**
-- TASK-2.7 — Build immutable `PXRestorePlan`. **LOCKED**
-- TASK-2.8 — Stage and validate main data. **LOCKED**
-- TASK-2.9 — Stage and validate app groups. **LOCKED**
-- TASK-2.10 — Stage optional components. **LOCKED**
-- TASK-2.11 — Transactional commit and rollback for main data. **LOCKED**
-- TASK-2.12 — Transactional commit and rollback for app groups. **LOCKED**
-- TASK-2.13 — Transactional handling for advanced components. **LOCKED**
-- TASK-2.14 — Add structured restore result. **LOCKED**
+- TASK-2.1 — Add manifest schema validator. **COMPLETED**
+- TASK-2.2 — Enforce supported manifest versions. **COMPLETED**
+- TASK-2.3 — Enforce exact bundle identifier match. **COMPLETED**
+- TASK-2.4 — Remove manifest path and UUID destination fallback. **COMPLETED**
+- TASK-2.5 — Add common artifact verifier. **COMPLETED**
+- TASK-2.6 — Add archive-entry safety validator. **COMPLETED**
+- TASK-2.6A — Fix archive validator compatibility and bounded topology. **COMPLETED**
+- TASK-2.7 — Build immutable `PXRestorePlan`. **COMPLETED**
+- TASK-2.8 — Stage and validate main data. **COMPLETED**
+- TASK-2.9 — Stage and validate app groups. **COMPLETED**
+- TASK-2.10 — Stage optional components. **COMPLETED**
+- TASK-2.11 — Transactional commit and rollback for main data. **COMPLETED**
+- TASK-2.11A — Fix pre-recovery source/lock proof and directory durability. **COMPLETED**
+- TASK-2.12 — Transactional commit and rollback for app groups. **COMPLETED**
+- TASK-2.13 — Transactional handling for advanced components. **COMPLETED**
+- TASK-2.13A — Implement missing optional directory-tree verifier. **COMPLETED**
+- TASK-2.14 - Add structured restore result. **COMPLETED**
+- TASK-2.14A - Make structured result mutations assertion-independent. **COMPLETED**
 
 ## Phase 3 — Atomic Backup Publication
 
-- TASK-3.1 — Create unique partial transaction directory. **LOCKED**
-- TASK-3.2 — Add per-bundle backup serialization. **LOCKED**
-- TASK-3.3 — Add common verified artifact writer. **LOCKED**
-- TASK-3.4 — Derive preferences inclusion from verified output. **LOCKED**
-- TASK-3.5 — Define required and optional artifact policy. **LOCKED**
-- TASK-3.6 — Introduce manifest schema v4. **LOCKED**
-- TASK-3.7 — Write and validate manifest atomically. **LOCKED**
-- TASK-3.8 — Publish completed backup atomically. **LOCKED**
-- TASK-3.9 — Centralize cleanup for all failure paths. **LOCKED**
-- TASK-3.10 — Harden backup discovery and stale partial cleanup. **LOCKED**
+- TASK-3.1 - Create unique partial transaction directory. **COMPLETED**
+- TASK-3.2 - Add per-bundle backup serialization. **COMPLETED**
+- TASK-3.3 - Add common verified artifact writer. **COMPLETED**
+- TASK-3.4 - Derive Preferences inclusion from verified output. **COMPLETED**
+- TASK-3.5 - Define required and optional artifact policy. **COMPLETED**
+- TASK-3.6 - Introduce manifest schema v4. **COMPLETED**
+- TASK-3.6A - Make manifest v4 malformed-type validation exception-safe. **COMPLETED**
+- TASK-3.7 - Write and validate manifest atomically. **COMPLETED**
+- TASK-3.8 - Publish completed backup atomically. **COMPLETED**
+- TASK-3.8A - Enforce atomic no-replace directory publication. **COMPLETED**
+- TASK-3.9 - Centralize cleanup for all failure paths. **COMPLETED**
+- TASK-3.9A - Make cleanup removal race-safe. **COMPLETED**
+- TASK-3.10 - Harden backup discovery and stale partial cleanup. **COMPLETED**
+- TASK-3.10A - Fix top-level name classification and rollback errors. **COMPLETED**
 
 ## Phase 4 — Keychain Safety
 
-- TASK-4.1 — Add structured helper result. **LOCKED**
-- TASK-4.2 — Define reliable helper exit codes. **LOCKED**
-- TASK-4.3 — Remove broad pre-delete from restore. **LOCKED**
-- TASK-4.4 — Define exact identity for each keychain class. **LOCKED**
-- TASK-4.5 — Implement per-item upsert. **LOCKED**
+- TASK-4.1 - Add structured helper result. **COMPLETED**
+- TASK-4.2 - Define reliable helper exit codes. **COMPLETED**
+- TASK-4.3 - Remove broad pre-delete from restore. **COMPLETED**
+- TASK-4.4 - Define exact identity for each keychain class. **READY**
+- TASK-4.5 - Implement per-item upsert. **LOCKED**
 - TASK-4.6 — Secure helper temporary workspace and path validation. **LOCKED**
 - TASK-4.7 — Report requested and effective access groups. **LOCKED**
 - TASK-4.8 — Integrate partial keychain result into manager. **LOCKED**

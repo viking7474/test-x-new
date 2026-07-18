@@ -4,348 +4,241 @@
 
 ```text
 Program: Backup / Restore Hardening
-Current phase: Phase 1 — Clear Data Safety Boundary
-Current task: TASK-1.10 — Integrate Keychain Clear Result Correctly
-Task file: docs/backup-restore-hardening/tasks/TASK-1.10-integrate-keychain-clear-result.md
-Expected report: docs/backup-restore-hardening/reports/TASK-1.10-REPORT.md
+Current phase: Phase 4 - Keychain Safety
+Current task: TASK-4.4 - Define Exact Keychain Item Identity
+Task file: docs/backup-restore-hardening/tasks/TASK-4.4-define-exact-keychain-item-identity.md
+Expected report: docs/backup-restore-hardening/reports/TASK-4.4-REPORT.md
 Status: READY
-Build owner: Project owner via GitHub Actions
-Next task: TASK-1.11 remains LOCKED
+Baseline: 4c7000289186a4d7cb3772bc7c4b80b24ab4c3f1
+Build owner: Project owner via GitHub Actions / Theos
+Next task: TASK-4.5 remains LOCKED
 ```
 
-## Accepted foundation
+## Completed phases
 
-### Phase 0 — Reliable Command Execution
+### Phase 0 - Reliable Command Execution
 
-Completed outcomes:
+COMPLETED.
 
-- structured `CommandResult`;
-- bounded stdout/stderr capture;
-- monotonic deadlines;
-- spawn-time process groups;
-- bounded process-group termination and reap;
-- direct executable/argv support;
-- bounded `AppDataCleaner` command wrappers;
-- bounded direct `find` helpers.
+### Phase 1 - Safe Restore Destination and Destructive Boundaries
 
-### TASK-1.1 through TASK-1.6 — Safety contracts
+COMPLETED, including TASK-1.1 through TASK-1.12.
 
-Accepted infrastructure:
+### Phase 2 - Fail-Closed Restore Planning, Staging and Transactions
 
-- immutable exact `PXResolvedContainer` identity;
-- root-specific exact data-container resolution;
-- canonical destructive-path validation;
-- application-bundle containers are read-only;
-- immutable typed `PXClearRequest`;
-- immutable structured `PXClearResult`.
+COMPLETED, including TASK-2.1 through TASK-2.14 and corrective tasks TASK-2.6A, TASK-2.11A, TASK-2.13A and TASK-2.14A.
 
-### TASK-1.7 — ApplicationData
+### Phase 3 - Atomic Backup Publication
 
-Rootful and rootless ApplicationData use:
+COMPLETED, including all corrective tasks through TASK-3.10A.
+
+## Phase 4 accepted foundation
+
+### TASK-4.1 - Structured helper result
 
 ```text
-exact resolver
-  -> canonical validator
-  -> one bounded strict command
-  -> post-command validator
-  -> strict postcondition
-  -> structured component result
+1a59e96258651aa9c6aa8d77a1e6debea67ab524
+phase4(task-4.1): add structured keychain helper result
 ```
 
-### TASK-1.8 and TASK-1.8A — ExtensionData and PluginKitData
-
-Accepted outcomes:
-
-- installed extension identifiers come from exact contained `.appex` bundles;
-- ExtensionData and PluginKitData use exact metadata resolution;
-- generic resolver compatibility with TASK-1.2 is preserved;
-- raw extension UUID caches are replaced by canonical paths;
-- callback precedence is deterministic.
-
-### TASK-1.9 — AppGroups
-
-Accepted commit:
+Accepted:
 
 ```text
-0bb2e354715e00f20c4df95719e900ae5e8e1673
+immutable bounded PXKeychainHelperResult
+schemaVersion 1
+exact ten-key property-list root
+binary plist + base64 framing
+one prefixed stdout line
+no secret, identity, path or human diagnostic fields
 ```
 
-Accepted review:
+### TASK-4.2 - Reliable helper exit codes
 
 ```text
-docs/backup-restore-hardening/reviews/TASK-1.9-REVIEW.md
+5c6e70ac4ecd815727c50216c80176d1cf9f80f2
+phase4(task-4.2): define reliable keychain helper exit codes
 ```
 
-Build:
+Accepted:
 
 ```text
-PASSED — reported by project owner
+direct codes: 0/10/20/21/30/40/50
+wrapper-only codes: 60 through 65
+one direct finalizer
+Partial -> 10
+protocol mismatch -> INVALID + 50
+recognized child code pass-through
+unknown child status -> 40
+current callers remain zero/nonzero consumers
 ```
 
-Accepted AppGroups boundary:
+### TASK-4.3 - Remove broad restore pre-delete
+
+Implementation commit:
 
 ```text
-signed application-group entitlements
-  -> root-specific exact typed resolver
-  -> canonical validator
-  -> unique physical-container plan
-  -> one bounded strict command per canonical path
-  -> every alias identity revalidated
-  -> strict postcondition
-  -> structured AppGroups component
+4c7000289186a4d7cb3772bc7c4b80b24ab4c3f1
+phase4(task-4.3): remove broad keychain restore pre-delete
 ```
 
-The internal data aggregate now contains exactly:
+Review:
 
 ```text
-ApplicationData
-ExtensionData
-AppGroups
-PluginKitData
+docs/backup-restore-hardening/reviews/TASK-4.3-REVIEW.md
+Production source review: ACCEPTED
+TASK-4.3: COMPLETED
+TASK-4.4 may open: YES
 ```
 
-App Group mutation through legacy fuzzy resolvers, raw UUID reconstruction, deep encrypted scans, final sweeps and MobileSafari Shared/AppGroup fallbacks is no longer reachable from the migrated main Clear path.
-
-## TASK-1.10 purpose
-
-Keychain is the final approved `PXClearScope` still outside the structured full Clear result.
-
-Current main Clear behavior is split across two loose calls:
+Accepted restore behavior:
 
 ```text
-initial _wipeSelectedKeychainForBundleID
-four-scope data aggregate
-final _wipeSelectedKeychainForBundleID
-separate BOOL/error callback branch
+restore SecItemDelete: 0
+restore SecItemUpdate: 0
+restore SecItemAdd: 1
+sole core SecItemDelete: explicit wipe only
+overwrite request: no group/class delete authority
+new item: add normally
+duplicate with overwrite NO: preserve + warning + failed item
+duplicate with overwrite YES: preserve + pending-safe-replacement warning + failed item
+all-new overwrite restore: eligible for Completed / 0
+any duplicate or add error: Partial / 10
 ```
 
-This causes ambiguity and false success because:
+TASK-4.3 keeps exact identity and per-item upsert locked for later tasks.
 
-- disabled and succeeded both return `YES`;
-- explicit empty selection is replaced with all groups;
-- settings and entitlements can be reread differently between passes;
-- selected groups are not exact-checked against signed authorization;
-- non-system helper execution is unbounded;
-- helper warnings can still exit zero;
-- the system bridge always reports success after wipe requests;
-- callback outcome is not derived from one final `PXClearResult`.
+## Phase 4 current objective
 
-TASK-1.10 must create a truthful Keychain component and one final five-scope aggregate.
+TASK-4.4 creates an immutable, class-specific Keychain identity authority.
 
-## Full Clear result boundary
+The factory input is an already-decoded Security item/add dictionary. It must derive an exact bounded match-query snapshot without executing the query.
 
-`clearDataForBundleID:completion:` must use:
+Supported classes and required tuples:
 
 ```text
-ApplicationData
-ExtensionData
-AppGroups
-PluginKitData
-Keychain
+generic password:
+  class + accessGroup + synchronizable + account + service
+
+internet password:
+  class + accessGroup + synchronizable + account + server + port
+  + protocol + authenticationType + path + securityDomain
+
+certificate:
+  class + accessGroup + synchronizable + issuer + serialNumber
+
+key:
+  class + accessGroup + synchronizable + applicationLabel + keyClass + keyType
+
+identity:
+  class + accessGroup + synchronizable + applicationLabel + issuer + serialNumber
 ```
 
-The existing four-scope data operation remains separate and unchanged.
-
-`completeAppDataWipe:` remains data-only and must not gain Keychain side effects.
-
-## Keychain plan policy
-
-One immutable request-scoped plan captures:
-
-- enable flag;
-- exact selected setting object;
-- signed exact authorized groups;
-- signed application identifier when required;
-- system-app transport policy;
-- planned pass count.
-
-The plan is created once and reused by every pass.
-
-Identity authorization comes only from signed:
+TASK-4.4 is foundation-only:
 
 ```text
-keychain-access-groups
-application-identifier
+no SecItemCopyMatching
+no SecItemAdd
+no SecItemUpdate
+no SecItemDelete
+no restore integration
+no duplicate behavior change
+no result/exit/wrapper change
 ```
 
-Selected groups must be an exact subset of the signed set.
+TASK-4.5 alone may consume the accepted identity object for per-item upsert.
 
-No hard-coded vendor groups, bundle-prefix inference, service/account matching or existing item inspection may authorize the typed flow.
-
-## Empty selection policy
+## Phase-4 task gate
 
 ```text
-saved setting absent -> default to all signed authorized groups
-saved NSArray         -> exact selection, including empty
-saved malformed value -> planning failure
+TASK-4.1 Add structured helper result: COMPLETED
+TASK-4.2 Define reliable helper exit codes: COMPLETED
+TASK-4.3 Remove broad pre-delete from restore: COMPLETED
+TASK-4.4 Define exact identity for each Keychain class: READY
+TASK-4.5 Implement per-item upsert: LOCKED
+TASK-4.6 Secure helper temporary workspace and path validation: LOCKED
+TASK-4.7 Report requested and effective access groups: LOCKED
+TASK-4.8 Integrate partial Keychain result into manager: LOCKED
+TASK-4.9 Finalize Keychain backup protection policy: LOCKED
+Phase 5: LOCKED
+Phase 6: LOCKED
 ```
 
-An explicit empty array produces:
+## TASK-4.4 authorized scope
 
 ```text
-Keychain Skipped 0/0/0
-No keychain access groups are selected
+A KeychainHelper/PXKeychainItemIdentity.h
+A KeychainHelper/PXKeychainItemIdentity.m
+M Makefile
+A docs/backup-restore-hardening/reports/TASK-4.4-REPORT.md
 ```
 
-It must not silently become all groups.
-
-## Pass accounting
-
-### Non-system application
+## TASK-4.4 protected foundation
 
 ```text
-initial pass
-final pass
+KeychainHelper/KeychainBackupHelper.h/.m
+KeychainHelper/PXKeychainHelperResult.h/.m
+KeychainHelper/PXKeychainHelperExitCode.h
+KeychainHelper/backup_helper.m
+scripts/keychain_backup.sh
+AppDataBackupManager.h/.m
+AppDataCleaner.h/.m
+WeaponXKeychainBridge/Tweak.m
+Phase-1 through Phase-3 production source
+Restore infrastructure
+UI/controllers
 ```
 
-Both passes use the same plan. The final pass still runs after an initial failure.
+## TASK-4.4 required boundaries
 
-### System application
+TASK-4.4 must:
 
 ```text
-one bridge pass
+use exact runtime-type proof
+create immutable deep-copied identity snapshots
+canonicalize absent synchronizable to false
+reject wildcard/ambiguous identity subsets
+create exact class-specific matchQuery dictionaries
+exclude values, return controls and authentication controls
+keep error/description output privacy-safe
+compile the new source into backup_helper
 ```
 
-The current intentional second-pass skip is preserved and does not count as a unit.
-
-### Outcomes
+TASK-4.4 must not add:
 
 ```text
-disabled / empty / no authorized groups -> Skipped 0/0/0
-planning failure                         -> Failed 1/0/1
-non-system full success                  -> Succeeded 2/2/0
-non-system partial failure               -> Failed 2/1/1
-non-system total failure                 -> Failed 2/0/2
-system success                           -> Succeeded 1/1/0
-system failure                           -> Failed 1/0/1
+Security operation calls
+restore item rejection or lookup
+SecItemUpdate
+per-item delete/add replacement
+rollback
+backup schema changes
+workspace/path hardening
+requested/effective group reporting
+manager/bridge parsing
+UI changes
 ```
 
-## Execution evidence
+## Workspace ownership
 
-Non-system signing and helper wipe must use bounded direct executable/argv calls.
+Coordinator-owned modified/untracked documentation must not be staged, reverted, deleted, reformatted or rewritten by an implementation agent.
 
-The helper wipe action must return nonzero when:
-
-- `itemsFailed > 0`; or
-- warnings are present.
-
-The system bridge must report:
+## Current repository gate
 
 ```text
-attempted
-succeeded
-failed
-ok
+HEAD: 4c7000289186a4d7cb3772bc7c4b80b24ab4c3f1
+Phase 0: COMPLETED
+Phase 1: COMPLETED
+Phase 2: COMPLETED
+Phase 3: COMPLETED
+TASK-4.1: COMPLETED
+TASK-4.2: COMPLETED
+TASK-4.3: COMPLETED
+TASK-4.4: READY
+TASK-4.5: LOCKED
+Phase 5: LOCKED
+Phase 6: LOCKED
 ```
 
-and may set `ok` only for a complete failure-free partition.
+## Stop condition
 
-AppDataCleaner must reject stale, malformed or partial bridge responses.
-
-## Callback policy
-
-After TASK-1.10, callback failure precedence is:
-
-```text
-1. ApplicationData
-2. ExtensionData
-3. AppGroups
-4. PluginKitData
-5. Keychain
-```
-
-The final five-scope result is the only component-based callback source.
-
-Skipped components are not callback failures. Therefore callback success is based on absence of failed components, not `allRequestedScopesSucceeded`.
-
-## TASK-1.10 gate rules
-
-TASK-1.10 may move to `COMPLETED` only when all conditions are met:
-
-- [ ] Agent creates `reports/TASK-1.10-REPORT.md`.
-- [ ] Only the five allowed production files change.
-- [ ] Four-scope data mask remains exact and unchanged.
-- [ ] Five-scope full mask is added exactly.
-- [ ] Full Clear request contains all five scopes.
-- [ ] `completeAppDataWipe:` remains four-scope and data-only.
-- [ ] One immutable Keychain plan is captured before the initial pass.
-- [ ] Settings and entitlements are not reread between passes.
-- [ ] Signed exact groups are the only typed authorization.
-- [ ] Selected groups are an exact subset of signed authorization.
-- [ ] Explicit empty selection remains empty and produces Skipped.
-- [ ] Malformed/unauthorized configuration fails closed.
-- [ ] System policy denial remains failure when Keychain was requested.
-- [ ] Non-system uses two exact pass units.
-- [ ] System uses one exact bridge pass unit.
-- [ ] Planning, success, partial and total failure counts are exact.
-- [ ] Non-system ldid and helper execution are bounded and direct.
-- [ ] Temporary artifacts are cleaned on every path.
-- [ ] Raw stdout/stderr/group values are not persisted.
-- [ ] `backup_helper` exits nonzero for warnings or failed items.
-- [ ] System bridge reports real operation counts.
-- [ ] AppDataCleaner validates full bridge response identity and partition.
-- [ ] KeychainGroups UI preserves an explicit empty selection.
-- [ ] Clear confirmation preserves an explicit empty selection.
-- [ ] Final aggregate contains exactly five components.
-- [ ] Callback error comes only from final aggregate precedence.
-- [ ] Separate `keychainOK1/keychainOK2/keychainFailed` callback logic is removed.
-- [ ] Extension Keychain, Backup and Restore remain out of scope.
-- [ ] Protected files remain unchanged.
-- [ ] `git diff --check`, whitespace and NUL gates pass.
-- [ ] GitHub Actions succeeds or owner confirms build.
-- [ ] Coordinator review accepts the task.
-
-## Task history
-
-| Task | Status | Report | Build | Review |
-|---|---|---|---|---|
-| TASK-0.1 through TASK-0.7 | COMPLETED | Present | PASSED | ACCEPTED |
-| TASK-1.1 through TASK-1.6 | COMPLETED | Present | PASSED reported by owner | ACCEPTED |
-| TASK-1.7 | COMPLETED | `reports/TASK-1.7-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.7-REVIEW.md` |
-| TASK-1.8 | COMPLETED | `reports/TASK-1.8-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.8-REVIEW.md` plus corrective acceptance |
-| TASK-1.8A | COMPLETED | `reports/TASK-1.8A-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.8A-REVIEW.md` |
-| TASK-1.9 | COMPLETED | `reports/TASK-1.9-REPORT.md` | PASSED reported by owner | `reviews/TASK-1.9-REVIEW.md` |
-| TASK-1.10 | READY | Not created | Not run | Not reviewed |
-| TASK-1.11 | LOCKED | Not created | Not run | Not reviewed |
-
-## Working-tree baseline
-
-At TASK-1.10 opening:
-
-```text
-HEAD: 0bb2e354715e00f20c4df95719e900ae5e8e1673
-TASK-1.9 build: PASSED reported by owner
-```
-
-Coordinator-owned uncommitted files may include:
-
-```text
-docs/backup-restore-hardening/DECISIONS.md
-docs/backup-restore-hardening/README.md
-docs/backup-restore-hardening/ROADMAP.md
-docs/backup-restore-hardening/STATUS.md
-docs/backup-restore-hardening/reviews/TASK-1.8-REVIEW.md
-docs/backup-restore-hardening/reviews/TASK-1.8A-REVIEW.md
-docs/backup-restore-hardening/reviews/TASK-1.9-REVIEW.md
-docs/backup-restore-hardening/tasks/TASK-1.8A-restore-resolver-contract-and-report-gates.md
-docs/backup-restore-hardening/tasks/TASK-1.9-migrate-app-group-clear.md
-docs/backup-restore-hardening/tasks/TASK-1.10-integrate-keychain-clear-result.md
-```
-
-The agent must treat these as protected coordinator baseline and must not rewrite task specifications or reviews.
-
-## Blocked work
-
-TASK-1.10 does not authorize:
-
-- TASK-1.11 permission/marker cleanup;
-- legacy aggressive Keychain API quarantine;
-- extension Keychain migration;
-- Backup/Restore Keychain migration;
-- public Clear API changes;
-- application-bundle writes;
-- data-container/App Group resolver changes;
-- UI layout redesign;
-- broad vendor/service/account Keychain matching.
-
-Agent must stop after TASK-1.10.
+The implementation agent stops after TASK-4.4 source, report and implementation commit. TASK-4.5 and all later tasks remain locked until owner build confirmation and coordinator acceptance.
