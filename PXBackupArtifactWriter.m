@@ -448,13 +448,27 @@ static BOOL PXBackupArtifactDirectoryEntries(int descriptor,
     if (entriesOut) {
         *entriesOut = nil;
     }
-    int duplicated = PXBackupArtifactDuplicateDescriptor(descriptor);
-    if (duplicated < 0) {
+    struct stat retainedStatus;
+    if (descriptor < 0 ||
+        fstat(descriptor, &retainedStatus) != 0 ||
+        !S_ISDIR(retainedStatus.st_mode)) {
         return NO;
     }
-    DIR *directory = fdopendir(duplicated);
+    int scanDescriptor = openat(descriptor,
+                                ".",
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat scanStatus;
+    if (scanDescriptor < 0 ||
+        fstat(scanDescriptor, &scanStatus) != 0 ||
+        !S_ISDIR(scanStatus.st_mode) ||
+        !PXBackupArtifactStatIdentityMatches(&retainedStatus, &scanStatus) ||
+        !PXBackupArtifactDescriptorHasCloseOnExec(scanDescriptor)) {
+        if (scanDescriptor >= 0) close(scanDescriptor);
+        return NO;
+    }
+    DIR *directory = fdopendir(scanDescriptor);
     if (!directory) {
-        close(duplicated);
+        close(scanDescriptor);
         return NO;
     }
     NSMutableArray<NSString *> *entries = [NSMutableArray array];

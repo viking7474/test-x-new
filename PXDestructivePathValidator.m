@@ -142,6 +142,15 @@ static BOOL PXModeIsWorldWritable(mode_t mode) {
     return (mode & S_IWOTH) != 0;
 }
 
+static BOOL PXContainerOwnerIsAuthorized(uid_t owner,
+                                         uid_t mobileUserID,
+                                         PXResolvedContainerRoot root) {
+    if (owner == mobileUserID) {
+        return YES;
+    }
+    return root == PXResolvedContainerRootRootful && owner == 0;
+}
+
 static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
     struct passwd passwordEntry;
     struct passwd *result = NULL;
@@ -418,12 +427,26 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
         return nil;
     }
 
-    if (canonicalCandidateStatus.st_uid != mobileUserID ||
-        PXModeIsWorldWritable(canonicalCandidateStatus.st_mode) ||
-        PXModeIsWorldWritable(canonicalBaseStatus.st_mode)) {
+    if (!PXContainerOwnerIsAuthorized(canonicalCandidateStatus.st_uid,
+                                       mobileUserID,
+                                       container.root)) {
         PXSetDestructivePathValidatorError(error,
                                            PXDestructivePathValidatorErrorOwnershipOrModeViolation,
-                                           @"The candidate or allowed base ownership and mode policy failed.",
+                                           @"The candidate owner is not authorized for this container root.",
+                                           0);
+        return nil;
+    }
+    if (PXModeIsWorldWritable(canonicalCandidateStatus.st_mode)) {
+        PXSetDestructivePathValidatorError(error,
+                                           PXDestructivePathValidatorErrorOwnershipOrModeViolation,
+                                           @"The candidate directory is world-writable.",
+                                           0);
+        return nil;
+    }
+    if (PXModeIsWorldWritable(canonicalBaseStatus.st_mode)) {
+        PXSetDestructivePathValidatorError(error,
+                                           PXDestructivePathValidatorErrorOwnershipOrModeViolation,
+                                           @"The allowed base directory is world-writable.",
                                            0);
         return nil;
     }
@@ -468,11 +491,19 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
                                            0);
         return nil;
     }
-    if (initialMetadataStatus.st_uid != mobileUserID ||
-        PXModeIsWorldWritable(initialMetadataStatus.st_mode)) {
+    if (!PXContainerOwnerIsAuthorized(initialMetadataStatus.st_uid,
+                                       mobileUserID,
+                                       container.root)) {
         PXSetDestructivePathValidatorError(error,
                                            PXDestructivePathValidatorErrorOwnershipOrModeViolation,
-                                           @"The container metadata ownership or mode policy failed.",
+                                           @"The container metadata owner is not authorized for this container root.",
+                                           0);
+        return nil;
+    }
+    if (PXModeIsWorldWritable(initialMetadataStatus.st_mode)) {
+        PXSetDestructivePathValidatorError(error,
+                                           PXDestructivePathValidatorErrorOwnershipOrModeViolation,
+                                           @"The container metadata file is world-writable.",
                                            0);
         return nil;
     }

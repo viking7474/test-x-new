@@ -60,45 +60,6 @@ static BOOL PXBackupPublicationDescriptorHasCloseOnExec(int descriptor) {
     return flags >= 0 && (flags & FD_CLOEXEC) != 0;
 }
 
-static int PXBackupPublicationDuplicateDescriptor(int descriptor) {
-    if (descriptor < 0) {
-        return -1;
-    }
-    int duplicated = -1;
-#if defined(F_DUPFD_CLOEXEC)
-    do {
-        duplicated = fcntl(descriptor, F_DUPFD_CLOEXEC, 0);
-    } while (duplicated < 0 && errno == EINTR);
-    if (duplicated >= 0) {
-        return duplicated;
-    }
-#endif
-    duplicated = -1;
-    do {
-        duplicated = dup(descriptor);
-    } while (duplicated < 0 && errno == EINTR);
-    if (duplicated < 0) {
-        return -1;
-    }
-    int flags = -1;
-    do {
-        flags = fcntl(duplicated, F_GETFD);
-    } while (flags < 0 && errno == EINTR);
-    if (flags < 0) {
-        close(duplicated);
-        return -1;
-    }
-    int setResult = -1;
-    do {
-        setResult = fcntl(duplicated, F_SETFD, flags | FD_CLOEXEC);
-    } while (setResult < 0 && errno == EINTR);
-    if (setResult < 0 || !PXBackupPublicationDescriptorHasCloseOnExec(duplicated)) {
-        close(duplicated);
-        return -1;
-    }
-    return duplicated;
-}
-
 static BOOL PXBackupPublicationStringContainsNull(NSString *value) {
     for (NSUInteger index = 0; index < value.length; index++) {
         if ([value characterAtIndex:index] == 0) {
@@ -309,13 +270,27 @@ static BOOL PXBackupPublicationDirectoryIsEmpty(int descriptor,
     if (inspectionComplete) {
         *inspectionComplete = NO;
     }
-    int duplicated = PXBackupPublicationDuplicateDescriptor(descriptor);
-    if (duplicated < 0) {
+    struct stat retainedStatus;
+    if (descriptor < 0 ||
+        fstat(descriptor, &retainedStatus) != 0 ||
+        !S_ISDIR(retainedStatus.st_mode)) {
         return NO;
     }
-    DIR *directory = fdopendir(duplicated);
+    int scanDescriptor = openat(descriptor,
+                                ".",
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat scanStatus;
+    if (scanDescriptor < 0 ||
+        fstat(scanDescriptor, &scanStatus) != 0 ||
+        !S_ISDIR(scanStatus.st_mode) ||
+        !PXBackupPublicationStatIdentityMatches(&retainedStatus, &scanStatus) ||
+        !PXBackupPublicationDescriptorHasCloseOnExec(scanDescriptor)) {
+        if (scanDescriptor >= 0) close(scanDescriptor);
+        return NO;
+    }
+    DIR *directory = fdopendir(scanDescriptor);
     if (!directory) {
-        close(duplicated);
+        close(scanDescriptor);
         return NO;
     }
     BOOL empty = YES;

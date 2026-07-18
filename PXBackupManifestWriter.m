@@ -106,39 +106,6 @@ static BOOL PXBackupManifestDescriptorHasCloseOnExec(int descriptor) {
     return flags >= 0 && (flags & FD_CLOEXEC) != 0;
 }
 
-static int PXBackupManifestDuplicateDescriptor(int descriptor) {
-    if (descriptor < 0) return -1;
-    int duplicated = -1;
-#if defined(F_DUPFD_CLOEXEC)
-    do {
-        duplicated = fcntl(descriptor, F_DUPFD_CLOEXEC, 0);
-    } while (duplicated < 0 && errno == EINTR);
-    if (duplicated >= 0) return duplicated;
-#endif
-    do {
-        duplicated = dup(descriptor);
-    } while (duplicated < 0 && errno == EINTR);
-    if (duplicated < 0) return -1;
-    int flags = -1;
-    do {
-        flags = fcntl(duplicated, F_GETFD);
-    } while (flags < 0 && errno == EINTR);
-    if (flags < 0) {
-        close(duplicated);
-        return -1;
-    }
-    int setResult = -1;
-    do {
-        setResult = fcntl(duplicated, F_SETFD, flags | FD_CLOEXEC);
-    } while (setResult < 0 && errno == EINTR);
-    if (setResult < 0 ||
-        !PXBackupManifestDescriptorHasCloseOnExec(duplicated)) {
-        close(duplicated);
-        return -1;
-    }
-    return duplicated;
-}
-
 static BOOL PXBackupManifestStrictSync(int descriptor) {
     if (descriptor < 0) return NO;
     int result = -1;
@@ -227,11 +194,25 @@ static BOOL PXBackupManifestScanTemporaryEntries(int workspaceDescriptor,
                                                   const char *allowedName,
                                                   NSUInteger *temporaryCountOut) {
     if (temporaryCountOut) *temporaryCountOut = 0;
-    int duplicated = PXBackupManifestDuplicateDescriptor(workspaceDescriptor);
-    if (duplicated < 0) return NO;
-    DIR *directory = fdopendir(duplicated);
+    struct stat retainedStatus;
+    if (workspaceDescriptor < 0 ||
+        fstat(workspaceDescriptor, &retainedStatus) != 0 ||
+        !S_ISDIR(retainedStatus.st_mode)) return NO;
+    int scanDescriptor = openat(workspaceDescriptor,
+                                ".",
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat scanStatus;
+    if (scanDescriptor < 0 ||
+        fstat(scanDescriptor, &scanStatus) != 0 ||
+        !S_ISDIR(scanStatus.st_mode) ||
+        !PXBackupManifestStatIdentityMatches(&retainedStatus, &scanStatus) ||
+        !PXBackupManifestDescriptorHasCloseOnExec(scanDescriptor)) {
+        if (scanDescriptor >= 0) close(scanDescriptor);
+        return NO;
+    }
+    DIR *directory = fdopendir(scanDescriptor);
     if (!directory) {
-        close(duplicated);
+        close(scanDescriptor);
         return NO;
     }
     const size_t prefixLength = sizeof(PXBackupManifestTemporaryFilePrefixBytes) - 1;
