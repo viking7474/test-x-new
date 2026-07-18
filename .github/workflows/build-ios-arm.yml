@@ -34,6 +34,41 @@ jobs:
             -framework Foundation -lz -o "$FIXTURE_BIN"
           "$FIXTURE_BIN" "$FIXTURE_ROOT/fixtures.json"
 
+      - name: Build and run transaction fault-injection tests
+        run: |
+          set -euo pipefail
+          FI_ROOT="$RUNNER_TEMP/px-transaction-faults"
+          PRELUDE="tests/backup-restore-hardening/PXTransactionFaultInjectionPrelude.h"
+          HARNESS="tests/backup-restore-hardening/PXTransactionFaultHarness.m"
+          mkdir -p "$FI_ROOT"
+          COMMON_FLAGS=(-fobjc-arc -fblocks -fmodules -Wno-deprecated-declarations -Werror=implicit-function-declaration -I.)
+
+          xcrun clang "${COMMON_FLAGS[@]}" -c PXResolvedContainer.m \
+            -o "$FI_ROOT/PXResolvedContainer.o"
+
+          build_domain() {
+            local domain="$1"
+            local source="$2"
+            shift 2
+            xcrun clang "${COMMON_FLAGS[@]}" \
+              -DPX_TRANSACTION_FAULT_INJECTION=1 -include "$PRELUDE" \
+              -c "$source" -o "$FI_ROOT/$domain-transaction.o"
+            xcrun clang "${COMMON_FLAGS[@]}" "-DPXFI_DOMAIN_$domain=1" \
+              -c "$HARNESS" -o "$FI_ROOT/$domain-harness.o"
+            xcrun clang "$FI_ROOT/$domain-transaction.o" \
+              "$FI_ROOT/$domain-harness.o" "$@" \
+              -framework Foundation -framework CoreFoundation \
+              -o "$FI_ROOT/$domain-tests"
+            "$FI_ROOT/$domain-tests" --self-test
+            "$FI_ROOT/$domain-tests" --run-all
+          }
+
+          build_domain MAIN PXMainDataRestoreTransaction.m \
+            "$FI_ROOT/PXResolvedContainer.o"
+          build_domain APP_GROUP PXAppGroupRestoreTransaction.m \
+            "$FI_ROOT/PXResolvedContainer.o"
+          build_domain OPTIONAL PXOptionalRestoreTransaction.m
+
       - name: Install build dependencies
         run: |
           brew update
