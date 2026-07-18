@@ -2200,7 +2200,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     ? dataTarResult.stderrString
                     : @"tar failed for data container";
             } else {
-                msg = @"Failed to create verified data artifact";
+                msg = dataArtifactError.localizedDescription.length
+                    ? dataArtifactError.localizedDescription
+                    : @"Failed to create verified data artifact";
             }
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:105

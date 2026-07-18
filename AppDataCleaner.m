@@ -3264,15 +3264,28 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *canonicalPath = [validator validatedCanonicalPathForContainer:container error:&validationError];
         if (canonicalPath.length == 0) {
             failedUnits++;
-            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: validation failed", rootLabel];
+            NSInteger validatorCode = validationError ? validationError.code : 0;
+            NSString *validatorDescription = validationError.localizedDescription.length
+                ? validationError.localizedDescription
+                : @"Unknown validator failure";
+            rootSummaries[rootIndex] = [NSString stringWithFormat:@"%@: validation failed (%ld)",
+                                                                  rootLabel,
+                                                                  (long)validatorCode];
             if (!firstFailure) {
+                NSString *rootName = rootIndex == 0 ? @"Rootful" : @"Rootless";
+                NSString *failureMessage = [NSString stringWithFormat:
+                    @"%@ application-data validation failed (validator=%ld): %@",
+                    rootName,
+                    (long)validatorCode,
+                    validatorDescription];
                 firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeValidationFailed,
-                                                        rootIndex == 0
-                                                            ? @"Rootful application-data validation failed"
-                                                            : @"Rootless application-data validation failed");
+                                                        failureMessage);
             }
-            [self logMessage:@"[AppDataCleaner] ApplicationData %@ validation failed (%@:%ld)",
-                  rootLabel, validationError.domain ?: @"unknown", (long)validationError.code];
+            [self logMessage:@"[AppDataCleaner] ApplicationData %@ validation failed (%@:%ld): %@",
+                  rootLabel,
+                  validationError.domain ?: @"unknown",
+                  (long)validatorCode,
+                  validatorDescription];
             continue;
         }
 

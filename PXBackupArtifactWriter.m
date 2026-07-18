@@ -1776,14 +1776,14 @@ static NSString *PXBackupArtifactHexDigest(const unsigned char *digest,
                                      @"The producer output is invalid");
             break;
         }
-        int payloadAccessMode =
-            policy.dataProtectionRequirement ==
-                    PXBackupArtifactDataProtectionRequirementComplete
-                ? O_RDWR
-                : O_RDONLY;
+        // Every produced payload is finalized through this descriptor with
+        // fchmod/fstat/fsync, even when no data-protection mutation is needed.
+        // A read-only descriptor can make fsync fail on Darwin after a valid
+        // producer output, so retain write access while preserving all
+        // no-follow, identity and policy checks below.
         payloadDescriptor = openat(temporary.descriptor,
                                    PXBackupArtifactPayloadName,
-                                   payloadAccessMode | O_NONBLOCK |
+                                   O_RDWR | O_NONBLOCK |
                                        O_NOFOLLOW | O_CLOEXEC);
         if (payloadDescriptor < 0) {
             PXBackupArtifactSetError(&operationError,
