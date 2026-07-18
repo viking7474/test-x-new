@@ -2752,7 +2752,7 @@ static BOOL PXFIRunOneGroupCrashCase(NSString *caseID, NSMutableArray<NSDictiona
         ok = NO;
     }
     NSInteger number = [[caseID substringFromIndex:1] integerValue];
-    if (![[PXFIGroupDurablePhase(fixture) ?: @""] isEqualToString:PXFIGroupExpectedCrashPhase(number)]) {
+    if (![(PXFIGroupDurablePhase(fixture) ?: @"") isEqualToString:PXFIGroupExpectedCrashPhase(number)]) {
         PXFIAddFailure(failures, caseID, @"crash.phase", @"leader durable phase differed"); ok = NO;
     }
     int recoveryStatus = 0;
@@ -3310,7 +3310,7 @@ static BOOL PXFIRunOneOptionalCrashCase(NSString *caseID, NSMutableArray<NSDicti
         ok = NO;
     }
     NSInteger number = [[caseID substringFromIndex:1] integerValue];
-    if (![[PXFIOptionalDurablePhase(fixture) ?: @""] isEqualToString:PXFIOptionalExpectedCrashPhase(number)]) {
+    if (![(PXFIOptionalDurablePhase(fixture) ?: @"") isEqualToString:PXFIOptionalExpectedCrashPhase(number)]) {
         PXFIAddFailure(failures, caseID, @"crash.phase", @"optional durable phase differed"); ok = NO;
     }
     int recoveryStatus = 0;
