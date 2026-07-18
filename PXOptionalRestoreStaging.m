@@ -122,13 +122,18 @@ static BOOL PXOptionalSetCloseOnExec(int descriptor) {
 }
 
 static int PXOptionalDuplicateDescriptor(int descriptor) {
+    int duplicate = -1;
 #ifdef F_DUPFD_CLOEXEC
-    int duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 0);
+    do {
+        duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 0);
+    } while (duplicate < 0 && errno == EINTR);
     if (duplicate >= 0) {
         return duplicate;
     }
 #endif
-    int duplicate = dup(descriptor);
+    do {
+        duplicate = dup(descriptor);
+    } while (duplicate < 0 && errno == EINTR);
     if (duplicate < 0) {
         return -1;
     }
