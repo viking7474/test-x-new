@@ -2592,8 +2592,15 @@ static BOOL PXFIGroupValidateCase(NSString *caseID,
         PXFI_GROUP_ASSERT(!transaction.committed && transaction.rollbackPerformed && !transaction.rollbackComplete,
                           @"rollback.incomplete", @"rollback failure was normalized into completion");
         PXFI_GROUP_ASSERT(PXFIGroupAllWorkspaces(fixture).count >= 1, @"rollback.evidence", @"rollback evidence was not retained");
-        PXFI_GROUP_ASSERT(!(PXFIGroupStateEquals(fixture, @"INSTALLED")), @"rollback.notcommitted", @"rollback failure appeared committed");
-        if (number == 22) {
+        if (number == 20) {
+            PXFI_GROUP_ASSERT(PXFIGroupStateEquals(fixture, @"INSTALLED"),
+                              @"rollback.installed-residue",
+                              @"installed batch was not preserved after rollback failed before the first installed-to-new move");
+        } else if (number == 21) {
+            PXFI_GROUP_ASSERT(!PXFIGroupStateEquals(fixture, @"INSTALLED"),
+                              @"rollback.partial-residue",
+                              @"original-restore failure did not leave the expected partial rollback residue");
+        } else {
             PXFI_GROUP_ASSERT(PXFIGroupStateEquals(fixture, @"ORIGINAL"),
                               @"rollback.original-undurable", @"rolled-back journal failure did not preserve original batch");
         }

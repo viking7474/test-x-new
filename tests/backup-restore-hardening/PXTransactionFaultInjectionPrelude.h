@@ -45,7 +45,7 @@ int PXFI_closedir(DIR *directory);
 #endif
 
 #if PX_TRANSACTION_FAULT_INJECTION
-#define open PXFI_open
+#define open(...) PXFI_open(__VA_ARGS__)
 #define openat PXFI_openat
 #define close PXFI_close
 #define dup PXFI_dup
