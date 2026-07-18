@@ -25,11 +25,13 @@ NSString * const PXBackupArtifactVerifierErrorFieldPathKey =
 @property (nonatomic, assign, readonly) uint64_t expectedSize;
 @property (nonatomic, copy, readonly) NSString *expectedDigest;
 @property (nonatomic, assign, readonly) NSUInteger originalIndex;
+@property (nonatomic, assign, readonly) BOOL requiresCompleteProtection;
 
 - (instancetype)initWithName:(NSString *)name
                 expectedSize:(uint64_t)expectedSize
               expectedDigest:(NSString *)expectedDigest
-               originalIndex:(NSUInteger)originalIndex;
+               originalIndex:(NSUInteger)originalIndex
+  requiresCompleteProtection:(BOOL)requiresCompleteProtection;
 
 @end
 
@@ -38,7 +40,8 @@ NSString * const PXBackupArtifactVerifierErrorFieldPathKey =
 - (instancetype)initWithName:(NSString *)name
                 expectedSize:(uint64_t)expectedSize
               expectedDigest:(NSString *)expectedDigest
-               originalIndex:(NSUInteger)originalIndex {
+               originalIndex:(NSUInteger)originalIndex
+  requiresCompleteProtection:(BOOL)requiresCompleteProtection {
     self = [super init];
     if (self) {
         _name = [name copy];
