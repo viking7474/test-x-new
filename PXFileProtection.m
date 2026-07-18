@@ -6,6 +6,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(PROTECTION_CLASS_A)
+static const int PXFileProtectionCompleteClass = PROTECTION_CLASS_A;
+#else
+// Apple exposes the fcntl data-protection commands in public SDK headers,
+// while the symbolic class identifiers may remain gated behind PRIVATE.
+// XNU's content-protection ABI defines class A as value 1.
+static const int PXFileProtectionCompleteClass = 1;
+#endif
+
 NSErrorDomain const PXFileProtectionErrorDomain =
     @"com.hydra.projectx.file-protection";
 NSString * const PXFileProtectionErrorFieldPathKey = @"fieldPath";
@@ -69,7 +78,7 @@ static BOOL PXFileProtectionSetCompleteClass(int descriptor) {
     do {
         result = fcntl(descriptor,
                        F_SETPROTECTIONCLASS,
-                       PROTECTION_CLASS_A);
+                       PXFileProtectionCompleteClass);
     } while (result < 0 && errno == EINTR);
     return result == 0;
 }
@@ -166,7 +175,7 @@ static BOOL PXFileProtectionVerifyCommon(int descriptor,
                                     PXFileProtectionClassField,
                                     @"The file protection class could not be inspected.");
     }
-    if (protectionClass != PROTECTION_CLASS_A) {
+    if (protectionClass != PXFileProtectionCompleteClass) {
         return PXFileProtectionFail(error,
                                     PXFileProtectionErrorClassMismatch,
                                     PXFileProtectionClassField,
