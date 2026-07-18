@@ -413,7 +413,7 @@ static NSString *PXKeychainHelperResultDecoderFieldPath(NSError *constructionErr
 
 @interface PXKeychainHelperResult ()
 
-- (instancetype)px_initWithOperation:(PXKeychainHelperOperation)operation
+- (instancetype)initWithOperation:(PXKeychainHelperOperation)operation
                           completion:(PXKeychainHelperCompletion)completion
                       attemptedCount:(NSUInteger)attemptedCount
                       succeededCount:(NSUInteger)succeededCount
@@ -734,7 +734,7 @@ static NSString *PXKeychainHelperResultDecoderFieldPath(NSError *constructionErr
     }
 
     PXKeychainHelperResult *result =
-        [[PXKeychainHelperResult alloc] px_initWithOperation:operation
+        [[PXKeychainHelperResult alloc] initWithOperation:operation
                                                  completion:completion
                                              attemptedCount:attemptedCount
                                              succeededCount:succeededCount
@@ -917,7 +917,7 @@ static NSString *PXKeychainHelperResultDecoderFieldPath(NSError *constructionErr
     return result;
 }
 
-- (instancetype)px_initWithOperation:(PXKeychainHelperOperation)operation
+- (instancetype)initWithOperation:(PXKeychainHelperOperation)operation
                           completion:(PXKeychainHelperCompletion)completion
                       attemptedCount:(NSUInteger)attemptedCount
                       succeededCount:(NSUInteger)succeededCount

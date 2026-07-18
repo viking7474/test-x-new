@@ -473,7 +473,7 @@ static BOOL PXKeychainItemIdentitySnapshotMatchesState(
 
 @interface PXKeychainItemIdentity ()
 
-- (instancetype)px_initWithItemClass:(PXKeychainItemIdentityClass)itemClass
+- (instancetype)initWithItemClass:(PXKeychainItemIdentityClass)itemClass
                            className:(NSString *)className
                          accessGroup:(NSString *)accessGroup
                       synchronizable:(BOOL)synchronizable
@@ -1101,7 +1101,7 @@ static BOOL PXKeychainItemIdentitySnapshotMatchesState(
         }
 
         PXKeychainItemIdentity *identity =
-            [[PXKeychainItemIdentity alloc] px_initWithItemClass:itemClass
+            [[PXKeychainItemIdentity alloc] initWithItemClass:itemClass
                                                        className:classNameSnapshot
                                                      accessGroup:accessGroup
                                                   synchronizable:synchronizable
@@ -1125,7 +1125,7 @@ static BOOL PXKeychainItemIdentitySnapshotMatchesState(
     }
 }
 
-- (instancetype)px_initWithItemClass:(PXKeychainItemIdentityClass)itemClass
+- (instancetype)initWithItemClass:(PXKeychainItemIdentityClass)itemClass
                            className:(NSString *)className
                          accessGroup:(NSString *)accessGroup
                       synchronizable:(BOOL)synchronizable
