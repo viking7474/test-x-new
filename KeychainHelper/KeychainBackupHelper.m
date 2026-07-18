@@ -150,7 +150,7 @@ static BOOL PXSerializedClassMetadataIsConsistent(NSDictionary *item,
         return NO;
     }
     NSString *expectedName = PXKeychainClassName(canonicalClass);
-    return [(__bridge NSString *)classMetadata isEqualToString:expectedName];
+    return [(NSString *)classMetadata isEqualToString:expectedName];
 }
 
 static BOOL PXDecodeRestoreValue(id serializedValue,
