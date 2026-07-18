@@ -142,6 +142,14 @@ static BOOL PXModeIsWorldWritable(mode_t mode) {
     return (mode & S_IWOTH) != 0;
 }
 
+static BOOL PXCandidateModeIsAuthorized(mode_t mode,
+                                        PXResolvedContainerRoot root) {
+    if (!PXModeIsWorldWritable(mode)) {
+        return YES;
+    }
+    return root == PXResolvedContainerRootRootful;
+}
+
 static BOOL PXContainerOwnerIsAuthorized(uid_t owner,
                                          uid_t mobileUserID,
                                          PXResolvedContainerRoot root) {
@@ -436,10 +444,11 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
                                            0);
         return nil;
     }
-    if (PXModeIsWorldWritable(canonicalCandidateStatus.st_mode)) {
+    if (!PXCandidateModeIsAuthorized(canonicalCandidateStatus.st_mode,
+                                      container.root)) {
         PXSetDestructivePathValidatorError(error,
                                            PXDestructivePathValidatorErrorOwnershipOrModeViolation,
-                                           @"The candidate directory is world-writable.",
+                                           @"The rootless candidate directory is world-writable.",
                                            0);
         return nil;
     }

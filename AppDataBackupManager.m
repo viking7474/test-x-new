@@ -2228,8 +2228,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSMutableArray<NSDictionary *> *groupManifests = [NSMutableArray array];
         NSArray<AppGroupContainerInfo *> *groupContainers = @[];
         NSArray<NSString *> *groupIDs = @[];
+        BOOL appGroupsRequested =
+            (options & PXBackupOptionIncludeAppGroups) != 0;
 
-        if (options & PXBackupOptionIncludeAppGroups) {
+        if (appGroupsRequested) {
             NSError *entErr = nil;
             AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
             groupIDs = [reader applicationGroupsForBundleID:bundleID error:&entErr];
@@ -2806,7 +2808,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 @"files": sharedSystemDBFiles,
             },
             @"options": @{
-                @"includeAppGroups": @((options & PXBackupOptionIncludeAppGroups) != 0),
+                @"includeAppGroups": @(appGroupsRequested),
                 @"includePreferences": @(preferencesRequested),
                 @"includeKeychain": @(keychainIncluded),
             },

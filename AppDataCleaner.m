@@ -2614,12 +2614,27 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                 attemptedUnits++;
                 failedUnits++;
+                NSString *resolverDescription = resolutionError.localizedDescription.length
+                    ? resolutionError.localizedDescription
+                    : @"Unknown App Group resolver failure";
+                NSString *resolutionMessage = [NSString stringWithFormat:
+                    @"App Groups exact resolution failed for %@ (%@:%ld): %@",
+                    rootLabels[rootIndex],
+                    resolutionError.domain ?: @"unknown",
+                    (long)resolutionError.code,
+                    resolverDescription];
                 if (!firstFailure) {
                     firstFailure = PXAppGroupsFailure(
                         PXAppGroupsClearFailureCodeResolutionFailed,
-                        [NSString stringWithFormat:@"App Groups exact resolution failed for %@",
-                                                   rootLabels[rootIndex]]);
+                        resolutionMessage);
                 }
+                [self logMessage:
+                    @"[AppDataCleaner] AppGroups %@ resolution failed for %@ (%@:%ld): %@",
+                    rootLabels[rootIndex],
+                    identifier,
+                    resolutionError.domain ?: @"unknown",
+                    (long)resolutionError.code,
+                    resolverDescription];
                 continue;
             }
 
