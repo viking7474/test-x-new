@@ -202,7 +202,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
 
 @interface PXKeychainHelperInvocationResult ()
 
-- (instancetype)px_initWithStatus:(PXKeychainHelperInvocationStatus)status
+- (instancetype)initWithStatus:(PXKeychainHelperInvocationStatus)status
                 expectedOperation:(PXKeychainHelperOperation)expectedOperation
                          exitCode:(NSInteger)exitCode
                      helperResult:(PXKeychainHelperResult * _Nullable)helperResult
@@ -276,7 +276,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
         !stdoutTruncated;
     if (!processUsable) {
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:PXKeychainHelperInvocationStatusProcessFailed
+            initWithStatus:PXKeychainHelperInvocationStatusProcessFailed
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -286,7 +286,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
 
     if (PXKeychainHelperInvocationExitIsWrapperFailure(exitCode)) {
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:PXKeychainHelperInvocationStatusWrapperFailed
+            initWithStatus:PXKeychainHelperInvocationStatusWrapperFailed
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -297,7 +297,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
         PXKeychainHelperInvocationExitIsHelperFailure(exitCode) || exitCode == 50;
     if (!recognizedDirectExit) {
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
+            initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -311,7 +311,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
     if (exitCode == 50) {
         if (scanStatus != PXKeychainHelperMachineScanStatusInvalidMarker) {
             return [[PXKeychainHelperInvocationResult alloc]
-                px_initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
+                initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
                 expectedOperation:expectedOperation
                 exitCode:exitCode
                 helperResult:nil
@@ -319,7 +319,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
                 diagnosticOutputTruncated:diagnosticOutputTruncated];
         }
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
+            initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -329,7 +329,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
     if (scanStatus != PXKeychainHelperMachineScanStatusResult ||
         machineLine.length == 0) {
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
+            initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -346,7 +346,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
         helperResult.operation != expectedOperation ||
         ![helperResult.requestedAccessGroups isEqualToArray:canonicalExpectedGroups]) {
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
+            initWithStatus:PXKeychainHelperInvocationStatusProtocolFailed
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -369,7 +369,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
     }
     if (status == PXKeychainHelperInvocationStatusProtocolFailed) {
         return [[PXKeychainHelperInvocationResult alloc]
-            px_initWithStatus:status
+            initWithStatus:status
             expectedOperation:expectedOperation
             exitCode:exitCode
             helperResult:nil
@@ -381,7 +381,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
         helperResult.effectiveAccessGroups.count -
         helperResult.requestedAccessGroups.count;
     return [[PXKeychainHelperInvocationResult alloc]
-        px_initWithStatus:status
+        initWithStatus:status
         expectedOperation:expectedOperation
         exitCode:exitCode
         helperResult:helperResult
@@ -389,7 +389,7 @@ static BOOL PXKeychainHelperInvocationExitIsWrapperFailure(NSInteger exitCode) {
         diagnosticOutputTruncated:diagnosticOutputTruncated];
 }
 
-- (instancetype)px_initWithStatus:(PXKeychainHelperInvocationStatus)status
+- (instancetype)initWithStatus:(PXKeychainHelperInvocationStatus)status
                 expectedOperation:(PXKeychainHelperOperation)expectedOperation
                          exitCode:(NSInteger)exitCode
                      helperResult:(PXKeychainHelperResult *)helperResult
