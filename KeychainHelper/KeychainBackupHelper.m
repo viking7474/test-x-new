@@ -2,7 +2,12 @@
 #import "PXKeychainItemIdentity.h"
 #import <Security/Security.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <errno.h>
+#import <fcntl.h>
 #import <math.h>
+#import <stdlib.h>
+#import <sys/stat.h>
+#import <unistd.h>
 
 NSString * const PXKeychainBackupErrorDomain = @"com.hydra.projectx.keychain";
 
@@ -18,6 +23,258 @@ NSString * const PXKeychainBackupErrorDomain = @"com.hydra.projectx.keychain";
 @end
 
 #pragma mark - Private Helpers
+
+static const NSUInteger PXKeychainBackupMaximumAccessGroups = 128;
+static const NSUInteger PXKeychainBackupMaximumAccessGroupBytes = 512;
+static const NSUInteger PXKeychainBackupMaximumAccessGroupArrayBytes = 8 * 1024;
+static const NSUInteger PXKeychainBackupPlistMaximumBytes = 64 * 1024 * 1024;
+
+static void PXAssignKeychainBackupError(NSError **error,
+                                        PXKeychainBackupErrorCode code,
+                                        NSString *description,
+                                        int posixError) {
+    if (!error) {
+        return;
+    }
+    NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithObject:
+        description ?: @"Keychain backup operation failed"
+                                                                  forKey:NSLocalizedDescriptionKey];
+    if (posixError != 0) {
+        userInfo[NSUnderlyingErrorKey] =
+            [NSError errorWithDomain:NSPOSIXErrorDomain code:posixError userInfo:nil];
+    }
+    *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
+                                 code:code
+                             userInfo:userInfo];
+}
+
+static NSArray<NSString *> *PXCanonicalKeychainAccessGroups(id value,
+                                                             NSError **error) {
+    if (![value isKindOfClass:[NSArray class]]) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidArguments,
+                                    @"Access groups must be an array",
+                                    0);
+        return nil;
+    }
+
+    NSArray *input = (NSArray *)value;
+    if (input.count == 0) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorNoAccessGroups,
+                                    @"At least one access group is required",
+                                    0);
+        return nil;
+    }
+    if (input.count > PXKeychainBackupMaximumAccessGroups) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidArguments,
+                                    @"The access-group array exceeds the fixed count limit",
+                                    0);
+        return nil;
+    }
+
+    NSMutableArray<NSString *> *canonical =
+        [NSMutableArray arrayWithCapacity:input.count];
+    NSMutableSet<NSString *> *seen = [NSMutableSet setWithCapacity:input.count];
+    NSCharacterSet *edgeWhitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSCharacterSet *controlCharacters = [NSCharacterSet controlCharacterSet];
+    NSUInteger totalBytes = 0;
+
+    for (id candidate in input) {
+        if (![candidate isKindOfClass:[NSString class]]) {
+            PXAssignKeychainBackupError(error,
+                                        PXKeychainBackupErrorInvalidArguments,
+                                        @"An access-group value is not a string",
+                                        0);
+            return nil;
+        }
+
+        NSString *trimmed = [(NSString *)candidate
+            stringByTrimmingCharactersInSet:edgeWhitespace];
+        NSData *utf8 = [trimmed dataUsingEncoding:NSUTF8StringEncoding
+                              allowLossyConversion:NO];
+        NSString *roundTrip = utf8
+            ? [[NSString alloc] initWithData:utf8 encoding:NSUTF8StringEncoding]
+            : nil;
+        if (trimmed.length == 0 ||
+            !utf8 || utf8.length == 0 ||
+            utf8.length > PXKeychainBackupMaximumAccessGroupBytes ||
+            ![roundTrip isEqualToString:trimmed] ||
+            [trimmed rangeOfCharacterFromSet:controlCharacters].location != NSNotFound ||
+            [trimmed rangeOfString:@","].location != NSNotFound) {
+            PXAssignKeychainBackupError(error,
+                                        PXKeychainBackupErrorInvalidArguments,
+                                        @"An access-group value violates the canonical contract",
+                                        0);
+            return nil;
+        }
+        if ([seen containsObject:trimmed]) {
+            continue;
+        }
+        if (totalBytes > PXKeychainBackupMaximumAccessGroupArrayBytes ||
+            utf8.length > PXKeychainBackupMaximumAccessGroupArrayBytes - totalBytes) {
+            PXAssignKeychainBackupError(error,
+                                        PXKeychainBackupErrorInvalidArguments,
+                                        @"The access-group array exceeds the fixed byte limit",
+                                        0);
+            return nil;
+        }
+        totalBytes += utf8.length;
+        NSString *snapshot = [trimmed copy];
+        [seen addObject:snapshot];
+        [canonical addObject:snapshot];
+    }
+
+    if (canonical.count == 0) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorNoAccessGroups,
+                                    @"The canonical access-group array is empty",
+                                    0);
+        return nil;
+    }
+    return [canonical copy];
+}
+
+static NSData *PXReadBoundedKeychainBackupFile(NSString *filePath,
+                                                NSError **error) {
+    if (![filePath isKindOfClass:[NSString class]] || filePath.length == 0) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidArguments,
+                                    @"Backup file path is required",
+                                    0);
+        return nil;
+    }
+
+    const char *path = filePath.fileSystemRepresentation;
+    if (!path) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidArguments,
+                                    @"Backup file path cannot be represented safely",
+                                    EINVAL);
+        return nil;
+    }
+
+    errno = 0;
+    int descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (descriptor < 0) {
+        int capturedError = errno;
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorFileIO,
+                                    @"Backup file could not be opened safely",
+                                    capturedError);
+        return nil;
+    }
+
+    struct stat initialStatus;
+    errno = 0;
+    if (fstat(descriptor, &initialStatus) != 0) {
+        int capturedError = errno;
+        close(descriptor);
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorFileIO,
+                                    @"Backup file could not be inspected safely",
+                                    capturedError);
+        return nil;
+    }
+    if (!S_ISREG(initialStatus.st_mode) ||
+        initialStatus.st_size <= 0 ||
+        (unsigned long long)initialStatus.st_size > PXKeychainBackupPlistMaximumBytes) {
+        close(descriptor);
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidBackupFile,
+                                    @"Backup file must be a nonempty regular file no larger than 64 MiB",
+                                    0);
+        return nil;
+    }
+
+    NSUInteger expectedLength = (NSUInteger)initialStatus.st_size;
+    void *buffer = malloc(expectedLength);
+    if (!buffer) {
+        close(descriptor);
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorFileIO,
+                                    @"Backup file buffer allocation failed",
+                                    ENOMEM);
+        return nil;
+    }
+
+    NSUInteger offset = 0;
+    while (offset < expectedLength) {
+        errno = 0;
+        ssize_t amount = read(descriptor,
+                              (unsigned char *)buffer + offset,
+                              expectedLength - offset);
+        if (amount < 0) {
+            int capturedError = errno;
+            if (capturedError == EINTR) {
+                continue;
+            }
+            free(buffer);
+            close(descriptor);
+            PXAssignKeychainBackupError(error,
+                                        PXKeychainBackupErrorFileIO,
+                                        @"Backup file could not be read safely",
+                                        capturedError);
+            return nil;
+        }
+        if (amount == 0) {
+            free(buffer);
+            close(descriptor);
+            PXAssignKeychainBackupError(error,
+                                        PXKeychainBackupErrorInvalidBackupFile,
+                                        @"Backup file ended before the verified size was read",
+                                        0);
+            return nil;
+        }
+        offset += (NSUInteger)amount;
+    }
+
+    struct stat finalStatus;
+    errno = 0;
+    if (fstat(descriptor, &finalStatus) != 0) {
+        int capturedError = errno;
+        free(buffer);
+        close(descriptor);
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorFileIO,
+                                    @"Backup file could not be revalidated safely",
+                                    capturedError);
+        return nil;
+    }
+    close(descriptor);
+
+    BOOL unchanged =
+        S_ISREG(finalStatus.st_mode) &&
+        finalStatus.st_dev == initialStatus.st_dev &&
+        finalStatus.st_ino == initialStatus.st_ino &&
+        finalStatus.st_size == initialStatus.st_size &&
+        finalStatus.st_mtimespec.tv_sec == initialStatus.st_mtimespec.tv_sec &&
+        finalStatus.st_mtimespec.tv_nsec == initialStatus.st_mtimespec.tv_nsec &&
+        finalStatus.st_ctimespec.tv_sec == initialStatus.st_ctimespec.tv_sec &&
+        finalStatus.st_ctimespec.tv_nsec == initialStatus.st_ctimespec.tv_nsec;
+    if (!unchanged) {
+        free(buffer);
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidBackupFile,
+                                    @"Backup file changed while it was being read",
+                                    0);
+        return nil;
+    }
+
+    NSData *data = [[NSData alloc] initWithBytesNoCopy:buffer
+                                                length:expectedLength
+                                          freeWhenDone:YES];
+    if (!data) {
+        free(buffer);
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorFileIO,
+                                    @"Backup file data could not be constructed",
+                                    ENOMEM);
+        return nil;
+    }
+    return data;
+}
 
 /// Convert keychain item class to SecItemClass CFTypeRef.
 static CFTypeRef PXSecItemClassFromType(PXKeychainItemClass itemClass) {
@@ -482,115 +739,40 @@ static PXRestoreItemOutcome PXProcessRestoreItem(NSDictionary *item,
                                      itemClasses:(PXKeychainItemClass)itemClasses
                                            error:(NSError **)error {
     if (!filePath.length) {
+        PXAssignKeychainBackupError(error,
+                                    PXKeychainBackupErrorInvalidArguments,
+                                    @"Backup file path is required",
+                                    0);
+        return nil;
+    }
+
+    NSError *canonicalGroupError = nil;
+    NSArray<NSString *> *canonicalGroups =
+        PXCanonicalKeychainAccessGroups(groups, &canonicalGroupError);
+    if (!canonicalGroups) {
         if (error) {
-            *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
-                                         code:PXKeychainBackupErrorInvalidArguments
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Backup file path is required"}];
+            *error = canonicalGroupError;
         }
         return nil;
     }
-    
-    if (!groups.count) {
-        if (error) {
-            *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
-                                         code:PXKeychainBackupErrorNoAccessGroups
-                                     userInfo:@{NSLocalizedDescriptionKey: @"At least one access group is required"}];
-        }
-        return nil;
-    }
-    
+
     PXKeychainBackupResult *result = [[PXKeychainBackupResult alloc] init];
     NSMutableArray<NSString *> *warnings = [NSMutableArray array];
     NSMutableArray<NSString *> *errors = [NSMutableArray array];
     NSMutableArray<NSDictionary *> *allItems = [NSMutableArray array];
-    
-    // Iterate through each keychain class.
-    for (NSNumber *classNum in PXAllKeychainClasses()) {
-        PXKeychainItemClass classType = [classNum unsignedIntegerValue];
-        if (!(itemClasses & classType)) {
-            continue;
-        }
-        
-        CFTypeRef secClass = PXSecItemClassFromType(classType);
-        if (!secClass) continue;
-        
-        // Query for all items of this class with matching access groups.
-        NSMutableDictionary *query = [@{
-            (__bridge id)kSecClass: (__bridge id)secClass,
-            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
-            (__bridge id)kSecReturnAttributes: @YES,
-            (__bridge id)kSecReturnData: @YES,
-            (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-            (__bridge id)kSecAttrAccessGroup: groups.firstObject, // Primary group
-        } mutableCopy];
-        PXAddAuthUIFlags(query);
-        
-        CFTypeRef cfResult = NULL;
-        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &cfResult);
-        
-        if (status == errSecItemNotFound) {
-            // No items of this class - not an error.
-            continue;
-        }
-        
-        if (status != errSecSuccess) {
-            NSString *msg = [NSString stringWithFormat:@"Failed to query %@: %@",
-                            PXKeychainClassName(secClass), PXSecurityErrorDescription(status)];
-            [warnings addObject:msg];
-            continue;
-        }
-        
-        NSArray *items = (__bridge_transfer NSArray *)cfResult;
-        if (![items isKindOfClass:[NSArray class]]) {
-            items = @[items];
-        }
-        
-        for (NSDictionary *item in items) {
-            result.itemsProcessed++;
-            
-            // Create a serializable copy of the item.
-            NSMutableDictionary *exportItem = [NSMutableDictionary dictionary];
-            exportItem[@"_class"] = PXKeychainClassName(secClass);
-            exportItem[@"_secClass"] = (__bridge id)secClass;
-            
-            for (NSString *key in item) {
-                id value = item[key];
-                
-                // Convert NSData to base64 for serialization.
-                if ([value isKindOfClass:[NSData class]]) {
-                    exportItem[key] = @{
-                        @"_type": @"data",
-                        @"_base64": [(NSData *)value base64EncodedStringWithOptions:0]
-                    };
-                } else if ([value isKindOfClass:[NSDate class]]) {
-                    exportItem[key] = @{
-                        @"_type": @"date",
-                        @"_timestamp": @([(NSDate *)value timeIntervalSince1970])
-                    };
-                } else if ([value isKindOfClass:[NSNumber class]] ||
-                           [value isKindOfClass:[NSString class]]) {
-                    exportItem[key] = value;
-                }
-                // Skip non-serializable types
-            }
-            
-            [allItems addObject:exportItem];
-            result.itemsSucceeded++;
-        }
-    }
-    
-    // Also try querying without access group restriction if we have special entitlements.
-    // This catches items that might use different access groups we're also entitled to.
-    for (NSString *group in groups) {
-        if ([group isEqualToString:groups.firstObject]) continue; // Already queried
-        
+
+    for (NSString *group in canonicalGroups) {
         for (NSNumber *classNum in PXAllKeychainClasses()) {
             PXKeychainItemClass classType = [classNum unsignedIntegerValue];
-            if (!(itemClasses & classType)) continue;
-            
+            if (!(itemClasses & classType)) {
+                continue;
+            }
+
             CFTypeRef secClass = PXSecItemClassFromType(classType);
-            if (!secClass) continue;
-            
+            if (!secClass) {
+                continue;
+            }
+
             NSMutableDictionary *query = [@{
                 (__bridge id)kSecClass: (__bridge id)secClass,
                 (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
@@ -600,57 +782,75 @@ static PXRestoreItemOutcome PXProcessRestoreItem(NSDictionary *item,
                 (__bridge id)kSecAttrAccessGroup: group,
             } mutableCopy];
             PXAddAuthUIFlags(query);
-            
+
             CFTypeRef cfResult = NULL;
-            OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &cfResult);
-            
-            if (status != errSecSuccess) continue;
-            
-            NSArray *items = (__bridge_transfer NSArray *)cfResult;
-            if (![items isKindOfClass:[NSArray class]]) {
-                items = @[items];
+            OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query,
+                                                   &cfResult);
+            if (status == errSecItemNotFound) {
+                continue;
             }
-            
-            for (NSDictionary *item in items) {
+            if (status != errSecSuccess) {
+                [warnings addObject:[NSString stringWithFormat:
+                    @"Failed to query %@ in access group %@: %@",
+                    PXKeychainClassName(secClass),
+                    group,
+                    PXSecurityErrorDescription(status)]];
+                continue;
+            }
+
+            id resultObject = (__bridge_transfer id)cfResult;
+            NSArray *items = [resultObject isKindOfClass:[NSArray class]]
+                ? (NSArray *)resultObject
+                : (resultObject ? @[resultObject] : @[]);
+
+            for (id itemObject in items) {
+                if (![itemObject isKindOfClass:[NSDictionary class]]) {
+                    result.itemsProcessed++;
+                    result.itemsFailed++;
+                    [warnings addObject:[NSString stringWithFormat:
+                        @"A %@ item in access group %@ had an invalid result type",
+                        PXKeychainClassName(secClass),
+                        group]];
+                    continue;
+                }
+
+                NSDictionary *item = (NSDictionary *)itemObject;
                 result.itemsProcessed++;
-                
                 NSMutableDictionary *exportItem = [NSMutableDictionary dictionary];
                 exportItem[@"_class"] = PXKeychainClassName(secClass);
                 exportItem[@"_secClass"] = (__bridge id)secClass;
-                
+
                 for (NSString *key in item) {
                     id value = item[key];
                     if ([value isKindOfClass:[NSData class]]) {
                         exportItem[key] = @{
                             @"_type": @"data",
-                            @"_base64": [(NSData *)value base64EncodedStringWithOptions:0]
+                            @"_base64": [(NSData *)value base64EncodedStringWithOptions:0],
                         };
                     } else if ([value isKindOfClass:[NSDate class]]) {
                         exportItem[key] = @{
                             @"_type": @"date",
-                            @"_timestamp": @([(NSDate *)value timeIntervalSince1970])
+                            @"_timestamp": @([(NSDate *)value timeIntervalSince1970]),
                         };
                     } else if ([value isKindOfClass:[NSNumber class]] ||
                                [value isKindOfClass:[NSString class]]) {
                         exportItem[key] = value;
                     }
                 }
-                
+
                 [allItems addObject:exportItem];
                 result.itemsSucceeded++;
             }
         }
     }
-    
-    // Create backup dictionary.
+
     NSDictionary *backup = @{
         @"version": @1,
         @"created": @([[NSDate date] timeIntervalSince1970]),
-        @"accessGroups": groups,
+        @"accessGroups": canonicalGroups,
         @"items": allItems,
     };
-    
-    // Write to file.
+
     NSError *writeError = nil;
     NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:backup
                                                                    format:NSPropertyListXMLFormat_v1_0
@@ -660,23 +860,29 @@ static PXRestoreItemOutcome PXProcessRestoreItem(NSDictionary *item,
         if (error) {
             *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
                                          code:PXKeychainBackupErrorFileIO
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to serialize backup",
-                                               NSUnderlyingErrorKey: writeError ?: [NSNull null]}];
+                                     userInfo:@{
+                NSLocalizedDescriptionKey: @"Failed to serialize backup",
+                NSUnderlyingErrorKey: writeError ?: [NSNull null],
+            }];
         }
         return nil;
     }
-    
-    BOOL written = [plistData writeToFile:filePath options:NSDataWritingAtomic error:&writeError];
+
+    BOOL written = [plistData writeToFile:filePath
+                                  options:NSDataWritingAtomic
+                                    error:&writeError];
     if (!written) {
         if (error) {
             *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
                                          code:PXKeychainBackupErrorFileIO
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to write backup file",
-                                               NSUnderlyingErrorKey: writeError ?: [NSNull null]}];
+                                     userInfo:@{
+                NSLocalizedDescriptionKey: @"Failed to write backup file",
+                NSUnderlyingErrorKey: writeError ?: [NSNull null],
+            }];
         }
         return nil;
     }
-    
+
     result.warnings = warnings;
     result.errors = errors;
     return result;
@@ -696,13 +902,8 @@ static PXRestoreItemOutcome PXProcessRestoreItem(NSDictionary *item,
         return nil;
     }
 
-    NSData *plistData = [NSData dataWithContentsOfFile:filePath];
-    if (!plistData.length) {
-        if (error) {
-            *error = [NSError errorWithDomain:PXKeychainBackupErrorDomain
-                                         code:PXKeychainBackupErrorFileIO
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to read backup file or file is empty"}];
-        }
+    NSData *plistData = PXReadBoundedKeychainBackupFile(filePath, error);
+    if (!plistData) {
         return nil;
     }
 

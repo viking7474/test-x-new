@@ -299,6 +299,9 @@ static const PXRestoreComponent PXRestoreManagerCanonicalComponents[] = {
     PXRestoreComponentPreferences,
     PXRestoreComponentKeychain,
 };
+static const NSUInteger PXRestoreManagerCanonicalComponentCount =
+    sizeof(PXRestoreManagerCanonicalComponents) /
+    sizeof(PXRestoreManagerCanonicalComponents[0]);
 
 static NSArray<NSString *> *PXRestoreWarningsSuffix(NSArray<NSString *> *warnings,
                                                      NSUInteger startIndex) {
@@ -360,20 +363,22 @@ static PXRestoreFailure *PXRestoreFailureSnapshotFromError(NSError *error) {
     if (((NSUInteger)requestedComponents & ~(NSUInteger)PXRestoreComponentAll) != 0 ||
         (requestedComponents & PXRestoreComponentApplicationData) == 0 ||
         ![plannedUnitCounts isKindOfClass:[NSDictionary class]] ||
-        plannedUnitCounts.count != 8) {
+        plannedUnitCounts.count != PXRestoreManagerCanonicalComponentCount) {
         return nil;
     }
 
     NSMutableDictionary<NSNumber *, NSNumber *> *copiedCounts =
-        [NSMutableDictionary dictionaryWithCapacity:8];
+        [NSMutableDictionary dictionaryWithCapacity:PXRestoreManagerCanonicalComponentCount];
     NSMutableDictionary<NSNumber *, NSNumber *> *statuses =
-        [NSMutableDictionary dictionaryWithCapacity:8];
+        [NSMutableDictionary dictionaryWithCapacity:PXRestoreManagerCanonicalComponentCount];
     NSMutableDictionary<NSNumber *, NSNumber *> *rollbackStatuses =
-        [NSMutableDictionary dictionaryWithCapacity:8];
+        [NSMutableDictionary dictionaryWithCapacity:PXRestoreManagerCanonicalComponentCount];
     NSMutableDictionary<NSNumber *, NSMutableArray<NSString *> *> *componentWarnings =
-        [NSMutableDictionary dictionaryWithCapacity:8];
+        [NSMutableDictionary dictionaryWithCapacity:PXRestoreManagerCanonicalComponentCount];
 
-    for (NSUInteger index = 0; index < 8; index++) {
+    for (NSUInteger index = 0;
+         index < PXRestoreManagerCanonicalComponentCount;
+         index++) {
         PXRestoreComponent component = PXRestoreManagerCanonicalComponents[index];
         NSNumber *key = @(component);
         NSNumber *countNumber = plannedUnitCounts[key];
@@ -401,7 +406,8 @@ static PXRestoreFailure *PXRestoreFailureSnapshotFromError(NSError *error) {
         _statuses = statuses;
         _rollbackStatuses = rollbackStatuses;
         _componentWarnings = componentWarnings;
-        _failures = [NSMutableDictionary dictionaryWithCapacity:8];
+        _failures = [NSMutableDictionary dictionaryWithCapacity:
+            PXRestoreManagerCanonicalComponentCount];
     }
     return self;
 }
@@ -483,8 +489,11 @@ static PXRestoreFailure *PXRestoreFailureSnapshotFromError(NSError *error) {
 }
 
 - (nullable PXRestoreResult *)resultWithAggregateWarnings:(NSArray<NSString *> *)warnings {
-    NSMutableArray<PXRestoreComponentResult *> *results = [NSMutableArray arrayWithCapacity:8];
-    for (NSUInteger index = 0; index < 8; index++) {
+    NSMutableArray<PXRestoreComponentResult *> *results =
+        [NSMutableArray arrayWithCapacity:PXRestoreManagerCanonicalComponentCount];
+    for (NSUInteger index = 0;
+         index < PXRestoreManagerCanonicalComponentCount;
+         index++) {
         PXRestoreComponent component = PXRestoreManagerCanonicalComponents[index];
         NSNumber *key = @(component);
         PXRestoreComponentStatus status = (PXRestoreComponentStatus)[_statuses[key] integerValue];
