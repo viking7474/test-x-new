@@ -21,6 +21,9 @@ jobs:
           python3 scripts/audit_backup_restore_hardening.py --self-test
           python3 scripts/audit_backup_restore_hardening.py
 
+      - name: Test canvas fingerprint protection invariants
+        run: node scripts/test_canvas_fingerprint_protection.js
+
       - name: Build and run malicious archive fixtures
         run: |
           set -euo pipefail
