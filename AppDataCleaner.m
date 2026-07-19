@@ -1132,6 +1132,55 @@ static BOOL PXReadOnlyRegularNonSymlinkFileAtPath(NSString *path) {
            !S_ISLNK(pathStat.st_mode);
 }
 
+static NSString *PXExactInstalledApplicationBundlePathFromLaunchServices(NSString *bundleIdentifier) {
+    if (!PXStrictBundleIdentifierIsValid(bundleIdentifier)) {
+        return nil;
+    }
+
+    @try {
+        Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+        SEL proxySelector = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        if (!proxyClass || ![proxyClass respondsToSelector:proxySelector]) {
+            return nil;
+        }
+
+        id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass,
+                                                       proxySelector,
+                                                       bundleIdentifier);
+        SEL bundleURLSelector = NSSelectorFromString(@"bundleURL");
+        if (!proxy || ![proxy respondsToSelector:bundleURLSelector]) {
+            return nil;
+        }
+
+        id bundleURLObject = ((id (*)(id, SEL))objc_msgSend)(proxy,
+                                                             bundleURLSelector);
+        if (![bundleURLObject isKindOfClass:[NSURL class]]) {
+            return nil;
+        }
+
+        NSString *bundlePath = [(NSURL *)bundleURLObject path];
+        if (!PXReadOnlyRealDirectoryAtPath(bundlePath)) {
+            return nil;
+        }
+
+        NSString *infoPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
+        if (!PXReadOnlyRegularNonSymlinkFileAtPath(infoPath)) {
+            return nil;
+        }
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+        id exactIdentifier = [info isKindOfClass:[NSDictionary class]]
+            ? info[@"CFBundleIdentifier"]
+            : nil;
+        if (![exactIdentifier isKindOfClass:[NSString class]] ||
+            ![(NSString *)exactIdentifier isEqualToString:bundleIdentifier]) {
+            return nil;
+        }
+        return [bundlePath copy];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
 static void PXInstalledExtensionDiscoveryAssignError(NSError **error,
                                                       PXInstalledExtensionDiscoveryErrorCode code,
                                                       NSString *message) {
@@ -2080,8 +2129,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         @"/containers/Bundle/Application"
     ];
     NSMutableArray<NSString *> *matchingApplicationBundles = [NSMutableArray array];
+    NSString *launchServicesBundlePath =
+        PXExactInstalledApplicationBundlePathFromLaunchServices(bundleIdentifier);
+    if (launchServicesBundlePath.length) {
+        [matchingApplicationBundles addObject:launchServicesBundlePath];
+    }
 
-    for (NSString *bundleRoot in bundleRoots) {
+    if (matchingApplicationBundles.count == 0) {
+        for (NSString *bundleRoot in bundleRoots) {
         struct stat rootStat;
         if (lstat(bundleRoot.fileSystemRepresentation, &rootStat) != 0) {
             int savedErrno = errno;
@@ -2156,6 +2211,18 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
             }
         }
+        if (matchingApplicationBundles.count > 0) {
+            break;
+        }
+    }
+    }
+
+    if (matchingApplicationBundles.count == 0 &&
+        [bundleIdentifier hasPrefix:@"com.apple."]) {
+        [self logMessage:
+            @"[AppDataCleaner] No exact system application bundle path was available for %@; treating extension discovery as empty",
+            bundleIdentifier];
+        return @[];
     }
 
     if (matchingApplicationBundles.count == 0) {
@@ -2604,14 +2671,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         for (NSUInteger rootIndex = 0; rootIndex < 2; rootIndex++) {
             PXResolvedContainerRoot root = roots[rootIndex];
             NSError *resolutionError = nil;
-            PXResolvedContainer *resolved =
-                [resolver resolveAppGroupContainerForGroupIdentifier:identifier
-                                                                root:root
-                                                               error:&resolutionError];
-            if (!resolved) {
-                if (!resolutionError) {
-                    continue;
-                }
+            NSArray<PXResolvedContainer *> *resolvedModels =
+                [resolver resolveAllAppGroupContainersForGroupIdentifier:identifier
+                                                                    root:root
+                                                                   error:&resolutionError];
+            if (!resolvedModels) {
                 attemptedUnits++;
                 failedUnits++;
                 NSString *resolverDescription = resolutionError.localizedDescription.length
@@ -2638,28 +2702,45 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 continue;
             }
 
-            NSError *validationError = nil;
-            NSString *canonicalPath =
-                [validator validatedCanonicalPathForContainer:resolved error:&validationError];
-            if (canonicalPath.length == 0) {
-                attemptedUnits++;
-                failedUnits++;
-                if (!firstFailure) {
-                    firstFailure = PXAppGroupsFailure(
-                        PXAppGroupsClearFailureCodeValidationFailed,
-                        [NSString stringWithFormat:@"App Groups validation failed for %@",
-                                                   rootLabels[rootIndex]]);
-                }
-                continue;
+            if (resolvedModels.count > 1) {
+                [self logMessage:
+                    @"[AppDataCleaner] AppGroups %@ found %lu exact physical containers for %@; validating every container",
+                    rootLabels[rootIndex],
+                    (unsigned long)resolvedModels.count,
+                    identifier];
             }
 
-            NSMutableArray<PXResolvedContainer *> *models = modelsByPath[canonicalPath];
-            if (!models) {
-                models = [NSMutableArray array];
-                modelsByPath[[canonicalPath copy]] = models;
-                [physicalPathOrder addObject:[canonicalPath copy]];
+            for (PXResolvedContainer *resolved in resolvedModels) {
+                NSError *validationError = nil;
+                NSString *canonicalPath =
+                    [validator validatedCanonicalPathForContainer:resolved error:&validationError];
+                if (canonicalPath.length == 0) {
+                    attemptedUnits++;
+                    failedUnits++;
+                    if (!firstFailure) {
+                        NSString *validationDescription = validationError.localizedDescription.length
+                            ? validationError.localizedDescription
+                            : @"Unknown App Group validation failure";
+                        firstFailure = PXAppGroupsFailure(
+                            PXAppGroupsClearFailureCodeValidationFailed,
+                            [NSString stringWithFormat:
+                                @"App Groups validation failed for %@ (%@:%ld): %@",
+                                rootLabels[rootIndex],
+                                validationError.domain ?: @"unknown",
+                                (long)validationError.code,
+                                validationDescription]);
+                    }
+                    continue;
+                }
+
+                NSMutableArray<PXResolvedContainer *> *models = modelsByPath[canonicalPath];
+                if (!models) {
+                    models = [NSMutableArray array];
+                    modelsByPath[[canonicalPath copy]] = models;
+                    [physicalPathOrder addObject:[canonicalPath copy]];
+                }
+                [models addObject:resolved];
             }
-            [models addObject:resolved];
         }
     }
 

@@ -87,9 +87,9 @@ static BOOL PXAppGroupResolverRegularFileAtPath(NSString *path) {
 
 @implementation AppGroupContainerResolver
 
-- (PXResolvedContainer *)resolveAppGroupContainerForGroupIdentifier:(NSString *)groupIdentifier
-                                                               root:(PXResolvedContainerRoot)root
-                                                              error:(NSError **)error {
+- (NSArray<PXResolvedContainer *> *)resolveAllAppGroupContainersForGroupIdentifier:(NSString *)groupIdentifier
+                                                                               root:(PXResolvedContainerRoot)root
+                                                                              error:(NSError **)error {
     if (error) {
         *error = nil;
     }
@@ -106,7 +106,7 @@ static BOOL PXAppGroupResolverRegularFileAtPath(NSString *path) {
     NSFileManager *fileManager = [NSFileManager defaultManager];
     BOOL baseIsDirectory = NO;
     if (![fileManager fileExistsAtPath:basePath isDirectory:&baseIsDirectory]) {
-        return nil;
+        return @[];
     }
     if (!baseIsDirectory) {
         PXAppGroupResolverAssignError(error,
@@ -194,7 +194,17 @@ static BOOL PXAppGroupResolverRegularFileAtPath(NSString *path) {
         [matches addObject:candidate];
     }
 
-    if (matches.count == 0) {
+    return [matches copy];
+}
+
+- (PXResolvedContainer *)resolveAppGroupContainerForGroupIdentifier:(NSString *)groupIdentifier
+                                                               root:(PXResolvedContainerRoot)root
+                                                              error:(NSError **)error {
+    NSArray<PXResolvedContainer *> *matches =
+        [self resolveAllAppGroupContainersForGroupIdentifier:groupIdentifier
+                                                       root:root
+                                                      error:error];
+    if (!matches || matches.count == 0) {
         return nil;
     }
     if (matches.count > 1) {

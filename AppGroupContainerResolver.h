@@ -22,6 +22,13 @@ typedef NS_ENUM(NSInteger, PXAppGroupContainerResolverErrorCode) {
 
 @interface AppGroupContainerResolver : NSObject
 
+// Returns every exact physical match for Clear. A missing root or no exact match returns an empty array.
+// Resolver faults return nil plus error. Callers must validate every returned model before mutation.
+- (nullable NSArray<PXResolvedContainer *> *)resolveAllAppGroupContainersForGroupIdentifier:(NSString *)groupIdentifier
+                                                                                       root:(PXResolvedContainerRoot)root
+                                                                                      error:(NSError * _Nullable * _Nullable)error;
+
+// Single-target resolver used by Restore and operations that require an unambiguous destination.
 - (nullable PXResolvedContainer *)resolveAppGroupContainerForGroupIdentifier:(NSString *)groupIdentifier
                                                                         root:(PXResolvedContainerRoot)root
                                                                        error:(NSError * _Nullable * _Nullable)error;

@@ -2743,6 +2743,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         NSString *toolVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
         NSString *toolBuild = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString *)kCFBundleVersionKey] ?: @"";
+        BOOL keychainArtifactIncluded = keychainBackupPath != nil;
+        BOOL profileAppDataIncluded = profileAppDataArchivePath != nil;
+        BOOL globalSafariIncluded = globalSafariArchivePath != nil;
+        BOOL systemGlobalLibraryIncluded = systemGlobalManifests.count > 0;
+        BOOL sharedSystemDBIncluded = sharedSystemDBFiles.count > 0;
         NSMutableArray<NSString *> *restoreNotes = [NSMutableArray array];
         if (keychainBackupPath) {
             [restoreNotes addObject:@"Keychain restore intentionally omits system-managed attributes such as access-control, dates and persistent refs when required by Security.framework."];
@@ -2784,27 +2789,27 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     : @"",
             },
             @"keychain": @{
-                @"included": @(keychainBackupPath != nil),
+                @"included": @(keychainArtifactIncluded),
                 @"archive": keychainArtifactRecord.relativePath ?: @"",
                 @"groupsSelected": selectedKeychainGroups ?: @[],
                 @"method": keychainMethod ?: @"",
             },
             @"profileAppData": @{
-                @"included": @(profileAppDataArchivePath != nil),
+                @"included": @(profileAppDataIncluded),
                 @"archive": profileArtifactRecord.relativePath ?: @"",
                 @"path": profileAppDataPath ?: @"",
             },
             @"globalSafari": @{
-                @"included": @(globalSafariArchivePath != nil),
+                @"included": @(globalSafariIncluded),
                 @"archive": globalSafariArtifactRecord.relativePath ?: @"",
                 @"path": globalSafariPath ?: @"",
             },
             @"systemGlobalLibrary": @{
-                @"included": @(systemGlobalManifests.count > 0),
+                @"included": @(systemGlobalLibraryIncluded),
                 @"items": systemGlobalManifests,
             },
             @"sharedSystemDB": @{
-                @"included": @(sharedSystemDBFiles.count > 0),
+                @"included": @(sharedSystemDBIncluded),
                 @"files": sharedSystemDBFiles,
             },
             @"options": @{
