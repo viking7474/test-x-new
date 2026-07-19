@@ -321,6 +321,46 @@ static void PXAddAuthUIFlags(NSMutableDictionary *query) {
     }
 }
 
+static OSStatus PXCountKeychainItemsMatchingQuery(NSDictionary *baseQuery,
+                                                   NSUInteger *countOut) {
+    if (countOut) {
+        *countOut = 0;
+    }
+    if (![baseQuery isKindOfClass:[NSDictionary class]] || !countOut) {
+        return errSecParam;
+    }
+
+    NSMutableDictionary *countQuery = [baseQuery mutableCopy];
+    countQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
+    countQuery[(__bridge id)kSecReturnAttributes] = @YES;
+
+    CFTypeRef countResult = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)countQuery,
+                                          &countResult);
+    if (status == errSecItemNotFound) {
+        return status;
+    }
+    if (status != errSecSuccess) {
+        if (countResult) {
+            CFRelease(countResult);
+        }
+        return status;
+    }
+
+    if (!countResult) {
+        return errSecDecode;
+    }
+    id resultObject = (__bridge_transfer id)countResult;
+    if ([resultObject isKindOfClass:[NSArray class]]) {
+        *countOut = [(NSArray *)resultObject count];
+    } else if ([resultObject isKindOfClass:[NSDictionary class]]) {
+        *countOut = 1;
+    } else {
+        return errSecDecode;
+    }
+    return errSecSuccess;
+}
+
 /// List of all keychain classes to iterate.
 static NSArray<NSNumber *> *PXAllKeychainClasses(void) {
     return @[
@@ -994,43 +1034,45 @@ static PXRestoreItemOutcome PXProcessRestoreItem(NSDictionary *item,
             NSMutableDictionary *query = [@{
                 (__bridge id)kSecClass: (__bridge id)secClass,
                 (__bridge id)kSecAttrAccessGroup: group,
-            } mutableCopy];
-            PXAddAuthUIFlags(query);
-            
-            // First count items.
-            NSMutableDictionary *countQuery = [@{
-                (__bridge id)kSecClass: (__bridge id)secClass,
-                (__bridge id)kSecAttrAccessGroup: group,
-                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
-                (__bridge id)kSecReturnAttributes: @YES,
                 (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
             } mutableCopy];
-            PXAddAuthUIFlags(countQuery);
-            
-            CFTypeRef countResult = NULL;
-            OSStatus countStatus = SecItemCopyMatching((__bridge CFDictionaryRef)countQuery, &countResult);
-            
+            PXAddAuthUIFlags(query);
+
             NSUInteger itemCount = 0;
-            if (countStatus == errSecSuccess && countResult) {
-                NSArray *matches = (__bridge_transfer NSArray *)countResult;
-                if ([matches isKindOfClass:[NSArray class]]) {
-                    itemCount = matches.count;
-                } else {
-                    itemCount = 1;
-                }
+            OSStatus countStatus = PXCountKeychainItemsMatchingQuery(query, &itemCount);
+            if (countStatus != errSecSuccess && countStatus != errSecItemNotFound) {
+                [warnings addObject:[NSString stringWithFormat:@"Failed to count %@ items in group %@ before deletion: %@",
+                                   PXKeychainClassName(secClass), group, PXSecurityErrorDescription(countStatus)]];
             }
-            
             result.itemsProcessed += itemCount;
-            
-            // Delete all matching items.
-            OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-            
-            if (status == errSecSuccess || status == errSecItemNotFound) {
+
+            OSStatus deleteStatus = SecItemDelete((__bridge CFDictionaryRef)query);
+            if (deleteStatus != errSecSuccess && deleteStatus != errSecItemNotFound) {
+                [warnings addObject:[NSString stringWithFormat:@"Failed to delete %@ items in group %@: %@",
+                                   PXKeychainClassName(secClass), group, PXSecurityErrorDescription(deleteStatus)]];
+                result.itemsFailed += itemCount;
+                continue;
+            }
+
+            NSUInteger residualCount = 0;
+            OSStatus verificationStatus = PXCountKeychainItemsMatchingQuery(query, &residualCount);
+            BOOL verifiedEmpty = verificationStatus == errSecItemNotFound ||
+                                 (verificationStatus == errSecSuccess && residualCount == 0);
+            if (verifiedEmpty) {
                 result.itemsSucceeded += itemCount;
             } else {
-                [warnings addObject:[NSString stringWithFormat:@"Failed to delete %@ items in group %@: %@",
-                                   PXKeychainClassName(secClass), group, PXSecurityErrorDescription(status)]];
                 result.itemsFailed += itemCount;
+                if (verificationStatus == errSecSuccess) {
+                    [warnings addObject:[NSString stringWithFormat:@"Keychain wipe left %lu residual %@ items in group %@",
+                                       (unsigned long)residualCount,
+                                       PXKeychainClassName(secClass),
+                                       group]];
+                } else {
+                    [warnings addObject:[NSString stringWithFormat:@"Failed to verify %@ items in group %@ after deletion: %@",
+                                       PXKeychainClassName(secClass),
+                                       group,
+                                       PXSecurityErrorDescription(verificationStatus)]];
+                }
             }
         }
     }

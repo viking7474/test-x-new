@@ -1192,6 +1192,7 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     shell = sources["scripts/keychain_backup.sh"]
     helper = sources["KeychainHelper/KeychainBackupHelper.m"]
     backup_helper = sources["KeychainHelper/backup_helper.m"]
+    cleaner = sources["AppDataCleaner.m"]
     manager = sources["AppDataBackupManager.m"]
     enum = extract_enum_assignments(exit_header, "PXKeychainHelperExitCode")
     enum_values = {name: evaluate_integer_expression(value) for name, value in enum.items()}
@@ -1220,6 +1221,35 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     collector.check("BRH-KEY-EXIT-PARITY", translated_shell == expected_enum, shell.path, 1,
                     "Keychain wrapper exit-code dictionary differs from the Objective-C enum")
 
+    helper_main = unique_c_function(backup_helper, "main")
+    helper_main_text = " ".join(helper_main.body_text.split())
+    helper_cli_contract = (
+        'NSString *requestedCSV = args[@"requested-groups"];',
+        'NSString *effectiveEntitlementsPath = args[@"effective-entitlements-file"];',
+        'Missing required group-report metadata',
+        'Operational access groups do not match requested metadata',
+    )
+    collector.check("BRH-KEY-CLI-METADATA-CONTRACT",
+                    all(token in helper_main_text for token in helper_cli_contract),
+                    backup_helper.path, helper_main.signature_start_line,
+                    "direct helper must require requested-group and effective-entitlements metadata")
+
+    clear_wipe_selector = (
+        "_executeKeychainWipeForBundleIdentifier:selectedGroups:"
+        "applicationIdentifier:systemApplication:error:"
+    )
+    clear_wipe_matches = definitions_for_selector(cleaner, clear_wipe_selector)
+    expected_clear_arguments = (
+        'arguments:@[ @"--action", @"wipe", @"--groups", groupsCSV, '
+        '@"--requested-groups", groupsCSV, '
+        '@"--effective-entitlements-file", entitlementsPath ]'
+    )
+    clear_wipe_body = " ".join(clear_wipe_matches[0].body_text.split()) if len(clear_wipe_matches) == 1 else ""
+    collector.check("BRH-KEY-CLEAR-CLI-METADATA",
+                    len(clear_wipe_matches) == 1 and clear_wipe_body.count(expected_clear_arguments) == 1,
+                    cleaner.path, clear_wipe_matches[0].signature_start_line if clear_wipe_matches else 1,
+                    "AppDataCleaner wipe invocation must pass the complete helper metadata contract")
+
     keychain_sources = [source for path, source in sources.items() if path.startswith("KeychainHelper/") and path.endswith(".m")]
     delete_occurrences = [(source.path, line_number(source.text, match.start()))
                           for source in keychain_sources
@@ -1233,6 +1263,46 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     len(wipe_matches) == 1 and wipe_matches[0].sanitized_body_text.count("SecItemDelete(") == 1,
                     helper.path, wipe_matches[0].signature_start_line if wipe_matches else 1,
                     "the sole SecItemDelete must remain inside explicit wipeKeychainForAccessGroups:itemClasses:error:")
+
+    count_helper = unique_c_function(helper, "PXCountKeychainItemsMatchingQuery")
+    count_helper_body = " ".join(count_helper.sanitized_body_text.split())
+    collector.check("BRH-KEY-WIPE-COUNT-PREDICATE",
+                    "NSMutableDictionary *countQuery = [baseQuery mutableCopy];" in count_helper_body and
+                    count_helper_body.count("SecItemCopyMatching(") == 1 and
+                    "kSecMatchLimitAll" in count_helper_body and
+                    "kSecReturnAttributes" in count_helper_body,
+                    helper.path, count_helper.signature_start_line,
+                    "wipe count helper must derive count queries from the exact delete predicate")
+
+    wipe_body = " ".join(wipe_matches[0].body_text.split()) if len(wipe_matches) == 1 else ""
+    synchronizable_pair = (
+        "(__bridge id)kSecAttrSynchronizable: "
+        "(__bridge id)kSecAttrSynchronizableAny,"
+    )
+    collector.check("BRH-KEY-WIPE-SYNCHRONIZABLE-ANY",
+                    len(wipe_matches) == 1 and wipe_body.count(synchronizable_pair) == 1,
+                    helper.path, wipe_matches[0].signature_start_line if wipe_matches else 1,
+                    "wipe delete predicate must include kSecAttrSynchronizableAny exactly once")
+
+    verification_tokens = (
+        "PXCountKeychainItemsMatchingQuery(query, &itemCount)",
+        "SecItemDelete((__bridge CFDictionaryRef)query)",
+        "PXCountKeychainItemsMatchingQuery(query, &residualCount)",
+        "residualCount == 0",
+        "if (verifiedEmpty)",
+        "result.itemsSucceeded += itemCount",
+    )
+    verification_positions = identifier_positions(wipe_body, verification_tokens)
+    collector.check("BRH-KEY-WIPE-POST-DELETE-VERIFY",
+                    len(wipe_matches) == 1 and
+                    wipe_body.count("PXCountKeychainItemsMatchingQuery(") == 2 and
+                    positions_strictly_increasing(verification_positions) and
+                    "result.itemsFailed += itemCount" in wipe_body and
+                    "Keychain wipe left %lu residual" in wipe_body and
+                    "Failed to verify %@ items" in wipe_body,
+                    helper.path, wipe_matches[0].signature_start_line if wipe_matches else 1,
+                    "wipe must verify the exact predicate is empty before reporting item success")
+
     process = unique_c_function(helper, "PXProcessRestoreItem")
     update = unique_c_function(helper, "PXUpdateExistingRestoreItem")
     required_process = ("SecItemAdd", "PXCreateRestoreIdentity", "PXCopyUniquePersistentReferenceForIdentity",
@@ -1612,8 +1682,59 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     shell_exit = shell.text.replace("readonly PX_KEYCHAIN_EXIT_PARTIAL=10", "readonly PX_KEYCHAIN_EXIT_PARTIAL=11", 1)
     tests.append(("shell-exit-code", "KEY", replace_source_text(base, shell.path, shell_exit),
                   "BRH-KEY-EXIT-PARITY"))
+
+    direct_helper = base["KeychainHelper/backup_helper.m"]
+    helper_contract_mutation = direct_helper.text.replace(
+        'NSString *requestedCSV = args[@"requested-groups"];',
+        'NSString *requestedCSV = args[@"groups"];',
+        1,
+    )
+    tests.append(("helper-cli-contract", "KEY",
+                  replace_source_text(base, direct_helper.path, helper_contract_mutation),
+                  "BRH-KEY-CLI-METADATA-CONTRACT"))
+
+    clear_wipe_selector = (
+        "_executeKeychainWipeForBundleIdentifier:selectedGroups:"
+        "applicationIdentifier:systemApplication:error:"
+    )
+    clear_cli_mutation = method_replacement(
+        cleaner,
+        clear_wipe_selector,
+        lambda text: text.replace('@"--requested-groups", groupsCSV,', "", 1),
+    )
+    tests.append(("clear-helper-cli-metadata", "KEY",
+                  replace_source_text(base, cleaner.path, clear_cli_mutation),
+                  "BRH-KEY-CLEAR-CLI-METADATA"))
+
     helper = base["KeychainHelper/KeychainBackupHelper.m"]
     helper_newline = source_newline(helper)
+    wipe_selector = "wipeKeychainForAccessGroups:itemClasses:error:"
+    synchronizable_mutation = method_replacement(
+        helper,
+        wipe_selector,
+        lambda text: text.replace(
+            "(__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,",
+            "",
+            1,
+        ),
+    )
+    tests.append(("wipe-synchronizable-any", "KEY",
+                  replace_source_text(base, helper.path, synchronizable_mutation),
+                  "BRH-KEY-WIPE-SYNCHRONIZABLE-ANY"))
+
+    verification_mutation = method_replacement(
+        helper,
+        wipe_selector,
+        lambda text: text.replace(
+            "OSStatus verificationStatus = PXCountKeychainItemsMatchingQuery(query, &residualCount);",
+            "OSStatus verificationStatus = errSecSuccess;",
+            1,
+        ),
+    )
+    tests.append(("wipe-post-delete-verification", "KEY",
+                  replace_source_text(base, helper.path, verification_mutation),
+                  "BRH-KEY-WIPE-POST-DELETE-VERIFY"))
+
     delete_mutation = helper.text.replace("OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);",
                                           f"SecItemDelete((__bridge CFDictionaryRef)addQuery);{helper_newline}        OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);", 1)
     tests.append(("restore-delete", "KEY", replace_source_text(base, helper.path, delete_mutation),

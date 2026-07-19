@@ -1964,7 +1964,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         CommandResult *wipeResult = [runner runExecutableAndCapture:workingHelper
                                                            arguments:@[
                                                                @"--action", @"wipe",
-                                                               @"--groups", groupsCSV
+                                                               @"--groups", groupsCSV,
+                                                               @"--requested-groups", groupsCSV,
+                                                               @"--effective-entitlements-file", entitlementsPath
                                                            ]
                                                           timeoutSec:120.0
                                                       maxOutputBytes:1024 * 1024];
