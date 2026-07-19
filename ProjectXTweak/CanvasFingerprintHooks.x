@@ -8,6 +8,8 @@
 #import "PXScope.h"
 #import "PXFileDebug.h"
 
+extern void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController);
+
 // Cache for bundle decisions
 static NSMutableDictionary *cachedBundleDecisions = nil;
 static NSDate *cacheTimestamp = nil;
@@ -819,180 +821,124 @@ static void addNoiseToImageData(NSMutableData *imageData, NSString *bundleID) {
     }
 }
 
-// Helper: Check if current app is in the scoped apps list (copied from WiFiHook.x)
-static BOOL isInScopedAppsList(void) {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        NSArray *possiblePaths = @[@"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                                   @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                                   @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        if (!validPath) return NO;
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) return NO;
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) return NO;
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-    } @catch (NSException *e) {
-        return NO;
+#pragma mark - Shared Document-Start WKUserScript Installation
+
+static BOOL PXUserContentControllerContainsMarker(WKUserContentController *controller, NSString *marker) {
+    if (!controller || !marker.length) return NO;
+    for (WKUserScript *script in controller.userScripts) {
+        if ([script.source containsString:marker]) return YES;
+    }
+    return NO;
+}
+
+static void PXAddDocumentStartUserScriptIfNeeded(WKUserContentController *controller,
+                                                  NSString *source,
+                                                  NSString *marker) {
+    if (!controller || !source.length || !marker.length) return;
+    if (PXUserContentControllerContainsMarker(controller, marker)) return;
+
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:source
+                                                  injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                               forMainFrameOnly:NO];
+    [controller addUserScript:script];
+}
+
+static void PXInstallDocumentStartSpoofScripts(WKUserContentController *controller) {
+    if (!controller) return;
+
+    BOOL hasCapabilities = PXUserContentControllerContainsMarker(controller,
+                                                                  @"__weaponx_device_capabilities__");
+    BOOL hasScreen = PXUserContentControllerContainsMarker(controller,
+                                                            @"__weaponx_screen_spoof__");
+    BOOL hasFingerprint = PXUserContentControllerContainsMarker(controller,
+                                                                 @"__weaponx_fp_spoof__");
+
+    // DeviceSpec contributes navigator.deviceMemory/hardwareConcurrency while this
+    // file remains the sole owner of WKWebView/WKWebViewConfiguration injection hooks.
+    if (!hasCapabilities) {
+        PXInstallDeviceSpecUserScripts(controller);
+    }
+
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bundleID.length) return;
+
+    if (!hasScreen && PXDisplayWebScreenSpoofEnabled()) {
+        NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
+        NSString *screenScript = deviceIds ? PXBuildWebScreenSpoofScript(deviceIds) : nil;
+        PXAddDocumentStartUserScriptIfNeeded(controller,
+                                             screenScript,
+                                             @"__weaponx_screen_spoof__");
+    }
+
+    if (!hasFingerprint && shouldProtectBundle(bundleID)) {
+        NSString *fingerprintScript = PXBuildSeededFingerprintProtectionScript(bundleID);
+        PXAddDocumentStartUserScriptIfNeeded(controller,
+                                             fingerprintScript,
+                                             @"__weaponx_fp_spoof__");
     }
 }
 
-// Helper: Re-inject JS into all live WKWebViews
-static void reinjectFingerprintProtectionScriptToAllWKWebViews() {
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID) return;
-
-    NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
-    NSString *fpScript = shouldProtectBundle(bundleID) ? PXBuildSeededFingerprintProtectionScript(bundleID) : nil;
-    NSString *screenScript = deviceIds ? PXBuildWebScreenSpoofScript(deviceIds) : nil;
-    if (!fpScript && !screenScript) return;
-
-    // Modern iOS 15+ way: enumerate all UIWindowScene windows
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        for (UIWindow *window in windowScene.windows) {
-            for (UIView *view in window.subviews) {
-                if ([view isKindOfClass:[WKWebView class]]) {
-                    WKWebView *webView = (WKWebView *)view;
-                    if (screenScript) [webView evaluateJavaScript:screenScript completionHandler:nil];
-                    if (fpScript) [webView evaluateJavaScript:fpScript completionHandler:nil];
-                }
-                // Recursively search subviews
-                NSMutableArray *stack = [NSMutableArray arrayWithArray:view.subviews];
+static void PXStageDocumentStartScriptsForExistingWebViews(void) {
+    void (^stageBlock)(void) = ^{
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
                 while (stack.count > 0) {
-                    UIView *subview = [stack lastObject];
+                    UIView *view = stack.lastObject;
                     [stack removeLastObject];
-                    if ([subview isKindOfClass:[WKWebView class]]) {
-                        WKWebView *webView = (WKWebView *)subview;
-                        if (screenScript) [webView evaluateJavaScript:screenScript completionHandler:nil];
-                        if (fpScript) [webView evaluateJavaScript:fpScript completionHandler:nil];
+                    if ([view isKindOfClass:[WKWebView class]]) {
+                        WKWebView *webView = (WKWebView *)view;
+                        PXInstallDocumentStartSpoofScripts(webView.configuration.userContentController);
                     }
-                    [stack addObjectsFromArray:subview.subviews];
+                    [stack addObjectsFromArray:view.subviews];
                 }
             }
         }
+    };
+
+    if ([NSThread isMainThread]) {
+        stageBlock();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), stageBlock);
     }
 }
 
 #pragma mark - WKWebView Configuration Hooks
 
-// Inject JS at document start for all WKWebViews
 %hook WKWebViewConfiguration
 
+- (instancetype)init {
+    WKWebViewConfiguration *configuration = %orig;
+    if (configuration) {
+        PXInstallDocumentStartSpoofScripts(configuration.userContentController);
+    }
+    return configuration;
+}
+
+- (WKUserContentController *)userContentController {
+    WKUserContentController *controller = %orig;
+    PXInstallDocumentStartSpoofScripts(controller);
+    return controller;
+}
+
 - (void)setUserContentController:(WKUserContentController *)userContentController {
-    %orig;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID) return;
-
-    NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
-    BOOL wantFP = shouldProtectBundle(bundleID);
-    BOOL wantScreen = (deviceIds != nil) && PXDisplayWebScreenSpoofEnabled();
-    if (!wantFP && !wantScreen) return;
-
-    BOOL hasFP = NO;
-    BOOL hasScreen = NO;
-    for (WKUserScript *script in userContentController.userScripts) {
-        NSString *src = script.source;
-        if ([src containsString:@"__weaponx_fp_spoof__"]) hasFP = YES;
-        if ([src containsString:@"__weaponx_screen_spoof__"]) hasScreen = YES;
-    }
-
-    if (wantScreen && !hasScreen) {
-        NSString *screenScript = PXBuildWebScreenSpoofScript(deviceIds);
-        if (screenScript.length) {
-            WKUserScript *s = [[NSClassFromString(@"WKUserScript") alloc] initWithSource:screenScript injectionTime:0 forMainFrameOnly:NO];
-            [userContentController addUserScript:s];
-        }
-    }
-
-    if (wantFP && !hasFP) {
-        NSString *fpScript = PXBuildSeededFingerprintProtectionScript(bundleID);
-        if (fpScript.length) {
-            WKUserScript *s = [[NSClassFromString(@"WKUserScript") alloc] initWithSource:fpScript injectionTime:0 forMainFrameOnly:NO];
-            [userContentController addUserScript:s];
-        }
-    }
+    PXInstallDocumentStartSpoofScripts(userContentController);
+    %orig(userContentController);
 }
 
 %end
 
-#pragma mark - WKWebView Hooks
+#pragma mark - WKWebView Construction Hook
 
-// Hook WKWebView to inject JavaScript that adds subtle noise to canvas operations
 %hook WKWebView
 
-- (void)_didFinishLoadForFrame:(WKFrameInfo *)frame {
-    %orig;
-    
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID) return;
-
-    NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
-    NSString *screenScript = deviceIds ? PXBuildWebScreenSpoofScript(deviceIds) : nil;
-    NSString *fpScript = shouldProtectBundle(bundleID) ? PXBuildSeededFingerprintProtectionScript(bundleID) : nil;
-    if (!screenScript && !fpScript) return;
-
-    if (screenScript.length) {
-        [self evaluateJavaScript:screenScript completionHandler:nil];
+- (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
+    if (configuration) {
+        PXInstallDocumentStartSpoofScripts(configuration.userContentController);
     }
-    if (fpScript.length) {
-        [self evaluateJavaScript:fpScript completionHandler:^(id result, NSError *error) {
-            if (error) {
-                PXLog(@"[CanvasFingerprint] Error injecting fingerprint protection script: %@", error);
-            }
-        }];
-    }
-}
-
-%end
-
-#pragma mark - UIImage+ImageIO Hooks
-
-// Hook UIImage imageWithData method to protect screenshots and image generation
-%hook UIImage
-
-+ (UIImage *)imageWithData:(NSData *)data {
-    UIImage *originalImage = %orig;
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID || !shouldProtectBundle(bundleID) || !data) {
-        return originalImage;
-    }
-    // Always add noise for protected apps
-    @try {
-        UIGraphicsBeginImageContextWithOptions(originalImage.size, NO, originalImage.scale);
-        CGContextRef context = UIGraphicsGetCurrentContext();
-        [originalImage drawInRect:CGRectMake(0, 0, originalImage.size.width, originalImage.size.height)];
-        CGContextSetBlendMode(context, kCGBlendModeLighten);
-        CGContextSetFillColorWithColor(context, [UIColor colorWithWhite:1.0 alpha:0.01].CGColor);
-        for (int i = 0; i < 20; i++) {
-            CGFloat x = arc4random_uniform((uint32_t)originalImage.size.width);
-            CGFloat y = arc4random_uniform((uint32_t)originalImage.size.height);
-            CGContextFillRect(context, CGRectMake(x, y, 1, 1));
-        }
-        UIImage *modifiedImage = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        if (modifiedImage) {
-            PXLog(@"[CanvasFingerprint] Noise added to image for %@", bundleID);
-            return modifiedImage;
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[CanvasFingerprint] Exception adding noise to image: %@", exception);
-    }
-    return originalImage;
+    return %orig(frame, configuration);
 }
 
 %end
@@ -1031,7 +977,7 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
     [cachedBundleDecisions removeAllObjects];
     cacheTimestamp = [NSDate date];
         [noiseSeedCache removeAllObjects];
-    reinjectFingerprintProtectionScriptToAllWKWebViews();
+    PXStageDocumentStartScriptsForExistingWebViews();
 }
 
 #pragma mark - Constructor

@@ -387,6 +387,58 @@ static NSDictionary *getDeviceSpecs() {
     }
 }
 
+#pragma mark - Document-Start Web Capability Script
+
+// Central WKWebView ownership lives in CanvasFingerprintHooks.x. This exported helper
+// contributes device capability spoofing without installing additional WKWebView hooks.
+void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController) {
+    if (!userContentController) return;
+    for (WKUserScript *existingScript in userContentController.userScripts) {
+        if ([existingScript.source containsString:@"__weaponx_device_capabilities__"]) {
+            return;
+        }
+    }
+    if (!isSpoofingEnabled()) return;
+
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *processName = [NSProcessInfo processInfo].processName;
+    if (!PXFullSpoofTestModeEnabled() &&
+        PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack) &&
+        PXIsSafariStackProcess(bundleID, processName)) {
+        return;
+    }
+
+    NSDictionary *specs = getDeviceSpecs();
+    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
+    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
+    if (deviceMemoryGB <= 0 && cpuCoreCount <= 0) return;
+
+    NSString *script = [NSString stringWithFormat:
+        @"(function(){\n"
+         "  'use strict';\n"
+         "  try {\n"
+         "    if (globalThis.__weaponx_device_capabilities__) return;\n"
+         "    Object.defineProperty(globalThis,'__weaponx_device_capabilities__',{value:true,configurable:false,enumerable:false,writable:false});\n"
+         "    var nav=globalThis.navigator; if(!nav) return;\n"
+         "    var proto=Object.getPrototypeOf(nav)||nav;\n"
+         "    function def(name,value){\n"
+         "      if(!(value>0)) return;\n"
+         "      try{Object.defineProperty(proto,name,{get:function(){return value;},configurable:true,enumerable:true});return;}catch(e){}\n"
+         "      try{Object.defineProperty(nav,name,{get:function(){return value;},configurable:true,enumerable:true});}catch(e){}\n"
+         "    }\n"
+         "    def('deviceMemory',%ld);\n"
+         "    def('hardwareConcurrency',%ld);\n"
+         "  } catch(e) {}\n"
+         "})();",
+        (long)deviceMemoryGB,
+        (long)cpuCoreCount];
+
+    WKUserScript *userScript = [[WKUserScript alloc] initWithSource:script
+                                                      injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                   forMainFrameOnly:NO];
+    [userContentController addUserScript:userScript];
+}
+
 // Parse resolution string (e.g., "2556x1179") into CGSize
 static CGSize parseResolution(NSString *resolutionString) {
     if (!resolutionString) return CGSizeZero;
@@ -744,64 +796,6 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 %end
 
-#pragma mark - Device Memory JS API Hooks
-
-// JavaScript deviceMemory API hook
-%hook WKWebView
-
-// Inject JavaScript to override navigator.deviceMemory
-- (void)_didFinishLoadForFrame:(WKFrameInfo *)frame {
-    %orig;
-
-    // Web compatibility: avoid JS property overrides in Safari/Auth stack.
-    // These hooks can break complex login flows (e.g. Google sign-in) in SafariViewService.
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXFullSpoofTestModeEnabled() && PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, proc)) {
-        return;
-    }
-    
-    if (!isSpoofingEnabled()) {
-        return;
-    }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return;
-    }
-    
-    // Get the device memory from specs (in GB)
-    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-    if (deviceMemoryGB <= 0) {
-        return;
-    }
-    
-    // Create JavaScript to override navigator.deviceMemory
-    NSString *script = [NSString stringWithFormat:
-                      @"(function() {"
-                      @"  Object.defineProperty(navigator, 'deviceMemory', {"
-                      @"    value: %ld,"
-                      @"    writable: false,"
-                      @"    configurable: true"
-                      @"  });"
-                      @"})();", (long)deviceMemoryGB];
-    
-    // Execute the script
-    [self evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-        if (error) {
-            PXLog(@"[DeviceSpec] Error injecting deviceMemory script: %@", error);
-        } else {
-            static BOOL loggedDeviceMemory = NO;
-            if (!loggedDeviceMemory) {
-                PXLog(@"[DeviceSpec] Successfully spoofed navigator.deviceMemory to %ld GB", (long)deviceMemoryGB);
-                loggedDeviceMemory = YES;
-            }
-        }
-    }];
-}
-
-%end
-
 #pragma mark - WebGL Info Hooks
 
 %hook WebGLRenderingContext
@@ -1007,91 +1001,8 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 
 #pragma mark - CPU Core Spoofing Enhancements
 
-// Add an early hook to ensure CPU core count is spoofed as early as possible
-%hook WKWebView
-
-// Hook page initialization to spoof cores early
-- (void)_didStartProvisionalLoadForFrame:(WKFrameInfo *)frame {
-    %orig;
-
-    // Web compatibility: avoid JS property overrides in Safari/Auth stack.
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXFullSpoofTestModeEnabled() && PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, proc)) {
-        return;
-    }
-    
-    if (!isSpoofingEnabled()) {
-        return;
-    }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return;
-    }
-    
-    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
-    if (cpuCoreCount <= 0) {
-        return;
-    }
-    
-    // Immediately inject CPU core count at load start
-    NSString *script = [NSString stringWithFormat:
-                        @"(function() {"
-                        @"  if ('hardwareConcurrency' in navigator) {"
-                        @"    Object.defineProperty(navigator, 'hardwareConcurrency', {"
-                        @"      value: %ld,"
-                        @"      writable: false,"
-                        @"      configurable: true"
-                        @"    });"
-                        @"  }"
-                        @"})();", (long)cpuCoreCount];
-    
-    [self evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-        if (error) {
-            PXLog(@"[DeviceSpec] Early CPU core spoof error: %@", error);
-        }
-    }];
-}
-
-// Hook JavaScript context creation to spoof core count at the earliest possible moment
-- (void)_didCreateJavaScriptContext:(id)context {
-    %orig;
-
-    // Web compatibility: avoid JS property overrides in Safari/Auth stack.
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXFullSpoofTestModeEnabled() && PXProcessIsAllowedForSpoofing(bid, proc, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, proc)) {
-        return;
-    }
-    
-    if (!isSpoofingEnabled()) {
-        return;
-    }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return;
-    }
-    
-    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
-    if (cpuCoreCount <= 0) {
-        return;
-    }
-    
-    NSString *script = [NSString stringWithFormat:
-                        @"if ('hardwareConcurrency' in navigator) {"
-                        @"  Object.defineProperty(navigator, 'hardwareConcurrency', {"
-                        @"    value: %ld,"
-                        @"    writable: false,"
-                        @"    configurable: true"
-                        @"  });"
-                        @"}", (long)cpuCoreCount];
-    
-    [self evaluateJavaScript:script completionHandler:nil];
-}
-
-%end
+// JavaScript hardwareConcurrency is installed through the shared document-start
+// WKUserScript path. Keep only lower-level native CPU detection hooks here.
 
 // Hook lower-level CPU detection APIs for native apps
 %hook host_basic_info
