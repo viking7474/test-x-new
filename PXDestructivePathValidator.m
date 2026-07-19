@@ -150,6 +150,14 @@ static BOOL PXCandidateModeIsAuthorized(mode_t mode,
     return root == PXResolvedContainerRootRootful;
 }
 
+static BOOL PXMetadataModeIsAuthorized(mode_t mode,
+                                       PXResolvedContainerRoot root) {
+    if (!PXModeIsWorldWritable(mode)) {
+        return YES;
+    }
+    return root == PXResolvedContainerRootRootful;
+}
+
 static BOOL PXContainerOwnerIsAuthorized(uid_t owner,
                                          uid_t mobileUserID,
                                          PXResolvedContainerRoot root) {
@@ -509,10 +517,11 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
                                            0);
         return nil;
     }
-    if (PXModeIsWorldWritable(initialMetadataStatus.st_mode)) {
+    if (!PXMetadataModeIsAuthorized(initialMetadataStatus.st_mode,
+                                    container.root)) {
         PXSetDestructivePathValidatorError(error,
                                            PXDestructivePathValidatorErrorOwnershipOrModeViolation,
-                                           @"The container metadata file is world-writable.",
+                                           @"The rootless container metadata file is world-writable.",
                                            0);
         return nil;
     }
@@ -690,7 +699,16 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
     }
     if (S_ISLNK(finalMetadataStatus.st_mode) ||
         !S_ISREG(finalMetadataStatus.st_mode) ||
-        !PXStatIdentityMatches(&initialMetadataStatus, &finalMetadataStatus)) {
+        !PXStatIdentityMatches(&initialMetadataStatus, &finalMetadataStatus) ||
+        finalMetadataStatus.st_uid != initialMetadataStatus.st_uid ||
+        finalMetadataStatus.st_gid != initialMetadataStatus.st_gid ||
+        (finalMetadataStatus.st_mode & 07777) !=
+            (initialMetadataStatus.st_mode & 07777) ||
+        !PXContainerOwnerIsAuthorized(finalMetadataStatus.st_uid,
+                                      mobileUserID,
+                                      container.root) ||
+        !PXMetadataModeIsAuthorized(finalMetadataStatus.st_mode,
+                                    container.root)) {
         PXSetDestructivePathValidatorError(error,
                                            PXDestructivePathValidatorErrorFilesystemChanged,
                                            @"The metadata file changed before validation completed.",
