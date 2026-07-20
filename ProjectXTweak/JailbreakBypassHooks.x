@@ -20,7 +20,6 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <sys/types.h>
-#import <sys/syscall.h>
 #import <sys/mount.h>
 #import <sys/statvfs.h>
 #import "PXScope.h"
@@ -36,6 +35,8 @@
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <stdint.h>
+#import <stdbool.h>
+#import <stdatomic.h>
 
 // XPC types — Theos SDK doesn't ship <xpc/xpc.h>.
 // We only need opaque pointers and a few functions.
@@ -157,160 +158,203 @@ static BOOL PXHasPrefixNoCase(const char *s, const char *prefix) {
     return YES;
 }
 
-static NSString *PXMainBundleID(void) {
-    static NSString *bid = nil;
+// P0-C: process eligibility is computed once before hook installation and is
+// never re-evaluated from a native hot path.
+static _Atomic(bool) gJBProcessEligible = false;
+
+typedef uint64_t PXJBPolicyMask;
+enum {
+    kPXJBPolicyMaster                     = 1ull << 0,
+    kPXJBPolicyStatfs                     = 1ull << 1,
+    kPXJBPolicyHideDylibs                 = 1ull << 2,
+    kPXJBPolicyBlockDyldAddImageCallbacks = 1ull << 3,
+    kPXJBPolicyHideTaskDyldInfo           = 1ull << 4,
+    kPXJBPolicyHideDlIteratePhdr          = 1ull << 5,
+    kPXJBPolicyBlockDlopenDlsymProbes     = 1ull << 6,
+    kPXJBPolicySysctlProcSanitize         = 1ull << 7,
+    kPXJBPolicyHideProcMaps               = 1ull << 8,
+    kPXJBPolicyHideObjcImages             = 1ull << 9,
+    kPXJBPolicyDebugLogging               = 1ull << 10,
+};
+
+static _Atomic(PXJBPolicyMask) gJBPolicyMask = 0;
+// Written once in %ctor before hook installation, then treated as immutable.
+// It caps runtime settings so a reload cannot enable a launch-only capability.
+static PXJBPolicyMask gJBLaunchCapabilityMask = 0;
+static dispatch_queue_t gJBPolicyReloadQueue = NULL;
+static dispatch_source_t gJBPolicyReloadTimer = NULL;
+
+static BOOL PXJBProcessIsEligibleAtLaunch(NSString *bundleID, NSString *processName) {
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return NO;
+    if (![processName isKindOfClass:[NSString class]] || processName.length == 0) return NO;
+
+    if ([processName isEqualToString:@"launchd"] ||
+        [processName isEqualToString:@"SpringBoard"] ||
+        [processName isEqualToString:@"backboardd"]) {
+        return NO;
+    }
+    if ([bundleID isEqualToString:@"com.hydra.projectx"] ||
+        [bundleID hasPrefix:@"com.apple."]) {
+        return NO;
+    }
+    return PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionNone);
+}
+
+static NSDictionary *PXJBReadSecuritySettingsSnapshot(void) {
+    static NSArray<NSString *> *paths = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        bid = [[NSBundle mainBundle] bundleIdentifier];
+        paths = @[
+            @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
+            @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
+        ];
     });
-    return bid;
+
+    for (NSString *path in paths) {
+        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:path];
+        if ([settings isKindOfClass:[NSDictionary class]]) {
+            return settings;
+        }
+    }
+
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+    NSDictionary *fallback = [defaults dictionaryRepresentation];
+    return [fallback isKindOfClass:[NSDictionary class]] ? fallback : @{};
 }
 
-static BOOL PXJBIsCriticalProcess(void) {
-    static BOOL computed = NO;
-    static BOOL isCritical = NO;
-    if (computed) return isCritical;
-    computed = YES;
-    NSString *p = [NSProcessInfo processInfo].processName;
-    if ([p isEqualToString:@"launchd"] || [p isEqualToString:@"SpringBoard"] || [p isEqualToString:@"backboardd"]) {
-        isCritical = YES;
-    }
-    return isCritical;
+static BOOL PXJBSettingEnabled(NSDictionary *settings, NSString *key) {
+    id value = settings[key];
+    return [value respondsToSelector:@selector(boolValue)] && [value boolValue];
 }
 
-static volatile BOOL gJBEnabled = NO;
-static volatile BOOL gJBStatfsEnabled = NO;
-static volatile BOOL gJBHideDylibsEnabled = NO;
-static volatile BOOL gJBSyscallHookEnabled = NO;
-static volatile BOOL gJBBlockDyldAddImageCallbacksEnabled = NO;
-static volatile BOOL gJBHideTaskDyldInfoEnabled = NO;
-static volatile BOOL gJBHideDlIteratePhdrEnabled = NO;
-static volatile BOOL gJBBlockDlopenDlsymProbesEnabled = NO;
-static volatile BOOL gJBSysctlProcSanitizeEnabled = NO;
-static volatile BOOL gJBHideProcMapsEnabled = NO;
-static volatile BOOL gJBHideObjcImagesEnabled = NO;
-static volatile BOOL gJBHookSandboxCheckEnabled = NO;
-static volatile BOOL gJBDebugLoggingEnabled = NO;
-static volatile CFTimeInterval gJBLastCheck = 0;
-static BOOL PXJBShouldBypassCached(void) {
-    if (PXJBIsCriticalProcess()) return NO;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - gJBLastCheck < 1.0) {
-        return gJBEnabled;
-    }
-    gJBLastCheck = now;
+static PXJBPolicyMask PXJBBuildRequestedPolicyMask(NSDictionary *settings) {
+    if (!atomic_load_explicit(&gJBProcessEligible, memory_order_acquire)) return 0;
+    if (!PXJBSettingEnabled(settings, @"jailbreakDetectionEnabled")) return 0;
 
+    PXJBPolicyMask mask = kPXJBPolicyMaster;
+    if (PXJBSettingEnabled(settings, @"jbBypassStatfsEnabled")) {
+        mask |= kPXJBPolicyStatfs;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassHideDylibsEnabled")) {
+        mask |= kPXJBPolicyHideDylibs;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassBlockDyldAddImageCallbacksEnabled")) {
+        mask |= kPXJBPolicyBlockDyldAddImageCallbacks;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassHideTaskDyldInfoEnabled")) {
+        mask |= kPXJBPolicyHideTaskDyldInfo;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassHideDlIteratePhdrEnabled")) {
+        mask |= kPXJBPolicyHideDlIteratePhdr;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassBlockDlopenDlsymProbesEnabled")) {
+        mask |= kPXJBPolicyBlockDlopenDlsymProbes;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassSysctlProcSanitizeEnabled")) {
+        mask |= kPXJBPolicySysctlProcSanitize;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassHideProcMapsEnabled")) {
+        mask |= kPXJBPolicyHideProcMaps;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassHideObjcImagesEnabled")) {
+        mask |= kPXJBPolicyHideObjcImages;
+    }
+    if (PXJBSettingEnabled(settings, @"jbBypassDebugLoggingEnabled")) {
+        mask |= kPXJBPolicyDebugLogging;
+    }
+    return mask;
+}
+
+static void PXJBPublishPolicySnapshot(NSDictionary *settings) {
+    PXJBPolicyMask requested = PXJBBuildRequestedPolicyMask(settings ?: @{});
+    PXJBPolicyMask effective = requested & gJBLaunchCapabilityMask;
+    atomic_store_explicit(&gJBPolicyMask, effective, memory_order_release);
+}
+
+static void PXJBReloadPolicySnapshot(void) {
     @autoreleasepool {
-        NSString *bundleID = PXMainBundleID();
-        if (!bundleID.length) {
-            gJBEnabled = NO;
-            return gJBEnabled;
-        }
-        if ([bundleID isEqualToString:@"com.hydra.projectx"]) {
-            gJBEnabled = NO;
-            return gJBEnabled;
-        }
-        if ([bundleID hasPrefix:@"com.apple."]) {
-            gJBEnabled = NO;
-            return gJBEnabled;
-        }
-
-        NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        BOOL enabled = [securitySettings boolForKey:@"jailbreakDetectionEnabled"];
-        if (!enabled) {
-            gJBEnabled = NO;
-            gJBStatfsEnabled = NO;
-            return gJBEnabled;
-        }
-
-        // Phase 2 extension toggle: mount/volume checks via statfs/statvfs.
-        gJBStatfsEnabled = [securitySettings boolForKey:@"jbBypassStatfsEnabled"]; // default OFF
-
-        // Phase 3 toggle: hide jailbreak-related dylibs from dyld enumeration.
-        gJBHideDylibsEnabled = [securitySettings boolForKey:@"jbBypassHideDylibsEnabled"]; // default OFF
-
-        // Phase 2 extension toggle: syscall() fallback (EXPERIMENTAL; default OFF)
-        gJBSyscallHookEnabled = [securitySettings boolForKey:@"jbBypassHookSyscallFallbackEnabled"]; 
-
-        // Phase 3 extension toggle: block suspicious dyld add_image callbacks (default OFF)
-        gJBBlockDyldAddImageCallbacksEnabled = [securitySettings boolForKey:@"jbBypassBlockDyldAddImageCallbacksEnabled"]; 
-
-        // Phase 3 extension toggle: hide TASK_DYLD_INFO via task_info (default OFF)
-        gJBHideTaskDyldInfoEnabled = [securitySettings boolForKey:@"jbBypassHideTaskDyldInfoEnabled"]; 
-
-        // Phase 3 extension toggle: hide dl_iterate_phdr image enumeration (default OFF)
-        gJBHideDlIteratePhdrEnabled = [securitySettings boolForKey:@"jbBypassHideDlIteratePhdrEnabled"]; 
-
-        // Phase 3 extension toggle: block dlopen/dlsym probing for jailbreak tooling (default OFF)
-        gJBBlockDlopenDlsymProbesEnabled = [securitySettings boolForKey:@"jbBypassBlockDlopenDlsymProbesEnabled"]; 
-
-        // Phase 3 extension toggle: sanitize sysctl/sysctlbyname proc/debug/bootargs (default OFF)
-        gJBSysctlProcSanitizeEnabled = [securitySettings boolForKey:@"jbBypassSysctlProcSanitizeEnabled"]; 
-
-        // Phase 3 extension toggle: hide libproc-based map filename queries (default OFF)
-        gJBHideProcMapsEnabled = [securitySettings boolForKey:@"jbBypassHideProcMapsEnabled"]; 
-
-        // Phase 3 extension toggle: hide ObjC runtime image list (default OFF)
-        gJBHideObjcImagesEnabled = [securitySettings boolForKey:@"jbBypassHideObjcImagesEnabled"]; 
-
-        // Phase 3 extension toggle: hook sandbox_check (default OFF)
-        gJBHookSandboxCheckEnabled = [securitySettings boolForKey:@"jbBypassHookSandboxCheckEnabled"]; 
-
-        // Debug: log blocked operations (default OFF)
-        gJBDebugLoggingEnabled = [securitySettings boolForKey:@"jbBypassDebugLoggingEnabled"]; 
-
-        NSString *proc = [NSProcessInfo processInfo].processName;
-        gJBEnabled = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
-        PXFileDebugAIDA64Log("[JailbreakBypass] decision enabled=%d bundle=%s", gJBEnabled, bundleID.UTF8String ?: "<nil>");
-        return gJBEnabled;
+        PXJBPublishPolicySnapshot(PXJBReadSecuritySettingsSnapshot());
     }
+}
+
+static void PXJBStartPolicyReloadTimer(void) {
+    if (gJBPolicyReloadTimer ||
+        !atomic_load_explicit(&gJBProcessEligible, memory_order_acquire)) {
+        return;
+    }
+
+    gJBPolicyReloadQueue = dispatch_queue_create("com.hydra.projectx.jb-policy", DISPATCH_QUEUE_SERIAL);
+    gJBPolicyReloadTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gJBPolicyReloadQueue);
+    if (!gJBPolicyReloadTimer) return;
+
+    dispatch_source_set_timer(gJBPolicyReloadTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                              NSEC_PER_SEC,
+                              100ull * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(gJBPolicyReloadTimer, ^{
+        PXJBReloadPolicySnapshot();
+    });
+    dispatch_resume(gJBPolicyReloadTimer);
+}
+
+static inline PXJBPolicyMask PXJBPolicyLoad(void) {
+    return atomic_load_explicit(&gJBPolicyMask, memory_order_acquire);
+}
+
+// Kept under the existing name to avoid touching every call site. It is now a
+// constant-time atomic read and performs no Foundation, filesystem or scope work.
+static BOOL PXJBShouldBypassCached(void) {
+    if (!atomic_load_explicit(&gJBProcessEligible, memory_order_acquire)) return NO;
+    return (PXJBPolicyLoad() & kPXJBPolicyMaster) != 0;
+}
+
+static BOOL PXJBPolicyFeatureEnabled(PXJBPolicyMask feature) {
+    if (!atomic_load_explicit(&gJBProcessEligible, memory_order_acquire)) return NO;
+    PXJBPolicyMask mask = PXJBPolicyLoad();
+    return (mask & (kPXJBPolicyMaster | feature)) == (kPXJBPolicyMaster | feature);
 }
 
 static BOOL PXJBStatfsBypassEnabled(void) {
-    return PXJBShouldBypassCached() && gJBStatfsEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyStatfs);
 }
 
 static BOOL PXJBHideDylibsEnabled(void) {
-    return PXJBShouldBypassCached() && gJBHideDylibsEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideDylibs);
 }
 
 // Forward declaration (defined later in dyld section).
 static BOOL PXStrContainsNoCase(const char *haystack, const char *needle);
 
 static BOOL PXJBBlockDyldAddImageCallbacksEnabled(void) {
-    return PXJBShouldBypassCached() && gJBBlockDyldAddImageCallbacksEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyBlockDyldAddImageCallbacks);
 }
 
 static BOOL PXJBHideTaskDyldInfoEnabled(void) {
-    return PXJBShouldBypassCached() && gJBHideTaskDyldInfoEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideTaskDyldInfo);
 }
 
 static BOOL PXJBHideDlIteratePhdrEnabled(void) {
-    return PXJBShouldBypassCached() && gJBHideDlIteratePhdrEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideDlIteratePhdr);
 }
 
 static BOOL PXJBBlockDlopenDlsymProbesEnabled(void) {
-    return PXJBShouldBypassCached() && gJBBlockDlopenDlsymProbesEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyBlockDlopenDlsymProbes);
 }
 
 static BOOL PXJBSysctlProcSanitizeEnabled(void) {
-    return PXJBShouldBypassCached() && gJBSysctlProcSanitizeEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicySysctlProcSanitize);
 }
 
 static BOOL PXJBHideProcMapsEnabled(void) {
-    return PXJBShouldBypassCached() && gJBHideProcMapsEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideProcMaps);
 }
 
 static BOOL PXJBHideObjcImagesEnabled(void) {
-    return PXJBShouldBypassCached() && gJBHideObjcImagesEnabled;
-}
-
-static BOOL PXJBHookSandboxCheckEnabled(void) {
-    return PXJBShouldBypassCached() && gJBHookSandboxCheckEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideObjcImages);
 }
 
 static BOOL PXJBDebugLoggingEnabled(void) {
-    return PXJBShouldBypassCached() && gJBDebugLoggingEnabled;
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyDebugLogging);
 }
 
 static void PXJBLogBlockedOncePerSecond(const char *what, const char *detail) {
@@ -322,10 +366,6 @@ static void PXJBLogBlockedOncePerSecond(const char *what, const char *detail) {
     if (!what) what = "(unknown)";
     if (!detail) detail = "";
     PXLog(@"[JailbreakBypass][debug] blocked %s %s", what, detail);
-}
-
-static BOOL PXJBSyscallBypassEnabled(void) {
-    return PXJBShouldBypassCached() && gJBSyscallHookEnabled;
 }
 
 // Path matching
@@ -989,90 +1029,8 @@ static pid_t hook_vfork(void) {
     return orig_vfork ? orig_vfork() : (pid_t)-1;
 }
 
-// Hook syscall() as a fallback when apps bypass libc wrappers.
-static long (*orig_syscall)(long number, ...);
-static long hook_syscall(long number, ...) {
-    if (!orig_syscall) {
-        errno = ENOSYS;
-        return -1;
-    }
-
-    if (!PXJBSyscallBypassEnabled()) {
-        // Forward without inspecting. We still have to consume varargs to call the function pointer.
-        uint64_t a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0;
-        va_list ap;
-        va_start(ap, number);
-        a1 = (uint64_t)va_arg(ap, uint64_t);
-        a2 = (uint64_t)va_arg(ap, uint64_t);
-        a3 = (uint64_t)va_arg(ap, uint64_t);
-        a4 = (uint64_t)va_arg(ap, uint64_t);
-        a5 = (uint64_t)va_arg(ap, uint64_t);
-        a6 = (uint64_t)va_arg(ap, uint64_t);
-        va_end(ap);
-        return orig_syscall(number, a1, a2, a3, a4, a5, a6);
-    }
-
-    // Pull up to 6 args as 64-bit values (covers common syscalls).
-    uint64_t a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0;
-    va_list ap;
-    va_start(ap, number);
-    a1 = (uint64_t)va_arg(ap, uint64_t);
-    a2 = (uint64_t)va_arg(ap, uint64_t);
-    a3 = (uint64_t)va_arg(ap, uint64_t);
-    a4 = (uint64_t)va_arg(ap, uint64_t);
-    a5 = (uint64_t)va_arg(ap, uint64_t);
-    a6 = (uint64_t)va_arg(ap, uint64_t);
-    va_end(ap);
-
-    if (PXJBSyscallBypassEnabled()) {
-        const char *path = NULL;
-
-        switch ((int)number) {
-            case SYS_stat:
-            case SYS_lstat:
-            case SYS_access:
-            case SYS_open:
-            #ifdef SYS_stat64
-            case SYS_stat64:
-            #endif
-            #ifdef SYS_lstat64
-            case SYS_lstat64:
-            #endif
-                path = (const char *)(uintptr_t)a1;
-                if (PXJBPathShouldHide(path)) {
-                    errno = ENOENT;
-                    return -1;
-                }
-                if (((int)number) == SYS_open) {
-                    int flags = (int)a2;
-                    if (PXJBWriteCheckShouldBlock(path, flags)) {
-                        errno = EACCES;
-                        return -1;
-                    }
-                }
-                break;
-
-            case SYS_openat: {
-                path = (const char *)(uintptr_t)a2;
-                if (path && path[0] == '/' && PXJBPathShouldHide(path)) {
-                    errno = ENOENT;
-                    return -1;
-                }
-                int flags = (int)a3;
-                if (path && path[0] == '/' && PXJBWriteCheckShouldBlock(path, flags)) {
-                    errno = EACCES;
-                    return -1;
-                }
-                break;
-            }
-            default:
-                break;
-        }
-    }
-
-    // Forward to original syscall with the same captured args. Extra args are ignored by callee.
-    return orig_syscall(number, a1, a2, a3, a4, a5, a6);
-}
+// P0-B: generic syscall interception is not a production capability.
+// A portable C variadic wrapper cannot preserve unknown syscall arguments.
 
 // Block common jailbreak probe commands executed via system()/popen().
 static BOOL PXJBCommandLooksLikeProbe(NSString *cmd) {
@@ -1189,32 +1147,8 @@ static int hook_posix_spawnp(pid_t *restrict pid, const char *restrict file, con
     return orig_posix_spawnp ? orig_posix_spawnp(pid, file, file_actions, attrp, argv, envp) : -1;
 }
 
-// Optional strong hook: sandbox_check
-static int (*orig_sandbox_check)(pid_t pid, const char *operation, int type, ...);
-static int hook_sandbox_check(pid_t pid, const char *operation, int type, ...) {
-    if (!orig_sandbox_check) {
-        errno = EPERM;
-        return -1;
-    }
-
-    // We only support the common 1-string-argument patterns.
-    const char *arg = NULL;
-    va_list ap;
-    va_start(ap, type);
-    arg = va_arg(ap, const char *);
-    va_end(ap);
-
-    if (PXJBHookSandboxCheckEnabled() && operation && arg && arg[0] == '/') {
-        // Only gate file-related operations (avoid breaking non-file sandbox queries).
-        if (PXHasPrefix(operation, "file-") && PXJBPathShouldHide(arg)) {
-            PXJBLogBlockedOncePerSecond("sandbox_check", arg);
-            errno = EPERM;
-            return -1;
-        }
-    }
-
-    return orig_sandbox_check(pid, operation, type, arg);
-}
+// P0-B: sandbox_check interception is not a production capability.
+// Its operation-specific variadic ABI is intentionally left unhooked.
 
 // Phase 3: dylib hiding (dyld enumeration + dladdr)
 static pthread_mutex_t gDyldLock = PTHREAD_MUTEX_INITIALIZER;
@@ -3387,43 +3321,57 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
 %ctor {
     @autoreleasepool {
-        // 1. Critical process check
-        if (PXJBIsCriticalProcess()) return;
-
-        // 2. Scope check
+        // P0-C: resolve process identity and scope once, before installing hooks.
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
-        if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone)) {
-            PXFileDebugAIDA64Log("[JailbreakBypass.ctor] skip allowed=0 bundle=%s proc=%s", bundleID.UTF8String ?: "<nil>", proc.UTF8String ?: "<nil>");
+        BOOL processEligible = PXJBProcessIsEligibleAtLaunch(bundleID, proc);
+        atomic_store_explicit(&gJBProcessEligible, processEligible, memory_order_release);
+        if (!processEligible) {
+            PXFileDebugAIDA64Log("[JailbreakBypass.ctor] skip eligible=0 bundle=%s proc=%s",
+                                bundleID.UTF8String ?: "<nil>",
+                                proc.UTF8String ?: "<nil>");
             return;
         }
 
-        // 3. Master toggle at process launch — if OFF, install nothing (no groups/providers).
-        // Turning OFF at runtime still pass-through via PXJBShouldBypassCached.
-        // Turning ON after launch requires app relaunch (no dynamic half-install).
-        NSUserDefaults *ss = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        BOOL masterJB = [ss boolForKey:@"jailbreakDetectionEnabled"];
+        NSDictionary *launchSettings = PXJBReadSecuritySettingsSnapshot();
+        BOOL masterJB = PXJBSettingEnabled(launchSettings, @"jailbreakDetectionEnabled");
         if (!masterJB) {
-            PXLog(@"[JailbreakBypass] master OFF at launch — not installing JB groups/providers");
+            PXLog(@"[JailbreakBypass] master OFF at launch ? not installing JB groups/providers");
             PXFileDebugAIDA64Log("[JailbreakBypass.ctor] skip master=0");
             return;
         }
 
-        // Install-time experimental toggles (take effect after app relaunch).
-        BOOL wantSyscallHook = [ss boolForKey:@"jbBypassHookSyscallFallbackEnabled"]; // experimental / aggressive
-        BOOL wantDyldHide = [ss boolForKey:@"jbBypassHideDylibsEnabled"]; // experimental / aggressive
-        BOOL wantBlockAddImage = [ss boolForKey:@"jbBypassBlockDyldAddImageCallbacksEnabled"]; // experimental
-        BOOL wantHideTaskDyldInfo = [ss boolForKey:@"jbBypassHideTaskDyldInfoEnabled"]; // experimental
-        BOOL wantHideDlIteratePhdr = [ss boolForKey:@"jbBypassHideDlIteratePhdrEnabled"]; // experimental
-        BOOL wantBlockDlopenDlsym = [ss boolForKey:@"jbBypassBlockDlopenDlsymProbesEnabled"]; // experimental
-        BOOL wantSysctlSanitize = [ss boolForKey:@"jbBypassSysctlProcSanitizeEnabled"]; // experimental
-        BOOL wantHideProcMaps = [ss boolForKey:@"jbBypassHideProcMapsEnabled"]; // experimental
-        BOOL wantHideObjcImages = [ss boolForKey:@"jbBypassHideObjcImagesEnabled"]; // experimental
-        BOOL wantSandboxCheck = [ss boolForKey:@"jbBypassHookSandboxCheckEnabled"]; // experimental
+        // Install-time capabilities. Optional hooks can be disabled at runtime,
+        // but enabling a hook that was not installed still requires app relaunch.
+        BOOL wantDyldHide = PXJBSettingEnabled(launchSettings, @"jbBypassHideDylibsEnabled");
+        BOOL wantBlockAddImage = PXJBSettingEnabled(launchSettings, @"jbBypassBlockDyldAddImageCallbacksEnabled");
+        BOOL wantHideTaskDyldInfo = PXJBSettingEnabled(launchSettings, @"jbBypassHideTaskDyldInfoEnabled");
+        BOOL wantHideDlIteratePhdr = PXJBSettingEnabled(launchSettings, @"jbBypassHideDlIteratePhdrEnabled");
+        BOOL wantBlockDlopenDlsym = PXJBSettingEnabled(launchSettings, @"jbBypassBlockDlopenDlsymProbesEnabled");
+        BOOL wantSysctlSanitize = PXJBSettingEnabled(launchSettings, @"jbBypassSysctlProcSanitizeEnabled");
+        BOOL wantHideProcMaps = PXJBSettingEnabled(launchSettings, @"jbBypassHideProcMapsEnabled");
+        BOOL wantHideObjcImages = PXJBSettingEnabled(launchSettings, @"jbBypassHideObjcImagesEnabled");
+
+        gJBLaunchCapabilityMask = kPXJBPolicyMaster |
+                                 kPXJBPolicyStatfs |
+                                 kPXJBPolicyDebugLogging;
+        if (wantDyldHide) gJBLaunchCapabilityMask |= kPXJBPolicyHideDylibs;
+        if (wantBlockAddImage) gJBLaunchCapabilityMask |= kPXJBPolicyBlockDyldAddImageCallbacks;
+        if (wantHideTaskDyldInfo) gJBLaunchCapabilityMask |= kPXJBPolicyHideTaskDyldInfo;
+        if (wantHideDlIteratePhdr) gJBLaunchCapabilityMask |= kPXJBPolicyHideDlIteratePhdr;
+        if (wantBlockDlopenDlsym) gJBLaunchCapabilityMask |= kPXJBPolicyBlockDlopenDlsymProbes;
+        if (wantSysctlSanitize) gJBLaunchCapabilityMask |= kPXJBPolicySysctlProcSanitize;
+        if (wantHideProcMaps) gJBLaunchCapabilityMask |= kPXJBPolicyHideProcMaps;
+        if (wantHideObjcImages) gJBLaunchCapabilityMask |= kPXJBPolicyHideObjcImages;
+
+        // Publish one complete snapshot before any native hook becomes visible.
+        PXJBPublishPolicySnapshot(launchSettings);
+
         // Groups conceptually:
         // JBSafeFoundation: file/process query wrappers (stat/access/open/...)
         // JBAppSpecific: Logos %init ObjC detectors
-        // JBAggressiveRuntime: dyld/dlsym/syscall/sandbox/task_info (experimental toggles only)
+        // JBAggressiveRuntime: dyld/dlsym/task_info (experimental toggles only)
+        // P0-B: syscall and sandbox_check are intentionally not production capabilities.
         void *libSystem = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
         if (libSystem) {
             void *sym = NULL;
@@ -3519,10 +3467,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol(NULL, "csops");
             if (sym) MSHookFunction(sym, (void *)hook_csops, (void **)&orig_csops);
 
-            if (wantSyscallHook) {
-                sym = FindSymbol(NULL, "syscall");
-                if (sym) MSHookFunction(sym, (void *)hook_syscall, (void **)&orig_syscall);
-            }
+            // P0-B: syscall is intentionally not resolved or hooked.
 
             sym = FindSymbol(NULL, "system");
             if (sym) MSHookFunction(sym, (void *)hook_system, (void **)&orig_system);
@@ -3537,11 +3482,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol(NULL, "posix_spawnp");
             if (sym) MSHookFunction(sym, (void *)hook_posix_spawnp, (void **)&orig_posix_spawnp);
 
-            // Optional: sandbox_check hook (default OFF)
-            if (wantSandboxCheck) {
-                sym = FindSymbol(NULL, "sandbox_check");
-                if (sym) MSHookFunction(sym, (void *)hook_sandbox_check, (void **)&orig_sandbox_check);
-            }
+            // P0-B: sandbox_check is intentionally not resolved or hooked.
 
             // Phase 2 extension (toggle: jbBypassStatfsEnabled)
             // statfs is coordinator-owned — register sanitizer post provider instead of MSHookFunction.
@@ -3751,6 +3692,9 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         }
 
         %init;
+
+        // Runtime reload happens off the hook path and publishes one atomic mask.
+        PXJBStartPolicyReloadTimer();
 
         // Proactive env cleanup (safe) for scoped apps.
         PXJBUnsetSuspiciousEnvIfNeeded();
