@@ -55,26 +55,6 @@ extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
 #define BOOTSTRAP_UNKNOWN_SERVICE 1102
 #endif
 
-// fcntl code-signing constants (not in all SDKs)
-#ifndef F_ADDSIGS
-#define F_ADDSIGS 61
-#endif
-#ifndef F_GETSIGSINFO
-#define F_GETSIGSINFO 69
-#endif
-#ifndef GETSIGSINFO_PLATFORM_BINARY
-#define GETSIGSINFO_PLATFORM_BINARY 1
-#endif
-// fsignatures_t is already defined in <sys/fcntl.h> on iOS 16.5+ SDK.
-// fgetsigsinfo may not be available in all SDKs.
-#ifndef _FGETSIGSINFO_T
-typedef struct {
-    off_t       fg_file_start;
-    int         fg_info_request;
-    int         fg_sig_is_platform;
-} fgetsigsinfo;
-#endif
-
 // XPC private pipe functions (resolved via libxpc at link time)
 extern int xpc_pipe_routine(xpc_object_t pipe, xpc_object_t request, xpc_object_t *reply);
 extern int xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t request, xpc_object_t *reply, uint64_t flags);
@@ -1947,12 +1927,40 @@ static int hook_creat(const char *path, mode_t mode) {
     return orig_creat ? orig_creat(path, mode) : -1;
 }
 
-// --- Priority 3: fstat (fd-based, resolve via fcntl F_GETPATH) ---
+// P0-A: fcntl is variadic and cannot be forwarded generically in portable C.
+// Keep a direct function pointer only for internal commands with a verified ABI.
+typedef int (*PXJBFcntlFunction)(int, int, ...);
+static PXJBFcntlFunction orig_fcntl = NULL;
+
+static int PXJBOriginalFcntlGetPath(int fd, char *path, size_t pathCapacity) {
+    if (fd < 0 || !path) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (pathCapacity < PATH_MAX) {
+        path[0] = '\0';
+        errno = ERANGE;
+        return -1;
+    }
+
+    path[0] = '\0';
+    PXJBFcntlFunction fn = orig_fcntl;
+    int result = fn ? fn(fd, F_GETPATH, path) : fcntl(fd, F_GETPATH, path);
+    if (result == -1) {
+        path[0] = '\0';
+        return -1;
+    }
+
+    path[pathCapacity - 1] = '\0';
+    return result;
+}
+
+// --- Priority 3: fstat (fd-based, resolve via original fcntl F_GETPATH) ---
 static int (*orig_fstat)(int, struct stat *);
 static int hook_fstat(int fd, struct stat *buf) {
     if (PXJBShouldBypassCached() && fd >= 0) {
         char fdpath[PATH_MAX];
-        if (fcntl(fd, F_GETPATH, fdpath) != -1) {
+        if (PXJBOriginalFcntlGetPath(fd, fdpath, sizeof(fdpath)) != -1) {
             if (PXJBPathShouldHide(fdpath)) {
                 errno = EBADF;
                 return -1;
@@ -1969,7 +1977,7 @@ static int hook_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
         // If pathname is relative, resolve against dirfd
         if (pathname[0] != '/' && dirfd != AT_FDCWD) {
             char dirpath[PATH_MAX];
-            if (fcntl(dirfd, F_GETPATH, dirpath) != -1) {
+            if (PXJBOriginalFcntlGetPath(dirfd, dirpath, sizeof(dirpath)) != -1) {
                 NSString *base = [NSString stringWithUTF8String:dirpath];
                 NSString *rel = [NSString stringWithUTF8String:pathname];
                 NSString *full = [base stringByAppendingPathComponent:rel];
@@ -1994,7 +2002,7 @@ static int hook_faccessat(int dirfd, const char *pathname, int mode, int flags) 
     if (PXJBShouldBypassCached() && pathname) {
         if (pathname[0] != '/' && dirfd != AT_FDCWD) {
             char dirpath[PATH_MAX];
-            if (fcntl(dirfd, F_GETPATH, dirpath) != -1) {
+            if (PXJBOriginalFcntlGetPath(dirfd, dirpath, sizeof(dirpath)) != -1) {
                 NSString *base = [NSString stringWithUTF8String:dirpath];
                 NSString *rel = [NSString stringWithUTF8String:pathname];
                 NSString *full = [base stringByAppendingPathComponent:rel];
@@ -2019,7 +2027,7 @@ static ssize_t hook_readlinkat(int dirfd, const char *pathname, char *buf, size_
     if (PXJBShouldBypassCached() && pathname) {
         if (pathname[0] != '/' && dirfd != AT_FDCWD) {
             char dirpath[PATH_MAX];
-            if (fcntl(dirfd, F_GETPATH, dirpath) != -1) {
+            if (PXJBOriginalFcntlGetPath(dirfd, dirpath, sizeof(dirpath)) != -1) {
                 NSString *base = [NSString stringWithUTF8String:dirpath];
                 NSString *rel = [NSString stringWithUTF8String:pathname];
                 NSString *full = [base stringByAppendingPathComponent:rel];
@@ -2214,36 +2222,9 @@ static kern_return_t hook_task_get_exception_ports(task_t task, exception_mask_t
     return kr;
 }
 
-// --- JailbreakDetector bypass: fcntl (F_ADDSIGS / F_GETSIGSINFO) ---
-// Block code signature injection probing and lie about platform binary status.
-static int (*orig_fcntl)(int, int, ...);
-static int hook_fcntl(int fd, int cmd, ...) {
-    va_list ap;
-    va_start(ap, cmd);
-
-    if (PXJBShouldBypassCached()) {
-        // Block F_ADDSIGS: prevents testing JB code signatures on kernel
-        if (cmd == F_ADDSIGS) {
-            va_end(ap);
-            errno = EPERM;
-            return -1;
-        }
-        // Sanitize F_GETSIGSINFO: always return "not platform binary"
-        if (cmd == F_GETSIGSINFO) {
-            fgetsigsinfo *siginfo = va_arg(ap, fgetsigsinfo *);
-            va_end(ap);
-            if (siginfo) {
-                siginfo->fg_sig_is_platform = 0;
-            }
-            return 0;
-        }
-    }
-
-    // Forward all other fcntl commands
-    void *arg = va_arg(ap, void *);
-    va_end(ap);
-    return orig_fcntl ? orig_fcntl(fd, cmd, arg) : -1;
-}
+// P0-A: no generic fcntl hook is installed. A C variadic wrapper cannot safely
+// preserve unknown command argument types, so production code only issues the
+// verified F_GETPATH call through PXJBOriginalFcntlGetPath().
 
 // --- JailbreakDetector bypass: xpc_pipe_routine ---
 // Block JB-server XPC queries (Dopamine jb-domain, launchd deplatformization probes).
@@ -3648,8 +3629,14 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol(NULL, "task_get_exception_ports");
             if (sym) MSHookFunction(sym, (void *)hook_task_get_exception_ports, (void **)&orig_task_get_exception_ports);
 
+            // P0-A: capture fcntl only for verified internal calls. Do not hook the
+            // variadic entry point until a command-complete ABI dispatcher exists.
             sym = FindSymbol(NULL, "fcntl");
-            if (sym) MSHookFunction(sym, (void *)hook_fcntl, (void **)&orig_fcntl);
+            if (sym) {
+                orig_fcntl = (PXJBFcntlFunction)sym;
+            } else {
+                PXLog(@"[JailbreakBypass] fcntl symbol unavailable; F_GETPATH helpers will use libc fallback");
+            }
 
             sym = FindSymbol(NULL, "xpc_pipe_routine");
             if (sym) MSHookFunction(sym, (void *)hook_xpc_pipe_routine, (void **)&orig_xpc_pipe_routine);
