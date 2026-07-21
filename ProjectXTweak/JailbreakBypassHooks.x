@@ -564,229 +564,305 @@ static void PXJBFlushDeferredDebugCounters(void) {
           (unsigned long long)count);
 }
 
-// Path matching
-static BOOL PXJBIsHiddenExactPath(const char *path) {
-    if (!path) return NO;
-    static const char *kExact[] = {
-        // Jailbreak package managers / apps
-        "/Applications/Cydia.app",
-        "/Applications/Sileo.app",
-        "/Applications/Zebra.app",
-        "/Applications/Filza.app",
-        "/Applications/Installer.app",
-        "/Applications/RockApp.app",
-        "/Applications/Icy.app",
-        "/Applications/WinterBoard.app",
-        "/Applications/SBSettings.app",
-        "/Applications/MxTube.app",
-        "/Applications/IntelliScreen.app",
-        "/Applications/FakeCarrier.app",
-        "/Applications/blackra1n.app",
-        "/Applications/Dopamine.app",
-        "/Applications/Th0r.app",
-        "/Applications/iFile.app",
-        "/Applications/Terminal.app",
-        "/Applications/NewTerm.app",
-        
-        // MobileSubstrate files
-        "/Library/MobileSubstrate/DynamicLibraries/0Cr4shed.dylib",
-        "/Library/MobileSubstrate/DynamicLibraries/libappstoreplus.dylib",
-        "/Library/MobileSubstrate/DynamicLibraries/ Crane.dylib",
-        "/Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib",
-        "/Library/MobileSubstrate/DynamicLibraries/FilzaHack.dylib",
-        "/Library/MobileSubstrate/DynamicLibraries/LiveClock.plist",
-        "/Library/MobileSubstrate/DynamicLibraries/Veency.plist",
-        "/Library/MobileSubstrate/MobileSubstrate.dylib",
-        "/Library/MobileSubstrate/DynamicLibraries",
-        "/Library/dpkg/info/mobilesubstrate.md5sums",
-        "/Library/dpkg/status", 
-        "/private/var/binpack/Applications/loader.app",      
+// P2: immutable path matcher. Exact and prefix rules are inserted into one
+// byte trie once, so the hot path performs O(path length) traversal instead of
+// scanning every rule. Allocation failure preserves behavior through a cached-
+// length linear fallback.
+typedef struct {
+    const char *bytes;
+    uint16_t length;
+} PXJBStaticPathRule;
 
-        // Substrate/hooking libs
-        "/usr/lib/substrate/SubstrateBootstrap.dylib",
-        "/usr/lib/substrate/SubstrateLoader.dylib",
-        "/usr/lib/substrate/SubstrateInserter.dylib",
+#define PXJB_PATH_RULE(literal) { (literal), (uint16_t)(sizeof(literal) - 1) }
 
-        "/usr/lib/libsubstrate.dylib",
-        "/usr/lib/libmryipc.dylib",
-        "/usr/lib/libFrida.dylib",
-        "/usr/lib/libcycript.dylib",
-        "/usr/lib/libjailbreak.dylib",
-        "/usr/lib/libhooker.dylib",
-        "/usr/lib/libsubstitute.dylib",
-        "/usr/lib/TweakInject.dylib",
-        "/usr/lib/ellekit/libinjector.dylib",
-        "/usr/lib/libellekit.dylib",
-        
-        // Frameworks
-        "/Library/Frameworks/CydiaSubstrate.framework",
-        "/Library/PreferenceBundles",
-        "/Library/PreferenceLoader",
-        
-        // SSH / shell tools
-        "/usr/bin/ssh",
-        "/usr/bin/scp",
-        "/usr/bin/sftp",
-        "/usr/sbin/sshd",
-        "/bin/bash",
-        "/bin/sh",
-        "/bin/zsh",
-        "/usr/bin/cycript",
-        "/usr/bin/dpkg",
-        "/usr/bin/apt",
-        "/usr/bin/apt-get",
-        
-        // SSH support files
-        "/usr/libexec/cydia",
-        "/usr/libexec/sftp-server",
-        "/usr/libexec/ssh-keysign",
-        
-        // Common directories
-        "/etc/apt",
-        "/private/etc/apt",
-        "/etc/ssh",
-        "/private/etc/ssh",
-        "/var/lib/apt",
-        "/var/lib/cydia",
-        "/var/cache/apt",
-        "/var/log/syslog",
-        "/var/tmp/cydia.log",
-        "/Library/dpkg",
-        "/private/var/binpack",
-        
-        // Jailbreak markers / files
-        "/var/checkra1n.dmg",
-        "/var/binpack",
-        "/.bootstrapped_electra",
-        "/.cydia_no_stash",
-        "/.installed_unc0ver",
-        "/.installed_taurine",
-        "/.installed_odyssey",
-        "/.installed_chimera",
-        "/.installed_dopamine",
-        "/.installed_palera1n",
-        "/private/var/stash",
-        
-        // Frida detection paths
-        "/usr/sbin/frida-server",
-        "/usr/lib/frida/frida-agent.dylib",
-        
-        // LaunchDaemons used for detection
-        "/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist",
-        "/System/Library/LaunchDaemons/com.ikey.bbot.plist",
-        
-        // Write test paths
-        "/private/jailbreak_test",
-        "/private/var/jailbreak_test",
-        
-        // Rootless jailbreak specific
-        "/var/jb",
-        "/var/jb/Applications",
-        "/var/jb/usr",
-        "/var/jb/Library",
-        "/private/preboot",
-        
-        NULL
-    };
-    for (int i = 0; kExact[i]; i++) {
-        if (strcmp(path, kExact[i]) == 0) return YES;
+static const PXJBStaticPathRule kPXJBHiddenExactRules[] = {
+    PXJB_PATH_RULE("/Applications/Cydia.app"),
+    PXJB_PATH_RULE("/Applications/Sileo.app"),
+    PXJB_PATH_RULE("/Applications/Zebra.app"),
+    PXJB_PATH_RULE("/Applications/Filza.app"),
+    PXJB_PATH_RULE("/Applications/Installer.app"),
+    PXJB_PATH_RULE("/Applications/RockApp.app"),
+    PXJB_PATH_RULE("/Applications/Icy.app"),
+    PXJB_PATH_RULE("/Applications/WinterBoard.app"),
+    PXJB_PATH_RULE("/Applications/SBSettings.app"),
+    PXJB_PATH_RULE("/Applications/MxTube.app"),
+    PXJB_PATH_RULE("/Applications/IntelliScreen.app"),
+    PXJB_PATH_RULE("/Applications/FakeCarrier.app"),
+    PXJB_PATH_RULE("/Applications/blackra1n.app"),
+    PXJB_PATH_RULE("/Applications/Dopamine.app"),
+    PXJB_PATH_RULE("/Applications/Th0r.app"),
+    PXJB_PATH_RULE("/Applications/iFile.app"),
+    PXJB_PATH_RULE("/Applications/Terminal.app"),
+    PXJB_PATH_RULE("/Applications/NewTerm.app"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/0Cr4shed.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/libappstoreplus.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/ Crane.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/FilzaHack.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/LiveClock.plist"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/Veency.plist"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/MobileSubstrate.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries"),
+    PXJB_PATH_RULE("/Library/dpkg/info/mobilesubstrate.md5sums"),
+    PXJB_PATH_RULE("/Library/dpkg/status"),
+    PXJB_PATH_RULE("/private/var/binpack/Applications/loader.app"),
+    PXJB_PATH_RULE("/usr/lib/substrate/SubstrateBootstrap.dylib"),
+    PXJB_PATH_RULE("/usr/lib/substrate/SubstrateLoader.dylib"),
+    PXJB_PATH_RULE("/usr/lib/substrate/SubstrateInserter.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libsubstrate.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libmryipc.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libFrida.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libcycript.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libjailbreak.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libhooker.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libsubstitute.dylib"),
+    PXJB_PATH_RULE("/usr/lib/TweakInject.dylib"),
+    PXJB_PATH_RULE("/usr/lib/ellekit/libinjector.dylib"),
+    PXJB_PATH_RULE("/usr/lib/libellekit.dylib"),
+    PXJB_PATH_RULE("/Library/Frameworks/CydiaSubstrate.framework"),
+    PXJB_PATH_RULE("/Library/PreferenceBundles"),
+    PXJB_PATH_RULE("/Library/PreferenceLoader"),
+    PXJB_PATH_RULE("/usr/bin/ssh"),
+    PXJB_PATH_RULE("/usr/bin/scp"),
+    PXJB_PATH_RULE("/usr/bin/sftp"),
+    PXJB_PATH_RULE("/usr/sbin/sshd"),
+    PXJB_PATH_RULE("/bin/bash"),
+    PXJB_PATH_RULE("/bin/sh"),
+    PXJB_PATH_RULE("/bin/zsh"),
+    PXJB_PATH_RULE("/usr/bin/cycript"),
+    PXJB_PATH_RULE("/usr/bin/dpkg"),
+    PXJB_PATH_RULE("/usr/bin/apt"),
+    PXJB_PATH_RULE("/usr/bin/apt-get"),
+    PXJB_PATH_RULE("/usr/libexec/cydia"),
+    PXJB_PATH_RULE("/usr/libexec/sftp-server"),
+    PXJB_PATH_RULE("/usr/libexec/ssh-keysign"),
+    PXJB_PATH_RULE("/etc/apt"),
+    PXJB_PATH_RULE("/private/etc/apt"),
+    PXJB_PATH_RULE("/etc/ssh"),
+    PXJB_PATH_RULE("/private/etc/ssh"),
+    PXJB_PATH_RULE("/var/lib/apt"),
+    PXJB_PATH_RULE("/var/lib/cydia"),
+    PXJB_PATH_RULE("/var/cache/apt"),
+    PXJB_PATH_RULE("/var/log/syslog"),
+    PXJB_PATH_RULE("/var/tmp/cydia.log"),
+    PXJB_PATH_RULE("/Library/dpkg"),
+    PXJB_PATH_RULE("/private/var/binpack"),
+    PXJB_PATH_RULE("/var/checkra1n.dmg"),
+    PXJB_PATH_RULE("/var/binpack"),
+    PXJB_PATH_RULE("/.bootstrapped_electra"),
+    PXJB_PATH_RULE("/.cydia_no_stash"),
+    PXJB_PATH_RULE("/.installed_unc0ver"),
+    PXJB_PATH_RULE("/.installed_taurine"),
+    PXJB_PATH_RULE("/.installed_odyssey"),
+    PXJB_PATH_RULE("/.installed_chimera"),
+    PXJB_PATH_RULE("/.installed_dopamine"),
+    PXJB_PATH_RULE("/.installed_palera1n"),
+    PXJB_PATH_RULE("/private/var/stash"),
+    PXJB_PATH_RULE("/usr/sbin/frida-server"),
+    PXJB_PATH_RULE("/usr/lib/frida/frida-agent.dylib"),
+    PXJB_PATH_RULE("/System/Library/LaunchDaemons/com.saurik.Cydia.Startup.plist"),
+    PXJB_PATH_RULE("/System/Library/LaunchDaemons/com.ikey.bbot.plist"),
+    PXJB_PATH_RULE("/private/jailbreak_test"),
+    PXJB_PATH_RULE("/private/var/jailbreak_test"),
+    PXJB_PATH_RULE("/var/jb"),
+    PXJB_PATH_RULE("/var/jb/Applications"),
+    PXJB_PATH_RULE("/var/jb/usr"),
+    PXJB_PATH_RULE("/var/jb/Library"),
+    PXJB_PATH_RULE("/private/preboot"),
+};
+static const PXJBStaticPathRule kPXJBHiddenPrefixRules[] = {
+    PXJB_PATH_RULE("/usr/lib/substrate/"),
+    PXJB_PATH_RULE("/usr/lib/TweakInject/"),
+    PXJB_PATH_RULE("/usr/lib/ellekit/"),
+    PXJB_PATH_RULE("/usr/lib/substitute/"),
+    PXJB_PATH_RULE("/usr/lib/libhooker/"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/"),
+    PXJB_PATH_RULE("/private/var/Library/MobileSubstrate/"),
+    PXJB_PATH_RULE("/private/var/mobile/Library/MobileSubstrate/"),
+    PXJB_PATH_RULE("/Library/Caches/cy-"),
+    PXJB_PATH_RULE("/private/var/Library/Caches/cy-"),
+    PXJB_PATH_RULE("/private/var/mobile/Library/Caches/cy-"),
+    PXJB_PATH_RULE("/Library/Frameworks/CydiaSubstrate.framework/"),
+    PXJB_PATH_RULE("/Library/PreferenceBundles/"),
+    PXJB_PATH_RULE("/Library/PreferenceLoader/"),
+    PXJB_PATH_RULE("/Library/dpkg/info/"),
+    PXJB_PATH_RULE("/Library/Themes/"),
+    PXJB_PATH_RULE("/Library/Ringtones/"),
+    PXJB_PATH_RULE("/Library/Wallpaper/"),
+    PXJB_PATH_RULE("/var/jb/"),
+    PXJB_PATH_RULE("/private/var/jb/"),
+    PXJB_PATH_RULE("/var/jb/Applications/"),
+    PXJB_PATH_RULE("/var/jb/usr/"),
+    PXJB_PATH_RULE("/var/jb/Library/"),
+    PXJB_PATH_RULE("/var/jb/bin/"),
+    PXJB_PATH_RULE("/var/jb/sbin/"),
+    PXJB_PATH_RULE("/var/jb/etc/"),
+    PXJB_PATH_RULE("/private/preboot/jb/"),
+    PXJB_PATH_RULE("/private/preboot/"),
+    PXJB_PATH_RULE("/var/lib/apt/"),
+    PXJB_PATH_RULE("/private/var/lib/apt/"),
+    PXJB_PATH_RULE("/var/cache/apt/"),
+    PXJB_PATH_RULE("/private/var/cache/apt/"),
+    PXJB_PATH_RULE("/var/lib/dpkg/"),
+    PXJB_PATH_RULE("/private/var/lib/dpkg/"),
+    PXJB_PATH_RULE("/var/tmp/cydia"),
+    PXJB_PATH_RULE("/private/var/tmp/cydia"),
+    PXJB_PATH_RULE("/private/var/stash/"),
+    PXJB_PATH_RULE("/var/stash/"),
+    PXJB_PATH_RULE("/usr/lib/frida/"),
+    PXJB_PATH_RULE("/var/jb/procursus/"),
+    PXJB_PATH_RULE("/var/jb/usr/lib/ellekit/"),
+    PXJB_PATH_RULE("/etc/apt/"),
+    PXJB_PATH_RULE("/private/etc/apt/"),
+    PXJB_PATH_RULE("/etc/ssh/"),
+    PXJB_PATH_RULE("/private/etc/ssh/"),
+    PXJB_PATH_RULE("/Library/dpkg/"),
+    PXJB_PATH_RULE("/private/var/binpack/"),
+    PXJB_PATH_RULE("/usr/libexec/cydia/"),
+};
+typedef enum {
+    kPXJBPathTrieTerminalExact  = 1u << 0,
+    kPXJBPathTrieTerminalPrefix = 1u << 1,
+} PXJBPathTrieFlags;
+
+typedef struct {
+    uint32_t firstChild;
+    uint32_t nextSibling;
+    uint8_t byte;
+    uint8_t flags;
+} PXJBPathTrieNode;
+
+#define PXJB_TRIE_NONE UINT32_MAX
+#define PXJB_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
+
+static pthread_once_t gJBPathMatcherOnce = PTHREAD_ONCE_INIT;
+static PXJBPathTrieNode *gJBPathTrieNodes = NULL;
+static uint32_t gJBPathTrieNodeCount = 0;
+static uint32_t gJBPathTrieNodeCapacity = 0;
+static _Atomic(bool) gJBPathMatcherReady = false;
+
+static uint32_t PXJBPathTrieFindChild(uint32_t parent,
+                                      uint8_t byte,
+                                      BOOL create) {
+    if (!gJBPathTrieNodes || parent >= gJBPathTrieNodeCount) return PXJB_TRIE_NONE;
+    uint32_t child = gJBPathTrieNodes[parent].firstChild;
+    while (child != PXJB_TRIE_NONE) {
+        if (gJBPathTrieNodes[child].byte == byte) return child;
+        child = gJBPathTrieNodes[child].nextSibling;
+    }
+    if (!create || gJBPathTrieNodeCount >= gJBPathTrieNodeCapacity) {
+        return PXJB_TRIE_NONE;
+    }
+
+    uint32_t index = gJBPathTrieNodeCount++;
+    PXJBPathTrieNode *node = &gJBPathTrieNodes[index];
+    node->firstChild = PXJB_TRIE_NONE;
+    node->nextSibling = gJBPathTrieNodes[parent].firstChild;
+    node->byte = byte;
+    node->flags = 0;
+    gJBPathTrieNodes[parent].firstChild = index;
+    return index;
+}
+
+static BOOL PXJBPathTrieInsertRule(const PXJBStaticPathRule *rule,
+                                   uint8_t terminalFlag) {
+    if (!rule || !rule->bytes || rule->length == 0) return NO;
+    uint32_t node = 0;
+    for (uint16_t i = 0; i < rule->length; i++) {
+        node = PXJBPathTrieFindChild(node, (uint8_t)rule->bytes[i], YES);
+        if (node == PXJB_TRIE_NONE) return NO;
+    }
+    gJBPathTrieNodes[node].flags |= terminalFlag;
+    return YES;
+}
+
+static void PXJBInitializePathMatcher(void) {
+    size_t capacity = 1;
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBHiddenExactRules); i++) {
+        capacity += kPXJBHiddenExactRules[i].length;
+    }
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBHiddenPrefixRules); i++) {
+        capacity += kPXJBHiddenPrefixRules[i].length;
+    }
+    if (capacity > UINT32_MAX || capacity > SIZE_MAX / sizeof(PXJBPathTrieNode)) return;
+
+    gJBPathTrieNodes = (PXJBPathTrieNode *)calloc(capacity,
+                                                   sizeof(PXJBPathTrieNode));
+    if (!gJBPathTrieNodes) return;
+    gJBPathTrieNodeCapacity = (uint32_t)capacity;
+    gJBPathTrieNodeCount = 1;
+    gJBPathTrieNodes[0].firstChild = PXJB_TRIE_NONE;
+    gJBPathTrieNodes[0].nextSibling = PXJB_TRIE_NONE;
+
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBHiddenExactRules); i++) {
+        if (!PXJBPathTrieInsertRule(&kPXJBHiddenExactRules[i],
+                                    kPXJBPathTrieTerminalExact)) {
+            free(gJBPathTrieNodes);
+            gJBPathTrieNodes = NULL;
+            gJBPathTrieNodeCount = 0;
+            gJBPathTrieNodeCapacity = 0;
+            return;
+        }
+    }
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBHiddenPrefixRules); i++) {
+        if (!PXJBPathTrieInsertRule(&kPXJBHiddenPrefixRules[i],
+                                    kPXJBPathTrieTerminalPrefix)) {
+            free(gJBPathTrieNodes);
+            gJBPathTrieNodes = NULL;
+            gJBPathTrieNodeCount = 0;
+            gJBPathTrieNodeCapacity = 0;
+            return;
+        }
+    }
+    atomic_store_explicit(&gJBPathMatcherReady, true, memory_order_release);
+}
+
+static BOOL PXJBPathMatchesHiddenRulesLinear(const char *path) {
+    size_t pathLength = strlen(path);
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBHiddenExactRules); i++) {
+        const PXJBStaticPathRule *rule = &kPXJBHiddenExactRules[i];
+        if (pathLength == rule->length &&
+            memcmp(path, rule->bytes, rule->length) == 0) {
+            return YES;
+        }
+    }
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBHiddenPrefixRules); i++) {
+        const PXJBStaticPathRule *rule = &kPXJBHiddenPrefixRules[i];
+        if (pathLength >= rule->length &&
+            memcmp(path, rule->bytes, rule->length) == 0) {
+            return YES;
+        }
     }
     return NO;
 }
 
-static BOOL PXJBIsHiddenPrefixPath(const char *path) {
-    if (!path) return NO;
-    static const char *kPrefixes[] = {
-        // Substrate/hooking framework paths
-        "/usr/lib/substrate/",
-        "/usr/lib/TweakInject/",
-        "/usr/lib/ellekit/",
-        "/usr/lib/substitute/",
-        "/usr/lib/libhooker/",
-        
-        // MobileSubstrate paths
-        "/Library/MobileSubstrate/",
-        "/private/var/Library/MobileSubstrate/",
-        "/private/var/mobile/Library/MobileSubstrate/",
-        
-        // Cydia cache injection paths
-        "/Library/Caches/cy-",
-        "/private/var/Library/Caches/cy-",
-        "/private/var/mobile/Library/Caches/cy-",
-        
-        // Library paths
-        "/Library/Frameworks/CydiaSubstrate.framework/",
-        "/Library/PreferenceBundles/",
-        "/Library/PreferenceLoader/",
-        "/Library/dpkg/info/",
-        "/Library/Themes/",
-        "/Library/Ringtones/",
-        "/Library/Wallpaper/",
-        
-        // Rootless jailbreak paths (Dopamine, palera1n, etc.)
-        "/var/jb/",
-        "/private/var/jb/",
-        "/var/jb/Applications/",
-        "/var/jb/usr/",
-        "/var/jb/Library/",
-        "/var/jb/bin/",
-        "/var/jb/sbin/",
-        "/var/jb/etc/",
-        
-        // Preboot jailbreak paths
-        "/private/preboot/jb/",
-        "/private/preboot/",
-        
-        // Package manager paths
-        "/var/lib/apt/",
-        "/private/var/lib/apt/",
-        "/var/cache/apt/",
-        "/private/var/cache/apt/",
-        "/var/lib/dpkg/",
-        "/private/var/lib/dpkg/",
-        
-        // Cydia temp/log paths
-        "/var/tmp/cydia",
-        "/private/var/tmp/cydia",
-        
-        // Stash paths (older jailbreaks)
-        "/private/var/stash/",
-        "/var/stash/",
-        
-        // Frida paths
-        "/usr/lib/frida/",
-        
-        // procursus (modern package set)
-        "/var/jb/procursus/",
-        
-        // ElleKit injection
-        "/var/jb/usr/lib/ellekit/",
-
-        // Additional prefixes found from sandbox logs (MB Bank / VNID)
-        "/etc/apt/",
-        "/private/etc/apt/",
-        "/etc/ssh/",
-        "/private/etc/ssh/",
-        "/Library/dpkg/",
-        "/private/var/binpack/",
-        "/usr/libexec/cydia/",
-        
-        NULL
-    };
-    for (int i = 0; kPrefixes[i]; i++) {
-        if (PXHasPrefix(path, kPrefixes[i])) return YES;
+static BOOL PXJBPathMatchesHiddenRulesTrie(const char *path) {
+    uint32_t node = 0;
+    for (const uint8_t *cursor = (const uint8_t *)path; *cursor; cursor++) {
+        node = PXJBPathTrieFindChild(node, *cursor, NO);
+        if (node == PXJB_TRIE_NONE) return NO;
+        if ((gJBPathTrieNodes[node].flags & kPXJBPathTrieTerminalPrefix) != 0) {
+            return YES;
+        }
     }
-    return NO;
+    return (gJBPathTrieNodes[node].flags &
+            (kPXJBPathTrieTerminalExact | kPXJBPathTrieTerminalPrefix)) != 0;
+}
+
+static BOOL PXJBPathMatcherIsReady(void) {
+    pthread_once(&gJBPathMatcherOnce, PXJBInitializePathMatcher);
+    return atomic_load_explicit(&gJBPathMatcherReady, memory_order_acquire);
 }
 
 static BOOL PXJBPathMatchesHiddenRules(const char *path) {
-    if (!path) return NO;
-    if (path[0] != '/') return NO;
-    // Quick exact/prefix checks.
-    if (PXJBIsHiddenExactPath(path)) return YES;
-    if (PXJBIsHiddenPrefixPath(path)) return YES;
-    return NO;
+    if (!path || path[0] != '/') return NO;
+    if (PXJBPathMatcherIsReady()) {
+        return PXJBPathMatchesHiddenRulesTrie(path);
+    }
+    return PXJBPathMatchesHiddenRulesLinear(path);
 }
+
+#undef PXJB_PATH_RULE
 
 static BOOL PXJBIsWriteAttempt(int flags) {
     if (flags & O_CREAT) return YES;
@@ -837,6 +913,9 @@ static PXJBFilesystemDisposition PXJBClassifyFilesystemPathAt(int dirfd,
                                                                int flags,
                                                                char *resolvedPath,
                                                                size_t resolvedCapacity);
+static int PXJBOriginalFcntlGetPath(int fd,
+                                      char *path,
+                                      size_t pathCapacity);
 
 static inline BOOL PXJBFilesystemDispositionIsHidden(PXJBFilesystemDisposition disposition) {
     return disposition == kPXJBFilesystemHide;
@@ -1167,44 +1246,332 @@ static FILE *hook_fopen(const char *path, const char *mode) {
     return orig_fopen ? orig_fopen(path, mode) : NULL;
 }
 
-static DIR *(*orig_opendir)(const char *);
-static DIR *hook_opendir(const char *path) {
-    PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem) {
-        PXJBFilesystemDisposition disposition =
-            PXJBClassifyFilesystemPathAt(AT_FDCWD,
-                                         path,
-                                         kPXJBFilesystemOperationRead,
-                                         O_RDONLY,
-                                         NULL,
-                                         0);
-        if (PXJBFilesystemDispositionIsHidden(disposition)) {
-            errno = ENOENT;
-            return NULL;
-        }
-    }
-    return orig_opendir ? orig_opendir(path) : NULL;
+// P2: directory stream lifecycle. A DIR* is associated with the normalized
+// parent path from opendir/fdopendir until closedir. readdir can therefore
+// classify the full child path instead of applying basename rules globally.
+typedef DIR *(*PXJBOpendirFunction)(const char *);
+typedef DIR *(*PXJBFdopendirFunction)(int);
+typedef struct dirent *(*PXJBReaddirFunction)(DIR *);
+typedef int (*PXJBClosedirFunction)(DIR *);
+
+typedef struct PXJBDirectoryStreamRecord {
+    DIR *stream;
+    uint64_t generation;
+    char parentPath[PATH_MAX];
+    struct PXJBDirectoryStreamRecord *next;
+} PXJBDirectoryStreamRecord;
+
+#define PXJB_DIRECTORY_BUCKET_COUNT 64u
+_Static_assert((PXJB_DIRECTORY_BUCKET_COUNT & (PXJB_DIRECTORY_BUCKET_COUNT - 1u)) == 0,
+               "directory bucket count must be a power of two");
+
+static PXJBOpendirFunction orig_opendir = NULL;
+static PXJBOpendirFunction gJBOpendirEntry = NULL;
+static PXJBFdopendirFunction orig_fdopendir = NULL;
+static PXJBFdopendirFunction gJBFdopendirEntry = NULL;
+static PXJBReaddirFunction orig_readdir = NULL;
+static PXJBReaddirFunction gJBReaddirEntry = NULL;
+static PXJBClosedirFunction orig_closedir = NULL;
+static PXJBClosedirFunction gJBClosedirEntry = NULL;
+static _Atomic(bool) gJBDirectoryLifecycleReady = false;
+static _Atomic(uint64_t) gJBDirectoryGeneration = 1;
+static pthread_mutex_t gJBDirectoryRegistryLock = PTHREAD_MUTEX_INITIALIZER;
+static PXJBDirectoryStreamRecord *gJBDirectoryBuckets[PXJB_DIRECTORY_BUCKET_COUNT];
+
+static size_t PXJBDirectoryBucketIndex(DIR *stream) {
+    uintptr_t value = (uintptr_t)stream;
+    value ^= value >> 17;
+    value ^= value >> 9;
+    return (size_t)(value & (PXJB_DIRECTORY_BUCKET_COUNT - 1u));
 }
 
-static struct dirent *(*orig_readdir)(DIR *);
+static void PXJBFreeDirectoryStreamRecord(PXJBDirectoryStreamRecord *record) {
+    if (!record) return;
+    memset(record, 0, sizeof(*record));
+    free(record);
+}
+
+static PXJBDirectoryStreamRecord *PXJBDetachDirectoryStream(DIR *stream) {
+    if (!stream) return NULL;
+    size_t bucket = PXJBDirectoryBucketIndex(stream);
+    pthread_mutex_lock(&gJBDirectoryRegistryLock);
+    PXJBDirectoryStreamRecord **cursor = &gJBDirectoryBuckets[bucket];
+    while (*cursor && (*cursor)->stream != stream) cursor = &(*cursor)->next;
+    PXJBDirectoryStreamRecord *record = *cursor;
+    if (record) {
+        *cursor = record->next;
+        record->next = NULL;
+    }
+    pthread_mutex_unlock(&gJBDirectoryRegistryLock);
+    return record;
+}
+
+static BOOL PXJBRestoreDirectoryStream(PXJBDirectoryStreamRecord *record) {
+    if (!record || !record->stream) return NO;
+    size_t bucket = PXJBDirectoryBucketIndex(record->stream);
+    BOOL restored = NO;
+    pthread_mutex_lock(&gJBDirectoryRegistryLock);
+    PXJBDirectoryStreamRecord *cursor = gJBDirectoryBuckets[bucket];
+    while (cursor && cursor->stream != record->stream) cursor = cursor->next;
+    if (!cursor) {
+        record->next = gJBDirectoryBuckets[bucket];
+        gJBDirectoryBuckets[bucket] = record;
+        restored = YES;
+    }
+    pthread_mutex_unlock(&gJBDirectoryRegistryLock);
+    return restored;
+}
+
+static BOOL PXJBRegisterDirectoryStream(DIR *stream, const char *parentPath) {
+    if (!stream || !parentPath || parentPath[0] != '/') return NO;
+    size_t pathLength = strlen(parentPath);
+    if (pathLength == 0 || pathLength >= PATH_MAX) return NO;
+
+    PXJBDirectoryStreamRecord *record =
+        (PXJBDirectoryStreamRecord *)calloc(1, sizeof(*record));
+    if (!record) return NO;
+    record->stream = stream;
+    record->generation = atomic_fetch_add_explicit(&gJBDirectoryGeneration,
+                                                    1,
+                                                    memory_order_relaxed);
+    memcpy(record->parentPath, parentPath, pathLength + 1);
+
+    size_t bucket = PXJBDirectoryBucketIndex(stream);
+    PXJBDirectoryStreamRecord *replaced = NULL;
+    pthread_mutex_lock(&gJBDirectoryRegistryLock);
+    PXJBDirectoryStreamRecord **cursor = &gJBDirectoryBuckets[bucket];
+    while (*cursor && (*cursor)->stream != stream) cursor = &(*cursor)->next;
+    if (*cursor) {
+        replaced = *cursor;
+        *cursor = replaced->next;
+        replaced->next = NULL;
+    }
+    record->next = gJBDirectoryBuckets[bucket];
+    gJBDirectoryBuckets[bucket] = record;
+    pthread_mutex_unlock(&gJBDirectoryRegistryLock);
+    PXJBFreeDirectoryStreamRecord(replaced);
+    return YES;
+}
+
+static BOOL PXJBCopyDirectoryStreamPath(DIR *stream,
+                                        char *outPath,
+                                        size_t outCapacity,
+                                        uint64_t *outGeneration) {
+    if (!stream || !outPath || outCapacity < 2) return NO;
+    BOOL found = NO;
+    size_t bucket = PXJBDirectoryBucketIndex(stream);
+    pthread_mutex_lock(&gJBDirectoryRegistryLock);
+    PXJBDirectoryStreamRecord *record = gJBDirectoryBuckets[bucket];
+    while (record && record->stream != stream) record = record->next;
+    if (record) {
+        size_t length = strlen(record->parentPath);
+        if (length + 1 <= outCapacity) {
+            memcpy(outPath, record->parentPath, length + 1);
+            if (outGeneration) *outGeneration = record->generation;
+            found = YES;
+        }
+    }
+    pthread_mutex_unlock(&gJBDirectoryRegistryLock);
+    return found;
+}
+
+static DIR *PXJBOriginalOpendir(const char *path) {
+    PXJBOpendirFunction function = orig_opendir;
+    if (!function || function == gJBOpendirEntry) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return function(path);
+}
+
+static DIR *PXJBOriginalFdopendir(int fd) {
+    PXJBFdopendirFunction function = orig_fdopendir;
+    if (!function || function == gJBFdopendirEntry) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return function(fd);
+}
+
+static struct dirent *PXJBOriginalReaddir(DIR *stream) {
+    PXJBReaddirFunction function = orig_readdir;
+    if (!function || function == gJBReaddirEntry) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return function(stream);
+}
+
+static int PXJBOriginalClosedir(DIR *stream) {
+    PXJBClosedirFunction function = orig_closedir;
+    if (!function || function == gJBClosedirEntry) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return function(stream);
+}
+
+static BOOL PXJBJoinDirectoryEntryPath(const char *parentPath,
+                                       const char *entryName,
+                                       char *outPath,
+                                       size_t outCapacity) {
+    if (!parentPath || parentPath[0] != '/' ||
+        !entryName || !entryName[0] || strchr(entryName, '/') != NULL ||
+        !outPath || outCapacity < 2) {
+        return NO;
+    }
+    size_t parentLength = strlen(parentPath);
+    size_t entryLength = strlen(entryName);
+    BOOL parentIsRoot = parentLength == 1 && parentPath[0] == '/';
+    size_t required = parentLength + (parentIsRoot ? 0 : 1) + entryLength + 1;
+    if (required > outCapacity) return NO;
+
+    memcpy(outPath, parentPath, parentLength);
+    size_t cursor = parentLength;
+    if (!parentIsRoot) outPath[cursor++] = '/';
+    memcpy(outPath + cursor, entryName, entryLength + 1);
+    return YES;
+}
+
+static BOOL PXJBUntrackedDirectoryEntryShouldHide(const char *entryName) {
+    if (!entryName) return NO;
+    static const char *const highConfidenceNames[] = {
+        "Cydia.app",
+        "Sileo.app",
+        "Zebra.app",
+        "Filza.app",
+        NULL
+    };
+    for (size_t i = 0; highConfidenceNames[i]; i++) {
+        if (PXStrEqNoCase(entryName, highConfidenceNames[i])) return YES;
+    }
+    return NO;
+}
+
+static BOOL PXJBDirectoryParentUsesAppNameRules(const char *parentPath) {
+    if (!parentPath) return NO;
+    return strcmp(parentPath, "/Applications") == 0 ||
+           strcmp(parentPath, "/var/jb/Applications") == 0;
+}
+
+static BOOL PXJBDirectoryEntryShouldHide(const char *parentPath,
+                                         const char *entryName) {
+    if (!entryName || !entryName[0] ||
+        strcmp(entryName, ".") == 0 || strcmp(entryName, "..") == 0) {
+        return NO;
+    }
+    if (!parentPath || parentPath[0] != '/') {
+        return PXJBUntrackedDirectoryEntryShouldHide(entryName);
+    }
+
+    char childPath[PATH_MAX];
+    if (!PXJBJoinDirectoryEntryPath(parentPath,
+                                    entryName,
+                                    childPath,
+                                    sizeof(childPath))) {
+        return NO;
+    }
+    if (PXJBPathMatchesHiddenRules(childPath)) return YES;
+    return PXJBDirectoryParentUsesAppNameRules(parentPath) &&
+           PXJBUntrackedDirectoryEntryShouldHide(entryName);
+}
+
+static DIR *hook_opendir(const char *path) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    BOOL lifecycleReady = atomic_load_explicit(&gJBDirectoryLifecycleReady,
+                                                memory_order_acquire);
+    BOOL collectContext = lifecycleReady && pxjbFilesystemScope.entered;
+    char resolvedPath[PATH_MAX];
+    resolvedPath[0] = '\0';
+    PXJBFilesystemDisposition disposition = kPXJBFilesystemUnresolved;
+    if (pxjbFilterFilesystem || collectContext) {
+        disposition = PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                                    path,
+                                                    kPXJBFilesystemOperationRead,
+                                                    O_RDONLY,
+                                                    resolvedPath,
+                                                    sizeof(resolvedPath));
+    }
+    if (pxjbFilterFilesystem && PXJBFilesystemDispositionIsHidden(disposition)) {
+        errno = ENOENT;
+        return NULL;
+    }
+
+    DIR *stream = PXJBOriginalOpendir(path);
+    if (stream && collectContext && resolvedPath[0] == '/') {
+        int savedErrno = errno;
+        (void)PXJBRegisterDirectoryStream(stream, resolvedPath);
+        errno = savedErrno;
+    }
+    return stream;
+}
+
+static DIR *hook_fdopendir(int fd) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    BOOL lifecycleReady = atomic_load_explicit(&gJBDirectoryLifecycleReady,
+                                                memory_order_acquire);
+    BOOL collectContext = lifecycleReady && pxjbFilesystemScope.entered;
+    char resolvedPath[PATH_MAX];
+    resolvedPath[0] = '\0';
+    if ((pxjbFilterFilesystem || collectContext) && fd >= 0) {
+        char fdPath[PATH_MAX];
+        if (PXJBOriginalFcntlGetPath(fd, fdPath, sizeof(fdPath)) != -1) {
+            (void)PXJBNormalizeAbsolutePath(fdPath,
+                                            resolvedPath,
+                                            sizeof(resolvedPath));
+        }
+    }
+    if (pxjbFilterFilesystem && resolvedPath[0] == '/' &&
+        PXJBPathMatchesHiddenRules(resolvedPath)) {
+        errno = ENOENT;
+        return NULL;
+    }
+
+    DIR *stream = PXJBOriginalFdopendir(fd);
+    if (stream && collectContext && resolvedPath[0] == '/') {
+        int savedErrno = errno;
+        (void)PXJBRegisterDirectoryStream(stream, resolvedPath);
+        errno = savedErrno;
+    }
+    return stream;
+}
+
 static struct dirent *hook_readdir(DIR *dirp) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (!orig_readdir) return NULL;
-    struct dirent *ent = orig_readdir(dirp);
-    if (!pxjbFilterFilesystem) return ent;
-
-    // Hide common jailbreak app names if a directory listing is used.
-    while (ent) {
-        const char *n = ent->d_name;
-        if (n) {
-            if (PXStrEqNoCase(n, "Cydia.app") || PXStrEqNoCase(n, "Sileo.app") || PXStrEqNoCase(n, "Zebra.app") || PXStrEqNoCase(n, "Filza.app")) {
-                ent = orig_readdir(dirp);
-                continue;
-            }
-        }
-        break;
+    BOOL lifecycleReady = atomic_load_explicit(&gJBDirectoryLifecycleReady,
+                                                memory_order_acquire);
+    if (!pxjbFilterFilesystem || !lifecycleReady) {
+        return PXJBOriginalReaddir(dirp);
     }
-    return ent;
+
+    char parentPath[PATH_MAX];
+    BOOL tracked = PXJBCopyDirectoryStreamPath(dirp,
+                                               parentPath,
+                                               sizeof(parentPath),
+                                               NULL);
+    for (;;) {
+        struct dirent *entry = PXJBOriginalReaddir(dirp);
+        if (!entry) return NULL;
+        if (!PXJBDirectoryEntryShouldHide(tracked ? parentPath : NULL,
+                                          entry->d_name)) {
+            return entry;
+        }
+        PXJBRecordBlockedEvent("readdir", entry->d_name);
+    }
+}
+
+static int hook_closedir(DIR *dirp) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    PXJBDirectoryStreamRecord *detached = PXJBDetachDirectoryStream(dirp);
+    int result = PXJBOriginalClosedir(dirp);
+    int savedErrno = errno;
+    if (result == 0) {
+        PXJBFreeDirectoryStreamRecord(detached);
+    } else if (detached && !PXJBRestoreDirectoryStream(detached)) {
+        PXJBFreeDirectoryStreamRecord(detached);
+    }
+    errno = savedErrno;
+    return result;
 }
 
 static ssize_t (*orig_readlink)(const char *, char *, size_t);
@@ -4011,6 +4378,10 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         // only after the install audit has verified each capability.
         PXJBPolicyMask launchRequestedMask = PXJBBuildRequestedPolicyMask(launchSettings);
         PXJBPrepareCapabilityRegistry(launchRequestedMask);
+        BOOL pathMatcherReady = PXJBPathMatcherIsReady();
+        if (!pathMatcherReady) {
+            PXLog(@"[JailbreakBypass] optimized path matcher unavailable; using linear fallback");
+        }
 
         BOOL wantDyldHide = (launchRequestedMask & kPXJBPolicyHideDylibs) != 0;
         BOOL wantBlockAddImage = (launchRequestedMask & kPXJBPolicyBlockDyldAddImageCallbacks) != 0;
@@ -4064,11 +4435,54 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol(NULL, "fopen");
             if (sym) MSHookFunction(sym, (void *)hook_fopen, (void **)&orig_fopen);
 
-            sym = FindSymbol(NULL, "opendir");
-            if (sym) MSHookFunction(sym, (void *)hook_opendir, (void **)&orig_opendir);
+            // P2: install opendir/readdir/closedir as one lifecycle group.
+            // fdopendir is optional, but if present its trampoline must also be valid.
+            void *opendirEntry = FindSymbol(NULL, "opendir");
+            void *readdirEntry = FindSymbol(NULL, "readdir");
+            void *closedirEntry = FindSymbol(NULL, "closedir");
+            void *fdopendirEntry = FindSymbol(NULL, "fdopendir");
+            if (opendirEntry && readdirEntry && closedirEntry) {
+                gJBOpendirEntry = (PXJBOpendirFunction)opendirEntry;
+                gJBReaddirEntry = (PXJBReaddirFunction)readdirEntry;
+                gJBClosedirEntry = (PXJBClosedirFunction)closedirEntry;
+                gJBFdopendirEntry = (PXJBFdopendirFunction)fdopendirEntry;
 
-            sym = FindSymbol(NULL, "readdir");
-            if (sym) MSHookFunction(sym, (void *)hook_readdir, (void **)&orig_readdir);
+                MSHookFunction(opendirEntry,
+                               (void *)hook_opendir,
+                               (void **)&orig_opendir);
+                MSHookFunction(readdirEntry,
+                               (void *)hook_readdir,
+                               (void **)&orig_readdir);
+                MSHookFunction(closedirEntry,
+                               (void *)hook_closedir,
+                               (void **)&orig_closedir);
+                if (fdopendirEntry) {
+                    MSHookFunction(fdopendirEntry,
+                                   (void *)hook_fdopendir,
+                                   (void **)&orig_fdopendir);
+                }
+
+                BOOL mandatoryReady = orig_opendir != NULL &&
+                                      orig_opendir != gJBOpendirEntry &&
+                                      orig_readdir != NULL &&
+                                      orig_readdir != gJBReaddirEntry &&
+                                      orig_closedir != NULL &&
+                                      orig_closedir != gJBClosedirEntry;
+                BOOL optionalReady = fdopendirEntry == NULL ||
+                                     (orig_fdopendir != NULL &&
+                                      orig_fdopendir != gJBFdopendirEntry);
+                atomic_store_explicit(&gJBDirectoryLifecycleReady,
+                                      mandatoryReady && optionalReady,
+                                      memory_order_release);
+                if (!mandatoryReady || !optionalReady) {
+                    PXLog(@"[JailbreakBypass] directory lifecycle disabled: invalid trampoline");
+                }
+            } else {
+                atomic_store_explicit(&gJBDirectoryLifecycleReady,
+                                      false,
+                                      memory_order_release);
+                PXLog(@"[JailbreakBypass] directory lifecycle disabled: missing mandatory symbol");
+            }
 
             sym = FindSymbol(NULL, "readlink");
             if (sym) MSHookFunction(sym, (void *)hook_readlink, (void **)&orig_readlink);
@@ -4500,6 +4914,18 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityCore, "fopen", orig_fopen, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "opendir", orig_opendir, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "readdir", orig_readdir, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "closedir", orig_closedir, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fdopendir", orig_fdopendir, false);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilityCore,
+                              "directory-stream-lifecycle",
+                              atomic_load_explicit(&gJBDirectoryLifecycleReady,
+                                                   memory_order_acquire),
+                              true);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilityCore,
+                              "path-matcher-optimized",
+                              atomic_load_explicit(&gJBPathMatcherReady,
+                                                   memory_order_acquire),
+                              false);
     PXJB_AUDIT(kPXJBCapabilityCore, "readlink", orig_readlink, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "realpath", orig_realpath, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "connect", orig_connect, false);
