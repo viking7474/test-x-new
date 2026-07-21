@@ -37,6 +37,7 @@
 #import <stdint.h>
 #import <stdbool.h>
 #import <stdatomic.h>
+#import <time.h>
 
 // XPC types — Theos SDK doesn't ship <xpc/xpc.h>.
 // We only need opaque pointers and a few functions.
@@ -85,6 +86,10 @@ struct dl_phdr_info {
 int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 #import <unistd.h>
 #import <limits.h>
+
+#ifndef AT_FDCWD
+#define AT_FDCWD (-2)
+#endif
 
 #import <substrate.h>
 
@@ -178,11 +183,62 @@ enum {
 };
 
 static _Atomic(PXJBPolicyMask) gJBPolicyMask = 0;
+static _Atomic(bool) gJBDyldIndexedHooksReady = false;
 // Written once in %ctor before hook installation, then treated as immutable.
 // It caps runtime settings so a reload cannot enable a launch-only capability.
 static PXJBPolicyMask gJBLaunchCapabilityMask = 0;
 static dispatch_queue_t gJBPolicyReloadQueue = NULL;
 static dispatch_source_t gJBPolicyReloadTimer = NULL;
+
+// P0-D: re-entry is tracked per domain. A nested filesystem call does not
+// globally disable dyld/process filtering, and policy/logging I/O can bypass
+// only filesystem interposition while those domains are active.
+enum {
+    kPXJBReentryFilesystem   = 1u << 0,
+    kPXJBReentryDyldSnapshot = 1u << 1,
+    kPXJBReentryPolicyReload = 1u << 2,
+    kPXJBReentryLogging      = 1u << 3,
+    kPXJBReentryExec         = 1u << 4,
+    kPXJBReentryHookInstall  = 1u << 5,
+};
+
+static __thread uint32_t gJBReentryDomains = 0;
+
+typedef struct {
+    uint32_t domain;
+    bool entered;
+} PXJBReentryScope;
+
+static inline bool PXJBReentryDomainIsActive(uint32_t domains) {
+    return (gJBReentryDomains & domains) != 0;
+}
+
+static inline uint64_t PXJBMonotonicNanoseconds(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return ((uint64_t)ts.tv_sec * 1000000000ull) + (uint64_t)ts.tv_nsec;
+}
+
+static inline PXJBReentryScope PXJBEnterReentryDomain(uint32_t domain) {
+    PXJBReentryScope scope = { domain, false };
+    if ((gJBReentryDomains & domain) != 0) return scope;
+    gJBReentryDomains |= domain;
+    scope.entered = true;
+    return scope;
+}
+
+static inline void PXJBLeaveReentryDomain(PXJBReentryScope *scope) {
+    if (!scope || !scope->entered) return;
+    gJBReentryDomains &= ~scope->domain;
+    scope->entered = false;
+}
+
+#define PXJB_REENTRY_SCOPE(name, domainValue) \
+    PXJBReentryScope name __attribute__((cleanup(PXJBLeaveReentryDomain))) = \
+        PXJBEnterReentryDomain((domainValue))
+
+static _Atomic(uint64_t) gJBDeferredBlockedEventCount = 0;
+static void PXJBFlushDeferredDebugCounters(void);
 
 static BOOL PXJBProcessIsEligibleAtLaunch(NSString *bundleID, NSString *processName) {
     if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return NO;
@@ -272,6 +328,9 @@ static void PXJBPublishPolicySnapshot(NSDictionary *settings) {
 }
 
 static void PXJBReloadPolicySnapshot(void) {
+    PXJB_REENTRY_SCOPE(policyScope, kPXJBReentryPolicyReload);
+    if (!policyScope.entered) return;
+
     @autoreleasepool {
         PXJBPublishPolicySnapshot(PXJBReadSecuritySettingsSnapshot());
     }
@@ -293,6 +352,7 @@ static void PXJBStartPolicyReloadTimer(void) {
                               100ull * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(gJBPolicyReloadTimer, ^{
         PXJBReloadPolicySnapshot();
+        PXJBFlushDeferredDebugCounters();
     });
     dispatch_resume(gJBPolicyReloadTimer);
 }
@@ -308,6 +368,34 @@ static BOOL PXJBShouldBypassCached(void) {
     return (PXJBPolicyLoad() & kPXJBPolicyMaster) != 0;
 }
 
+static inline BOOL PXJBFilesystemFilteringAllowed(void) {
+    const uint32_t suppressDomains = kPXJBReentryFilesystem |
+                                     kPXJBReentryDyldSnapshot |
+                                     kPXJBReentryPolicyReload |
+                                     kPXJBReentryLogging |
+                                     kPXJBReentryExec |
+                                     kPXJBReentryHookInstall;
+    return PXJBShouldBypassCached() && !PXJBReentryDomainIsActive(suppressDomains);
+}
+
+static inline BOOL PXJBExecFilteringAllowed(void) {
+    const uint32_t suppressDomains = kPXJBReentryExec |
+                                     kPXJBReentryPolicyReload |
+                                     kPXJBReentryLogging |
+                                     kPXJBReentryHookInstall;
+    return PXJBShouldBypassCached() && !PXJBReentryDomainIsActive(suppressDomains);
+}
+
+#define PXJB_FILESYSTEM_HOOK_SCOPE() \
+    BOOL pxjbFilterFilesystem = PXJBFilesystemFilteringAllowed(); \
+    PXJB_REENTRY_SCOPE(pxjbFilesystemScope, kPXJBReentryFilesystem); \
+    if (!pxjbFilesystemScope.entered) pxjbFilterFilesystem = NO
+
+#define PXJB_EXEC_HOOK_SCOPE() \
+    BOOL pxjbFilterExec = PXJBExecFilteringAllowed(); \
+    PXJB_REENTRY_SCOPE(pxjbExecScope, kPXJBReentryExec); \
+    if (!pxjbExecScope.entered) pxjbFilterExec = NO
+
 static BOOL PXJBPolicyFeatureEnabled(PXJBPolicyMask feature) {
     if (!atomic_load_explicit(&gJBProcessEligible, memory_order_acquire)) return NO;
     PXJBPolicyMask mask = PXJBPolicyLoad();
@@ -319,7 +407,8 @@ static BOOL PXJBStatfsBypassEnabled(void) {
 }
 
 static BOOL PXJBHideDylibsEnabled(void) {
-    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideDylibs);
+    return PXJBPolicyFeatureEnabled(kPXJBPolicyHideDylibs) &&
+           atomic_load_explicit(&gJBDyldIndexedHooksReady, memory_order_acquire);
 }
 
 // Forward declaration (defined later in dyld section).
@@ -357,15 +446,25 @@ static BOOL PXJBDebugLoggingEnabled(void) {
     return PXJBPolicyFeatureEnabled(kPXJBPolicyDebugLogging);
 }
 
-static void PXJBLogBlockedOncePerSecond(const char *what, const char *detail) {
+// Native hooks only record a counter. Formatting and Foundation logging are
+// deferred to the policy queue so C hot paths perform no I/O or ObjC work.
+static inline void PXJBRecordBlockedEvent(const char *what, const char *detail) {
+    (void)what;
+    (void)detail;
     if (!PXJBDebugLoggingEnabled()) return;
-    static CFTimeInterval last = 0;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if ((now - last) < 1.0) return;
-    last = now;
-    if (!what) what = "(unknown)";
-    if (!detail) detail = "";
-    PXLog(@"[JailbreakBypass][debug] blocked %s %s", what, detail);
+    atomic_fetch_add_explicit(&gJBDeferredBlockedEventCount, 1, memory_order_relaxed);
+}
+
+static void PXJBFlushDeferredDebugCounters(void) {
+    PXJB_REENTRY_SCOPE(loggingScope, kPXJBReentryLogging);
+    if (!loggingScope.entered) return;
+
+    uint64_t count = atomic_exchange_explicit(&gJBDeferredBlockedEventCount,
+                                              0,
+                                              memory_order_acq_rel);
+    if (!PXJBDebugLoggingEnabled() || count == 0) return;
+    PXLog(@"[JailbreakBypass][debug] deferred blocked events=%llu",
+          (unsigned long long)count);
 }
 
 // Path matching
@@ -639,7 +738,8 @@ static BOOL PXJBIsDeniedLoopbackPort(uint16_t port) {
 // --- C hooks ---
 static int (*orig_stat)(const char *, struct stat *);
 static int hook_stat(const char *path, struct stat *st) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -648,7 +748,8 @@ static int hook_stat(const char *path, struct stat *st) {
 
 static int (*orig_stat64)(const char *, struct stat *);
 static int hook_stat64(const char *path, struct stat *st) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -657,7 +758,8 @@ static int hook_stat64(const char *path, struct stat *st) {
 
 static int (*orig_lstat)(const char *, struct stat *);
 static int hook_lstat(const char *path, struct stat *st) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -666,7 +768,8 @@ static int hook_lstat(const char *path, struct stat *st) {
 
 static int (*orig_lstat64)(const char *, struct stat *);
 static int hook_lstat64(const char *path, struct stat *st) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -675,7 +778,8 @@ static int hook_lstat64(const char *path, struct stat *st) {
 
 static int (*orig_access)(const char *, int);
 static int hook_access(const char *path, int amode) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -684,7 +788,8 @@ static int hook_access(const char *path, int amode) {
 
 static int (*orig_open)(const char *, int, ...);
 static int hook_open(const char *path, int oflag, ...) {
-    if (PXJBShouldBypassCached()) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
         if (PXJBPathShouldHide(path)) {
             errno = ENOENT;
             return -1;
@@ -797,45 +902,43 @@ static BOOL PXJBJoinCwdAndNormalize(const char *relPath, char *out, size_t outsz
 }
 
 static int hook_openat(int fd, const char *path, int oflag, ...) {
-    if (PXJBShouldBypassCached()) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
         if (path) {
             if (path[0] == '/') {
                 if (PXJBPathShouldHide(path)) {
-                    PXJBLogBlockedOncePerSecond("openat", path);
+                    PXJBRecordBlockedEvent("openat", path);
                     errno = ENOENT;
                     return -1;
                 }
                 if (PXJBWriteCheckShouldBlock(path, oflag)) {
-                    PXJBLogBlockedOncePerSecond("openat(write)", path);
+                    PXJBRecordBlockedEvent("openat(write)", path);
                     errno = EACCES;
                     return -1;
                 }
             } else {
-#ifndef AT_FDCWD
-#define AT_FDCWD (-2)
-#endif
                 if (fd == AT_FDCWD) {
                     char normalized[PATH_MAX];
                     if (PXJBJoinCwdAndNormalize(path, normalized, sizeof(normalized))) {
                         if (PXJBPathShouldHide(normalized)) {
-                            PXJBLogBlockedOncePerSecond("openat", normalized);
+                            PXJBRecordBlockedEvent("openat", normalized);
                             errno = ENOENT;
                             return -1;
                         }
                         if (PXJBWriteCheckShouldBlock(normalized, oflag)) {
-                            PXJBLogBlockedOncePerSecond("openat(write)", normalized);
+                            PXJBRecordBlockedEvent("openat(write)", normalized);
                             errno = EACCES;
                             return -1;
                         }
                     } else if (PXJBRelativePathLooksLikeProbe(path)) {
-                        PXJBLogBlockedOncePerSecond("openat(rel)", path);
+                        PXJBRecordBlockedEvent("openat(rel)", path);
                         errno = ENOENT;
                         return -1;
                     }
                 } else {
                     // Don't try to resolve fd->path (avoid side effects). Only block obvious probes.
                     if (PXJBRelativePathLooksLikeProbe(path)) {
-                        PXJBLogBlockedOncePerSecond("openat(relfd)", path);
+                        PXJBRecordBlockedEvent("openat(relfd)", path);
                         errno = ENOENT;
                         return -1;
                     }
@@ -856,7 +959,8 @@ static int hook_openat(int fd, const char *path, int oflag, ...) {
 
 static FILE *(*orig_fopen)(const char *, const char *);
 static FILE *hook_fopen(const char *path, const char *mode) {
-    if (PXJBShouldBypassCached()) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
         if (PXJBPathShouldHide(path)) {
             errno = ENOENT;
             return NULL;
@@ -877,7 +981,8 @@ static FILE *hook_fopen(const char *path, const char *mode) {
 
 static DIR *(*orig_opendir)(const char *);
 static DIR *hook_opendir(const char *path) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return NULL;
     }
@@ -886,9 +991,10 @@ static DIR *hook_opendir(const char *path) {
 
 static struct dirent *(*orig_readdir)(DIR *);
 static struct dirent *hook_readdir(DIR *dirp) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
     if (!orig_readdir) return NULL;
     struct dirent *ent = orig_readdir(dirp);
-    if (!PXJBShouldBypassCached()) return ent;
+    if (!pxjbFilterFilesystem) return ent;
 
     // Hide common jailbreak app names if a directory listing is used.
     while (ent) {
@@ -906,7 +1012,8 @@ static struct dirent *hook_readdir(DIR *dirp) {
 
 static ssize_t (*orig_readlink)(const char *, char *, size_t);
 static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -915,7 +1022,8 @@ static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
 
 static char *(*orig_realpath)(const char *, char *);
 static char *hook_realpath(const char *path, char *resolved) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return NULL;
     }
@@ -1033,42 +1141,68 @@ static pid_t hook_vfork(void) {
 // A portable C variadic wrapper cannot preserve unknown syscall arguments.
 
 // Block common jailbreak probe commands executed via system()/popen().
-static BOOL PXJBCommandLooksLikeProbe(NSString *cmd) {
-    if (![cmd isKindOfClass:[NSString class]] || cmd.length == 0) return NO;
-    NSString *c = [[cmd lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!c.length) return NO;
+// This matcher is intentionally C-only because both callers are native hooks.
+static inline BOOL PXJBCommandSeparator(unsigned char c) {
+    switch (c) {
+        case ' ': case '\t': case '\r': case '\n':
+        case ';': case '|': case '&': case '(': case ')':
+        case '<': case '>': case '"': case '\'': case '\\':
+            return YES;
+        default:
+            return NO;
+    }
+}
 
-    // Avoid overly broad substring checks that can break legitimate commands.
-    // Only treat as a probe when we see explicit jailbreak tool paths/binaries.
-    NSArray<NSString *> *pathNeedles = @[
-        @"/applications/cydia.app",
-        @"/applications/sileo.app",
-        @"/applications/zebra.app",
-        @"/applications/filza.app",
-        @"/library/mobilesubstrate",
-        @"/usr/sbin/sshd",
-        @"/etc/apt",
-        @"/var/lib/apt",
-        @"/var/lib/cydia",
-        @"/var/jb",
-        @"/private/preboot/jb",
-        @"frida-server",
-        @"fridagadget",
-        @"cycript",
-        @"uicache",
-        @"ldrestart"
-    ];
-    for (NSString *n in pathNeedles) {
-        if ([c containsString:n]) return YES;
+static BOOL PXJBTokenEqualsNoCase(const char *token, size_t tokenLength, const char *expected) {
+    if (!token || !expected) return NO;
+    size_t expectedLength = strlen(expected);
+    if (tokenLength != expectedLength) return NO;
+    for (size_t i = 0; i < tokenLength; i++) {
+        char a = token[i];
+        char b = expected[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return NO;
+    }
+    return YES;
+}
+
+static BOOL PXJBCommandLooksLikeProbe(const char *command) {
+    if (!command || !command[0]) return NO;
+
+    static const char *pathNeedles[] = {
+        "/applications/cydia.app",
+        "/applications/sileo.app",
+        "/applications/zebra.app",
+        "/applications/filza.app",
+        "/library/mobilesubstrate",
+        "/usr/sbin/sshd",
+        "/etc/apt",
+        "/var/lib/apt",
+        "/var/lib/cydia",
+        "/var/jb",
+        "/private/preboot/jb",
+        "frida-server",
+        "fridagadget",
+        "cycript",
+        "uicache",
+        "ldrestart",
+        NULL
+    };
+    for (size_t i = 0; pathNeedles[i]; i++) {
+        if (PXStrContainsNoCase(command, pathNeedles[i])) return YES;
     }
 
-    // Token checks for package managers (match whole tokens only).
-    // This avoids false positives like "capture" containing "apt".
-    NSCharacterSet *seps = [NSCharacterSet characterSetWithCharactersInString:@" \t\r\n;|&()<>\"'\\"];
-    NSArray<NSString *> *tokens = [c componentsSeparatedByCharactersInSet:seps];
-    for (NSString *t in tokens) {
-        if (!t.length) continue;
-        if ([t isEqualToString:@"apt"] || [t isEqualToString:@"apt-get"] || [t isEqualToString:@"dpkg"]) {
+    const char *cursor = command;
+    while (*cursor) {
+        while (*cursor && PXJBCommandSeparator((unsigned char)*cursor)) cursor++;
+        const char *token = cursor;
+        while (*cursor && !PXJBCommandSeparator((unsigned char)*cursor)) cursor++;
+        size_t tokenLength = (size_t)(cursor - token);
+        if (tokenLength == 0) continue;
+        if (PXJBTokenEqualsNoCase(token, tokenLength, "apt") ||
+            PXJBTokenEqualsNoCase(token, tokenLength, "apt-get") ||
+            PXJBTokenEqualsNoCase(token, tokenLength, "dpkg")) {
             return YES;
         }
     }
@@ -1077,24 +1211,22 @@ static BOOL PXJBCommandLooksLikeProbe(NSString *cmd) {
 
 static int (*orig_system)(const char *);
 static int hook_system(const char *command) {
-    if (PXJBShouldBypassCached() && command) {
-        NSString *cmd = [NSString stringWithUTF8String:command] ?: @"";
-        if (PXJBCommandLooksLikeProbe(cmd)) {
-            errno = EPERM;
-            return -1;
-        }
+    PXJB_EXEC_HOOK_SCOPE();
+    if (pxjbFilterExec && command && PXJBCommandLooksLikeProbe(command)) {
+        PXJBRecordBlockedEvent("system", command);
+        errno = EPERM;
+        return -1;
     }
     return orig_system ? orig_system(command) : -1;
 }
 
 static FILE *(*orig_popen)(const char *, const char *);
 static FILE *hook_popen(const char *command, const char *type) {
-    if (PXJBShouldBypassCached() && command) {
-        NSString *cmd = [NSString stringWithUTF8String:command] ?: @"";
-        if (PXJBCommandLooksLikeProbe(cmd)) {
-            errno = EPERM;
-            return NULL;
-        }
+    PXJB_EXEC_HOOK_SCOPE();
+    if (pxjbFilterExec && command && PXJBCommandLooksLikeProbe(command)) {
+        PXJBRecordBlockedEvent("popen", command);
+        errno = EPERM;
+        return NULL;
     }
     return orig_popen ? orig_popen(command, type) : NULL;
 }
@@ -1129,8 +1261,9 @@ static BOOL PXJBSpawnPathLooksLikeProbe(const char *path) {
 
 static int (*orig_posix_spawn)(pid_t *restrict, const char *restrict, const posix_spawn_file_actions_t *restrict, const posix_spawnattr_t *restrict, char *const argv[restrict], char *const envp[restrict]);
 static int hook_posix_spawn(pid_t *restrict pid, const char *restrict path, const posix_spawn_file_actions_t *restrict file_actions, const posix_spawnattr_t *restrict attrp, char *const argv[restrict], char *const envp[restrict]) {
-    if (PXJBShouldBypassCached() && path && PXJBSpawnPathLooksLikeProbe(path)) {
-        PXJBLogBlockedOncePerSecond("posix_spawn", path);
+    PXJB_EXEC_HOOK_SCOPE();
+    if (pxjbFilterExec && path && PXJBSpawnPathLooksLikeProbe(path)) {
+        PXJBRecordBlockedEvent("posix_spawn", path);
         errno = ENOENT;
         return -1;
     }
@@ -1139,8 +1272,9 @@ static int hook_posix_spawn(pid_t *restrict pid, const char *restrict path, cons
 
 static int (*orig_posix_spawnp)(pid_t *restrict, const char *restrict, const posix_spawn_file_actions_t *restrict, const posix_spawnattr_t *restrict, char *const argv[restrict], char *const envp[restrict]);
 static int hook_posix_spawnp(pid_t *restrict pid, const char *restrict file, const posix_spawn_file_actions_t *restrict file_actions, const posix_spawnattr_t *restrict attrp, char *const argv[restrict], char *const envp[restrict]) {
-    if (PXJBShouldBypassCached() && file && PXJBSpawnPathLooksLikeProbe(file)) {
-        PXJBLogBlockedOncePerSecond("posix_spawnp", file);
+    PXJB_EXEC_HOOK_SCOPE();
+    if (pxjbFilterExec && file && PXJBSpawnPathLooksLikeProbe(file)) {
+        PXJBRecordBlockedEvent("posix_spawnp", file);
         errno = ENOENT;
         return -1;
     }
@@ -1155,42 +1289,55 @@ static pthread_mutex_t gDyldLock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t *gVisibleToReal = NULL;
 static uint32_t gVisibleCount = 0;
 static uint32_t gRealCount = 0;
-static CFTimeInterval gDyldLastBuild = 0;
+static uint64_t gDyldLastBuildNs = 0;
 
-// Declare originals before helpers to avoid implicit declarations.
-static uint32_t (*orig__dyld_image_count)(void) = NULL;
-static const char *(*orig__dyld_get_image_name)(uint32_t image_index) = NULL;
-static const struct mach_header *(*orig__dyld_get_image_header)(uint32_t image_index) = NULL;
-static intptr_t (*orig__dyld_get_image_vmaddr_slide)(uint32_t image_index) = NULL;
+// P0-E: the only callable originals are trampolines returned by MSHookFunction.
+// Entry pointers are retained solely for integrity comparison and are never invoked.
+typedef uint32_t (*PXDyldImageCountFn)(void);
+typedef const char *(*PXDyldImageNameFn)(uint32_t image_index);
+typedef const struct mach_header *(*PXDyldImageHeaderFn)(uint32_t image_index);
+typedef intptr_t (*PXDyldImageSlideFn)(uint32_t image_index);
 
-// Real function pointers captured before hooking, to avoid recursion issues.
-static uint32_t (*real__dyld_image_count)(void) = NULL;
-static const char *(*real__dyld_get_image_name)(uint32_t image_index) = NULL;
-static const struct mach_header *(*real__dyld_get_image_header)(uint32_t image_index) = NULL;
-static intptr_t (*real__dyld_get_image_vmaddr_slide)(uint32_t image_index) = NULL;
+static PXDyldImageCountFn orig__dyld_image_count = NULL;
+static PXDyldImageNameFn orig__dyld_get_image_name = NULL;
+static PXDyldImageHeaderFn orig__dyld_get_image_header = NULL;
+static PXDyldImageSlideFn orig__dyld_get_image_vmaddr_slide = NULL;
 
-static uint32_t PXDyldRealImageCount(void) {
-    if (real__dyld_image_count) return real__dyld_image_count();
-    if (orig__dyld_image_count) return orig__dyld_image_count();
-    return 0;
+static PXDyldImageCountFn gDyldImageCountEntry = NULL;
+static PXDyldImageNameFn gDyldImageNameEntry = NULL;
+static PXDyldImageHeaderFn gDyldImageHeaderEntry = NULL;
+static PXDyldImageSlideFn gDyldImageSlideEntry = NULL;
+
+static BOOL PXDyldIndexedTrampolinesAreReady(void) {
+    return orig__dyld_image_count != NULL &&
+           orig__dyld_image_count != gDyldImageCountEntry &&
+           orig__dyld_get_image_name != NULL &&
+           orig__dyld_get_image_name != gDyldImageNameEntry &&
+           orig__dyld_get_image_header != NULL &&
+           orig__dyld_get_image_header != gDyldImageHeaderEntry &&
+           orig__dyld_get_image_vmaddr_slide != NULL &&
+           orig__dyld_get_image_vmaddr_slide != gDyldImageSlideEntry;
 }
 
-static const char *PXDyldRealImageName(uint32_t idx) {
-    if (real__dyld_get_image_name) return real__dyld_get_image_name(idx);
-    if (orig__dyld_get_image_name) return orig__dyld_get_image_name(idx);
-    return NULL;
+static uint32_t PXDyldOriginalImageCount(void) {
+    if (!orig__dyld_image_count || orig__dyld_image_count == gDyldImageCountEntry) return 0;
+    return orig__dyld_image_count();
 }
 
-static const struct mach_header *PXDyldRealImageHeader(uint32_t idx) {
-    if (real__dyld_get_image_header) return real__dyld_get_image_header(idx);
-    if (orig__dyld_get_image_header) return orig__dyld_get_image_header(idx);
-    return NULL;
+static const char *PXDyldOriginalImageName(uint32_t idx) {
+    if (!orig__dyld_get_image_name || orig__dyld_get_image_name == gDyldImageNameEntry) return NULL;
+    return orig__dyld_get_image_name(idx);
 }
 
-static intptr_t PXDyldRealImageSlide(uint32_t idx) {
-    if (real__dyld_get_image_vmaddr_slide) return real__dyld_get_image_vmaddr_slide(idx);
-    if (orig__dyld_get_image_vmaddr_slide) return orig__dyld_get_image_vmaddr_slide(idx);
-    return 0;
+static const struct mach_header *PXDyldOriginalImageHeader(uint32_t idx) {
+    if (!orig__dyld_get_image_header || orig__dyld_get_image_header == gDyldImageHeaderEntry) return NULL;
+    return orig__dyld_get_image_header(idx);
+}
+
+static intptr_t PXDyldOriginalImageSlide(uint32_t idx) {
+    if (!orig__dyld_get_image_vmaddr_slide ||
+        orig__dyld_get_image_vmaddr_slide == gDyldImageSlideEntry) return 0;
+    return orig__dyld_get_image_vmaddr_slide(idx);
 }
 
 static BOOL PXStrContainsNoCase(const char *haystack, const char *needle) {
@@ -1524,124 +1671,147 @@ static int hook_sysctlbyname_jb(const char *name, void *oldp, size_t *oldlenp, v
 }
 
 static void PXDyldRebuildVisibleMapLocked(void) {
-    uint32_t count = PXDyldRealImageCount();
+    uint32_t count = PXDyldOriginalImageCount();
     if (count == 0) {
+        free(gVisibleToReal);
+        gVisibleToReal = NULL;
         gRealCount = 0;
         gVisibleCount = 0;
+        gDyldLastBuildNs = PXJBMonotonicNanoseconds();
         return;
     }
 
-    if (gVisibleToReal) {
+    uint32_t *replacement = (uint32_t *)calloc(count, sizeof(uint32_t));
+    if (!replacement) {
+        // Fail open rather than expose a stale index map from another dyld
+        // generation. The indexed wrappers call the original trampoline when
+        // no visible map is available.
         free(gVisibleToReal);
         gVisibleToReal = NULL;
-    }
-
-    gVisibleToReal = (uint32_t *)calloc(count, sizeof(uint32_t));
-    if (!gVisibleToReal) {
         gRealCount = count;
-        gVisibleCount = count;
+        gVisibleCount = 0;
+        gDyldLastBuildNs = PXJBMonotonicNanoseconds();
         return;
     }
 
     uint32_t visible = 0;
     for (uint32_t i = 0; i < count; i++) {
-        const char *nm = PXDyldRealImageName(i);
-        if (PXJBShouldHideImageName(nm)) {
-            continue;
-        }
-        gVisibleToReal[visible++] = i;
+        const char *name = PXDyldOriginalImageName(i);
+        if (PXJBShouldHideImageName(name)) continue;
+        replacement[visible++] = i;
     }
+
+    uint32_t *oldMap = gVisibleToReal;
+    gVisibleToReal = replacement;
     gRealCount = count;
     gVisibleCount = visible;
-    gDyldLastBuild = CFAbsoluteTimeGetCurrent();
+    gDyldLastBuildNs = PXJBMonotonicNanoseconds();
+    free(oldMap);
 }
 
 static void PXDyldEnsureVisibleMap(void) {
     if (!PXJBHideDylibsEnabled()) return;
 
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    // Rebuild at most once per second, or when dyld image count changes.
-    uint32_t countNow = PXDyldRealImageCount();
+    uint64_t nowNs = PXJBMonotonicNanoseconds();
+    uint32_t countNow = PXDyldOriginalImageCount();
 
     pthread_mutex_lock(&gDyldLock);
-    BOOL needs = (gVisibleToReal == NULL) || (gRealCount != countNow) || ((now - gDyldLastBuild) > 1.0);
-    if (needs) {
-        PXDyldRebuildVisibleMapLocked();
-    }
+    BOOL expired = (nowNs == 0 || gDyldLastBuildNs == 0 ||
+                    nowNs - gDyldLastBuildNs > 1000000000ull);
+    BOOL needsRebuild = (gVisibleToReal == NULL) ||
+                        (gRealCount != countNow) ||
+                        expired;
+    if (needsRebuild) PXDyldRebuildVisibleMapLocked();
     pthread_mutex_unlock(&gDyldLock);
 }
 
 static uint32_t hook__dyld_image_count(void) {
-    uint32_t count = orig__dyld_image_count ? orig__dyld_image_count() : 0;
-    if (!PXJBHideDylibsEnabled()) return count;
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
+    uint32_t originalCount = PXDyldOriginalImageCount();
+    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) return originalCount;
+
     PXDyldEnsureVisibleMap();
     pthread_mutex_lock(&gDyldLock);
-    uint32_t out = gVisibleToReal ? gVisibleCount : count;
+    uint32_t result = gVisibleToReal ? gVisibleCount : originalCount;
     pthread_mutex_unlock(&gDyldLock);
-    return out;
+    return result;
 }
 
 static const char *hook__dyld_get_image_name(uint32_t image_index) {
-    if (!PXJBHideDylibsEnabled()) {
-        return orig__dyld_get_image_name ? orig__dyld_get_image_name(image_index) : NULL;
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
+    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) {
+        return PXDyldOriginalImageName(image_index);
     }
-    PXDyldEnsureVisibleMap();
 
+    PXDyldEnsureVisibleMap();
     pthread_mutex_lock(&gDyldLock);
-    if (!gVisibleToReal || image_index >= gVisibleCount) {
+    if (!gVisibleToReal) {
+        pthread_mutex_unlock(&gDyldLock);
+        return PXDyldOriginalImageName(image_index);
+    }
+    if (image_index >= gVisibleCount) {
         pthread_mutex_unlock(&gDyldLock);
         return NULL;
     }
     uint32_t realIndex = gVisibleToReal[image_index];
     pthread_mutex_unlock(&gDyldLock);
-
-    return orig__dyld_get_image_name ? orig__dyld_get_image_name(realIndex) : NULL;
+    return PXDyldOriginalImageName(realIndex);
 }
 
 static const struct mach_header *hook__dyld_get_image_header(uint32_t image_index) {
-    if (!PXJBHideDylibsEnabled()) {
-        return orig__dyld_get_image_header ? orig__dyld_get_image_header(image_index) : NULL;
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
+    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) {
+        return PXDyldOriginalImageHeader(image_index);
     }
-    PXDyldEnsureVisibleMap();
 
+    PXDyldEnsureVisibleMap();
     pthread_mutex_lock(&gDyldLock);
-    if (!gVisibleToReal || image_index >= gVisibleCount) {
+    if (!gVisibleToReal) {
+        pthread_mutex_unlock(&gDyldLock);
+        return PXDyldOriginalImageHeader(image_index);
+    }
+    if (image_index >= gVisibleCount) {
         pthread_mutex_unlock(&gDyldLock);
         return NULL;
     }
     uint32_t realIndex = gVisibleToReal[image_index];
     pthread_mutex_unlock(&gDyldLock);
-
-    return orig__dyld_get_image_header ? orig__dyld_get_image_header(realIndex) : NULL;
+    return PXDyldOriginalImageHeader(realIndex);
 }
 
 static intptr_t hook__dyld_get_image_vmaddr_slide(uint32_t image_index) {
-    if (!PXJBHideDylibsEnabled()) {
-        return orig__dyld_get_image_vmaddr_slide ? orig__dyld_get_image_vmaddr_slide(image_index) : 0;
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
+    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) {
+        return PXDyldOriginalImageSlide(image_index);
     }
-    PXDyldEnsureVisibleMap();
 
+    PXDyldEnsureVisibleMap();
     pthread_mutex_lock(&gDyldLock);
-    if (!gVisibleToReal || image_index >= gVisibleCount) {
+    if (!gVisibleToReal) {
+        pthread_mutex_unlock(&gDyldLock);
+        return PXDyldOriginalImageSlide(image_index);
+    }
+    if (image_index >= gVisibleCount) {
         pthread_mutex_unlock(&gDyldLock);
         return 0;
     }
     uint32_t realIndex = gVisibleToReal[image_index];
     pthread_mutex_unlock(&gDyldLock);
-
-    return orig__dyld_get_image_vmaddr_slide ? orig__dyld_get_image_vmaddr_slide(realIndex) : 0;
+    return PXDyldOriginalImageSlide(realIndex);
 }
 
 static int (*orig_dladdr)(const void *addr, Dl_info *info);
 static int hook_dladdr(const void *addr, Dl_info *info) {
-    int r = orig_dladdr ? orig_dladdr(addr, info) : 0;
-    if (r == 0 || !info) return r;
-    if (!PXJBHideDylibsEnabled()) return r;
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
+    int result = orig_dladdr ? orig_dladdr(addr, info) : 0;
+    if (!dyldScope.entered || result == 0 || !info || !PXJBHideDylibsEnabled()) {
+        return result;
+    }
     if (info->dli_fname && PXJBShouldHideImageName(info->dli_fname)) {
-        // Fail lookup so callers can't attribute symbols to jailbreak dylibs.
+        memset(info, 0, sizeof(*info));
         return 0;
     }
-    return r;
+    return result;
 }
 
 // Phase 2 extension: mount/volume checks (statfs/statvfs)
@@ -1672,8 +1842,9 @@ static void PXJBNormalizeStatvfs(struct statvfs *buf) {
 
 static int (*orig_statfs)(const char *, struct statfs *);
 static int hook_statfs(const char *path, struct statfs *buf) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
     int r = orig_statfs ? orig_statfs(path, buf) : -1;
-    if (r == 0 && PXJBStatfsBypassEnabled() && PXJBIsSensitiveMountPath(path)) {
+    if (r == 0 && (pxjbFilterFilesystem && PXJBStatfsBypassEnabled()) && PXJBIsSensitiveMountPath(path)) {
         PXJBNormalizeStatfs(buf);
     }
     return r;
@@ -1681,8 +1852,9 @@ static int hook_statfs(const char *path, struct statfs *buf) {
 
 static int (*orig_fstatfs)(int, struct statfs *);
 static int hook_fstatfs(int fd, struct statfs *buf) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
     int r = orig_fstatfs ? orig_fstatfs(fd, buf) : -1;
-    if (r == 0 && PXJBStatfsBypassEnabled()) {
+    if (r == 0 && (pxjbFilterFilesystem && PXJBStatfsBypassEnabled())) {
         // We can't reliably map fd->path cheaply; normalize anyway (best-effort).
         PXJBNormalizeStatfs(buf);
     }
@@ -1691,8 +1863,9 @@ static int hook_fstatfs(int fd, struct statfs *buf) {
 
 static int (*orig_statvfs)(const char *, struct statvfs *);
 static int hook_statvfs(const char *path, struct statvfs *buf) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
     int r = orig_statvfs ? orig_statvfs(path, buf) : -1;
-    if (r == 0 && PXJBStatfsBypassEnabled() && PXJBIsSensitiveMountPath(path)) {
+    if (r == 0 && (pxjbFilterFilesystem && PXJBStatfsBypassEnabled()) && PXJBIsSensitiveMountPath(path)) {
         PXJBNormalizeStatvfs(buf);
     }
     return r;
@@ -1700,8 +1873,9 @@ static int hook_statvfs(const char *path, struct statvfs *buf) {
 
 static int (*orig_fstatvfs)(int, struct statvfs *);
 static int hook_fstatvfs(int fd, struct statvfs *buf) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
     int r = orig_fstatvfs ? orig_fstatvfs(fd, buf) : -1;
-    if (r == 0 && PXJBStatfsBypassEnabled()) {
+    if (r == 0 && (pxjbFilterFilesystem && PXJBStatfsBypassEnabled())) {
         PXJBNormalizeStatvfs(buf);
     }
     return r;
@@ -1854,7 +2028,8 @@ static int32_t hook_NSVersionOfLinkTimeLibrary(const char *libraryName) {
 // --- Priority 3: creat ---
 static int (*orig_creat)(const char *, mode_t);
 static int hook_creat(const char *path, mode_t mode) {
-    if (PXJBShouldBypassCached() && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
         errno = EACCES;
         return -1;
     }
@@ -1889,10 +2064,57 @@ static int PXJBOriginalFcntlGetPath(int fd, char *path, size_t pathCapacity) {
     return result;
 }
 
+static BOOL PXJBJoinAbsoluteBaseAndNormalize(const char *basePath,
+                                             const char *relativePath,
+                                             char *out,
+                                             size_t outCapacity) {
+    if (!basePath || basePath[0] != '/' || !relativePath || !out || outCapacity < 2) {
+        return NO;
+    }
+
+    size_t baseLength = strlen(basePath);
+    size_t relativeLength = strlen(relativePath);
+    BOOL needsSlash = (baseLength > 0 && basePath[baseLength - 1] != '/');
+    size_t needed = baseLength + (needsSlash ? 1u : 0u) + relativeLength + 1u;
+    if (needed > PATH_MAX || needed > outCapacity) return NO;
+
+    char joined[PATH_MAX];
+    size_t offset = 0;
+    memcpy(joined + offset, basePath, baseLength);
+    offset += baseLength;
+    if (needsSlash) joined[offset++] = '/';
+    memcpy(joined + offset, relativePath, relativeLength);
+    offset += relativeLength;
+    joined[offset] = '\0';
+    return PXJBNormalizeAbsolutePath(joined, out, outCapacity);
+}
+
+static BOOL PXJBResolveAtPathForFiltering(int dirfd,
+                                          const char *path,
+                                          char *out,
+                                          size_t outCapacity) {
+    if (!path || !out || outCapacity < 2) return NO;
+    out[0] = '\0';
+
+    if (path[0] == '/') {
+        return PXJBNormalizeAbsolutePath(path, out, outCapacity);
+    }
+    if (dirfd == AT_FDCWD) {
+        return PXJBJoinCwdAndNormalize(path, out, outCapacity);
+    }
+
+    char directoryPath[PATH_MAX];
+    if (PXJBOriginalFcntlGetPath(dirfd, directoryPath, sizeof(directoryPath)) == -1) {
+        return NO;
+    }
+    return PXJBJoinAbsoluteBaseAndNormalize(directoryPath, path, out, outCapacity);
+}
+
 // --- Priority 3: fstat (fd-based, resolve via original fcntl F_GETPATH) ---
 static int (*orig_fstat)(int, struct stat *);
 static int hook_fstat(int fd, struct stat *buf) {
-    if (PXJBShouldBypassCached() && fd >= 0) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && fd >= 0) {
         char fdpath[PATH_MAX];
         if (PXJBOriginalFcntlGetPath(fd, fdpath, sizeof(fdpath)) != -1) {
             if (PXJBPathShouldHide(fdpath)) {
@@ -1907,24 +2129,13 @@ static int hook_fstat(int fd, struct stat *buf) {
 // --- Priority 3: fstatat ---
 static int (*orig_fstatat)(int, const char *, struct stat *, int);
 static int hook_fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
-    if (PXJBShouldBypassCached() && pathname) {
-        // If pathname is relative, resolve against dirfd
-        if (pathname[0] != '/' && dirfd != AT_FDCWD) {
-            char dirpath[PATH_MAX];
-            if (PXJBOriginalFcntlGetPath(dirfd, dirpath, sizeof(dirpath)) != -1) {
-                NSString *base = [NSString stringWithUTF8String:dirpath];
-                NSString *rel = [NSString stringWithUTF8String:pathname];
-                NSString *full = [base stringByAppendingPathComponent:rel];
-                if (PXJBPathShouldHide([full fileSystemRepresentation])) {
-                    errno = ENOENT;
-                    return -1;
-                }
-            }
-        } else {
-            if (PXJBPathShouldHide(pathname)) {
-                errno = ENOENT;
-                return -1;
-            }
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && pathname) {
+        char resolvedPath[PATH_MAX];
+        if (PXJBResolveAtPathForFiltering(dirfd, pathname, resolvedPath, sizeof(resolvedPath)) &&
+            PXJBPathShouldHide(resolvedPath)) {
+            errno = ENOENT;
+            return -1;
         }
     }
     return orig_fstatat ? orig_fstatat(dirfd, pathname, buf, flags) : -1;
@@ -1933,23 +2144,13 @@ static int hook_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
 // --- Priority 3: faccessat ---
 static int (*orig_faccessat)(int, const char *, int, int);
 static int hook_faccessat(int dirfd, const char *pathname, int mode, int flags) {
-    if (PXJBShouldBypassCached() && pathname) {
-        if (pathname[0] != '/' && dirfd != AT_FDCWD) {
-            char dirpath[PATH_MAX];
-            if (PXJBOriginalFcntlGetPath(dirfd, dirpath, sizeof(dirpath)) != -1) {
-                NSString *base = [NSString stringWithUTF8String:dirpath];
-                NSString *rel = [NSString stringWithUTF8String:pathname];
-                NSString *full = [base stringByAppendingPathComponent:rel];
-                if (PXJBPathShouldHide([full fileSystemRepresentation])) {
-                    errno = ENOENT;
-                    return -1;
-                }
-            }
-        } else {
-            if (PXJBPathShouldHide(pathname)) {
-                errno = ENOENT;
-                return -1;
-            }
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && pathname) {
+        char resolvedPath[PATH_MAX];
+        if (PXJBResolveAtPathForFiltering(dirfd, pathname, resolvedPath, sizeof(resolvedPath)) &&
+            PXJBPathShouldHide(resolvedPath)) {
+            errno = ENOENT;
+            return -1;
         }
     }
     return orig_faccessat ? orig_faccessat(dirfd, pathname, mode, flags) : -1;
@@ -1958,23 +2159,13 @@ static int hook_faccessat(int dirfd, const char *pathname, int mode, int flags) 
 // --- Priority 3: readlinkat ---
 static ssize_t (*orig_readlinkat)(int, const char *, char *, size_t);
 static ssize_t hook_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
-    if (PXJBShouldBypassCached() && pathname) {
-        if (pathname[0] != '/' && dirfd != AT_FDCWD) {
-            char dirpath[PATH_MAX];
-            if (PXJBOriginalFcntlGetPath(dirfd, dirpath, sizeof(dirpath)) != -1) {
-                NSString *base = [NSString stringWithUTF8String:dirpath];
-                NSString *rel = [NSString stringWithUTF8String:pathname];
-                NSString *full = [base stringByAppendingPathComponent:rel];
-                if (PXJBPathShouldHide([full fileSystemRepresentation])) {
-                    errno = ENOENT;
-                    return -1;
-                }
-            }
-        } else {
-            if (PXJBPathShouldHide(pathname)) {
-                errno = ENOENT;
-                return -1;
-            }
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && pathname) {
+        char resolvedPath[PATH_MAX];
+        if (PXJBResolveAtPathForFiltering(dirfd, pathname, resolvedPath, sizeof(resolvedPath)) &&
+            PXJBPathShouldHide(resolvedPath)) {
+            errno = ENOENT;
+            return -1;
         }
     }
     return orig_readlinkat ? orig_readlinkat(dirfd, pathname, buf, bufsiz) : -1;
@@ -1983,7 +2174,8 @@ static ssize_t hook_readlinkat(int dirfd, const char *pathname, char *buf, size_
 // --- Priority 3: Filesystem mutation hooks ---
 static int (*orig_symlink)(const char *, const char *);
 static int hook_symlink(const char *path1, const char *path2) {
-    if (PXJBShouldBypassCached()) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
         if ((path1 && PXJBPathShouldHide(path1)) || (path2 && PXJBPathShouldHide(path2))) {
             errno = EACCES;
             return -1;
@@ -1994,7 +2186,8 @@ static int hook_symlink(const char *path1, const char *path2) {
 
 static int (*orig_rename)(const char *, const char *);
 static int hook_rename(const char *old, const char *new_path) {
-    if (PXJBShouldBypassCached()) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
         if ((old && PXJBPathShouldHide(old)) || (new_path && PXJBPathShouldHide(new_path))) {
             errno = ENOENT;
             return -1;
@@ -2005,7 +2198,8 @@ static int hook_rename(const char *old, const char *new_path) {
 
 static int (*orig_link)(const char *, const char *);
 static int hook_link(const char *path1, const char *path2) {
-    if (PXJBShouldBypassCached()) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
         if ((path1 && PXJBPathShouldHide(path1)) || (path2 && PXJBPathShouldHide(path2))) {
             errno = ENOENT;
             return -1;
@@ -2016,7 +2210,8 @@ static int hook_link(const char *path1, const char *path2) {
 
 static int (*orig_unlink)(const char *);
 static int hook_unlink(const char *path) {
-    if (PXJBShouldBypassCached() && path && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && path && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -2025,7 +2220,8 @@ static int hook_unlink(const char *path) {
 
 static int (*orig_remove_func)(const char *);
 static int hook_remove_func(const char *path) {
-    if (PXJBShouldBypassCached() && path && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && path && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -2034,7 +2230,8 @@ static int hook_remove_func(const char *path) {
 
 static int (*orig_rmdir)(const char *);
 static int hook_rmdir(const char *path) {
-    if (PXJBShouldBypassCached() && path && PXJBPathShouldHide(path)) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem && path && PXJBPathShouldHide(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -2045,8 +2242,9 @@ static int hook_rmdir(const char *path) {
 // Filters out bind mounts and suspicious APFS snapshot mounts from mount enumeration.
 static int (*orig_getmntinfo)(struct statfs **, int);
 static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
     int n = orig_getmntinfo ? orig_getmntinfo(mntbufp, flags) : 0;
-    if (!PXJBShouldBypassCached() || n <= 0 || !mntbufp || !*mntbufp) return n;
+    if (!pxjbFilterFilesystem || n <= 0 || !mntbufp || !*mntbufp) return n;
 
     struct statfs *buf = *mntbufp;
     int out = 0;
@@ -3367,6 +3565,12 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         // Publish one complete snapshot before any native hook becomes visible.
         PXJBPublishPolicySnapshot(launchSettings);
 
+        // Hook installation may call dlopen, logging, coordinator code and
+        // filesystem APIs after the first native entry has already been patched.
+        // Suppress only dependent filesystem/exec domains until ctor teardown.
+        PXJB_REENTRY_SCOPE(installScope, kPXJBReentryHookInstall);
+        if (!installScope.entered) return;
+
         // Groups conceptually:
         // JBSafeFoundation: file/process query wrappers (stat/access/open/...)
         // JBAppSpecific: Logos %init ObjC detectors
@@ -3493,6 +3697,9 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 static dispatch_once_t jbStatfsOnce;
                 dispatch_once(&jbStatfsOnce, ^{
                     [coord registerStatfsProvider:@"jb.statfs.sanitize" priority:PXNativeHookPriorityJailbreakSanitize post:^(const char * _Nullable path, struct statfs * _Nullable buf, int * _Nonnull inoutResult) {
+                        BOOL filterFilesystem = PXJBFilesystemFilteringAllowed();
+                        PXJB_REENTRY_SCOPE(providerScope, kPXJBReentryFilesystem);
+                        if (!providerScope.entered || !filterFilesystem) return;
                         if (*inoutResult != 0 || !buf) return;
                         if (PXJBStatfsBypassEnabled() && PXJBIsSensitiveMountPath(path)) {
                             PXJBNormalizeStatfs(buf);
@@ -3585,42 +3792,48 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol(NULL, "xpc_pipe_routine_with_flags");
             if (sym) MSHookFunction(sym, (void *)hook_xpc_pipe_routine_with_flags, (void **)&orig_xpc_pipe_routine_with_flags);
 
-            // Phase 3 (toggle: jbBypassHideDylibsEnabled). Install only when explicitly enabled.
+            // P0-E: install the four indexed dyld APIs as one consistency group.
+            // The patched entries are never called as originals; only the
+            // trampolines returned by MSHookFunction are callable.
             if (wantDyldHide) {
-                sym = FindSymbol(NULL, "_dyld_image_count");
-                if (sym) {
-                    if (!real__dyld_image_count) {
-                        real__dyld_image_count = (uint32_t (*)(void))sym;
-                    }
-                    MSHookFunction(sym, (void *)hook__dyld_image_count, (void **)&orig__dyld_image_count);
-                }
+                void *countEntry = FindSymbol(NULL, "_dyld_image_count");
+                void *nameEntry = FindSymbol(NULL, "_dyld_get_image_name");
+                void *headerEntry = FindSymbol(NULL, "_dyld_get_image_header");
+                void *slideEntry = FindSymbol(NULL, "_dyld_get_image_vmaddr_slide");
 
-                sym = FindSymbol(NULL, "_dyld_get_image_name");
-                if (sym) {
-                    if (!real__dyld_get_image_name) {
-                        real__dyld_get_image_name = (const char *(*)(uint32_t))sym;
-                    }
-                    MSHookFunction(sym, (void *)hook__dyld_get_image_name, (void **)&orig__dyld_get_image_name);
-                }
+                if (countEntry && nameEntry && headerEntry && slideEntry) {
+                    gDyldImageCountEntry = (PXDyldImageCountFn)countEntry;
+                    gDyldImageNameEntry = (PXDyldImageNameFn)nameEntry;
+                    gDyldImageHeaderEntry = (PXDyldImageHeaderFn)headerEntry;
+                    gDyldImageSlideEntry = (PXDyldImageSlideFn)slideEntry;
 
-                sym = FindSymbol(NULL, "_dyld_get_image_header");
-                if (sym) {
-                    if (!real__dyld_get_image_header) {
-                        real__dyld_get_image_header = (const struct mach_header *(*)(uint32_t))sym;
-                    }
-                    MSHookFunction(sym, (void *)hook__dyld_get_image_header, (void **)&orig__dyld_get_image_header);
-                }
+                    MSHookFunction(countEntry,
+                                   (void *)hook__dyld_image_count,
+                                   (void **)&orig__dyld_image_count);
+                    MSHookFunction(nameEntry,
+                                   (void *)hook__dyld_get_image_name,
+                                   (void **)&orig__dyld_get_image_name);
+                    MSHookFunction(headerEntry,
+                                   (void *)hook__dyld_get_image_header,
+                                   (void **)&orig__dyld_get_image_header);
+                    MSHookFunction(slideEntry,
+                                   (void *)hook__dyld_get_image_vmaddr_slide,
+                                   (void **)&orig__dyld_get_image_vmaddr_slide);
 
-                sym = FindSymbol(NULL, "_dyld_get_image_vmaddr_slide");
-                if (sym) {
-                    if (!real__dyld_get_image_vmaddr_slide) {
-                        real__dyld_get_image_vmaddr_slide = (intptr_t (*)(uint32_t))sym;
+                    BOOL dyldReady = PXDyldIndexedTrampolinesAreReady();
+                    atomic_store_explicit(&gJBDyldIndexedHooksReady,
+                                          dyldReady,
+                                          memory_order_release);
+                    if (dyldReady) {
+                        sym = FindSymbol(NULL, "dladdr");
+                        if (sym) MSHookFunction(sym, (void *)hook_dladdr, (void **)&orig_dladdr);
+                    } else {
+                        PXLog(@"[JailbreakBypass] dyld indexed group disabled: invalid trampoline");
                     }
-                    MSHookFunction(sym, (void *)hook__dyld_get_image_vmaddr_slide, (void **)&orig__dyld_get_image_vmaddr_slide);
+                } else {
+                    atomic_store_explicit(&gJBDyldIndexedHooksReady, false, memory_order_release);
+                    PXLog(@"[JailbreakBypass] dyld indexed group disabled: missing symbol");
                 }
-
-                sym = FindSymbol(NULL, "dladdr");
-                if (sym) MSHookFunction(sym, (void *)hook_dladdr, (void **)&orig_dladdr);
             }
 
             // Phase 3 extension: block suspicious add_image callback registrations.
