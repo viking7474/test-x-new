@@ -33,7 +33,6 @@
 #import <pthread.h>
 #import <dispatch/dispatch.h>
 #import <mach/mach.h>
-#import <mach/vm_map.h>
 #import <stdint.h>
 #import <stdbool.h>
 #import <stdatomic.h>
@@ -233,6 +232,9 @@ static PXJBCapabilityRecord gJBCapabilities[kPXJBCapabilityCount] = {
 static _Atomic(PXJBPolicyMask) gJBInstalledCapabilityMask = 0;
 static _Atomic(bool) gJBCapabilityRegistryFinalized = false;
 static bool gJBStatfsProviderRegistered = false;
+static bool gJBMountSnapshotOwnerReady = false;
+static bool gJBSysctlProviderRegistered = false;
+static bool gJBSysctlBynameProviderRegistered = false;
 
 static void PXJBPrepareCapabilityRegistry(PXJBPolicyMask requestedMask) {
     atomic_store_explicit(&gJBInstalledCapabilityMask, 0, memory_order_release);
@@ -1816,19 +1818,32 @@ static void *hook_dlsym(void *handle, const char *symbol) {
     return orig_dlsym ? orig_dlsym(handle, symbol) : NULL;
 }
 
-// Phase 3 strong option: sysctl/sysctlbyname sanitization
-static int (*orig_sysctl_jb)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-static int (*orig_sysctlbyname_jb)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+// P1-D: sysctl/sysctlbyname sanitization is coordinator-owned. These
+// handlers are narrow terminal pre-providers because the existing identity
+// provider calls the original internally and returns YES, which intentionally
+// skips later post providers. Only jailbreak-specific keys are claimed here.
+static int (*orig_sysctl_jb)(int *name,
+                             u_int namelen,
+                             void *oldp,
+                             size_t *oldlenp,
+                             void *newp,
+                             size_t newlen) = NULL;
+static int (*orig_sysctlbyname_jb)(const char *name,
+                                   void *oldp,
+                                   size_t *oldlenp,
+                                   void *newp,
+                                   size_t newlen) = NULL;
 
 static void PXJBSanitizeBootArgs(void *oldp, size_t *oldlenp) {
     if (!oldp || !oldlenp || *oldlenp == 0) return;
     char *buf = (char *)oldp;
     size_t n = *oldlenp;
-    // Ensure NUL-termination for scanning.
     buf[n - 1] = '\0';
-    if (strstr(buf, "checkra1n") || strstr(buf, "cs_enforcement_disable") || strstr(buf, "amfid") || strstr(buf, "jailbreak")) {
+    if (strstr(buf, "checkra1n") ||
+        strstr(buf, "cs_enforcement_disable") ||
+        strstr(buf, "amfid") ||
+        strstr(buf, "jailbreak")) {
         memset(buf, 0, n);
-        // Keep it plausible.
         const char *clean = "root_device=md0";
         strncpy(buf, clean, n - 1);
     }
@@ -1837,7 +1852,6 @@ static void PXJBSanitizeBootArgs(void *oldp, size_t *oldlenp) {
 static void PXJBSanitizeKinfoProc(void *oldp, size_t *oldlenp) {
     if (!oldp || !oldlenp || *oldlenp == 0) return;
 #if __has_include(<sys/user.h>)
-    // Clear P_TRACED if present.
 #ifndef P_TRACED
 #define P_TRACED 0x00000800
 #endif
@@ -1849,38 +1863,80 @@ static void PXJBSanitizeKinfoProc(void *oldp, size_t *oldlenp) {
         procs[i].kp_proc.p_flag &= ~P_TRACED;
     }
 #else
-    (void)oldp; (void)oldlenp;
+    (void)oldp;
+    (void)oldlenp;
 #endif
 }
 
-static int hook_sysctl_jb(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    int r = orig_sysctl_jb ? orig_sysctl_jb(name, namelen, oldp, oldlenp, newp, newlen) : -1;
-    if (r != 0 || !PXJBSysctlProcSanitizeEnabled()) return r;
-    if (!name || namelen < 2) return r;
+static BOOL PXJBIsRawSysctlSanitizeTarget(const int *name, u_int namelen) {
+    if (!name || namelen < 2 || name[0] != CTL_KERN) return NO;
+#ifdef KERN_BOOTARGS
+    if (name[1] == KERN_BOOTARGS) return YES;
+#endif
+    return name[1] == KERN_PROC;
+}
 
-    if (name[0] == CTL_KERN) {
+static BOOL PXJBHandleSysctlSanitizeRequest(int *name,
+                                            u_int namelen,
+                                            void *oldp,
+                                            size_t *oldlenp,
+                                            void *newp,
+                                            size_t newlen,
+                                            int *outResult) {
+    if (!PXJBSysctlProcSanitizeEnabled() ||
+        !orig_sysctl_jb ||
+        !PXJBIsRawSysctlSanitizeTarget(name, namelen) ||
+        newp != NULL ||
+        newlen != 0) {
+        return NO;
+    }
+
+    int result = orig_sysctl_jb(name, namelen, oldp, oldlenp, NULL, 0);
+    if (result == 0) {
 #ifdef KERN_BOOTARGS
         if (name[1] == KERN_BOOTARGS) {
             PXJBSanitizeBootArgs(oldp, oldlenp);
-        }
+        } else
 #endif
         if (name[1] == KERN_PROC) {
             PXJBSanitizeKinfoProc(oldp, oldlenp);
         }
     }
-    return r;
+    if (outResult) *outResult = result;
+    return YES;
 }
 
-static int hook_sysctlbyname_jb(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    int r = orig_sysctlbyname_jb ? orig_sysctlbyname_jb(name, oldp, oldlenp, newp, newlen) : -1;
-    if (r != 0 || !PXJBSysctlProcSanitizeEnabled()) return r;
-    if (!name) return r;
-    if (strcmp(name, "kern.bootargs") == 0) {
-        PXJBSanitizeBootArgs(oldp, oldlenp);
-    } else if (strcmp(name, "kern.proc.pid") == 0 || strcmp(name, "kern.proc") == 0) {
-        PXJBSanitizeKinfoProc(oldp, oldlenp);
+static BOOL PXJBIsSysctlBynameSanitizeTarget(const char *name) {
+    if (!name) return NO;
+    return strcmp(name, "kern.bootargs") == 0 ||
+           strcmp(name, "kern.proc.pid") == 0 ||
+           strcmp(name, "kern.proc") == 0;
+}
+
+static BOOL PXJBHandleSysctlBynameSanitizeRequest(const char *name,
+                                                  void *oldp,
+                                                  size_t *oldlenp,
+                                                  void *newp,
+                                                  size_t newlen,
+                                                  int *outResult) {
+    if (!PXJBSysctlProcSanitizeEnabled() ||
+        !orig_sysctlbyname_jb ||
+        !PXJBIsSysctlBynameSanitizeTarget(name) ||
+        newp != NULL ||
+        newlen != 0) {
+        return NO;
     }
-    return r;
+
+    int result = orig_sysctlbyname_jb(name, oldp, oldlenp, NULL, 0);
+    if (result == 0) {
+        if (strcmp(name, "kern.bootargs") == 0) {
+            PXJBSanitizeBootArgs(oldp, oldlenp);
+        } else {
+            PXJBSanitizeKinfoProc(oldp, oldlenp);
+        }
+    }
+    if (outResult) *outResult = result;
+    return YES;
 }
 
 static void PXDyldRebuildVisibleMapLocked(void) {
@@ -2610,43 +2666,126 @@ static int hook_rmdir(const char *path) {
 }
 
 // --- JailbreakDetector bypass: getmntinfo ---
-// Filters out bind mounts and suspicious APFS snapshot mounts from mount enumeration.
-static int (*orig_getmntinfo)(struct statfs **, int);
+// P1-C: libc owns the original mount array. Never compact or mutate it in place.
+// Each calling thread receives a filtered snapshot owned by this hook until that
+// thread's next getmntinfo call or thread teardown.
+typedef int (*PXJBGetmntinfoFunction)(struct statfs **, int);
+typedef struct {
+    struct statfs *entries;
+    size_t capacity;
+} PXJBMountSnapshotStorage;
+
+static PXJBGetmntinfoFunction orig_getmntinfo = NULL;
+static PXJBGetmntinfoFunction gJBGetmntinfoEntry = NULL;
+static pthread_key_t gJBMountSnapshotKey;
+static pthread_once_t gJBMountSnapshotKeyOnce = PTHREAD_ONCE_INIT;
+static int gJBMountSnapshotKeyStatus = EAGAIN;
+
+static void PXJBDestroyMountSnapshotStorage(void *context) {
+    PXJBMountSnapshotStorage *storage = (PXJBMountSnapshotStorage *)context;
+    if (!storage) return;
+    free(storage->entries);
+    storage->entries = NULL;
+    storage->capacity = 0;
+    free(storage);
+}
+
+static void PXJBCreateMountSnapshotKey(void) {
+    gJBMountSnapshotKeyStatus = pthread_key_create(&gJBMountSnapshotKey,
+                                                    PXJBDestroyMountSnapshotStorage);
+}
+
+static BOOL PXJBPrepareMountSnapshotOwner(void) {
+    pthread_once(&gJBMountSnapshotKeyOnce, PXJBCreateMountSnapshotKey);
+    return gJBMountSnapshotKeyStatus == 0;
+}
+
+static PXJBMountSnapshotStorage *PXJBGetMountSnapshotStorage(void) {
+    if (!PXJBPrepareMountSnapshotOwner()) return NULL;
+    PXJBMountSnapshotStorage *storage =
+        (PXJBMountSnapshotStorage *)pthread_getspecific(gJBMountSnapshotKey);
+    if (storage) return storage;
+
+    storage = (PXJBMountSnapshotStorage *)calloc(1, sizeof(*storage));
+    if (!storage) return NULL;
+    if (pthread_setspecific(gJBMountSnapshotKey, storage) != 0) {
+        free(storage);
+        return NULL;
+    }
+    return storage;
+}
+
+static BOOL PXJBEnsureMountSnapshotCapacity(PXJBMountSnapshotStorage *storage,
+                                            size_t count) {
+    if (!storage) return NO;
+    if (count <= storage->capacity) return YES;
+    if (count > SIZE_MAX / sizeof(struct statfs)) return NO;
+
+    struct statfs *replacement =
+        (struct statfs *)realloc(storage->entries, count * sizeof(struct statfs));
+    if (!replacement) return NO;
+    storage->entries = replacement;
+    storage->capacity = count;
+    return YES;
+}
+
+static int PXJBOriginalGetmntinfo(struct statfs **mntbufp, int flags) {
+    PXJBGetmntinfoFunction function = orig_getmntinfo;
+    if (!function || function == gJBGetmntinfoEntry) {
+        errno = ENOSYS;
+        return 0;
+    }
+    return function(mntbufp, flags);
+}
+
+static BOOL PXJBMountEntryShouldHide(const struct statfs *entry) {
+    if (!entry) return NO;
+    if (strcmp(entry->f_fstypename, "bindfs") == 0) {
+        static const char *knownBinds[] = {
+            "/usr/standalone/firmware",
+            "/System/Library/Pearl/ReferenceFrames",
+            "/System/Library/Caches/com.apple.factorydata",
+            NULL
+        };
+        BOOL known = NO;
+        for (int i = 0; knownBinds[i]; i++) {
+            if (strcmp(entry->f_mntonname, knownBinds[i]) == 0) {
+                known = YES;
+                break;
+            }
+        }
+        if (!known) return YES;
+    }
+
+    if (strcmp(entry->f_mntonname, "/") != 0 &&
+        strcmp(entry->f_fstypename, "apfs") == 0 &&
+        strstr(entry->f_mntfromname, "@") != NULL &&
+        PXJBPathShouldHide(entry->f_mntonname)) {
+        return YES;
+    }
+    return NO;
+}
+
 static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    int n = orig_getmntinfo ? orig_getmntinfo(mntbufp, flags) : 0;
-    if (!pxjbFilterFilesystem || n <= 0 || !mntbufp || !*mntbufp) return n;
+    int count = PXJBOriginalGetmntinfo(mntbufp, flags);
+    if (!pxjbFilterFilesystem || count <= 0 || !mntbufp || !*mntbufp) return count;
 
-    struct statfs *buf = *mntbufp;
-    int out = 0;
-    for (int i = 0; i < n; i++) {
-        // Hide bindfs mounts (used by some JBs for fakefs/fakelib)
-        if (strcmp(buf[i].f_fstypename, "bindfs") == 0) {
-            // Only allow known Apple bind mounts
-            static const char *knownBinds[] = {
-                "/usr/standalone/firmware",
-                "/System/Library/Pearl/ReferenceFrames",
-                "/System/Library/Caches/com.apple.factorydata",
-                NULL
-            };
-            BOOL known = NO;
-            for (int j = 0; knownBinds[j]; j++) {
-                if (strcmp(buf[i].f_mntonname, knownBinds[j]) == 0) { known = YES; break; }
-            }
-            if (!known) continue; // hide unknown bindfs
-        }
-        // Hide unexpected APFS snapshot mounts (JB rootfs remounts)
-        if (strcmp(buf[i].f_mntonname, "/") != 0 &&
-            strcmp(buf[i].f_fstypename, "apfs") == 0 &&
-            strstr(buf[i].f_mntfromname, "@") != NULL) {
-            // Optional: hide suspicious snapshot mounts not on /
-            // Only hide if mount point looks JB-related
-            if (PXJBPathShouldHide(buf[i].f_mntonname)) continue;
-        }
-        if (out != i) buf[out] = buf[i];
-        out++;
+    PXJBMountSnapshotStorage *storage = PXJBGetMountSnapshotStorage();
+    if (!storage || !PXJBEnsureMountSnapshotCapacity(storage, (size_t)count)) {
+        // Allocation/key failure must not corrupt or replace libc's snapshot.
+        return count;
     }
-    return out;
+
+    const struct statfs *source = *mntbufp;
+    int visibleCount = 0;
+    for (int i = 0; i < count; i++) {
+        if (PXJBMountEntryShouldHide(&source[i])) continue;
+        storage->entries[visibleCount++] = source[i];
+    }
+
+    *mntbufp = storage->entries;
+    return visibleCount;
 }
 
 // --- JailbreakDetector bypass: bootstrap_look_up ---
@@ -2678,52 +2817,9 @@ static kern_return_t hook_bootstrap_look_up(mach_port_t bp, const char *service_
     return orig_bootstrap_look_up ? orig_bootstrap_look_up(bp, service_name, sp) : BOOTSTRAP_UNKNOWN_SERVICE;
 }
 
-// --- JailbreakDetector bypass: vm_region_64 ---
-// Sanitize protection flags so injected code regions look normal.
-static kern_return_t (*orig_vm_region_64)(vm_map_t, vm_address_t *, vm_size_t *, vm_region_flavor_t, vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
-static kern_return_t hook_vm_region_64(vm_map_t target_task, vm_address_t *address, vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info, mach_msg_type_number_t *infoCnt, mach_port_t *object_name) {
-    kern_return_t kr = orig_vm_region_64 ? orig_vm_region_64(target_task, address, size, flavor, info, infoCnt, object_name) : KERN_FAILURE;
-    if (kr != KERN_SUCCESS) return kr;
-    if (!PXJBShouldBypassCached()) return kr;
-
-    // For basic info, ensure protection looks like read-only for system library regions
-    if (flavor == VM_REGION_BASIC_INFO_64 && info) {
-        vm_region_basic_info_data_64_t *binfo = (vm_region_basic_info_data_64_t *)info;
-        // If protection has execute+write on what should be read-only, fix it
-        if ((binfo->protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == (VM_PROT_WRITE | VM_PROT_EXECUTE)) {
-            // Injected regions typically have RWX; sanitize to RX
-            binfo->protection &= ~VM_PROT_WRITE;
-        }
-        // If it's RW on a region that should be RO (system lib text), sanitize to R
-        if (binfo->protection == (VM_PROT_READ | VM_PROT_WRITE)) {
-            // Check if it looks like it should be read-only
-            if (binfo->max_protection == VM_PROT_READ) {
-                binfo->protection = VM_PROT_READ;
-            }
-        }
-    }
-    return kr;
-}
-
-// --- JailbreakDetector bypass: task_get_exception_ports ---
-// Return clean exception port state (no JB-inherited ports).
-static kern_return_t (*orig_task_get_exception_ports)(task_t, exception_mask_t, exception_mask_array_t, mach_msg_type_number_t *, exception_handler_array_t, exception_behavior_array_t, exception_flavor_array_t);
-static kern_return_t hook_task_get_exception_ports(task_t task, exception_mask_t exception_mask, exception_mask_array_t masks, mach_msg_type_number_t *masksCnt, exception_handler_array_t old_handlers, exception_behavior_array_t old_behaviors, exception_flavor_array_t old_flavors) {
-    kern_return_t kr = orig_task_get_exception_ports ? orig_task_get_exception_ports(task, exception_mask, masks, masksCnt, old_handlers, old_behaviors, old_flavors) : KERN_FAILURE;
-    if (kr != KERN_SUCCESS) return kr;
-    if (!PXJBShouldBypassCached()) return kr;
-
-    // Sanitize: set all ports/behaviors/flavors to 0 (clean state)
-    // The detector checks if count != 1 or if any ports/behaviors/flavors are non-zero
-    if (masksCnt && masks && old_handlers && old_behaviors && old_flavors) {
-        for (mach_msg_type_number_t i = 0; i < *masksCnt; i++) {
-            old_handlers[i] = MACH_PORT_NULL;
-            old_behaviors[i] = 0;
-            old_flavors[i] = 0;
-        }
-    }
-    return kr;
-}
+// P1-E: vm_region_64 and task_get_exception_ports are intentionally absent
+// from the default module. Reintroducing either requires a separate explicit
+// capability, dedicated install audit and per-target compatibility evidence.
 
 // P0-A: no generic fcntl hook is installed. A C variadic wrapper cannot safely
 // preserve unknown command argument types, so production code only issues the
@@ -4131,16 +4227,20 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // JailbreakDetector bypass hooks.
             sym = FindSymbol(NULL, "getmntinfo");
-            if (sym) MSHookFunction(sym, (void *)hook_getmntinfo, (void **)&orig_getmntinfo);
+            if (sym) {
+                gJBGetmntinfoEntry = (PXJBGetmntinfoFunction)sym;
+                MSHookFunction(sym, (void *)hook_getmntinfo, (void **)&orig_getmntinfo);
+                gJBMountSnapshotOwnerReady = orig_getmntinfo != NULL &&
+                                             orig_getmntinfo != gJBGetmntinfoEntry &&
+                                             PXJBPrepareMountSnapshotOwner();
+            }
 
             sym = FindSymbol(NULL, "bootstrap_look_up");
             if (sym) MSHookFunction(sym, (void *)hook_bootstrap_look_up, (void **)&orig_bootstrap_look_up);
 
-            sym = FindSymbol(NULL, "vm_region_64");
-            if (sym) MSHookFunction(sym, (void *)hook_vm_region_64, (void **)&orig_vm_region_64);
-
-            sym = FindSymbol(NULL, "task_get_exception_ports");
-            if (sym) MSHookFunction(sym, (void *)hook_task_get_exception_ports, (void **)&orig_task_get_exception_ports);
+            // P1-E: vm_region_64 and task_get_exception_ports are high-risk,
+            // process-wide introspection hooks and are absent from the default
+            // module. A future implementation requires an explicit capability.
 
             // P0-A: capture fcntl only for verified internal calls. Do not hook the
             // variadic entry point until a command-complete ABI dispatcher exists.
@@ -4237,13 +4337,55 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 if (sym) MSHookFunction(sym, (void *)hook_dlsym, (void **)&orig_dlsym);
             }
 
-            // Phase 5: sysctl/sysctlbyname sanitize via coordinator post providers (no MSHookFunction).
+            // P1-D: register real coordinator providers. Priority 150 runs
+            // before the terminal identity pre-provider, but these providers only
+            // claim KERN_PROC/kern.bootargs and pass every other key onward.
             if (wantSysctlSanitize) {
-                // Keep legacy hook bodies available; register as post sanitizers on coordinator.
-                // Note: full provider wiring uses hook_sysctl_jb as post — install originals via coordinator.
-                PXLog(@"[JailbreakBypass] sysctl sanitize uses coordinator post path (skip direct MSHookFunction)");
-                // Direct MSHookFunction intentionally omitted to avoid multi-owner install.
-                // Sanitizer will run when registered with PXNativeHookCoordinator by aggressive module.
+                PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+                [coord installOwnedSymbolsIfNeeded];
+                orig_sysctl_jb = [coord originalForSymbol:kPXNativeSymbolSysctl];
+                orig_sysctlbyname_jb = [coord originalForSymbol:kPXNativeSymbolSysctlByname];
+
+                static dispatch_once_t jbSysctlProviderOnce;
+                dispatch_once(&jbSysctlProviderOnce, ^{
+                    NSInteger priority = PXNativeHookPriorityScopeABI + 50;
+                    gJBSysctlProviderRegistered =
+                        [coord registerSysctlProvider:@"jb.sysctl.sanitize"
+                                             priority:priority
+                                                  pre:^BOOL(int *name,
+                                                            u_int namelen,
+                                                            void *oldp,
+                                                            size_t *oldlenp,
+                                                            void *newp,
+                                                            size_t newlen,
+                                                            int *outResult) {
+                            return PXJBHandleSysctlSanitizeRequest(name,
+                                                                  namelen,
+                                                                  oldp,
+                                                                  oldlenp,
+                                                                  newp,
+                                                                  newlen,
+                                                                  outResult);
+                        }
+                                                 post:nil];
+                    gJBSysctlBynameProviderRegistered =
+                        [coord registerSysctlBynameProvider:@"jb.sysctlbyname.sanitize"
+                                                   priority:priority
+                                                        pre:^BOOL(const char *name,
+                                                                  void *oldp,
+                                                                  size_t *oldlenp,
+                                                                  void *newp,
+                                                                  size_t newlen,
+                                                                  int *outResult) {
+                            return PXJBHandleSysctlBynameSanitizeRequest(name,
+                                                                        oldp,
+                                                                        oldlenp,
+                                                                        newp,
+                                                                        newlen,
+                                                                        outResult);
+                        }
+                                                       post:nil];
+                });
             }
 
             // Phase 6: hide proc map filenames (libproc).
@@ -4396,10 +4538,12 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityCore, "objc_copyClassNamesForImage", orig_objc_copyClassNamesForImage, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "NSVersionOfRunTimeLibrary", orig_NSVersionOfRunTimeLibrary, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "NSVersionOfLinkTimeLibrary", orig_NSVersionOfLinkTimeLibrary, false);
-    PXJB_AUDIT(kPXJBCapabilityCore, "getmntinfo", orig_getmntinfo, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getmntinfo-trampoline", orig_getmntinfo, false);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilityCore,
+                              "getmntinfo-owned-snapshot",
+                              gJBMountSnapshotOwnerReady,
+                              false);
     PXJB_AUDIT(kPXJBCapabilityCore, "bootstrap_look_up", orig_bootstrap_look_up, false);
-    PXJB_AUDIT(kPXJBCapabilityCore, "vm_region_64", orig_vm_region_64, false);
-    PXJB_AUDIT(kPXJBCapabilityCore, "task_get_exception_ports", orig_task_get_exception_ports, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "xpc_pipe_routine", orig_xpc_pipe_routine, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "xpc_pipe_routine_with_flags", orig_xpc_pipe_routine_with_flags, false);
     PXJBCapabilityAuditSymbol(kPXJBCapabilityCore, "logos-init-invoked", true, true);
@@ -4429,12 +4573,22 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityDlopenDlsym, "dlopen", orig_dlopen, true);
     PXJB_AUDIT(kPXJBCapabilityDlopenDlsym, "dlsym", orig_dlsym, true);
 
-    // Current source intentionally omits direct sysctl ownership and has no
-    // coordinator provider registration in this module. Do not grant the bit.
-    PXJBCapabilityAuditSymbol(kPXJBCapabilitySysctlSanitize, "sysctl-provider", false, true);
-    if (gJBCapabilities[kPXJBCapabilitySysctlSanitize].requested) {
-        PXJBCapabilitySetFailure(kPXJBCapabilitySysctlSanitize, "provider-not-wired");
-    }
+    PXJB_AUDIT(kPXJBCapabilitySysctlSanitize,
+                 "sysctl-coordinator-original",
+                 orig_sysctl_jb,
+                 true);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilitySysctlSanitize,
+                              "sysctl-provider-registration",
+                              gJBSysctlProviderRegistered,
+                              true);
+    PXJB_AUDIT(kPXJBCapabilitySysctlSanitize,
+                 "sysctlbyname-coordinator-original",
+                 orig_sysctlbyname_jb,
+                 true);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilitySysctlSanitize,
+                              "sysctlbyname-provider-registration",
+                              gJBSysctlBynameProviderRegistered,
+                              true);
 
     PXJB_AUDIT(kPXJBCapabilityProcMaps, "proc_regionfilename", orig_proc_regionfilename, true);
     PXJB_AUDIT(kPXJBCapabilityObjcImages, "objc_copyImageNames", orig_objc_copyImageNames, true);
