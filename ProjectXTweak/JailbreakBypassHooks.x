@@ -184,9 +184,102 @@ enum {
 
 static _Atomic(PXJBPolicyMask) gJBPolicyMask = 0;
 static _Atomic(bool) gJBDyldIndexedHooksReady = false;
-// Written once in %ctor before hook installation, then treated as immutable.
-// It caps runtime settings so a reload cannot enable a launch-only capability.
-static PXJBPolicyMask gJBLaunchCapabilityMask = 0;
+
+// P1-A: requested settings are not capabilities. A policy bit becomes usable
+// only after the install audit proves the corresponding hook/provider is ready.
+typedef enum {
+    kPXJBCapabilityCore = 0,
+    kPXJBCapabilityStatfs,
+    kPXJBCapabilityDyldIndexed,
+    kPXJBCapabilityDyldAddImage,
+    kPXJBCapabilityTaskDyldInfo,
+    kPXJBCapabilityDlIteratePhdr,
+    kPXJBCapabilityDlopenDlsym,
+    kPXJBCapabilitySysctlSanitize,
+    kPXJBCapabilityProcMaps,
+    kPXJBCapabilityObjcImages,
+    kPXJBCapabilityDebugLogging,
+    kPXJBCapabilityCount,
+} PXJBCapabilityID;
+
+typedef struct {
+    const char *name;
+    PXJBPolicyMask policyBit;
+    bool requested;
+    bool attempted;
+    bool ready;
+    uint16_t expectedSymbols;
+    uint16_t installedSymbols;
+    uint16_t requiredSymbols;
+    uint16_t missingRequiredSymbols;
+    const char *firstMissingRequiredSymbol;
+    const char *failureReason;
+} PXJBCapabilityRecord;
+
+static PXJBCapabilityRecord gJBCapabilities[kPXJBCapabilityCount] = {
+    { .name = "core",            .policyBit = kPXJBPolicyMaster },
+    { .name = "statfs",          .policyBit = kPXJBPolicyStatfs },
+    { .name = "dyld-indexed",    .policyBit = kPXJBPolicyHideDylibs },
+    { .name = "dyld-add-image",  .policyBit = kPXJBPolicyBlockDyldAddImageCallbacks },
+    { .name = "task-dyld-info",  .policyBit = kPXJBPolicyHideTaskDyldInfo },
+    { .name = "dl-iterate-phdr", .policyBit = kPXJBPolicyHideDlIteratePhdr },
+    { .name = "dlopen-dlsym",    .policyBit = kPXJBPolicyBlockDlopenDlsymProbes },
+    { .name = "sysctl-sanitize", .policyBit = kPXJBPolicySysctlProcSanitize },
+    { .name = "proc-maps",       .policyBit = kPXJBPolicyHideProcMaps },
+    { .name = "objc-images",     .policyBit = kPXJBPolicyHideObjcImages },
+    { .name = "debug-logging",   .policyBit = kPXJBPolicyDebugLogging },
+};
+
+static _Atomic(PXJBPolicyMask) gJBInstalledCapabilityMask = 0;
+static _Atomic(bool) gJBCapabilityRegistryFinalized = false;
+static bool gJBStatfsProviderRegistered = false;
+
+static void PXJBPrepareCapabilityRegistry(PXJBPolicyMask requestedMask) {
+    atomic_store_explicit(&gJBInstalledCapabilityMask, 0, memory_order_release);
+    atomic_store_explicit(&gJBCapabilityRegistryFinalized, false, memory_order_release);
+    for (uint32_t i = 0; i < kPXJBCapabilityCount; i++) {
+        PXJBCapabilityRecord *record = &gJBCapabilities[i];
+        record->requested = (requestedMask & record->policyBit) != 0;
+        record->attempted = false;
+        record->ready = false;
+        record->expectedSymbols = 0;
+        record->installedSymbols = 0;
+        record->requiredSymbols = 0;
+        record->missingRequiredSymbols = 0;
+        record->firstMissingRequiredSymbol = NULL;
+        record->failureReason = NULL;
+    }
+}
+
+static void PXJBCapabilityAuditSymbol(PXJBCapabilityID capability,
+                                      const char *symbol,
+                                      bool installed,
+                                      bool required) {
+    if ((uint32_t)capability >= kPXJBCapabilityCount) return;
+    PXJBCapabilityRecord *record = &gJBCapabilities[capability];
+    record->attempted = record->attempted || record->requested;
+    record->expectedSymbols++;
+    if (required) record->requiredSymbols++;
+    if (installed) {
+        record->installedSymbols++;
+        return;
+    }
+    if (required) {
+        record->missingRequiredSymbols++;
+        if (!record->firstMissingRequiredSymbol) {
+            record->firstMissingRequiredSymbol = symbol;
+        }
+    }
+}
+
+static void PXJBCapabilitySetFailure(PXJBCapabilityID capability,
+                                     const char *reason) {
+    if ((uint32_t)capability >= kPXJBCapabilityCount) return;
+    gJBCapabilities[capability].failureReason = reason;
+}
+
+static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void);
+
 static dispatch_queue_t gJBPolicyReloadQueue = NULL;
 static dispatch_source_t gJBPolicyReloadTimer = NULL;
 
@@ -323,7 +416,9 @@ static PXJBPolicyMask PXJBBuildRequestedPolicyMask(NSDictionary *settings) {
 
 static void PXJBPublishPolicySnapshot(NSDictionary *settings) {
     PXJBPolicyMask requested = PXJBBuildRequestedPolicyMask(settings ?: @{});
-    PXJBPolicyMask effective = requested & gJBLaunchCapabilityMask;
+    PXJBPolicyMask installed = atomic_load_explicit(&gJBInstalledCapabilityMask,
+                                                    memory_order_acquire);
+    PXJBPolicyMask effective = requested & installed;
     atomic_store_explicit(&gJBPolicyMask, effective, memory_order_release);
 }
 
@@ -682,7 +777,7 @@ static BOOL PXJBIsHiddenPrefixPath(const char *path) {
     return NO;
 }
 
-static BOOL PXJBPathShouldHide(const char *path) {
+static BOOL PXJBPathMatchesHiddenRules(const char *path) {
     if (!path) return NO;
     if (path[0] != '/') return NO;
     // Quick exact/prefix checks.
@@ -709,7 +804,7 @@ static BOOL PXJBIsSandboxAllowedWritePath(const char *path) {
     return NO;
 }
 
-static BOOL PXJBWriteCheckShouldBlock(const char *path, int flags) {
+static BOOL PXJBPathMatchesDenyWriteRules(const char *path, int flags) {
     if (!path) return NO;
     if (!PXJBIsWriteAttempt(flags)) return NO;
     // Only block classic jailbreak write-probe targets and obvious restricted prefixes.
@@ -719,6 +814,61 @@ static BOOL PXJBWriteCheckShouldBlock(const char *path, int flags) {
     if (PXHasPrefix(path, "/var/tmp/cydia")) return YES;
     if (PXHasPrefix(path, "/private/var/tmp/cydia")) return YES;
     return NO;
+}
+
+// P1-B: one classifier owns path resolution and filesystem policy decisions.
+typedef enum {
+    kPXJBFilesystemAllow = 0,
+    kPXJBFilesystemHide,
+    kPXJBFilesystemDenyWrite,
+    kPXJBFilesystemUnresolved,
+} PXJBFilesystemDisposition;
+
+typedef enum {
+    kPXJBFilesystemOperationRead = 0,
+    kPXJBFilesystemOperationWrite,
+} PXJBFilesystemOperation;
+
+static PXJBFilesystemDisposition PXJBClassifyFilesystemPathAt(int dirfd,
+                                                               const char *path,
+                                                               PXJBFilesystemOperation operation,
+                                                               int flags,
+                                                               char *resolvedPath,
+                                                               size_t resolvedCapacity);
+
+static inline BOOL PXJBFilesystemDispositionIsHidden(PXJBFilesystemDisposition disposition) {
+    return disposition == kPXJBFilesystemHide;
+}
+
+static inline BOOL PXJBFilesystemDispositionBlocksWrite(PXJBFilesystemDisposition disposition) {
+    return disposition == kPXJBFilesystemHide ||
+           disposition == kPXJBFilesystemDenyWrite;
+}
+
+static inline int PXJBFilesystemErrno(PXJBFilesystemDisposition disposition) {
+    return disposition == kPXJBFilesystemDenyWrite ? EACCES : ENOENT;
+}
+
+// Compatibility helpers keep ObjC hook call sites on the classifier while the
+// native hooks below consume the full four-state result directly.
+static BOOL PXJBPathShouldHide(const char *path) {
+    return PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                        path,
+                                        kPXJBFilesystemOperationRead,
+                                        O_RDONLY,
+                                        NULL,
+                                        0) == kPXJBFilesystemHide;
+}
+
+static BOOL PXJBPathShouldBlockWrite(const char *path) {
+    PXJBFilesystemDisposition disposition =
+        PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                     path,
+                                     kPXJBFilesystemOperationWrite,
+                                     O_WRONLY | O_CREAT,
+                                     NULL,
+                                     0);
+    return PXJBFilesystemDispositionBlocksWrite(disposition);
 }
 
 // Loopback port scan blocking
@@ -739,9 +889,18 @@ static BOOL PXJBIsDeniedLoopbackPort(uint16_t port) {
 static int (*orig_stat)(const char *, struct stat *);
 static int hook_stat(const char *path, struct stat *st) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return orig_stat ? orig_stat(path, st) : -1;
 }
@@ -749,9 +908,18 @@ static int hook_stat(const char *path, struct stat *st) {
 static int (*orig_stat64)(const char *, struct stat *);
 static int hook_stat64(const char *path, struct stat *st) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return orig_stat64 ? orig_stat64(path, st) : -1;
 }
@@ -759,9 +927,18 @@ static int hook_stat64(const char *path, struct stat *st) {
 static int (*orig_lstat)(const char *, struct stat *);
 static int hook_lstat(const char *path, struct stat *st) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return orig_lstat ? orig_lstat(path, st) : -1;
 }
@@ -769,9 +946,18 @@ static int hook_lstat(const char *path, struct stat *st) {
 static int (*orig_lstat64)(const char *, struct stat *);
 static int hook_lstat64(const char *path, struct stat *st) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return orig_lstat64 ? orig_lstat64(path, st) : -1;
 }
@@ -779,9 +965,18 @@ static int hook_lstat64(const char *path, struct stat *st) {
 static int (*orig_access)(const char *, int);
 static int hook_access(const char *path, int amode) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return orig_access ? orig_access(path, amode) : -1;
 }
@@ -790,12 +985,19 @@ static int (*orig_open)(const char *, int, ...);
 static int hook_open(const char *path, int oflag, ...) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem) {
-        if (PXJBPathShouldHide(path)) {
-            errno = ENOENT;
-            return -1;
-        }
-        if (PXJBWriteCheckShouldBlock(path, oflag)) {
-            errno = EACCES;
+        PXJBFilesystemOperation operation = PXJBIsWriteAttempt(oflag)
+            ? kPXJBFilesystemOperationWrite
+            : kPXJBFilesystemOperationRead;
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         operation,
+                                         oflag,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition) ||
+            disposition == kPXJBFilesystemDenyWrite) {
+            errno = PXJBFilesystemErrno(disposition);
             return -1;
         }
     }
@@ -904,47 +1106,28 @@ static BOOL PXJBJoinCwdAndNormalize(const char *relPath, char *out, size_t outsz
 static int hook_openat(int fd, const char *path, int oflag, ...) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem) {
-        if (path) {
-            if (path[0] == '/') {
-                if (PXJBPathShouldHide(path)) {
-                    PXJBRecordBlockedEvent("openat", path);
-                    errno = ENOENT;
-                    return -1;
-                }
-                if (PXJBWriteCheckShouldBlock(path, oflag)) {
-                    PXJBRecordBlockedEvent("openat(write)", path);
-                    errno = EACCES;
-                    return -1;
-                }
-            } else {
-                if (fd == AT_FDCWD) {
-                    char normalized[PATH_MAX];
-                    if (PXJBJoinCwdAndNormalize(path, normalized, sizeof(normalized))) {
-                        if (PXJBPathShouldHide(normalized)) {
-                            PXJBRecordBlockedEvent("openat", normalized);
-                            errno = ENOENT;
-                            return -1;
-                        }
-                        if (PXJBWriteCheckShouldBlock(normalized, oflag)) {
-                            PXJBRecordBlockedEvent("openat(write)", normalized);
-                            errno = EACCES;
-                            return -1;
-                        }
-                    } else if (PXJBRelativePathLooksLikeProbe(path)) {
-                        PXJBRecordBlockedEvent("openat(rel)", path);
-                        errno = ENOENT;
-                        return -1;
-                    }
-                } else {
-                    // Don't try to resolve fd->path (avoid side effects). Only block obvious probes.
-                    if (PXJBRelativePathLooksLikeProbe(path)) {
-                        PXJBRecordBlockedEvent("openat(relfd)", path);
-                        errno = ENOENT;
-                        return -1;
-                    }
-                }
-            }
+        char resolvedPath[PATH_MAX];
+        PXJBFilesystemOperation operation = PXJBIsWriteAttempt(oflag)
+            ? kPXJBFilesystemOperationWrite
+            : kPXJBFilesystemOperationRead;
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(fd,
+                                         path,
+                                         operation,
+                                         oflag,
+                                         resolvedPath,
+                                         sizeof(resolvedPath));
+        if (PXJBFilesystemDispositionIsHidden(disposition) ||
+            disposition == kPXJBFilesystemDenyWrite) {
+            PXJBRecordBlockedEvent(disposition == kPXJBFilesystemDenyWrite
+                                       ? "openat(write)"
+                                       : "openat",
+                                   resolvedPath[0] ? resolvedPath : path);
+            errno = PXJBFilesystemErrno(disposition);
+            return -1;
         }
+        // UNRESOLVED deliberately fails open unless the lexical relative path
+        // was strong enough for the classifier to return HIDE/DENY_WRITE.
     }
 
     int mode = 0;
@@ -961,19 +1144,22 @@ static FILE *(*orig_fopen)(const char *, const char *);
 static FILE *hook_fopen(const char *path, const char *mode) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem) {
-        if (PXJBPathShouldHide(path)) {
-            errno = ENOENT;
+        BOOL writeIntent = mode &&
+                           (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
+        int flags = writeIntent ? (O_WRONLY | O_CREAT) : O_RDONLY;
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         writeIntent
+                                             ? kPXJBFilesystemOperationWrite
+                                             : kPXJBFilesystemOperationRead,
+                                         flags,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition) ||
+            disposition == kPXJBFilesystemDenyWrite) {
+            errno = PXJBFilesystemErrno(disposition);
             return NULL;
-        }
-        if (path && mode) {
-            // If mode implies write.
-            if (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+')) {
-                int flags = O_WRONLY | O_CREAT;
-                if (PXJBWriteCheckShouldBlock(path, flags)) {
-                    errno = EACCES;
-                    return NULL;
-                }
-            }
         }
     }
     return orig_fopen ? orig_fopen(path, mode) : NULL;
@@ -982,9 +1168,18 @@ static FILE *hook_fopen(const char *path, const char *mode) {
 static DIR *(*orig_opendir)(const char *);
 static DIR *hook_opendir(const char *path) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return NULL;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return NULL;
+        }
     }
     return orig_opendir ? orig_opendir(path) : NULL;
 }
@@ -1013,9 +1208,18 @@ static struct dirent *hook_readdir(DIR *dirp) {
 static ssize_t (*orig_readlink)(const char *, char *, size_t);
 static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     return orig_readlink ? orig_readlink(path, buf, bufsiz) : -1;
 }
@@ -1023,9 +1227,18 @@ static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
 static char *(*orig_realpath)(const char *, char *);
 static char *hook_realpath(const char *path, char *resolved) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return NULL;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return NULL;
+        }
     }
     return orig_realpath ? orig_realpath(path, resolved) : NULL;
 }
@@ -2029,9 +2242,18 @@ static int32_t hook_NSVersionOfLinkTimeLibrary(const char *libraryName) {
 static int (*orig_creat)(const char *, mode_t);
 static int hook_creat(const char *path, mode_t mode) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && PXJBPathShouldHide(path)) {
-        errno = EACCES;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY | O_CREAT | O_TRUNC,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionBlocksWrite(disposition)) {
+            errno = PXJBFilesystemErrno(disposition);
+            return -1;
+        }
     }
     return orig_creat ? orig_creat(path, mode) : -1;
 }
@@ -2110,14 +2332,67 @@ static BOOL PXJBResolveAtPathForFiltering(int dirfd,
     return PXJBJoinAbsoluteBaseAndNormalize(directoryPath, path, out, outCapacity);
 }
 
+static PXJBFilesystemDisposition PXJBClassifyFilesystemPathAt(int dirfd,
+                                                               const char *path,
+                                                               PXJBFilesystemOperation operation,
+                                                               int flags,
+                                                               char *resolvedPath,
+                                                               size_t resolvedCapacity) {
+    if (resolvedPath && resolvedCapacity > 0) resolvedPath[0] = '\0';
+    if (!path || !path[0]) return kPXJBFilesystemUnresolved;
+
+    char localResolved[PATH_MAX];
+    char *target = resolvedPath;
+    size_t targetCapacity = resolvedCapacity;
+    if (!target || targetCapacity < 2) {
+        target = localResolved;
+        targetCapacity = sizeof(localResolved);
+    }
+
+    BOOL resolved = PXJBResolveAtPathForFiltering(dirfd,
+                                                  path,
+                                                  target,
+                                                  targetCapacity);
+    if (!resolved) {
+        // A relative probe can still be classified from its own lexical form.
+        // Otherwise preserve uncertainty and let callers fail open.
+        if (path[0] != '/' && PXJBRelativePathLooksLikeProbe(path)) {
+            return operation == kPXJBFilesystemOperationWrite
+                ? kPXJBFilesystemDenyWrite
+                : kPXJBFilesystemHide;
+        }
+        return kPXJBFilesystemUnresolved;
+    }
+
+    // Dedicated write-probe targets must remain distinguishable from hidden
+    // filesystem artifacts. They return EACCES/DENY_WRITE even when a broader
+    // hidden-path table also contains the same lexical path.
+    if (operation == kPXJBFilesystemOperationWrite &&
+        PXJBPathMatchesDenyWriteRules(target, flags)) {
+        return kPXJBFilesystemDenyWrite;
+    }
+    if (PXJBPathMatchesHiddenRules(target)) {
+        return kPXJBFilesystemHide;
+    }
+    return kPXJBFilesystemAllow;
+}
+
+
 // --- Priority 3: fstat (fd-based, resolve via original fcntl F_GETPATH) ---
 static int (*orig_fstat)(int, struct stat *);
 static int hook_fstat(int fd, struct stat *buf) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem && fd >= 0) {
-        char fdpath[PATH_MAX];
-        if (PXJBOriginalFcntlGetPath(fd, fdpath, sizeof(fdpath)) != -1) {
-            if (PXJBPathShouldHide(fdpath)) {
+        char fdPath[PATH_MAX];
+        if (PXJBOriginalFcntlGetPath(fd, fdPath, sizeof(fdPath)) != -1) {
+            PXJBFilesystemDisposition disposition =
+                PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                             fdPath,
+                                             kPXJBFilesystemOperationRead,
+                                             O_RDONLY,
+                                             NULL,
+                                             0);
+            if (PXJBFilesystemDispositionIsHidden(disposition)) {
                 errno = EBADF;
                 return -1;
             }
@@ -2130,10 +2405,15 @@ static int hook_fstat(int fd, struct stat *buf) {
 static int (*orig_fstatat)(int, const char *, struct stat *, int);
 static int hook_fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && pathname) {
-        char resolvedPath[PATH_MAX];
-        if (PXJBResolveAtPathForFiltering(dirfd, pathname, resolvedPath, sizeof(resolvedPath)) &&
-            PXJBPathShouldHide(resolvedPath)) {
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(dirfd,
+                                         pathname,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
             errno = ENOENT;
             return -1;
         }
@@ -2145,10 +2425,15 @@ static int hook_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
 static int (*orig_faccessat)(int, const char *, int, int);
 static int hook_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && pathname) {
-        char resolvedPath[PATH_MAX];
-        if (PXJBResolveAtPathForFiltering(dirfd, pathname, resolvedPath, sizeof(resolvedPath)) &&
-            PXJBPathShouldHide(resolvedPath)) {
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(dirfd,
+                                         pathname,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
             errno = ENOENT;
             return -1;
         }
@@ -2160,10 +2445,15 @@ static int hook_faccessat(int dirfd, const char *pathname, int mode, int flags) 
 static ssize_t (*orig_readlinkat)(int, const char *, char *, size_t);
 static ssize_t hook_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && pathname) {
-        char resolvedPath[PATH_MAX];
-        if (PXJBResolveAtPathForFiltering(dirfd, pathname, resolvedPath, sizeof(resolvedPath)) &&
-            PXJBPathShouldHide(resolvedPath)) {
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(dirfd,
+                                         pathname,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
             errno = ENOENT;
             return -1;
         }
@@ -2176,8 +2466,26 @@ static int (*orig_symlink)(const char *, const char *);
 static int hook_symlink(const char *path1, const char *path2) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem) {
-        if ((path1 && PXJBPathShouldHide(path1)) || (path2 && PXJBPathShouldHide(path2))) {
-            errno = EACCES;
+        PXJBFilesystemDisposition sourceDisposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path1,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        PXJBFilesystemDisposition destinationDisposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path2,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY | O_CREAT,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(sourceDisposition)) {
+            errno = ENOENT;
+            return -1;
+        }
+        if (PXJBFilesystemDispositionBlocksWrite(destinationDisposition)) {
+            errno = PXJBFilesystemErrno(destinationDisposition);
             return -1;
         }
     }
@@ -2188,8 +2496,26 @@ static int (*orig_rename)(const char *, const char *);
 static int hook_rename(const char *old, const char *new_path) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem) {
-        if ((old && PXJBPathShouldHide(old)) || (new_path && PXJBPathShouldHide(new_path))) {
+        PXJBFilesystemDisposition sourceDisposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         old,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        PXJBFilesystemDisposition destinationDisposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         new_path,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY | O_CREAT,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(sourceDisposition)) {
             errno = ENOENT;
+            return -1;
+        }
+        if (PXJBFilesystemDispositionBlocksWrite(destinationDisposition)) {
+            errno = PXJBFilesystemErrno(destinationDisposition);
             return -1;
         }
     }
@@ -2200,8 +2526,26 @@ static int (*orig_link)(const char *, const char *);
 static int hook_link(const char *path1, const char *path2) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     if (pxjbFilterFilesystem) {
-        if ((path1 && PXJBPathShouldHide(path1)) || (path2 && PXJBPathShouldHide(path2))) {
+        PXJBFilesystemDisposition sourceDisposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path1,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        PXJBFilesystemDisposition destinationDisposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path2,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY | O_CREAT,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(sourceDisposition)) {
             errno = ENOENT;
+            return -1;
+        }
+        if (PXJBFilesystemDispositionBlocksWrite(destinationDisposition)) {
+            errno = PXJBFilesystemErrno(destinationDisposition);
             return -1;
         }
     }
@@ -2211,9 +2555,18 @@ static int hook_link(const char *path1, const char *path2) {
 static int (*orig_unlink)(const char *);
 static int hook_unlink(const char *path) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && path && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionBlocksWrite(disposition)) {
+            errno = PXJBFilesystemErrno(disposition);
+            return -1;
+        }
     }
     return orig_unlink ? orig_unlink(path) : -1;
 }
@@ -2221,9 +2574,18 @@ static int hook_unlink(const char *path) {
 static int (*orig_remove_func)(const char *);
 static int hook_remove_func(const char *path) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && path && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionBlocksWrite(disposition)) {
+            errno = PXJBFilesystemErrno(disposition);
+            return -1;
+        }
     }
     return orig_remove_func ? orig_remove_func(path) : -1;
 }
@@ -2231,9 +2593,18 @@ static int hook_remove_func(const char *path) {
 static int (*orig_rmdir)(const char *);
 static int hook_rmdir(const char *path) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && path && PXJBPathShouldHide(path)) {
-        errno = ENOENT;
-        return -1;
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                         path,
+                                         kPXJBFilesystemOperationWrite,
+                                         O_WRONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionBlocksWrite(disposition)) {
+            errno = PXJBFilesystemErrno(disposition);
+            return -1;
+        }
     }
     return orig_rmdir ? orig_rmdir(path) : -1;
 }
@@ -2424,7 +2795,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)isWritableFileAtPath:(NSString *)path {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -2568,8 +2939,8 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)copyItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
     if (PXJBShouldBypassCached()) {
         BOOL srcHide = [srcPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([srcPath fileSystemRepresentation]);
-        BOOL dstHide = [dstPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([dstPath fileSystemRepresentation]);
-        if (srcHide || dstHide) {
+        BOOL dstBlock = [dstPath isKindOfClass:[NSString class]] && PXJBPathShouldBlockWrite([dstPath fileSystemRepresentation]);
+        if (srcHide || dstBlock) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2580,8 +2951,8 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)copyItemAtURL:(NSURL *)srcURL toURL:(NSURL *)dstURL error:(NSError **)error {
     if (PXJBShouldBypassCached()) {
         BOOL srcHide = [srcURL isKindOfClass:[NSURL class]] && [srcURL isFileURL] && PXJBPathShouldHide([[srcURL path] fileSystemRepresentation]);
-        BOOL dstHide = [dstURL isKindOfClass:[NSURL class]] && [dstURL isFileURL] && PXJBPathShouldHide([[dstURL path] fileSystemRepresentation]);
-        if (srcHide || dstHide) {
+        BOOL dstBlock = [dstURL isKindOfClass:[NSURL class]] && [dstURL isFileURL] && PXJBPathShouldBlockWrite([[dstURL path] fileSystemRepresentation]);
+        if (srcHide || dstBlock) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2592,8 +2963,8 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)moveItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
     if (PXJBShouldBypassCached()) {
         BOOL srcHide = [srcPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([srcPath fileSystemRepresentation]);
-        BOOL dstHide = [dstPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([dstPath fileSystemRepresentation]);
-        if (srcHide || dstHide) {
+        BOOL dstBlock = [dstPath isKindOfClass:[NSString class]] && PXJBPathShouldBlockWrite([dstPath fileSystemRepresentation]);
+        if (srcHide || dstBlock) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2604,8 +2975,8 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)moveItemAtURL:(NSURL *)srcURL toURL:(NSURL *)dstURL error:(NSError **)error {
     if (PXJBShouldBypassCached()) {
         BOOL srcHide = [srcURL isKindOfClass:[NSURL class]] && [srcURL isFileURL] && PXJBPathShouldHide([[srcURL path] fileSystemRepresentation]);
-        BOOL dstHide = [dstURL isKindOfClass:[NSURL class]] && [dstURL isFileURL] && PXJBPathShouldHide([[dstURL path] fileSystemRepresentation]);
-        if (srcHide || dstHide) {
+        BOOL dstBlock = [dstURL isKindOfClass:[NSURL class]] && [dstURL isFileURL] && PXJBPathShouldBlockWrite([[dstURL path] fileSystemRepresentation]);
+        if (srcHide || dstBlock) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2616,7 +2987,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)createDirectoryAtPath:(NSString *)path withIntermediateDirectories:(BOOL)createIntermediates attributes:(NSDictionary *)attributes error:(NSError **)error {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2627,7 +2998,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)createDirectoryAtURL:(NSURL *)url withIntermediateDirectories:(BOOL)createIntermediates attributes:(NSDictionary *)attributes error:(NSError **)error {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2638,7 +3009,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)createFileAtPath:(NSString *)path contents:(NSData *)data attributes:(NSDictionary *)attr {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -2646,7 +3017,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)removeItemAtPath:(NSString *)path error:(NSError **)error {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2657,7 +3028,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)removeItemAtURL:(NSURL *)URL error:(NSError **)error {
     if (PXJBShouldBypassCached() && [URL isKindOfClass:[NSURL class]] && [URL isFileURL]) {
         const char *p = [[URL path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2668,8 +3039,8 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)linkItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
     if (PXJBShouldBypassCached()) {
         BOOL srcHide = [srcPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([srcPath fileSystemRepresentation]);
-        BOOL dstHide = [dstPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([dstPath fileSystemRepresentation]);
-        if (srcHide || dstHide) {
+        BOOL dstBlock = [dstPath isKindOfClass:[NSString class]] && PXJBPathShouldBlockWrite([dstPath fileSystemRepresentation]);
+        if (srcHide || dstBlock) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2679,9 +3050,9 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 
 - (BOOL)createSymbolicLinkAtPath:(NSString *)path withDestinationPath:(NSString *)destPath error:(NSError **)error {
     if (PXJBShouldBypassCached()) {
-        BOOL srcHide = [path isKindOfClass:[NSString class]] && PXJBPathShouldHide([path fileSystemRepresentation]);
-        BOOL dstHide = [destPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([destPath fileSystemRepresentation]);
-        if (srcHide || dstHide) {
+        BOOL linkBlock = [path isKindOfClass:[NSString class]] && PXJBPathShouldBlockWrite([path fileSystemRepresentation]);
+        BOOL targetHide = [destPath isKindOfClass:[NSString class]] && PXJBPathShouldHide([destPath fileSystemRepresentation]);
+        if (linkBlock || targetHide) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2846,7 +3217,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 + (instancetype)fileHandleForWritingAtPath:(NSString *)path {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return nil;
+        if (PXJBPathShouldBlockWrite(p)) return nil;
     }
     return %orig;
 }
@@ -2854,7 +3225,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 + (instancetype)fileHandleForWritingToURL:(NSURL *)url error:(NSError **)error {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return nil;
         }
@@ -2865,7 +3236,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 + (instancetype)fileHandleForUpdatingAtPath:(NSString *)path {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return nil;
+        if (PXJBPathShouldBlockWrite(p)) return nil;
     }
     return %orig;
 }
@@ -2943,7 +3314,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToFile:(NSString *)path atomically:(BOOL)useAuxiliaryFile encoding:(NSStringEncoding)enc error:(NSError **)error {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2954,7 +3325,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)useAuxiliaryFile encoding:(NSStringEncoding)enc error:(NSError **)error {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -2994,7 +3365,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToFile:(NSString *)path atomically:(BOOL)useAuxiliaryFile {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -3002,7 +3373,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -3067,7 +3438,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToFile:(NSString *)path atomically:(BOOL)useAuxiliaryFile {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -3075,7 +3446,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -3083,7 +3454,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url error:(NSError **)error {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -3195,7 +3566,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToFile:(NSString *)path atomically:(BOOL)useAuxiliaryFile {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -3203,7 +3574,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToFile:(NSString *)path options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)error {
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -3214,7 +3585,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)useAuxiliaryFile {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return NO;
+        if (PXJBPathShouldBlockWrite(p)) return NO;
     }
     return %orig;
 }
@@ -3222,7 +3593,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url options:(NSDataWritingOptions)writeOptionsMask error:(NSError **)error {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -3389,7 +3760,7 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (BOOL)writeToURL:(NSURL *)url options:(NSFileWrapperWritingOptions)options originalContentsURL:(NSURL *)originalContentsURL error:(NSError **)outError {
     if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] && [url isFileURL]) {
         const char *p = [[url path] fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
+        if (PXJBPathShouldBlockWrite(p)) {
             if (outError) *outError = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
             return NO;
         }
@@ -3539,30 +3910,23 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             return;
         }
 
-        // Install-time capabilities. Optional hooks can be disabled at runtime,
-        // but enabling a hook that was not installed still requires app relaunch.
-        BOOL wantDyldHide = PXJBSettingEnabled(launchSettings, @"jbBypassHideDylibsEnabled");
-        BOOL wantBlockAddImage = PXJBSettingEnabled(launchSettings, @"jbBypassBlockDyldAddImageCallbacksEnabled");
-        BOOL wantHideTaskDyldInfo = PXJBSettingEnabled(launchSettings, @"jbBypassHideTaskDyldInfoEnabled");
-        BOOL wantHideDlIteratePhdr = PXJBSettingEnabled(launchSettings, @"jbBypassHideDlIteratePhdrEnabled");
-        BOOL wantBlockDlopenDlsym = PXJBSettingEnabled(launchSettings, @"jbBypassBlockDlopenDlsymProbesEnabled");
-        BOOL wantSysctlSanitize = PXJBSettingEnabled(launchSettings, @"jbBypassSysctlProcSanitizeEnabled");
-        BOOL wantHideProcMaps = PXJBSettingEnabled(launchSettings, @"jbBypassHideProcMapsEnabled");
-        BOOL wantHideObjcImages = PXJBSettingEnabled(launchSettings, @"jbBypassHideObjcImagesEnabled");
+        // P1-A: capture requested capabilities, but publish an empty effective
+        // mask before hook installation. The final mask is activated atomically
+        // only after the install audit has verified each capability.
+        PXJBPolicyMask launchRequestedMask = PXJBBuildRequestedPolicyMask(launchSettings);
+        PXJBPrepareCapabilityRegistry(launchRequestedMask);
 
-        gJBLaunchCapabilityMask = kPXJBPolicyMaster |
-                                 kPXJBPolicyStatfs |
-                                 kPXJBPolicyDebugLogging;
-        if (wantDyldHide) gJBLaunchCapabilityMask |= kPXJBPolicyHideDylibs;
-        if (wantBlockAddImage) gJBLaunchCapabilityMask |= kPXJBPolicyBlockDyldAddImageCallbacks;
-        if (wantHideTaskDyldInfo) gJBLaunchCapabilityMask |= kPXJBPolicyHideTaskDyldInfo;
-        if (wantHideDlIteratePhdr) gJBLaunchCapabilityMask |= kPXJBPolicyHideDlIteratePhdr;
-        if (wantBlockDlopenDlsym) gJBLaunchCapabilityMask |= kPXJBPolicyBlockDlopenDlsymProbes;
-        if (wantSysctlSanitize) gJBLaunchCapabilityMask |= kPXJBPolicySysctlProcSanitize;
-        if (wantHideProcMaps) gJBLaunchCapabilityMask |= kPXJBPolicyHideProcMaps;
-        if (wantHideObjcImages) gJBLaunchCapabilityMask |= kPXJBPolicyHideObjcImages;
+        BOOL wantDyldHide = (launchRequestedMask & kPXJBPolicyHideDylibs) != 0;
+        BOOL wantBlockAddImage = (launchRequestedMask & kPXJBPolicyBlockDyldAddImageCallbacks) != 0;
+        BOOL wantHideTaskDyldInfo = (launchRequestedMask & kPXJBPolicyHideTaskDyldInfo) != 0;
+        BOOL wantHideDlIteratePhdr = (launchRequestedMask & kPXJBPolicyHideDlIteratePhdr) != 0;
+        BOOL wantBlockDlopenDlsym = (launchRequestedMask & kPXJBPolicyBlockDlopenDlsymProbes) != 0;
+        BOOL wantSysctlSanitize = (launchRequestedMask & kPXJBPolicySysctlProcSanitize) != 0;
+        BOOL wantHideProcMaps = (launchRequestedMask & kPXJBPolicyHideProcMaps) != 0;
+        BOOL wantHideObjcImages = (launchRequestedMask & kPXJBPolicyHideObjcImages) != 0;
 
-        // Publish one complete snapshot before any native hook becomes visible.
+        // Pre-install publication intentionally resolves to zero because no
+        // capability has passed install audit yet.
         PXJBPublishPolicySnapshot(launchSettings);
 
         // Hook installation may call dlopen, logging, coordinator code and
@@ -3705,6 +4069,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                             PXJBNormalizeStatfs(buf);
                         }
                     }];
+                    gJBStatfsProviderRegistered = true;
                 });
             }
 
@@ -3906,7 +4271,13 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
         %init;
 
-        // Runtime reload happens off the hook path and publishes one atomic mask.
+        // Finalize install evidence, publish the immutable installed mask, then
+        // activate the requested subset with one atomic policy publication.
+        PXJBFinalizeCapabilityRegistryAndAudit();
+        PXJBPublishPolicySnapshot(launchSettings);
+
+        // Runtime reload happens off the hook path and can only use capabilities
+        // that passed the immutable install audit.
         PXJBStartPolicyReloadTimer();
 
         // Proactive env cleanup (safe) for scoped apps.
@@ -3961,4 +4332,163 @@ static kern_return_t hook_task_info(task_t target_task, task_flavor_t flavor, ta
 void PXJBInstallTaskInfoHook(void *sym) {
     if (!sym) return;
     MSHookFunction(sym, (void *)hook_task_info, (void **)&orig_task_info);
+}
+
+static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&gJBCapabilityRegistryFinalized,
+                                                  &expected,
+                                                  true,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+        return atomic_load_explicit(&gJBInstalledCapabilityMask, memory_order_acquire);
+    }
+
+#define PXJB_AUDIT(capability, symbolName, pointerValue, requiredValue)     PXJBCapabilityAuditSymbol((capability), (symbolName), (pointerValue) != NULL, (requiredValue))
+
+    // Core baseline: audit every unconditional native hook, while only stable
+    // filesystem/process primitives are hard requirements for master activation.
+    PXJB_AUDIT(kPXJBCapabilityCore, "stat", orig_stat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "stat64", orig_stat64, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "lstat", orig_lstat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "lstat64", orig_lstat64, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "access", orig_access, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "open", orig_open, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "openat", orig_openat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fopen", orig_fopen, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "opendir", orig_opendir, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "readdir", orig_readdir, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "readlink", orig_readlink, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "realpath", orig_realpath, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "connect", orig_connect, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getenv", orig_getenv, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "ptrace", orig_ptrace, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fork", orig_fork, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "vfork", orig_vfork, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getuid", orig_getuid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "geteuid", orig_geteuid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getgid", orig_getgid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getegid", orig_getegid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "setuid", orig_setuid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "seteuid", orig_seteuid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "setgid", orig_setgid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "setegid", orig_setegid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "setreuid", orig_setreuid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "setregid", orig_setregid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getppid", orig_getppid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "csops", orig_csops, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "system", orig_system, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "popen", orig_popen, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "posix_spawn", orig_posix_spawn, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "posix_spawnp", orig_posix_spawnp, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "dlopen_preflight", orig_dlopen_preflight, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "creat", orig_creat, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fstat", orig_fstat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fstatat", orig_fstatat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "faccessat", orig_faccessat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "readlinkat", orig_readlinkat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "symlink", orig_symlink, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "rename", orig_rename, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "link", orig_link, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "unlink", orig_unlink, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "remove", orig_remove_func, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "rmdir", orig_rmdir, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "objc_copyClassNamesForImage", orig_objc_copyClassNamesForImage, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "NSVersionOfRunTimeLibrary", orig_NSVersionOfRunTimeLibrary, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "NSVersionOfLinkTimeLibrary", orig_NSVersionOfLinkTimeLibrary, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getmntinfo", orig_getmntinfo, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "bootstrap_look_up", orig_bootstrap_look_up, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "vm_region_64", orig_vm_region_64, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "task_get_exception_ports", orig_task_get_exception_ports, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "xpc_pipe_routine", orig_xpc_pipe_routine, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "xpc_pipe_routine_with_flags", orig_xpc_pipe_routine_with_flags, false);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilityCore, "logos-init-invoked", true, true);
+
+    PXJBCapabilityAuditSymbol(kPXJBCapabilityStatfs,
+                              "statfs-provider-registration",
+                              gJBStatfsProviderRegistered,
+                              true);
+    PXJB_AUDIT(kPXJBCapabilityStatfs, "statfs-provider-original", orig_statfs, true);
+    PXJB_AUDIT(kPXJBCapabilityStatfs, "fstatfs", orig_fstatfs, false);
+    PXJB_AUDIT(kPXJBCapabilityStatfs, "statvfs", orig_statvfs, false);
+    PXJB_AUDIT(kPXJBCapabilityStatfs, "fstatvfs", orig_fstatvfs, false);
+
+    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_image_count", orig__dyld_image_count, true);
+    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_get_image_name", orig__dyld_get_image_name, true);
+    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_get_image_header", orig__dyld_get_image_header, true);
+    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_get_image_vmaddr_slide", orig__dyld_get_image_vmaddr_slide, true);
+    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "dladdr", orig_dladdr, false);
+    if (gJBCapabilities[kPXJBCapabilityDyldIndexed].requested &&
+        !atomic_load_explicit(&gJBDyldIndexedHooksReady, memory_order_acquire)) {
+        PXJBCapabilitySetFailure(kPXJBCapabilityDyldIndexed, "trampoline-integrity-failed");
+    }
+
+    PXJB_AUDIT(kPXJBCapabilityDyldAddImage, "_dyld_register_func_for_add_image", orig__dyld_register_func_for_add_image, true);
+    PXJB_AUDIT(kPXJBCapabilityTaskDyldInfo, "task_info", orig_task_info, true);
+    PXJB_AUDIT(kPXJBCapabilityDlIteratePhdr, "dl_iterate_phdr", orig_dl_iterate_phdr, true);
+    PXJB_AUDIT(kPXJBCapabilityDlopenDlsym, "dlopen", orig_dlopen, true);
+    PXJB_AUDIT(kPXJBCapabilityDlopenDlsym, "dlsym", orig_dlsym, true);
+
+    // Current source intentionally omits direct sysctl ownership and has no
+    // coordinator provider registration in this module. Do not grant the bit.
+    PXJBCapabilityAuditSymbol(kPXJBCapabilitySysctlSanitize, "sysctl-provider", false, true);
+    if (gJBCapabilities[kPXJBCapabilitySysctlSanitize].requested) {
+        PXJBCapabilitySetFailure(kPXJBCapabilitySysctlSanitize, "provider-not-wired");
+    }
+
+    PXJB_AUDIT(kPXJBCapabilityProcMaps, "proc_regionfilename", orig_proc_regionfilename, true);
+    PXJB_AUDIT(kPXJBCapabilityObjcImages, "objc_copyImageNames", orig_objc_copyImageNames, true);
+    PXJB_AUDIT(kPXJBCapabilityObjcImages, "class_getImageName", orig_class_getImageName, true);
+    PXJBCapabilityAuditSymbol(kPXJBCapabilityDebugLogging, "atomic-counter", true, true);
+
+#undef PXJB_AUDIT
+
+    PXJBPolicyMask readyMask = 0;
+    uint32_t requestedCount = 0;
+    uint32_t readyCount = 0;
+    uint32_t failedCount = 0;
+
+    for (uint32_t i = 0; i < kPXJBCapabilityCount; i++) {
+        PXJBCapabilityRecord *record = &gJBCapabilities[i];
+        if (record->requested) {
+            requestedCount++;
+            if (!record->failureReason && record->missingRequiredSymbols > 0) {
+                record->failureReason = "required-symbol-missing";
+            }
+            record->ready = record->failureReason == NULL &&
+                            record->missingRequiredSymbols == 0 &&
+                            record->installedSymbols >= record->requiredSymbols;
+            if (i != kPXJBCapabilityCore &&
+                !gJBCapabilities[kPXJBCapabilityCore].ready) {
+                record->ready = false;
+                if (!record->failureReason) record->failureReason = "core-not-ready";
+            }
+            if (record->ready) {
+                readyMask |= record->policyBit;
+                readyCount++;
+            } else {
+                failedCount++;
+            }
+        }
+
+        PXFileDebugAIDA64Log("[JailbreakBypass.capability] name=%s requested=%d attempted=%d ready=%d installed=%u/%u required=%u missing_required=%u first_missing=%s reason=%s",
+                            record->name,
+                            record->requested ? 1 : 0,
+                            record->attempted ? 1 : 0,
+                            record->ready ? 1 : 0,
+                            (unsigned int)record->installedSymbols,
+                            (unsigned int)record->expectedSymbols,
+                            (unsigned int)record->requiredSymbols,
+                            (unsigned int)record->missingRequiredSymbols,
+                            record->firstMissingRequiredSymbol ? record->firstMissingRequiredSymbol : "-",
+                            record->failureReason ? record->failureReason : "-");
+    }
+
+    atomic_store_explicit(&gJBInstalledCapabilityMask, readyMask, memory_order_release);
+    PXLog(@"[JailbreakBypass] capability audit requested=%u ready=%u failed=%u mask=0x%llx",
+          requestedCount,
+          readyCount,
+          failedCount,
+          (unsigned long long)readyMask);
+    return readyMask;
 }
