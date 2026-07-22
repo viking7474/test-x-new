@@ -1,4 +1,4 @@
-// JailbreakBypassHooks.x
+﻿// JailbreakBypassHooks.x
 // Phase 1: File/URL/InstalledApps/LoopbackPortScan/WriteCheck
 
 #import <Foundation/Foundation.h>
@@ -2169,11 +2169,38 @@ static int hook_posix_spawnp(pid_t *restrict pid, const char *restrict file, con
 // Its operation-specific variadic ABI is intentionally left unhooked.
 
 // Phase 3: dylib hiding (dyld enumeration + dladdr)
+// Atomic snapshot: immutable snapshot swapped atomically. TLS-cached
+// reference ensures count/name/header/slide see the same map.
+
+typedef struct PXDyldSnapshot {
+    _Atomic(int32_t) refCount;
+    uint32_t *map;
+    uint32_t visibleCount;
+    uint32_t realCount;
+    uint64_t buildNs;
+} PXDyldSnapshot;
+
+static _Atomic(PXDyldSnapshot *) gDyldCurrentSnapshot = NULL;
 static pthread_mutex_t gDyldLock = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t *gVisibleToReal = NULL;
-static uint32_t gVisibleCount = 0;
-static uint32_t gRealCount = 0;
-static uint64_t gDyldLastBuildNs = 0;
+static __thread PXDyldSnapshot *tls_dyldSnapshot = NULL;
+
+static PXDyldSnapshot *PXDyldSnapshotRetain(PXDyldSnapshot *snap) {
+    if (snap) atomic_fetch_add_explicit(&snap->refCount, 1, memory_order_relaxed);
+    return snap;
+}
+
+static void PXDyldSnapshotRelease(PXDyldSnapshot *snap) {
+    if (!snap) return;
+    if (atomic_fetch_sub_explicit(&snap->refCount, 1, memory_order_acq_rel) == 1) {
+        free(snap->map);
+        free(snap);
+    }
+}
+
+static PXDyldSnapshot *PXDyldAcquireSnapshot(void) {
+    PXDyldSnapshot *snap = atomic_load_explicit(&gDyldCurrentSnapshot, memory_order_acquire);
+    return PXDyldSnapshotRetain(snap);
+}
 
 // P0-E: the only callable originals are trampolines returned by MSHookFunction.
 // Entry pointers are retained solely for integrity comparison and are never invoked.
@@ -2515,24 +2542,23 @@ static BOOL PXJBHandleSysctlBynameSanitizeRequest(const char *name,
 static void PXDyldRebuildVisibleMapLocked(void) {
     uint32_t count = PXDyldOriginalImageCount();
     if (count == 0) {
-        free(gVisibleToReal);
-        gVisibleToReal = NULL;
-        gRealCount = 0;
-        gVisibleCount = 0;
-        gDyldLastBuildNs = PXJBMonotonicNanoseconds();
+        PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, NULL, memory_order_acq_rel);
+        PXDyldSnapshotRelease(old);
         return;
     }
 
-    uint32_t *replacement = (uint32_t *)calloc(count, sizeof(uint32_t));
-    if (!replacement) {
-        // Fail open rather than expose a stale index map from another dyld
-        // generation. The indexed wrappers call the original trampoline when
-        // no visible map is available.
-        free(gVisibleToReal);
-        gVisibleToReal = NULL;
-        gRealCount = count;
-        gVisibleCount = 0;
-        gDyldLastBuildNs = PXJBMonotonicNanoseconds();
+    PXDyldSnapshot *snap = (PXDyldSnapshot *)calloc(1, sizeof(PXDyldSnapshot));
+    if (!snap) {
+        PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, NULL, memory_order_acq_rel);
+        PXDyldSnapshotRelease(old);
+        return;
+    }
+
+    snap->map = (uint32_t *)calloc(count, sizeof(uint32_t));
+    if (!snap->map) {
+        free(snap);
+        PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, NULL, memory_order_acq_rel);
+        PXDyldSnapshotRelease(old);
         return;
     }
 
@@ -2540,15 +2566,16 @@ static void PXDyldRebuildVisibleMapLocked(void) {
     for (uint32_t i = 0; i < count; i++) {
         const char *name = PXDyldOriginalImageName(i);
         if (PXJBShouldHideImageName(name)) continue;
-        replacement[visible++] = i;
+        snap->map[visible++] = i;
     }
 
-    uint32_t *oldMap = gVisibleToReal;
-    gVisibleToReal = replacement;
-    gRealCount = count;
-    gVisibleCount = visible;
-    gDyldLastBuildNs = PXJBMonotonicNanoseconds();
-    free(oldMap);
+    snap->visibleCount = visible;
+    snap->realCount = count;
+    snap->buildNs = PXJBMonotonicNanoseconds();
+    atomic_store_explicit(&snap->refCount, 1, memory_order_relaxed);
+
+    PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, snap, memory_order_acq_rel);
+    PXDyldSnapshotRelease(old);
 }
 
 static void PXDyldEnsureVisibleMap(void) {
@@ -2557,12 +2584,23 @@ static void PXDyldEnsureVisibleMap(void) {
     uint64_t nowNs = PXJBMonotonicNanoseconds();
     uint32_t countNow = PXDyldOriginalImageCount();
 
-    pthread_mutex_lock(&gDyldLock);
-    BOOL expired = (nowNs == 0 || gDyldLastBuildNs == 0 ||
-                    nowNs - gDyldLastBuildNs > 1000000000ull);
-    BOOL needsRebuild = (gVisibleToReal == NULL) ||
-                        (gRealCount != countNow) ||
+    // Fast path: check without locking.
+    PXDyldSnapshot *current = atomic_load_explicit(&gDyldCurrentSnapshot, memory_order_acquire);
+    BOOL expired = (nowNs == 0 || !current || current->buildNs == 0 ||
+                    nowNs - current->buildNs > 1000000000ull);
+    BOOL needsRebuild = (!current) ||
+                        (current->realCount != countNow) ||
                         expired;
+    if (!needsRebuild) return;
+
+    // Slow path: acquire lock, double-check, rebuild.
+    pthread_mutex_lock(&gDyldLock);
+    current = atomic_load_explicit(&gDyldCurrentSnapshot, memory_order_acquire);
+    expired = (nowNs == 0 || !current || current->buildNs == 0 ||
+              nowNs - current->buildNs > 1000000000ull);
+    needsRebuild = (!current) ||
+                   (current->realCount != countNow) ||
+                   expired;
     if (needsRebuild) PXDyldRebuildVisibleMapLocked();
     pthread_mutex_unlock(&gDyldLock);
 }
@@ -2573,10 +2611,13 @@ static uint32_t hook__dyld_image_count(void) {
     if (!dyldScope.entered || !PXJBHideDylibsEnabled()) return originalCount;
 
     PXDyldEnsureVisibleMap();
-    pthread_mutex_lock(&gDyldLock);
-    uint32_t result = gVisibleToReal ? gVisibleCount : originalCount;
-    pthread_mutex_unlock(&gDyldLock);
-    return result;
+
+    // Cache snapshot in TLS so subsequent name/header/slide calls
+    // on this thread see a consistent index mapping.
+    PXDyldSnapshotRelease(tls_dyldSnapshot);
+    tls_dyldSnapshot = PXDyldAcquireSnapshot();
+
+    return tls_dyldSnapshot ? tls_dyldSnapshot->visibleCount : originalCount;
 }
 
 static const char *hook__dyld_get_image_name(uint32_t image_index) {
@@ -2586,17 +2627,23 @@ static const char *hook__dyld_get_image_name(uint32_t image_index) {
     }
 
     PXDyldEnsureVisibleMap();
-    pthread_mutex_lock(&gDyldLock);
-    if (!gVisibleToReal) {
-        pthread_mutex_unlock(&gDyldLock);
+
+    PXDyldSnapshot *snap = tls_dyldSnapshot;
+    BOOL ownedSnap = NO;
+    if (!snap) {
+        snap = PXDyldAcquireSnapshot();
+        ownedSnap = YES;
+    }
+    if (!snap || !snap->map) {
+        if (ownedSnap) PXDyldSnapshotRelease(snap);
         return PXDyldOriginalImageName(image_index);
     }
-    if (image_index >= gVisibleCount) {
-        pthread_mutex_unlock(&gDyldLock);
+    if (image_index >= snap->visibleCount) {
+        if (ownedSnap) PXDyldSnapshotRelease(snap);
         return NULL;
     }
-    uint32_t realIndex = gVisibleToReal[image_index];
-    pthread_mutex_unlock(&gDyldLock);
+    uint32_t realIndex = snap->map[image_index];
+    if (ownedSnap) PXDyldSnapshotRelease(snap);
     return PXDyldOriginalImageName(realIndex);
 }
 
@@ -2607,17 +2654,23 @@ static const struct mach_header *hook__dyld_get_image_header(uint32_t image_inde
     }
 
     PXDyldEnsureVisibleMap();
-    pthread_mutex_lock(&gDyldLock);
-    if (!gVisibleToReal) {
-        pthread_mutex_unlock(&gDyldLock);
+
+    PXDyldSnapshot *snap = tls_dyldSnapshot;
+    BOOL ownedSnap = NO;
+    if (!snap) {
+        snap = PXDyldAcquireSnapshot();
+        ownedSnap = YES;
+    }
+    if (!snap || !snap->map) {
+        if (ownedSnap) PXDyldSnapshotRelease(snap);
         return PXDyldOriginalImageHeader(image_index);
     }
-    if (image_index >= gVisibleCount) {
-        pthread_mutex_unlock(&gDyldLock);
+    if (image_index >= snap->visibleCount) {
+        if (ownedSnap) PXDyldSnapshotRelease(snap);
         return NULL;
     }
-    uint32_t realIndex = gVisibleToReal[image_index];
-    pthread_mutex_unlock(&gDyldLock);
+    uint32_t realIndex = snap->map[image_index];
+    if (ownedSnap) PXDyldSnapshotRelease(snap);
     return PXDyldOriginalImageHeader(realIndex);
 }
 
@@ -2628,17 +2681,23 @@ static intptr_t hook__dyld_get_image_vmaddr_slide(uint32_t image_index) {
     }
 
     PXDyldEnsureVisibleMap();
-    pthread_mutex_lock(&gDyldLock);
-    if (!gVisibleToReal) {
-        pthread_mutex_unlock(&gDyldLock);
+
+    PXDyldSnapshot *snap = tls_dyldSnapshot;
+    BOOL ownedSnap = NO;
+    if (!snap) {
+        snap = PXDyldAcquireSnapshot();
+        ownedSnap = YES;
+    }
+    if (!snap || !snap->map) {
+        if (ownedSnap) PXDyldSnapshotRelease(snap);
         return PXDyldOriginalImageSlide(image_index);
     }
-    if (image_index >= gVisibleCount) {
-        pthread_mutex_unlock(&gDyldLock);
+    if (image_index >= snap->visibleCount) {
+        if (ownedSnap) PXDyldSnapshotRelease(snap);
         return 0;
     }
-    uint32_t realIndex = gVisibleToReal[image_index];
-    pthread_mutex_unlock(&gDyldLock);
+    uint32_t realIndex = snap->map[image_index];
+    if (ownedSnap) PXDyldSnapshotRelease(snap);
     return PXDyldOriginalImageSlide(realIndex);
 }
 
