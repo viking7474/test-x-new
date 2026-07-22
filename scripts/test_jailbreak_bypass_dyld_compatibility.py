@@ -114,7 +114,43 @@ def main() -> None:
     matrix.check("dyld: count remains unhooked", 'FindSymbol("_dyld_image_count")' not in SOURCE)
     matrix.check("dyld: header remains unhooked", 'FindSymbol("_dyld_get_image_header")' not in SOURCE)
     matrix.check("dyld: slide remains unhooked", 'FindSymbol("_dyld_get_image_vmaddr_slide")' not in SOURCE)
-    matrix.check("dyld: name remains hooked", 'FindSymbol("_dyld_get_image_name")' in SOURCE)
+    matrix.check("dyld: name implementation remains available", 'FindSymbol("_dyld_get_image_name")' in SOURCE)
+
+    disabled_mask = re.search(
+        r"kPXJBPolicyProductionDisabledLoaderMask\s*=\s*(.*?);",
+        SOURCE,
+        re.S,
+    )
+    if not disabled_mask:
+        raise AssertionError("production-disabled loader mask not found")
+    disabled_mask_body = disabled_mask.group(1)
+    disabled_bits = (
+        "kPXJBPolicyHideDylibs",
+        "kPXJBPolicyBlockDyldAddImageCallbacks",
+        "kPXJBPolicyHideTaskDyldInfo",
+        "kPXJBPolicyHideDlIteratePhdr",
+        "kPXJBPolicyBlockDlopenDlsymProbes",
+        "kPXJBPolicyHideObjcImages",
+    )
+    matrix.check(
+        "production: all six risky loader bits are disabled",
+        all(disabled_mask_body.count(bit) == 1 for bit in disabled_bits),
+    )
+    matrix.check(
+        "production: disabled mask contains only six bits",
+        disabled_mask_body.count("kPXJBPolicy") == len(disabled_bits),
+    )
+
+    policy_builder = source_function("PXJBBuildRequestedPolicyMask")
+    matrix.check(
+        "production: launch and reload clear risky loader bits",
+        "return mask & ~kPXJBPolicyProductionDisabledLoaderMask;" in policy_builder,
+    )
+    publisher = source_function("PXJBPublishPolicySnapshot")
+    matrix.check(
+        "production: runtime reload uses the guarded policy builder",
+        "PXJBBuildRequestedPolicyMask(settings ?: @{})" in publisher,
+    )
 
     name_hook = source_function("hook__dyld_get_image_name")
     matrix.check("dyld: original index is preserved", "PXDyldOriginalImageName(image_index)" in name_hook)
