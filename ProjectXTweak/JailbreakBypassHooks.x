@@ -35,6 +35,7 @@
 #import <dispatch/dispatch.h>
 #import <mach/mach.h>
 #import <stdint.h>
+#import <stddef.h>
 #import <stdbool.h>
 #import <stdatomic.h>
 #import <time.h>
@@ -482,7 +483,7 @@ enum {
 };
 
 static _Atomic(PXJBPolicyMask) gJBPolicyMask = 0;
-static _Atomic(bool) gJBDyldIndexedHooksReady = false;
+static _Atomic(bool) gJBDyldNameHookReady = false;
 
 // P1-A: requested settings are not capabilities. A policy bit becomes usable
 // only after the install audit proves the corresponding hook/provider is ready.
@@ -590,7 +591,7 @@ static dispatch_source_t gJBPolicyReloadTimer = NULL;
 // only filesystem interposition while those domains are active.
 enum {
     kPXJBReentryFilesystem   = 1u << 0,
-    kPXJBReentryDyldSnapshot = 1u << 1,
+    kPXJBReentryDyldNames = 1u << 1,
     kPXJBReentryPolicyReload = 1u << 2,
     kPXJBReentryLogging      = 1u << 3,
     kPXJBReentryExec         = 1u << 4,
@@ -767,7 +768,7 @@ static BOOL PXJBShouldBypassCached(void) {
 
 static inline BOOL PXJBFilesystemFilteringAllowed(void) {
     const uint32_t suppressDomains = kPXJBReentryFilesystem |
-                                     kPXJBReentryDyldSnapshot |
+                                     kPXJBReentryDyldNames |
                                      kPXJBReentryPolicyReload |
                                      kPXJBReentryLogging |
                                      kPXJBReentryExec |
@@ -805,7 +806,7 @@ static BOOL PXJBStatfsBypassEnabled(void) {
 
 static BOOL PXJBHideDylibsEnabled(void) {
     return PXJBPolicyFeatureEnabled(kPXJBPolicyHideDylibs) &&
-           atomic_load_explicit(&gJBDyldIndexedHooksReady, memory_order_acquire);
+           atomic_load_explicit(&gJBDyldNameHookReady, memory_order_acquire);
 }
 
 // Forward declaration (defined later in dyld section).
@@ -2168,87 +2169,23 @@ static int hook_posix_spawnp(pid_t *restrict pid, const char *restrict file, con
 // P0-B: sandbox_check interception is not a production capability.
 // Its operation-specific variadic ABI is intentionally left unhooked.
 
-// Phase 3: dylib hiding (dyld enumeration + dladdr)
-// Atomic snapshot: immutable snapshot swapped atomically. TLS-cached
-// reference ensures count/name/header/slide see the same map.
-
-typedef struct PXDyldSnapshot {
-    _Atomic(int32_t) refCount;
-    uint32_t *map;
-    uint32_t visibleCount;
-    uint32_t realCount;
-    uint64_t buildNs;
-} PXDyldSnapshot;
-
-static _Atomic(PXDyldSnapshot *) gDyldCurrentSnapshot = NULL;
-static pthread_mutex_t gDyldLock = PTHREAD_MUTEX_INITIALIZER;
-static __thread PXDyldSnapshot *tls_dyldSnapshot = NULL;
-
-static PXDyldSnapshot *PXDyldSnapshotRetain(PXDyldSnapshot *snap) {
-    if (snap) atomic_fetch_add_explicit(&snap->refCount, 1, memory_order_relaxed);
-    return snap;
-}
-
-static void PXDyldSnapshotRelease(PXDyldSnapshot *snap) {
-    if (!snap) return;
-    if (atomic_fetch_sub_explicit(&snap->refCount, 1, memory_order_acq_rel) == 1) {
-        free(snap->map);
-        free(snap);
-    }
-}
-
-static PXDyldSnapshot *PXDyldAcquireSnapshot(void) {
-    PXDyldSnapshot *snap = atomic_load_explicit(&gDyldCurrentSnapshot, memory_order_acquire);
-    return PXDyldSnapshotRetain(snap);
-}
-
-// P0-E: the only callable originals are trampolines returned by MSHookFunction.
-// Entry pointers are retained solely for integrity comparison and are never invoked.
-typedef uint32_t (*PXDyldImageCountFn)(void);
+// Phase 3: compatibility-first dylib hiding.
+// Preserve dyld cardinality and index identity. Only image-name surfaces are
+// sanitized; count/header/slide remain owned by dyld and are never hooked.
 typedef const char *(*PXDyldImageNameFn)(uint32_t image_index);
-typedef const struct mach_header *(*PXDyldImageHeaderFn)(uint32_t image_index);
-typedef intptr_t (*PXDyldImageSlideFn)(uint32_t image_index);
 
-static PXDyldImageCountFn orig__dyld_image_count = NULL;
 static PXDyldImageNameFn orig__dyld_get_image_name = NULL;
-static PXDyldImageHeaderFn orig__dyld_get_image_header = NULL;
-static PXDyldImageSlideFn orig__dyld_get_image_vmaddr_slide = NULL;
-
-static PXDyldImageCountFn gDyldImageCountEntry = NULL;
 static PXDyldImageNameFn gDyldImageNameEntry = NULL;
-static PXDyldImageHeaderFn gDyldImageHeaderEntry = NULL;
-static PXDyldImageSlideFn gDyldImageSlideEntry = NULL;
 
-static BOOL PXDyldIndexedTrampolinesAreReady(void) {
-    return orig__dyld_image_count != NULL &&
-           orig__dyld_image_count != gDyldImageCountEntry &&
-           orig__dyld_get_image_name != NULL &&
-           orig__dyld_get_image_name != gDyldImageNameEntry &&
-           orig__dyld_get_image_header != NULL &&
-           orig__dyld_get_image_header != gDyldImageHeaderEntry &&
-           orig__dyld_get_image_vmaddr_slide != NULL &&
-           orig__dyld_get_image_vmaddr_slide != gDyldImageSlideEntry;
-}
-
-static uint32_t PXDyldOriginalImageCount(void) {
-    if (!orig__dyld_image_count || orig__dyld_image_count == gDyldImageCountEntry) return 0;
-    return orig__dyld_image_count();
+static BOOL PXDyldNameTrampolineIsReady(void) {
+    return orig__dyld_get_image_name != NULL &&
+           orig__dyld_get_image_name != gDyldImageNameEntry;
 }
 
 static const char *PXDyldOriginalImageName(uint32_t idx) {
-    if (!orig__dyld_get_image_name || orig__dyld_get_image_name == gDyldImageNameEntry) return NULL;
+    if (!orig__dyld_get_image_name ||
+        orig__dyld_get_image_name == gDyldImageNameEntry) return NULL;
     return orig__dyld_get_image_name(idx);
-}
-
-static const struct mach_header *PXDyldOriginalImageHeader(uint32_t idx) {
-    if (!orig__dyld_get_image_header || orig__dyld_get_image_header == gDyldImageHeaderEntry) return NULL;
-    return orig__dyld_get_image_header(idx);
-}
-
-static intptr_t PXDyldOriginalImageSlide(uint32_t idx) {
-    if (!orig__dyld_get_image_vmaddr_slide ||
-        orig__dyld_get_image_vmaddr_slide == gDyldImageSlideEntry) return 0;
-    return orig__dyld_get_image_vmaddr_slide(idx);
 }
 
 static BOOL PXStrContainsNoCase(const char *haystack, const char *needle) {
@@ -2278,6 +2215,45 @@ static BOOL PXJBShouldHideImageName(const char *name) {
     return PXJBArtifactPathShouldMatch(name);
 }
 
+static uint32_t PXJBStableImageAliasHash(const char *name) {
+    uint32_t hash = 2166136261u;
+    if (!name) return hash;
+    for (const unsigned char *cursor = (const unsigned char *)name; *cursor; cursor++) {
+        unsigned char value = *cursor;
+        if (value >= 'A' && value <= 'Z') value = (unsigned char)(value - 'A' + 'a');
+        hash ^= value;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static const char *PXJBSanitizedImageName(const char *name) {
+    if (!name || !PXJBShouldHideImageName(name)) return name;
+
+    // Immutable process-lifetime aliases: no allocation, lock, TLS or index map.
+    // A stable hash spreads hidden images across believable system paths while
+    // preserving the same alias for the same original path on every call.
+    static const char *const aliases[] = {
+        "/System/Library/Frameworks/Accelerate.framework/Accelerate",
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+        "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+        "/System/Library/Frameworks/Foundation.framework/Foundation",
+        "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+        "/System/Library/Frameworks/Security.framework/Security",
+        "/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration",
+        "/System/Library/PrivateFrameworks/CoreAnalytics.framework/CoreAnalytics",
+        "/System/Library/PrivateFrameworks/CoreUtils.framework/CoreUtils",
+        "/System/Library/PrivateFrameworks/LoggingSupport.framework/LoggingSupport",
+        "/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libc++.1.dylib",
+        "/usr/lib/libobjc.A.dylib",
+        "/usr/lib/system/libsystem_trace.dylib",
+    };
+    return aliases[PXJBStableImageAliasHash(name) % PXJB_ARRAY_COUNT(aliases)];
+}
+
 // Phase 3 strong option: hide libproc-based region filename queries
 static int (*orig_proc_regionfilename)(int pid, uint64_t address, void *buffer, uint32_t buffersize);
 static int hook_proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t buffersize) {
@@ -2298,42 +2274,43 @@ static int hook_proc_regionfilename(int pid, uint64_t address, void *buffer, uin
     return r;
 }
 
-// Phase 3 strong option: hide ObjC runtime image list
+// Phase 3 compatibility option: preserve ObjC image-list cardinality and
+// sanitize only the path strings exposed to callers.
 static const char **(*orig_objc_copyImageNames)(unsigned int *outCount);
 static const char **hook_objc_copyImageNames(unsigned int *outCount) {
     const char **list = orig_objc_copyImageNames ? orig_objc_copyImageNames(outCount) : NULL;
-    if (!PXJBHideObjcImagesEnabled()) {
-        return list;
-    }
-    if (!list || !outCount || *outCount == 0) {
+    if (!PXJBHideObjcImagesEnabled() || !list || !outCount || *outCount == 0) {
         return list;
     }
 
-    unsigned int inCount = *outCount;
-    // Allocate a new list and free the original (caller will free what we return).
-    const char **out = (const char **)calloc(inCount + 1, sizeof(char *));
-    if (!out) {
-        return list;
+    unsigned int count = *outCount;
+    BOOL changed = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        if (PXJBSanitizedImageName(list[i]) != list[i]) {
+            changed = YES;
+            break;
+        }
     }
+    if (!changed) return list;
 
-    unsigned int j = 0;
-    for (unsigned int i = 0; i < inCount; i++) {
-        const char *nm = list[i];
-        if (PXJBShouldHideImageName(nm)) continue;
-        out[j++] = nm;
+    // objc_copyImageNames returns a caller-owned pointer array. Replace only
+    // that array; original and alias strings both have process lifetime.
+    const char **out = (const char **)calloc(count + 1, sizeof(char *));
+    if (!out) return list; // fail open without corrupting ownership
+
+    for (unsigned int i = 0; i < count; i++) {
+        out[i] = PXJBSanitizedImageName(list[i]);
     }
-    out[j] = NULL;
-    *outCount = j;
+    out[count] = NULL;
     free((void *)list);
     return out;
 }
 
 static const char *(*orig_class_getImageName)(Class cls);
 static const char *hook_class_getImageName(Class cls) {
-    const char *nm = orig_class_getImageName ? orig_class_getImageName(cls) : NULL;
-    if (!PXJBHideObjcImagesEnabled()) return nm;
-    if (PXJBShouldHideImageName(nm)) return NULL;
-    return nm;
+    const char *name = orig_class_getImageName ? orig_class_getImageName(cls) : NULL;
+    if (!PXJBHideObjcImagesEnabled()) return name;
+    return PXJBSanitizedImageName(name);
 }
 
 static BOOL PXJBShouldBlockDlopenPath(const char *path) {
@@ -2375,10 +2352,24 @@ static int px_dl_iterate_phdr_cb(struct dl_phdr_info *info, size_t size, void *d
     PXJBPhdrIterCtx *ctx = (PXJBPhdrIterCtx *)data;
     if (!ctx || !ctx->cb) return 0;
 
-    if (PXJBHideDlIteratePhdrEnabled() && info) {
-        const char *nm = info->dlpi_name;
-        if (PXJBShouldHideImageName(nm)) {
-            return 0; // skip
+    const size_t nameFieldEnd =
+        offsetof(struct dl_phdr_info, dlpi_name) + sizeof(info->dlpi_name);
+    if (PXJBHideDlIteratePhdrEnabled() &&
+        info &&
+        size >= nameFieldEnd) {
+        const char *sanitized = PXJBSanitizedImageName(info->dlpi_name);
+        if (sanitized != info->dlpi_name) {
+            // Preserve every ABI field and the callback cardinality. The SDK
+            // declaration may expose only leading fields, so copy exactly the
+            // runtime-provided size before replacing dlpi_name.
+            void *copy = malloc(size);
+            if (copy) {
+                memcpy(copy, info, size);
+                ((struct dl_phdr_info *)copy)->dlpi_name = sanitized;
+                int result = ctx->cb((struct dl_phdr_info *)copy, size, ctx->data);
+                free(copy);
+                return result;
+            }
         }
     }
     return ctx->cb(info, size, ctx->data);
@@ -2539,179 +2530,21 @@ static BOOL PXJBHandleSysctlBynameSanitizeRequest(const char *name,
     return YES;
 }
 
-static void PXDyldRebuildVisibleMapLocked(void) {
-    uint32_t count = PXDyldOriginalImageCount();
-    if (count == 0) {
-        PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, NULL, memory_order_acq_rel);
-        PXDyldSnapshotRelease(old);
-        return;
-    }
-
-    PXDyldSnapshot *snap = (PXDyldSnapshot *)calloc(1, sizeof(PXDyldSnapshot));
-    if (!snap) {
-        PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, NULL, memory_order_acq_rel);
-        PXDyldSnapshotRelease(old);
-        return;
-    }
-
-    snap->map = (uint32_t *)calloc(count, sizeof(uint32_t));
-    if (!snap->map) {
-        free(snap);
-        PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, NULL, memory_order_acq_rel);
-        PXDyldSnapshotRelease(old);
-        return;
-    }
-
-    uint32_t visible = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = PXDyldOriginalImageName(i);
-        if (PXJBShouldHideImageName(name)) continue;
-        snap->map[visible++] = i;
-    }
-
-    snap->visibleCount = visible;
-    snap->realCount = count;
-    snap->buildNs = PXJBMonotonicNanoseconds();
-    atomic_store_explicit(&snap->refCount, 1, memory_order_relaxed);
-
-    PXDyldSnapshot *old = atomic_exchange_explicit(&gDyldCurrentSnapshot, snap, memory_order_acq_rel);
-    PXDyldSnapshotRelease(old);
-}
-
-static void PXDyldEnsureVisibleMap(void) {
-    if (!PXJBHideDylibsEnabled()) return;
-
-    uint64_t nowNs = PXJBMonotonicNanoseconds();
-    uint32_t countNow = PXDyldOriginalImageCount();
-
-    // Fast path: check without locking.
-    PXDyldSnapshot *current = atomic_load_explicit(&gDyldCurrentSnapshot, memory_order_acquire);
-    BOOL expired = (nowNs == 0 || !current || current->buildNs == 0 ||
-                    nowNs - current->buildNs > 1000000000ull);
-    BOOL needsRebuild = (!current) ||
-                        (current->realCount != countNow) ||
-                        expired;
-    if (!needsRebuild) return;
-
-    // Slow path: acquire lock, double-check, rebuild.
-    pthread_mutex_lock(&gDyldLock);
-    current = atomic_load_explicit(&gDyldCurrentSnapshot, memory_order_acquire);
-    expired = (nowNs == 0 || !current || current->buildNs == 0 ||
-              nowNs - current->buildNs > 1000000000ull);
-    needsRebuild = (!current) ||
-                   (current->realCount != countNow) ||
-                   expired;
-    if (needsRebuild) PXDyldRebuildVisibleMapLocked();
-    pthread_mutex_unlock(&gDyldLock);
-}
-
-static uint32_t hook__dyld_image_count(void) {
-    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
-    uint32_t originalCount = PXDyldOriginalImageCount();
-    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) return originalCount;
-
-    PXDyldEnsureVisibleMap();
-
-    // Cache snapshot in TLS so subsequent name/header/slide calls
-    // on this thread see a consistent index mapping.
-    PXDyldSnapshotRelease(tls_dyldSnapshot);
-    tls_dyldSnapshot = PXDyldAcquireSnapshot();
-
-    return tls_dyldSnapshot ? tls_dyldSnapshot->visibleCount : originalCount;
-}
-
 static const char *hook__dyld_get_image_name(uint32_t image_index) {
-    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
-    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) {
-        return PXDyldOriginalImageName(image_index);
-    }
-
-    PXDyldEnsureVisibleMap();
-
-    PXDyldSnapshot *snap = tls_dyldSnapshot;
-    BOOL ownedSnap = NO;
-    if (!snap) {
-        snap = PXDyldAcquireSnapshot();
-        ownedSnap = YES;
-    }
-    if (!snap || !snap->map) {
-        if (ownedSnap) PXDyldSnapshotRelease(snap);
-        return PXDyldOriginalImageName(image_index);
-    }
-    if (image_index >= snap->visibleCount) {
-        if (ownedSnap) PXDyldSnapshotRelease(snap);
-        return NULL;
-    }
-    uint32_t realIndex = snap->map[image_index];
-    if (ownedSnap) PXDyldSnapshotRelease(snap);
-    return PXDyldOriginalImageName(realIndex);
-}
-
-static const struct mach_header *hook__dyld_get_image_header(uint32_t image_index) {
-    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
-    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) {
-        return PXDyldOriginalImageHeader(image_index);
-    }
-
-    PXDyldEnsureVisibleMap();
-
-    PXDyldSnapshot *snap = tls_dyldSnapshot;
-    BOOL ownedSnap = NO;
-    if (!snap) {
-        snap = PXDyldAcquireSnapshot();
-        ownedSnap = YES;
-    }
-    if (!snap || !snap->map) {
-        if (ownedSnap) PXDyldSnapshotRelease(snap);
-        return PXDyldOriginalImageHeader(image_index);
-    }
-    if (image_index >= snap->visibleCount) {
-        if (ownedSnap) PXDyldSnapshotRelease(snap);
-        return NULL;
-    }
-    uint32_t realIndex = snap->map[image_index];
-    if (ownedSnap) PXDyldSnapshotRelease(snap);
-    return PXDyldOriginalImageHeader(realIndex);
-}
-
-static intptr_t hook__dyld_get_image_vmaddr_slide(uint32_t image_index) {
-    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
-    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) {
-        return PXDyldOriginalImageSlide(image_index);
-    }
-
-    PXDyldEnsureVisibleMap();
-
-    PXDyldSnapshot *snap = tls_dyldSnapshot;
-    BOOL ownedSnap = NO;
-    if (!snap) {
-        snap = PXDyldAcquireSnapshot();
-        ownedSnap = YES;
-    }
-    if (!snap || !snap->map) {
-        if (ownedSnap) PXDyldSnapshotRelease(snap);
-        return PXDyldOriginalImageSlide(image_index);
-    }
-    if (image_index >= snap->visibleCount) {
-        if (ownedSnap) PXDyldSnapshotRelease(snap);
-        return 0;
-    }
-    uint32_t realIndex = snap->map[image_index];
-    if (ownedSnap) PXDyldSnapshotRelease(snap);
-    return PXDyldOriginalImageSlide(realIndex);
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldNames);
+    const char *name = PXDyldOriginalImageName(image_index);
+    if (!dyldScope.entered || !PXJBHideDylibsEnabled()) return name;
+    return PXJBSanitizedImageName(name);
 }
 
 static int (*orig_dladdr)(const void *addr, Dl_info *info);
 static int hook_dladdr(const void *addr, Dl_info *info) {
-    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldSnapshot);
+    PXJB_REENTRY_SCOPE(dyldScope, kPXJBReentryDyldNames);
     int result = orig_dladdr ? orig_dladdr(addr, info) : 0;
     if (!dyldScope.entered || result == 0 || !info || !PXJBHideDylibsEnabled()) {
         return result;
     }
-    if (info->dli_fname && PXJBShouldHideImageName(info->dli_fname)) {
-        memset(info, 0, sizeof(*info));
-        return 0;
-    }
+    info->dli_fname = PXJBSanitizedImageName(info->dli_fname);
     return result;
 }
 
@@ -5166,47 +4999,30 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol("xpc_pipe_routine_with_flags");
             if (sym) MSHookFunction(sym, (void *)hook_xpc_pipe_routine_with_flags, (void **)&orig_xpc_pipe_routine_with_flags);
 
-            // P0-E: install the four indexed dyld APIs as one consistency group.
-            // The patched entries are never called as originals; only the
-            // trampolines returned by MSHookFunction are callable.
+            // Compatibility-first dyld concealment: hook only the name surface.
+            // count/header/slide retain their original dyld implementation and
+            // therefore preserve cardinality, index identity and valid pointers.
             if (wantDyldHide) {
-                void *countEntry = FindSymbol("_dyld_image_count");
                 void *nameEntry = FindSymbol("_dyld_get_image_name");
-                void *headerEntry = FindSymbol("_dyld_get_image_header");
-                void *slideEntry = FindSymbol("_dyld_get_image_vmaddr_slide");
-
-                if (countEntry && nameEntry && headerEntry && slideEntry) {
-                    gDyldImageCountEntry = (PXDyldImageCountFn)countEntry;
+                if (nameEntry) {
                     gDyldImageNameEntry = (PXDyldImageNameFn)nameEntry;
-                    gDyldImageHeaderEntry = (PXDyldImageHeaderFn)headerEntry;
-                    gDyldImageSlideEntry = (PXDyldImageSlideFn)slideEntry;
-
-                    MSHookFunction(countEntry,
-                                   (void *)hook__dyld_image_count,
-                                   (void **)&orig__dyld_image_count);
                     MSHookFunction(nameEntry,
                                    (void *)hook__dyld_get_image_name,
                                    (void **)&orig__dyld_get_image_name);
-                    MSHookFunction(headerEntry,
-                                   (void *)hook__dyld_get_image_header,
-                                   (void **)&orig__dyld_get_image_header);
-                    MSHookFunction(slideEntry,
-                                   (void *)hook__dyld_get_image_vmaddr_slide,
-                                   (void **)&orig__dyld_get_image_vmaddr_slide);
 
-                    BOOL dyldReady = PXDyldIndexedTrampolinesAreReady();
-                    atomic_store_explicit(&gJBDyldIndexedHooksReady,
+                    BOOL dyldReady = PXDyldNameTrampolineIsReady();
+                    atomic_store_explicit(&gJBDyldNameHookReady,
                                           dyldReady,
                                           memory_order_release);
                     if (dyldReady) {
                         sym = FindSymbol("dladdr");
                         if (sym) MSHookFunction(sym, (void *)hook_dladdr, (void **)&orig_dladdr);
                     } else {
-                        PXLog(@"[JailbreakBypass] dyld indexed group disabled: invalid trampoline");
+                        PXLog(@"[JailbreakBypass] dyld name sanitizer disabled: invalid trampoline");
                     }
                 } else {
-                    atomic_store_explicit(&gJBDyldIndexedHooksReady, false, memory_order_release);
-                    PXLog(@"[JailbreakBypass] dyld indexed group disabled: missing symbol");
+                    atomic_store_explicit(&gJBDyldNameHookReady, false, memory_order_release);
+                    PXLog(@"[JailbreakBypass] dyld name sanitizer disabled: missing symbol");
                 }
             }
 
@@ -5492,13 +5308,10 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityStatfs, "statvfs", orig_statvfs, false);
     PXJB_AUDIT(kPXJBCapabilityStatfs, "fstatvfs", orig_fstatvfs, false);
 
-    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_image_count", orig__dyld_image_count, true);
     PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_get_image_name", orig__dyld_get_image_name, true);
-    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_get_image_header", orig__dyld_get_image_header, true);
-    PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "_dyld_get_image_vmaddr_slide", orig__dyld_get_image_vmaddr_slide, true);
     PXJB_AUDIT(kPXJBCapabilityDyldIndexed, "dladdr", orig_dladdr, false);
     if (gJBCapabilities[kPXJBCapabilityDyldIndexed].requested &&
-        !atomic_load_explicit(&gJBDyldIndexedHooksReady, memory_order_acquire)) {
+        !atomic_load_explicit(&gJBDyldNameHookReady, memory_order_acquire)) {
         PXJBCapabilitySetFailure(kPXJBCapabilityDyldIndexed, "trampoline-integrity-failed");
     }
 
