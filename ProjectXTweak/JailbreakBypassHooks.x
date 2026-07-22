@@ -1620,7 +1620,8 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
             const struct sockaddr_in *a = (const struct sockaddr_in *)addr;
             uint32_t ip = ntohl(a->sin_addr.s_addr);
             uint16_t port = ntohs(a->sin_port);
-            if (ip == INADDR_LOOPBACK && PXJBIsDeniedLoopbackPort(port)) {
+            if ((ip & 0xFF000000U) == 0x7F000000U &&
+                PXJBIsDeniedLoopbackPort(port)) {
                 errno = ECONNREFUSED;
                 return -1;
             }
@@ -2462,6 +2463,23 @@ static BOOL PXJBIsSensitiveMountPath(const char *path) {
     return NO;
 }
 
+static BOOL PXJBFileDescriptorNeedsReadonlyFilesystemSpoof(int fd) {
+    if (fd < 0) return NO;
+
+    char fdPath[PATH_MAX];
+    if (PXJBOriginalFcntlGetPath(fd, fdPath, sizeof(fdPath)) == -1) {
+        return NO;
+    }
+
+    char normalizedPath[PATH_MAX];
+    if (!PXJBNormalizeAbsolutePath(fdPath,
+                                   normalizedPath,
+                                   sizeof(normalizedPath))) {
+        return NO;
+    }
+    return PXJBIsSensitiveMountPath(normalizedPath);
+}
+
 static void PXJBNormalizeStatfs(struct statfs *buf) {
     if (!buf) return;
     // Ensure rootfs looks read-only (common non-JB expectation).
@@ -2491,10 +2509,12 @@ static int (*orig_fstatfs)(int, struct statfs *);
 static int hook_fstatfs(int fd, struct statfs *buf) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     int r = orig_fstatfs ? orig_fstatfs(fd, buf) : -1;
-    if (r == 0 && (pxjbFilterFilesystem && PXJBStatfsBypassEnabled())) {
-        // We can't reliably map fd->path cheaply; normalize anyway (best-effort).
+    int savedErrno = errno;
+    if (r == 0 && pxjbFilterFilesystem && PXJBStatfsBypassEnabled() &&
+        PXJBFileDescriptorNeedsReadonlyFilesystemSpoof(fd)) {
         PXJBNormalizeStatfs(buf);
     }
+    errno = savedErrno;
     return r;
 }
 
@@ -2512,38 +2532,45 @@ static int (*orig_fstatvfs)(int, struct statvfs *);
 static int hook_fstatvfs(int fd, struct statvfs *buf) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     int r = orig_fstatvfs ? orig_fstatvfs(fd, buf) : -1;
-    if (r == 0 && (pxjbFilterFilesystem && PXJBStatfsBypassEnabled())) {
+    int savedErrno = errno;
+    if (r == 0 && pxjbFilterFilesystem && PXJBStatfsBypassEnabled() &&
+        PXJBFileDescriptorNeedsReadonlyFilesystemSpoof(fd)) {
         PXJBNormalizeStatvfs(buf);
     }
+    errno = savedErrno;
     return r;
 }
 
 // --- Priority 1: UID/GID spoofing ---
-// Many apps check getuid()==0 to detect root access on jailbroken devices.
-// Return 501 (mobile user) to appear non-jailbroken.
+// Preserve legitimate process identity and only hide an actual root identity.
+// The fallback remains 501 when a trampoline is unavailable.
 
 static uid_t (*orig_getuid)(void);
 static uid_t hook_getuid(void) {
-    if (PXJBShouldBypassCached()) return 501;
-    return orig_getuid ? orig_getuid() : 501;
+    uid_t original = orig_getuid ? orig_getuid() : 501;
+    if (PXJBShouldBypassCached() && original == 0) return 501;
+    return original;
 }
 
 static uid_t (*orig_geteuid)(void);
 static uid_t hook_geteuid(void) {
-    if (PXJBShouldBypassCached()) return 501;
-    return orig_geteuid ? orig_geteuid() : 501;
+    uid_t original = orig_geteuid ? orig_geteuid() : 501;
+    if (PXJBShouldBypassCached() && original == 0) return 501;
+    return original;
 }
 
 static gid_t (*orig_getgid)(void);
 static gid_t hook_getgid(void) {
-    if (PXJBShouldBypassCached()) return 501;
-    return orig_getgid ? orig_getgid() : 501;
+    gid_t original = orig_getgid ? orig_getgid() : 501;
+    if (PXJBShouldBypassCached() && original == 0) return 501;
+    return original;
 }
 
 static gid_t (*orig_getegid)(void);
 static gid_t hook_getegid(void) {
-    if (PXJBShouldBypassCached()) return 501;
-    return orig_getegid ? orig_getegid() : 501;
+    gid_t original = orig_getegid ? orig_getegid() : 501;
+    if (PXJBShouldBypassCached() && original == 0) return 501;
+    return original;
 }
 
 static int (*orig_setuid)(uid_t);
