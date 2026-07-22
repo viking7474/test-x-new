@@ -1,4 +1,4 @@
-﻿// JailbreakBypassHooks.x
+// JailbreakBypassHooks.x
 // Phase 1: File/URL/InstalledApps/LoopbackPortScan/WriteCheck
 
 #import <Foundation/Foundation.h>
