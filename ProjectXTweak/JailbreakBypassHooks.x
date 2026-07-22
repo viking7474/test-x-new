@@ -262,7 +262,7 @@ static BOOL PXJBPathContainsComponentSequenceNoCase(const char *path,
         while (*cursor == '/') cursor++;
         if (!*cursor) break;
         if (PXHasPrefixNoCase(cursor, sequence) &&
-            (cursor[sequenceLength] == ' ' || cursor[sequenceLength] == '/')) {
+            (cursor[sequenceLength] == '\0' || cursor[sequenceLength] == '/')) {
             return YES;
         }
         while (*cursor && *cursor != '/') cursor++;
