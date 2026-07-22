@@ -3,6 +3,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #import <CoreFoundation/CoreFoundation.h>
 #import <mach-o/dyld.h>
@@ -3225,6 +3226,76 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
     return orig_xpc_pipe_routine_with_flags ? orig_xpc_pipe_routine_with_flags(pipe, request, reply, flags) : -1;
 }
 
+// Foundation directory enumeration must classify child entries against the
+// directory root captured when enumeration begins. Relative children are never
+// resolved against a later process CWD; unresolved roots fail open.
+static char kPXJBDirectoryEnumeratorBasePathKey;
+
+static void PXJBSetNoSuchDirectoryError(NSError **error) {
+    if (!error) return;
+    *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                 code:NSFileNoSuchFileError
+                             userInfo:nil];
+}
+
+static NSString *PXJBResolvedDirectoryBasePath(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0) return nil;
+
+    const char *fileSystemPath = [path fileSystemRepresentation];
+    if (!fileSystemPath || !fileSystemPath[0]) return nil;
+
+    char resolvedPath[PATH_MAX];
+    if (!PXJBResolveAtPathForFiltering(AT_FDCWD,
+                                       fileSystemPath,
+                                       resolvedPath,
+                                       sizeof(resolvedPath))) {
+        return nil;
+    }
+
+    return [[NSString alloc] initWithBytes:resolvedPath
+                                    length:strlen(resolvedPath)
+                                  encoding:NSUTF8StringEncoding];
+}
+
+static BOOL PXJBRelativeDirectoryChildShouldHide(NSString *basePath,
+                                                  NSString *childPath) {
+    if (![childPath isKindOfClass:[NSString class]] || childPath.length == 0) {
+        return NO;
+    }
+
+    NSString *fullPath = nil;
+    if ([childPath isAbsolutePath]) {
+        fullPath = childPath;
+    } else if ([basePath isKindOfClass:[NSString class]] && basePath.length > 0) {
+        fullPath = [basePath stringByAppendingPathComponent:childPath];
+    } else {
+        return NO;
+    }
+
+    const char *fileSystemPath = [fullPath fileSystemRepresentation];
+    return fileSystemPath && PXJBPathShouldHide(fileSystemPath);
+}
+
+static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
+                                                      NSString *basePath) {
+    if (![children isKindOfClass:[NSArray class]] || children.count == 0 ||
+        ![basePath isKindOfClass:[NSString class]] || basePath.length == 0) {
+        return children;
+    }
+
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:children.count];
+    BOOL changed = NO;
+    for (id child in children) {
+        if ([child isKindOfClass:[NSString class]] &&
+            PXJBRelativeDirectoryChildShouldHide(basePath, (NSString *)child)) {
+            changed = YES;
+            continue;
+        }
+        [filtered addObject:child];
+    }
+    return changed ? [filtered copy] : children;
+}
+
 // --- ObjC hooks ---
 %hook NSFileManager
 
@@ -3285,20 +3356,19 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 }
 
 - (NSArray<NSString *> *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
+    NSString *basePath = nil;
+    if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
+        const char *p = [path fileSystemRepresentation];
+        if (PXJBPathShouldHide(p)) {
+            PXJBSetNoSuchDirectoryError(error);
+            return nil;
+        }
+        basePath = PXJBResolvedDirectoryBasePath(path);
+    }
+
     NSArray<NSString *> *orig = %orig;
     if (!PXJBShouldBypassCached()) return orig;
-    if (![orig isKindOfClass:[NSArray class]] || orig.count == 0) return orig;
-
-    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:orig.count];
-    for (NSString *item in orig) {
-        if (![item isKindOfClass:[NSString class]]) continue;
-        if ([item caseInsensitiveCompare:@"Cydia.app"] == NSOrderedSame) continue;
-        if ([item caseInsensitiveCompare:@"Sileo.app"] == NSOrderedSame) continue;
-        if ([item caseInsensitiveCompare:@"Zebra.app"] == NSOrderedSame) continue;
-        if ([item caseInsensitiveCompare:@"Filza.app"] == NSOrderedSame) continue;
-        [out addObject:item];
-    }
-    return out;
+    return (NSArray<NSString *> *)PXJBFilterRelativeDirectoryChildren(orig, basePath);
 }
 
 - (NSString *)destinationOfSymbolicLinkAtPath:(NSString *)path error:(NSError **)error {
@@ -3361,42 +3431,50 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 }
 
 - (NSDirectoryEnumerator<NSString *> *)enumeratorAtPath:(NSString *)path {
-    if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
-        const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) return %orig(@"/.file");
-    }
-    return %orig;
-}
-
-- (NSArray<NSString *> *)subpathsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
-    if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
-        const char *p = [path fileSystemRepresentation];
-        if (PXJBPathShouldHide(p)) {
-            if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil];
-            return nil;
-        }
-    }
-    NSArray *ret = %orig;
-    if (!PXJBShouldBypassCached()) return ret;
-    if (![ret isKindOfClass:[NSArray class]] || ret.count == 0) return ret;
-    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:ret.count];
-    for (NSString *sub in ret) {
-        if ([sub isKindOfClass:[NSString class]]) {
-            NSString *full = [path stringByAppendingPathComponent:sub];
-            const char *fp = [full fileSystemRepresentation];
-            if (PXJBPathShouldHide(fp)) continue;
-        }
-        [filtered addObject:sub];
-    }
-    return [filtered copy];
-}
-
-- (NSArray<NSString *> *)subpathsAtPath:(NSString *)path {
+    NSString *basePath = nil;
     if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
         const char *p = [path fileSystemRepresentation];
         if (PXJBPathShouldHide(p)) return nil;
+        basePath = PXJBResolvedDirectoryBasePath(path);
     }
-    return %orig;
+
+    NSDirectoryEnumerator<NSString *> *enumerator = %orig;
+    if (enumerator && basePath) {
+        objc_setAssociatedObject(enumerator,
+                                 &kPXJBDirectoryEnumeratorBasePathKey,
+                                 basePath,
+                                 OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+    return enumerator;
+}
+
+- (NSArray<NSString *> *)subpathsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
+    NSString *basePath = nil;
+    if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
+        const char *p = [path fileSystemRepresentation];
+        if (PXJBPathShouldHide(p)) {
+            PXJBSetNoSuchDirectoryError(error);
+            return nil;
+        }
+        basePath = PXJBResolvedDirectoryBasePath(path);
+    }
+
+    NSArray<NSString *> *ret = %orig;
+    if (!PXJBShouldBypassCached()) return ret;
+    return (NSArray<NSString *> *)PXJBFilterRelativeDirectoryChildren(ret, basePath);
+}
+
+- (NSArray<NSString *> *)subpathsAtPath:(NSString *)path {
+    NSString *basePath = nil;
+    if (PXJBShouldBypassCached() && [path isKindOfClass:[NSString class]]) {
+        const char *p = [path fileSystemRepresentation];
+        if (PXJBPathShouldHide(p)) return nil;
+        basePath = PXJBResolvedDirectoryBasePath(path);
+    }
+
+    NSArray<NSString *> *ret = %orig;
+    if (!PXJBShouldBypassCached()) return ret;
+    return (NSArray<NSString *> *)PXJBFilterRelativeDirectoryChildren(ret, basePath);
 }
 
 - (BOOL)copyItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
@@ -4175,23 +4253,24 @@ static int hook_xpc_pipe_routine_with_flags(xpc_object_t pipe, xpc_object_t requ
 - (id)nextObject {
     if (!PXJBShouldBypassCached()) return %orig;
 
+    NSString *basePath = objc_getAssociatedObject(self,
+                                                   &kPXJBDirectoryEnumeratorBasePathKey);
     id obj = %orig;
     while (obj != nil) {
-        NSString *path = nil;
+        BOOL shouldHide = NO;
         if ([obj isKindOfClass:[NSURL class]]) {
             NSURL *url = (NSURL *)obj;
-            if ([url isFileURL]) path = [url path];
-        } else if ([obj isKindOfClass:[NSString class]]) {
-            path = (NSString *)obj;
-        }
-        if (path) {
-            const char *p = [path fileSystemRepresentation];
-            if (PXJBPathShouldHide(p)) {
-                obj = %orig;
-                continue;
+            if ([url isFileURL]) {
+                shouldHide = PXJBRelativeDirectoryChildShouldHide(nil, [url path]);
             }
+        } else if ([obj isKindOfClass:[NSString class]]) {
+            shouldHide = PXJBRelativeDirectoryChildShouldHide(basePath,
+                                                               (NSString *)obj);
         }
-        break;
+
+        if (!shouldHide) break;
+        [self skipDescendants];
+        obj = %orig;
     }
     return obj;
 }
