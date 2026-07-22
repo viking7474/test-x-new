@@ -221,8 +221,8 @@ def run_source_matrix(matrix: Matrix) -> None:
     readdir_body = source_function("hook_readdir")
     register_body = source_function("PXJBRegisterDirectoryStream")
 
-    matrix.check("source: exact rule count is stable", len(EXACT) == 93)
-    matrix.check("source: prefix rule count is stable", len(PREFIX) == 48)
+    matrix.check("source: exact rule count is stable", len(EXACT) == 92)
+    matrix.check("source: prefix rule count is stable", len(PREFIX) == 46)
     matrix.check("source: optimized trie initialized once", "pthread_once(&gJBPathMatcherOnce" in SOURCE)
     matrix.check("source: matcher has linear fallback", "PXJBPathMatchesHiddenRulesLinear(path)" in SOURCE)
     matrix.check("source: matcher readiness is audited", '"path-matcher-optimized"' in SOURCE)

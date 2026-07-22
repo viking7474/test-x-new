@@ -163,6 +163,311 @@ static BOOL PXHasPrefixNoCase(const char *s, const char *prefix) {
     return YES;
 }
 
+static BOOL PXJBSpanEqualsNoCase(const char *bytes,
+                                 size_t length,
+                                 const char *expected) {
+    if (!bytes || !expected) return NO;
+    size_t expectedLength = strlen(expected);
+    if (length != expectedLength) return NO;
+    for (size_t i = 0; i < length; i++) {
+        char a = bytes[i];
+        char b = expected[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return NO;
+    }
+    return YES;
+}
+
+static BOOL PXJBSpanHasPrefixNoCase(const char *bytes,
+                                    size_t length,
+                                    const char *prefix) {
+    if (!bytes || !prefix) return NO;
+    size_t prefixLength = strlen(prefix);
+    if (length < prefixLength) return NO;
+    for (size_t i = 0; i < prefixLength; i++) {
+        char a = bytes[i];
+        char b = prefix[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return NO;
+    }
+    return YES;
+}
+
+static BOOL PXJBPathBasenameMatchesAnyNoCase(const char *path,
+                                              const char *const *exactNames,
+                                              const char *const *prefixNames) {
+    if (!path || !path[0]) return NO;
+    const char *end = path + strlen(path);
+    while (end > path && end[-1] == '/') end--;
+    if (end == path) return NO;
+
+    const char *start = end;
+    while (start > path && start[-1] != '/') start--;
+    size_t length = (size_t)(end - start);
+
+    if (exactNames) {
+        for (size_t i = 0; exactNames[i]; i++) {
+            if (PXJBSpanEqualsNoCase(start, length, exactNames[i])) return YES;
+        }
+    }
+    if (prefixNames) {
+        for (size_t i = 0; prefixNames[i]; i++) {
+            if (PXJBSpanHasPrefixNoCase(start, length, prefixNames[i])) return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL PXJBPathComponentMatchesAnyNoCase(const char *path,
+                                               const char *const *exactComponents,
+                                               const char *const *prefixComponents) {
+    if (!path || !path[0]) return NO;
+    const char *cursor = path;
+    while (*cursor) {
+        while (*cursor == '/') cursor++;
+        if (!*cursor) break;
+        const char *start = cursor;
+        while (*cursor && *cursor != '/') cursor++;
+        size_t length = (size_t)(cursor - start);
+
+        if (exactComponents) {
+            for (size_t i = 0; exactComponents[i]; i++) {
+                if (PXJBSpanEqualsNoCase(start, length, exactComponents[i])) return YES;
+            }
+        }
+        if (prefixComponents) {
+            for (size_t i = 0; prefixComponents[i]; i++) {
+                if (PXJBSpanHasPrefixNoCase(start, length, prefixComponents[i])) return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+static BOOL PXJBPathContainsComponentSequencePrefixNoCase(const char *path,
+                                                           const char *sequencePrefix) {
+    if (!path || !sequencePrefix || !sequencePrefix[0]) return NO;
+    const char *cursor = path;
+    while (*cursor) {
+        while (*cursor == '/') cursor++;
+        if (!*cursor) break;
+        if (PXHasPrefixNoCase(cursor, sequencePrefix)) return YES;
+        while (*cursor && *cursor != '/') cursor++;
+    }
+    return NO;
+}
+
+static BOOL PXJBPathContainsComponentSequenceNoCase(const char *path,
+                                                     const char *sequence) {
+    if (!path || !sequence || !sequence[0]) return NO;
+    size_t sequenceLength = strlen(sequence);
+    const char *cursor = path;
+    while (*cursor) {
+        while (*cursor == '/') cursor++;
+        if (!*cursor) break;
+        if (PXHasPrefixNoCase(cursor, sequence) &&
+            (cursor[sequenceLength] == ' ' || cursor[sequenceLength] == '/')) {
+            return YES;
+        }
+        while (*cursor && *cursor != '/') cursor++;
+    }
+    return NO;
+}
+
+static const char *const kPXJBArtifactExactBasenames[] = {
+    "MobileSubstrate.dylib",
+    "SubstrateLoader.dylib",
+    "SubstrateBootstrap.dylib",
+    "SubstrateInserter.dylib",
+    "libsubstrate.dylib",
+    "libellekit.dylib",
+    "libinjector.dylib",
+    "libhooker.dylib",
+    "libsubstitute.dylib",
+    "SubstituteLoader.dylib",
+    "TweakInject.dylib",
+    "RocketBootstrap.dylib",
+    "libmryipc.dylib",
+    "libblackjack.dylib",
+    "AppList.dylib",
+    "Cephei.dylib",
+    "libcolorpicker.dylib",
+    "libFLEX.dylib",
+    "libactivator.dylib",
+    "FridaGadget.dylib",
+    "libFrida.dylib",
+    "frida-agent.dylib",
+    "libcycript.dylib",
+    "Cycript.dylib",
+    "SSLKillSwitch2.dylib",
+    "Shadow.dylib",
+    "Liberty.dylib",
+    "vnodebypass.dylib",
+    "UnSub.dylib",
+    "A-Bypass.dylib",
+    "Hestia.dylib",
+    "Choicy.dylib",
+    "KernBypass.dylib",
+    "HideJB.dylib",
+    "JailProtect.dylib",
+    "DetectorDeter.dylib",
+    "libjailbreak.dylib",
+    "jailbreakd",
+    "frida-server",
+    NULL
+};
+
+static const char *const kPXJBArtifactBasenamePrefixes[] = {
+    "FridaGadget-",
+    "frida-agent-",
+    NULL
+};
+
+static const char *const kPXJBArtifactExactComponents[] = {
+    "MobileSubstrate",
+    "TweakInject",
+    "ellekit",
+    "libhooker",
+    "CydiaSubstrate.framework",
+    "PreferenceLoader",
+    "PreferenceBundles",
+    NULL
+};
+
+static const char *const kPXJBArtifactAbsolutePrefixes[] = {
+    "/usr/lib/substrate/",
+    "/usr/lib/TweakInject/",
+    "/usr/lib/ellekit/",
+    "/usr/lib/substitute/",
+    "/usr/lib/libhooker/",
+    "/usr/lib/frida/",
+    "/Library/MobileSubstrate/",
+    "/private/var/Library/MobileSubstrate/",
+    "/private/var/mobile/Library/MobileSubstrate/",
+    "/Library/Frameworks/CydiaSubstrate.framework/",
+    "/Library/PreferenceBundles/",
+    "/Library/PreferenceLoader/",
+    "/Library/Caches/cy-",
+    "/private/var/Library/Caches/cy-",
+    "/private/var/mobile/Library/Caches/cy-",
+    "/var/jb/",
+    "/private/var/jb/",
+    NULL
+};
+
+static const char *const kPXJBArtifactRelativeExactSequences[] = {
+    "var/jb",
+    "private/var/jb",
+    NULL
+};
+
+static const char *const kPXJBArtifactRelativeSequencePrefixes[] = {
+    "usr/lib/substrate/",
+    "usr/lib/TweakInject/",
+    "usr/lib/ellekit/",
+    "usr/lib/substitute/",
+    "usr/lib/libhooker/",
+    "usr/lib/frida/",
+    "Library/MobileSubstrate/",
+    "private/var/Library/MobileSubstrate/",
+    "private/var/mobile/Library/MobileSubstrate/",
+    "Library/Frameworks/CydiaSubstrate.framework/",
+    "Library/PreferenceBundles/",
+    "Library/PreferenceLoader/",
+    "Library/Caches/cy-",
+    "private/var/Library/Caches/cy-",
+    "private/var/mobile/Library/Caches/cy-",
+    "var/jb/",
+    "private/var/jb/",
+    NULL
+};
+
+static const char *const kPXJBPrivatePrebootExactComponents[] = {
+    "jb",
+    "procursus",
+    "dopamine",
+    "palera1n",
+    NULL
+};
+
+static const char *const kPXJBPrivatePrebootComponentPrefixes[] = {
+    "jb-",
+    NULL
+};
+
+static BOOL PXJBPrivatePrebootPathShouldHide(const char *path) {
+    if (!path || !path[0]) return NO;
+
+    const char *descendants = NULL;
+    static const char absolutePrefix[] = "/private/preboot";
+    if (path[0] == '/') {
+        size_t prefixLength = sizeof(absolutePrefix) - 1;
+        if (!PXHasPrefixNoCase(path, absolutePrefix)) return NO;
+        if (path[prefixLength] != '\0' && path[prefixLength] != '/') return NO;
+        descendants = path + prefixLength;
+    } else {
+        static const char relativePrefix[] = "private/preboot";
+        const char *cursor = path;
+        while (*cursor) {
+            while (*cursor == '/') cursor++;
+            if (!*cursor) break;
+            if (PXHasPrefixNoCase(cursor, relativePrefix)) {
+                size_t prefixLength = sizeof(relativePrefix) - 1;
+                if (cursor[prefixLength] == '\0' || cursor[prefixLength] == '/') {
+                    descendants = cursor + prefixLength;
+                    break;
+                }
+            }
+            while (*cursor && *cursor != '/') cursor++;
+        }
+    }
+
+    if (!descendants || !descendants[0]) return NO;
+    return PXJBPathComponentMatchesAnyNoCase(descendants,
+                                              kPXJBPrivatePrebootExactComponents,
+                                              kPXJBPrivatePrebootComponentPrefixes);
+}
+
+static BOOL PXJBArtifactPathShouldMatch(const char *path) {
+    if (!path || !path[0]) return NO;
+
+    if (PXJBPathBasenameMatchesAnyNoCase(path,
+                                         kPXJBArtifactExactBasenames,
+                                         kPXJBArtifactBasenamePrefixes)) {
+        return YES;
+    }
+    if (PXJBPathComponentMatchesAnyNoCase(path,
+                                          kPXJBArtifactExactComponents,
+                                          NULL)) {
+        return YES;
+    }
+    if (PXJBPrivatePrebootPathShouldHide(path)) return YES;
+
+    if (path[0] == '/') {
+        for (size_t i = 0; kPXJBArtifactAbsolutePrefixes[i]; i++) {
+            if (PXHasPrefixNoCase(path, kPXJBArtifactAbsolutePrefixes[i])) return YES;
+        }
+    } else {
+        for (size_t i = 0; kPXJBArtifactRelativeExactSequences[i]; i++) {
+            if (PXJBPathContainsComponentSequenceNoCase(
+                    path,
+                    kPXJBArtifactRelativeExactSequences[i])) {
+                return YES;
+            }
+        }
+        for (size_t i = 0; kPXJBArtifactRelativeSequencePrefixes[i]; i++) {
+            if (PXJBPathContainsComponentSequencePrefixNoCase(
+                    path,
+                    kPXJBArtifactRelativeSequencePrefixes[i])) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 // P0-C: process eligibility is computed once before hook installation and is
 // never re-evaluated from a native hot path.
 static _Atomic(bool) gJBProcessEligible = false;
@@ -669,7 +974,6 @@ static const PXJBStaticPathRule kPXJBHiddenExactRules[] = {
     PXJB_PATH_RULE("/var/jb/Applications"),
     PXJB_PATH_RULE("/var/jb/usr"),
     PXJB_PATH_RULE("/var/jb/Library"),
-    PXJB_PATH_RULE("/private/preboot"),
 };
 static const PXJBStaticPathRule kPXJBHiddenPrefixRules[] = {
     PXJB_PATH_RULE("/usr/lib/substrate/"),
@@ -698,8 +1002,6 @@ static const PXJBStaticPathRule kPXJBHiddenPrefixRules[] = {
     PXJB_PATH_RULE("/var/jb/bin/"),
     PXJB_PATH_RULE("/var/jb/sbin/"),
     PXJB_PATH_RULE("/var/jb/etc/"),
-    PXJB_PATH_RULE("/private/preboot/jb/"),
-    PXJB_PATH_RULE("/private/preboot/"),
     PXJB_PATH_RULE("/var/lib/apt/"),
     PXJB_PATH_RULE("/private/var/lib/apt/"),
     PXJB_PATH_RULE("/var/cache/apt/"),
@@ -857,10 +1159,15 @@ static BOOL PXJBPathMatcherIsReady(void) {
 
 static BOOL PXJBPathMatchesHiddenRules(const char *path) {
     if (!path || path[0] != '/') return NO;
-    if (PXJBPathMatcherIsReady()) {
-        return PXJBPathMatchesHiddenRulesTrie(path);
-    }
-    return PXJBPathMatchesHiddenRulesLinear(path);
+
+    BOOL matched = PXJBPathMatcherIsReady()
+        ? PXJBPathMatchesHiddenRulesTrie(path)
+        : PXJBPathMatchesHiddenRulesLinear(path);
+    if (matched) return YES;
+
+    // /private/preboot is a normal iOS volume. Only hide descendants whose
+    // component boundaries identify a jailbreak bootstrap/rootless subtree.
+    return PXJBPrivatePrebootPathShouldHide(path);
 }
 
 #undef PXJB_PATH_RULE
@@ -1097,28 +1404,10 @@ static int hook_open(const char *path, int oflag, ...) {
 static int (*orig_openat)(int, const char *, int, ...);
 
 static BOOL PXJBRelativePathLooksLikeProbe(const char *path) {
-    if (!path) return NO;
-    // Keep this list tight to avoid false positives.
-    static const char *needles[] = {
-        "mobilesubstrate",
-        "cydia.app",
-        "sileo.app",
-        "zebra.app",
-        "filza.app",
-        "preferenceloader",
-        "preferencebundles",
-        "var/jb",
-        "library/caches/cy-",
-        "substrate",
-        "ellekit",
-        "libhooker",
-        "frida",
-        NULL
-    };
-    for (int i = 0; needles[i]; i++) {
-        if (PXStrContainsNoCase(path, needles[i])) return YES;
-    }
-    return NO;
+    if (!path || !path[0] || path[0] == '/') return NO;
+    // Resolution failure is uncertain. Only retain high-confidence matches
+    // with basename/component/prefix boundaries; otherwise fail open.
+    return PXJBArtifactPathShouldMatch(path);
 }
 
 static BOOL PXJBNormalizeAbsolutePath(const char *inPath, char *out, size_t outsz) {
@@ -1946,89 +2235,9 @@ static BOOL PXStrContainsNoCase(const char *haystack, const char *needle) {
 }
 
 static BOOL PXJBShouldHideImageName(const char *name) {
-    if (!name) return NO;
-    // Substrings frequently used by jailbreak tooling / injection.
-    static const char *deny[] = {
-        // Substrate family
-        "mobilesubstrate",
-        "substrateloader",
-        "substratebootstrap",
-        "libsubstrate",
-        "substrate",
-        
-        // ElleKit (modern jailbreaks)
-        "ellekit",
-        "libellekit",
-        
-        // libhooker
-        "libhooker",
-        
-        // Substitute
-        "substitute",
-        
-        // TweakInject
-        "tweakinject",
-        
-        // Common ecosystem libs
-        "rocketbootstrap",
-        "libmryipc",
-        "libblackjack",
-        "applist",
-        "cephei",
-        "libcolorpicker",
-        "libflex",
-        "libactivator",
-        "preferenceloader",
-        "preferencebundles",
-        
-        // Security tools
-        "frida",
-        "fridagadget",
-        "cycript",
-        "ssl_logger",
-        "objection",
-        
-        // Common tweak names
-        "shadow",
-        "liberty",
-        "vnodebypass",
-        "unsub",
-        "a-bypass",
-        "hestia",
-        "choicy",
-        "kernbypass",
-        "hidejb",
-        "jailprotect",
-        "detectordeter",
-        
-        // Jailbreak specific
-        "libjailbreak",
-        "jailbreakd",
-        "cy-",
-        "dopamine",
-        "palera1n",
-        "procursus",
-        "checkra1n",
-        "unc0ver",
-        "taurine",
-        "odyssey",
-        "chimera",
-        "electra",
-        
-        NULL
-    };
-    for (int i = 0; deny[i]; i++) {
-        if (PXStrContainsNoCase(name, deny[i])) return YES;
-    }
-    // Common rootless prefixes.
-    if (PXStrContainsNoCase(name, "/var/jb")) return YES;
-    if (PXStrContainsNoCase(name, "/private/preboot/jb")) return YES;
-    if (PXStrContainsNoCase(name, "/private/preboot/")) return YES;
-    // Common jailbreak cache-injected dylib pattern.
-    if (PXStrContainsNoCase(name, "/library/caches/cy-")) return YES;
-    // MobileSubstrate injection path.
-    if (PXStrContainsNoCase(name, "/library/mobilesubstrate/")) return YES;
-    return NO;
+    // Image enumeration is compatibility-sensitive: never match arbitrary
+    // substrings such as "shadow", "liberty", "substrate" or "frida".
+    return PXJBArtifactPathShouldMatch(name);
 }
 
 // Phase 3 strong option: hide libproc-based region filename queries
@@ -2090,25 +2299,9 @@ static const char *hook_class_getImageName(Class cls) {
 }
 
 static BOOL PXJBShouldBlockDlopenPath(const char *path) {
-    if (!path || !path[0]) return NO;
-    // Block direct probes for common injection/jailbreak libraries.
-    static const char *deny[] = {
-        "/usr/lib/substrate/",
-        "substratebootstrap",
-        "mobilesubstrate",
-        "substrate",
-        "ellekit",
-        "libhooker",
-        "rocketbootstrap",
-        "substitute",
-        "frida",
-        "/library/caches/cy-",
-        NULL
-    };
-    for (int i = 0; deny[i]; i++) {
-        if (PXStrContainsNoCase(path, deny[i])) return YES;
-    }
-    return NO;
+    // Direct dlopen probes share the same boundary-aware artifact policy as
+    // dyld/ObjC image enumeration so the two surfaces cannot drift.
+    return PXJBArtifactPathShouldMatch(path);
 }
 
 static BOOL PXJBShouldBlockDlsymName(const char *sym) {
@@ -3133,30 +3326,60 @@ static int PXJBOriginalGetmntinfo(struct statfs **mntbufp, int flags) {
     return function(mntbufp, flags);
 }
 
+static BOOL PXJBMountPathShouldHide(const char *path) {
+    if (!path || !path[0]) return NO;
+    if (strcmp(path, "/var/jb") == 0 || PXHasPrefix(path, "/var/jb/")) return YES;
+    if (strcmp(path, "/private/var/jb") == 0 ||
+        PXHasPrefix(path, "/private/var/jb/")) {
+        return YES;
+    }
+    return PXJBPrivatePrebootPathShouldHide(path);
+}
+
+static BOOL PXJBMountSourceShouldHide(const char *source) {
+    if (!source || !source[0]) return NO;
+    if (PXJBMountPathShouldHide(source)) return YES;
+
+    // APFS snapshot sources can encode a mounted path after '@'. Only inspect
+    // path-valued suffixes; ordinary Apple snapshot names remain visible.
+    const char *cursor = source;
+    while ((cursor = strchr(cursor, '@')) != NULL) {
+        cursor++;
+        if (*cursor == '/' && PXJBMountPathShouldHide(cursor)) return YES;
+    }
+    return NO;
+}
+
+static BOOL PXJBKnownSystemBindMountPath(const char *path) {
+    if (!path) return NO;
+    static const char *const knownBinds[] = {
+        "/usr/standalone/firmware",
+        "/System/Library/Pearl/ReferenceFrames",
+        "/System/Library/Caches/com.apple.factorydata",
+        NULL
+    };
+    for (size_t i = 0; knownBinds[i]; i++) {
+        if (strcmp(path, knownBinds[i]) == 0) return YES;
+    }
+    return NO;
+}
+
 static BOOL PXJBMountEntryShouldHide(const struct statfs *entry) {
     if (!entry) return NO;
+
+    BOOL jailbreakMount = PXJBMountPathShouldHide(entry->f_mntonname) ||
+                          PXJBMountSourceShouldHide(entry->f_mntfromname);
+
     if (strcmp(entry->f_fstypename, "bindfs") == 0) {
-        static const char *knownBinds[] = {
-            "/usr/standalone/firmware",
-            "/System/Library/Pearl/ReferenceFrames",
-            "/System/Library/Caches/com.apple.factorydata",
-            NULL
-        };
-        BOOL known = NO;
-        for (int i = 0; knownBinds[i]; i++) {
-            if (strcmp(entry->f_mntonname, knownBinds[i]) == 0) {
-                known = YES;
-                break;
-            }
-        }
-        if (!known) return YES;
+        if (PXJBKnownSystemBindMountPath(entry->f_mntonname)) return NO;
+        // Unknown bindfs mounts are not jailbreak evidence by themselves.
+        return jailbreakMount;
     }
 
     if (strcmp(entry->f_mntonname, "/") != 0 &&
         strcmp(entry->f_fstypename, "apfs") == 0 &&
-        strstr(entry->f_mntfromname, "@") != NULL &&
-        PXJBPathShouldHide(entry->f_mntonname)) {
-        return YES;
+        strchr(entry->f_mntfromname, '@') != NULL) {
+        return jailbreakMount;
     }
     return NO;
 }
