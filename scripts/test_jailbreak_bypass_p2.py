@@ -213,7 +213,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     )
     install_group = SOURCE[
         SOURCE.index("// P2: install opendir/readdir/closedir as one lifecycle group.") :
-        SOURCE.index('sym = FindSymbol(NULL, "readlink")')
+        SOURCE.index('sym = FindSymbol("readlink")')
     ]
     closedir_body = source_function("hook_closedir")
     opendir_body = source_function("hook_opendir")
@@ -229,9 +229,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: lifecycle resolves all mandatory entries before install", all(
         install_group.index(token) < install_group.index("MSHookFunction(opendirEntry")
         for token in [
-            'FindSymbol(NULL, "opendir")',
-            'FindSymbol(NULL, "readdir")',
-            'FindSymbol(NULL, "closedir")',
+            'FindSymbol("opendir")',
+            'FindSymbol("readdir")',
+            'FindSymbol("closedir")',
         ]
     ))
     matrix.check("source: lifecycle installs closedir", "MSHookFunction(closedirEntry" in install_group)

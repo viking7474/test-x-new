@@ -43,8 +43,8 @@
 // We only need opaque pointers and a few functions.
 typedef void *xpc_object_t;
 typedef const struct _xpc_type_s *xpc_type_t;
-extern xpc_type_t _xpc_type_dictionary;
-#define XPC_TYPE_DICTIONARY (&_xpc_type_dictionary)
+extern const struct _xpc_type_s _xpc_type_dictionary;
+#define XPC_TYPE_DICTIONARY ((xpc_type_t)&_xpc_type_dictionary)
 extern xpc_type_t xpc_get_type(xpc_object_t object);
 extern xpc_object_t xpc_dictionary_create(const char * const *keys, const xpc_object_t *values, size_t count);
 extern xpc_object_t xpc_dictionary_create_empty(void);
@@ -120,14 +120,8 @@ int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 - (LSBundleProxy *)containingBundle;
 @end
 
-static void *FindSymbol(const char *image, const char *symbol) {
-    if (!symbol) return NULL;
-    if (image) {
-        void *handle = dlopen(image, RTLD_NOW);
-        if (!handle) return dlsym(RTLD_DEFAULT, symbol);
-        return dlsym(handle, symbol);
-    }
-    return dlsym(RTLD_DEFAULT, symbol);
+static void *FindSymbol(const char *symbol) {
+    return symbol ? dlsym(RTLD_DEFAULT, symbol) : NULL;
 }
 
 static BOOL PXStrEqNoCase(const char *a, const char *b) {
@@ -1928,55 +1922,72 @@ static int hook_connect(int sockfd, const struct sockaddr *addr, socklen_t addrl
 }
 
 static char *(*orig_getenv)(const char *);
-static char *hook_getenv(const char *name) {
-    if (PXJBShouldBypassCached() && name) {
-        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
-            strcmp(name, "DYLD_LIBRARY_PATH") == 0 ||
-            strcmp(name, "DYLD_FRAMEWORK_PATH") == 0 ||
-            strcmp(name, "DYLD_FALLBACK_LIBRARY_PATH") == 0 ||
-            strcmp(name, "DYLD_FALLBACK_FRAMEWORK_PATH") == 0 ||
-            strcmp(name, "DYLD_ROOT_PATH") == 0 ||
-            strcmp(name, "DYLD_SHARED_CACHE_DIR") == 0 ||
-            strcmp(name, "DYLD_PRINT_TO_FILE") == 0 ||
-            strcmp(name, "DYLD_PRINT_LIBRARIES") == 0 ||
-            strcmp(name, "DYLD_PRINT_APIS") == 0 ||
-            strcmp(name, "DYLD_PRINT_OPTS") == 0 ||
-            strcmp(name, "DYLD_PRINT_ENV") == 0 ||
-            strcmp(name, "LD_PRELOAD") == 0 ||
-            strcmp(name, "_MSSafeMode") == 0 ||
-            strcmp(name, "JB_SANDBOX_EXTENSIONS") == 0 ||
-            strcmp(name, "SHELL") == 0) {
-            return NULL;
-        }
+
+static BOOL PXJBShellEnvironmentValueShouldHide(const char *value) {
+    if (!value || !value[0]) return NO;
+    if (PXStrEqNoCase(value, "/bin/bash") ||
+        PXStrEqNoCase(value, "/bin/zsh") ||
+        PXStrEqNoCase(value, "/usr/bin/bash") ||
+        PXStrEqNoCase(value, "/usr/bin/zsh")) {
+        return YES;
     }
-    return orig_getenv ? orig_getenv(name) : NULL;
+    if (PXHasPrefixNoCase(value, "/var/jb/") ||
+        PXHasPrefixNoCase(value, "/private/var/jb/")) {
+        return YES;
+    }
+    return PXJBPrivatePrebootPathShouldHide(value);
+}
+
+static const char *const kPXJBAlwaysHiddenEnvironmentKeys[] = {
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_ROOT_PATH",
+    "DYLD_SHARED_CACHE_DIR",
+    "DYLD_PRINT_TO_FILE",
+    "DYLD_PRINT_LIBRARIES",
+    "DYLD_PRINT_APIS",
+    "DYLD_PRINT_OPTS",
+    "DYLD_PRINT_ENV",
+    "LD_PRELOAD",
+    "_MSSafeMode",
+    "MSDebug",
+    "JB_SANDBOX_EXTENSIONS",
+    NULL
+};
+
+static BOOL PXJBEnvironmentKeyAlwaysHidden(const char *name) {
+    if (!name) return NO;
+    for (size_t i = 0; kPXJBAlwaysHiddenEnvironmentKeys[i]; i++) {
+        if (strcmp(name, kPXJBAlwaysHiddenEnvironmentKeys[i]) == 0) return YES;
+    }
+    return NO;
+}
+
+static char *hook_getenv(const char *name) {
+    char *value = orig_getenv ? orig_getenv(name) : NULL;
+    if (!PXJBShouldBypassCached() || !name) return value;
+    if (PXJBEnvironmentKeyAlwaysHidden(name)) return NULL;
+    if (strcmp(name, "SHELL") == 0 &&
+        PXJBShellEnvironmentValueShouldHide(value)) {
+        return NULL;
+    }
+    return value;
 }
 
 static void PXJBUnsetSuspiciousEnvIfNeeded(void) {
     if (!PXJBShouldBypassCached()) return;
-    // Proactive cleanup so detectors reading env via non-getenv paths see a clean environment.
-    // Low risk: only affects this process.
-    const char *keys[] = {
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-        "DYLD_FALLBACK_LIBRARY_PATH",
-        "DYLD_FALLBACK_FRAMEWORK_PATH",
-        "DYLD_ROOT_PATH",
-        "DYLD_SHARED_CACHE_DIR",
-        "DYLD_PRINT_TO_FILE",
-        "DYLD_PRINT_LIBRARIES",
-        "DYLD_PRINT_APIS",
-        "DYLD_PRINT_OPTS",
-        "DYLD_PRINT_ENV",
-        "LD_PRELOAD",
-        "_MSSafeMode",
-        "MSDebug",
-        "JB_SANDBOX_EXTENSIONS",
-        NULL
-    };
-    for (int i = 0; keys[i]; i++) {
-        unsetenv(keys[i]);
+    // Keep raw environ consistent with getenv/NSProcessInfo. SHELL is removed
+    // only when its value identifies a jailbreak/rootless shell.
+    for (size_t i = 0; kPXJBAlwaysHiddenEnvironmentKeys[i]; i++) {
+        unsetenv(kPXJBAlwaysHiddenEnvironmentKeys[i]);
+    }
+
+    const char *shell = orig_getenv ? orig_getenv("SHELL") : getenv("SHELL");
+    if (PXJBShellEnvironmentValueShouldHide(shell)) {
+        unsetenv("SHELL");
     }
 }
 
@@ -3861,26 +3872,16 @@ static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
     if (![env isKindOfClass:[NSDictionary class]] || env.count == 0) return env;
 
     NSMutableDictionary *out = [env mutableCopy];
-    NSArray<NSString *> *deny = @[
-        @"DYLD_INSERT_LIBRARIES",
-        @"DYLD_LIBRARY_PATH",
-        @"DYLD_FRAMEWORK_PATH",
-        @"DYLD_FALLBACK_LIBRARY_PATH",
-        @"DYLD_FALLBACK_FRAMEWORK_PATH",
-        @"DYLD_ROOT_PATH",
-        @"DYLD_SHARED_CACHE_DIR",
-        @"DYLD_PRINT_TO_FILE",
-        @"DYLD_PRINT_LIBRARIES",
-        @"DYLD_PRINT_APIS",
-        @"DYLD_PRINT_OPTS",
-        @"DYLD_PRINT_ENV",
-        @"LD_PRELOAD",
-        @"_MSSafeMode",
-        @"MSDebug",
-        @"JB_SANDBOX_EXTENSIONS",
-        @"SHELL"
-    ];
-    [out removeObjectsForKeys:deny];
+    for (size_t i = 0; kPXJBAlwaysHiddenEnvironmentKeys[i]; i++) {
+        NSString *key = [NSString stringWithUTF8String:kPXJBAlwaysHiddenEnvironmentKeys[i]];
+        if (key) [out removeObjectForKey:key];
+    }
+
+    NSString *shell = out[@"SHELL"];
+    if ([shell isKindOfClass:[NSString class]] &&
+        PXJBShellEnvironmentValueShouldHide([shell UTF8String])) {
+        [out removeObjectForKey:@"SHELL"];
+    }
     return [out copy];
 }
 
@@ -3910,17 +3911,11 @@ static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
 
 %end
 
-%hook LSApplicationWorkspace
-
-- (NSArray *)allInstalledApplications {
-    NSArray *apps = %orig;
-    if (!PXJBShouldBypassCached()) return apps;
-    if (![apps isKindOfClass:[NSArray class]] || apps.count == 0) return apps;
-
-    static NSSet<NSString *> *deny = nil;
+static NSSet<NSString *> *PXJBWorkspaceHiddenApplicationIdentifiers(void) {
+    static NSSet<NSString *> *identifiers = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        deny = [NSSet setWithArray:@[
+        identifiers = [NSSet setWithArray:@[
             @"com.saurik.Cydia",
             @"org.coolstar.SileoStore",
             @"com.opa334.Sileo",
@@ -3928,27 +3923,111 @@ static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
             @"com.tigisoftware.Filza",
         ]];
     });
+    return identifiers;
+}
 
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:apps.count];
-    for (id proxy in apps) {
-        NSString *bid = nil;
+static NSSet<NSString *> *PXJBWorkspaceHiddenPluginOwnerIdentifiers(void) {
+    static NSSet<NSString *> *identifiers = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        identifiers = [NSSet setWithArray:@[
+            @"com.xina.jailbreak",
+            @"com.opa334.Dopamine",
+            @"com.tigisoftware.Filza",
+            @"org.coolstar.SileoStore",
+            @"org.coolstar.Sileo",
+            @"ws.hbang.Terminal",
+            @"xyz.willy.Zebra",
+            @"shshd",
+            @"com.saurik.Cydia",
+        ]];
+    });
+    return identifiers;
+}
+
+static NSArray *PXJBFilterWorkspaceApplications(NSArray *applications) {
+    if (![applications isKindOfClass:[NSArray class]] || applications.count == 0) {
+        return applications;
+    }
+
+    NSSet<NSString *> *deny = PXJBWorkspaceHiddenApplicationIdentifiers();
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:applications.count];
+    BOOL changed = NO;
+    for (id proxy in applications) {
+        NSString *bundleIdentifier = nil;
         if ([proxy respondsToSelector:@selector(bundleIdentifier)]) {
-            bid = [proxy performSelector:@selector(bundleIdentifier)];
+            bundleIdentifier = [(LSBundleProxy *)proxy bundleIdentifier];
         }
-        if ([bid isKindOfClass:[NSString class]] && [deny containsObject:bid]) {
+        if ([bundleIdentifier isKindOfClass:[NSString class]] &&
+            [deny containsObject:bundleIdentifier]) {
+            changed = YES;
             continue;
         }
-        [out addObject:proxy];
+        [filtered addObject:proxy];
     }
-    return out;
+    return changed ? [filtered copy] : applications;
+}
+
+static NSArray *PXJBFilterWorkspacePlugins(NSArray *plugins) {
+    if (![plugins isKindOfClass:[NSArray class]] || plugins.count == 0) {
+        return plugins;
+    }
+
+    NSSet<NSString *> *deny = PXJBWorkspaceHiddenPluginOwnerIdentifiers();
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:plugins.count];
+    BOOL changed = NO;
+    for (id plugin in plugins) {
+        NSString *ownerIdentifier = nil;
+        if ([plugin respondsToSelector:@selector(containingBundle)]) {
+            LSBundleProxy *owner = [(LSPlugInKitProxy *)plugin containingBundle];
+            if ([owner respondsToSelector:@selector(bundleIdentifier)]) {
+                ownerIdentifier = [owner bundleIdentifier];
+            }
+        }
+        if ([ownerIdentifier isKindOfClass:[NSString class]] &&
+            [deny containsObject:ownerIdentifier]) {
+            changed = YES;
+            continue;
+        }
+
+        NSString *pluginIdentifier = nil;
+        if ([plugin respondsToSelector:@selector(pluginIdentifier)]) {
+            pluginIdentifier = [(LSPlugInKitProxy *)plugin pluginIdentifier];
+        }
+        if ([pluginIdentifier isKindOfClass:[NSString class]] &&
+            [deny containsObject:pluginIdentifier]) {
+            changed = YES;
+            continue;
+        }
+        [filtered addObject:plugin];
+    }
+    return changed ? [filtered copy] : plugins;
+}
+
+%hook LSApplicationWorkspace
+
+- (NSArray *)allInstalledApplications {
+    NSArray *applications = %orig;
+    if (!PXJBShouldBypassCached()) return applications;
+    return PXJBFilterWorkspaceApplications(applications);
 }
 
 - (NSArray *)installedApplications {
-    return [self allInstalledApplications];
+    NSArray *applications = %orig;
+    if (!PXJBShouldBypassCached()) return applications;
+    return PXJBFilterWorkspaceApplications(applications);
 }
 
 - (NSArray *)allApplications {
-    return [self allInstalledApplications];
+    NSArray *applications = %orig;
+    if (!PXJBShouldBypassCached()) return applications;
+    return PXJBFilterWorkspaceApplications(applications);
+}
+
+- (NSArray *)installedPlugins {
+    NSArray *plugins = %orig;
+    if (!PXJBShouldBypassCached()) return plugins;
+    return PXJBFilterWorkspacePlugins(plugins);
 }
 
 %end
@@ -4395,107 +4474,178 @@ static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
 %end
 
 // --- Priority 2: Known JB detection library class hooks ---
-// These classes are from popular SDKs that apps embed for jailbreak detection.
+// Detector SDK classes can be loaded after Logos initialization. Keep a
+// table-driven runtime installer and re-check it after every added image.
+typedef enum {
+    kPXJBDetectionReturnFalse = 0,
+    kPXJBDetectionReturnTrue,
+    kPXJBDetectionReturnNull,
+} PXJBDetectionReturnPolicy;
 
-%hook UIDevice
-+ (BOOL)isJailbroken { return NO; }
-- (BOOL)isJailBreak { return NO; }
-- (BOOL)isJailBroken { return NO; }
-%end
+typedef struct {
+    const char *className;
+    const char *selectorName;
+    bool classMethod;
+    PXJBDetectionReturnPolicy returnPolicy;
+    bool installed;
+    IMP original;
+    IMP replacement;
+} PXJBDetectionHookRule;
 
-%hook JailbreakDetectionVC
-- (BOOL)isJailbroken { return NO; }
-%end
+#define PXJB_DETECTION_RULE(cls, sel, isClass, policy) \
+    { (cls), (sel), (isClass), (policy), false, NULL, NULL }
 
-%hook DTTJailbreakDetection
-+ (BOOL)isJailbroken { return NO; }
-%end
+static PXJBDetectionHookRule kPXJBDetectionHookRules[] = {
+    PXJB_DETECTION_RULE("UIDevice", "isJailbroken", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("UIDevice", "isJailBreak", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("UIDevice", "isJailBroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("JailbreakDetectionVC", "isJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("DTTJailbreakDetection", "isJailbroken", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("ANSMetadata", "computeIsJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("ANSMetadata", "isJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("AppsFlyerUtils", "isJailBreakon", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("GBDeviceInfo", "isJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("CMARAppRestrictionsDelegate", "isDeviceNonCompliant", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("ADYSecurityChecks", "isDeviceJailbroken", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("UBReportMetadataDevice", "is_rooted", false, kPXJBDetectionReturnNull),
+    PXJB_DETECTION_RULE("UtilitySystem", "isJailbreak", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("GemaltoConfiguration", "isJailbreak", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("CPWRDeviceInfo", "isJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("CPWRSessionInfo", "isJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("KSSystemInfo", "isJailbroken", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("EMDSKPPConfiguration", "jailBroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("EnrollParameters", "jailbroken", false, kPXJBDetectionReturnNull),
+    PXJB_DETECTION_RULE("EMDskppConfigurationBuilder", "jailbreakStatus", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("FCRSystemMetadata", "isJailbroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("v_VDMap", "isJailBrokenDetectedByVOS", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("v_VDMap", "isDFPHookedDetecedByVOS", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("v_VDMap", "isCodeInjectionDetectedByVOS", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("v_VDMap", "isDebuggerCheckDetectedByVOS", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("v_VDMap", "isAppSignerCheckDetectedByVOS", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("v_VDMap", "v_checkAModified", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("SDMUtils", "isJailBroken", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("OneSignalJailbreakDetection", "isJailbroken", true, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("DigiPassHandler", "rootedDeviceTestResult", false, kPXJBDetectionReturnFalse),
+    PXJB_DETECTION_RULE("AWMyDeviceGeneralInfo", "isCompliant", false, kPXJBDetectionReturnTrue),
+};
 
-%hook ANSMetadata
-- (BOOL)computeIsJailbroken { return NO; }
-- (BOOL)isJailbroken { return NO; }
-%end
+#undef PXJB_DETECTION_RULE
 
-%hook AppsFlyerUtils
-+ (BOOL)isJailBreakon { return NO; }
-%end
+static dispatch_queue_t gJBLateDetectionHookQueue = NULL;
+static _Atomic(bool) gJBLateDetectionMonitorStarted = false;
+static _Atomic(bool) gJBLateDetectionInstallPending = false;
 
-%hook GBDeviceInfo
-- (BOOL)isJailbroken { return NO; }
-%end
+static dispatch_queue_t PXJBLateDetectionQueue(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        gJBLateDetectionHookQueue = dispatch_queue_create(
+            "com.weaponx.jailbreak-bypass.late-detection-hooks",
+            DISPATCH_QUEUE_SERIAL);
+    });
+    return gJBLateDetectionHookQueue;
+}
 
-%hook CMARAppRestrictionsDelegate
-- (bool)isDeviceNonCompliant { return false; }
-%end
+static IMP PXJBCreateDetectionReplacement(PXJBDetectionHookRule *rule,
+                                           SEL selector) {
+    if (!rule || !selector) return NULL;
 
-%hook ADYSecurityChecks
-+ (bool)isDeviceJailbroken { return false; }
-%end
+    switch (rule->returnPolicy) {
+        case kPXJBDetectionReturnTrue:
+            return imp_implementationWithBlock(^BOOL(id receiver) {
+                if (PXJBShouldBypassCached()) return YES;
+                IMP original = rule->original;
+                return original && original != rule->replacement
+                    ? ((BOOL (*)(id, SEL))original)(receiver, selector)
+                    : YES;
+            });
+        case kPXJBDetectionReturnNull:
+            return imp_implementationWithBlock(^void *(id receiver) {
+                if (PXJBShouldBypassCached()) return NULL;
+                IMP original = rule->original;
+                return original && original != rule->replacement
+                    ? ((void *(*)(id, SEL))original)(receiver, selector)
+                    : NULL;
+            });
+        case kPXJBDetectionReturnFalse:
+        default:
+            return imp_implementationWithBlock(^BOOL(id receiver) {
+                if (PXJBShouldBypassCached()) return NO;
+                IMP original = rule->original;
+                return original && original != rule->replacement
+                    ? ((BOOL (*)(id, SEL))original)(receiver, selector)
+                    : NO;
+            });
+    }
+}
 
-%hook UBReportMetadataDevice
-- (void *)is_rooted { return NULL; }
-%end
+static void PXJBInstallLoadedDetectionClassHooks(void) {
+    for (size_t i = 0; i < PXJB_ARRAY_COUNT(kPXJBDetectionHookRules); i++) {
+        PXJBDetectionHookRule *rule = &kPXJBDetectionHookRules[i];
+        Class cls = objc_getClass(rule->className);
+        if (!cls) continue;
 
-%hook UtilitySystem
-+ (bool)isJailbreak { return false; }
-%end
+        Class targetClass = rule->classMethod ? object_getClass(cls) : cls;
+        SEL selector = sel_registerName(rule->selectorName);
+        Method method = class_getInstanceMethod(targetClass, selector);
+        if (!method) continue;
 
-%hook GemaltoConfiguration
-+ (bool)isJailbreak { return false; }
-%end
+        if (rule->installed &&
+            method_getImplementation(method) == rule->replacement) {
+            continue;
+        }
+        if (!rule->replacement) {
+            rule->replacement = PXJBCreateDetectionReplacement(rule, selector);
+            if (!rule->replacement) continue;
+        }
 
-%hook CPWRDeviceInfo
-- (bool)isJailbroken { return false; }
-%end
+        // A late category can replace an already-hooked implementation. Re-run
+        // MSHookMessageEx when the currently published IMP is no longer ours.
+        MSHookMessageEx(targetClass,
+                        selector,
+                        rule->replacement,
+                        &rule->original);
+        rule->installed = true;
+    }
+}
 
-%hook CPWRSessionInfo
-- (bool)isJailbroken { return false; }
-%end
+static void PXJBRegisterDyldAddImageCallback(
+    void (*callback)(const struct mach_header *, intptr_t));
 
-%hook KSSystemInfo
-+ (bool)isJailbroken { return false; }
-%end
+static void PXJBLateDetectionImageAdded(const struct mach_header *header,
+                                        intptr_t slide) {
+    (void)header;
+    (void)slide;
+    if (!atomic_load_explicit(&gJBLateDetectionMonitorStarted,
+                              memory_order_acquire)) {
+        return;
+    }
+    if (atomic_exchange_explicit(&gJBLateDetectionInstallPending,
+                                 true,
+                                 memory_order_acq_rel)) {
+        return;
+    }
 
-%hook EMDSKPPConfiguration
-- (bool)jailBroken { return false; }
-%end
+    dispatch_queue_t queue = PXJBLateDetectionQueue();
+    dispatch_async(queue, ^{
+        PXJBInstallLoadedDetectionClassHooks();
+        atomic_store_explicit(&gJBLateDetectionInstallPending,
+                              false,
+                              memory_order_release);
+    });
+}
 
-%hook EnrollParameters
-- (void *)jailbroken { return NULL; }
-%end
+static void PXJBStartLateLoadedDetectionClassMonitoring(void) {
+    dispatch_queue_t queue = PXJBLateDetectionQueue();
+    if (!queue) return;
 
-%hook EMDskppConfigurationBuilder
-- (bool)jailbreakStatus { return false; }
-%end
-
-%hook FCRSystemMetadata
-- (bool)isJailbroken { return false; }
-%end
-
-%hook v_VDMap
-- (bool)isJailBrokenDetectedByVOS { return false; }
-- (bool)isDFPHookedDetecedByVOS { return false; }
-- (bool)isCodeInjectionDetectedByVOS { return false; }
-- (bool)isDebuggerCheckDetectedByVOS { return false; }
-- (bool)isAppSignerCheckDetectedByVOS { return false; }
-- (bool)v_checkAModified { return false; }
-%end
-
-%hook SDMUtils
-- (BOOL)isJailBroken { return NO; }
-%end
-
-%hook OneSignalJailbreakDetection
-+ (BOOL)isJailbroken { return NO; }
-%end
-
-%hook DigiPassHandler
-- (BOOL)rootedDeviceTestResult { return NO; }
-%end
-
-%hook AWMyDeviceGeneralInfo
-- (bool)isCompliant { return true; }
-%end
+    atomic_store_explicit(&gJBLateDetectionMonitorStarted,
+                          true,
+                          memory_order_release);
+    PXJBRegisterDyldAddImageCallback(PXJBLateDetectionImageAdded);
+    dispatch_sync(queue, ^{
+        PXJBInstallLoadedDetectionClassHooks();
+    });
+}
 
 // --- Priority 3: NSDirectoryEnumerator filtering ---
 %hook NSDirectoryEnumerator
@@ -4635,50 +4785,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
 %end
 
-// --- JailbreakDetector bypass: LSApplicationWorkspace installedPlugins ---
-// Filter plugins belonging to known JB apps from the enumeration.
-%hook LSApplicationWorkspace
 
-- (NSArray *)installedPlugins {
-    NSArray *plugins = %orig;
-    if (!PXJBShouldBypassCached() || !plugins) return plugins;
-
-    static NSSet *jbAppIDs = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        jbAppIDs = [NSSet setWithArray:@[
-            @"com.xina.jailbreak",
-            @"com.opa334.Dopamine",
-            @"com.tigisoftware.Filza",
-            @"org.coolstar.SileoStore",
-            @"org.coolstar.Sileo",
-            @"ws.hbang.Terminal",
-            @"xyz.willy.Zebra",
-            @"shshd",
-            @"com.saurik.Cydia",
-        ]];
-    });
-
-    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:plugins.count];
-    for (id plugin in plugins) {
-        if ([plugin respondsToSelector:@selector(containingBundle)]) {
-            id appBundle = [plugin performSelector:@selector(containingBundle)];
-            if (appBundle && [appBundle respondsToSelector:@selector(bundleIdentifier)]) {
-                NSString *appID = [appBundle performSelector:@selector(bundleIdentifier)];
-                if (appID && [jbAppIDs containsObject:appID]) continue; // skip JB plugin
-            }
-        }
-        // Also check plugin identifier hash for obfuscated detection
-        if ([plugin respondsToSelector:@selector(pluginIdentifier)]) {
-            NSString *pluginID = [plugin performSelector:@selector(pluginIdentifier)];
-            if (pluginID && [jbAppIDs containsObject:pluginID]) continue;
-        }
-        [filtered addObject:plugin];
-    }
-    return [filtered copy];
-}
-
-%end
 
 %ctor {
     @autoreleasepool {
@@ -4733,43 +4840,43 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
         // Groups conceptually:
         // JBSafeFoundation: file/process query wrappers (stat/access/open/...)
-        // JBAppSpecific: Logos %init ObjC detectors
+        // JBAppSpecific: Logos Foundation hooks plus runtime detector table
         // JBAggressiveRuntime: dyld/dlsym/task_info (experimental toggles only)
         // P0-B: syscall and sandbox_check are intentionally not production capabilities.
         void *libSystem = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
         if (libSystem) {
             void *sym = NULL;
 
-            sym = FindSymbol(NULL, "stat");
+            sym = FindSymbol("stat");
             if (sym) MSHookFunction(sym, (void *)hook_stat, (void **)&orig_stat);
 
-            sym = FindSymbol(NULL, "stat64");
+            sym = FindSymbol("stat64");
             if (sym) MSHookFunction(sym, (void *)hook_stat64, (void **)&orig_stat64);
 
-            sym = FindSymbol(NULL, "lstat");
+            sym = FindSymbol("lstat");
             if (sym) MSHookFunction(sym, (void *)hook_lstat, (void **)&orig_lstat);
 
-            sym = FindSymbol(NULL, "lstat64");
+            sym = FindSymbol("lstat64");
             if (sym) MSHookFunction(sym, (void *)hook_lstat64, (void **)&orig_lstat64);
 
-            sym = FindSymbol(NULL, "access");
+            sym = FindSymbol("access");
             if (sym) MSHookFunction(sym, (void *)hook_access, (void **)&orig_access);
 
-            sym = FindSymbol(NULL, "open");
+            sym = FindSymbol("open");
             if (sym) MSHookFunction(sym, (void *)hook_open, (void **)&orig_open);
 
-            sym = FindSymbol(NULL, "openat");
+            sym = FindSymbol("openat");
             if (sym) MSHookFunction(sym, (void *)hook_openat, (void **)&orig_openat);
 
-            sym = FindSymbol(NULL, "fopen");
+            sym = FindSymbol("fopen");
             if (sym) MSHookFunction(sym, (void *)hook_fopen, (void **)&orig_fopen);
 
             // P2: install opendir/readdir/closedir as one lifecycle group.
             // fdopendir is optional, but if present its trampoline must also be valid.
-            void *opendirEntry = FindSymbol(NULL, "opendir");
-            void *readdirEntry = FindSymbol(NULL, "readdir");
-            void *closedirEntry = FindSymbol(NULL, "closedir");
-            void *fdopendirEntry = FindSymbol(NULL, "fdopendir");
+            void *opendirEntry = FindSymbol("opendir");
+            void *readdirEntry = FindSymbol("readdir");
+            void *closedirEntry = FindSymbol("closedir");
+            void *fdopendirEntry = FindSymbol("fdopendir");
             if (opendirEntry && readdirEntry && closedirEntry) {
                 gJBOpendirEntry = (PXJBOpendirFunction)opendirEntry;
                 gJBReaddirEntry = (PXJBReaddirFunction)readdirEntry;
@@ -4813,80 +4920,80 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 PXLog(@"[JailbreakBypass] directory lifecycle disabled: missing mandatory symbol");
             }
 
-            sym = FindSymbol(NULL, "readlink");
+            sym = FindSymbol("readlink");
             if (sym) MSHookFunction(sym, (void *)hook_readlink, (void **)&orig_readlink);
 
-            sym = FindSymbol(NULL, "realpath");
+            sym = FindSymbol("realpath");
             if (sym) MSHookFunction(sym, (void *)hook_realpath, (void **)&orig_realpath);
 
-            sym = FindSymbol(NULL, "connect");
+            sym = FindSymbol("connect");
             if (sym) MSHookFunction(sym, (void *)hook_connect, (void **)&orig_connect);
 
-            sym = FindSymbol(NULL, "getenv");
+            sym = FindSymbol("getenv");
             if (sym) MSHookFunction(sym, (void *)hook_getenv, (void **)&orig_getenv);
 
             // Phase 2
-            sym = FindSymbol(NULL, "ptrace");
+            sym = FindSymbol("ptrace");
             if (sym) MSHookFunction(sym, (void *)hook_ptrace, (void **)&orig_ptrace);
 
-            sym = FindSymbol(NULL, "fork");
+            sym = FindSymbol("fork");
             if (sym) MSHookFunction(sym, (void *)hook_fork, (void **)&orig_fork);
 
-            sym = FindSymbol(NULL, "vfork");
+            sym = FindSymbol("vfork");
             if (sym) MSHookFunction(sym, (void *)hook_vfork, (void **)&orig_vfork);
 
             // Priority 1: UID/GID spoofing - hide root access.
-            sym = FindSymbol(NULL, "getuid");
+            sym = FindSymbol("getuid");
             if (sym) MSHookFunction(sym, (void *)hook_getuid, (void **)&orig_getuid);
 
-            sym = FindSymbol(NULL, "geteuid");
+            sym = FindSymbol("geteuid");
             if (sym) MSHookFunction(sym, (void *)hook_geteuid, (void **)&orig_geteuid);
 
-            sym = FindSymbol(NULL, "getgid");
+            sym = FindSymbol("getgid");
             if (sym) MSHookFunction(sym, (void *)hook_getgid, (void **)&orig_getgid);
 
-            sym = FindSymbol(NULL, "getegid");
+            sym = FindSymbol("getegid");
             if (sym) MSHookFunction(sym, (void *)hook_getegid, (void **)&orig_getegid);
 
-            sym = FindSymbol(NULL, "setuid");
+            sym = FindSymbol("setuid");
             if (sym) MSHookFunction(sym, (void *)hook_setuid, (void **)&orig_setuid);
 
-            sym = FindSymbol(NULL, "seteuid");
+            sym = FindSymbol("seteuid");
             if (sym) MSHookFunction(sym, (void *)hook_seteuid, (void **)&orig_seteuid);
 
-            sym = FindSymbol(NULL, "setgid");
+            sym = FindSymbol("setgid");
             if (sym) MSHookFunction(sym, (void *)hook_setgid, (void **)&orig_setgid);
 
-            sym = FindSymbol(NULL, "setegid");
+            sym = FindSymbol("setegid");
             if (sym) MSHookFunction(sym, (void *)hook_setegid, (void **)&orig_setegid);
 
-            sym = FindSymbol(NULL, "setreuid");
+            sym = FindSymbol("setreuid");
             if (sym) MSHookFunction(sym, (void *)hook_setreuid, (void **)&orig_setreuid);
 
-            sym = FindSymbol(NULL, "setregid");
+            sym = FindSymbol("setregid");
             if (sym) MSHookFunction(sym, (void *)hook_setregid, (void **)&orig_setregid);
 
             // Priority 1: getppid spoofing.
-            sym = FindSymbol(NULL, "getppid");
+            sym = FindSymbol("getppid");
             if (sym) MSHookFunction(sym, (void *)hook_getppid, (void **)&orig_getppid);
 
             // Priority 1: csops — clear CS_PLATFORM_BINARY.
-            sym = FindSymbol(NULL, "csops");
+            sym = FindSymbol("csops");
             if (sym) MSHookFunction(sym, (void *)hook_csops, (void **)&orig_csops);
 
             // P0-B: syscall is intentionally not resolved or hooked.
 
-            sym = FindSymbol(NULL, "system");
+            sym = FindSymbol("system");
             if (sym) MSHookFunction(sym, (void *)hook_system, (void **)&orig_system);
 
-            sym = FindSymbol(NULL, "popen");
+            sym = FindSymbol("popen");
             if (sym) MSHookFunction(sym, (void *)hook_popen, (void **)&orig_popen);
 
             // Block probe spawns (safe default; gate inside hook).
-            sym = FindSymbol(NULL, "posix_spawn");
+            sym = FindSymbol("posix_spawn");
             if (sym) MSHookFunction(sym, (void *)hook_posix_spawn, (void **)&orig_posix_spawn);
 
-            sym = FindSymbol(NULL, "posix_spawnp");
+            sym = FindSymbol("posix_spawnp");
             if (sym) MSHookFunction(sym, (void *)hook_posix_spawnp, (void **)&orig_posix_spawnp);
 
             // P0-B: sandbox_check is intentionally not resolved or hooked.
@@ -4912,64 +5019,64 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 });
             }
 
-            sym = FindSymbol(NULL, "fstatfs");
+            sym = FindSymbol("fstatfs");
             if (sym) MSHookFunction(sym, (void *)hook_fstatfs, (void **)&orig_fstatfs);
 
-            sym = FindSymbol(NULL, "statvfs");
+            sym = FindSymbol("statvfs");
             if (sym) MSHookFunction(sym, (void *)hook_statvfs, (void **)&orig_statvfs);
 
-            sym = FindSymbol(NULL, "fstatvfs");
+            sym = FindSymbol("fstatvfs");
             if (sym) MSHookFunction(sym, (void *)hook_fstatvfs, (void **)&orig_fstatvfs);
 
             // Priority 3: dlopen_preflight, creat, fstat variants, fs mutation hooks.
-            sym = FindSymbol(NULL, "dlopen_preflight");
+            sym = FindSymbol("dlopen_preflight");
             if (sym) MSHookFunction(sym, (void *)hook_dlopen_preflight, (void **)&orig_dlopen_preflight);
 
-            sym = FindSymbol(NULL, "creat");
+            sym = FindSymbol("creat");
             if (sym) MSHookFunction(sym, (void *)hook_creat, (void **)&orig_creat);
 
-            sym = FindSymbol(NULL, "fstat");
+            sym = FindSymbol("fstat");
             if (sym) MSHookFunction(sym, (void *)hook_fstat, (void **)&orig_fstat);
 
-            sym = FindSymbol(NULL, "fstatat");
+            sym = FindSymbol("fstatat");
             if (sym) MSHookFunction(sym, (void *)hook_fstatat, (void **)&orig_fstatat);
 
-            sym = FindSymbol(NULL, "faccessat");
+            sym = FindSymbol("faccessat");
             if (sym) MSHookFunction(sym, (void *)hook_faccessat, (void **)&orig_faccessat);
 
-            sym = FindSymbol(NULL, "readlinkat");
+            sym = FindSymbol("readlinkat");
             if (sym) MSHookFunction(sym, (void *)hook_readlinkat, (void **)&orig_readlinkat);
 
-            sym = FindSymbol(NULL, "symlink");
+            sym = FindSymbol("symlink");
             if (sym) MSHookFunction(sym, (void *)hook_symlink, (void **)&orig_symlink);
 
-            sym = FindSymbol(NULL, "rename");
+            sym = FindSymbol("rename");
             if (sym) MSHookFunction(sym, (void *)hook_rename, (void **)&orig_rename);
 
-            sym = FindSymbol(NULL, "link");
+            sym = FindSymbol("link");
             if (sym) MSHookFunction(sym, (void *)hook_link, (void **)&orig_link);
 
-            sym = FindSymbol(NULL, "unlink");
+            sym = FindSymbol("unlink");
             if (sym) MSHookFunction(sym, (void *)hook_unlink, (void **)&orig_unlink);
 
-            sym = FindSymbol(NULL, "remove");
+            sym = FindSymbol("remove");
             if (sym) MSHookFunction(sym, (void *)hook_remove_func, (void **)&orig_remove_func);
 
-            sym = FindSymbol(NULL, "rmdir");
+            sym = FindSymbol("rmdir");
             if (sym) MSHookFunction(sym, (void *)hook_rmdir, (void **)&orig_rmdir);
 
             // Priority 3: objc_copyClassNamesForImage, NSVersionOf*.
-            sym = FindSymbol(NULL, "objc_copyClassNamesForImage");
+            sym = FindSymbol("objc_copyClassNamesForImage");
             if (sym) MSHookFunction(sym, (void *)hook_objc_copyClassNamesForImage, (void **)&orig_objc_copyClassNamesForImage);
 
-            sym = FindSymbol(NULL, "NSVersionOfRunTimeLibrary");
+            sym = FindSymbol("NSVersionOfRunTimeLibrary");
             if (sym) MSHookFunction(sym, (void *)hook_NSVersionOfRunTimeLibrary, (void **)&orig_NSVersionOfRunTimeLibrary);
 
-            sym = FindSymbol(NULL, "NSVersionOfLinkTimeLibrary");
+            sym = FindSymbol("NSVersionOfLinkTimeLibrary");
             if (sym) MSHookFunction(sym, (void *)hook_NSVersionOfLinkTimeLibrary, (void **)&orig_NSVersionOfLinkTimeLibrary);
 
             // JailbreakDetector bypass hooks.
-            sym = FindSymbol(NULL, "getmntinfo");
+            sym = FindSymbol("getmntinfo");
             if (sym) {
                 gJBGetmntinfoEntry = (PXJBGetmntinfoFunction)sym;
                 MSHookFunction(sym, (void *)hook_getmntinfo, (void **)&orig_getmntinfo);
@@ -4978,7 +5085,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                                              PXJBPrepareMountSnapshotOwner();
             }
 
-            sym = FindSymbol(NULL, "bootstrap_look_up");
+            sym = FindSymbol("bootstrap_look_up");
             if (sym) MSHookFunction(sym, (void *)hook_bootstrap_look_up, (void **)&orig_bootstrap_look_up);
 
             // P1-E: vm_region_64 and task_get_exception_ports are high-risk,
@@ -4987,27 +5094,27 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // P0-A: capture fcntl only for verified internal calls. Do not hook the
             // variadic entry point until a command-complete ABI dispatcher exists.
-            sym = FindSymbol(NULL, "fcntl");
+            sym = FindSymbol("fcntl");
             if (sym) {
                 orig_fcntl = (PXJBFcntlFunction)sym;
             } else {
                 PXLog(@"[JailbreakBypass] fcntl symbol unavailable; F_GETPATH helpers will use libc fallback");
             }
 
-            sym = FindSymbol(NULL, "xpc_pipe_routine");
+            sym = FindSymbol("xpc_pipe_routine");
             if (sym) MSHookFunction(sym, (void *)hook_xpc_pipe_routine, (void **)&orig_xpc_pipe_routine);
 
-            sym = FindSymbol(NULL, "xpc_pipe_routine_with_flags");
+            sym = FindSymbol("xpc_pipe_routine_with_flags");
             if (sym) MSHookFunction(sym, (void *)hook_xpc_pipe_routine_with_flags, (void **)&orig_xpc_pipe_routine_with_flags);
 
             // P0-E: install the four indexed dyld APIs as one consistency group.
             // The patched entries are never called as originals; only the
             // trampolines returned by MSHookFunction are callable.
             if (wantDyldHide) {
-                void *countEntry = FindSymbol(NULL, "_dyld_image_count");
-                void *nameEntry = FindSymbol(NULL, "_dyld_get_image_name");
-                void *headerEntry = FindSymbol(NULL, "_dyld_get_image_header");
-                void *slideEntry = FindSymbol(NULL, "_dyld_get_image_vmaddr_slide");
+                void *countEntry = FindSymbol("_dyld_image_count");
+                void *nameEntry = FindSymbol("_dyld_get_image_name");
+                void *headerEntry = FindSymbol("_dyld_get_image_header");
+                void *slideEntry = FindSymbol("_dyld_get_image_vmaddr_slide");
 
                 if (countEntry && nameEntry && headerEntry && slideEntry) {
                     gDyldImageCountEntry = (PXDyldImageCountFn)countEntry;
@@ -5033,7 +5140,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                                           dyldReady,
                                           memory_order_release);
                     if (dyldReady) {
-                        sym = FindSymbol(NULL, "dladdr");
+                        sym = FindSymbol("dladdr");
                         if (sym) MSHookFunction(sym, (void *)hook_dladdr, (void **)&orig_dladdr);
                     } else {
                         PXLog(@"[JailbreakBypass] dyld indexed group disabled: invalid trampoline");
@@ -5047,7 +5154,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             // Phase 3 extension: block suspicious add_image callback registrations.
             if (wantBlockAddImage) {
                 // _dyld_register_func_for_add_image is in libdyld/dyld; dlsym RTLD_DEFAULT works.
-                sym = FindSymbol(NULL, "_dyld_register_func_for_add_image");
+                sym = FindSymbol("_dyld_register_func_for_add_image");
                 if (sym) {
                     // See hook implementation below (near dyld helpers).
                     extern void PXJBInstallDyldAddImageBlocker(void *sym);
@@ -5057,7 +5164,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // Phase 3 extension: hide TASK_DYLD_INFO via task_info.
             if (wantHideTaskDyldInfo) {
-                sym = FindSymbol(NULL, "task_info");
+                sym = FindSymbol("task_info");
                 if (sym) {
                     extern void PXJBInstallTaskInfoHook(void *sym);
                     PXJBInstallTaskInfoHook(sym);
@@ -5066,7 +5173,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // Phase 3 extension: hide dl_iterate_phdr enumeration.
             if (wantHideDlIteratePhdr) {
-                sym = FindSymbol(NULL, "dl_iterate_phdr");
+                sym = FindSymbol("dl_iterate_phdr");
                 if (sym) {
                     MSHookFunction(sym, (void *)hook_dl_iterate_phdr, (void **)&orig_dl_iterate_phdr);
                 }
@@ -5074,9 +5181,9 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // Phase 4: block dlopen/dlsym probes.
             if (wantBlockDlopenDlsym) {
-                sym = FindSymbol(NULL, "dlopen");
+                sym = FindSymbol("dlopen");
                 if (sym) MSHookFunction(sym, (void *)hook_dlopen, (void **)&orig_dlopen);
-                sym = FindSymbol(NULL, "dlsym");
+                sym = FindSymbol("dlsym");
                 if (sym) MSHookFunction(sym, (void *)hook_dlsym, (void **)&orig_dlsym);
             }
 
@@ -5133,7 +5240,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // Phase 6: hide proc map filenames (libproc).
             if (wantHideProcMaps) {
-                sym = FindSymbol(NULL, "proc_regionfilename");
+                sym = FindSymbol("proc_regionfilename");
                 if (sym) {
                     MSHookFunction(sym, (void *)hook_proc_regionfilename, (void **)&orig_proc_regionfilename);
                 }
@@ -5141,11 +5248,11 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             // Phase 7: hide ObjC runtime image list.
             if (wantHideObjcImages) {
-                sym = FindSymbol(NULL, "objc_copyImageNames");
+                sym = FindSymbol("objc_copyImageNames");
                 if (sym) {
                     MSHookFunction(sym, (void *)hook_objc_copyImageNames, (void **)&orig_objc_copyImageNames);
                 }
-                sym = FindSymbol(NULL, "class_getImageName");
+                sym = FindSymbol("class_getImageName");
                 if (sym) {
                     MSHookFunction(sym, (void *)hook_class_getImageName, (void **)&orig_class_getImageName);
                 }
@@ -5160,6 +5267,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         // activate the requested subset with one atomic policy publication.
         PXJBFinalizeCapabilityRegistryAndAudit();
         PXJBPublishPolicySnapshot(launchSettings);
+        PXJBStartLateLoadedDetectionClassMonitoring();
 
         // Runtime reload happens off the hook path and can only use capabilities
         // that passed the immutable install audit.
@@ -5176,6 +5284,19 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
 // --- Optional strong hooks (installed only when toggle is enabled at launch) ---
 static void (*orig__dyld_register_func_for_add_image)(void (*func)(const struct mach_header *, intptr_t));
+
+static void PXJBRegisterDyldAddImageCallback(
+    void (*callback)(const struct mach_header *, intptr_t)) {
+    if (!callback) return;
+    // Register internal lifecycle observers through the original trampoline so
+    // the optional public callback blocker cannot suppress our own monitor.
+    if (orig__dyld_register_func_for_add_image) {
+        orig__dyld_register_func_for_add_image(callback);
+    } else {
+        _dyld_register_func_for_add_image(callback);
+    }
+}
+
 static void hook__dyld_register_func_for_add_image(void (*func)(const struct mach_header *, intptr_t)) {
     if (!orig__dyld_register_func_for_add_image) return;
     if (!PXJBBlockDyldAddImageCallbacksEnabled() || !func) {
