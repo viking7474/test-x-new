@@ -482,18 +482,6 @@ enum {
     kPXJBPolicyDebugLogging               = 1ull << 10,
 };
 
-// Production-safe loader policy. These surfaces are intentionally disabled
-// even when an older plist still requests them. Global loader interception can
-// violate RASP/runtime contracts (NULL dlsym results, suppressed dyld callbacks,
-// TASK_DYLD_INFO failures, or inconsistent name/header/runtime views).
-static const PXJBPolicyMask kPXJBPolicyProductionDisabledLoaderMask =
-    kPXJBPolicyHideDylibs |
-    kPXJBPolicyBlockDyldAddImageCallbacks |
-    kPXJBPolicyHideTaskDyldInfo |
-    kPXJBPolicyHideDlIteratePhdr |
-    kPXJBPolicyBlockDlopenDlsymProbes |
-    kPXJBPolicyHideObjcImages;
-
 static _Atomic(PXJBPolicyMask) gJBPolicyMask = 0;
 static _Atomic(bool) gJBDyldNameHookReady = false;
 
@@ -726,12 +714,7 @@ static PXJBPolicyMask PXJBBuildRequestedPolicyMask(NSDictionary *settings) {
     if (PXJBSettingEnabled(settings, @"jbBypassDebugLoggingEnabled")) {
         mask |= kPXJBPolicyDebugLogging;
     }
-
-    // Fail open for process stability: never request or publish the six global
-    // loader/runtime interception capabilities in production builds. Because
-    // launch installation is derived from this returned mask, their trampolines
-    // are not installed; runtime reload also cannot reactivate them.
-    return mask & ~kPXJBPolicyProductionDisabledLoaderMask;
+    return mask;
 }
 
 static void PXJBPublishPolicySnapshot(NSDictionary *settings) {
