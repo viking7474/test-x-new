@@ -12,8 +12,10 @@ from types import MappingProxyType
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_PATH = ROOT / "ProjectXTweak" / "DeviceSpecHooks.x"
+CANVAS_PATH = ROOT / "ProjectXTweak" / "CanvasFingerprintHooks.x"
 PROBE_PATH = ROOT / "scripts" / "probe_device_spec_p1_2.sh"
 DEVICE_SOURCE = DEVICE_PATH.read_text(encoding="utf-8")
+CANVAS_SOURCE = CANVAS_PATH.read_text(encoding="utf-8")
 PROBE_SOURCE = PROBE_PATH.read_text(encoding="utf-8") if PROBE_PATH.exists() else ""
 
 
@@ -297,8 +299,12 @@ def run_source_matrix(matrix: Matrix) -> None:
 
     web_script = DEVICE_SOURCE[DEVICE_SOURCE.index("void PXInstallDeviceSpecUserScripts"):DEVICE_SOURCE.index("// Parse resolution string")]
     matrix.check("source: WebKit capability script is generation-tagged", "generationMarker" in web_script and "snapshot.generation" in web_script)
-    matrix.check("source: newer WebKit generation cannot be downgraded", "if(current>generation)return" in web_script)
+    matrix.check("source: generation placeholder remains extractor-safe", "Number('%llu')||1" in web_script)
+    matrix.check("source: generation marker is replaceable", "delete globalThis.__weaponx_device_capabilities_generation__" in web_script and "writable:true" in web_script)
+    matrix.check("source: newer or equal WebKit generation cannot overwrite", "if(current>=generation)return" in web_script)
+    matrix.check("source: legacy capability invariant remains published", "__weaponx_device_capabilities__" in web_script)
     matrix.check("source: same WebKit generation is not installed twice", "containsString:generationMarker" in web_script)
+    matrix.check("source: Canvas always delegates generation-aware capability install", "PXInstallDeviceSpecUserScripts(controller);" in CANVAS_SOURCE and "if (!hasCapabilities)" not in CANVAS_SOURCE)
 
     hot_methods = [
         ("- (CGRect)bounds", 1),

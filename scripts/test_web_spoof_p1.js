@@ -100,19 +100,42 @@ const capabilityTemplate = extractObjectiveCStringAssignment(
     "void PXInstallDeviceSpecUserScripts",
     "WKUserScript *userScript"
 );
-let replacementIndex = 0;
-const capabilitySource = capabilityTemplate.replace(/%ld/g, () => String([8, 6][replacementIndex++]));
+function renderCapabilitySource(generation, deviceMemory, hardwareConcurrency) {
+    let replacementIndex = 0;
+    return capabilityTemplate
+        .replace(/%llu/g, String(generation))
+        .replace(/%ld/g, () => String([deviceMemory, hardwareConcurrency][replacementIndex++]));
+}
+
 const navigatorPrototype = {};
 const runtimeContext = {
     navigator: Object.create(navigatorPrototype),
-    Object
+    Object,
+    Number
 };
 runtimeContext.globalThis = runtimeContext;
-vm.runInNewContext(capabilitySource, runtimeContext, { filename: "device-capabilities.js" });
+
+const capabilitySourceV1 = renderCapabilitySource(1, 8, 6);
+vm.runInNewContext(capabilitySourceV1, runtimeContext, { filename: "device-capabilities-v1.js" });
 assert.strictEqual(runtimeContext.navigator.deviceMemory, 8, "deviceMemory must be installed at runtime");
 assert.strictEqual(runtimeContext.navigator.hardwareConcurrency, 6, "hardwareConcurrency must be installed at runtime");
-vm.runInNewContext(capabilitySource, runtimeContext, { filename: "device-capabilities-repeat.js" });
-assert.strictEqual(runtimeContext.navigator.deviceMemory, 8, "capability script must be idempotent");
-assert.strictEqual(runtimeContext.navigator.hardwareConcurrency, 6, "capability script must be idempotent");
+assert.strictEqual(runtimeContext.__weaponx_device_capabilities__, true, "legacy capability marker must remain published");
+assert.strictEqual(runtimeContext.__weaponx_device_capabilities_generation__, 1, "generation 1 must be published");
+
+vm.runInNewContext(capabilitySourceV1, runtimeContext, { filename: "device-capabilities-v1-repeat.js" });
+assert.strictEqual(runtimeContext.navigator.deviceMemory, 8, "same generation must be idempotent");
+assert.strictEqual(runtimeContext.navigator.hardwareConcurrency, 6, "same generation must be idempotent");
+
+const capabilitySourceV2 = renderCapabilitySource(2, 12, 10);
+vm.runInNewContext(capabilitySourceV2, runtimeContext, { filename: "device-capabilities-v2.js" });
+assert.strictEqual(runtimeContext.navigator.deviceMemory, 12, "newer generation must update deviceMemory");
+assert.strictEqual(runtimeContext.navigator.hardwareConcurrency, 10, "newer generation must update hardwareConcurrency");
+assert.strictEqual(runtimeContext.__weaponx_device_capabilities_generation__, 2, "newer generation marker must replace the old marker");
+
+const staleCapabilitySource = renderCapabilitySource(1, 2, 2);
+vm.runInNewContext(staleCapabilitySource, runtimeContext, { filename: "device-capabilities-stale.js" });
+assert.strictEqual(runtimeContext.navigator.deviceMemory, 12, "stale generation must not downgrade deviceMemory");
+assert.strictEqual(runtimeContext.navigator.hardwareConcurrency, 10, "stale generation must not downgrade hardwareConcurrency");
+assert.strictEqual(runtimeContext.__weaponx_device_capabilities_generation__, 2, "stale generation must not downgrade the marker");
 
 console.log("web spoof P1 source invariants: PASS");

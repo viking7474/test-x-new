@@ -846,18 +846,14 @@ static void PXAddDocumentStartUserScriptIfNeeded(WKUserContentController *contro
 static void PXInstallDocumentStartSpoofScripts(WKUserContentController *controller) {
     if (!controller) return;
 
-    BOOL hasCapabilities = PXUserContentControllerContainsMarker(controller,
-                                                                  @"__weaponx_device_capabilities__");
     BOOL hasScreen = PXUserContentControllerContainsMarker(controller,
                                                             @"__weaponx_screen_spoof__");
     BOOL hasFingerprint = PXUserContentControllerContainsMarker(controller,
                                                                  @"__weaponx_fp_spoof__");
 
-    // DeviceSpec contributes navigator.deviceMemory/hardwareConcurrency while this
-    // file remains the sole owner of WKWebView/WKWebViewConfiguration injection hooks.
-    if (!hasCapabilities) {
-        PXInstallDeviceSpecUserScripts(controller);
-    }
+    // DeviceSpec owns generation-aware capability deduplication. Always delegate:
+    // the legacy marker is compatibility evidence, not an outer installation gate.
+    PXInstallDeviceSpecUserScripts(controller);
 
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID.length) return;
