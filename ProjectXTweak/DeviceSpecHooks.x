@@ -6,6 +6,7 @@
 #import "HookOwnership.h"
 #import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
+#import <sys/sysctl.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -23,18 +24,6 @@
 
 #import "PXScope.h"
 #import "PXFileDebug.h"
-
-// Define the swap usage structure if it's not available
-#ifndef HAVE_XSW_USAGE
-struct xsw_usage {
-    uint64_t xsu_total;
-    uint64_t xsu_avail;
-    uint64_t xsu_used;
-    uint32_t xsu_pagesize;
-    boolean_t xsu_encrypted;
-};
-typedef struct xsw_usage xsw_usage;
-#endif
 
 #ifndef CPU_SUBTYPE_ARM64_V8
 #define CPU_SUBTYPE_ARM64_V8 ((cpu_subtype_t)1)
@@ -1853,9 +1842,9 @@ static int applyDeviceSpecSysctlBynamePost(const char *name, void *oldp, size_t 
                 name, totalMemory, (long)deviceMemoryGB);
             loggedMemSize = YES;
         }
-    } else if (strcmp(name, "vm.swapusage") == 0 && *oldlenp >= sizeof(xsw_usage)) {
-        // Swap usage information
-        xsw_usage *swap = (xsw_usage *)oldp;
+    } else if (strcmp(name, "vm.swapusage") == 0 && *oldlenp >= sizeof(struct xsw_usage)) {
+        // Swap usage information from <sys/sysctl.h>.
+        struct xsw_usage *swap = (struct xsw_usage *)oldp;
         
         // Get the device memory from specs (in GB)
         NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
