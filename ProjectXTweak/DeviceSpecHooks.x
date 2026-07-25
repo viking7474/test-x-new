@@ -18,6 +18,7 @@
 #import <substrate.h>
 #import <dlfcn.h>
 #import <errno.h>
+#import <limits.h>
 #import <mach-o/arch.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import "IOSVersionInfo.h"
@@ -32,9 +33,97 @@
 #define CPU_SUBTYPE_ARM64E ((cpu_subtype_t)2)
 #endif
 
-// Original function pointers
+typedef NS_OPTIONS(uint32_t, PXDeviceCPUFeatureFlags) {
+    PXDeviceCPUFeatureARM64       = 1u << 0,
+    PXDeviceCPUFeatureARM64E      = 1u << 1,
+    PXDeviceCPUFeatureAtomics     = 1u << 2,
+    PXDeviceCPUFeatureFCMA        = 1u << 3,
+    PXDeviceCPUFeatureCRC32       = 1u << 4,
+    PXDeviceCPUFeatureNEON        = 1u << 5,
+    PXDeviceCPUFeatureAES         = 1u << 6,
+    PXDeviceCPUFeatureFP16        = 1u << 7,
+    PXDeviceCPUFeatureJSCVT       = 1u << 8,
+    PXDeviceCPUFeatureLRCPC       = 1u << 9,
+};
+
+typedef struct {
+    const char *token;
+    const char *qualifier;
+    const char *brand;
+    const char *archDescription;
+    cpu_subtype_t cpuSubtype;
+    uint32_t cpuFamily;
+    uint32_t defaultCoreCount;
+    uint64_t minFrequencyHz;
+    uint64_t maxFrequencyHz;
+    uint64_t l1iCacheBytes;
+    uint64_t l1dCacheBytes;
+    uint64_t l2CacheBytes;
+    uint64_t cacheLineBytes;
+    PXDeviceCPUFeatureFlags featureFlags;
+    const char *featureString;
+} PXDeviceCPUProfile;
+
+#define PX_CPU_BASE_FLAGS ((PXDeviceCPUFeatureFlags)(PXDeviceCPUFeatureARM64 | PXDeviceCPUFeatureCRC32 | PXDeviceCPUFeatureNEON | PXDeviceCPUFeatureAES))
+#define PX_CPU_ATOMICS_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_BASE_FLAGS | PXDeviceCPUFeatureAtomics))
+#define PX_CPU_ARM64E_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ATOMICS_FLAGS | PXDeviceCPUFeatureARM64E | PXDeviceCPUFeatureFCMA))
+#define PX_CPU_ARM64E_FP16_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ARM64E_FLAGS | PXDeviceCPUFeatureFP16 | PXDeviceCPUFeatureJSCVT))
+#define PX_CPU_ARM64E_LRCPC_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ARM64E_FP16_FLAGS | PXDeviceCPUFeatureLRCPC))
+
+// P1.1 canonical CPU source. All native CPU surfaces resolve through this table.
+static const PXDeviceCPUProfile kPXDeviceCPUProfiles[] = {
+    { "A18", "PRO", "Apple A18 Pro", "ARM64E", CPU_SUBTYPE_ARM64E, 0x75D4ACB9u, 6u, 1620000000ULL, 4050000000ULL, 131072ULL, 131072ULL, 20971520ULL, 64u, PX_CPU_ARM64E_LRCPC_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT LRCPC" },
+    { "A18", NULL, "Apple A18", "ARM64E", CPU_SUBTYPE_ARM64E, 0x204526D0u, 6u, 1620000000ULL, 4050000000ULL, 131072ULL, 131072ULL, 20971520ULL, 64u, PX_CPU_ARM64E_LRCPC_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT LRCPC" },
+    { "A17", NULL, "Apple A17 Pro", "ARM64E", CPU_SUBTYPE_ARM64E, 0x2876F5B5u, 6u, 1512000000ULL, 3780000000ULL, 65536ULL, 65536ULL, 16777216ULL, 64u, PX_CPU_ARM64E_LRCPC_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT LRCPC" },
+    { "A16", NULL, "Apple A16 Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0x8765EDEAu, 6u, 1384000000ULL, 3460000000ULL, 65536ULL, 65536ULL, 16777216ULL, 64u, PX_CPU_ARM64E_FP16_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT" },
+    { "A15", NULL, "Apple A15 Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0xDA33D83Du, 6u, 1292000000ULL, 3230000000ULL, 65536ULL, 65536ULL, 12582912ULL, 64u, PX_CPU_ARM64E_FP16_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT" },
+    { "A14", NULL, "Apple A14 Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0x1B588BB3u, 6u, 1196000000ULL, 2990000000ULL, 65536ULL, 65536ULL, 12582912ULL, 64u, PX_CPU_ARM64E_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA" },
+    { "A13", NULL, "Apple A13 Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0x462504D2u, 6u, 1060000000ULL, 2650000000ULL, 65536ULL, 65536ULL, 8388608ULL, 64u, PX_CPU_ARM64E_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA" },
+    { "A12X", NULL, "Apple A12X Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0x07D34B9Fu, 8u, 996000000ULL, 2490000000ULL, 32768ULL, 32768ULL, 8388608ULL, 64u, PX_CPU_ARM64E_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA" },
+    { "A12Z", NULL, "Apple A12Z Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0x07D34B9Fu, 8u, 996000000ULL, 2490000000ULL, 32768ULL, 32768ULL, 8388608ULL, 64u, PX_CPU_ARM64E_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA" },
+    { "A12", NULL, "Apple A12 Bionic", "ARM64E", CPU_SUBTYPE_ARM64E, 0x07D34B9Fu, 6u, 996000000ULL, 2490000000ULL, 32768ULL, 32768ULL, 8388608ULL, 64u, PX_CPU_ARM64E_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA" },
+    { "A11", NULL, "Apple A11 Bionic", "ARM64", CPU_SUBTYPE_ARM64_V8, 0xE81E7EF6u, 6u, 956000000ULL, 2390000000ULL, 32768ULL, 32768ULL, 8388608ULL, 64u, PX_CPU_ATOMICS_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS" },
+    { "A10", NULL, "Apple A10 Fusion", "ARM64", CPU_SUBTYPE_ARM64_V8, 0x67CEEE93u, 4u, 936000000ULL, 2340000000ULL, 32768ULL, 32768ULL, 3145728ULL, 64u, PX_CPU_BASE_FLAGS, "NEON AES SHA1 SHA2 CRC32" },
+    { "A9", NULL, "Apple A9", "ARM64", CPU_SUBTYPE_ARM64_V8, 0x92FB37C8u, 2u, 720000000ULL, 1800000000ULL, 32768ULL, 32768ULL, 3145728ULL, 64u, PX_CPU_BASE_FLAGS, "NEON AES SHA1 SHA2 CRC32" },
+    { "M2", NULL, "Apple M2", "ARM64E", CPU_SUBTYPE_ARM64E, 0xDA33D83Du, 8u, 1396000000ULL, 3490000000ULL, 131072ULL, 131072ULL, 16777216ULL, 64u, PX_CPU_ARM64E_LRCPC_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT LRCPC" },
+    { "M1", NULL, "Apple M1", "ARM64E", CPU_SUBTYPE_ARM64E, 0x1B588BB3u, 8u, 1280000000ULL, 3200000000ULL, 131072ULL, 131072ULL, 12582912ULL, 64u, PX_CPU_ARM64E_LRCPC_FLAGS, "NEON AES SHA1 SHA2 CRC32 ATOMICS FCMA FP16 JSCVT LRCPC" },
+};
+
+typedef struct {
+    const char *name;
+    PXDeviceCPUFeatureFlags feature;
+} PXDeviceCPUOptionalKey;
+
+// Exact whitelist only. Unknown hw.optional.* keys fall through to the real kernel.
+static const PXDeviceCPUOptionalKey kPXDeviceCPUOptionalKeys[] = {
+    { "hw.optional.arm64", PXDeviceCPUFeatureARM64 },
+    { "hw.optional.neon", PXDeviceCPUFeatureNEON },
+    { "hw.optional.neon_fp16", PXDeviceCPUFeatureFP16 },
+    { "hw.optional.armv8_crc32", PXDeviceCPUFeatureCRC32 },
+    { "hw.optional.armv8_1_atomics", PXDeviceCPUFeatureAtomics },
+    { "hw.optional.armv8_3_compnum", PXDeviceCPUFeatureFCMA },
+    { "hw.optional.arm.AdvSIMD", PXDeviceCPUFeatureNEON },
+    { "hw.optional.arm.FEAT_AES", PXDeviceCPUFeatureAES },
+    { "hw.optional.arm.FEAT_CRC32", PXDeviceCPUFeatureCRC32 },
+    { "hw.optional.arm.FEAT_LSE", PXDeviceCPUFeatureAtomics },
+    { "hw.optional.arm.FEAT_FCMA", PXDeviceCPUFeatureFCMA },
+    { "hw.optional.arm.FEAT_FP16", PXDeviceCPUFeatureFP16 },
+    { "hw.optional.arm.FEAT_JSCVT", PXDeviceCPUFeatureJSCVT },
+    { "hw.optional.arm.FEAT_LRCPC", PXDeviceCPUFeatureLRCPC },
+};
+
+#undef PX_CPU_BASE_FLAGS
+#undef PX_CPU_ATOMICS_FLAGS
+#undef PX_CPU_ARM64E_FLAGS
+#undef PX_CPU_ARM64E_FP16_FLAGS
+#undef PX_CPU_ARM64E_LRCPC_FLAGS
+
+// Original function pointers. sysctlbyname remains coordinator-owned; DeviceSpec
+// only borrows the coordinator's original pointer for existence-gated keys.
+static int (*orig_sysctlbyname_device_spec)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 static kern_return_t (*orig_host_statistics64)(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
-static NXArchInfo* (* orig_nx_get_local_arch_info)();
+static const NXArchInfo *(*orig_nx_get_local_arch_info)(void);
+static __thread NXArchInfo g_deviceSpecThreadArchInfo;
 
 // Path to scoped apps plist
 static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
@@ -64,6 +153,16 @@ static void logMemoryHook(NSString *apiName);
 // Function declarations
 static NSString *getCurrentBundleID(void);
 static BOOL PXCPUArchitectureHasToken(NSString *architecture, NSString *token);
+static const PXDeviceCPUProfile *PXCPUProfileForArchitecture(NSString *architecture);
+static const PXDeviceCPUProfile *PXCPUProfileFromSpecs(NSDictionary *specs);
+static NSUInteger PXCPUCoreCountFromSpecs(NSDictionary *specs);
+static NSInteger PXDeviceMemoryGBFromSpecs(NSDictionary *specs);
+static BOOL PXDeviceMemoryBytesFromSpecs(NSDictionary *specs, uint64_t *outBytes);
+static BOOL PXWriteSysctlBytes(const void *value, size_t valueSize, void *oldp, size_t *oldlenp, int *outResult);
+static BOOL PXWriteExistingSysctlBytes(const char *name, const void *value, size_t valueSize, void *oldp, size_t *oldlenp, int *outResult);
+static BOOL PXWriteExistingSysctlCString(const char *name, const char *value, void *oldp, size_t *oldlenp, int *outResult);
+static BOOL PXCompleteDeviceSpecSysctlResult(const char *name, const PXDeviceCPUProfile *profile, BOOL handled, size_t *oldlenp, int *outResult);
+static BOOL PXOptionalFeatureValue(const char *name, const PXDeviceCPUProfile *profile, uint32_t *outValue);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
 static BOOL isSpoofingEnabled(void);
@@ -76,8 +175,8 @@ static void getConsistentMemoryStats(unsigned long long totalMemory,
                                     unsigned long long *activeMemory,
                                     unsigned long long *inactiveMemory);
 static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
-static int applyDeviceSpecSysctlBynamePost(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int originalResult);
-static NXArchInfo* hook_nx_get_local_arch_info();
+static BOOL handleDeviceSpecSysctlByname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult);
+static const NXArchInfo *hook_nx_get_local_arch_info(void);
 static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static CGSize parseResolution(NSString *resolutionString);
 
@@ -132,6 +231,167 @@ static BOOL PXCPUArchitectureHasToken(NSString *architecture, NSString *token) {
         searchRange = NSMakeRange(next, upperArchitecture.length - next);
     }
 
+    return NO;
+}
+
+static const PXDeviceCPUProfile *PXCPUProfileForArchitecture(NSString *architecture) {
+    if (!architecture.length) return NULL;
+
+    for (NSUInteger i = 0; i < sizeof(kPXDeviceCPUProfiles) / sizeof(kPXDeviceCPUProfiles[0]); i++) {
+        const PXDeviceCPUProfile *profile = &kPXDeviceCPUProfiles[i];
+        NSString *token = [NSString stringWithUTF8String:profile->token];
+        if (!PXCPUArchitectureHasToken(architecture, token)) continue;
+
+        if (profile->qualifier) {
+            NSString *qualifier = [NSString stringWithUTF8String:profile->qualifier];
+            if (!PXCPUArchitectureHasToken(architecture, qualifier)) {
+                continue;
+            }
+        }
+        return profile;
+    }
+    return NULL;
+}
+
+static const PXDeviceCPUProfile *PXCPUProfileFromSpecs(NSDictionary *specs) {
+    NSString *architecture = [specs[@"cpuArchitecture"] isKindOfClass:[NSString class]] ? specs[@"cpuArchitecture"] : nil;
+    return PXCPUProfileForArchitecture(architecture);
+}
+
+static NSUInteger PXCPUCoreCountFromSpecs(NSDictionary *specs) {
+    // Fail open as one unit. An unknown architecture must not spoof only the core
+    // count while family/subtype/cache/features continue exposing the real device.
+    const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
+    return profile ? profile->defaultCoreCount : 0;
+}
+
+static NSInteger PXDeviceMemoryGBFromSpecs(NSDictionary *specs) {
+    NSInteger memoryGB = [specs[@"deviceMemory"] integerValue];
+    return (memoryGB > 0 && memoryGB <= 64) ? memoryGB : 0;
+}
+
+static BOOL PXDeviceMemoryBytesFromSpecs(NSDictionary *specs, uint64_t *outBytes) {
+    if (!outBytes) return NO;
+    NSInteger memoryGB = PXDeviceMemoryGBFromSpecs(specs);
+    if (memoryGB <= 0) return NO;
+    *outBytes = ((uint64_t)memoryGB) * 1024ULL * 1024ULL * 1024ULL;
+    return YES;
+}
+
+static BOOL PXWriteSysctlBytes(const void *value,
+                               size_t valueSize,
+                               void *oldp,
+                               size_t *oldlenp,
+                               int *outResult) {
+    if (!value || valueSize == 0 || !oldlenp || !outResult) return NO;
+
+    if (!oldp) {
+        *oldlenp = valueSize;
+        *outResult = 0;
+        return YES;
+    }
+
+    size_t capacity = *oldlenp;
+    *oldlenp = valueSize;
+    if (capacity < valueSize) {
+        errno = ENOMEM;
+        *outResult = -1;
+        return YES;
+    }
+
+    memcpy(oldp, value, valueSize);
+    *outResult = 0;
+    return YES;
+}
+
+// Preserve the real kernel's key-existence contract while retaining the caller's
+// original buffer capacity. The coordinator skips its own original call when this
+// helper returns YES, so the real sysctlbyname is still executed at most once.
+static BOOL PXWriteExistingSysctlBytes(const char *name,
+                                       const void *value,
+                                       size_t valueSize,
+                                       void *oldp,
+                                       size_t *oldlenp,
+                                       int *outResult) {
+    if (!name || !value || valueSize == 0 || !oldlenp || !outResult ||
+        !orig_sysctlbyname_device_spec) {
+        return NO;
+    }
+
+    size_t callerCapacity = oldp ? *oldlenp : 0;
+    int incomingErrno = errno;
+    int originalResult = orig_sysctlbyname_device_spec(name, oldp, oldlenp, NULL, 0);
+    int originalErrno = errno;
+
+    // ENOMEM proves the key exists but the caller's buffer was too small.
+    // Other failures (for example ENOENT on release kernels) are preserved exactly.
+    if (originalResult != 0 && originalErrno != ENOMEM) {
+        *outResult = originalResult;
+        errno = originalErrno;
+        return YES;
+    }
+
+    if (oldp) {
+        *oldlenp = callerCapacity;
+    }
+
+    BOOL handled = PXWriteSysctlBytes(value, valueSize, oldp, oldlenp, outResult);
+    if (handled && *outResult == 0) {
+        errno = incomingErrno;
+    }
+    return handled;
+}
+
+static BOOL PXWriteExistingSysctlCString(const char *name,
+                                         const char *value,
+                                         void *oldp,
+                                         size_t *oldlenp,
+                                         int *outResult) {
+    if (!value) return NO;
+    return PXWriteExistingSysctlBytes(name,
+                                      value,
+                                      strlen(value) + 1,
+                                      oldp,
+                                      oldlenp,
+                                      outResult);
+}
+
+// Emit bounded runtime evidence only after DeviceSpec has terminally handled a
+// request. Preserve errno because opt-in file logging performs its own syscalls.
+static BOOL PXCompleteDeviceSpecSysctlResult(const char *name,
+                                             const PXDeviceCPUProfile *profile,
+                                             BOOL handled,
+                                             size_t *oldlenp,
+                                             int *outResult) {
+    if (!handled) return NO;
+
+    int resultErrno = errno;
+    static volatile uint32_t resultLogCount = 0;
+    uint32_t logIndex = __sync_fetch_and_add(&resultLogCount, 1u);
+    if (logIndex < 80u) {
+        PXFileDebugAIDA64Log("[DeviceSpec.sysctlbyname.result] key=%s profile=%s result=%d size=%llu errno=%d",
+                             name ?: "<nil>",
+                             profile ? profile->token : "<none>",
+                             outResult ? *outResult : 0,
+                             (unsigned long long)(oldlenp ? *oldlenp : 0),
+                             resultErrno);
+    }
+    errno = resultErrno;
+    return YES;
+}
+
+static BOOL PXOptionalFeatureValue(const char *name,
+                                   const PXDeviceCPUProfile *profile,
+                                   uint32_t *outValue) {
+    if (!name || !profile || !outValue) return NO;
+
+    for (NSUInteger i = 0; i < sizeof(kPXDeviceCPUOptionalKeys) / sizeof(kPXDeviceCPUOptionalKeys[0]); i++) {
+        const PXDeviceCPUOptionalKey *optionalKey = &kPXDeviceCPUOptionalKeys[i];
+        if (strcmp(name, optionalKey->name) == 0) {
+            *outValue = (profile->featureFlags & optionalKey->feature) ? 1u : 0u;
+            return YES;
+        }
+    }
     return NO;
 }
 
@@ -446,9 +706,9 @@ void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentControll
     }
 
     NSDictionary *specs = getDeviceSpecs();
-    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
-    if (deviceMemoryGB <= 0 && cpuCoreCount <= 0) return;
+    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
+    NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
+    if (deviceMemoryGB <= 0 && cpuCoreCount == 0) return;
 
     NSString *script = [NSString stringWithFormat:
         @"(function(){\n"
@@ -702,14 +962,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
         return originalMemory;
     }
     
-    // Get the device memory from specs (in GB)
-    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-    if (deviceMemoryGB <= 0) {
+    uint64_t spoofedMemory = 0;
+    if (!PXDeviceMemoryBytesFromSpecs(specs, &spoofedMemory)) {
         return originalMemory;
     }
-    
-    // Convert GB to bytes
-    unsigned long long spoofedMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
+    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
     
     // Log the change the first time
     static BOOL loggedMemory = NO;
@@ -747,18 +1004,15 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
         return originalAvailableMemory;
     }
     
-    // Get the device memory from specs (in GB)
-    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-    if (deviceMemoryGB <= 0) {
+    uint64_t totalMemory = 0;
+    if (!PXDeviceMemoryBytesFromSpecs(specs, &totalMemory)) {
         return originalAvailableMemory;
     }
-    
-    // Calculate total memory
-    unsigned long long totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
-    
-    // Calculate free memory based on typical iOS behavior
-    float freePercentage = getFreeMemoryPercentage();
-    unsigned long long spoofedAvailableMemory = (unsigned long long)(totalMemory * freePercentage);
+
+    unsigned long long spoofedAvailableMemory = 0;
+    getConsistentMemoryStats(totalMemory, &spoofedAvailableMemory, NULL, NULL, NULL);
+    float freePercentage = totalMemory > 0 ? (float)((double)spoofedAvailableMemory / (double)totalMemory) : 0.0f;
+    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
     
     // Log the change the first time
     static BOOL loggedAvailableMemory = NO;
@@ -784,17 +1038,16 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
         return originalCount;
     }
     
-    // Get CPU core count from specs
-    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
-    if (cpuCoreCount <= 0) {
+    NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
+    if (cpuCoreCount == 0) {
         return originalCount;
     }
     
     // Log the change the first time
     static BOOL loggedProcessorCount = NO;
     if (!loggedProcessorCount) {
-        PXLog(@"[DeviceSpec] Spoofing processor count from %lu to %ld",
-             (unsigned long)originalCount, (long)cpuCoreCount);
+        PXLog(@"[DeviceSpec] Spoofing processor count from %lu to %lu",
+             (unsigned long)originalCount, (unsigned long)cpuCoreCount);
         loggedProcessorCount = YES;
     }
     
@@ -814,11 +1067,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
         return originalName;
     }
     
-    // Get CPU architecture from specs
-    NSString *cpuArchitecture = specs[@"cpuArchitecture"];
-    if (!cpuArchitecture || cpuArchitecture.length == 0) {
+    const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
+    if (!profile || !profile->brand) {
         return originalName;
     }
+    NSString *cpuArchitecture = [NSString stringWithUTF8String:profile->brand];
     
     // Log the change the first time
     static BOOL loggedMachineHardwareName = NO;
@@ -1056,14 +1309,14 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
         return original;
     }
     
-    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
-    if (cpuCoreCount <= 0) {
+    NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
+    if (cpuCoreCount == 0 || cpuCoreCount > UINT_MAX) {
         return original;
     }
     
     static BOOL loggedCoreAPI = NO;
     if (!loggedCoreAPI) {
-        PXLog(@"[DeviceSpec] Spoofing low-level CPU API from %u to %ld", original, (long)cpuCoreCount);
+        PXLog(@"[DeviceSpec] Spoofing low-level CPU API from %u to %lu", original, (unsigned long)cpuCoreCount);
         loggedCoreAPI = YES;
     }
     
@@ -1130,32 +1383,32 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
             
             PXLog(@"[DeviceSpec] App %@ is scoped, installing device specification hooks", currentBundleID);
 
-            // sysctlbyname is owned by PXNativeHookCoordinator. DeviceSpec participates as a
-            // post-provider so the original syscall is executed exactly once and identity
-            // pre-providers (Tweak/BootTime/UUID) retain first right of refusal.
+            // DeviceSpec is a selective coordinator pre-provider. It claims only CPU,
+            // cache, feature and memory keys; identity and OS keys remain owned by Tweak.
             PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
             [coord installOwnedSymbolsIfNeeded];
+            orig_sysctlbyname_device_spec = [coord originalForSymbol:kPXNativeSymbolSysctlByname];
             static dispatch_once_t deviceSpecSysctlProviderOnce;
             dispatch_once(&deviceSpecSysctlProviderOnce, ^{
-                BOOL registered = [coord registerSysctlBynameProvider:@"devicespec.sysctlbyname"
+                BOOL registered = NO;
+                if (orig_sysctlbyname_device_spec) {
+                    registered = [coord registerSysctlBynameProvider:@"devicespec.sysctlbyname"
                                                               priority:PXNativeHookPriorityIdentity
-                                                                   pre:nil
-                                                                  post:^(const char *name,
-                                                                         void *oldp,
-                                                                         size_t *oldlenp,
-                                                                         void *newp,
-                                                                         size_t newlen,
-                                                                         int *inoutResult) {
-                    if (!inoutResult) return;
-                    *inoutResult = applyDeviceSpecSysctlBynamePost(name,
-                                                                  oldp,
-                                                                  oldlenp,
-                                                                  newp,
-                                                                  newlen,
-                                                                  *inoutResult);
-                }];
-                PXLog(@"[DeviceSpec] sysctlbyname coordinator post-provider %@",
+                                                                   pre:^BOOL(const char *name,
+                                                                              void *oldp,
+                                                                              size_t *oldlenp,
+                                                                              void *newp,
+                                                                              size_t newlen,
+                                                                              int *outResult) {
+                    return handleDeviceSpecSysctlByname(name, oldp, oldlenp, newp, newlen, outResult);
+                }
+                                                                  post:nil];
+                }
+                PXLog(@"[DeviceSpec] sysctlbyname coordinator selective provider %@",
                       registered ? @"registered" : @"registration failed");
+                PXFileDebugAIDA64Log("[DeviceSpec.provider] registered=%d original=%d",
+                                     registered ? 1 : 0,
+                                     orig_sysctlbyname_device_spec ? 1 : 0);
             });
             
             // Initialize memory hook function pointers for scoped apps only
@@ -1176,7 +1429,9 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 orig_nx_get_local_arch_info = dlsym(libSystem, "NXGetLocalArchInfo");
                 if (orig_nx_get_local_arch_info) {
                     PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook NXGetLocalArchInfo");
-                    MSHookFunction(orig_nx_get_local_arch_info, (void *)hook_nx_get_local_arch_info, (void **)&orig_nx_get_local_arch_info);
+                    MSHookFunction((void *)orig_nx_get_local_arch_info,
+                                   (void *)hook_nx_get_local_arch_info,
+                                   (void **)&orig_nx_get_local_arch_info);
                     PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook NXGetLocalArchInfo");
                     PXLog(@"[DeviceSpec] Successfully hooked NXGetLocalArchInfo for CPU architecture spoofing");
                 }
@@ -1202,175 +1457,105 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 
 // Helper for logging memory hook invocations only once
 static void logMemoryHook(NSString *apiName) {
-    if (!hookedMemoryAPIs) {
+    if (!apiName.length) return;
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
         hookedMemoryAPIs = [NSMutableSet set];
+    });
+
+    BOOL shouldLog = NO;
+    @synchronized(hookedMemoryAPIs) {
+        if (![hookedMemoryAPIs containsObject:apiName]) {
+            [hookedMemoryAPIs addObject:apiName];
+            shouldLog = YES;
+        }
     }
-    
-    if (![hookedMemoryAPIs containsObject:apiName]) {
-        [hookedMemoryAPIs addObject:apiName];
+
+    if (shouldLog) {
         PXLog(@"[DeviceSpec] Memory spoofing API '%@' was accessed", apiName);
     }
 }
 
-// Function to calculate free memory percentage based on device specs
+// Normalize free-memory configuration to a bounded fraction.
 static float getFreeMemoryPercentage(void) {
-    // Default free memory percentage (typical for iOS devices under normal usage)
-    float defaultFreePercentage = 0.35; // 35% free
-    
-    // Check if spoofing is enabled
-    if (!isSpoofingEnabled()) {
-        return defaultFreePercentage;
-    }
-    
-    // Get device specs
+    const float defaultFreePercentage = 0.35f;
+    if (!isSpoofingEnabled()) return defaultFreePercentage;
+
     NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return defaultFreePercentage;
+    if (!specs) return defaultFreePercentage;
+
+    id configuredValue = specs[@"freeMemoryPercentage"];
+    if ([configuredValue respondsToSelector:@selector(doubleValue)]) {
+        double configured = [configuredValue doubleValue];
+        if (configured > 1.0 && configured <= 100.0) configured /= 100.0;
+        if (configured >= 0.10 && configured <= 0.70) return (float)configured;
     }
-    
-    // If we have a specific free memory percentage in specs, use it
-    NSNumber *freeMemoryPercent = specs[@"freeMemoryPercentage"];
-    if (freeMemoryPercent) {
-        float percentage = [freeMemoryPercent floatValue];
-        // Validate the percentage is reasonable
-        if (percentage > 0.1 && percentage < 0.7) {
-            return percentage;
-        }
-    }
-    
-    // Otherwise use a realistic value based on device memory
-    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-    if (deviceMemoryGB <= 0) {
-        return defaultFreePercentage;
-    }
-    
-    // Larger memory devices typically have higher free percentage
-    if (deviceMemoryGB >= 6) {
-        return 0.45; // 45% free for 6GB+ devices
-    } else if (deviceMemoryGB >= 4) {
-        return 0.40; // 40% free for 4GB devices
-    } else if (deviceMemoryGB >= 3) {
-        return 0.35; // 35% free for 3GB devices
-    } else {
-        return 0.30; // 30% free for smaller memory devices
-    }
+
+    NSInteger memoryGB = PXDeviceMemoryGBFromSpecs(specs);
+    if (memoryGB >= 6) return 0.45f;
+    if (memoryGB >= 4) return 0.40f;
+    if (memoryGB >= 3) return 0.35f;
+    if (memoryGB > 0) return 0.30f;
+    return defaultFreePercentage;
 }
 
-// Function to get consistent free/wired/active memory values based on total memory
-static void getConsistentMemoryStats(unsigned long long totalMemory, 
-                                    unsigned long long *freeMemory,
-                                    unsigned long long *wiredMemory,
-                                    unsigned long long *activeMemory,
-                                    unsigned long long *inactiveMemory) {
-    
-    float freePercentage = getFreeMemoryPercentage();
-    freePercentage = MAX(0.0f, MIN(1.0f, freePercentage));
+// Produce deterministic buckets whose byte sum is exactly totalMemory.
+static void getConsistentMemoryStats(unsigned long long totalMemory,
+                                     unsigned long long *freeMemory,
+                                     unsigned long long *wiredMemory,
+                                     unsigned long long *activeMemory,
+                                     unsigned long long *inactiveMemory) {
+    double freeFraction = MAX(0.10, MIN(0.70, (double)getFreeMemoryPercentage()));
+    uint64_t freeBytes = (uint64_t)((double)totalMemory * freeFraction);
+    uint64_t remaining = totalMemory >= freeBytes ? totalMemory - freeBytes : 0;
 
-    float wiredPercentage = 0.20f; // 20% wired (kernel, system)
-    float activePercentage = 0.30f; // 30% active (running apps)
-    float remainingPercentage = MAX(0.0f, 1.0f - freePercentage);
-    float committedPercentage = wiredPercentage + activePercentage;
+    // Preserve the original 20:30:15 wired/active/inactive relationship.
+    // 4:6:3 distributes the remaining bytes while leaving a real inactive bucket.
+    uint64_t wiredBytes = (remaining * 4ULL) / 13ULL;
+    uint64_t activeBytes = (remaining * 6ULL) / 13ULL;
+    uint64_t inactiveBytes = remaining - wiredBytes - activeBytes;
 
-    // Keep all buckets non-negative and ensure their total never exceeds RAM.
-    if (committedPercentage > remainingPercentage && committedPercentage > 0.0f) {
-        float scale = remainingPercentage / committedPercentage;
-        wiredPercentage *= scale;
-        activePercentage *= scale;
-    }
-
-    float inactivePercentage = MAX(0.0f,
-        1.0f - freePercentage - wiredPercentage - activePercentage);
-    
-    if (freeMemory) {
-        *freeMemory = (unsigned long long)(totalMemory * freePercentage);
-    }
-    
-    if (wiredMemory) {
-        *wiredMemory = (unsigned long long)(totalMemory * wiredPercentage);
-    }
-    
-    if (activeMemory) {
-        *activeMemory = (unsigned long long)(totalMemory * activePercentage);
-    }
-    
-    if (inactiveMemory) {
-        *inactiveMemory = (unsigned long long)(totalMemory * inactivePercentage);
-    }
+    if (freeMemory) *freeMemory = freeBytes;
+    if (wiredMemory) *wiredMemory = wiredBytes;
+    if (activeMemory) *activeMemory = activeBytes;
+    if (inactiveMemory) *inactiveMemory = inactiveBytes;
 }
 
-// NXGetLocalArchInfo hook for CPU architecture spoofing
-static NXArchInfo* hook_nx_get_local_arch_info() {
-    if (!orig_nx_get_local_arch_info) {
-        return NULL;
-    }
-    
-    NXArchInfo* original = orig_nx_get_local_arch_info();
-    if (!original) {
-        return NULL;
-    }
-    
-    if (!isSpoofingEnabled()) {
-        return original;
-    }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return original;
-    }
-    
-    NSString *cpuArchitecture = specs[@"cpuArchitecture"];
-    if (!cpuArchitecture || cpuArchitecture.length == 0) {
-        return original;
-    }
-    
-    // Create new struct to check, don't modify original
-    static NXArchInfo customArchInfo;
-    customArchInfo = *original; // Copy original values
-    
-    // NXArchInfo reports ARM ABI subtype, not a synthetic per-chip sequence.
-    BOOL isLegacyARM64 = PXCPUArchitectureHasToken(cpuArchitecture, @"A9") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A10") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A11");
-    BOOL isARM64E = PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"A16") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
-                    PXCPUArchitectureHasToken(cpuArchitecture, @"M2");
+// NXGetLocalArchInfo reports ABI subtype, sourced from the canonical CPU profile.
+static const NXArchInfo *hook_nx_get_local_arch_info(void) {
+    if (!orig_nx_get_local_arch_info) return NULL;
 
-    cpu_subtype_t cpuSubtype = original->cpusubtype;
-    const char *customDescription = original->description;
-    if (isARM64E) {
-        cpuSubtype = CPU_SUBTYPE_ARM64E;
-        customDescription = "ARM64E";
-    } else if (isLegacyARM64) {
-        cpuSubtype = CPU_SUBTYPE_ARM64_V8;
-        customDescription = "ARM64";
-    }
-    
-    customArchInfo.cpusubtype = cpuSubtype;
-    customArchInfo.description = customDescription;
-    
-    static BOOL loggedArchInfo = NO;
-    if (!loggedArchInfo) {
-        PXLog(@"[DeviceSpec] Spoofing NXArchInfo: cpusubtype %d->%d, description %s->%s", 
-              original->cpusubtype, cpuSubtype, original->description, customDescription);
-        loggedArchInfo = YES;
-    }
-    
-    return &customArchInfo;
+    const NXArchInfo *original = orig_nx_get_local_arch_info();
+    if (!original || !isSpoofingEnabled()) return original;
+
+    NSDictionary *specs = getDeviceSpecs();
+    const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
+    if (!profile) return original;
+
+    g_deviceSpecThreadArchInfo = *original;
+    g_deviceSpecThreadArchInfo.name = profile->cpuSubtype == CPU_SUBTYPE_ARM64E ? "arm64e" : "arm64";
+    g_deviceSpecThreadArchInfo.cputype = CPU_TYPE_ARM64;
+    g_deviceSpecThreadArchInfo.cpusubtype = profile->cpuSubtype;
+    g_deviceSpecThreadArchInfo.description = profile->archDescription;
+
+    static dispatch_once_t logOnce;
+    dispatch_once(&logOnce, ^{
+        PXLog(@"[DeviceSpec] Spoofing NXArchInfo: cpusubtype %d->%d, description %s->%s",
+              original->cpusubtype,
+              profile->cpuSubtype,
+              original->description ? original->description : "<nil>",
+              profile->archDescription ? profile->archDescription : "<nil>");
+    });
+    return &g_deviceSpecThreadArchInfo;
 }
 
 // Host statistics hook for memory stats
 static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count) {
-    // Call original function first
+    if (!orig_host_statistics64) return KERN_FAILURE;
     kern_return_t result = orig_host_statistics64(host, flavor, info, count);
-    
-    // Check if we should modify the result
-    if (result != KERN_SUCCESS || !info || !isSpoofingEnabled()) {
+
+    if (result != KERN_SUCCESS || !info || !count || !isSpoofingEnabled()) {
         return result;
     }
     
@@ -1380,14 +1565,11 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
         return result;
     }
     
-    // Get the device memory from specs (in GB)
-    NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-    if (deviceMemoryGB <= 0) {
+    uint64_t totalMemory = 0;
+    if (!PXDeviceMemoryBytesFromSpecs(specs, &totalMemory)) {
         return result;
     }
-    
-    // Calculate total memory in bytes
-    unsigned long long totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
+    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
     
     // Handle specific host info types
     if (flavor == HOST_VM_INFO64 || flavor == HOST_VM_INFO) {
@@ -1401,7 +1583,7 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
             
             // page size is typically 4096 or 16384 depending on device
             vm_size_t pageSize = 4096;
-            host_page_size(host, &pageSize);
+            if (host_page_size(host, &pageSize) != KERN_SUCCESS || pageSize == 0) pageSize = 4096;
             
             // Convert bytes to pages
             uint64_t freePages = freeMemory / pageSize;
@@ -1431,7 +1613,7 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
             
             // page size is typically 4096 or 16384 depending on device
             vm_size_t pageSize = 4096;
-            host_page_size(host, &pageSize);
+            if (host_page_size(host, &pageSize) != KERN_SUCCESS || pageSize == 0) pageSize = 4096;
             
             // Convert bytes to pages
             unsigned int freePages = (unsigned int)(freeMemory / pageSize);
@@ -1474,513 +1656,211 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
     return result;
 }
 
-// Coordinator post-provider for device-spec sysctlbyname values.
-// The coordinator has already called the real sysctlbyname exactly once.
-static int applyDeviceSpecSysctlBynamePost(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int originalResult) {
-    static int loggedCount = 0;
-    if (name && loggedCount < 40) {
-        loggedCount++;
-        PXFileDebugAIDA64Log("[DeviceSpec.sysctlbyname] key=%s oldp=%d oldlenp=%d", name, oldp ? 1 : 0, oldlenp ? 1 : 0);
-    }
-    // The coordinator already called the original function before invoking post-providers.
-    int result = originalResult;
-    if (!name || newp != NULL || newlen != 0) {
-        return result;
+// Selective coordinator pre-provider for CPU and memory sysctl keys.
+static BOOL handleDeviceSpecSysctlByname(const char *name,
+                                         void *oldp,
+                                         size_t *oldlenp,
+                                         void *newp,
+                                         size_t newlen,
+                                         int *outResult) {
+    if (!name || !outResult || !oldlenp || newp != NULL || newlen != 0 || !isSpoofingEnabled()) {
+        return NO;
     }
 
-    // iOS version/build consistency (AIDA64 build number)
-    // Handle these early and preserve sysctl size-query semantics (oldp can be NULL).
-    if (name && oldlenp && (strcmp(name, "kern.osversion") == 0 || strcmp(name, "kern.osrelease") == 0 || strcmp(name, "kern.version") == 0)) {
-        @try {
-            IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            NSString *proc = [NSProcessInfo processInfo].processName;
-            if (manager && bundleID && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack) && [manager isIdentifierEnabled:@"IOSVersion"]) {
-                NSString *identityDir = [manager profileIdentityPath];
-                NSDictionary *deviceIds = identityDir.length > 0 ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
-                NSDictionary *current = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
-                NSString *value = nil;
-
-                if (strcmp(name, "kern.osversion") == 0) {
-                    value = deviceIds[@"IOSBuild"] ?: current[@"build"];
-                } else if (strcmp(name, "kern.osrelease") == 0) {
-                    value = deviceIds[@"Darwin"] ?: current[@"darwin"];
-                } else if (strcmp(name, "kern.version") == 0) {
-                    value = deviceIds[@"KernelVersion"] ?: current[@"kernel_version"];
-                }
-
-                if (value.length > 0) {
-                    const char *s = [value UTF8String];
-                    if (s) {
-                        size_t len = strlen(s) + 1;
-
-                        // Size query: oldp can be NULL in normal sysctlbyname usage.
-                        if (!oldp && oldlenp) {
-                            *oldlenp = len;
-                            return 0;
-                        }
-
-                        if (oldp && oldlenp) {
-                            if (*oldlenp >= len) {
-                                *oldlenp = len;
-                                memset(oldp, 0, len);
-                                strcpy((char *)oldp, s);
-                                return 0;
-                            }
-
-                            // Buffer too small: report required size and preserve sysctl errno semantics.
-                            *oldlenp = len;
-                            errno = ENOMEM;
-                            return -1;
-                        }
-                    }
-                }
-            }
-        } @catch (NSException *e) {
-            // Fall through to other spoofing logic
-        }
-    }
-
-    // Return original result if conditions not met for the remaining spec/memory spoofing
-    if (result != 0 || !name || !oldlenp || !isSpoofingEnabled() || !oldp || *oldlenp == 0) {
-        return result;
-    }
-    
-    // Get device specs
     NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return result;
-    }
-    
-    // Get CPU architecture for processor-related sysctls
-    NSString *cpuArchitecture = specs[@"cpuArchitecture"];
-    NSInteger cpuCoreCount = [specs[@"cpuCoreCount"] integerValue];
-    
-    // Handle CPU-related sysctls
-    if (strcmp(name, "hw.ncpu") == 0 || strcmp(name, "hw.activecpu") == 0) {
-        // Number of CPUs / Active CPUs
-        if (cpuCoreCount > 0) {
-            if (*oldlenp == sizeof(uint32_t)) {
-                *(uint32_t *)oldp = (uint32_t)cpuCoreCount;
-            } else if (*oldlenp == sizeof(int)) {
-                *(int *)oldp = (int)cpuCoreCount;
-            } else if (*oldlenp == sizeof(unsigned long)) {
-                *(unsigned long *)oldp = (unsigned long)cpuCoreCount;
-            }
-            
-            static BOOL loggedCPUCount = NO;
-            if (!loggedCPUCount) {
-                PXLog(@"[DeviceSpec] Spoofed %s to %ld cores", name, (long)cpuCoreCount);
-                loggedCPUCount = YES;
-            }
-        }
-    }
-    else if (strcmp(name, "hw.cpu.brand_string") == 0 || strcmp(name, "machdep.cpu.brand_string") == 0 || strcmp(name, "hw.cpubrand") == 0) {
-        // CPU Brand/Model Name - return the processor name like "Apple A11 Bionic"
-        if (cpuArchitecture && cpuArchitecture.length > 0) {
-            const char *cpuBrand = [cpuArchitecture UTF8String];
-            if (cpuBrand && *oldlenp > 0) {
-                size_t brandLen = strlen(cpuBrand);
-                if (brandLen < *oldlenp) {
-                    *oldlenp = brandLen + 1;
-                    memset(oldp, 0, *oldlenp);
-                    strcpy(oldp, cpuBrand);
-                    
-                    static BOOL loggedCPUBrand = NO;
-                    if (!loggedCPUBrand) {
-                        PXLog(@"[DeviceSpec] Spoofed %s to '%s'", name, cpuBrand);
-                        loggedCPUBrand = YES;
-                    }
-                } else {
-                    PXLog(@"[DeviceSpec] WARNING: CPU brand string too long for buffer");
-                }
-            }
-        }
-    }
-    else if (strcmp(name, "hw.model") == 0) {
-        // Hardware model / board-id style string (e.g. N71AP / D431AP)
-        NSString *hwModel = specs[@"hwModel"];
-        if (!hwModel.length) {
-            hwModel = specs[@"boardID"];
-        }
+    if (!specs) return NO;
 
-        if (hwModel.length > 0) {
-            const char *hwModelStr = [hwModel UTF8String];
-            if (hwModelStr && *oldlenp > 0) {
-                size_t hwModelLen = strlen(hwModelStr);
-                if (hwModelLen < *oldlenp) {
-                    *oldlenp = hwModelLen + 1;
-                    memset(oldp, 0, *oldlenp);
-                    strcpy((char *)oldp, hwModelStr);
+    const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
+    NSUInteger coreCount = PXCPUCoreCountFromSpecs(specs);
 
-                    static BOOL loggedHWModel = NO;
-                    if (!loggedHWModel) {
-                        PXLog(@"[DeviceSpec] Spoofed hw.model to '%s'", hwModelStr);
-                        loggedHWModel = YES;
-                    }
-                } else {
-                    PXLog(@"[DeviceSpec] WARNING: hw.model string too long for buffer");
-                }
-            }
-        }
-    }
-    else if (strcmp(name, "hw.cputype") == 0) {
-        // CPU Type - ARM64 is already defined as CPU_TYPE_ARM64 in system headers
-        if (*oldlenp >= sizeof(uint32_t)) {
-            *(uint32_t *)oldp = CPU_TYPE_ARM64;
-            
-            static BOOL loggedCPUType = NO;
-            if (!loggedCPUType) {
-                PXLog(@"[DeviceSpec] Spoofed hw.cputype to ARM64 (0x%X)", (uint32_t)CPU_TYPE_ARM64);
-                loggedCPUType = YES;
-            }
-        }
-    }
-    else if (strcmp(name, "hw.cpusubtype") == 0) {
-        // ARM64 sysctl exposes ABI subtypes, not one synthetic value per SoC.
-        BOOL isLegacyARM64 = PXCPUArchitectureHasToken(cpuArchitecture, @"A9") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A10") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A11");
-        BOOL isARM64E = PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A16") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
-                        PXCPUArchitectureHasToken(cpuArchitecture, @"M2");
-
-        uint32_t cpuSubtype = isARM64E ? (uint32_t)CPU_SUBTYPE_ARM64E :
-                              (isLegacyARM64 ? (uint32_t)CPU_SUBTYPE_ARM64_V8 : 0);
-        if (cpuSubtype != 0 && *oldlenp >= sizeof(uint32_t)) {
-            *(uint32_t *)oldp = cpuSubtype;
-
-            static BOOL loggedCPUSubtype = NO;
-            if (!loggedCPUSubtype) {
-                PXLog(@"[DeviceSpec] Spoofed hw.cpusubtype to %u for %@", cpuSubtype, cpuArchitecture);
-                loggedCPUSubtype = YES;
-            }
-        }
-    }
-    else if (strcmp(name, "hw.cpufamily") == 0) {
-        // CPU family identifies the Apple core microarchitecture; related SoCs may share it.
-        uint32_t cpuFamily = 0;
-
-        if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9")) {
-            cpuFamily = 0x92FB37C8; // Twister
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A10")) {
-            cpuFamily = 0x67CEEE93; // Hurricane
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A11")) {
-            cpuFamily = 0xE81E7EF6; // Monsoon / Mistral
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A12")) {
-            cpuFamily = 0x07D34B9F; // Vortex / Tempest (A12/A12X/A12Z)
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A13")) {
-            cpuFamily = 0x462504D2; // Lightning / Thunder
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"M1")) {
-            cpuFamily = 0x1B588BB3; // Firestorm / Icestorm
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
-            cpuFamily = 0xDA33D83D; // Avalanche / Blizzard
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A16")) {
-            cpuFamily = 0x8765EDEA; // Everest / Sawtooth
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A17")) {
-            cpuFamily = 0x2876F5B5; // Coll
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A18")) {
-            BOOL isPro = [cpuArchitecture rangeOfString:@"PRO" options:NSCaseInsensitiveSearch].location != NSNotFound;
-            cpuFamily = isPro ? 0x75D4ACB9 : 0x204526D0; // Tahiti / Tupai
-        }
-        
-        if (cpuFamily != 0 && *oldlenp >= sizeof(uint32_t)) {
-            *(uint32_t *)oldp = cpuFamily;
-            
-            static BOOL loggedCPUFamily = NO;
-            if (!loggedCPUFamily) {
-                PXLog(@"[DeviceSpec] Spoofed hw.cpufamily to 0x%X for %@", cpuFamily, cpuArchitecture);
-                loggedCPUFamily = YES;
-            }
-        }
-    }
-    else if (strcmp(name, "hw.cpufrequency") == 0 || strcmp(name, "hw.cpufrequency_max") == 0 || strcmp(name, "hw.cpufrequency_min") == 0) {
-        // CPU Frequency - approximate values based on processor
-        uint64_t cpuFrequency = 0;
-        
-        if (cpuArchitecture) {
-            if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9")) {
-                cpuFrequency = 1800000000; // 1.8 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A10")) {
-                cpuFrequency = 2340000000; // 2.34 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A11")) {
-                cpuFrequency = 2390000000; // 2.39 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A12")) {
-                cpuFrequency = 2490000000; // 2.49 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A13")) {
-                cpuFrequency = 2650000000; // 2.65 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A14")) {
-                cpuFrequency = 2990000000; // 2.99 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A15")) {
-                cpuFrequency = 3230000000; // 3.23 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A16")) {
-                cpuFrequency = 3460000000; // 3.46 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A17")) {
-                cpuFrequency = 3780000000; // 3.78 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A18")) {
-                cpuFrequency = 4050000000; // 4.05 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M1")) {
-                cpuFrequency = 3200000000; // 3.2 GHz
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
-                cpuFrequency = 3490000000; // 3.49 GHz
-            } else {
-                cpuFrequency = 2000000000; // Default 2.0 GHz
-            }
-            
-            // Adjust for min/max variants
-            if (strcmp(name, "hw.cpufrequency_min") == 0) {
-                cpuFrequency = cpuFrequency * 0.4; // Min is typically 40% of max
-            }
-        }
-        
-        if (*oldlenp >= sizeof(uint64_t)) {
-            *(uint64_t *)oldp = cpuFrequency;
-        } else if (*oldlenp >= sizeof(uint32_t)) {
-            *(uint32_t *)oldp = (uint32_t)cpuFrequency;
-        }
-        
-        static BOOL loggedCPUFreq = NO;
-        if (!loggedCPUFreq) {
-            PXLog(@"[DeviceSpec] Spoofed %s to %.2f GHz for %@", name, cpuFrequency / 1000000000.0, cpuArchitecture);
-            loggedCPUFreq = YES;
-        }
-    }
-    else if (strcmp(name, "hw.cachelinesize") == 0) {
-        // Cache line size - typically 64 bytes for ARM64
-        uint32_t cacheLineSize = 64;
-        
-        if (*oldlenp >= sizeof(uint32_t)) {
-            *(uint32_t *)oldp = cacheLineSize;
-            
-            static BOOL loggedCacheLineSize = NO;
-            if (!loggedCacheLineSize) {
-                PXLog(@"[DeviceSpec] Spoofed hw.cachelinesize to %u bytes", cacheLineSize);
-                loggedCacheLineSize = YES;
-            }
-        }
-    }
-    else if (strcmp(name, "hw.l1icachesize") == 0 || strcmp(name, "hw.l1dcachesize") == 0 || 
-             strcmp(name, "hw.l2cachesize") == 0) {
-        // Cache sizes vary by processor
-        uint32_t cacheSize = 0;
-        
-        if (cpuArchitecture) {
-            BOOL isL1 = (strcmp(name, "hw.l1icachesize") == 0 || strcmp(name, "hw.l1dcachesize") == 0);
-            BOOL isL2 = (strcmp(name, "hw.l2cachesize") == 0);
-            
-            if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9")) {
-                cacheSize = isL1 ? 32768 : (isL2 ? 3145728 : 0); // 32KB L1, 3MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A10")) {
-                cacheSize = isL1 ? 32768 : (isL2 ? 3145728 : 0); // 32KB L1, 3MB L2  
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A11")) {
-                cacheSize = isL1 ? 32768 : (isL2 ? 8388608 : 0); // 32KB L1, 8MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A12")) {
-                cacheSize = isL1 ? 32768 : (isL2 ? 8388608 : 0); // 32KB L1, 8MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A13")) {
-                cacheSize = isL1 ? 65536 : (isL2 ? 8388608 : 0); // 64KB L1, 8MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A14") || PXCPUArchitectureHasToken(cpuArchitecture, @"A15")) {
-                cacheSize = isL1 ? 65536 : (isL2 ? 12582912 : 0); // 64KB L1, 12MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A16") || PXCPUArchitectureHasToken(cpuArchitecture, @"A17")) {
-                cacheSize = isL1 ? 65536 : (isL2 ? 16777216 : 0); // 64KB L1, 16MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A18")) {
-                cacheSize = isL1 ? 131072 : (isL2 ? 20971520 : 0); // 128KB L1, 20MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M1")) {
-                cacheSize = isL1 ? 131072 : (isL2 ? 12582912 : 0); // 128KB L1, 12MB L2
-            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
-                cacheSize = isL1 ? 131072 : (isL2 ? 16777216 : 0); // 128KB L1, 16MB L2
-            } else {
-                cacheSize = isL1 ? 32768 : (isL2 ? 3145728 : 0); // Default
-            }
-        }
-        
-        if (*oldlenp >= sizeof(uint32_t) && cacheSize > 0) {
-            *(uint32_t *)oldp = cacheSize;
-            
-            static NSMutableSet *loggedCacheSizes = nil;
-            if (!loggedCacheSizes) {
-                loggedCacheSizes = [NSMutableSet set];
-            }
-            
-            if (![loggedCacheSizes containsObject:@(name)]) {
-                [loggedCacheSizes addObject:@(name)];
-                PXLog(@"[DeviceSpec] Spoofed %s to %u bytes for %@", name, cacheSize, cpuArchitecture);
-            }
-        }
-    }
-    // Handle memory-related sysctls
-    else if (strcmp(name, "hw.memsize") == 0 || strcmp(name, "hw.physmem") == 0) {
-        // Get the device memory from specs (in GB)
-        NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-        if (deviceMemoryGB <= 0) {
-            return result;
-        }
-        
-        // Calculate total memory in bytes
-        unsigned long long totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
-        
-        // Different sysctls might return different size types
-        if (*oldlenp == sizeof(uint64_t)) {
-            *(uint64_t *)oldp = totalMemory;
-        } else if (*oldlenp == sizeof(uint32_t)) {
-            *(uint32_t *)oldp = (uint32_t)totalMemory;
-        } else if (*oldlenp == sizeof(unsigned long)) {
-            *(unsigned long *)oldp = (unsigned long)totalMemory;
-        }
-        
-        // Log the change the first time
-        static BOOL loggedMemSize = NO;
-        if (!loggedMemSize) {
-            PXLog(@"[DeviceSpec] Spoofed sysctlbyname %s to %llu bytes (%ld GB)",
-                name, totalMemory, (long)deviceMemoryGB);
-            loggedMemSize = YES;
-        }
-    } else if (strcmp(name, "vm.swapusage") == 0 && *oldlenp >= sizeof(struct xsw_usage)) {
-        // Swap usage information from <sys/sysctl.h>.
-        struct xsw_usage *swap = (struct xsw_usage *)oldp;
-        
-        // Get the device memory from specs (in GB)
-        NSInteger deviceMemoryGB = [specs[@"deviceMemory"] integerValue];
-        if (deviceMemoryGB <= 0) {
-            return result;
-        }
-        
-        // Calculate realistic swap values based on device memory
-        // iOS typically uses swap space proportional to RAM
-        uint64_t totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
-        
-        // Typical iOS swap is ~50-100% of RAM depending on device
-        float swapRatio = (deviceMemoryGB >= 4) ? 0.5 : 1.0;  // Less swap on high-RAM devices
-        
-        swap->xsu_total = totalMemory * swapRatio;
-        swap->xsu_avail = totalMemory * swapRatio * 0.7;  // 70% available
-        swap->xsu_used = totalMemory * swapRatio * 0.3;   // 30% used
-        
-        // Log the change the first time
-        static BOOL loggedSwap = NO;
-        if (!loggedSwap) {
-            PXLog(@"[DeviceSpec] Spoofed vm.swapusage to %llu total, %llu used, %llu available",
-                swap->xsu_total, swap->xsu_used, swap->xsu_avail);
-            loggedSwap = YES;
-        }
-    }
-    // Add additional CPU feature and identification sysctls
-    else if (strncmp(name, "hw.optional.", 12) == 0) {
-        // Only override capabilities that are explicitly tied to the selected ABI.
-        // Unknown optional keys retain the original result instead of defaulting to YES.
-        BOOL isARM64EChip = PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A16") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
-                            PXCPUArchitectureHasToken(cpuArchitecture, @"M2");
-        BOOL shouldOverride = strstr(name, "arm64e") != NULL || strstr(name, "armv8_3") != NULL;
-        BOOL featureSupported = isARM64EChip;
-
-        if (shouldOverride && *oldlenp >= sizeof(uint32_t)) {
-            *(uint32_t *)oldp = featureSupported ? 1 : 0;
-
-            static NSMutableSet *loggedOptionalFeatures = nil;
-            static dispatch_once_t optionalFeatureLogOnce;
-            dispatch_once(&optionalFeatureLogOnce, ^{
-                loggedOptionalFeatures = [NSMutableSet set];
-            });
-
-            NSString *featureName = [NSString stringWithUTF8String:name];
-            @synchronized(loggedOptionalFeatures) {
-                if (![loggedOptionalFeatures containsObject:featureName]) {
-                    [loggedOptionalFeatures addObject:featureName];
-                    PXLog(@"[DeviceSpec] Spoofed %s to %d for %@", name, featureSupported ? 1 : 0, cpuArchitecture);
-                }
-            }
-        }
-    }
-    else if (strcmp(name, "hw.machine") == 0) {
-        // Machine name - should return the device model like "iPhone10,1"
-        NSString *deviceModel = getSpoofedDeviceModel();
-        if (deviceModel && deviceModel.length > 0) {
-            const char *machineStr = [deviceModel UTF8String];
-            if (machineStr && *oldlenp > 0) {
-                size_t machineLen = strlen(machineStr);
-                if (machineLen < *oldlenp) {
-                    *oldlenp = machineLen + 1;
-                    memset(oldp, 0, *oldlenp);
-                    strcpy(oldp, machineStr);
-                    
-                    static BOOL loggedMachine = NO;
-                    if (!loggedMachine) {
-                        PXLog(@"[DeviceSpec] Spoofed hw.machine to '%s'", machineStr);
-                        loggedMachine = YES;
-                    }
-                } else {
-                    PXLog(@"[DeviceSpec] WARNING: Machine string too long for buffer");
-                }
-            }
-        }
-    }
-    else if (strcmp(name, "hw.cpu.features") == 0) {
-        // Never fall back to an x86 SSE/AVX feature string on ARM.
-        NSString *cpuFeatures = nil;
-        if (PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
-            PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
-            PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
-            PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
-            cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS FP16 JSCVT FCMA LRCPC";
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"A16")) {
-            cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS FP16 JSCVT";
-        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"A10") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"A11") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
-                   PXCPUArchitectureHasToken(cpuArchitecture, @"A14")) {
-            cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS";
-        }
-        
-        const char *featuresStr = [cpuFeatures UTF8String];
-        if (featuresStr && *oldlenp > 0) {
-            size_t featuresLen = strlen(featuresStr);
-            if (featuresLen < *oldlenp) {
-                *oldlenp = featuresLen + 1;
-                memset(oldp, 0, *oldlenp);
-                strcpy(oldp, featuresStr);
-                
-                static BOOL loggedFeatures = NO;
-                if (!loggedFeatures) {
-                    PXLog(@"[DeviceSpec] Spoofed hw.cpu.features to '%s'", featuresStr);
-                    loggedFeatures = YES;
-                }
-            }
-        }
-    }
-    
-    // Log any unhandled successful sysctl queries for debugging
-    if (result == 0 && isSpoofingEnabled()) {
-        static NSMutableSet *loggedIgnoredKeys = nil;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            loggedIgnoredKeys = [NSMutableSet set];
-        });
-        
-        @synchronized(loggedIgnoredKeys) {
-            NSString *keyStr = [NSString stringWithUTF8String:name];
-            if (![loggedIgnoredKeys containsObject:keyStr]) {
-                [loggedIgnoredKeys addObject:keyStr];
-                PXLog(@"[DeviceSpec DEBUG] Unhandled sysctl query: %s", name);
-            }
-        }
+    if (strcmp(name, "hw.physicalcpu") == 0 ||
+        strcmp(name, "hw.physicalcpu_max") == 0 ||
+        strcmp(name, "hw.logicalcpu") == 0 ||
+        strcmp(name, "hw.logicalcpu_max") == 0 ||
+        strcmp(name, "hw.ncpu") == 0 ||
+        strcmp(name, "hw.activecpu") == 0) {
+        if (coreCount == 0 || coreCount > UINT32_MAX) return NO;
+        uint32_t value = (uint32_t)coreCount;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
     }
 
-    return result;
-} 
+    if (profile && strcmp(name, "hw.cputype") == 0) {
+        uint32_t value = (uint32_t)CPU_TYPE_ARM64;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.cpusubtype") == 0) {
+        uint32_t value = (uint32_t)profile->cpuSubtype;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.cpufamily") == 0) {
+        uint32_t value = profile->cpuFamily;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.cachelinesize") == 0) {
+        uint64_t value = profile->cacheLineBytes;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.l1icachesize") == 0) {
+        uint64_t value = profile->l1iCacheBytes;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.l1dcachesize") == 0) {
+        uint64_t value = profile->l1dCacheBytes;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.l2cachesize") == 0) {
+        uint64_t value = profile->l2CacheBytes;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    uint64_t totalMemory = 0;
+    BOOL hasMemory = PXDeviceMemoryBytesFromSpecs(specs, &totalMemory);
+
+    if (hasMemory && strcmp(name, "hw.memsize") == 0) {
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&totalMemory, sizeof(totalMemory), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (hasMemory && strcmp(name, "hw.physmem") == 0) {
+        // XNU exposes hw.physmem as a legacy compatibility unsigned int.
+        uint32_t legacyBytes = totalMemory > UINT32_MAX ? UINT32_MAX : (uint32_t)totalMemory;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteSysctlBytes(&legacyBytes, sizeof(legacyBytes), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    // The following keys are release/build dependent. Ask the coordinator-owned
+    // original exactly once to preserve ENOENT/EPERM, then serialize from the
+    // canonical profile using the caller's original buffer capacity.
+    if (profile && strncmp(name, "hw.optional.", 12) == 0) {
+        uint32_t value = 0;
+        if (!PXOptionalFeatureValue(name, profile, &value)) return NO;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteExistingSysctlBytes(name,
+                                          &value,
+                                          sizeof(value),
+                                          oldp,
+                                          oldlenp,
+                                          outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && (strcmp(name, "hw.cpufrequency") == 0 ||
+                    strcmp(name, "hw.cpufrequency_max") == 0 ||
+                    strcmp(name, "hw.cpufrequency_min") == 0)) {
+        uint64_t value = strcmp(name, "hw.cpufrequency_min") == 0
+            ? profile->minFrequencyHz
+            : profile->maxFrequencyHz;
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteExistingSysctlBytes(name,
+                                          &value,
+                                          sizeof(value),
+                                          oldp,
+                                          oldlenp,
+                                          outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && (strcmp(name, "hw.cpu.brand_string") == 0 ||
+                    strcmp(name, "machdep.cpu.brand_string") == 0 ||
+                    strcmp(name, "hw.cpubrand") == 0)) {
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteExistingSysctlCString(name,
+                                            profile->brand,
+                                            oldp,
+                                            oldlenp,
+                                            outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (profile && strcmp(name, "hw.cpu.features") == 0) {
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteExistingSysctlCString(name,
+                                            profile->featureString,
+                                            oldp,
+                                            oldlenp,
+                                            outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (strcmp(name, "vm.swapusage") == 0) {
+        if (!hasMemory) return NO;
+
+        struct xsw_usage usage;
+        memset(&usage, 0, sizeof(usage));
+        usage.xsu_total = PXDeviceMemoryGBFromSpecs(specs) >= 4 ? totalMemory / 2ULL : totalMemory;
+        usage.xsu_used = (usage.xsu_total * 3ULL) / 10ULL;
+        usage.xsu_avail = usage.xsu_total - usage.xsu_used;
+
+        vm_size_t pageSize = 4096;
+        if (host_page_size(mach_host_self(), &pageSize) != KERN_SUCCESS || pageSize == 0) {
+            pageSize = 4096;
+        }
+        usage.xsu_pagesize = (uint32_t)pageSize;
+        usage.xsu_encrypted = TRUE;
+
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  PXWriteExistingSysctlBytes(name,
+                                          &usage,
+                                          sizeof(usage),
+                                          oldp,
+                                          oldlenp,
+                                          outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    return NO;
+}

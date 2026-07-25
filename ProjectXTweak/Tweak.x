@@ -1150,48 +1150,11 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
         return r;
     }
     
-    // CPU INFO SPOOFING (Crucial for correct device identification)
-    if (strcmp(name, "hw.physicalcpu") == 0 ||
-        strcmp(name, "hw.physicalcpu_max") == 0 ||
-        strcmp(name, "hw.logicalcpu") == 0 ||
-        strcmp(name, "hw.logicalcpu_max") == 0 ||
-        strcmp(name, "hw.ncpu") == 0 ||
-        strcmp(name, "hw.activecpu") == 0) {
-        
-        if ([manager isIdentifierEnabled:@"DeviceModel"]) {
-            NSString *model = [manager currentValueForIdentifier:@"DeviceModel"];
-            int64_t cores = 6; // Default to modern iPhone (XS/11/12/13/14+)
-            
-            if ([model hasPrefix:@"iPhone8"] || [model hasPrefix:@"iPhone9"] || [model hasPrefix:@"iPhone10"]) {
-                cores = 2; // 6S, 7, 8
-            } else if ([model hasPrefix:@"iPhone10,3"] || [model hasPrefix:@"iPhone10,6"]) {
-                cores = 6; // X
-            } else if ([model hasPrefix:@"iPhone11"]) {
-                cores = 6;
-            }
-            
-            if (cores > 0) {
-                // Exact match to bypass code size query behavior
-                if (!oldp && oldlenp) {
-                   size_t tmp = 0;
-                   (void)sysctlbyname_orig(name, NULL, &tmp, NULL, 0);
-                   if (tmp > 0) *oldlenp = tmp;
-                   if (outHandled) *outHandled = YES;
-                   px_sysctlbyname_in_hook = NO;
-                   return 0;
-                }
+    // CPU topology and CPU identity are owned exclusively by DeviceSpecHooks.x.
+    // Leave all hw.*cpu* keys unhandled here so the canonical DeviceSpec provider
+    // can serialize one consistent SoC profile across sysctlbyname, NSProcessInfo,
+    // and NXGetLocalArchInfo.
 
-               int r = PXWriteSysctlInt64(name, cores, oldp, oldlenp);
-               if (r == 0) {
-                   PXLog(@"[WeaponX] 🎯 Spoofed sysctlbyname CPU count %s to: %lld", name, (long long)cores);
-               }
-               if (outHandled) *outHandled = YES;
-               px_sysctlbyname_in_hook = NO;
-               return r;
-            }
-        }
-    }
-    
     // Jailbreak detection hook removed to match working bypass behavior
     // (Facebook may check for behavior discrepancy here)
 
