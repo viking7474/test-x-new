@@ -14,11 +14,13 @@
 #import <WebKit/WebKit.h>
 #import <mach/mach.h>
 #import <mach/mach_host.h>
+#import <mach/machine.h>
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <dlfcn.h>
 #import <errno.h>
 #import <limits.h>
+#import <strings.h>
 #import <mach-o/arch.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import "IOSVersionInfo.h"
@@ -27,24 +29,16 @@
 #import "PXPaths.h"
 #import "PXFileDebug.h"
 
-#ifndef CPU_SUBTYPE_ARM64_V8
-#define CPU_SUBTYPE_ARM64_V8 ((cpu_subtype_t)1)
-#endif
-#ifndef CPU_SUBTYPE_ARM64E
-#define CPU_SUBTYPE_ARM64E ((cpu_subtype_t)2)
-#endif
-
 typedef NS_OPTIONS(uint32_t, PXDeviceCPUFeatureFlags) {
     PXDeviceCPUFeatureARM64       = 1u << 0,
-    PXDeviceCPUFeatureARM64E      = 1u << 1,
-    PXDeviceCPUFeatureAtomics     = 1u << 2,
-    PXDeviceCPUFeatureFCMA        = 1u << 3,
-    PXDeviceCPUFeatureCRC32       = 1u << 4,
-    PXDeviceCPUFeatureNEON        = 1u << 5,
-    PXDeviceCPUFeatureAES         = 1u << 6,
-    PXDeviceCPUFeatureFP16        = 1u << 7,
-    PXDeviceCPUFeatureJSCVT       = 1u << 8,
-    PXDeviceCPUFeatureLRCPC       = 1u << 9,
+    PXDeviceCPUFeatureAtomics     = 1u << 1,
+    PXDeviceCPUFeatureFCMA        = 1u << 2,
+    PXDeviceCPUFeatureCRC32       = 1u << 3,
+    PXDeviceCPUFeatureNEON        = 1u << 4,
+    PXDeviceCPUFeatureAES         = 1u << 5,
+    PXDeviceCPUFeatureFP16        = 1u << 6,
+    PXDeviceCPUFeatureJSCVT       = 1u << 7,
+    PXDeviceCPUFeatureLRCPC       = 1u << 8,
 };
 
 typedef struct {
@@ -67,7 +61,7 @@ typedef struct {
 
 #define PX_CPU_BASE_FLAGS ((PXDeviceCPUFeatureFlags)(PXDeviceCPUFeatureARM64 | PXDeviceCPUFeatureCRC32 | PXDeviceCPUFeatureNEON | PXDeviceCPUFeatureAES))
 #define PX_CPU_ATOMICS_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_BASE_FLAGS | PXDeviceCPUFeatureAtomics))
-#define PX_CPU_ARM64E_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ATOMICS_FLAGS | PXDeviceCPUFeatureARM64E | PXDeviceCPUFeatureFCMA))
+#define PX_CPU_ARM64E_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ATOMICS_FLAGS | PXDeviceCPUFeatureFCMA))
 #define PX_CPU_ARM64E_FP16_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ARM64E_FLAGS | PXDeviceCPUFeatureFP16 | PXDeviceCPUFeatureJSCVT))
 #define PX_CPU_ARM64E_LRCPC_FLAGS ((PXDeviceCPUFeatureFlags)(PX_CPU_ARM64E_FP16_FLAGS | PXDeviceCPUFeatureLRCPC))
 
@@ -192,6 +186,11 @@ static void logMemoryHook(NSString *apiName);
 // Function declarations
 static NSString *getCurrentBundleID(void);
 static BOOL PXCPUArchitectureHasToken(NSString *architecture, NSString *token);
+static BOOL PXASCIIContainsCaseInsensitive(const char *value, const char *needle);
+static BOOL PXCPUProfileHasSupportedSubtype(const PXDeviceCPUProfile *profile);
+static BOOL PXCPUFeatureStringIsARMOnly(const char *featureString);
+static BOOL PXCPUProfileIsUsable(const PXDeviceCPUProfile *profile);
+static const char *PXCPUArchNameForSubtype(cpu_subtype_t subtype);
 static const PXDeviceCPUProfile *PXCPUProfileForArchitecture(NSString *architecture);
 static const PXDeviceCPUProfile *PXCPUProfileFromSpecs(NSDictionary *specs);
 static NSUInteger PXCPUCoreCountFromSpecs(NSDictionary *specs);
@@ -276,6 +275,72 @@ static BOOL PXCPUArchitectureHasToken(NSString *architecture, NSString *token) {
     return NO;
 }
 
+// P1.3 accepts only the public ARM64 ABI subtype classes. Raw per-chip values
+// (historically 2-13) are never interpreted as model-specific subtypes.
+static BOOL PXCPUProfileHasSupportedSubtype(const PXDeviceCPUProfile *profile) {
+    if (!profile) return NO;
+
+    switch (profile->cpuSubtype) {
+        case CPU_SUBTYPE_ARM64_ALL:
+        case CPU_SUBTYPE_ARM64_V8:
+        case CPU_SUBTYPE_ARM64E:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static BOOL PXASCIIContainsCaseInsensitive(const char *value, const char *needle) {
+    if (!value || !needle || !*needle) return NO;
+
+    size_t needleLength = strlen(needle);
+    for (const char *cursor = value; *cursor; cursor++) {
+        if (strncasecmp(cursor, needle, needleLength) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// A canonical ARM profile must never synthesize x86 ISA capability tokens.
+static BOOL PXCPUFeatureStringIsARMOnly(const char *featureString) {
+    if (!featureString) return NO;
+
+    static const char *const forbiddenFeatures[] = { "SSE", "AVX", "MMX", "X86" };
+    for (NSUInteger i = 0; i < sizeof(forbiddenFeatures) / sizeof(forbiddenFeatures[0]); i++) {
+        if (PXASCIIContainsCaseInsensitive(featureString, forbiddenFeatures[i])) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL PXCPUProfileIsUsable(const PXDeviceCPUProfile *profile) {
+    if (!profile || !profile->brand || !profile->archDescription || !profile->featureString) {
+        return NO;
+    }
+    if (!PXCPUProfileHasSupportedSubtype(profile) || !PXCPUFeatureStringIsARMOnly(profile->featureString)) {
+        return NO;
+    }
+
+    if (profile->cpuSubtype == CPU_SUBTYPE_ARM64E) {
+        return strcmp(profile->archDescription, "ARM64E") == 0;
+    }
+    return strcmp(profile->archDescription, "ARM64") == 0;
+}
+
+static const char *PXCPUArchNameForSubtype(cpu_subtype_t subtype) {
+    switch (subtype) {
+        case CPU_SUBTYPE_ARM64E:
+            return "arm64e";
+        case CPU_SUBTYPE_ARM64_ALL:
+        case CPU_SUBTYPE_ARM64_V8:
+            return "arm64";
+        default:
+            return NULL;
+    }
+}
+
 static const PXDeviceCPUProfile *PXCPUProfileForArchitecture(NSString *architecture) {
     if (!architecture.length) return NULL;
 
@@ -290,7 +355,10 @@ static const PXDeviceCPUProfile *PXCPUProfileForArchitecture(NSString *architect
                 continue;
             }
         }
-        return profile;
+
+        // A matched but malformed canonical row must fail open. Do not fall
+        // through to a broader family row and expose a different CPU identity.
+        return PXCPUProfileIsUsable(profile) ? profile : NULL;
     }
     return NULL;
 }
@@ -1553,8 +1621,11 @@ static const NXArchInfo *hook_nx_get_local_arch_info(void) {
     const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
     if (!profile) return original;
 
+    const char *archName = PXCPUArchNameForSubtype(profile->cpuSubtype);
+    if (!archName) return original;
+
     g_deviceSpecThreadArchInfo = *original;
-    g_deviceSpecThreadArchInfo.name = profile->cpuSubtype == CPU_SUBTYPE_ARM64E ? "arm64e" : "arm64";
+    g_deviceSpecThreadArchInfo.name = archName;
     g_deviceSpecThreadArchInfo.cputype = CPU_TYPE_ARM64;
     g_deviceSpecThreadArchInfo.cpusubtype = profile->cpuSubtype;
     g_deviceSpecThreadArchInfo.description = profile->archDescription;
@@ -1802,23 +1873,25 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
                                                   outResult);
     }
 
-    // The following keys are release/build dependent. Ask the coordinator-owned
-    // original exactly once to preserve ENOENT/EPERM, then serialize from the
-    // canonical profile using the caller's original buffer capacity.
-    if (profile && strncmp(name, "hw.optional.", 12) == 0) {
-        uint32_t value = 0;
-        if (!PXOptionalFeatureValue(name, profile, &value)) return NO;
+    // P1.3 exact whitelist: only a table hit may be synthesized. Unknown
+    // hw.optional.* keys return NO so the coordinator preserves the real kernel
+    // result instead of applying a default-YES policy.
+    uint32_t optionalValue = 0;
+    if (profile && PXOptionalFeatureValue(name, profile, &optionalValue)) {
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
                                                   generation,
                                                   PXWriteExistingSysctlBytes(name,
-                                          &value,
-                                          sizeof(value),
+                                          &optionalValue,
+                                          sizeof(optionalValue),
                                           oldp,
                                           oldlenp,
                                           outResult),
                                                   oldlenp,
                                                   outResult);
+    }
+    if (strncmp(name, "hw.optional.", 12) == 0) {
+        return NO;
     }
 
     if (profile && (strcmp(name, "hw.cpufrequency") == 0 ||

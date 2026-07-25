@@ -348,7 +348,10 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: VM64 write is count-gated", "*count >= HOST_VM_INFO64_COUNT" in memory_hook)
     matrix.check("source: VM32 write is count-gated", "*count >= HOST_VM_INFO_COUNT" in memory_hook)
     matrix.check("source: HOST_BASIC_INFO write is count-gated", "*count >= HOST_BASIC_INFO_COUNT" in memory_hook)
-    matrix.check("source: CPU feature string contains no x86 ISA tokens", not re.search(r"\b(?:SSE|AVX|MMX)\b", DEVICE_SOURCE))
+    matrix.check("source: CPU feature strings contain no x86 ISA tokens", all(
+        not re.search(r"\b(?:SSE|AVX|MMX|X86)\b", profile.feature_string, re.I)
+        for profile in PROFILES
+    ))
     matrix.check("source: optional-feature whitelist is exact", OPTIONAL_KEYS == EXPECTED_OPTIONAL_KEYS)
     matrix.check("source: optional-feature whitelist does not invent arm64e key", "hw.optional.arm64e" not in OPTIONAL_KEYS)
     matrix.check("source: legacy standalone CPU core table removed from Tweak", "CPU INFO SPOOFING" not in TWEAK_SOURCE and "int64_t cores =" not in TWEAK_SOURCE)
