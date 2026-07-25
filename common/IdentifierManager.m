@@ -24,6 +24,7 @@
 #import "AppInstallUUIDManager.h"
 #import "AppContainerUUIDManager.h"
 #import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
 #import <Security/Security.h>
 
 @interface LSApplicationWorkspace
@@ -98,21 +99,7 @@ static NSDictionary *PXScreenDictFromModelSpec(NSDictionary *modelSpec) {
     return screen ?: @{};
 }
 
-static NSDictionary *PXWebGLInfoFromModelSpec(NSDictionary *modelSpec) {
-    NSDictionary *webgl = [modelSpec[@"webgl"] isKindOfClass:[NSDictionary class]] ? modelSpec[@"webgl"] : nil;
-    NSString *vendor = [webgl[@"vendor"] isKindOfClass:[NSString class]] ? webgl[@"vendor"] : @"Apple";
-    NSString *renderer = [webgl[@"renderer"] isKindOfClass:[NSString class]] ? webgl[@"renderer"] : nil;
-    if (!renderer.length) {
-        renderer = [modelSpec[@"gpuFamily"] isKindOfClass:[NSString class]] ? modelSpec[@"gpuFamily"] : @"Apple GPU";
-    }
-    return @{
-        @"webglVendor": vendor ?: @"Apple",
-        @"webglRenderer": renderer ?: @"Apple GPU",
-        @"unmaskedVendor": @"Apple Inc.",
-        @"unmaskedRenderer": renderer ?: @"Apple GPU",
-        @"webglVersion": @"WebGL 2.0"
-    };
-}
+
 
 static NSUInteger PXRandomIndex3(NSUInteger upperBoundExclusive) {
     if (upperBoundExclusive == 0) return 0;
@@ -131,8 +118,8 @@ static NSDictionary *PXPickHardwareVariantFromModelSpec(NSDictionary *modelSpec)
     NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
     for (id v in variants) {
         if (![v isKindOfClass:[NSDictionary class]]) continue;
-        NSString *boardID = [v[@"boardID"] isKindOfClass:[NSString class]] ? v[@"boardID"] : nil;
-        NSString *hwModel = [v[@"hwModel"] isKindOfClass:[NSString class]] ? v[@"hwModel"] : nil;
+        NSString *boardID = PXProfileString(v[@"boardID"]);
+        NSString *hwModel = PXProfileString(v[@"hwModel"]);
         if (!boardID.length && !hwModel.length) continue;
         [candidates addObject:(NSDictionary *)v];
     }
@@ -242,18 +229,14 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     NSNumber *deviceMemoryGB = [modelSpec[@"deviceMemoryGB"] isKindOfClass:[NSNumber class]] ? modelSpec[@"deviceMemoryGB"] : nil;
     NSString *gpuFamily = [modelSpec[@"gpuFamily"] isKindOfClass:[NSString class]] ? modelSpec[@"gpuFamily"] : @"";
     NSNumber *cpuCores = [modelSpec[@"cpuCores"] isKindOfClass:[NSNumber class]] ? modelSpec[@"cpuCores"] : nil;
-    NSString *metalFeatureSet = [modelSpec[@"metalFeatureSet"] isKindOfClass:[NSString class]] ? modelSpec[@"metalFeatureSet"] : @"Unknown";
+    NSString *metalFeatureSet = PXProfileString(modelSpec[@"metalFeatureSet"]);
 
-    // Hardware variant selection (boardID/hwModel)
+    // Hardware variant selection. BoardID and HwModel are independent fields.
     NSDictionary *pickedVariant = PXPickHardwareVariantFromModelSpec(modelSpec);
-    NSString *boardID = [pickedVariant[@"boardID"] isKindOfClass:[NSString class]] ? pickedVariant[@"boardID"] : nil;
-    NSString *hwModel = [pickedVariant[@"hwModel"] isKindOfClass:[NSString class]] ? pickedVariant[@"hwModel"] : nil;
-    if (!boardID.length) {
-        boardID = [modelSpec[@"boardID"] isKindOfClass:[NSString class]] ? modelSpec[@"boardID"] : @"Unknown";
-    }
-    if (!hwModel.length) {
-        hwModel = [modelSpec[@"hwModel"] isKindOfClass:[NSString class]] ? modelSpec[@"hwModel"] : boardID;
-    }
+    NSString *boardID = PXProfileString(pickedVariant[@"boardID"]);
+    NSString *hwModel = PXProfileString(pickedVariant[@"hwModel"]);
+    if (!boardID.length) boardID = PXProfileString(modelSpec[@"boardID"]);
+    if (!hwModel.length) hwModel = PXProfileString(modelSpec[@"hwModel"]);
 
     // Optional model number (Axxxx)
     NSString *modelNumber = PXPickModelNumberFromModelSpec(modelSpec);
@@ -273,7 +256,9 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         @"DeviceModel", @"DeviceModelName",
         @"ScreenResolution", @"ViewportResolution", @"DevicePixelRatio", @"ScreenDensityPPI",
         @"CPUArchitecture", @"DeviceMemory", @"CPUCoreCount", @"MetalFeatureSet", @"GPUFamily",
-        @"WebGLVendor", @"WebGLRenderer",
+        @"WebGLVendor", @"WebGLRenderer", @"WebGLVersion",
+        @"WebGLUnmaskedVendor", @"WebGLUnmaskedRenderer",
+        @"WebGLMaxTextureSize", @"WebGLMaxRenderbufferSize", @"WebGLMaxRenderBufferSize",
         @"BoardID", @"HwModel", @"ModelNumber",
         @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"
     ];
@@ -290,12 +275,11 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     deviceIds[@"CPUArchitecture"] = cpuArchitecture ?: @"";
     if (deviceMemoryGB) deviceIds[@"DeviceMemory"] = deviceMemoryGB;
     if (cpuCores) deviceIds[@"CPUCoreCount"] = cpuCores;
-    deviceIds[@"MetalFeatureSet"] = metalFeatureSet ?: @"Unknown";
-    deviceIds[@"GPUFamily"] = gpuFamily ?: @"";
-    deviceIds[@"WebGLVendor"] = webGLInfo[@"webglVendor"] ?: @"Apple";
-    deviceIds[@"WebGLRenderer"] = webGLInfo[@"webglRenderer"] ?: @"Apple GPU";
-    deviceIds[@"BoardID"] = boardID ?: @"Unknown";
-    deviceIds[@"HwModel"] = hwModel ?: @"Unknown";
+    if (metalFeatureSet.length) deviceIds[@"MetalFeatureSet"] = metalFeatureSet;
+    if (gpuFamily.length) deviceIds[@"GPUFamily"] = gpuFamily;
+    PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
+    if (boardID.length) deviceIds[@"BoardID"] = boardID;
+    if (hwModel.length) deviceIds[@"HwModel"] = hwModel;
 
     if (modelNumber.length) deviceIds[@"ModelNumber"] = modelNumber;
 
@@ -384,13 +368,16 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         deviceIds[@"CPUArchitecture"] = cpuArchitecture ?: @"";
         deviceIds[@"DeviceMemory"] = @(deviceMemory);
         deviceIds[@"CPUCoreCount"] = @(cpuCoreCount);
-        deviceIds[@"MetalFeatureSet"] = metalFeatureSet ?: @"Unknown";
-        deviceIds[@"GPUFamily"] = gpuFamily ?: @"";
-        // Simplified WebGL info for combined file
-        deviceIds[@"WebGLVendor"] = webGLInfo[@"webglVendor"] ?: @"Apple";
-        deviceIds[@"WebGLRenderer"] = webGLInfo[@"webglRenderer"] ?: @"Apple GPU";
-        deviceIds[@"BoardID"] = boardID ?: @"Unknown";
-        deviceIds[@"HwModel"] = hwModel ?: @"Unknown";
+        [deviceIds removeObjectsForKeys:@[@"MetalFeatureSet", @"GPUFamily", @"BoardID", @"HwModel"]];
+        NSString *normalizedMetal = PXProfileString(metalFeatureSet);
+        NSString *normalizedGPU = PXProfileString(gpuFamily);
+        NSString *normalizedBoardID = PXProfileString(boardID);
+        NSString *normalizedHwModel = PXProfileString(hwModel);
+        if (normalizedMetal) deviceIds[@"MetalFeatureSet"] = normalizedMetal;
+        if (normalizedGPU) deviceIds[@"GPUFamily"] = normalizedGPU;
+        PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
+        if (normalizedBoardID) deviceIds[@"BoardID"] = normalizedBoardID;
+        if (normalizedHwModel) deviceIds[@"HwModel"] = normalizedHwModel;
         
         [deviceIds writeToFile:deviceIdsPath atomically:YES];
     }
@@ -445,13 +432,16 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         deviceIds[@"CPUArchitecture"] = cpuArchitecture ?: @"";
         deviceIds[@"DeviceMemory"] = @(deviceMemory);
         deviceIds[@"CPUCoreCount"] = @(cpuCoreCount);
-        deviceIds[@"MetalFeatureSet"] = metalFeatureSet ?: @"Unknown";
-        deviceIds[@"GPUFamily"] = gpuFamily ?: @"";
-        // Simplified WebGL info for combined file
-        deviceIds[@"WebGLVendor"] = webGLInfo[@"webglVendor"] ?: @"Apple";
-        deviceIds[@"WebGLRenderer"] = webGLInfo[@"webglRenderer"] ?: @"Apple GPU";
-        deviceIds[@"BoardID"] = boardID ?: @"Unknown";
-        deviceIds[@"HwModel"] = hwModel ?: @"Unknown";
+        [deviceIds removeObjectsForKeys:@[@"MetalFeatureSet", @"GPUFamily", @"BoardID", @"HwModel"]];
+        NSString *normalizedMetal = PXProfileString(metalFeatureSet);
+        NSString *normalizedGPU = PXProfileString(gpuFamily);
+        NSString *normalizedBoardID = PXProfileString(boardID);
+        NSString *normalizedHwModel = PXProfileString(hwModel);
+        if (normalizedMetal) deviceIds[@"MetalFeatureSet"] = normalizedMetal;
+        if (normalizedGPU) deviceIds[@"GPUFamily"] = normalizedGPU;
+        PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
+        if (normalizedBoardID) deviceIds[@"BoardID"] = normalizedBoardID;
+        if (normalizedHwModel) deviceIds[@"HwModel"] = normalizedHwModel;
         
         success = [deviceIds writeToFile:deviceIdsPath atomically:YES];
     }
@@ -484,54 +474,11 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
 #pragma mark - Profile Integration
 
 - (NSString *)getActiveProfileId {
-    // First check the primary profile info file
-    NSString *centralInfoPath = PXCurrentProfileInfoPath();
-    NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-    
-    NSString *profileId = [centralInfo[@"ProfileId"] isKindOfClass:[NSString class]] ? centralInfo[@"ProfileId"] : nil;
-    if (!profileId) {
-        // If not found, check the legacy active_profile_info.plist
-        NSString *activeInfoPath = PXLegacyActiveProfileInfoPath();
-        NSDictionary *activeInfo = [NSDictionary dictionaryWithContentsOfFile:activeInfoPath];
-        profileId = [activeInfo[@"ProfileId"] isKindOfClass:[NSString class]] ? activeInfo[@"ProfileId"] : nil;
-        if (!profileId.length) {
-            profileId = [activeInfo[@"currentProfileId"] isKindOfClass:[NSString class]] ? activeInfo[@"currentProfileId"] : nil;
-        }
-        
-        NSLog(@"[WeaponX] 🔍 CRITICAL CHECK - Primary profile info not found, checked backup: %@", profileId ? @"✅ found" : @"❌ not found");
+    NSString *profileID = PXActiveProfileID();
+    if (!profileID.length) {
+        NSLog(@"[WeaponX] Error: Could not resolve active profile ID");
     }
-    
-    if (!profileId) {
-        NSLog(@"[WeaponX] Warning: No active profile ID found, using default");
-        // Try to find any profile directory as a fallback
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *profilesDir = PXProfilesPath();
-        NSError *error = nil;
-        NSArray *contents = [fileManager contentsOfDirectoryAtPath:profilesDir error:&error];
-        
-        if (!error && contents.count > 0) {
-            // Use the first directory found as a fallback
-            for (NSString *item in contents) {
-                BOOL isDir = NO;
-                NSString *fullPath = [profilesDir stringByAppendingPathComponent:item];
-                [fileManager fileExistsAtPath:fullPath isDirectory:&isDir];
-                
-                if (isDir && ![item isEqualToString:@"0"] && ![item isEqualToString:@"profile_0"]) {
-                    profileId = item;
-                    NSLog(@"[WeaponX] Using fallback profile ID: %@", profileId);
-                    break;
-                }
-            }
-        }
-        
-        // If we still don't have a profile ID, give up
-        if (!profileId) {
-            NSLog(@"[WeaponX] Error: Could not find any profile");
-            return nil;
-        }
-    }
-    
-    return profileId;
+    return profileID;
 }
 
 - (NSString *)profileIdentityPath {
@@ -542,9 +489,9 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         return nil;
     }
     
-    // Build the path to this profile's identity directory
-    NSString *profileDir = [PXProfilesPath() stringByAppendingPathComponent:profileId];
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
+    // Build the identity path through the shared profile resolver.
+    NSString *identityDir = PXProfileIdentityPath(profileId);
+    if (!identityDir.length) return nil;
     
     // Create the directory if it doesn't exist
     NSFileManager *fileManager = [NSFileManager defaultManager];
@@ -3195,71 +3142,16 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 #pragma mark - Device Model Specifications
 
 - (NSDictionary *)getDeviceModelSpecifications {
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir) return nil;
+    NSString *deviceIdsPath = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIds = deviceIdsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath]
+        : nil;
+    NSDictionary *profileSpecs = PXDeviceSpecificationsFromDeviceIDs(deviceIds);
+    if (profileSpecs.count) return profileSpecs;
 
-    // Read from the combined device_ids.plist only (source of truth)
-    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-    NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-    
-    if (deviceIds && deviceIds[@"DeviceModel"]) {
-        NSMutableDictionary *specs = [NSMutableDictionary dictionary];
-        
-        specs[@"value"] = deviceIds[@"DeviceModel"];
-        specs[@"name"] = deviceIds[@"DeviceModelName"] ?: @"Unknown";
-        specs[@"screenResolution"] = deviceIds[@"ScreenResolution"] ?: @"Unknown";
-        specs[@"viewportResolution"] = deviceIds[@"ViewportResolution"] ?: @"Unknown";
-        specs[@"devicePixelRatio"] = deviceIds[@"DevicePixelRatio"] ?: @(0);
-        specs[@"screenDensity"] = deviceIds[@"ScreenDensityPPI"] ?: @(0);
-        specs[@"cpuArchitecture"] = deviceIds[@"CPUArchitecture"] ?: @"Unknown";
-        specs[@"deviceMemory"] = deviceIds[@"DeviceMemory"] ?: @(0);
-        specs[@"gpuFamily"] = deviceIds[@"GPUFamily"] ?: @"Unknown";
-        specs[@"cpuCoreCount"] = deviceIds[@"CPUCoreCount"] ?: @(0);
-        specs[@"metalFeatureSet"] = deviceIds[@"MetalFeatureSet"] ?: @"Unknown";
-        
-        // Rebuild webGLInfo from simplified fields
-        NSMutableDictionary *webGLInfo = [NSMutableDictionary dictionary];
-        webGLInfo[@"webglVendor"] = deviceIds[@"WebGLVendor"] ?: @"Apple";
-        webGLInfo[@"webglRenderer"] = deviceIds[@"WebGLRenderer"] ?: @"Apple GPU";
-        webGLInfo[@"unmaskedVendor"] = @"Apple Inc.";
-        webGLInfo[@"unmaskedRenderer"] = deviceIds[@"GPUFamily"] ?: @"Apple GPU";
-        webGLInfo[@"webglVersion"] = @"WebGL 2.0";
-        webGLInfo[@"maxTextureSize"] = @(16384);
-        webGLInfo[@"maxRenderBufferSize"] = @(16384);
-        
-        specs[@"webGLInfo"] = webGLInfo;
-
-        if (deviceIds[@"ModelNumber"]) {
-            specs[@"modelNumber"] = deviceIds[@"ModelNumber"];
-        }
-        
-        return specs;
-    }
-    
-    // If still not found, get the current device model and fetch its specs
-    NSString *currentDeviceModel = [self currentValueForIdentifier:@"DeviceModel"];
-    if (currentDeviceModel) {
-        DeviceModelManager *deviceManager = [DeviceModelManager sharedManager];
-        NSMutableDictionary *specs = [NSMutableDictionary dictionary];
-        
-        specs[@"value"] = currentDeviceModel;
-        specs[@"name"] = [deviceManager deviceModelNameForString:currentDeviceModel] ?: @"Unknown";
-        specs[@"screenResolution"] = [deviceManager screenResolutionForModel:currentDeviceModel] ?: @"Unknown";
-        specs[@"viewportResolution"] = [deviceManager viewportResolutionForModel:currentDeviceModel] ?: @"Unknown";
-        specs[@"devicePixelRatio"] = @([deviceManager devicePixelRatioForModel:currentDeviceModel]);
-        specs[@"screenDensity"] = @([deviceManager screenDensityForModel:currentDeviceModel]);
-        specs[@"cpuArchitecture"] = [deviceManager cpuArchitectureForModel:currentDeviceModel] ?: @"Unknown";
-        specs[@"deviceMemory"] = @([deviceManager deviceMemoryForModel:currentDeviceModel]);
-        specs[@"gpuFamily"] = [deviceManager gpuFamilyForModel:currentDeviceModel] ?: @"Unknown";
-        specs[@"cpuCoreCount"] = @([deviceManager cpuCoreCountForModel:currentDeviceModel]);
-        specs[@"metalFeatureSet"] = [deviceManager metalFeatureSetForModel:currentDeviceModel] ?: @"Unknown";
-        specs[@"webGLInfo"] = [deviceManager webGLInfoForModel:currentDeviceModel] ?: @{};
-        
-        return specs;
-    }
-    
-    
-    return nil;
+    NSString *currentDeviceModel = PXProfileString([self currentValueForIdentifier:@"DeviceModel"]);
+    if (!currentDeviceModel.length) return nil;
+    return [[DeviceModelManager sharedManager] deviceSpecificationsForModel:currentDeviceModel];
 }
 
 - (NSString *)getScreenResolution {

@@ -240,8 +240,13 @@ for (const token of [
 }
 source = source
     .replace("__WX_BASE_SEED__", "305419896")
-    .replace("__WX_VENDOR_JSON__", JSON.stringify("Apple Inc."))
-    .replace("__WX_RENDERER_JSON__", JSON.stringify("Apple A15 GPU"));
+    .replace("__WX_WEBGL_VENDOR_JSON__", JSON.stringify("Apple"))
+    .replace("__WX_WEBGL_RENDERER_JSON__", JSON.stringify("Apple GPU"))
+    .replace("__WX_WEBGL_VERSION_JSON__", JSON.stringify("WebGL 2.0 Profile"))
+    .replace("__WX_UNMASKED_VENDOR_JSON__", JSON.stringify("Apple Inc."))
+    .replace("__WX_UNMASKED_RENDERER_JSON__", JSON.stringify("Apple A15 GPU"))
+    .replace("__WX_MAX_TEXTURE_SIZE__", "8192")
+    .replace("__WX_MAX_RENDERBUFFER_SIZE__", "4096");
 vm.runInNewContext(source, context, { filename: "canvas-fingerprint-protection.js" });
 
 async function main() {
@@ -294,12 +299,13 @@ async function main() {
     for (const gl of [gl1, gl2]) {
         assert.strictEqual(gl.getParameter(37445), "Apple Inc.");
         assert.strictEqual(gl.getParameter(37446), "Apple A15 GPU");
-        assert.strictEqual(gl.getParameter(7936), "WebKit");
-        assert.strictEqual(gl.getParameter(7937), "WebKit WebGL");
+        assert.strictEqual(gl.getParameter(7936), "Apple");
+        assert.strictEqual(gl.getParameter(7937), "Apple GPU");
+        assert.strictEqual(gl.getParameter(7938), "WebGL 2.0 Profile");
+        assert.strictEqual(gl.getParameter(3379), 8192);
+        assert.strictEqual(gl.getParameter(34024), 4096);
         assert.deepStrictEqual(gl.getSupportedExtensions(), gl.getSupportedExtensions(), "extension order must be stable");
     }
-    assert.ok(gl1.getParameter(7938).startsWith("WebGL 1.0"));
-    assert.ok(gl2.getParameter(7938).startsWith("WebGL 2.0"));
 
     const analyser = new context.AnalyserNode();
     const frequencies1 = new Float32Array(8);

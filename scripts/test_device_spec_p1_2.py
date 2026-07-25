@@ -13,9 +13,13 @@ from types import MappingProxyType
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE_PATH = ROOT / "ProjectXTweak" / "DeviceSpecHooks.x"
 CANVAS_PATH = ROOT / "ProjectXTweak" / "CanvasFingerprintHooks.x"
+PATHS_PATH = ROOT / "common" / "PXPaths.m"
+SCHEMA_PATH = ROOT / "common" / "PXDeviceProfileSchema.m"
 PROBE_PATH = ROOT / "scripts" / "probe_device_spec_p1_2.sh"
 DEVICE_SOURCE = DEVICE_PATH.read_text(encoding="utf-8")
 CANVAS_SOURCE = CANVAS_PATH.read_text(encoding="utf-8")
+PATHS_SOURCE = PATHS_PATH.read_text(encoding="utf-8")
+SCHEMA_SOURCE = SCHEMA_PATH.read_text(encoding="utf-8")
 PROBE_SOURCE = PROBE_PATH.read_text(encoding="utf-8") if PROBE_PATH.exists() else ""
 
 
@@ -40,13 +44,20 @@ class Matrix:
 
 
 def source_function(source: str, name: str) -> str:
-    match = re.search(
-        rf"(?ms)^static\s+[^;{{}}]+?\b{re.escape(name)}\s*\([^;{{}}]*?\)\s*\{{",
+    match = None
+    brace = -1
+    for candidate in re.finditer(
+        rf"(?m)^\s*(?:static\s+)?[^;{{\n]+\b{re.escape(name)}\s*\(",
         source,
-    )
-    if not match:
+    ):
+        candidate_brace = source.find("{", candidate.end())
+        candidate_semicolon = source.find(";", candidate.end())
+        if candidate_brace >= 0 and (candidate_semicolon < 0 or candidate_brace < candidate_semicolon):
+            match = candidate
+            brace = candidate_brace
+            break
+    if not match or brace < 0:
         raise RuntimeError(f"missing function: {name}")
-    brace = source.index("{", match.start())
     depth = 0
     state = "code"
     quote = ""
@@ -237,8 +248,8 @@ def run_source_matrix(matrix: Matrix) -> None:
     current_fn = source_function(DEVICE_SOURCE, "PXCurrentDeviceSpecSnapshot")
     active_fn = source_function(DEVICE_SOURCE, "PXActiveDeviceSpecSnapshot")
     deep_copy = source_function(DEVICE_SOURCE, "PXDeviceSpecDeepImmutableCopy")
-    validator = source_function(DEVICE_SOURCE, "PXDeviceSpecValidatedProfileID")
-    reconstruct = source_function(DEVICE_SOURCE, "PXDeviceSpecReconstructSpecs")
+    validator = source_function(PATHS_SOURCE, "PXValidatedProfileID")
+    reconstruct = source_function(SCHEMA_SOURCE, "PXDeviceSpecificationsFromDeviceIDs")
     refresh = source_function(DEVICE_SOURCE, "refreshCaches")
     sysctl_handler = source_function(DEVICE_SOURCE, "handleDeviceSpecSysctlByname")
     result_logger = source_function(DEVICE_SOURCE, "PXCompleteDeviceSpecSysctlResult")
@@ -254,9 +265,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: deep copy handles arrays and sets", "isKindOfClass:[NSArray class]" in deep_copy and "isKindOfClass:[NSSet class]" in deep_copy)
     matrix.check("source: profile ID rejects traversal", all(fragment in validator for fragment in ['isEqualToString:@".."', 'rangeOfString:@"/"', 'rangeOfString:@"\\\\"', "lastPathComponent"]))
     matrix.check("source: profile ID length is bounded", "profileID.length > 128" in validator)
-    matrix.check("source: canonical PXPaths are used", '#import "PXPaths.h"' in DEVICE_SOURCE and "PXProfilesPath()" in builder and "PXCurrentProfileInfoPath()" in builder)
-    matrix.check("source: legacy profile info fallback is supported", "PXLegacyActiveProfileInfoPath()" in builder and 'legacyInfo[@"currentProfileId"]' in builder)
-    matrix.check("source: all plist reads are isolated to builder", DEVICE_SOURCE.count("dictionaryWithContentsOfFile") == 4 and builder.count("dictionaryWithContentsOfFile") == 4)
+    matrix.check("source: canonical PXPaths are used", '#import "PXPaths.h"' in DEVICE_SOURCE and "PXActiveProfileID()" in builder and "PXProfileRootPath(profileID)" in builder and "PXProfileDeviceIDsPath(profileID)" in builder)
+    matrix.check("source: legacy profile info fallback is supported", "PXLegacyActiveProfileInfoPath()" in PATHS_SOURCE and 'legacyInfo[@"currentProfileId"]' in PATHS_SOURCE)
+    matrix.check("source: DeviceSpec plist reads are isolated to builder", DEVICE_SOURCE.count("dictionaryWithContentsOfFile") == 2 and builder.count("dictionaryWithContentsOfFile") == 2)
     matrix.check("source: hot snapshot getters perform no plist I/O", "dictionaryWithContentsOfFile" not in current_fn and "dictionaryWithContentsOfFile" not in active_fn)
     matrix.check("source: stable lock is initialized once", "dispatch_once" in source_function(DEVICE_SOURCE, "PXDeviceSpecSnapshotLockObject") and "gDeviceSpecSnapshotLock = [NSObject new]" in DEVICE_SOURCE)
     matrix.check("source: reload serializes generation and publication", "@synchronized(lock)" in reload_fn and "gDeviceSpecSnapshot = candidate" in reload_fn)
@@ -275,7 +286,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: manager enable state is canonical", "managerAvailable ? managerEnabled : profileFallbackEnabled" in builder and "managerEnabled ||" not in builder)
     matrix.check("source: profile enable is legacy fallback only", "profileFallbackEnabled = hasProfileEnableValue" in builder and "managerAvailable = identifierManager != nil" in builder)
     matrix.check("source: selected profile is the only model source", 'deviceIDs[@"DeviceModel"]' in builder and "currentValueForIdentifier" not in builder and "currentDeviceModel" not in builder)
-    matrix.check("source: profile specs are reconstructed from same device_ids", "PXDeviceSpecReconstructSpecs(deviceIDs)" in builder and 'source = @"device_ids"' in builder)
+    matrix.check("source: profile specs use shared device_ids schema", "PXDeviceSpecificationsFromDeviceIDs(deviceIDs)" in builder and 'source = @"device_ids"' in builder and "PXDeviceSpecificationsFromDeviceIDs" in reconstruct)
     matrix.check("source: manager specs are deep-copied for the locked profile model", "PXDeviceSpecDeepImmutableCopy(managerSpecs)" in builder and "deviceSpecificationsForModel:deviceModel" in builder)
     matrix.check("source: incomplete requested profile fails closed", "requestedEnabled && profileID.length && deviceModel.length && specs.count > 0" in builder and "effectiveEnabled ? specs : nil" in builder)
     matrix.check("source: notification rebuilds a new generation", "PXReloadDeviceSpecSnapshot" in refresh and "rebuilding immutable snapshot" in refresh)

@@ -27,11 +27,13 @@ jobs:
       - name: Test WebKit spoof P1 invariants
         run: node scripts/test_web_spoof_p1.js
 
-      - name: Test DeviceSpec P1 matrices
+      - name: Test device profile matrices
         run: |
           python3 scripts/test_device_spec_p1_1.py
           python3 scripts/test_device_spec_p1_2.py
           python3 scripts/test_device_spec_p1_3.py
+          python3 scripts/test_device_profile_webgl_p2.py
+          node scripts/test_webgl_profile_p2.js
 
       - name: Build and run malicious archive fixtures
         run: |

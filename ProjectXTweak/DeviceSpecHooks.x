@@ -27,6 +27,7 @@
 
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
 #import "PXFileDebug.h"
 
 typedef NS_OPTIONS(uint32_t, PXDeviceCPUFeatureFlags) {
@@ -202,8 +203,6 @@ static BOOL PXWriteExistingSysctlCString(const char *name, const char *value, vo
 static BOOL PXCompleteDeviceSpecSysctlResult(const char *name, const PXDeviceCPUProfile *profile, uint64_t generation, BOOL handled, size_t *oldlenp, int *outResult);
 static BOOL PXOptionalFeatureValue(const char *name, const PXDeviceCPUProfile *profile, uint32_t *outValue);
 static id PXDeviceSpecDeepImmutableCopy(id object);
-static NSString *PXDeviceSpecValidatedProfileID(id value);
-static NSDictionary *PXDeviceSpecReconstructSpecs(NSDictionary *deviceIDs);
 static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation);
 static PXDeviceSpecSnapshot *PXReloadDeviceSpecSnapshot(NSString *reason);
 static PXDeviceSpecSnapshot *PXCurrentDeviceSpecSnapshot(void);
@@ -543,59 +542,9 @@ static id PXDeviceSpecDeepImmutableCopy(id object) {
     return [object conformsToProtocol:@protocol(NSCopying)] ? [object copy] : object;
 }
 
-static NSString *PXDeviceSpecValidatedProfileID(id value) {
-    if (![value isKindOfClass:[NSString class]]) return nil;
-    NSString *profileID = [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!profileID.length || profileID.length > 128) return nil;
-    if ([profileID isEqualToString:@"."] || [profileID isEqualToString:@".."]) return nil;
-    if ([profileID rangeOfString:@"/"].location != NSNotFound ||
-        [profileID rangeOfString:@"\\"].location != NSNotFound ||
-        ![[profileID lastPathComponent] isEqualToString:profileID]) {
-        return nil;
-    }
-    return profileID;
-}
 
-static NSDictionary *PXDeviceSpecReconstructSpecs(NSDictionary *deviceIDs) {
-    if (![deviceIDs isKindOfClass:[NSDictionary class]]) return nil;
-    NSString *deviceModel = [deviceIDs[@"DeviceModel"] isKindOfClass:[NSString class]] ? deviceIDs[@"DeviceModel"] : nil;
-    if (!deviceModel.length) return nil;
 
-    NSMutableDictionary *specs = [NSMutableDictionary dictionary];
-    specs[@"value"] = deviceModel;
-    specs[@"name"] = deviceIDs[@"DeviceModelName"] ?: @"Unknown";
-    specs[@"screenResolution"] = deviceIDs[@"ScreenResolution"] ?: @"Unknown";
-    specs[@"viewportResolution"] = deviceIDs[@"ViewportResolution"] ?: @"Unknown";
-    specs[@"devicePixelRatio"] = deviceIDs[@"DevicePixelRatio"] ?: @(0);
-    specs[@"screenDensity"] = deviceIDs[@"ScreenDensityPPI"] ?: @(0);
-    specs[@"cpuArchitecture"] = deviceIDs[@"CPUArchitecture"] ?: @"Unknown";
-    specs[@"deviceMemory"] = deviceIDs[@"DeviceMemory"] ?: @(0);
-    specs[@"gpuFamily"] = deviceIDs[@"GPUFamily"] ?: @"Unknown";
-    specs[@"cpuCoreCount"] = deviceIDs[@"CPUCoreCount"] ?: @(0);
-    specs[@"metalFeatureSet"] = deviceIDs[@"MetalFeatureSet"] ?: @"Unknown";
 
-    if (deviceIDs[@"FreeMemoryPercentage"]) {
-        specs[@"freeMemoryPercentage"] = deviceIDs[@"FreeMemoryPercentage"];
-    }
-    if (deviceIDs[@"BoardID"]) specs[@"boardID"] = deviceIDs[@"BoardID"];
-    if (deviceIDs[@"HwModel"]) {
-        specs[@"hwModel"] = deviceIDs[@"HwModel"];
-    } else if (deviceIDs[@"BoardID"]) {
-        specs[@"hwModel"] = deviceIDs[@"BoardID"];
-    }
-
-    NSMutableDictionary *webGLInfo = [NSMutableDictionary dictionary];
-    webGLInfo[@"webglVendor"] = deviceIDs[@"WebGLVendor"] ?: @"Apple";
-    webGLInfo[@"webglRenderer"] = deviceIDs[@"WebGLRenderer"] ?: @"Apple GPU";
-    webGLInfo[@"unmaskedVendor"] = deviceIDs[@"WebGLUnmaskedVendor"] ?: @"Apple Inc.";
-    webGLInfo[@"unmaskedRenderer"] = deviceIDs[@"WebGLUnmaskedRenderer"] ?: (deviceIDs[@"GPUFamily"] ?: @"Apple GPU");
-    webGLInfo[@"webglVersion"] = deviceIDs[@"WebGLVersion"] ?: @"WebGL 2.0";
-    webGLInfo[@"maxTextureSize"] = deviceIDs[@"WebGLMaxTextureSize"] ?: @(16384);
-    webGLInfo[@"maxRenderBufferSize"] = deviceIDs[@"WebGLMaxRenderBufferSize"] ?: @(16384);
-    specs[@"webGLInfo"] = webGLInfo;
-
-    return PXDeviceSpecDeepImmutableCopy(specs);
-}
 
 static NSObject *PXDeviceSpecSnapshotLockObject(void) {
     static dispatch_once_t onceToken;
@@ -620,23 +569,15 @@ static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
                                                         source:@"scope-denied"];
     }
 
-    NSString *profilesPath = PXProfilesPath();
-    NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
-    NSString *profileID = PXDeviceSpecValidatedProfileID(centralInfo[@"ProfileId"]);
-    if (!profileID.length) {
-        NSDictionary *legacyInfo = [NSDictionary dictionaryWithContentsOfFile:PXLegacyActiveProfileInfoPath()];
-        id legacyID = legacyInfo[@"ProfileId"] ?: legacyInfo[@"currentProfileId"];
-        profileID = PXDeviceSpecValidatedProfileID(legacyID);
-    }
-
-    NSDictionary *settings = nil;
-    NSDictionary *deviceIDs = nil;
-    if (profileID.length && profilesPath.length) {
-        NSString *profileRoot = [profilesPath stringByAppendingPathComponent:profileID];
-        settings = [NSDictionary dictionaryWithContentsOfFile:[profileRoot stringByAppendingPathComponent:@"settings.plist"]];
-        deviceIDs = [NSDictionary dictionaryWithContentsOfFile:[[profileRoot stringByAppendingPathComponent:@"identity"]
-                                                                  stringByAppendingPathComponent:@"device_ids.plist"]];
-    }
+    NSString *profileID = PXActiveProfileID();
+    NSString *profileRoot = PXProfileRootPath(profileID);
+    NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileID);
+    NSDictionary *settings = profileRoot.length
+        ? [NSDictionary dictionaryWithContentsOfFile:[profileRoot stringByAppendingPathComponent:@"settings.plist"]]
+        : nil;
+    NSDictionary *deviceIDs = deviceIDsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
+        : nil;
 
     IdentifierManager *identifierManager = nil;
     Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
@@ -654,14 +595,12 @@ static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
     // The selected profile is the only identity source for this generation.
     // IdentifierManager remains the canonical enable gate shared with the UI and
     // Tweak; the profile flag is used only when that manager is unavailable.
-    NSString *deviceModel = [deviceIDs[@"DeviceModel"] isKindOfClass:[NSString class]]
-        ? deviceIDs[@"DeviceModel"]
-        : nil;
+    NSString *deviceModel = PXProfileString(deviceIDs[@"DeviceModel"]);
     NSDictionary *specs = nil;
     NSString *source = @"disabled";
 
     if (requestedEnabled && deviceModel.length) {
-        specs = PXDeviceSpecReconstructSpecs(deviceIDs);
+        specs = PXDeviceSpecificationsFromDeviceIDs(deviceIDs);
         source = @"device_ids";
     }
 
@@ -1204,7 +1143,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     }
     NSDictionary *specs = snapshot.specs;
     
-    NSDictionary *webGLInfo = specs[@"webGLInfo"];
+    NSDictionary *webGLInfo = PXCanonicalWebGLInfo(specs);
     if (!webGLInfo) {
         return original;
     }
@@ -1214,20 +1153,20 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     id spoofedValue = nil;
     
     if (pname == 0x1F00) { // VENDOR
-        spoofedValue = webGLInfo[@"webglVendor"];
+        spoofedValue = webGLInfo[PXWebGLVendorKey];
     } else if (pname == 0x1F01) { // RENDERER
-        spoofedValue = webGLInfo[@"webglRenderer"];
+        spoofedValue = webGLInfo[PXWebGLRendererKey];
     } else if (pname == 0x1F02) { // VERSION
-        spoofedValue = webGLInfo[@"webglVersion"];
-    } else if (pname == 0x8B4F || pname == 0x8B4E) { // UNMASKED_VENDOR_WEBGL or UNMASKED_RENDERER_WEBGL
-        spoofedValue = (pname == 0x8B4F) ? webGLInfo[@"unmaskedVendor"] : webGLInfo[@"unmaskedRenderer"];
+        spoofedValue = webGLInfo[PXWebGLVersionKey];
+    } else if (pname == 0x9245 || pname == 0x9246) { // UNMASKED_VENDOR_WEBGL or UNMASKED_RENDERER_WEBGL
+        spoofedValue = (pname == 0x9245) ? webGLInfo[PXWebGLUnmaskedVendorKey] : webGLInfo[PXWebGLUnmaskedRendererKey];
     } else if (pname == 0x0D33) { // MAX_TEXTURE_SIZE
-        id v = webGLInfo[@"maxTextureSize"];
+        id v = webGLInfo[PXWebGLMaxTextureSizeKey];
         if ([v isKindOfClass:[NSNumber class]]) return v;
         if ([v respondsToSelector:@selector(integerValue)]) return @([v integerValue]);
         return original;
-    } else if (pname == 0x8D57) { // MAX_RENDERBUFFER_SIZE
-        id v = webGLInfo[@"maxRenderBufferSize"];
+    } else if (pname == 0x84E8) { // MAX_RENDERBUFFER_SIZE
+        id v = webGLInfo[PXWebGLMaxRenderbufferSizeKey];
         if ([v isKindOfClass:[NSNumber class]]) return v;
         if ([v respondsToSelector:@selector(integerValue)]) return @([v integerValue]);
         return original;

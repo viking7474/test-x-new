@@ -6,6 +6,8 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 
 #import "PXScope.h"
+#import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
 #import "PXFileDebug.h"
 
 extern void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController);
@@ -44,33 +46,20 @@ static BOOL isCanvasFingerprintProtectionEnabledForCurrentApp(void) {
 
 static NSDictionary *PXReadCurrentDeviceIdsForFingerprint(void) {
     @try {
-        NSArray *possibleProfilesPaths = @[@"/var/mobile/Library/WeaponX/Profiles",
-                                          @"/private/var/mobile/Library/WeaponX/Profiles",
-                                          @"/var/mobile/Library/WeaponX/Profiles"];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        for (NSString *profilesPath in possibleProfilesPaths) {
-            if (![fm fileExistsAtPath:profilesPath]) continue;
-            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-            NSString *profileId = centralInfo[@"ProfileId"];
-            if (!profileId.length) continue;
-            NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-            if ([deviceIds isKindOfClass:[NSDictionary class]] && deviceIds.count) {
-                return deviceIds;
-            }
-        }
-    } @catch (__unused NSException *e) {
+        NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
+        if (!deviceIDsPath.length) return nil;
+        NSDictionary *deviceIDs = [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath];
+        return [deviceIDs isKindOfClass:[NSDictionary class]] && deviceIDs.count ? deviceIDs : nil;
+    } @catch (__unused NSException *exception) {
+        return nil;
     }
-    return nil;
 }
 
 static uint32_t PXStableSeedForBundle(NSString *bundleID, NSDictionary *deviceIds) {
     // FNV-1a 32-bit
     uint32_t h = 2166136261u;
-    NSString *model = [deviceIds[@"DeviceModel"] isKindOfClass:[NSString class]] ? deviceIds[@"DeviceModel"] : @"";
-    NSString *build = [deviceIds[@"IOSBuild"] isKindOfClass:[NSString class]] ? deviceIds[@"IOSBuild"] : @"";
+    NSString *model = PXProfileString(deviceIds[@"DeviceModel"]) ?: @"";
+    NSString *build = PXProfileString(deviceIds[@"IOSBuild"]) ?: @"";
     NSString *s = [NSString stringWithFormat:@"%@|%@|%@", bundleID ?: @"", model, build];
     NSData *data = [s dataUsingEncoding:NSUTF8StringEncoding];
     const uint8_t *bytes = (const uint8_t *)data.bytes;
@@ -98,9 +87,9 @@ static BOOL PXParseResolutionString(NSString *res, NSInteger *outW, NSInteger *o
 static NSString *PXBuildWebScreenSpoofScript(NSDictionary *deviceIds) {
     if (!PXDisplayWebScreenSpoofEnabled()) return nil;
 
-    NSString *viewportRes = [deviceIds[@"ViewportResolution"] isKindOfClass:[NSString class]] ? deviceIds[@"ViewportResolution"] : nil;
-    NSString *screenRes = [deviceIds[@"ScreenResolution"] isKindOfClass:[NSString class]] ? deviceIds[@"ScreenResolution"] : nil;
-    NSNumber *dprNum = [deviceIds[@"DevicePixelRatio"] isKindOfClass:[NSNumber class]] ? deviceIds[@"DevicePixelRatio"] : nil;
+    NSString *viewportRes = PXProfileString(deviceIds[@"ViewportResolution"]);
+    NSString *screenRes = PXProfileString(deviceIds[@"ScreenResolution"]);
+    NSNumber *dprNum = PXProfilePositiveNumber(deviceIds[@"DevicePixelRatio"]);
     CGFloat dpr = dprNum ? [dprNum floatValue] : 0.0;
     if (dpr <= 0.0) dpr = 1.0;
 
@@ -167,20 +156,32 @@ static NSString *PXJavaScriptJSONStringLiteral(NSString *value) {
     return literal;
 }
 
+static NSString *PXJavaScriptNullableStringLiteral(NSString *value) {
+    return value.length ? PXJavaScriptJSONStringLiteral(value) : @"null";
+}
+
 static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
     NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
     if (!deviceIds) return nil;
 
     uint32_t seed = PXStableSeedForBundle(bundleID, deviceIds);
 
-    NSString *unmaskedVendor = @"Apple Inc.";
-    NSString *unmaskedRenderer = [deviceIds[@"GPUFamily"] isKindOfClass:[NSString class]] ? deviceIds[@"GPUFamily"] : nil;
-    if (!unmaskedRenderer.length) {
-        unmaskedRenderer = [deviceIds[@"WebGLRenderer"] isKindOfClass:[NSString class]] ? deviceIds[@"WebGLRenderer"] : @"Apple GPU";
-    }
+    NSDictionary *webGLInfo = PXWebGLInfoFromDeviceIDs(deviceIds);
+    NSString *webGLVendor = PXProfileString(webGLInfo[PXWebGLVendorKey]);
+    NSString *webGLRenderer = PXProfileString(webGLInfo[PXWebGLRendererKey]);
+    NSString *webGLVersion = PXProfileString(webGLInfo[PXWebGLVersionKey]);
+    NSString *unmaskedVendor = PXProfileString(webGLInfo[PXWebGLUnmaskedVendorKey]);
+    NSString *unmaskedRenderer = PXProfileString(webGLInfo[PXWebGLUnmaskedRendererKey]);
+    NSNumber *maxTextureSize = PXProfilePositiveNumber(webGLInfo[PXWebGLMaxTextureSizeKey]);
+    NSNumber *maxRenderbufferSize = PXProfilePositiveNumber(webGLInfo[PXWebGLMaxRenderbufferSizeKey]);
 
-    NSString *vendorLiteral = PXJavaScriptJSONStringLiteral(unmaskedVendor);
-    NSString *rendererLiteral = PXJavaScriptJSONStringLiteral(unmaskedRenderer);
+    NSString *webGLVendorLiteral = PXJavaScriptNullableStringLiteral(webGLVendor);
+    NSString *webGLRendererLiteral = PXJavaScriptNullableStringLiteral(webGLRenderer);
+    NSString *webGLVersionLiteral = PXJavaScriptNullableStringLiteral(webGLVersion);
+    NSString *unmaskedVendorLiteral = PXJavaScriptNullableStringLiteral(unmaskedVendor);
+    NSString *unmaskedRendererLiteral = PXJavaScriptNullableStringLiteral(unmaskedRenderer);
+    NSString *maxTextureSizeLiteral = maxTextureSize ? [maxTextureSize stringValue] : @"null";
+    NSString *maxRenderbufferSizeLiteral = maxRenderbufferSize ? [maxRenderbufferSize stringValue] : @"null";
     NSString *script =
         @"(function () {\n"
          "    \"use strict\";\n"
@@ -283,7 +284,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "    }\n"
          "\n"
          "    try {\n"
-         "        function __wxInstallScope(g, baseSeed, spoofedVendor, spoofedRenderer) {\n"
+         "        function __wxInstallScope(g, baseSeed, webGLVendor, webGLRenderer, webGLVersion, unmaskedVendor, unmaskedRenderer, maxTextureSize, maxRenderbufferSize) {\n"
          "            if (!g || g.__weaponx_fp_spoof__) return;\n"
          "            try {\n"
          "                Object.defineProperty(g, \"__weaponx_fp_spoof__\", {\n"
@@ -523,23 +524,19 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                }\n"
          "            }\n"
          "\n"
-         "            function __wxPatchWebGLConstructor(constructorValue, webGLVersion) {\n"
+         "            function __wxPatchWebGLConstructor(constructorValue, contextVersion) {\n"
          "                if (!constructorValue || !constructorValue.prototype) return;\n"
          "                const proto = constructorValue.prototype;\n"
          "                if (typeof proto.getParameter === \"function\") {\n"
          "                    const originalGetParameter = proto.getParameter;\n"
          "                    proto.getParameter = function (parameter) {\n"
-         "                        if (parameter === 37445) return spoofedVendor;\n"
-         "                        if (parameter === 37446) return spoofedRenderer;\n"
-         "                        if (parameter === 7936) return \"WebKit\";\n"
-         "                        if (parameter === 7937) return \"WebKit WebGL\";\n"
-         "                        if (parameter === 7938) {\n"
-         "                            const originalVersion = originalGetParameter.call(this, parameter);\n"
-         "                            if (typeof originalVersion === \"string\") {\n"
-         "                                return originalVersion.replace(/WebGL\\s+\\d+(?:\\.\\d+)?/, webGLVersion);\n"
-         "                            }\n"
-         "                            return webGLVersion;\n"
-         "                        }\n"
+         "                        if (parameter === 37445 && unmaskedVendor != null) return unmaskedVendor;\n"
+         "                        if (parameter === 37446 && unmaskedRenderer != null) return unmaskedRenderer;\n"
+         "                        if (parameter === 7936 && webGLVendor != null) return webGLVendor;\n"
+         "                        if (parameter === 7937 && webGLRenderer != null) return webGLRenderer;\n"
+         "                        if (parameter === 7938 && webGLVersion != null) return webGLVersion;\n"
+         "                        if (parameter === 3379 && maxTextureSize != null) return maxTextureSize;\n"
+         "                        if (parameter === 34024 && maxRenderbufferSize != null) return maxRenderbufferSize;\n"
          "                        return originalGetParameter.call(this, parameter);\n"
          "                    };\n"
          "                }\n"
@@ -548,7 +545,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    proto.getSupportedExtensions = function () {\n"
          "                        const extensions = originalGetSupportedExtensions.call(this);\n"
          "                        return Array.isArray(extensions)\n"
-         "                            ? __wxStableSort(extensions, webGLVersion === \"WebGL 2.0\" ? 0x77673265 : 0x77673165)\n"
+         "                            ? __wxStableSort(extensions, (webGLVersion || contextVersion) === \"WebGL 2.0\" ? 0x77673265 : 0x77673165)\n"
          "                            : extensions;\n"
          "                    };\n"
          "                }\n"
@@ -612,8 +609,10 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "\n"
          "            function __wxWorkerBootstrapSource() {\n"
          "                return \"(\" + __wxInstallScope.toString() + \")((typeof globalThis!==\\\"undefined\\\"?globalThis:self),\" +\n"
-         "                    (baseSeed >>> 0) + \",\" + JSON.stringify(spoofedVendor) + \",\" +\n"
-         "                    JSON.stringify(spoofedRenderer) + \");\\n\";\n"
+         "                    (baseSeed >>> 0) + \",\" + JSON.stringify(webGLVendor) + \",\" +\n"
+         "                    JSON.stringify(webGLRenderer) + \",\" + JSON.stringify(webGLVersion) + \",\" +\n"
+         "                    JSON.stringify(unmaskedVendor) + \",\" + JSON.stringify(unmaskedRenderer) + \",\" +\n"
+         "                    JSON.stringify(maxTextureSize) + \",\" + JSON.stringify(maxRenderbufferSize) + \");\\n\";\n"
          "            }\n"
          "\n"
          "            function __wxAbsoluteWorkerURL(url) {\n"
@@ -742,17 +741,27 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "            __wxFailClosedServiceWorkers();\n"
          "        }\n"
          "\n"
-         "        __wxInstallScope(__wxRoot, __WX_BASE_SEED__, __WX_VENDOR_JSON__, __WX_RENDERER_JSON__);\n"
+         "        __wxInstallScope(__wxRoot, __WX_BASE_SEED__, __WX_WEBGL_VENDOR_JSON__, __WX_WEBGL_RENDERER_JSON__, __WX_WEBGL_VERSION_JSON__, __WX_UNMASKED_VENDOR_JSON__, __WX_UNMASKED_RENDERER_JSON__, __WX_MAX_TEXTURE_SIZE__, __WX_MAX_RENDERBUFFER_SIZE__);\n"
          "    } catch (_) {\n"
          "        __wxInstallMainFailClosed(__wxRoot);\n"
          "    }\n"
          "})();\n";
     script = [script stringByReplacingOccurrencesOfString:@"__WX_BASE_SEED__"
                                                withString:[NSString stringWithFormat:@"%u", seed]];
-    script = [script stringByReplacingOccurrencesOfString:@"__WX_VENDOR_JSON__"
-                                               withString:vendorLiteral];
-    script = [script stringByReplacingOccurrencesOfString:@"__WX_RENDERER_JSON__"
-                                               withString:rendererLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_WEBGL_VENDOR_JSON__"
+                                               withString:webGLVendorLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_WEBGL_RENDERER_JSON__"
+                                               withString:webGLRendererLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_WEBGL_VERSION_JSON__"
+                                               withString:webGLVersionLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_UNMASKED_VENDOR_JSON__"
+                                               withString:unmaskedVendorLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_UNMASKED_RENDERER_JSON__"
+                                               withString:unmaskedRendererLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_MAX_TEXTURE_SIZE__"
+                                               withString:maxTextureSizeLiteral];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_MAX_RENDERBUFFER_SIZE__"
+                                               withString:maxRenderbufferSizeLiteral];
     return script;
 }
 

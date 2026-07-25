@@ -38,6 +38,7 @@
 #import "HookOwnership.h"
 #import "PXNativeHookCoordinator.h"
 #import "PXScope.h"
+#import "PXDeviceProfileSchema.h"
 #import "PXFileDebug.h"
 #import <CoreFoundation/CoreFoundation.h>
 
@@ -741,7 +742,7 @@ static BOOL PXRequireKeysAll(NSDictionary *ids, NSArray<NSString *> *keys, NSStr
     NSMutableArray *missing = [NSMutableArray array];
     for (NSString *k in keys) {
         id v = ids[k];
-        if (![v isKindOfClass:[NSString class]] || ((NSString *)v).length == 0) {
+        if (!PXProfileString(v)) {
             [missing addObject:k];
         }
     }
@@ -755,22 +756,6 @@ static BOOL PXRequireKeysAll(NSDictionary *ids, NSArray<NSString *> *keys, NSStr
     return NO;
 }
 
-static BOOL PXRequireKeysAny(NSDictionary *ids, NSArray<NSString *> *keys, NSString *api, NSString *req, NSString *bundleID, NSString *profileId, NSNumber *gen) {
-    if (!keys.count) return YES;
-    for (NSString *k in keys) {
-        id v = ids[k];
-        if ([v isKindOfClass:[NSString class]] && ((NSString *)v).length > 0) {
-            return YES;
-        }
-    }
-    NSString *proc = [NSProcessInfo processInfo].processName ?: @"";
-    NSString *missingStr = [keys componentsJoinedByString:@","];
-    NSString *line = [NSString stringWithFormat:@"ts=%@ api=%@ req=%@ bundle=%@ proc=%@ profile=%@ gen=%@ missing_any=[%@]",
-                      PXISO8601Now(), api ?: @"", req ?: @"", bundleID ?: @"", proc, profileId ?: @"", gen ?: @"", missingStr];
-    NSString *sig = [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|any:%@", bundleID ?: @"", proc, api ?: @"", req ?: @"", profileId ?: @"", gen ?: @"", missingStr];
-    PXHookMissingLogOnce(sig, line);
-    return NO;
-}
 
 static CFDataRef PXCreateCFDataFromNSString(NSString *s) {
     if (!s.length) return NULL;
@@ -849,11 +834,10 @@ static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
                             NSString *spoofed = deviceIds[@"DeviceModel"];
                             return PXWriteSysctlCStringLocal([spoofed UTF8String], oldp, oldlenp);
                         } else if (name[1] == HW_MODEL) {
-                            if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"sysctl", @"CTL_HW/HW_MODEL", bundleID, profileId, gen)) {
+                            if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"sysctl", @"CTL_HW/HW_MODEL", bundleID, profileId, gen)) {
                                 return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
                             }
                             NSString *spoofed = deviceIds[@"HwModel"];
-                            if (!spoofed.length) spoofed = deviceIds[@"BoardID"];
                             return PXWriteSysctlCStringLocal([spoofed UTF8String], oldp, oldlenp);
                         }
                     }
@@ -1089,12 +1073,11 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
         spoofedValue = deviceIds[@"DeviceModel"];
     }
     else if (strcmp(name, "hw.model") == 0 && [manager isIdentifierEnabled:@"DeviceModel"]) {
-        if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"sysctlbyname", @"hw.model", bundleID, profileId, gen)) {
+        if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"sysctlbyname", @"hw.model", bundleID, profileId, gen)) {
             px_sysctlbyname_in_hook = NO;
             return 0;
         }
         spoofedValue = deviceIds[@"HwModel"];
-        if (!spoofedValue.length) spoofedValue = deviceIds[@"BoardID"];
     }
     else if (strcmp(name, "hw.product") == 0 && [manager isIdentifierEnabled:@"DeviceModel"]) {
          if (!PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"sysctlbyname", @"hw.product", bundleID, profileId, gen)) {
@@ -1262,11 +1245,10 @@ static int uname_hook(struct utsname *buf) {
                     [propertyString isEqualToString:@"HardwareModel"] ||
                     [propertyString isEqualToString:@"HWModel"] ||
                     [propertyString isEqualToString:@"hw-model"]) {
-                    if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"MG", @"HWModel", currentBundleID, profileId, gen)) {
+                    if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"MG", @"HWModel", currentBundleID, profileId, gen)) {
                         return %orig;
                     }
                     NSString *hwModel = deviceIds[@"HwModel"];
-                    if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
                     return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)hwModel);
                 }
 
@@ -3517,11 +3499,10 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                 }
 
                 if (wantsHWModel) {
-                    if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
+                    if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                         return original;
                     }
                     NSString *hwModel = deviceIds[@"HwModel"];
-                    if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
                     if (original && CFGetTypeID(original) == CFDataGetTypeID()) {
                         CFRelease(original);
                         return PXCreateCFDataFromNSString(hwModel);
@@ -3531,11 +3512,10 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                 }
 
                 if (wantsCompatible) {
-                    if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
+                    if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                         return original;
                     }
                     NSString *hwModel = deviceIds[@"HwModel"];
-                    if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
                     NSString *deviceModel = deviceIds[@"DeviceModel"];
 
                     return PXIOKitPatchCompatibleValue(original, hwModel, deviceModel);
@@ -3552,12 +3532,11 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                 }
 
                 if (wantsPlatformName) {
-                    // Best-effort: use hwModel (or BoardID) to match typical device-tree platform naming.
-                    if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
+                    // Use HwModel only; BoardID is a separate device-tree identity field.
+                    if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                         return original;
                     }
                     NSString *hwModel = deviceIds[@"HwModel"];
-                    if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
                     CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
                     if (original) CFRelease(original);
                     return repl;
@@ -3676,10 +3655,9 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     }
 
                     if ([keyString isEqualToString:@"model"] || [keyString isEqualToString:@"hw.model"]) {
-                        if (PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
+                        if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *hwModel = deviceIds[@"HwModel"];
-                            if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
-                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
@@ -3695,20 +3673,18 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     }
 
                     if ([keyString isEqualToString:@"platform-name"]) {
-                        if (PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
+                        if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *hwModel = deviceIds[@"HwModel"];
-                            if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
-                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
                     }
 
                     if ([keyString isEqualToString:@"compatible"]) {
-                        if (PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
+                        if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *hwModel = deviceIds[@"HwModel"];
-                            if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
-                            NSString *deviceModel = deviceIds[@"DeviceModel"];
+                                    NSString *deviceModel = deviceIds[@"DeviceModel"];
 
                             // For compatible we must preserve array/data semantics.
                             CFTypeRef repl = PXIOKitPatchCompatibleValue(original ? CFRetain(original) : NULL, hwModel, deviceModel);
@@ -3841,10 +3817,9 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
                 }
 
                 if ([keyString isEqualToString:@"model"] || [keyString isEqualToString:@"hw.model"] || [keyString isEqualToString:@"platform-name"]) {
-                    if (PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
+                    if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
                         NSString *hwModel = deviceIds[@"HwModel"];
-                        if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
                         if (repl) {
                             if (original) CFRelease(original);
                             return repl;
@@ -3854,10 +3829,9 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
                 }
 
                 if ([keyString isEqualToString:@"compatible"]) {
-                    if (PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
+                    if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
                         NSString *hwModel = deviceIds[@"HwModel"];
-                        if (!hwModel.length) hwModel = deviceIds[@"BoardID"];
-                        NSString *deviceModel = deviceIds[@"DeviceModel"];
+                            NSString *deviceModel = deviceIds[@"DeviceModel"];
                         CFTypeRef repl = PXIOKitPatchCompatibleValue(original ? CFRetain(original) : NULL, hwModel, deviceModel);
                         if (repl) {
                             if (original) CFRelease(original);

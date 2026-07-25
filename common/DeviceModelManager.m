@@ -1,5 +1,6 @@
 #import "DeviceModelManager.h"
 #import "ProjectXLogging.h"
+#import "PXDeviceProfileSchema.h"
 #import <Security/Security.h>
 #import <UIKit/UIKit.h>
 
@@ -261,14 +262,16 @@
                  
     // Add device memory and GPU info based on model
     NSInteger deviceMemory = 0;
-    NSString *gpuFamily = @"Unknown";
+    NSString *gpuFamily = nil;
     NSDictionary *webGLInfo = nil;
+    NSInteger webGLMaxTextureSize = 0;
+    NSInteger webGLMaxRenderbufferSize = 0;
     NSInteger cpuCoreCount = 0;
-    NSString *metalFeatureSet = @"Unknown";
+    NSString *metalFeatureSet = nil;
     
-    // Add Board ID and Hardware Model mapping
-    NSString *boardID = @"Unknown";
-    NSString *hwModel = @"Unknown";
+    // BoardID and HwModel are independent optional fields.
+    NSString *boardID = nil;
+    NSString *hwModel = nil;
     
     // Map device identifiers to Board IDs and hw.model values
     // This follows Apple's internal mapping for different device variants
@@ -416,12 +419,12 @@
         metalFeatureSet = @"Metal 2.3";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A11 GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(8192),
-            @"maxRenderBufferSize": @(8192)
+            @"maxRenderbufferSize": @(8192)
         };
     }
     else if ([modelIdentifier hasPrefix:@"iPhone11"]) { // iPhone XR, XS, XS Max
@@ -431,12 +434,12 @@
         metalFeatureSet = @"Metal 2.4";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A12 GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(8192),
-            @"maxRenderBufferSize": @(8192)
+            @"maxRenderbufferSize": @(8192)
         };
     }
     else if ([modelIdentifier hasPrefix:@"iPhone12"]) { // iPhone 11, 11 Pro, 11 Pro Max, SE 2nd gen
@@ -446,12 +449,12 @@
         metalFeatureSet = @"Metal 3.0";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A13 GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(16384),
-            @"maxRenderBufferSize": @(16384)
+            @"maxRenderbufferSize": @(16384)
         };
     }
     else if ([modelIdentifier hasPrefix:@"iPhone13"]) { // iPhone 12 mini, 12, 12 Pro, 12 Pro Max
@@ -465,12 +468,12 @@
         metalFeatureSet = @"Metal 3.0";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A14 GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(16384),
-            @"maxRenderBufferSize": @(16384)
+            @"maxRenderbufferSize": @(16384)
         };
     }
     else if ([modelIdentifier hasPrefix:@"iPhone14"]) { // iPhone 13 series, 14, 14 Plus, SE 3rd gen
@@ -484,12 +487,12 @@
         metalFeatureSet = @"Metal 3.0";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A15 GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(16384),
-            @"maxRenderBufferSize": @(16384)
+            @"maxRenderbufferSize": @(16384)
         };
     }
     else if ([modelIdentifier hasPrefix:@"iPhone15"]) { // iPhone 14 Pro, 14 Pro Max, 15, 15 Plus
@@ -504,12 +507,12 @@
         gpuFamily = [modelIdentifier hasPrefix:@"iPhone15,4"] || [modelIdentifier hasPrefix:@"iPhone15,5"] ? @"Apple A16 GPU" : @"Apple A16 Pro GPU";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A16 GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(16384),
-            @"maxRenderBufferSize": @(16384)
+            @"maxRenderbufferSize": @(16384)
         };
     }
     else if ([modelIdentifier hasPrefix:@"iPhone16"]) { // iPhone 15 Pro, 15 Pro Max
@@ -519,12 +522,12 @@
         metalFeatureSet = @"Metal 3.1";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": @"Apple A17 Pro GPU",
+            @"unmaskedRenderer": [gpuFamily copy],
             @"webglVendor": @"Apple",
             @"webglRenderer": @"Apple GPU",
             @"webglVersion": @"WebGL 2.0",
             @"maxTextureSize": @(16384),
-            @"maxRenderBufferSize": @(16384)
+            @"maxRenderbufferSize": @(16384)
         };
     }
     // iPad models
@@ -534,24 +537,32 @@
             cpuCoreCount = 4; // A10: 2 performance + 2 efficiency cores
             gpuFamily = @"Apple A10 GPU";
             metalFeatureSet = @"Metal 2.2";
+            webGLMaxTextureSize = 8192;
+            webGLMaxRenderbufferSize = 8192;
         } 
         else if ([modelIdentifier hasPrefix:@"iPad8"]) { // iPad Pro models (3rd, 4th gen)
             deviceMemory = 4;
             cpuCoreCount = 8; // A12X/Z: 8 cores
             gpuFamily = [modelIdentifier hasPrefix:@"iPad8,1"] || [modelIdentifier hasPrefix:@"iPad8,5"] ? @"Apple A12X GPU" : @"Apple A12Z GPU";
             metalFeatureSet = @"Metal 2.4";
+            webGLMaxTextureSize = 16384;
+            webGLMaxRenderbufferSize = 16384;
         }
         else if ([modelIdentifier hasPrefix:@"iPad11"]) { // iPad 8th gen, iPad Air 3rd gen, iPad Mini 5th gen
             deviceMemory = 3;
             cpuCoreCount = 6; // A12: 2 performance + 4 efficiency cores
             gpuFamily = @"Apple A12 GPU";
             metalFeatureSet = @"Metal 2.4";
+            webGLMaxTextureSize = 8192;
+            webGLMaxRenderbufferSize = 8192;
         }
         else if ([modelIdentifier hasPrefix:@"iPad12"]) { // iPad 9th gen
             deviceMemory = 3;
             cpuCoreCount = 6; // A13: 2 performance + 4 efficiency cores
             gpuFamily = @"Apple A13 GPU";
             metalFeatureSet = @"Metal 3.0";
+            webGLMaxTextureSize = 16384;
+            webGLMaxRenderbufferSize = 16384;
         }
         else if ([modelIdentifier hasPrefix:@"iPad13"]) { // iPad 10th gen, iPad Air 4th gen, iPad Pro 11"/12.9" 3rd/5th gen
             if ([modelIdentifier hasPrefix:@"iPad13,4"] || [modelIdentifier hasPrefix:@"iPad13,8"]) { // M1 iPad Pros
@@ -565,6 +576,8 @@
                 gpuFamily = @"Apple A14 GPU";
                 metalFeatureSet = @"Metal 3.0";
             }
+            webGLMaxTextureSize = 16384;
+            webGLMaxRenderbufferSize = 16384;
         }
         else if ([modelIdentifier hasPrefix:@"iPad14"]) { // iPad Mini 6th gen, iPad Pro 11"/12.9" 4th/6th gen
             if ([modelIdentifier hasPrefix:@"iPad14,3"] || [modelIdentifier hasPrefix:@"iPad14,5"]) { // M2 iPad Pros
@@ -578,54 +591,60 @@
                 gpuFamily = @"Apple A15 GPU";
                 metalFeatureSet = @"Metal 3.0";
             }
+            webGLMaxTextureSize = 16384;
+            webGLMaxRenderbufferSize = 16384;
         }
-        
-        webGLInfo = @{
-            @"unmaskedVendor": @"Apple Inc.",
-            @"unmaskedRenderer": [gpuFamily copy],
-            @"webglVendor": @"Apple",
-            @"webglRenderer": @"Apple GPU",
-            @"webglVersion": @"WebGL 2.0",
-            @"maxTextureSize": @(16384),
-            @"maxRenderBufferSize": @(16384)
-        };
+
+        if (PXProfileString(gpuFamily) && webGLMaxTextureSize > 0 && webGLMaxRenderbufferSize > 0) {
+            webGLInfo = @{
+                @"unmaskedVendor": @"Apple Inc.",
+                @"unmaskedRenderer": [gpuFamily copy],
+                @"webglVendor": @"Apple",
+                @"webglRenderer": @"Apple GPU",
+                @"webglVersion": @"WebGL 2.0",
+                @"maxTextureSize": @(webGLMaxTextureSize),
+                @"maxRenderbufferSize": @(webGLMaxRenderbufferSize)
+            };
+        }
     }
     
-    NSDictionary *deviceSpecs = @{
-        @"name": name,
-        @"screenResolution": resolution,
-        @"viewportResolution": viewportResolution,
-        @"devicePixelRatio": @(devicePixelRatio),
-        @"screenDensity": @(screenDensity),
-        @"cpuArchitecture": cpuArchitecture,
-        @"deviceMemory": @(deviceMemory),
-        @"gpuFamily": gpuFamily,
-        @"cpuCoreCount": @(cpuCoreCount),
-        @"metalFeatureSet": metalFeatureSet,
-        @"webGLInfo": webGLInfo ?: @{},
-        @"boardID": boardID,
-        @"hwModel": hwModel
-    };
-    
-    specs[modelIdentifier] = deviceSpecs;
+    NSMutableDictionary *deviceSpecs = [NSMutableDictionary dictionary];
+    deviceSpecs[@"value"] = modelIdentifier;
+    if (PXProfileString(name)) deviceSpecs[@"name"] = PXProfileString(name);
+    if (PXProfileString(resolution)) deviceSpecs[@"screenResolution"] = PXProfileString(resolution);
+    if (PXProfileString(viewportResolution)) deviceSpecs[@"viewportResolution"] = PXProfileString(viewportResolution);
+    if (devicePixelRatio > 0.0) deviceSpecs[@"devicePixelRatio"] = @(devicePixelRatio);
+    if (screenDensity > 0) deviceSpecs[@"screenDensity"] = @(screenDensity);
+    if (PXProfileString(cpuArchitecture)) deviceSpecs[@"cpuArchitecture"] = PXProfileString(cpuArchitecture);
+    if (deviceMemory > 0) deviceSpecs[@"deviceMemory"] = @(deviceMemory);
+    if (PXProfileString(gpuFamily)) deviceSpecs[@"gpuFamily"] = PXProfileString(gpuFamily);
+    if (cpuCoreCount > 0) deviceSpecs[@"cpuCoreCount"] = @(cpuCoreCount);
+    if (PXProfileString(metalFeatureSet)) deviceSpecs[@"metalFeatureSet"] = PXProfileString(metalFeatureSet);
+    NSDictionary *canonicalWebGL = PXCanonicalWebGLInfo(webGLInfo);
+    if (canonicalWebGL.count) deviceSpecs[PXDeviceSpecWebGLInfoKey] = canonicalWebGL;
+    if (PXProfileString(boardID)) deviceSpecs[@"boardID"] = PXProfileString(boardID);
+    if (PXProfileString(hwModel)) deviceSpecs[@"hwModel"] = PXProfileString(hwModel);
+
+    specs[modelIdentifier] = [deviceSpecs copy];
 }
 
 #pragma mark - Device Specifications
 
 - (NSDictionary *)deviceSpecificationsForModel:(NSString *)deviceString {
-    if (!deviceString) return nil;
-    
-    return self.deviceSpecifications[deviceString];
+    NSString *model = PXProfileString(deviceString);
+    if (!model.length) return nil;
+    NSDictionary *rawSpecs = self.deviceSpecifications[model];
+    return PXCanonicalDeviceSpecifications(rawSpecs, model);
 }
 
 - (NSString *)screenResolutionForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"screenResolution"] : @"Unknown";
+    return PXProfileString(specs[@"screenResolution"]);
 }
 
 - (NSString *)viewportResolutionForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"viewportResolution"] : @"Unknown";
+    return PXProfileString(specs[@"viewportResolution"]);
 }
 
 - (CGFloat)devicePixelRatioForModel:(NSString *)deviceString {
@@ -640,7 +659,7 @@
 
 - (NSString *)cpuArchitectureForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"cpuArchitecture"] : @"Unknown";
+    return PXProfileString(specs[@"cpuArchitecture"]);
 }
 
 - (NSInteger)deviceMemoryForModel:(NSString *)deviceString {
@@ -650,7 +669,7 @@
 
 - (NSString *)gpuFamilyForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"gpuFamily"] : @"Unknown";
+    return PXProfileString(specs[@"gpuFamily"]);
 }
 
 - (NSInteger)cpuCoreCountForModel:(NSString *)deviceString {
@@ -660,23 +679,23 @@
 
 - (NSString *)metalFeatureSetForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"metalFeatureSet"] : @"Unknown";
+    return PXProfileString(specs[@"metalFeatureSet"]);
 }
 
 - (NSDictionary *)webGLInfoForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"webGLInfo"] : @{};
+    return PXCanonicalWebGLInfo(specs);
 }
 
 // NEW: Board ID and hw.model getter methods
 - (NSString *)boardIDForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"boardID"] : @"Unknown";
+    return PXProfileString(specs[@"boardID"]);
 }
 
 - (NSString *)hwModelForModel:(NSString *)deviceString {
     NSDictionary *specs = [self deviceSpecificationsForModel:deviceString];
-    return specs ? specs[@"hwModel"] : @"Unknown";
+    return PXProfileString(specs[@"hwModel"]);
 }
 
 // Processor name getter
@@ -687,7 +706,7 @@
     }
     
     NSString *cpuArchitecture = specs[@"cpuArchitecture"];
-    if (!cpuArchitecture || [cpuArchitecture isEqualToString:@"Unknown"]) {
+    if (!PXProfileString(cpuArchitecture)) {
         // Fallback to a default processor name if not found
         return @"Apple ARM64";
     }
