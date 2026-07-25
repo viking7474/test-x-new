@@ -56,13 +56,14 @@ static NSDictionary* (*original_NSDictionary_dictionaryWithContentsOfFile)(Class
 static id (*original_NSString_stringWithContentsOfFile)(Class self, SEL _cmd, NSString *path, NSStringEncoding enc, NSError **error);
 
 // Version cache: immutable dictionary and timestamp are one lock-owned unit.
+static const NSTimeInterval kIOSVersionCacheValidPeriod = 1800.0; // 30 minutes
 static os_unfair_lock gIOSVersionCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSDictionary *versionCache = nil;
 static NSTimeInterval lastVersionLoad = 0;
 
 static NSDictionary *PXIOSVersionCachedInfo(NSTimeInterval now) {
     os_unfair_lock_lock(&gIOSVersionCacheLock);
-    NSDictionary *cached = (versionCache && (now - lastVersionLoad < VERSION_CACHE_VALID_PERIOD))
+    NSDictionary *cached = (versionCache && (now - lastVersionLoad < kIOSVersionCacheValidPeriod))
         ? versionCache
         : nil;
     os_unfair_lock_unlock(&gIOSVersionCacheLock);
@@ -93,7 +94,6 @@ static uint64_t lastDictCallTime = 0;
 static CFDictionaryRef cachedDictResult = NULL;
 
 // Define constants
-#define VERSION_CACHE_VALID_PERIOD 1800.0 // 30 minutes
 #define THROTTLE_INTERVAL_NSEC 100000000  // 100ms in nanoseconds
 
 // SystemVersion.plist path constants
@@ -214,7 +214,7 @@ static NSDictionary *getIOSVersionInfo() {
         NSString *version = nil;
         NSString *build = [deviceIds[@"IOSBuild"] isKindOfClass:[NSString class]] ? deviceIds[@"IOSBuild"] : nil;
         if ([formattedVersion containsString:@"("]) {
-            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"([0-9.]+)\s*\(([^)]+)\)" options:0 error:nil];
+            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"([0-9.]+)\\s*\\(([^)]+)\\)" options:0 error:nil];
             NSTextCheckingResult *match = [regex firstMatchInString:formattedVersion options:0 range:NSMakeRange(0, formattedVersion.length)];
             if (match && match.numberOfRanges == 3) {
                 version = [formattedVersion substringWithRange:[match rangeAtIndex:1]];
