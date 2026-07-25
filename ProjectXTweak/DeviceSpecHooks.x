@@ -24,6 +24,7 @@
 #import "IOSVersionInfo.h"
 
 #import "PXScope.h"
+#import "PXPaths.h"
 #import "PXFileDebug.h"
 
 #ifndef CPU_SUBTYPE_ARM64_V8
@@ -125,27 +126,65 @@ static kern_return_t (*orig_host_statistics64)(host_t host, host_flavor_t flavor
 static const NXArchInfo *(*orig_nx_get_local_arch_info)(void);
 static __thread NXArchInfo g_deviceSpecThreadArchInfo;
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
+// P1.2 immutable profile snapshot. Every DeviceSpec surface reads one published
+// generation instead of independently re-reading profile files on hot paths.
+@interface PXDeviceSpecSnapshot : NSObject {
+@private
+    BOOL _enabled;
+    uint64_t _generation;
+    NSString *_profileID;
+    NSString *_deviceModel;
+    NSDictionary *_specs;
+    NSString *_source;
+}
+@property (nonatomic, readonly, getter=isEnabled) BOOL enabled;
+@property (nonatomic, readonly) uint64_t generation;
+@property (nonatomic, copy, readonly) NSString *profileID;
+@property (nonatomic, copy, readonly) NSString *deviceModel;
+@property (nonatomic, copy, readonly) NSDictionary *specs;
+@property (nonatomic, copy, readonly) NSString *source;
+- (instancetype)initWithGeneration:(uint64_t)generation
+                           enabled:(BOOL)enabled
+                         profileID:(NSString *)profileID
+                       deviceModel:(NSString *)deviceModel
+                             specs:(NSDictionary *)specs
+                            source:(NSString *)source;
+@end
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
+@implementation PXDeviceSpecSnapshot
+@synthesize enabled = _enabled;
+@synthesize generation = _generation;
+@synthesize profileID = _profileID;
+@synthesize deviceModel = _deviceModel;
+@synthesize specs = _specs;
+@synthesize source = _source;
 
-// Caches for device specs
-static NSMutableDictionary *deviceSpecsCache;
-static NSDate *cacheTimestamp;
-static NSString *cachedDeviceModel;
-static NSMutableDictionary *cachedBundleDecisions;
+- (instancetype)initWithGeneration:(uint64_t)generation
+                           enabled:(BOOL)enabled
+                         profileID:(NSString *)profileID
+                       deviceModel:(NSString *)deviceModel
+                             specs:(NSDictionary *)specs
+                            source:(NSString *)source {
+    self = [super init];
+    if (self) {
+        _generation = generation;
+        _enabled = enabled;
+        _profileID = [profileID copy];
+        _deviceModel = [deviceModel copy];
+        _specs = [specs copy];
+        _source = [source copy];
+    }
+    return self;
+}
+@end
 
-// Cache to track which memory hooks have been called for logging
+static NSObject *gDeviceSpecSnapshotLock;
+static PXDeviceSpecSnapshot *gDeviceSpecSnapshot;
+static uint64_t gDeviceSpecSnapshotGeneration;
+static __thread BOOL gDeviceSpecSnapshotBuildInProgress;
+
+// Cache to track which memory hooks have been called for logging.
 static NSMutableSet *hookedMemoryAPIs;
-
-// Cache for bundle decisions
-static const NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes
 
 // Helper for logging memory hook invocations only once
 static void logMemoryHook(NSString *apiName);
@@ -161,19 +200,22 @@ static BOOL PXDeviceMemoryBytesFromSpecs(NSDictionary *specs, uint64_t *outBytes
 static BOOL PXWriteSysctlBytes(const void *value, size_t valueSize, void *oldp, size_t *oldlenp, int *outResult);
 static BOOL PXWriteExistingSysctlBytes(const char *name, const void *value, size_t valueSize, void *oldp, size_t *oldlenp, int *outResult);
 static BOOL PXWriteExistingSysctlCString(const char *name, const char *value, void *oldp, size_t *oldlenp, int *outResult);
-static BOOL PXCompleteDeviceSpecSysctlResult(const char *name, const PXDeviceCPUProfile *profile, BOOL handled, size_t *oldlenp, int *outResult);
+static BOOL PXCompleteDeviceSpecSysctlResult(const char *name, const PXDeviceCPUProfile *profile, uint64_t generation, BOOL handled, size_t *oldlenp, int *outResult);
 static BOOL PXOptionalFeatureValue(const char *name, const PXDeviceCPUProfile *profile, uint32_t *outValue);
-static NSDictionary *loadScopedApps(void);
-static BOOL isInScopedAppsList(void);
-static BOOL isSpoofingEnabled(void);
-static NSString *getSpoofedDeviceModel(void);
-static NSDictionary *getDeviceSpecs(void);
-static float getFreeMemoryPercentage(void);
-static void getConsistentMemoryStats(unsigned long long totalMemory, 
-                                    unsigned long long *freeMemory,
-                                    unsigned long long *wiredMemory,
-                                    unsigned long long *activeMemory,
-                                    unsigned long long *inactiveMemory);
+static id PXDeviceSpecDeepImmutableCopy(id object);
+static NSString *PXDeviceSpecValidatedProfileID(id value);
+static NSDictionary *PXDeviceSpecReconstructSpecs(NSDictionary *deviceIDs);
+static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation);
+static PXDeviceSpecSnapshot *PXReloadDeviceSpecSnapshot(NSString *reason);
+static PXDeviceSpecSnapshot *PXCurrentDeviceSpecSnapshot(void);
+static PXDeviceSpecSnapshot *PXActiveDeviceSpecSnapshot(void);
+static float getFreeMemoryPercentage(NSDictionary *specs);
+static void getConsistentMemoryStats(NSDictionary *specs,
+                                     unsigned long long totalMemory,
+                                     unsigned long long *freeMemory,
+                                     unsigned long long *wiredMemory,
+                                     unsigned long long *activeMemory,
+                                     unsigned long long *inactiveMemory);
 static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
 static BOOL handleDeviceSpecSysctlByname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult);
 static const NXArchInfo *hook_nx_get_local_arch_info(void);
@@ -360,6 +402,7 @@ static BOOL PXWriteExistingSysctlCString(const char *name,
 // request. Preserve errno because opt-in file logging performs its own syscalls.
 static BOOL PXCompleteDeviceSpecSysctlResult(const char *name,
                                              const PXDeviceCPUProfile *profile,
+                                             uint64_t generation,
                                              BOOL handled,
                                              size_t *oldlenp,
                                              int *outResult) {
@@ -369,9 +412,10 @@ static BOOL PXCompleteDeviceSpecSysctlResult(const char *name,
     static volatile uint32_t resultLogCount = 0;
     uint32_t logIndex = __sync_fetch_and_add(&resultLogCount, 1u);
     if (logIndex < 80u) {
-        PXFileDebugAIDA64Log("[DeviceSpec.sysctlbyname.result] key=%s profile=%s result=%d size=%llu errno=%d",
+        PXFileDebugAIDA64Log("[DeviceSpec.sysctlbyname.result] key=%s profile=%s generation=%llu result=%d size=%llu errno=%d",
                              name ?: "<nil>",
                              profile ? profile->token : "<none>",
+                             (unsigned long long)generation,
                              outResult ? *outResult : 0,
                              (unsigned long long)(oldlenp ? *oldlenp : 0),
                              resultErrno);
@@ -395,293 +439,291 @@ static BOOL PXOptionalFeatureValue(const char *name,
     return NO;
 }
 
-// Load scoped apps from the plist file
-static NSDictionary *loadScopedApps(void) {
-    @try {
-        // Check if cache is valid
-        if (scopedAppsCache && scopedAppsCacheTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        // Initialize cache if needed
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        // Try each possible path for the scoped apps file
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            // Don't log this error too frequently to avoid spam
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) { // 5 minutes
-                PXLog(@"[DeviceSpec] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Load the plist file safely
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Get the scoped apps dictionary
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Copy the scoped apps to our cache
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
+// Recursively detach mutable profile containers before publishing a snapshot.
+static id PXDeviceSpecDeepImmutableCopy(id object) {
+    if (!object || object == [NSNull null]) return object;
+
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *copy = [NSMutableDictionary dictionaryWithCapacity:[(NSDictionary *)object count]];
+        [(NSDictionary *)object enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+            (void)stop;
+            id immutableKey = [key conformsToProtocol:@protocol(NSCopying)] ? [key copy] : key;
+            id immutableValue = PXDeviceSpecDeepImmutableCopy(value);
+            if (immutableKey && immutableValue) copy[immutableKey] = immutableValue;
+        }];
+        return [copy copy];
     }
+
+    if ([object isKindOfClass:[NSArray class]]) {
+        NSMutableArray *copy = [NSMutableArray arrayWithCapacity:[(NSArray *)object count]];
+        for (id value in (NSArray *)object) {
+            id immutableValue = PXDeviceSpecDeepImmutableCopy(value);
+            if (immutableValue) [copy addObject:immutableValue];
+        }
+        return [copy copy];
+    }
+
+    if ([object isKindOfClass:[NSSet class]]) {
+        NSMutableSet *copy = [NSMutableSet setWithCapacity:[(NSSet *)object count]];
+        for (id value in (NSSet *)object) {
+            id immutableValue = PXDeviceSpecDeepImmutableCopy(value);
+            if (immutableValue) [copy addObject:immutableValue];
+        }
+        return [copy copy];
+    }
+
+    return [object conformsToProtocol:@protocol(NSCopying)] ? [object copy] : object;
 }
 
-// Check if the current app is in the scoped apps list
-static BOOL isInScopedAppsList(void) {
-    @try {
-        NSString *bundleID = getCurrentBundleID();
-        if (!bundleID || [bundleID length] == 0) {
-            return NO;
-        }
-        
-        NSDictionary *scopedApps = loadScopedApps();
-        if (!scopedApps || scopedApps.count == 0) {
-            return NO;
-        }
-        
-        // Check if this bundle ID is in the scoped apps dictionary
-        id appEntry = scopedApps[bundleID];
-        if (!appEntry || ![appEntry isKindOfClass:[NSDictionary class]]) {
-            return NO;
-        }
-        
-        // Check if the app is enabled
-        BOOL isEnabled = [appEntry[@"enabled"] boolValue];
-        return isEnabled;
-        
-    } @catch (NSException *e) {
-        return NO;
-    }
-}
-
-// Check if device model spoofing is enabled for the current app with caching
-static BOOL isSpoofingEnabled(void) {
-    NSString *currentBundleID = getCurrentBundleID();
-    if (!currentBundleID) return NO;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
-    
-    // Check if the current app is a scoped app AND if device model spoofing is enabled
-    BOOL shouldSpoof = NO;
-    @try {
-        BOOL managerCheckPassed = NO;
-        if (NSClassFromString(@"IdentifierManager")) {
-            IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-            if (manager && [manager isIdentifierEnabled:@"DeviceModel"]) {
-                shouldSpoof = YES;
-                managerCheckPassed = YES;
-            }
-        }
-
-        if (!managerCheckPassed) {
-            NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-            NSString *profileId = centralInfo[@"ProfileId"];
-            if (profileId) {
-                NSString *profileSettingsPath = [profilesPath stringByAppendingPathComponent:[profileId stringByAppendingPathComponent:@"settings.plist"]];
-                NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:profileSettingsPath];
-                if (settings && settings[@"deviceModelEnabled"]) {
-                    shouldSpoof = [settings[@"deviceModelEnabled"] boolValue];
-                }
-            }
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[DeviceSpec] Exception checking if device model spoofing is enabled: %@", exception);
-        shouldSpoof = NO;
-    }
-    
-    return shouldSpoof;
-}
-
-// Get the device model from profile
-static NSString *getSpoofedDeviceModel() {
-    @try {
-        // Try multiple methods to get the model value
-        NSString *deviceModel = nil;
-
-        // METHOD 0: Prefer IdentifierManager for consistency with other hooks
-        if (NSClassFromString(@"IdentifierManager")) {
-            IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-            if (manager) {
-                NSString *m = [manager currentValueForIdentifier:@"DeviceModel"];
-                if (m.length > 0) {
-                    deviceModel = m;
-                }
-            }
-        }
-        
-        // METHOD 1: Try direct access from profile plist (device_ids.plist)
-        if (!deviceModel.length) {
-            NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-
-            NSString *profileId = centralInfo[@"ProfileId"];
-            if (profileId) {
-                // Build path to identity directory
-                NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                deviceModel = deviceIds[@"DeviceModel"];
-            }
-        }
-        
-        // METHOD 2: Use DeviceModelManager as fallback (do not generate here)
-        if (!deviceModel.length && NSClassFromString(@"DeviceModelManager")) {
-            DeviceModelManager *deviceManager = [NSClassFromString(@"DeviceModelManager") sharedManager];
-            deviceModel = [deviceManager currentDeviceModel];
-        }
-        
-        return deviceModel;
-    } @catch (NSException *exception) {
-        PXLog(@"[DeviceSpec] Exception getting spoofed device model: %@", exception);
+static NSString *PXDeviceSpecValidatedProfileID(id value) {
+    if (![value isKindOfClass:[NSString class]]) return nil;
+    NSString *profileID = [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!profileID.length || profileID.length > 128) return nil;
+    if ([profileID isEqualToString:@"."] || [profileID isEqualToString:@".."]) return nil;
+    if ([profileID rangeOfString:@"/"].location != NSNotFound ||
+        [profileID rangeOfString:@"\\"].location != NSNotFound ||
+        ![[profileID lastPathComponent] isEqualToString:profileID]) {
         return nil;
     }
+    return profileID;
 }
 
-// Get all device specifications for the current spoofed model
-static NSDictionary *getDeviceSpecs() {
-    // Initialize cache if needed
+static NSDictionary *PXDeviceSpecReconstructSpecs(NSDictionary *deviceIDs) {
+    if (![deviceIDs isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *deviceModel = [deviceIDs[@"DeviceModel"] isKindOfClass:[NSString class]] ? deviceIDs[@"DeviceModel"] : nil;
+    if (!deviceModel.length) return nil;
+
+    NSMutableDictionary *specs = [NSMutableDictionary dictionary];
+    specs[@"value"] = deviceModel;
+    specs[@"name"] = deviceIDs[@"DeviceModelName"] ?: @"Unknown";
+    specs[@"screenResolution"] = deviceIDs[@"ScreenResolution"] ?: @"Unknown";
+    specs[@"viewportResolution"] = deviceIDs[@"ViewportResolution"] ?: @"Unknown";
+    specs[@"devicePixelRatio"] = deviceIDs[@"DevicePixelRatio"] ?: @(0);
+    specs[@"screenDensity"] = deviceIDs[@"ScreenDensityPPI"] ?: @(0);
+    specs[@"cpuArchitecture"] = deviceIDs[@"CPUArchitecture"] ?: @"Unknown";
+    specs[@"deviceMemory"] = deviceIDs[@"DeviceMemory"] ?: @(0);
+    specs[@"gpuFamily"] = deviceIDs[@"GPUFamily"] ?: @"Unknown";
+    specs[@"cpuCoreCount"] = deviceIDs[@"CPUCoreCount"] ?: @(0);
+    specs[@"metalFeatureSet"] = deviceIDs[@"MetalFeatureSet"] ?: @"Unknown";
+
+    if (deviceIDs[@"FreeMemoryPercentage"]) {
+        specs[@"freeMemoryPercentage"] = deviceIDs[@"FreeMemoryPercentage"];
+    }
+    if (deviceIDs[@"BoardID"]) specs[@"boardID"] = deviceIDs[@"BoardID"];
+    if (deviceIDs[@"HwModel"]) {
+        specs[@"hwModel"] = deviceIDs[@"HwModel"];
+    } else if (deviceIDs[@"BoardID"]) {
+        specs[@"hwModel"] = deviceIDs[@"BoardID"];
+    }
+
+    NSMutableDictionary *webGLInfo = [NSMutableDictionary dictionary];
+    webGLInfo[@"webglVendor"] = deviceIDs[@"WebGLVendor"] ?: @"Apple";
+    webGLInfo[@"webglRenderer"] = deviceIDs[@"WebGLRenderer"] ?: @"Apple GPU";
+    webGLInfo[@"unmaskedVendor"] = deviceIDs[@"WebGLUnmaskedVendor"] ?: @"Apple Inc.";
+    webGLInfo[@"unmaskedRenderer"] = deviceIDs[@"WebGLUnmaskedRenderer"] ?: (deviceIDs[@"GPUFamily"] ?: @"Apple GPU");
+    webGLInfo[@"webglVersion"] = deviceIDs[@"WebGLVersion"] ?: @"WebGL 2.0";
+    webGLInfo[@"maxTextureSize"] = deviceIDs[@"WebGLMaxTextureSize"] ?: @(16384);
+    webGLInfo[@"maxRenderBufferSize"] = deviceIDs[@"WebGLMaxRenderBufferSize"] ?: @(16384);
+    specs[@"webGLInfo"] = webGLInfo;
+
+    return PXDeviceSpecDeepImmutableCopy(specs);
+}
+
+static NSObject *PXDeviceSpecSnapshotLockObject(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        deviceSpecsCache = [NSMutableDictionary dictionary];
+        gDeviceSpecSnapshotLock = [NSObject new];
     });
-    
-    // Check if specs are already cached
-    @synchronized(deviceSpecsCache) {
-        NSDictionary *cachedSpecs = deviceSpecsCache[@"specs"];
-        if (cachedSpecs && [[NSDate date] timeIntervalSinceDate:cacheTimestamp] < kCacheValidityDuration) {
-            return cachedSpecs;
-        }
-    }
-    
-    @try {
-        // METHOD 1: Try to get specs directly from device_ids.plist
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        
-        NSString *profileId = centralInfo[@"ProfileId"];
-        if (profileId) {
-            NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-            
-            if (deviceIds && deviceIds[@"DeviceModel"]) {
-                // Reconstruct specs from device_ids.plist
-                NSMutableDictionary *specs = [NSMutableDictionary dictionary];
-                specs[@"value"] = deviceIds[@"DeviceModel"];
-                specs[@"name"] = deviceIds[@"DeviceModelName"] ?: @"Unknown";
-                specs[@"screenResolution"] = deviceIds[@"ScreenResolution"] ?: @"Unknown";
-                specs[@"viewportResolution"] = deviceIds[@"ViewportResolution"] ?: @"Unknown";
-                specs[@"devicePixelRatio"] = deviceIds[@"DevicePixelRatio"] ?: @(0);
-                specs[@"screenDensity"] = deviceIds[@"ScreenDensityPPI"] ?: @(0);
-                specs[@"cpuArchitecture"] = deviceIds[@"CPUArchitecture"] ?: @"Unknown";
-                specs[@"deviceMemory"] = deviceIds[@"DeviceMemory"] ?: @(0);
-                specs[@"gpuFamily"] = deviceIds[@"GPUFamily"] ?: @"Unknown";
-                specs[@"cpuCoreCount"] = deviceIds[@"CPUCoreCount"] ?: @(0);
-                specs[@"metalFeatureSet"] = deviceIds[@"MetalFeatureSet"] ?: @"Unknown";
-                
-                // Add board/hardware identifiers (used by apps like AIDA)
-                if (deviceIds[@"BoardID"]) {
-                    specs[@"boardID"] = deviceIds[@"BoardID"];
-                }
-                if (deviceIds[@"HwModel"]) {
-                    specs[@"hwModel"] = deviceIds[@"HwModel"];
-                } else if (deviceIds[@"BoardID"]) {
-                    specs[@"hwModel"] = deviceIds[@"BoardID"]; // Best-effort fallback
-                }
+    return gDeviceSpecSnapshotLock;
+}
 
-                // Reconstruct webGLInfo
-                NSMutableDictionary *webGLInfo = [NSMutableDictionary dictionary];
-                webGLInfo[@"webglVendor"] = deviceIds[@"WebGLVendor"] ?: @"Apple";
-                webGLInfo[@"webglRenderer"] = deviceIds[@"WebGLRenderer"] ?: @"Apple GPU";
-                webGLInfo[@"unmaskedVendor"] = @"Apple Inc.";
-                webGLInfo[@"unmaskedRenderer"] = deviceIds[@"GPUFamily"] ?: @"Apple GPU";
-                webGLInfo[@"webglVersion"] = @"WebGL 2.0";
-                webGLInfo[@"maxTextureSize"] = @(16384);
-                webGLInfo[@"maxRenderBufferSize"] = @(16384);
-                specs[@"webGLInfo"] = webGLInfo;
-                
-                PXLog(@"[DeviceSpec] Reconstructed device specs from device_ids.plist");
-                
-                // Cache the specifications
-                @synchronized(deviceSpecsCache) {
-                    deviceSpecsCache[@"specs"] = specs;
-                    cacheTimestamp = [NSDate date];
-                }
-                
-                return specs;
-            }
-        }
-        
-        // METHOD 2: Fallback to DeviceModelManager
-        // Get the current spoofed device model
-        NSString *deviceModel = getSpoofedDeviceModel();
-        if (!deviceModel.length) {
-            return nil;
-        }
-        
-        // Get the specifications from DeviceModelManager
-        DeviceModelManager *deviceManager = [NSClassFromString(@"DeviceModelManager") sharedManager];
-        if (!deviceManager) {
-            PXLog(@"[DeviceSpec] WARNING: DeviceModelManager not available");
-            return nil;
-        }
-        
-        NSDictionary *specs = [deviceManager deviceSpecificationsForModel:deviceModel];
-        if (!specs) {
-            PXLog(@"[DeviceSpec] WARNING: No specifications found for device model: %@", deviceModel);
-            return nil;
-        }
-        
-        // Cache the specifications
-        @synchronized(deviceSpecsCache) {
-            deviceSpecsCache[@"specs"] = specs;
-            cacheTimestamp = [NSDate date];
-        }
-        
-        return specs;
-    } @catch (NSException *exception) {
-        PXLog(@"[DeviceSpec] Exception getting device specifications: %@", exception);
-        return nil;
+static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
+    NSString *bundleID = getCurrentBundleID();
+    NSString *processName = [NSProcessInfo processInfo].processName;
+    BOOL allowed = bundleID.length && PXProcessIsAllowedForSpoofing(bundleID,
+                                                                     processName,
+                                                                     PXScopeOptionAllowSafariAuthStack);
+    if (!allowed) {
+        return [[PXDeviceSpecSnapshot alloc] initWithGeneration:generation
+                                                       enabled:NO
+                                                     profileID:nil
+                                                   deviceModel:nil
+                                                         specs:nil
+                                                        source:@"scope-denied"];
     }
+
+    NSString *profilesPath = PXProfilesPath();
+    NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+    NSString *profileID = PXDeviceSpecValidatedProfileID(centralInfo[@"ProfileId"]);
+    if (!profileID.length) {
+        NSDictionary *legacyInfo = [NSDictionary dictionaryWithContentsOfFile:PXLegacyActiveProfileInfoPath()];
+        id legacyID = legacyInfo[@"ProfileId"] ?: legacyInfo[@"currentProfileId"];
+        profileID = PXDeviceSpecValidatedProfileID(legacyID);
+    }
+
+    NSDictionary *settings = nil;
+    NSDictionary *deviceIDs = nil;
+    if (profileID.length && profilesPath.length) {
+        NSString *profileRoot = [profilesPath stringByAppendingPathComponent:profileID];
+        settings = [NSDictionary dictionaryWithContentsOfFile:[profileRoot stringByAppendingPathComponent:@"settings.plist"]];
+        deviceIDs = [NSDictionary dictionaryWithContentsOfFile:[[profileRoot stringByAppendingPathComponent:@"identity"]
+                                                                  stringByAppendingPathComponent:@"device_ids.plist"]];
+    }
+
+    IdentifierManager *identifierManager = nil;
+    Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
+    if (identifierManagerClass && [identifierManagerClass respondsToSelector:@selector(sharedManager)]) {
+        identifierManager = [identifierManagerClass sharedManager];
+    }
+
+    BOOL managerAvailable = identifierManager != nil;
+    BOOL managerEnabled = managerAvailable && [identifierManager isIdentifierEnabled:@"DeviceModel"];
+    id profileEnabledValue = settings[@"deviceModelEnabled"];
+    BOOL hasProfileEnableValue = [profileEnabledValue respondsToSelector:@selector(boolValue)];
+    BOOL profileFallbackEnabled = hasProfileEnableValue && [profileEnabledValue boolValue];
+    BOOL requestedEnabled = managerAvailable ? managerEnabled : profileFallbackEnabled;
+
+    // The selected profile is the only identity source for this generation.
+    // IdentifierManager remains the canonical enable gate shared with the UI and
+    // Tweak; the profile flag is used only when that manager is unavailable.
+    NSString *deviceModel = [deviceIDs[@"DeviceModel"] isKindOfClass:[NSString class]]
+        ? deviceIDs[@"DeviceModel"]
+        : nil;
+    NSDictionary *specs = nil;
+    NSString *source = @"disabled";
+
+    if (requestedEnabled && deviceModel.length) {
+        specs = PXDeviceSpecReconstructSpecs(deviceIDs);
+        source = @"device_ids";
+    }
+
+    if (requestedEnabled && !specs.count && deviceModel.length) {
+        Class deviceManagerClass = NSClassFromString(@"DeviceModelManager");
+        DeviceModelManager *deviceManager = nil;
+        if (deviceManagerClass && [deviceManagerClass respondsToSelector:@selector(sharedManager)]) {
+            deviceManager = [deviceManagerClass sharedManager];
+        }
+        NSDictionary *managerSpecs = [deviceManager deviceSpecificationsForModel:deviceModel];
+        if ([managerSpecs isKindOfClass:[NSDictionary class]] && managerSpecs.count) {
+            specs = PXDeviceSpecDeepImmutableCopy(managerSpecs);
+            source = @"device_model_manager";
+        }
+    }
+
+    BOOL effectiveEnabled = requestedEnabled && profileID.length && deviceModel.length && specs.count > 0;
+    if (requestedEnabled && !effectiveEnabled) {
+        source = deviceModel.length ? @"missing-specs" : @"missing-model";
+        PXLog(@"[DeviceSpec.snapshot] requested profile failed closed model=%@ profile=%@ source=%@",
+              deviceModel ?: @"<nil>",
+              profileID ?: @"<nil>",
+              source);
+    }
+
+    return [[PXDeviceSpecSnapshot alloc] initWithGeneration:generation
+                                                   enabled:effectiveEnabled
+                                                 profileID:profileID
+                                               deviceModel:deviceModel
+                                                     specs:effectiveEnabled ? specs : nil
+                                                    source:source];
+}
+
+static PXDeviceSpecSnapshot *PXReloadDeviceSpecSnapshot(NSString *reason) {
+    int incomingErrno = errno;
+    NSObject *lock = PXDeviceSpecSnapshotLockObject();
+
+    // Recursive hook activity during a build must see the last complete snapshot
+    // (or fail open during the very first build), never start a nested file read.
+    if (gDeviceSpecSnapshotBuildInProgress) {
+        PXDeviceSpecSnapshot *existing = nil;
+        @synchronized(lock) {
+            existing = gDeviceSpecSnapshot;
+        }
+        errno = incomingErrno;
+        return existing;
+    }
+
+    uint64_t generation = 0;
+    @synchronized(lock) {
+        generation = ++gDeviceSpecSnapshotGeneration;
+    }
+
+    gDeviceSpecSnapshotBuildInProgress = YES;
+    PXDeviceSpecSnapshot *candidate = nil;
+    @try {
+        // Build outside the publication lock. Readers continue using the previous
+        // immutable generation while profile I/O and manager lookups complete.
+        @autoreleasepool {
+            candidate = PXBuildDeviceSpecSnapshot(generation);
+        }
+    } @catch (NSException *exception) {
+        PXLog(@"[DeviceSpec.snapshot] build exception: %@", exception);
+        candidate = [[PXDeviceSpecSnapshot alloc] initWithGeneration:generation
+                                                             enabled:NO
+                                                           profileID:nil
+                                                         deviceModel:nil
+                                                               specs:nil
+                                                              source:@"exception"];
+    } @finally {
+        gDeviceSpecSnapshotBuildInProgress = NO;
+    }
+
+    PXDeviceSpecSnapshot *published = nil;
+    BOOL didPublish = NO;
+    BOOL rejectedTransientFailure = NO;
+    @synchronized(lock) {
+        // Concurrent reloads may finish out of order. A lower generation is stale
+        // and must never overwrite a newer complete publication.
+        BOOL transientFailure = [candidate.source isEqualToString:@"exception"] ||
+                                [candidate.source isEqualToString:@"missing-model"] ||
+                                [candidate.source isEqualToString:@"missing-specs"];
+        if (transientFailure && gDeviceSpecSnapshot) {
+            // Keep the last complete/intentional generation while profile files are
+            // between atomic writes. This avoids a temporary real-device leak.
+            rejectedTransientFailure = YES;
+        } else if (candidate && (!gDeviceSpecSnapshot || candidate.generation > gDeviceSpecSnapshot.generation)) {
+            gDeviceSpecSnapshot = candidate;
+            didPublish = YES;
+        }
+        published = gDeviceSpecSnapshot;
+    }
+
+    if (rejectedTransientFailure) {
+        PXFileDebugAIDA64Log("[DeviceSpec.snapshot.reject] generation=%llu source=%s retained=%llu reason=%s",
+                             (unsigned long long)candidate.generation,
+                             candidate.source.UTF8String ?: "<none>",
+                             (unsigned long long)published.generation,
+                             reason.UTF8String ?: "<none>");
+    }
+
+    if (didPublish) {
+        PXFileDebugAIDA64Log("[DeviceSpec.snapshot] generation=%llu enabled=%d profile=%s model=%s source=%s specs=%llu reason=%s",
+                             (unsigned long long)published.generation,
+                             published.enabled ? 1 : 0,
+                             published.profileID.UTF8String ?: "<none>",
+                             published.deviceModel.UTF8String ?: "<none>",
+                             published.source.UTF8String ?: "<none>",
+                             (unsigned long long)published.specs.count,
+                             reason.UTF8String ?: "<none>");
+    }
+    errno = incomingErrno;
+    return published;
+}
+
+static PXDeviceSpecSnapshot *PXCurrentDeviceSpecSnapshot(void) {
+    int incomingErrno = errno;
+    NSObject *lock = PXDeviceSpecSnapshotLockObject();
+    PXDeviceSpecSnapshot *snapshot = nil;
+    @synchronized(lock) {
+        snapshot = gDeviceSpecSnapshot;
+    }
+    if (!snapshot) snapshot = PXReloadDeviceSpecSnapshot(@"lazy");
+    errno = incomingErrno;
+    return snapshot;
+}
+
+static PXDeviceSpecSnapshot *PXActiveDeviceSpecSnapshot(void) {
+    PXDeviceSpecSnapshot *snapshot = PXCurrentDeviceSpecSnapshot();
+    return snapshot.enabled ? snapshot : nil;
 }
 
 #pragma mark - Document-Start Web Capability Script
@@ -690,12 +732,17 @@ static NSDictionary *getDeviceSpecs() {
 // contributes device capability spoofing without installing additional WKWebView hooks.
 void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController) {
     if (!userContentController) return;
+
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) return;
+
+    NSString *generationMarker = [NSString stringWithFormat:@"__weaponx_device_capabilities_generation__:%llu",
+                                  (unsigned long long)snapshot.generation];
     for (WKUserScript *existingScript in userContentController.userScripts) {
-        if ([existingScript.source containsString:@"__weaponx_device_capabilities__"]) {
+        if ([existingScript.source containsString:generationMarker]) {
             return;
         }
     }
-    if (!isSpoofingEnabled()) return;
 
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     NSString *processName = [NSProcessInfo processInfo].processName;
@@ -705,17 +752,24 @@ void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentControll
         return;
     }
 
-    NSDictionary *specs = getDeviceSpecs();
+    NSDictionary *specs = snapshot.specs;
     NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
     NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
     if (deviceMemoryGB <= 0 && cpuCoreCount == 0) return;
 
+    // Multiple immutable generations may coexist in a long-lived content
+    // controller. Scripts execute in insertion order; the highest generation
+    // wins and an older script can never downgrade a newer page state.
     NSString *script = [NSString stringWithFormat:
-        @"(function(){\n"
+        @"/*%@*/\n"
+         "(function(){\n"
          "  'use strict';\n"
          "  try {\n"
-         "    if (globalThis.__weaponx_device_capabilities__) return;\n"
-         "    Object.defineProperty(globalThis,'__weaponx_device_capabilities__',{value:true,configurable:false,enumerable:false,writable:false});\n"
+         "    var generation=%llu;\n"
+         "    var current=Number(globalThis.__weaponx_device_capabilities_generation__||0);\n"
+         "    if(current>generation)return;\n"
+         "    try{Object.defineProperty(globalThis,'__weaponx_device_capabilities_generation__',{value:generation,configurable:true,enumerable:false,writable:false});}\n"
+         "    catch(e){try{globalThis.__weaponx_device_capabilities_generation__=generation;}catch(_){} }\n"
          "    var nav=globalThis.navigator; if(!nav) return;\n"
          "    var proto=Object.getPrototypeOf(nav)||nav;\n"
          "    function def(name,value){\n"
@@ -727,6 +781,8 @@ void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentControll
          "    def('hardwareConcurrency',%ld);\n"
          "  } catch(e) {}\n"
          "})();",
+        generationMarker,
+        (unsigned long long)snapshot.generation,
         (long)deviceMemoryGB,
         (long)cpuCoreCount];
 
@@ -803,14 +859,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGRect)bounds {
     CGRect originalBounds = %orig;
     
-    if (!isSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalBounds;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalBounds;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     // Get the viewport resolution and device pixel ratio from specs
     NSString *viewportResString = specs[@"viewportResolution"];
@@ -863,14 +916,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGRect)nativeBounds {
     CGRect originalNativeBounds = %orig;
     
-    if (!isSpoofingEnabled() || !PXDisplayPixelMetricsSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot || !PXDisplayPixelMetricsSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalNativeBounds;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalNativeBounds;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     // Get the screen resolution from specs
     NSString *screenResString = specs[@"screenResolution"];
@@ -904,14 +954,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGFloat)scale {
     CGFloat originalScale = %orig;
     
-    if (!isSpoofingEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot || !shouldSpoofResolutionForCurrentProcess()) {
         return originalScale;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalScale;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     // Get the device pixel ratio from specs
     CGFloat pixelRatio = [specs[@"devicePixelRatio"] floatValue];
@@ -933,7 +980,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (UIScreenMode *)currentMode {
     UIScreenMode *originalMode = %orig;
     
-    if (!isSpoofingEnabled()) {
+    if (!PXActiveDeviceSpecSnapshot()) {
         return originalMode;
     }
     
@@ -953,14 +1000,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (unsigned long long)physicalMemory {
     unsigned long long originalMemory = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return originalMemory;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalMemory;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     uint64_t spoofedMemory = 0;
     if (!PXDeviceMemoryBytesFromSpecs(specs, &spoofedMemory)) {
@@ -995,14 +1039,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (unsigned long long)availableMemory {
     unsigned long long originalAvailableMemory = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return originalAvailableMemory;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalAvailableMemory;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     uint64_t totalMemory = 0;
     if (!PXDeviceMemoryBytesFromSpecs(specs, &totalMemory)) {
@@ -1010,7 +1051,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     }
 
     unsigned long long spoofedAvailableMemory = 0;
-    getConsistentMemoryStats(totalMemory, &spoofedAvailableMemory, NULL, NULL, NULL);
+    getConsistentMemoryStats(specs, totalMemory, &spoofedAvailableMemory, NULL, NULL, NULL);
     float freePercentage = totalMemory > 0 ? (float)((double)spoofedAvailableMemory / (double)totalMemory) : 0.0f;
     NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
     
@@ -1029,14 +1070,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSUInteger)processorCount {
     NSUInteger originalCount = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return originalCount;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalCount;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
     if (cpuCoreCount == 0) {
@@ -1058,14 +1096,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSString *)machineHardwareName {
     NSString *originalName = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return originalName;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalName;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
     if (!profile || !profile->brand) {
@@ -1094,14 +1129,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (id)getParameter:(unsigned)pname {
     id original = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return original;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return original;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     NSDictionary *webGLInfo = specs[@"webGLInfo"];
     if (!webGLInfo) {
@@ -1160,14 +1192,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSString *)name {
     NSString *originalName = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return originalName;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalName;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     NSString *gpuFamily = specs[@"gpuFamily"];
     if (!gpuFamily) {
@@ -1188,14 +1217,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (NSString *)familyName {
     NSString *originalFamilyName = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return originalFamilyName;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalFamilyName;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     NSString *gpuFamily = specs[@"gpuFamily"];
     if (!gpuFamily) {
@@ -1222,12 +1248,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 - (CGFloat)nativeScale {
     CGFloat original = %orig;
 
-    if (!isSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return original;
     }
-
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) return original;
+    NSDictionary *specs = snapshot.specs;
 
     CGFloat pixelRatio = [specs[@"devicePixelRatio"] floatValue];
     if (pixelRatio <= 0) return original;
@@ -1240,14 +1265,11 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     CGFloat originalScale = %orig;
     
     // Avoid spoofing screen density in Safari/Auth stack; it can desync page layout/touch logic.
-    if (!isSpoofingEnabled() || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot || !PXDisplayUIScaleSpoofEnabled() || !shouldSpoofResolutionForCurrentProcess()) {
         return originalScale;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return originalScale;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     // Calculate from screen density (PPI)
     NSInteger screenDensity = [specs[@"screenDensity"] integerValue];
@@ -1273,19 +1295,16 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 #pragma mark - Notification Handlers
 
-// Handler for notification to refresh caches
+// Rebuild and atomically publish the next immutable generation on profile changes.
 static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    NSString *notificationName = (__bridge NSString *)name;
-    PXLog(@"[DeviceSpec] Received notification: %@, refreshing caches", notificationName);
-    
-    @synchronized(deviceSpecsCache) {
-        [deviceSpecsCache removeAllObjects];
-        cachedDeviceModel = nil;
-        cacheTimestamp = nil;
-    }
-    
-    @synchronized(cachedBundleDecisions) {
-        [cachedBundleDecisions removeAllObjects];
+    (void)center;
+    (void)observer;
+    (void)object;
+    (void)userInfo;
+    @autoreleasepool {
+        NSString *notificationName = (__bridge NSString *)name;
+        PXLog(@"[DeviceSpec] Received notification: %@, rebuilding immutable snapshot", notificationName);
+        PXReloadDeviceSpecSnapshot(notificationName ?: @"notification");
     }
 }
 
@@ -1300,14 +1319,11 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 - (unsigned int)max_cpus {
     unsigned int original = %orig;
     
-    if (!isSpoofingEnabled()) {
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) {
         return original;
     }
-    
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return original;
-    }
+    NSDictionary *specs = snapshot.specs;
     
     NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
     if (cpuCoreCount == 0 || cpuCoreCount > UINT_MAX) {
@@ -1358,11 +1374,8 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 return;
             }
             
-            // Always initialize caches
-            deviceSpecsCache = [NSMutableDictionary dictionary];
-            cachedBundleDecisions = [NSMutableDictionary dictionary];
-            
-            // Register for notifications to refresh caches
+            // Register for notifications before publishing the first snapshot so
+            // no profile-change generation can be missed after hooks become visible.
             CFNotificationCenterAddObserver(
                 CFNotificationCenterGetDarwinNotifyCenter(),
                 NULL,
@@ -1381,7 +1394,12 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 CFNotificationSuspensionBehaviorDeliverImmediately
             );
             
-            PXLog(@"[DeviceSpec] App %@ is scoped, installing device specification hooks", currentBundleID);
+            PXDeviceSpecSnapshot *initialSnapshot = PXReloadDeviceSpecSnapshot(@"constructor");
+            PXLog(@"[DeviceSpec] App %@ is scoped; snapshot generation=%llu enabled=%d source=%@",
+                  currentBundleID,
+                  (unsigned long long)initialSnapshot.generation,
+                  initialSnapshot.enabled ? 1 : 0,
+                  initialSnapshot.source ?: @"<none>");
 
             // DeviceSpec is a selective coordinator pre-provider. It claims only CPU,
             // cache, feature and memory keys; identity and OS keys remain owned by Tweak.
@@ -1477,12 +1495,10 @@ static void logMemoryHook(NSString *apiName) {
     }
 }
 
-// Normalize free-memory configuration to a bounded fraction.
-static float getFreeMemoryPercentage(void) {
+// Normalize free-memory configuration from the same immutable snapshot used
+// for total memory so one call cannot mix two profile generations.
+static float getFreeMemoryPercentage(NSDictionary *specs) {
     const float defaultFreePercentage = 0.35f;
-    if (!isSpoofingEnabled()) return defaultFreePercentage;
-
-    NSDictionary *specs = getDeviceSpecs();
     if (!specs) return defaultFreePercentage;
 
     id configuredValue = specs[@"freeMemoryPercentage"];
@@ -1501,12 +1517,13 @@ static float getFreeMemoryPercentage(void) {
 }
 
 // Produce deterministic buckets whose byte sum is exactly totalMemory.
-static void getConsistentMemoryStats(unsigned long long totalMemory,
+static void getConsistentMemoryStats(NSDictionary *specs,
+                                     unsigned long long totalMemory,
                                      unsigned long long *freeMemory,
                                      unsigned long long *wiredMemory,
                                      unsigned long long *activeMemory,
                                      unsigned long long *inactiveMemory) {
-    double freeFraction = MAX(0.10, MIN(0.70, (double)getFreeMemoryPercentage()));
+    double freeFraction = MAX(0.10, MIN(0.70, (double)getFreeMemoryPercentage(specs)));
     uint64_t freeBytes = (uint64_t)((double)totalMemory * freeFraction);
     uint64_t remaining = totalMemory >= freeBytes ? totalMemory - freeBytes : 0;
 
@@ -1527,9 +1544,11 @@ static const NXArchInfo *hook_nx_get_local_arch_info(void) {
     if (!orig_nx_get_local_arch_info) return NULL;
 
     const NXArchInfo *original = orig_nx_get_local_arch_info();
-    if (!original || !isSpoofingEnabled()) return original;
+    if (!original) return original;
 
-    NSDictionary *specs = getDeviceSpecs();
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) return original;
+    NSDictionary *specs = snapshot.specs;
     const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
     if (!profile) return original;
 
@@ -1555,15 +1574,13 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
     if (!orig_host_statistics64) return KERN_FAILURE;
     kern_return_t result = orig_host_statistics64(host, flavor, info, count);
 
-    if (result != KERN_SUCCESS || !info || !count || !isSpoofingEnabled()) {
+    if (result != KERN_SUCCESS || !info || !count) {
         return result;
     }
-    
-    // Get device specs
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) {
-        return result;
-    }
+
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) return result;
+    NSDictionary *specs = snapshot.specs;
     
     uint64_t totalMemory = 0;
     if (!PXDeviceMemoryBytesFromSpecs(specs, &totalMemory)) {
@@ -1579,7 +1596,7 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
             
             // Calculate consistent memory values
             unsigned long long freeMemory, wiredMemory, activeMemory, inactiveMemory;
-            getConsistentMemoryStats(totalMemory, &freeMemory, &wiredMemory, &activeMemory, &inactiveMemory);
+            getConsistentMemoryStats(specs, totalMemory, &freeMemory, &wiredMemory, &activeMemory, &inactiveMemory);
             
             // page size is typically 4096 or 16384 depending on device
             vm_size_t pageSize = 4096;
@@ -1609,7 +1626,7 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
             
             // Calculate consistent memory values
             unsigned long long freeMemory, wiredMemory, activeMemory, inactiveMemory;
-            getConsistentMemoryStats(totalMemory, &freeMemory, &wiredMemory, &activeMemory, &inactiveMemory);
+            getConsistentMemoryStats(specs, totalMemory, &freeMemory, &wiredMemory, &activeMemory, &inactiveMemory);
             
             // page size is typically 4096 or 16384 depending on device
             vm_size_t pageSize = 4096;
@@ -1663,12 +1680,14 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
                                          void *newp,
                                          size_t newlen,
                                          int *outResult) {
-    if (!name || !outResult || !oldlenp || newp != NULL || newlen != 0 || !isSpoofingEnabled()) {
+    if (!name || !outResult || !oldlenp || newp != NULL || newlen != 0) {
         return NO;
     }
 
-    NSDictionary *specs = getDeviceSpecs();
-    if (!specs) return NO;
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) return NO;
+    NSDictionary *specs = snapshot.specs;
+    uint64_t generation = snapshot.generation;
 
     const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
     NSUInteger coreCount = PXCPUCoreCountFromSpecs(specs);
@@ -1683,6 +1702,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint32_t value = (uint32_t)coreCount;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1692,6 +1712,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint32_t value = (uint32_t)CPU_TYPE_ARM64;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1701,6 +1722,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint32_t value = (uint32_t)profile->cpuSubtype;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1710,6 +1732,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint32_t value = profile->cpuFamily;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1719,6 +1742,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint64_t value = profile->cacheLineBytes;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1728,6 +1752,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint64_t value = profile->l1iCacheBytes;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1737,6 +1762,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint64_t value = profile->l1dCacheBytes;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1746,6 +1772,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint64_t value = profile->l2CacheBytes;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&value, sizeof(value), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1757,6 +1784,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
     if (hasMemory && strcmp(name, "hw.memsize") == 0) {
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&totalMemory, sizeof(totalMemory), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1767,6 +1795,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         uint32_t legacyBytes = totalMemory > UINT32_MAX ? UINT32_MAX : (uint32_t)totalMemory;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteSysctlBytes(&legacyBytes, sizeof(legacyBytes), oldp, oldlenp, outResult),
                                                   oldlenp,
                                                   outResult);
@@ -1780,6 +1809,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
         if (!PXOptionalFeatureValue(name, profile, &value)) return NO;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteExistingSysctlBytes(name,
                                           &value,
                                           sizeof(value),
@@ -1798,6 +1828,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
             : profile->maxFrequencyHz;
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteExistingSysctlBytes(name,
                                           &value,
                                           sizeof(value),
@@ -1813,6 +1844,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
                     strcmp(name, "hw.cpubrand") == 0)) {
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteExistingSysctlCString(name,
                                             profile->brand,
                                             oldp,
@@ -1825,6 +1857,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
     if (profile && strcmp(name, "hw.cpu.features") == 0) {
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteExistingSysctlCString(name,
                                             profile->featureString,
                                             oldp,
@@ -1852,6 +1885,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
 
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
+                                                  generation,
                                                   PXWriteExistingSysctlBytes(name,
                                           &usage,
                                           sizeof(usage),
