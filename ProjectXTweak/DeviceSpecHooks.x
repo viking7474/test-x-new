@@ -4,6 +4,7 @@
 #import "ProfileManager.h"
 #import "ProjectXLogging.h"
 #import "HookOwnership.h"
+#import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -15,6 +16,7 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <dlfcn.h>
+#import <errno.h>
 #import <mach-o/arch.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import "IOSVersionInfo.h"
@@ -34,8 +36,14 @@ struct xsw_usage {
 typedef struct xsw_usage xsw_usage;
 #endif
 
+#ifndef CPU_SUBTYPE_ARM64_V8
+#define CPU_SUBTYPE_ARM64_V8 ((cpu_subtype_t)1)
+#endif
+#ifndef CPU_SUBTYPE_ARM64E
+#define CPU_SUBTYPE_ARM64E ((cpu_subtype_t)2)
+#endif
+
 // Original function pointers
-static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 static kern_return_t (*orig_host_statistics64)(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
 static NXArchInfo* (* orig_nx_get_local_arch_info)();
 
@@ -66,6 +74,7 @@ static void logMemoryHook(NSString *apiName);
 
 // Function declarations
 static NSString *getCurrentBundleID(void);
+static BOOL PXCPUArchitectureHasToken(NSString *architecture, NSString *token);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
 static BOOL isSpoofingEnabled(void);
@@ -78,7 +87,7 @@ static void getConsistentMemoryStats(unsigned long long totalMemory,
                                     unsigned long long *activeMemory,
                                     unsigned long long *inactiveMemory);
 static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
-static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+static int applyDeviceSpecSysctlBynamePost(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int originalResult);
 static NXArchInfo* hook_nx_get_local_arch_info();
 static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
 static CGSize parseResolution(NSString *resolutionString);
@@ -96,6 +105,45 @@ static NSString *getCurrentBundleID(void) {
     } @catch (NSException *e) {
         return nil;
     }
+}
+
+// Match a processor token on an alphanumeric boundary so A18 does not match A180
+// and M1 does not match M10. A12X/A12Z are explicit members of the A12 family.
+static BOOL PXCPUArchitectureHasToken(NSString *architecture, NSString *token) {
+    if (!architecture.length || !token.length) return NO;
+
+    NSString *upperArchitecture = [architecture uppercaseString];
+    NSString *upperToken = [token uppercaseString];
+    NSCharacterSet *alphanumeric = [NSCharacterSet alphanumericCharacterSet];
+    NSRange searchRange = NSMakeRange(0, upperArchitecture.length);
+
+    while (searchRange.length > 0) {
+        NSRange match = [upperArchitecture rangeOfString:upperToken options:0 range:searchRange];
+        if (match.location == NSNotFound) return NO;
+
+        BOOL beforeIsBoundary = (match.location == 0) ||
+            ![alphanumeric characterIsMember:[upperArchitecture characterAtIndex:match.location - 1]];
+        NSUInteger end = NSMaxRange(match);
+        BOOL afterIsBoundary = (end >= upperArchitecture.length) ||
+            ![alphanumeric characterIsMember:[upperArchitecture characterAtIndex:end]];
+
+        // A12X and A12Z share the A12 CPU family but must be accepted explicitly.
+        if (!afterIsBoundary && [upperToken isEqualToString:@"A12"] && end < upperArchitecture.length) {
+            unichar suffix = [upperArchitecture characterAtIndex:end];
+            NSUInteger suffixEnd = end + 1;
+            BOOL suffixBoundary = (suffixEnd >= upperArchitecture.length) ||
+                ![alphanumeric characterIsMember:[upperArchitecture characterAtIndex:suffixEnd]];
+            afterIsBoundary = (suffix == 'X' || suffix == 'Z') && suffixBoundary;
+        }
+
+        if (beforeIsBoundary && afterIsBoundary) return YES;
+
+        NSUInteger next = match.location + 1;
+        if (next >= upperArchitecture.length) return NO;
+        searchRange = NSMakeRange(next, upperArchitecture.length - next);
+    }
+
+    return NO;
 }
 
 // Load scoped apps from the plist file
@@ -672,7 +720,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     }
     
     // Convert GB to bytes
-    unsigned long long spoofedMemory = deviceMemoryGB * 1024 * 1024 * 1024;
+    unsigned long long spoofedMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
     
     // Log the change the first time
     static BOOL loggedMemory = NO;
@@ -717,7 +765,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     }
     
     // Calculate total memory
-    unsigned long long totalMemory = deviceMemoryGB * 1024 * 1024 * 1024;
+    unsigned long long totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
     
     // Calculate free memory based on typical iOS behavior
     float freePercentage = getFreeMemoryPercentage();
@@ -1092,19 +1140,40 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
             );
             
             PXLog(@"[DeviceSpec] App %@ is scoped, installing device specification hooks", currentBundleID);
+
+            // sysctlbyname is owned by PXNativeHookCoordinator. DeviceSpec participates as a
+            // post-provider so the original syscall is executed exactly once and identity
+            // pre-providers (Tweak/BootTime/UUID) retain first right of refusal.
+            PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+            [coord installOwnedSymbolsIfNeeded];
+            static dispatch_once_t deviceSpecSysctlProviderOnce;
+            dispatch_once(&deviceSpecSysctlProviderOnce, ^{
+                BOOL registered = [coord registerSysctlBynameProvider:@"devicespec.sysctlbyname"
+                                                              priority:PXNativeHookPriorityIdentity
+                                                                   pre:nil
+                                                                  post:^(const char *name,
+                                                                         void *oldp,
+                                                                         size_t *oldlenp,
+                                                                         void *newp,
+                                                                         size_t newlen,
+                                                                         int *inoutResult) {
+                    if (!inoutResult) return;
+                    *inoutResult = applyDeviceSpecSysctlBynamePost(name,
+                                                                  oldp,
+                                                                  oldlenp,
+                                                                  newp,
+                                                                  newlen,
+                                                                  *inoutResult);
+                }];
+                PXLog(@"[DeviceSpec] sysctlbyname coordinator post-provider %@",
+                      registered ? @"registered" : @"registration failed");
+            });
             
             // Initialize memory hook function pointers for scoped apps only
             PXFileDebugAIDA64Log("[DeviceSpec.ctor] before dlopen libSystem");
             void *libSystem = dlopen("/usr/lib/libSystem.dylib", RTLD_NOW);
             PXFileDebugAIDA64Log("[DeviceSpec.ctor] after dlopen libSystem handle=%d", libSystem ? 1 : 0);
             if (libSystem) {
-                // Hook sysctlbyname for memory-related calls
-                orig_sysctlbyname = dlsym(libSystem, "sysctlbyname");
-                if (orig_sysctlbyname) {
-                    // Always coordinator-owned for sysctlbyname — skip direct install.
-                    PXLog(@"[DeviceSpec] Skipping sysctlbyname hook (PXNativeHookCoordinator owns symbol)");
-                }
-                
                 // Hook host_statistics64 for VM stats spoofing
                 orig_host_statistics64 = dlsym(libSystem, "host_statistics64");
                 if (orig_host_statistics64) {
@@ -1206,9 +1275,22 @@ static void getConsistentMemoryStats(unsigned long long totalMemory,
                                     unsigned long long *inactiveMemory) {
     
     float freePercentage = getFreeMemoryPercentage();
-    float wiredPercentage = 0.20; // 20% wired (kernel, system)
-    float activePercentage = 0.30; // 30% active (running apps)
-    float inactivePercentage = 1.0 - freePercentage - wiredPercentage - activePercentage;
+    freePercentage = MAX(0.0f, MIN(1.0f, freePercentage));
+
+    float wiredPercentage = 0.20f; // 20% wired (kernel, system)
+    float activePercentage = 0.30f; // 30% active (running apps)
+    float remainingPercentage = MAX(0.0f, 1.0f - freePercentage);
+    float committedPercentage = wiredPercentage + activePercentage;
+
+    // Keep all buckets non-negative and ensure their total never exceeds RAM.
+    if (committedPercentage > remainingPercentage && committedPercentage > 0.0f) {
+        float scale = remainingPercentage / committedPercentage;
+        wiredPercentage *= scale;
+        activePercentage *= scale;
+    }
+
+    float inactivePercentage = MAX(0.0f,
+        1.0f - freePercentage - wiredPercentage - activePercentage);
     
     if (freeMemory) {
         *freeMemory = (unsigned long long)(totalMemory * freePercentage);
@@ -1234,6 +1316,9 @@ static NXArchInfo* hook_nx_get_local_arch_info() {
     }
     
     NXArchInfo* original = orig_nx_get_local_arch_info();
+    if (!original) {
+        return NULL;
+    }
     
     if (!isSpoofingEnabled()) {
         return original;
@@ -1253,45 +1338,28 @@ static NXArchInfo* hook_nx_get_local_arch_info() {
     static NXArchInfo customArchInfo;
     customArchInfo = *original; // Copy original values
     
-    // Safely set subtype
-    cpu_subtype_t cpuSubtype = original->cpusubtype; // Keep original
-    const char *customDescription = original->description; // Default to original
-    
-    // Set subtype and description based on architecture
-    if ([cpuArchitecture containsString:@"A9"]) {
-        cpuSubtype = 2;
-    } else if ([cpuArchitecture containsString:@"A10"]) {
-        cpuSubtype = 3;
-    } else if ([cpuArchitecture containsString:@"A11"]) {
-        cpuSubtype = 4;
+    // NXArchInfo reports ARM ABI subtype, not a synthetic per-chip sequence.
+    BOOL isLegacyARM64 = PXCPUArchitectureHasToken(cpuArchitecture, @"A9") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A10") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A11");
+    BOOL isARM64E = PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"A16") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
+                    PXCPUArchitectureHasToken(cpuArchitecture, @"M2");
+
+    cpu_subtype_t cpuSubtype = original->cpusubtype;
+    const char *customDescription = original->description;
+    if (isARM64E) {
+        cpuSubtype = CPU_SUBTYPE_ARM64E;
         customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A12"]) {
-        cpuSubtype = 5;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A13"]) {
-        cpuSubtype = 6;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A14"]) {
-        cpuSubtype = 7;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A15"]) {
-        cpuSubtype = 8;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A16"]) {
-        cpuSubtype = 9;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A17"]) {
-        cpuSubtype = 10;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"A18"]) {
-        cpuSubtype = 11;
-        customDescription = "ARM64E";
-    } else if ([cpuArchitecture containsString:@"M1"]) {
-        cpuSubtype = 12;
-        customDescription = "arm64v8 Apple M1";
-    } else if ([cpuArchitecture containsString:@"M2"]) {
-        cpuSubtype = 13;
-        customDescription = "arm64v8 Apple M2";
+    } else if (isLegacyARM64) {
+        cpuSubtype = CPU_SUBTYPE_ARM64_V8;
+        customDescription = "ARM64";
     }
     
     customArchInfo.cpusubtype = cpuSubtype;
@@ -1330,7 +1398,7 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
     }
     
     // Calculate total memory in bytes
-    unsigned long long totalMemory = deviceMemoryGB * 1024 * 1024 * 1024;
+    unsigned long long totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
     
     // Handle specific host info types
     if (flavor == HOST_VM_INFO64 || flavor == HOST_VM_INFO) {
@@ -1417,15 +1485,19 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
     return result;
 }
 
-// Sysctlbyname hook for memory-related calls
-static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+// Coordinator post-provider for device-spec sysctlbyname values.
+// The coordinator has already called the real sysctlbyname exactly once.
+static int applyDeviceSpecSysctlBynamePost(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int originalResult) {
     static int loggedCount = 0;
     if (name && loggedCount < 40) {
         loggedCount++;
         PXFileDebugAIDA64Log("[DeviceSpec.sysctlbyname] key=%s oldp=%d oldlenp=%d", name, oldp ? 1 : 0, oldlenp ? 1 : 0);
     }
-    // Always call original function first to ensure proper behavior
-    int result = orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
+    // The coordinator already called the original function before invoking post-providers.
+    int result = originalResult;
+    if (!name || newp != NULL || newlen != 0) {
+        return result;
+    }
 
     // iOS version/build consistency (AIDA64 build number)
     // Handle these early and preserve sysctl size-query semantics (oldp can be NULL).
@@ -1467,9 +1539,10 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
                                 return 0;
                             }
 
-                            // Buffer too small: report required size.
+                            // Buffer too small: report required size and preserve sysctl errno semantics.
                             *oldlenp = len;
-                            return 0;
+                            errno = ENOMEM;
+                            return -1;
                         }
                     }
                 }
@@ -1575,42 +1648,25 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         }
     }
     else if (strcmp(name, "hw.cpusubtype") == 0) {
-        // CPU Subtype - varies by processor
-        uint32_t cpuSubtype = 0;
-        
-        if (cpuArchitecture) {
-            if ([cpuArchitecture containsString:@"A9"]) {
-                cpuSubtype = 2; // A9 subtype
-            } else if ([cpuArchitecture containsString:@"A10"]) {
-                cpuSubtype = 3; // A10 subtype  
-            } else if ([cpuArchitecture containsString:@"A11"]) {
-                cpuSubtype = 4; // A11 subtype
-            } else if ([cpuArchitecture containsString:@"A12"]) {
-                cpuSubtype = 5; // A12 subtype
-            } else if ([cpuArchitecture containsString:@"A13"]) {
-                cpuSubtype = 6; // A13 subtype
-            } else if ([cpuArchitecture containsString:@"A14"]) {
-                cpuSubtype = 7; // A14 subtype
-            } else if ([cpuArchitecture containsString:@"A15"]) {
-                cpuSubtype = 8; // A15 subtype
-            } else if ([cpuArchitecture containsString:@"A16"]) {
-                cpuSubtype = 9; // A16 subtype
-            } else if ([cpuArchitecture containsString:@"A17"]) {
-                cpuSubtype = 10; // A17 subtype
-            } else if ([cpuArchitecture containsString:@"A18"]) {
-                cpuSubtype = 11; // A18 subtype
-            } else if ([cpuArchitecture containsString:@"M1"]) {
-                cpuSubtype = 12; // M1 subtype
-            } else if ([cpuArchitecture containsString:@"M2"]) {
-                cpuSubtype = 13; // M2 subtype
-            } else {
-                cpuSubtype = 1; // Default ARM64 subtype
-            }
-        }
-        
-        if (*oldlenp >= sizeof(uint32_t)) {
+        // ARM64 sysctl exposes ABI subtypes, not one synthetic value per SoC.
+        BOOL isLegacyARM64 = PXCPUArchitectureHasToken(cpuArchitecture, @"A9") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A10") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A11");
+        BOOL isARM64E = PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A16") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
+                        PXCPUArchitectureHasToken(cpuArchitecture, @"M2");
+
+        uint32_t cpuSubtype = isARM64E ? (uint32_t)CPU_SUBTYPE_ARM64E :
+                              (isLegacyARM64 ? (uint32_t)CPU_SUBTYPE_ARM64_V8 : 0);
+        if (cpuSubtype != 0 && *oldlenp >= sizeof(uint32_t)) {
             *(uint32_t *)oldp = cpuSubtype;
-            
+
             static BOOL loggedCPUSubtype = NO;
             if (!loggedCPUSubtype) {
                 PXLog(@"[DeviceSpec] Spoofed hw.cpusubtype to %u for %@", cpuSubtype, cpuArchitecture);
@@ -1619,40 +1675,35 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         }
     }
     else if (strcmp(name, "hw.cpufamily") == 0) {
-        // CPU Family - unique identifier for each processor family
+        // CPU family identifies the Apple core microarchitecture; related SoCs may share it.
         uint32_t cpuFamily = 0;
-        
-        if (cpuArchitecture) {
-            if ([cpuArchitecture containsString:@"A9"]) {
-                cpuFamily = 0x67CEEE93; // Apple A9 family
-            } else if ([cpuArchitecture containsString:@"A10"]) {
-                cpuFamily = 0x92FB37C8; // Apple A10 family
-            } else if ([cpuArchitecture containsString:@"A11"]) {
-                cpuFamily = 0xDA33D83D; // Apple A11 family
-            } else if ([cpuArchitecture containsString:@"A12"]) {
-                cpuFamily = 0x8765EDEA; // Apple A12 family
-            } else if ([cpuArchitecture containsString:@"A13"]) {
-                cpuFamily = 0xAF4F32CB; // Apple A13 family
-            } else if ([cpuArchitecture containsString:@"A14"]) {
-                cpuFamily = 0x1B588BB3; // Apple A14 family
-            } else if ([cpuArchitecture containsString:@"A15"]) {
-                cpuFamily = 0xDA33D83D; // Apple A15 family
-            } else if ([cpuArchitecture containsString:@"A16"]) {
-                cpuFamily = 0x8765EDEA; // Apple A16 family
-            } else if ([cpuArchitecture containsString:@"A17"]) {
-                cpuFamily = 0xAF4F32CB; // Apple A17 family
-            } else if ([cpuArchitecture containsString:@"A18"]) {
-                cpuFamily = 0x1B588BB3; // Apple A18 family
-            } else if ([cpuArchitecture containsString:@"M1"]) {
-                cpuFamily = 0x458F4D97; // Apple M1 family
-            } else if ([cpuArchitecture containsString:@"M2"]) {
-                cpuFamily = 0x458F4D97; // Apple M2 family (same as M1)
-            } else {
-                cpuFamily = 0x67CEEE93; // Default ARM64 family
-            }
+
+        if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9")) {
+            cpuFamily = 0x92FB37C8; // Twister
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A10")) {
+            cpuFamily = 0x67CEEE93; // Hurricane
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A11")) {
+            cpuFamily = 0xE81E7EF6; // Monsoon / Mistral
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A12")) {
+            cpuFamily = 0x07D34B9F; // Vortex / Tempest (A12/A12X/A12Z)
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A13")) {
+            cpuFamily = 0x462504D2; // Lightning / Thunder
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"M1")) {
+            cpuFamily = 0x1B588BB3; // Firestorm / Icestorm
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
+            cpuFamily = 0xDA33D83D; // Avalanche / Blizzard
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A16")) {
+            cpuFamily = 0x8765EDEA; // Everest / Sawtooth
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A17")) {
+            cpuFamily = 0x2876F5B5; // Coll
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A18")) {
+            BOOL isPro = [cpuArchitecture rangeOfString:@"PRO" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            cpuFamily = isPro ? 0x75D4ACB9 : 0x204526D0; // Tahiti / Tupai
         }
         
-        if (*oldlenp >= sizeof(uint32_t)) {
+        if (cpuFamily != 0 && *oldlenp >= sizeof(uint32_t)) {
             *(uint32_t *)oldp = cpuFamily;
             
             static BOOL loggedCPUFamily = NO;
@@ -1667,29 +1718,29 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         uint64_t cpuFrequency = 0;
         
         if (cpuArchitecture) {
-            if ([cpuArchitecture containsString:@"A9"]) {
+            if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9")) {
                 cpuFrequency = 1800000000; // 1.8 GHz
-            } else if ([cpuArchitecture containsString:@"A10"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A10")) {
                 cpuFrequency = 2340000000; // 2.34 GHz
-            } else if ([cpuArchitecture containsString:@"A11"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A11")) {
                 cpuFrequency = 2390000000; // 2.39 GHz
-            } else if ([cpuArchitecture containsString:@"A12"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A12")) {
                 cpuFrequency = 2490000000; // 2.49 GHz
-            } else if ([cpuArchitecture containsString:@"A13"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A13")) {
                 cpuFrequency = 2650000000; // 2.65 GHz
-            } else if ([cpuArchitecture containsString:@"A14"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A14")) {
                 cpuFrequency = 2990000000; // 2.99 GHz
-            } else if ([cpuArchitecture containsString:@"A15"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A15")) {
                 cpuFrequency = 3230000000; // 3.23 GHz
-            } else if ([cpuArchitecture containsString:@"A16"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A16")) {
                 cpuFrequency = 3460000000; // 3.46 GHz
-            } else if ([cpuArchitecture containsString:@"A17"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A17")) {
                 cpuFrequency = 3780000000; // 3.78 GHz
-            } else if ([cpuArchitecture containsString:@"A18"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A18")) {
                 cpuFrequency = 4050000000; // 4.05 GHz
-            } else if ([cpuArchitecture containsString:@"M1"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M1")) {
                 cpuFrequency = 3200000000; // 3.2 GHz
-            } else if ([cpuArchitecture containsString:@"M2"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
                 cpuFrequency = 3490000000; // 3.49 GHz
             } else {
                 cpuFrequency = 2000000000; // Default 2.0 GHz
@@ -1736,25 +1787,25 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
             BOOL isL1 = (strcmp(name, "hw.l1icachesize") == 0 || strcmp(name, "hw.l1dcachesize") == 0);
             BOOL isL2 = (strcmp(name, "hw.l2cachesize") == 0);
             
-            if ([cpuArchitecture containsString:@"A9"]) {
+            if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9")) {
                 cacheSize = isL1 ? 32768 : (isL2 ? 3145728 : 0); // 32KB L1, 3MB L2
-            } else if ([cpuArchitecture containsString:@"A10"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A10")) {
                 cacheSize = isL1 ? 32768 : (isL2 ? 3145728 : 0); // 32KB L1, 3MB L2  
-            } else if ([cpuArchitecture containsString:@"A11"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A11")) {
                 cacheSize = isL1 ? 32768 : (isL2 ? 8388608 : 0); // 32KB L1, 8MB L2
-            } else if ([cpuArchitecture containsString:@"A12"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A12")) {
                 cacheSize = isL1 ? 32768 : (isL2 ? 8388608 : 0); // 32KB L1, 8MB L2
-            } else if ([cpuArchitecture containsString:@"A13"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A13")) {
                 cacheSize = isL1 ? 65536 : (isL2 ? 8388608 : 0); // 64KB L1, 8MB L2
-            } else if ([cpuArchitecture containsString:@"A14"] || [cpuArchitecture containsString:@"A15"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A14") || PXCPUArchitectureHasToken(cpuArchitecture, @"A15")) {
                 cacheSize = isL1 ? 65536 : (isL2 ? 12582912 : 0); // 64KB L1, 12MB L2
-            } else if ([cpuArchitecture containsString:@"A16"] || [cpuArchitecture containsString:@"A17"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A16") || PXCPUArchitectureHasToken(cpuArchitecture, @"A17")) {
                 cacheSize = isL1 ? 65536 : (isL2 ? 16777216 : 0); // 64KB L1, 16MB L2
-            } else if ([cpuArchitecture containsString:@"A18"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A18")) {
                 cacheSize = isL1 ? 131072 : (isL2 ? 20971520 : 0); // 128KB L1, 20MB L2
-            } else if ([cpuArchitecture containsString:@"M1"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M1")) {
                 cacheSize = isL1 ? 131072 : (isL2 ? 12582912 : 0); // 128KB L1, 12MB L2
-            } else if ([cpuArchitecture containsString:@"M2"]) {
+            } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
                 cacheSize = isL1 ? 131072 : (isL2 ? 16777216 : 0); // 128KB L1, 16MB L2
             } else {
                 cacheSize = isL1 ? 32768 : (isL2 ? 3145728 : 0); // Default
@@ -1784,7 +1835,7 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         }
         
         // Calculate total memory in bytes
-        unsigned long long totalMemory = deviceMemoryGB * 1024 * 1024 * 1024;
+        unsigned long long totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
         
         // Different sysctls might return different size types
         if (*oldlenp == sizeof(uint64_t)) {
@@ -1814,7 +1865,7 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         
         // Calculate realistic swap values based on device memory
         // iOS typically uses swap space proportional to RAM
-        uint64_t totalMemory = deviceMemoryGB * 1024 * 1024 * 1024;
+        uint64_t totalMemory = ((unsigned long long)deviceMemoryGB) * 1024ULL * 1024ULL * 1024ULL;
         
         // Typical iOS swap is ~50-100% of RAM depending on device
         float swapRatio = (deviceMemoryGB >= 4) ? 0.5 : 1.0;  // Less swap on high-RAM devices
@@ -1833,31 +1884,35 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     }
     // Add additional CPU feature and identification sysctls
     else if (strncmp(name, "hw.optional.", 12) == 0) {
-        // Handle CPU feature flags - these indicate specific CPU capabilities
-        // Most ARM64 devices support these features consistently
-        BOOL featureSupported = YES;
-        
-        // Some features that might not be supported on older processors
-        if (cpuArchitecture) {
-            if (strstr(name, "arm64e") && [cpuArchitecture containsString:@"A9"]) {
-                featureSupported = NO; // A9 doesn't support arm64e
-            } else if (strstr(name, "armv8_3") && ([cpuArchitecture containsString:@"A9"] || [cpuArchitecture containsString:@"A10"])) {
-                featureSupported = NO; // A9/A10 don't support ARMv8.3
-            }
-        }
-        
-        if (*oldlenp >= sizeof(uint32_t)) {
+        // Only override capabilities that are explicitly tied to the selected ABI.
+        // Unknown optional keys retain the original result instead of defaulting to YES.
+        BOOL isARM64EChip = PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A14") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A16") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
+                            PXCPUArchitectureHasToken(cpuArchitecture, @"M2");
+        BOOL shouldOverride = strstr(name, "arm64e") != NULL || strstr(name, "armv8_3") != NULL;
+        BOOL featureSupported = isARM64EChip;
+
+        if (shouldOverride && *oldlenp >= sizeof(uint32_t)) {
             *(uint32_t *)oldp = featureSupported ? 1 : 0;
-            
+
             static NSMutableSet *loggedOptionalFeatures = nil;
-            if (!loggedOptionalFeatures) {
+            static dispatch_once_t optionalFeatureLogOnce;
+            dispatch_once(&optionalFeatureLogOnce, ^{
                 loggedOptionalFeatures = [NSMutableSet set];
-            }
-            
+            });
+
             NSString *featureName = [NSString stringWithUTF8String:name];
-            if (![loggedOptionalFeatures containsObject:featureName]) {
-                [loggedOptionalFeatures addObject:featureName];
-                PXLog(@"[DeviceSpec] Spoofed %s to %d for %@", name, featureSupported ? 1 : 0, cpuArchitecture);
+            @synchronized(loggedOptionalFeatures) {
+                if (![loggedOptionalFeatures containsObject:featureName]) {
+                    [loggedOptionalFeatures addObject:featureName];
+                    PXLog(@"[DeviceSpec] Spoofed %s to %d for %@", name, featureSupported ? 1 : 0, cpuArchitecture);
+                }
             }
         }
     }
@@ -1885,18 +1940,23 @@ static int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         }
     }
     else if (strcmp(name, "hw.cpu.features") == 0) {
-        // CPU features string - return a realistic feature set
-        NSString *cpuFeatures = @"SSE SSE2 SSE3 SSSE3 SSE4.1 SSE4.2 AES AVX AVX2 BMI1 BMI2 FMA";
-        
-        // For ARM64, use ARM-specific features
-        if (cpuArchitecture) {
-            if ([cpuArchitecture containsString:@"A17"] || [cpuArchitecture containsString:@"A18"] || [cpuArchitecture containsString:@"M"]) {
-                cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS FP16 JSCVT FCMA LRCPC";
-            } else if ([cpuArchitecture containsString:@"A15"] || [cpuArchitecture containsString:@"A16"]) {
-                cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS FP16 JSCVT";
-            } else {
-                cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS";
-            }
+        // Never fall back to an x86 SSE/AVX feature string on ARM.
+        NSString *cpuFeatures = nil;
+        if (PXCPUArchitectureHasToken(cpuArchitecture, @"A17") ||
+            PXCPUArchitectureHasToken(cpuArchitecture, @"A18") ||
+            PXCPUArchitectureHasToken(cpuArchitecture, @"M1") ||
+            PXCPUArchitectureHasToken(cpuArchitecture, @"M2")) {
+            cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS FP16 JSCVT FCMA LRCPC";
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A15") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"A16")) {
+            cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS FP16 JSCVT";
+        } else if (PXCPUArchitectureHasToken(cpuArchitecture, @"A9") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"A10") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"A11") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"A12") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"A13") ||
+                   PXCPUArchitectureHasToken(cpuArchitecture, @"A14")) {
+            cpuFeatures = @"NEON AES SHA1 SHA2 CRC32 ATOMICS";
         }
         
         const char *featuresStr = [cpuFeatures UTF8String];

@@ -1014,48 +1014,45 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
-static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, BOOL *outHandled) {
+    if (outHandled) *outHandled = NO;
     static int loggedCount = 0;
     if (name && loggedCount < 20) {
         loggedCount++;
         PXFileDebugAIDA64Log("[Tweak.sysctlbyname] key=%s oldp=%d oldlenp=%d", name, oldp ? 1 : 0, oldlenp ? 1 : 0);
     }
-    if (!sysctlbyname_orig) return -1;
-    if (px_sysctlbyname_in_hook) return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
-    if (!name) { errno = EINVAL; return -1; }
+    if (!sysctlbyname_orig) return 0;
+    if (px_sysctlbyname_in_hook) return 0;
+    if (!name) return 0;
 
     px_sysctlbyname_in_hook = YES;
 
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID) {
         px_sysctlbyname_in_hook = NO;
-        return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+        return 0;
     }
     
     // Check if we should spoof
     if (!%c(IdentifierManager)) {
         px_sysctlbyname_in_hook = NO;
-        return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+        return 0;
     }
     
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (!manager || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
           px_sysctlbyname_in_hook = NO;
-          return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+          return 0;
     }
 
     NSString *profileId = nil;
     NSNumber *gen = nil;
     NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
 
-    // Capture original value for logging (best effort)
-    char originalValue[256] = "<not available>";
-    size_t originalLen = sizeof(originalValue);
-    // Don't call original if user is just querying size (oldp=NULL) to avoid side effects
-    if (oldp) {
-        (void)sysctlbyname_orig(name, originalValue, &originalLen, NULL, 0);
-    }
+    // Do not sample the original here. This function is a coordinator pre-provider;
+    // unhandled requests must fall through without calling the real syscall twice.
+    const char *originalValue = "<coordinator-original>";
 
     NSString *spoofedValue = nil;
     
@@ -1064,6 +1061,7 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
         const char *v = "Darwin";
         int r = PXWriteSysctlCString(name, v, oldp, oldlenp);
         if (r == 0) PXLog(@"[WeaponX] 🎯 Spoofed sysctlbyname kern.ostype to: %s", v);
+        if (outHandled) *outHandled = YES;
         px_sysctlbyname_in_hook = NO;
         return r;
     }
@@ -1073,12 +1071,12 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
           // Fix Version (runtime-capped): for selected apps, always return runtime value to avoid crashes.
           if (PXFixVersionAppliesToBundle(bundleID)) {
               px_sysctlbyname_in_hook = NO;
-              return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+              return 0;
           }
 
           if (!PXRequireKeysAll(deviceIds, @[@"IOSVersion"], @"sysctlbyname", @"kern.osproductversion", bundleID, profileId, gen)) {
               px_sysctlbyname_in_hook = NO;
-              return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+              return 0;
           }
           spoofedValue = deviceIds[@"IOSVersion"];
       }
@@ -1086,14 +1084,14 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     else if (strcmp(name, "hw.machine") == 0 && [manager isIdentifierEnabled:@"DeviceModel"]) {
         if (!PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"sysctlbyname", @"hw.machine", bundleID, profileId, gen)) {
             px_sysctlbyname_in_hook = NO;
-            return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+            return 0;
         }
         spoofedValue = deviceIds[@"DeviceModel"];
     }
     else if (strcmp(name, "hw.model") == 0 && [manager isIdentifierEnabled:@"DeviceModel"]) {
         if (!PXRequireKeysAny(deviceIds, @[@"HwModel", @"BoardID"], @"sysctlbyname", @"hw.model", bundleID, profileId, gen)) {
             px_sysctlbyname_in_hook = NO;
-            return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+            return 0;
         }
         spoofedValue = deviceIds[@"HwModel"];
         if (!spoofedValue.length) spoofedValue = deviceIds[@"BoardID"];
@@ -1101,7 +1099,7 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     else if (strcmp(name, "hw.product") == 0 && [manager isIdentifierEnabled:@"DeviceModel"]) {
          if (!PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"sysctlbyname", @"hw.product", bundleID, profileId, gen)) {
              px_sysctlbyname_in_hook = NO;
-             return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+             return 0;
          }
          spoofedValue = deviceIds[@"DeviceModel"];
     }
@@ -1111,19 +1109,19 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
          if (strcmp(name, "kern.osversion") == 0) {
              if (!PXRequireKeysAll(deviceIds, @[@"IOSBuild"], @"sysctlbyname", @"kern.osversion", bundleID, profileId, gen)) {
                  px_sysctlbyname_in_hook = NO;
-                 return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+                 return 0;
              }
              spoofedValue = deviceIds[@"IOSBuild"];
          } else if (strcmp(name, "kern.osrelease") == 0) {
              if (!PXRequireKeysAll(deviceIds, @[@"Darwin"], @"sysctlbyname", @"kern.osrelease", bundleID, profileId, gen)) {
                  px_sysctlbyname_in_hook = NO;
-                 return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+                 return 0;
              }
              spoofedValue = deviceIds[@"Darwin"];
          } else {
              if (!PXRequireKeysAll(deviceIds, @[@"KernelVersion"], @"sysctlbyname", @"kern.version", bundleID, profileId, gen)) {
                  px_sysctlbyname_in_hook = NO;
-                 return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+                 return 0;
              }
              spoofedValue = deviceIds[@"KernelVersion"];
          }
@@ -1147,6 +1145,7 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
         if (r == 0) {
             PXLog(@"[WeaponX] 🎯 Spoofed sysctlbyname %s from: %s to: %s", name, originalValue, v);
         }
+        if (outHandled) *outHandled = YES;
         px_sysctlbyname_in_hook = NO;
         return r;
     }
@@ -1177,6 +1176,7 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
                    size_t tmp = 0;
                    (void)sysctlbyname_orig(name, NULL, &tmp, NULL, 0);
                    if (tmp > 0) *oldlenp = tmp;
+                   if (outHandled) *outHandled = YES;
                    px_sysctlbyname_in_hook = NO;
                    return 0;
                 }
@@ -1185,6 +1185,7 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
                if (r == 0) {
                    PXLog(@"[WeaponX] 🎯 Spoofed sysctlbyname CPU count %s to: %lld", name, (long long)cores);
                }
+               if (outHandled) *outHandled = YES;
                px_sysctlbyname_in_hook = NO;
                return r;
             }
@@ -1195,7 +1196,7 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     // (Facebook may check for behavior discrepancy here)
 
     px_sysctlbyname_in_hook = NO;
-    return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+    return 0;
 }
 
 // Hook for uname() system call - used by many apps to detect device model
@@ -4089,7 +4090,8 @@ static char* hook_GSSystemGetSerialNo(void) {
 
         static dispatch_once_t tweakProvOnce;
         dispatch_once(&tweakProvOnce, ^{
-            // Existing hook bodies call original then spoof; as pre returning YES they fully own the path (no double original).
+            // sysctl still uses the legacy terminal body. sysctlbyname below is a selective
+            // pre-provider and returns NO for unhandled keys so coordinator post-providers run.
             [coord registerSysctlProvider:@"tweak.sysctl" priority:PXNativeHookPriorityIdentity pre:^BOOL(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
                 if (!sysctl_orig) return NO;
                 int r = sysctl_hook(name, namelen, oldp, oldlenp, newp, newlen);
@@ -4097,8 +4099,10 @@ static char* hook_GSSystemGetSerialNo(void) {
                 return YES;
             } post:nil];
             [coord registerSysctlBynameProvider:@"tweak.sysctlbyname" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
-                if (!sysctlbyname_orig) return NO;
-                int r = sysctlbyname_hook(name, oldp, oldlenp, newp, newlen);
+                if (!sysctlbyname_orig || !name || newp != NULL || newlen != 0) return NO;
+                BOOL handled = NO;
+                int r = sysctlbyname_hook(name, oldp, oldlenp, newp, newlen, &handled);
+                if (!handled) return NO;
                 if (outResult) *outResult = r;
                 return YES;
             } post:nil];
