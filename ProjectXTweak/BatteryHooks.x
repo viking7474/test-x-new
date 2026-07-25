@@ -4,20 +4,11 @@
 #import "BatteryManager.h"
 #import "IdentifierManager.h"
 #import "PXScope.h"
+#import "PXPaths.h"
 #import "PXFileDebug.h"
+#import <os/lock.h>
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
-
-// Bundle decision cache
-static NSMutableDictionary *cachedBundleDecisions = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes
 
 // Shared profile battery snapshot (level + LPM) — short TTL, one file read
 typedef struct {
@@ -28,8 +19,22 @@ typedef struct {
     NSTimeInterval loadedAt;
 } PXBatterySnapshot;
 
+static os_unfair_lock gBatterySnapshotLock = OS_UNFAIR_LOCK_INIT;
 static PXBatterySnapshot gBatterySnap = {0};
 static const NSTimeInterval kBatterySnapTTL = 2.0;
+
+static PXBatterySnapshot PXReadBatterySnapshot(void) {
+    os_unfair_lock_lock(&gBatterySnapshotLock);
+    PXBatterySnapshot snapshot = gBatterySnap;
+    os_unfair_lock_unlock(&gBatterySnapshotLock);
+    return snapshot;
+}
+
+static void PXPublishBatterySnapshot(PXBatterySnapshot snapshot) {
+    os_unfair_lock_lock(&gBatterySnapshotLock);
+    gBatterySnap = snapshot;
+    os_unfair_lock_unlock(&gBatterySnapshotLock);
+}
 
 static BOOL gHavePostedLPM = NO;
 static BOOL gLastPostedLPM = NO;
@@ -53,46 +58,7 @@ static NSString *getCurrentBundleID(void) {
 
 // Helper: load scoped apps from plist (with cache)
 static NSDictionary *loadScopedApps(void) {
-    @try {
-        if (scopedAppsCache && scopedAppsCacheTimestamp &&
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        if (!validPath) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache;
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
+    return PXScopedAppsSnapshot();
 }
 
 // Helper: check if current app is in scoped apps list and enabled
@@ -164,40 +130,15 @@ static BOOL isBatterySpoofingEnabled(void) {
 }
 
 static NSString *PXProfileBatteryInfoPath(void) {
-    NSArray *candidates = @[
-        @"/var/mobile/Library/WeaponX/Profiles/current_profile_info.plist",
-        @"/private/var/mobile/Library/WeaponX/Profiles/current_profile_info.plist"
-    ];
-    NSDictionary *currentProfileInfo = nil;
-    for (NSString *p in candidates) {
-        currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:p];
-        if (currentProfileInfo[@"ProfileId"]) break;
-    }
-    NSString *profileId = currentProfileInfo[@"ProfileId"];
-    if (![profileId isKindOfClass:[NSString class]] || !profileId.length) return nil;
+    NSString *identityPath = PXActiveProfileIdentityPath();
+    NSString *profileRoot = PXActiveProfileRootPath();
+    if (!identityPath.length || !profileRoot.length) return nil;
 
-    // Prefer identity/battery_info.plist (canonical); fall back to profile-root legacy.
-    NSArray *bases = @[
-        [NSString stringWithFormat:@"/var/mobile/Library/WeaponX/Profiles/%@", profileId],
-        [NSString stringWithFormat:@"/private/var/mobile/Library/WeaponX/Profiles/%@", profileId]
-    ];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *base in bases) {
-        NSString *identityPath = [[base stringByAppendingPathComponent:@"identity"]
-                                  stringByAppendingPathComponent:@"battery_info.plist"];
-        if ([fm fileExistsAtPath:identityPath]) {
-            return identityPath;
-        }
-    }
-    for (NSString *base in bases) {
-        NSString *legacyPath = [base stringByAppendingPathComponent:@"battery_info.plist"];
-        if ([fm fileExistsAtPath:legacyPath]) {
-            return legacyPath;
-        }
-    }
-    // Prefer canonical identity path even if missing (callers handle nil dict)
-    return [[bases.firstObject stringByAppendingPathComponent:@"identity"]
-            stringByAppendingPathComponent:@"battery_info.plist"];
+    NSString *canonical = [identityPath stringByAppendingPathComponent:@"battery_info.plist"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:canonical]) return canonical;
+    NSString *legacy = [profileRoot stringByAppendingPathComponent:@"battery_info.plist"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:legacy]) return legacy;
+    return canonical;
 }
 
 // Load level + LPM from the same profile snapshot (TTL cache).
@@ -205,14 +146,15 @@ static NSString *PXProfileBatteryInfoPath(void) {
 // and the singleton is still initializing.
 static PXBatterySnapshot PXGetBatterySnapshot(void) {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    if (gBatterySnap.loadedAt > 0 && (now - gBatterySnap.loadedAt) < kBatterySnapTTL) {
-        return gBatterySnap;
+    PXBatterySnapshot current = PXReadBatterySnapshot();
+    if (current.loadedAt > 0 && (now - current.loadedAt) < kBatterySnapTTL) {
+        return current;
     }
 
     // Re-entrant call (e.g. UIDevice.batteryLevel during BatteryManager init): 
     // return last snapshot or empty — never touch sharedManager again.
     if (gPXBatterySnapshotDepth > 0) {
-        return gBatterySnap;
+        return current;
     }
 
     gPXBatterySnapshotDepth++;
@@ -268,13 +210,14 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
     } @catch (__unused NSException *e) {
     }
 
-    gBatterySnap = snap;
+    PXPublishBatterySnapshot(snap);
     gPXBatterySnapshotDepth--;
     return snap;
 }
 
 static void PXInvalidateBatterySnapshot(void) {
-    gBatterySnap.loadedAt = 0;
+    PXBatterySnapshot empty = {0};
+    PXPublishBatterySnapshot(empty);
 }
 
 static void PXMaybePostLPMChangeNotification(void) {
@@ -299,6 +242,7 @@ static void batterySettingsChanged(CFNotificationCenterRef center,
                                    CFStringRef name,
                                    const void *object,
                                    CFDictionaryRef userInfo) {
+    PXInvalidateScopeDecisionCache();
     BOOL previousLPM = gHavePostedLPM ? gLastPostedLPM : NO;
     BOOL hadPrevious = gHavePostedLPM;
 

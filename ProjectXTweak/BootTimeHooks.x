@@ -1,6 +1,5 @@
 #import "ProjectX.h"
 #import "UptimeManager.h"
-#import "ProfileManager.h"
 #import "ProjectXLogging.h"
 #import "HookOwnership.h"
 #import "PXNativeHookCoordinator.h"
@@ -16,6 +15,9 @@
 #import <objc/runtime.h>
 
 #import "PXScope.h"
+#import "PXRuntimeUtilities.h"
+#import "PXPaths.h"
+#import <os/lock.h>
 #import "PXFileDebug.h"
 
 // Define the boot time structure for sysctl calls
@@ -29,21 +31,47 @@ static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 
 // Cache for spoofed values to improve performance
+static os_unfair_lock gBootTimeCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSDate *cachedBootTime = nil;
 static NSTimeInterval cachedUptime = 0;
 static NSString *cachedProfilePath = nil;
 static NSDate *cacheTimestamp = nil;
-static const NSTimeInterval kCacheValidityDuration = 30.0; // 30 seconds cache
+static const NSTimeInterval kCacheValidityDuration = 30.0;
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
+static NSDate *PXCachedBootTimeValue(void) {
+    os_unfair_lock_lock(&gBootTimeCacheLock);
+    NSDate *value = cachedBootTime;
+    os_unfair_lock_unlock(&gBootTimeCacheLock);
+    return value;
+}
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 30.0; // 30 seconds
+static NSTimeInterval PXCachedUptimeValue(void) {
+    os_unfair_lock_lock(&gBootTimeCacheLock);
+    NSTimeInterval value = cachedUptime;
+    os_unfair_lock_unlock(&gBootTimeCacheLock);
+    return value;
+}
+
+static void PXInvalidateBootTimeCache(void) {
+    os_unfair_lock_lock(&gBootTimeCacheLock);
+    cachedBootTime = nil;
+    cachedUptime = 0;
+    cachedProfilePath = nil;
+    cacheTimestamp = nil;
+    os_unfair_lock_unlock(&gBootTimeCacheLock);
+}
+
+static void PXBootTimeSettingsChanged(CFNotificationCenterRef center,
+                                      void *observer,
+                                      CFStringRef name,
+                                      const void *object,
+                                      CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXInvalidateBootTimeCache();
+    PXInvalidateScopeDecisionCache();
+}
+
+
 
 // Global flag to track if hooks are installed
 static BOOL hooksInstalled = NO;
@@ -79,67 +107,7 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
-    @try {
-        // Check if cache is valid
-        if (scopedAppsCache && scopedAppsCacheTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        // Initialize cache if needed
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        // Try each possible path for the scoped apps file
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            // Don't log this error too frequently to avoid spam
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) { // 5 minutes
-                PXLog(@"[BootTimeHooks] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Load the plist file safely
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Get the scoped apps dictionary
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Copy the scoped apps to our cache
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
+    return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
@@ -185,95 +153,60 @@ static BOOL shouldSpoofBootTimeForApp(void) {
 
 // Get the current profile path for spoofed values
 static NSString *getCurrentProfilePath(void) {
-    @try {
-        ProfileManager *profileManager = [ProfileManager sharedManager];
-        if (!profileManager) return nil;
-        
-        Profile *currentProfile = [profileManager currentProfile];
-        if (!currentProfile) return nil;
-        
-        // Use the hardcoded profiles directory path since profilesDirectory is private
-        NSString *profilesDir = @"/var/mobile/Library/WeaponX/Profiles";
-        return [profilesDir stringByAppendingPathComponent:currentProfile.profileId];
-    } @catch (NSException *e) {
-        return nil;
-    }
+    return PXActiveProfileRootPath();
 }
 
 // Update cached boot time values from profile data
 static void updateCachedBootTimeValues(void) {
     @try {
         NSString *profilePath = getCurrentProfilePath();
-        if (!profilePath) {
-            // Don't log this too frequently
-            static NSDate *lastLog = nil;
-            if (!lastLog || [[NSDate date] timeIntervalSinceDate:lastLog] > 300.0) {
-                PXLog(@"[BootTimeHooks] ⚠️ No profile path available");
-                lastLog = [NSDate date];
+        if (!profilePath.length) {
+            if (PXLogOnceClaim(@"BootTimeHooks.missingProfile", @"active-profile")) {
+                PXLog(@"[BootTimeHooks] No active profile path available");
             }
             return;
         }
-        
-        // Check if cache is still valid
-        if (cachedBootTime && cacheTimestamp && cachedProfilePath && 
+
+        NSDate *now = [NSDate date];
+        os_unfair_lock_lock(&gBootTimeCacheLock);
+        BOOL valid = cachedBootTime && cacheTimestamp &&
             [cachedProfilePath isEqualToString:profilePath] &&
-            [[NSDate date] timeIntervalSinceDate:cacheTimestamp] < kCacheValidityDuration) {
-            return; // Cache is still valid
-        }
-        
+            [now timeIntervalSinceDate:cacheTimestamp] < kCacheValidityDuration;
+        os_unfair_lock_unlock(&gBootTimeCacheLock);
+        if (valid) return;
+
         UptimeManager *uptimeManager = [UptimeManager sharedManager];
         if (!uptimeManager) return;
-        
-        // Get spoofed boot time and uptime
         NSDate *bootTime = [uptimeManager currentBootTimeForProfile:profilePath];
         NSTimeInterval uptime = [uptimeManager currentUptimeForProfile:profilePath];
-        
         if (!bootTime || uptime <= 0) {
             [uptimeManager generateConsistentUptimeAndBootTimeForProfile:profilePath];
             bootTime = [uptimeManager currentBootTimeForProfile:profilePath];
             uptime = [uptimeManager currentUptimeForProfile:profilePath];
         }
-        
-        // Validate the data before caching
         if (bootTime && uptime > 0) {
-            cachedBootTime = bootTime;
+            os_unfair_lock_lock(&gBootTimeCacheLock);
+            cachedBootTime = [bootTime copy];
             cachedUptime = uptime;
-            cachedProfilePath = profilePath;
-            cacheTimestamp = [NSDate date];
+            cachedProfilePath = [profilePath copy];
+            cacheTimestamp = now;
+            os_unfair_lock_unlock(&gBootTimeCacheLock);
         }
-        
-    } @catch (NSException *e) {
-        // Silent failure to avoid crashes
+    } @catch (__unused NSException *e) {
     }
 }
 
 // Log boot time access attempts for debugging
 static void logBootTimeAccess(const char *method, NSString *bundleID) {
     @try {
-        // Early exit if parameters are invalid
-        if (!method || !bundleID || [bundleID length] == 0) return;
-        
-        static NSMutableSet *loggedMethods = nil;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            loggedMethods = [[NSMutableSet alloc] init];
-        });
-        
-        if (!loggedMethods) return;
-        
-        // Use safer string creation
+        if (!method || !bundleID.length) return;
         NSString *methodStr = [NSString stringWithUTF8String:method];
-        if (!methodStr) return;
-        
+        if (!methodStr.length) return;
         NSString *methodKey = [NSString stringWithFormat:@"%@:%@", methodStr, bundleID];
-        if (!methodKey) return;
-        
-        if (![loggedMethods containsObject:methodKey]) {
-            [loggedMethods addObject:methodKey];
-            PXLog(@"[BootTimeHooks] 🕵️ App %@ accessed boot time via %@", bundleID, methodStr);
+        if (PXLogOnceClaim(@"BootTimeHooks.access", methodKey)) {
+            PXLog(@"[BootTimeHooks] App %@ accessed boot time via %@", bundleID, methodStr);
         }
-    } @catch (NSException *e) {
-        // Silent failure
+    } @catch (__unused NSException *e) {
     }
 }
 
@@ -418,9 +351,10 @@ int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *new
                 updateCachedBootTimeValues();
                 isInsideHook = NO;
                 
-                if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
+                NSDate *bootTime = PXCachedBootTimeValue();
+                if (bootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
                     struct timeval boottime;
-                    boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
+                    boottime.tv_sec = (time_t)[bootTime timeIntervalSince1970];
                     boottime.tv_usec = 0;
                     memcpy(oldp, &boottime, sizeof(boottime));
                     *oldlenp = sizeof(boottime);
@@ -467,9 +401,10 @@ int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
                 updateCachedBootTimeValues();
                 isInsideHook = NO;
                 
-                if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
+                NSDate *bootTime = PXCachedBootTimeValue();
+                if (bootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
                     struct timeval boottime;
-                    boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
+                    boottime.tv_sec = (time_t)[bootTime timeIntervalSince1970];
                     boottime.tv_usec = 0;
                     memcpy(oldp, &boottime, sizeof(boottime));
                     *oldlenp = sizeof(boottime);
@@ -501,9 +436,8 @@ static NSTimeInterval hook_systemUptime(NSProcessInfo *self, SEL _cmd) {
         updateCachedBootTimeValues();
         isInsideHook = NO;
         
-        if (cachedUptime > 0) {
-            return cachedUptime;
-        }
+        NSTimeInterval uptime = PXCachedUptimeValue();
+        if (uptime > 0) return uptime;
     }
     return orig_systemUptime(self, _cmd);
 }
@@ -539,9 +473,10 @@ static void installSystemCallHooks(void) {
                 isInsideHook = NO;
             }
 
-            if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
+            NSDate *bootTime = PXCachedBootTimeValue();
+            if (bootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
                 struct timeval boottime;
-                boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
+                boottime.tv_sec = (time_t)[bootTime timeIntervalSince1970];
                 boottime.tv_usec = 0;
                 memcpy(oldp, &boottime, sizeof(boottime));
                 *oldlenp = sizeof(boottime);
@@ -549,7 +484,7 @@ static void installSystemCallHooks(void) {
                 return YES;
             }
             // Two-call sizing
-            if (!oldp && oldlenp && cachedBootTime) {
+            if (!oldp && oldlenp && bootTime) {
                 *oldlenp = sizeof(struct timeval);
                 if (outResult) *outResult = 0;
                 return YES;
@@ -570,9 +505,10 @@ static void installSystemCallHooks(void) {
                 isInsideHook = NO;
             }
 
-            if (cachedBootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
+            NSDate *bootTime = PXCachedBootTimeValue();
+            if (bootTime && oldp && oldlenp && *oldlenp >= sizeof(struct timeval)) {
                 struct timeval boottime;
-                boottime.tv_sec = (time_t)[cachedBootTime timeIntervalSince1970];
+                boottime.tv_sec = (time_t)[bootTime timeIntervalSince1970];
                 boottime.tv_usec = 0;
                 memcpy(oldp, &boottime, sizeof(boottime));
                 *oldlenp = sizeof(boottime);
@@ -630,6 +566,17 @@ static void installSystemCallHooks(void) {
             
             PXLog(@"[BootTimeHooks] 🎯 Installing minimal system call hooks for scoped app: %@", bundleID);
             
+            CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+            for (NSString *notificationName in @[
+                @"com.hydra.projectx.settings.changed",
+                @"com.hydra.projectx.profileChanged",
+                @"com.hydra.projectx.scopedAppsChanged"
+            ]) {
+                CFNotificationCenterAddObserver(center, NULL, PXBootTimeSettingsChanged,
+                    (__bridge CFStringRef)notificationName, NULL,
+                    CFNotificationSuspensionBehaviorDeliverImmediately);
+            }
+
             // Install the minimal system call hooks that App Store apps actually use immediately
             installSystemCallHooks();
             PXFileDebugAIDA64Log("[BootTime.ctor] exit");

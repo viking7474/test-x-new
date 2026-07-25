@@ -33,6 +33,7 @@ jobs:
           python3 scripts/test_device_spec_p1_2.py
           python3 scripts/test_device_spec_p1_3.py
           python3 scripts/test_device_profile_webgl_p2.py
+          python3 scripts/test_thread_safety_cleanup_p3.py
           node scripts/test_webgl_profile_p2.js
 
       - name: Build and run malicious archive fixtures

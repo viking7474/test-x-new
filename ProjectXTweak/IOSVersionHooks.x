@@ -14,19 +14,13 @@
 #import <dispatch/dispatch.h>
 
 #import "PXScope.h"
+#import "PXPaths.h"
 #import "PXFileDebug.h"
+#import <os/lock.h>
 
 #import "AppVersionHooks.h"
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
 
 // Add a macro for logging with a recognizable prefix
 // Set DEBUG_LOG to 0 to reduce logging in production
@@ -61,11 +55,36 @@ static NSData* (*original_NSData_dataWithContentsOfFile)(Class self, SEL _cmd, N
 static NSDictionary* (*original_NSDictionary_dictionaryWithContentsOfFile)(Class self, SEL _cmd, NSString *path);
 static id (*original_NSString_stringWithContentsOfFile)(Class self, SEL _cmd, NSString *path, NSStringEncoding enc, NSError **error);
 
-// Global variables
-static NSMutableDictionary *cachedBundleDecisions = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes
-static NSMutableDictionary *versionCache = nil;
+// Version cache: immutable dictionary and timestamp are one lock-owned unit.
+static os_unfair_lock gIOSVersionCacheLock = OS_UNFAIR_LOCK_INIT;
+static NSDictionary *versionCache = nil;
 static NSTimeInterval lastVersionLoad = 0;
+
+static NSDictionary *PXIOSVersionCachedInfo(NSTimeInterval now) {
+    os_unfair_lock_lock(&gIOSVersionCacheLock);
+    NSDictionary *cached = (versionCache && (now - lastVersionLoad < VERSION_CACHE_VALID_PERIOD))
+        ? versionCache
+        : nil;
+    os_unfair_lock_unlock(&gIOSVersionCacheLock);
+    return cached;
+}
+
+static NSDictionary *PXIOSVersionPublishInfo(NSDictionary *info, NSTimeInterval loadedAt) {
+    NSDictionary *immutableInfo = [info isKindOfClass:[NSDictionary class]] ? [info copy] : nil;
+    os_unfair_lock_lock(&gIOSVersionCacheLock);
+    versionCache = immutableInfo;
+    lastVersionLoad = immutableInfo ? loadedAt : 0;
+    NSDictionary *published = versionCache;
+    os_unfair_lock_unlock(&gIOSVersionCacheLock);
+    return published;
+}
+
+static void PXIOSVersionInvalidateCache(void) {
+    os_unfair_lock_lock(&gIOSVersionCacheLock);
+    versionCache = nil;
+    lastVersionLoad = 0;
+    os_unfair_lock_unlock(&gIOSVersionCacheLock);
+}
 
 // Throttling variables to prevent excessive function calls
 static uint64_t lastSystemVersionCallTime = 0;
@@ -98,67 +117,7 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
-    @try {
-        // Check if cache is valid
-        if (scopedAppsCache && scopedAppsCacheTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        // Initialize cache if needed
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        // Try each possible path for the scoped apps file
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            // Don't log this error too frequently to avoid spam
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) { // 5 minutes
-                PXLog(@"[IOSVersionHooks] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Load the plist file safely
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Get the scoped apps dictionary
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Copy the scoped apps to our cache
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
+    return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
@@ -207,13 +166,7 @@ static NSSet *criticalSystemBundleIDs() {
             @"com.apple.tccd",
             @"com.apple.launchd",
             @"com.apple.trustd",
-            @"com.apple.CoreTelephony",
-            // Note: The following browser-related bundle IDs are kept in this list
-            // but special handling in isCriticalSystemProcess allows spoofing for them
-            @"com.apple.mobilesafari",
-            @"com.apple.WebKit",
-            @"com.apple.WebKit.WebContent",
-            @"com.apple.WebKit.Networking"
+            @"com.apple.CoreTelephony"
         ]];
     });
     return criticalBundleIDs;
@@ -244,94 +197,55 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 
 // Get the current iOS version information from the profile
 static NSDictionary *getIOSVersionInfo() {
-    static dispatch_once_t onceToken;
-    
+    static dispatch_once_t sourceLogOnce;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    
-    // Check if we have a cached version that's still valid
-    if (versionCache && (now - lastVersionLoad < VERSION_CACHE_VALID_PERIOD)) {
-        return versionCache;
-    }
-    
-    // Read version info directly from device_ids.plist (source of truth)
-    NSString *formattedVersion = nil;
-    NSDictionary *deviceIds = nil;
+    NSDictionary *cached = PXIOSVersionCachedInfo(now);
+    if (cached) return cached;
 
-    NSArray *possibleProfilePaths = @[
-        @"/var/mobile/Library/WeaponX/Profiles",
-        @"/private/var/mobile/Library/WeaponX/Profiles",
-        @"/var/mobile/Library/WeaponX/Profiles"
-    ];
-
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    for (NSString *profileBasePath in possibleProfilePaths) {
-        if ([fileManager fileExistsAtPath:profileBasePath]) {
-            NSString *currentProfileInfoPath = [profileBasePath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:currentProfileInfoPath];
-            NSString *profileId = currentProfileInfo[@"ProfileId"];
-            if (profileId) {
-                NSString *identityDir = [[profileBasePath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                if (deviceIds.count > 0) {
-                    formattedVersion = deviceIds[@"IOSVersion"];
-                    break;
-                }
-            }
-        }
-    }
+    NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIds = deviceIDsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
+        : nil;
+    NSString *formattedVersion = [deviceIds[@"IOSVersion"] isKindOfClass:[NSString class]]
+        ? deviceIds[@"IOSVersion"]
+        : nil;
 
     if (deviceIds.count > 0) {
         NSString *version = nil;
-        NSString *build = deviceIds[@"IOSBuild"];
-        if ([formattedVersion isKindOfClass:[NSString class]] && [formattedVersion containsString:@"("]) {
-            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"([0-9.]+)\\s*\\(([^)]+)\\)" options:0 error:nil];
+        NSString *build = [deviceIds[@"IOSBuild"] isKindOfClass:[NSString class]] ? deviceIds[@"IOSBuild"] : nil;
+        if ([formattedVersion containsString:@"("]) {
+            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"([0-9.]+)\s*\(([^)]+)\)" options:0 error:nil];
             NSTextCheckingResult *match = [regex firstMatchInString:formattedVersion options:0 range:NSMakeRange(0, formattedVersion.length)];
             if (match && match.numberOfRanges == 3) {
                 version = [formattedVersion substringWithRange:[match rangeAtIndex:1]];
-                if (!build.length) {
-                    build = [formattedVersion substringWithRange:[match rangeAtIndex:2]];
-                }
+                if (!build.length) build = [formattedVersion substringWithRange:[match rangeAtIndex:2]];
             }
         }
-        if (!version.length && [formattedVersion isKindOfClass:[NSString class]] && formattedVersion.length > 0) {
-            version = formattedVersion;
-        }
+        if (!version.length && formattedVersion.length) version = formattedVersion;
 
-        NSString *darwin = deviceIds[@"Darwin"];
-        NSString *xnu = deviceIds[@"XNU"];
-        NSString *kernel = deviceIds[@"KernelVersion"];
-
+        NSString *darwin = [deviceIds[@"Darwin"] isKindOfClass:[NSString class]] ? deviceIds[@"Darwin"] : nil;
+        NSString *xnu = [deviceIds[@"XNU"] isKindOfClass:[NSString class]] ? deviceIds[@"XNU"] : nil;
+        NSString *kernel = [deviceIds[@"KernelVersion"] isKindOfClass:[NSString class]] ? deviceIds[@"KernelVersion"] : nil;
         if (version.length && build.length && darwin.length && xnu.length && kernel.length) {
-            NSDictionary *versionInfo = @{
+            NSDictionary *published = PXIOSVersionPublishInfo(@{
                 @"version": version,
                 @"build": build,
                 @"darwin": darwin,
                 @"xnu": xnu,
                 @"kernel_version": kernel
-            };
-
-            versionCache = [versionInfo copy];
-            lastVersionLoad = now;
-
-            dispatch_once(&onceToken, ^{
+            }, now);
+            dispatch_once(&sourceLogOnce, ^{
                 IOSVERSION_LOG(@"Using iOS version from device_ids: %@ (%@)", version, build);
             });
-
-            return versionCache;
+            return published;
         }
-
-        IOSVERSION_LOG(@"❌ device_ids.plist missing required iOS fields (version/build/darwin/xnu/kernel)");
+        IOSVERSION_LOG(@"device_ids.plist missing required iOS fields (version/build/darwin/xnu/kernel)");
     }
 
-    // Fallback to IOSVersionInfo current (no synthetic generation)
     NSDictionary *current = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
-    if (current && current[@"version"] && current[@"build"] && current[@"darwin"] && current[@"xnu"] && current[@"kernel_version"]) {
-        versionCache = [current copy];
-        lastVersionLoad = now;
-        return versionCache;
+    if (current[@"version"] && current[@"build"] && current[@"darwin"] && current[@"xnu"] && current[@"kernel_version"]) {
+        return PXIOSVersionPublishInfo(current, now);
     }
-
     return nil;
 }
 
@@ -493,7 +407,7 @@ static BOOL PXUADebugScopeAllows(NSString *bundleID, NSString *processName) {
     PXUADebugEnsure();
     if (!gUADebug.masterEnabled) return YES;
 
-    BOOL isSafari = [bundleID isEqualToString:@"com.apple.mobilesafari"];
+    BOOL isSafari = PXIsSafariBrowserBundleIdentifier(bundleID);
     BOOL isSafariViewService = [bundleID isEqualToString:@"com.apple.SafariViewService"] ||
                                ([processName isKindOfClass:[NSString class]] && [processName containsString:@"SafariViewService"]);
     BOOL isWebKit = ([bundleID hasPrefix:@"com.apple.WebKit"] ||
@@ -1336,7 +1250,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             PXUADebugTrace(@"SFUserAgentController.userAgentWithDomain", bundleID, proc, domain, @"skip", @"reason=toggle", originalUA, nil);
             return originalUA;
         }
-        if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) {
+        if (PXIsSafariBrowserBundleIdentifier(bundleID)) {
             if (PXUAHostIsSensitive(domain)) {
                 PXUADebugTrace(@"SFUserAgentController.userAgentWithDomain", bundleID, proc, domain, @"skip", @"reason=sensitive", originalUA, nil);
                 return originalUA;
@@ -1376,7 +1290,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             PXUADebugTrace(@"SFUserAgentController.defaultUserAgentString", bundleID, proc, nil, @"skip", @"reason=toggle", originalUA, nil);
             return originalUA;
         }
-        if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) {
+        if (PXIsSafariBrowserBundleIdentifier(bundleID)) {
             // Avoid global UA changes for Safari; per-request/domain hooks handle spoofing.
             // In FullSpoof test mode, allow default UA mutation to force failures.
             if (PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack) && !PXFullSpoofTestModeEnabled()) {
@@ -1894,14 +1808,8 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
 
 // Settings changed notification handler
 static void settingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear cached decisions
-    if (cachedBundleDecisions) {
-        [cachedBundleDecisions removeAllObjects];
-    }
-    
-    // Clear version cache
-    versionCache = nil;
-    lastVersionLoad = 0;
+    PXInvalidateScopeDecisionCache();
+    PXIOSVersionInvalidateCache();
 
     // Clear UA debug cache (runtime toggles)
     PXUADebugInvalidate();
@@ -1937,9 +1845,7 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
     if ([criticalSystemBundleIDs() containsObject:bundleID]) {
         // Allow spoofing for Safari and WebKit processes, even though they're in the critical list
         // This is necessary to spoof browser user agents
-        if ([bundleID isEqualToString:@"com.apple.mobilesafari"] ||
-            [bundleID isEqualToString:@"com.apple.SafariViewService"] ||
-            [bundleID hasPrefix:@"com.apple.WebKit"]) {
+        if (PXIsSafariStackProcess(bundleID, proc)) {
             return NO;
         }
         return YES;
@@ -1948,9 +1854,7 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
     // Check for system app prefixes
     if ([bundleID hasPrefix:@"com.apple."]) {
         // Allow spoofing for Safari and WebKit processes
-        if ([bundleID isEqualToString:@"com.apple.mobilesafari"] ||
-            [bundleID isEqualToString:@"com.apple.SafariViewService"] ||
-            [bundleID hasPrefix:@"com.apple.WebKit"]) {
+        if (PXIsSafariStackProcess(bundleID, proc)) {
             return NO;
         }
         return YES;
@@ -1979,8 +1883,7 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
     
     // Clear other caches
     cachedSystemVersionResult = nil;
-    cachedBundleDecisions = nil;
-    versionCache = nil;
+    PXIOSVersionInvalidateCache();
 }
 
 %ctor {
@@ -2007,9 +1910,7 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         
         IOSVERSION_LOG(@"App %@ is scoped, installing iOS version hooks", bundleID);
         
-        // Initialize caches
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-        versionCache = nil;
+        PXIOSVersionInvalidateCache();
         
         // Register for settings change notifications
         CFNotificationCenterAddObserver(
@@ -2031,12 +1932,20 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
             CFNotificationSuspensionBehaviorDeliverImmediately
         );
         
-        // Register for profile change notifications
+        // Register for profile and scoped-app changes.
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,
             settingsChanged,
             CFSTR("com.hydra.projectx.profileChanged"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            settingsChanged,
+            CFSTR("com.hydra.projectx.scopedAppsChanged"),
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately
         );
@@ -2112,22 +2021,9 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
             IOSVERSION_LOG(@"⚠️ Failed to open CoreFoundation framework");
         }
         
-        // Hook sysctlbyname for kernel version checks
-        PXFileDebugAIDA64Log("[IOSVersion.ctor] before dlopen libSystem.B");
-        void *libSystemHandle = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
-        PXFileDebugAIDA64Log("[IOSVersion.ctor] after dlopen libSystem.B handle=%d", libSystemHandle ? 1 : 0);
-        if (libSystemHandle) {
-            void *sysctlbynamePtr = dlsym(libSystemHandle, "sysctlbyname");
-            if (sysctlbynamePtr) {
-                // Owned by PXNativeHookCoordinator — Tweak identity provider handles version keys.
-                IOSVERSION_LOG(@"Skipping sysctlbyname hook (coordinator/owner handles)");
-            } else {
-                IOSVERSION_LOG(@"⚠️ Failed to find sysctlbyname symbol");
-            }
-        } else {
-            IOSVERSION_LOG(@"⚠️ Failed to open libSystem.B.dylib");
-        }
-        
+        // sysctlbyname is owned by PXNativeHookCoordinator/Tweak identity provider.
+        IOSVERSION_LOG(@"Skipping sysctlbyname hook (coordinator/owner handles)");
+
         // Set up hooks for direct file access methods to catch SystemVersion.plist reads
         IOSVERSION_LOG(@"Setting up hooks for direct file access methods");
         

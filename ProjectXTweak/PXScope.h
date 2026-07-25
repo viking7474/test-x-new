@@ -32,6 +32,15 @@ BOOL PXWebKitHostIsScopedForSpoofing(void);
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName);
 BOOL PXAllowUnscopedSafariStack(void);
 
+/// Immutable scoped-app dictionary owned by PXScope's snapshot.
+NSDictionary<NSString *, NSDictionary *> *PXScopedAppsSnapshot(void);
+BOOL PXBundleIsEnabledInScope(NSString *bundleID);
+
+/// Canonical browser bundle identifier prefixes used by all tweak modules.
+NSArray<NSString *> *PXBrowserBundleIdentifierPrefixes(void);
+BOOL PXIsBrowserBundleIdentifier(NSString *bundleID);
+BOOL PXIsSafariBrowserBundleIdentifier(NSString *bundleID);
+
 BOOL PXScopeIsReadingSecuritySettings(void);
 BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID);
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options);

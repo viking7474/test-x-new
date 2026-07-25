@@ -7,24 +7,21 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 
 #import "PXScope.h"
+#import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
 
 // Function declarations
 static NSString *getSpoofedUserDefaultsUUID(void);
 static BOOL isUUIDKey(NSString *key);
 static id processDictionaryValues(id object);
 
-// Global variables to track state
-static NSMutableDictionary *cachedBundleDecisions = nil;
-
 // Recursion guard to prevent infinite loops when getSpoofedUserDefaultsUUID accesses NSUserDefaults
 static __thread BOOL isInsideHook = NO;
 
 // Callback function for notifications that clear the cache
 static void clearCacheCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear cached decisions
-    if (cachedBundleDecisions) {
-        [cachedBundleDecisions removeAllObjects];
-    }
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXInvalidateScopeDecisionCache();
 }
 
 // Helper function to check if we should spoof for this bundle ID (with caching)
@@ -47,51 +44,24 @@ static NSString *getSpoofedUserDefaultsUUID(void) {
         return uuid;
     }
     
-    // If UserDefaultsUUIDManager failed, read directly from active profile
-    NSString *activeProfileId = nil;
-    
-    // Get active profile ID from central profile info
-    NSString *centralInfoPath = @"/var/mobile/Library/WeaponX/Profiles/current_profile_info.plist";
-    NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-    if (centralInfo && centralInfo[@"ProfileId"]) {
-        activeProfileId = centralInfo[@"ProfileId"];
-    } else {
-        // Try fallback location for profile ID
-        NSString *fallbackPath = @"/var/mobile/Library/WeaponX/active_profile_info.plist";
-        NSDictionary *fallbackInfo = [NSDictionary dictionaryWithContentsOfFile:fallbackPath];
-        if (fallbackInfo && fallbackInfo[@"ProfileId"]) {
-            activeProfileId = fallbackInfo[@"ProfileId"];
-        }
+    // If UserDefaultsUUIDManager failed, read directly from the active profile.
+    NSString *identityDir = PXActiveProfileIdentityPath();
+    NSString *deviceIdsPath = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIds = deviceIdsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath]
+        : nil;
+    NSString *profileUUID = PXProfileString(deviceIds[@"UserDefaultsUUID"]);
+    if (profileUUID.length) return profileUUID;
+
+    if (identityDir.length) {
+        NSDictionary *userDefaultsInfo = [NSDictionary dictionaryWithContentsOfFile:
+            [identityDir stringByAppendingPathComponent:@"userdefaults_uuid.plist"]];
+        profileUUID = PXProfileString(userDefaultsInfo[@"value"]);
+        if (profileUUID.length) return profileUUID;
     }
-    
-    if (activeProfileId) {
-        // Build path to the profile's identity directory
-        NSString *profileDir = [NSString stringWithFormat:@"/var/mobile/Library/WeaponX/Profiles/%@", activeProfileId];
-        NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
-        
-        // Read from device_ids.plist first (combined identifiers file)
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-        if (deviceIds && deviceIds[@"UserDefaultsUUID"]) {
-            PXLog(@"[WeaponX] 🔍 Found UserDefaults UUID in device_ids.plist: %@", deviceIds[@"UserDefaultsUUID"]);
-            return deviceIds[@"UserDefaultsUUID"];
-        }
-        
-        // Try specific userdefaults_uuid.plist as fallback
-        NSString *userDefaultsUUIDPath = [identityDir stringByAppendingPathComponent:@"userdefaults_uuid.plist"];
-        NSDictionary *userDefaultsInfo = [NSDictionary dictionaryWithContentsOfFile:userDefaultsUUIDPath];
-        if (userDefaultsInfo && userDefaultsInfo[@"value"]) {
-            PXLog(@"[WeaponX] 🔍 Found UserDefaults UUID in userdefaults_uuid.plist: %@", userDefaultsInfo[@"value"]);
-            return userDefaultsInfo[@"value"];
-        }
-        
-        PXLog(@"[WeaponX] ⚠️ Could not find UserDefaults UUID in profile %@", activeProfileId);
-    } else {
-        PXLog(@"[WeaponX] ⚠️ Could not determine active profile ID");
-    }
-    
+
     // If all else fails, use a persistent fallback UUID
-    NSString *fallbackUUIDPath = @"/var/mobile/Library/WeaponX/fallback_userdefaults_uuid.plist";
+    NSString *fallbackUUIDPath = [PXWeaponXBasePath() stringByAppendingPathComponent:@"fallback_userdefaults_uuid.plist"];
     NSMutableDictionary *fallbackDict = [NSMutableDictionary dictionaryWithContentsOfFile:fallbackUUIDPath];
     
     if (!fallbackDict) {
@@ -610,9 +580,6 @@ static BOOL isUUIDKey(NSString *key) {
             return;
         }
         
-        // Initialize cache with retained object
-        cachedBundleDecisions = [[NSMutableDictionary alloc] init];
-        
         // Register for settings change notifications
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
@@ -643,6 +610,15 @@ static BOOL isUUIDKey(NSString *key) {
             CFNotificationSuspensionBehaviorDeliverImmediately
         );
         
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            clearCacheCallback,
+            CFSTR("com.hydra.projectx.scopedAppsChanged"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+
         // Activate NSUserDefaults hooks only after scope check
         %init(UserDefaultsHooks);
         

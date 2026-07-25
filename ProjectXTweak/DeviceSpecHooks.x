@@ -28,6 +28,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXRuntimeUtilities.h"
 #import "PXFileDebug.h"
 
 typedef NS_OPTIONS(uint32_t, PXDeviceCPUFeatureFlags) {
@@ -179,7 +180,6 @@ static uint64_t gDeviceSpecSnapshotGeneration;
 static __thread BOOL gDeviceSpecSnapshotBuildInProgress;
 
 // Cache to track which memory hooks have been called for logging.
-static NSMutableSet *hookedMemoryAPIs;
 
 // Helper for logging memory hook invocations only once
 static void logMemoryHook(NSString *apiName);
@@ -817,13 +817,6 @@ static CGSize parseResolution(NSString *resolutionString) {
 
 // Check if current process is a WebKit/WebContent process that needs resolution spoofing
 static BOOL shouldSpoofResolutionForCurrentProcess() {
-    static BOOL cachedDecision = NO;
-    static BOOL hasCheckedProcess = NO;
-    
-    if (hasCheckedProcess) {
-        return cachedDecision;
-    }
-    
     // IMPORTANT:
     // By default, do NOT spoof UIScreen bounds/scale for Safari/Auth stack processes.
     // In SafariViewService/WebKit services, spoofing UIScreen can desync touch hit-testing
@@ -832,8 +825,6 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     NSString *procName = [[NSProcessInfo processInfo] processName];
     if (PXProcessIsAllowedForSpoofing(bid, procName, PXScopeOptionAllowSafariAuthStack) && PXIsSafariStackProcess(bid, procName) && !PXFullSpoofTestModeEnabled()) {
-        hasCheckedProcess = YES;
-        cachedDecision = NO;
         return NO;
     }
 
@@ -843,22 +834,12 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
                         [processName containsString:@"WebContent"] ||
                         [processName containsString:@"Safari"];
                          
-    // For Safari and web-focused apps, continue spoofing
+    // For browser bundles and web helper processes, continue spoofing.
     NSString *bundleID = bid;
-    BOOL isWebApp = [bundleID hasPrefix:@"com.apple.mobilesafari"] ||
-                    [bundleID hasPrefix:@"com.google.chrome"] ||
-                    [bundleID hasPrefix:@"org.mozilla.ios.Firefox"] ||
-                    [bundleID hasPrefix:@"com.brave.ios"] ||
-                    [bundleID hasPrefix:@"com.opera"];
-    
-    // Cache the decision
-    hasCheckedProcess = YES;
-    cachedDecision = isWebProcess || isWebApp;
-    
-    PXLog(@"[DeviceSpec] Resolution spoofing for process '%@' (%@): %@", 
-          processName, bundleID, cachedDecision ? @"ENABLED" : @"DISABLED");
-          
-    return cachedDecision;
+    BOOL decision = isWebProcess || PXIsBrowserBundleIdentifier(bundleID);
+    PXLog(@"[DeviceSpec] Resolution spoofing for process '%@' (%@): %@",
+          processName, bundleID, decision ? @"ENABLED" : @"DISABLED");
+    return decision;
 }
 
 %hook UIScreen
@@ -1173,14 +1154,8 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     }
     
     if (spoofedValue) {
-        static NSMutableSet *loggedParameters = nil;
-        if (!loggedParameters) {
-            loggedParameters = [NSMutableSet set];
-        }
-        
         NSString *paramKey = [NSString stringWithFormat:@"%u", pname];
-        if (![loggedParameters containsObject:paramKey]) {
-            [loggedParameters addObject:paramKey];
+        if (PXLogOnceClaim(@"DeviceSpec.WebGLParameter", paramKey)) {
             PXLog(@"[DeviceSpec] Spoofing WebGL parameter 0x%X from '%@' to '%@'", pname, original, spoofedValue);
         }
         
@@ -1437,33 +1412,23 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                                      orig_sysctlbyname_device_spec ? 1 : 0);
             });
             
-            // Initialize memory hook function pointers for scoped apps only
-            PXFileDebugAIDA64Log("[DeviceSpec.ctor] before dlopen libSystem");
-            void *libSystem = dlopen("/usr/lib/libSystem.dylib", RTLD_NOW);
-            PXFileDebugAIDA64Log("[DeviceSpec.ctor] after dlopen libSystem handle=%d", libSystem ? 1 : 0);
-            if (libSystem) {
-                // Hook host_statistics64 for VM stats spoofing
-                orig_host_statistics64 = dlsym(libSystem, "host_statistics64");
-                if (orig_host_statistics64) {
-                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook host_statistics64");
-                    MSHookFunction(orig_host_statistics64, (void *)hook_host_statistics64, (void **)&orig_host_statistics64);
-                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook host_statistics64");
-                    PXLog(@"[DeviceSpec] Successfully hooked host_statistics64 for memory stats spoofing");
-                }
-                
-                // Hook NXGetLocalArchInfo for CPU architecture spoofing
-                orig_nx_get_local_arch_info = dlsym(libSystem, "NXGetLocalArchInfo");
-                if (orig_nx_get_local_arch_info) {
-                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook NXGetLocalArchInfo");
-                    MSHookFunction((void *)orig_nx_get_local_arch_info,
-                                   (void *)hook_nx_get_local_arch_info,
-                                   (void **)&orig_nx_get_local_arch_info);
-                    PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook NXGetLocalArchInfo");
-                    PXLog(@"[DeviceSpec] Successfully hooked NXGetLocalArchInfo for CPU architecture spoofing");
-                }
-                
-                dlclose(libSystem);
-                PXFileDebugAIDA64Log("[DeviceSpec.ctor] after dlclose libSystem");
+            // libSystem is already loaded in every process; resolve through RTLD_DEFAULT.
+            orig_host_statistics64 = dlsym(RTLD_DEFAULT, "host_statistics64");
+            if (orig_host_statistics64) {
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook host_statistics64");
+                MSHookFunction(orig_host_statistics64, (void *)hook_host_statistics64, (void **)&orig_host_statistics64);
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook host_statistics64");
+                PXLog(@"[DeviceSpec] Successfully hooked host_statistics64 for memory stats spoofing");
+            }
+
+            orig_nx_get_local_arch_info = dlsym(RTLD_DEFAULT, "NXGetLocalArchInfo");
+            if (orig_nx_get_local_arch_info) {
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook NXGetLocalArchInfo");
+                MSHookFunction((void *)orig_nx_get_local_arch_info,
+                               (void *)hook_nx_get_local_arch_info,
+                               (void **)&orig_nx_get_local_arch_info);
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook NXGetLocalArchInfo");
+                PXLog(@"[DeviceSpec] Successfully hooked NXGetLocalArchInfo for CPU architecture spoofing");
             }
             
             // Initialize Objective-C hooks for scoped apps only
@@ -1483,22 +1448,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 
 // Helper for logging memory hook invocations only once
 static void logMemoryHook(NSString *apiName) {
-    if (!apiName.length) return;
-
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        hookedMemoryAPIs = [NSMutableSet set];
-    });
-
-    BOOL shouldLog = NO;
-    @synchronized(hookedMemoryAPIs) {
-        if (![hookedMemoryAPIs containsObject:apiName]) {
-            [hookedMemoryAPIs addObject:apiName];
-            shouldLog = YES;
-        }
-    }
-
-    if (shouldLog) {
+    if (PXLogOnceClaim(@"DeviceSpec.MemoryAPI", apiName)) {
         PXLog(@"[DeviceSpec] Memory spoofing API '%@' was accessed", apiName);
     }
 }

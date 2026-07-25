@@ -8,25 +8,24 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 
 #import "PXScope.h"
+#import "PXRuntimeUtilities.h"
+#import "PXPaths.h"
+#import <os/lock.h>
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
 
 // Global variables to track state
-static NSMutableDictionary *cachedBundleDecisions = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes
 static NSMutableDictionary *customChangeCountMap = nil; // Store custom change counts per app
 static NSMutableDictionary *lastKnownPasteboardData = nil; // Cache pasteboard content hash
 
-// One-time log set for unsupported optional selectors
-static NSMutableSet *loggedUnsupportedSelectors = nil;
+static os_unfair_lock gPasteboardStateLock = OS_UNFAIR_LOCK_INIT;
+static void PXEnsurePasteboardState(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        customChangeCountMap = [NSMutableDictionary dictionary];
+        lastKnownPasteboardData = [NSMutableDictionary dictionary];
+    });
+}
 
 // Forward declarations
 static NSString *getCurrentBundleID(void);
@@ -41,15 +40,12 @@ static NSString *deterministicPasteboardName(NSString *originalName, NSString *u
 
 // Callback function for notifications that clear the cache
 static void clearCacheCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    if (cachedBundleDecisions) {
-        [cachedBundleDecisions removeAllObjects];
-    }
-    if (customChangeCountMap) {
-        [customChangeCountMap removeAllObjects];
-    }
-    if (lastKnownPasteboardData) {
-        [lastKnownPasteboardData removeAllObjects];
-    }
+    PXInvalidateScopeDecisionCache();
+    PXEnsurePasteboardState();
+    os_unfair_lock_lock(&gPasteboardStateLock);
+    [customChangeCountMap removeAllObjects];
+    [lastKnownPasteboardData removeAllObjects];
+    os_unfair_lock_unlock(&gPasteboardStateLock);
 }
 
 #pragma mark - Scoped Apps Helper Functions
@@ -67,60 +63,7 @@ static NSString *getCurrentBundleID(void) {
 }
 
 static NSDictionary *loadScopedApps(void) {
-    @try {
-        if (scopedAppsCache && scopedAppsCacheTimestamp &&
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) {
-                PXLog(@"[PasteboardHooks] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
+    return PXScopedAppsSnapshot();
 }
 
 static BOOL isInScopedAppsList(void) {
@@ -176,29 +119,11 @@ static NSString *getSpoofedPasteboardUUID(void) {
         return uuid;
     }
     
-    NSString *identityDir = nil;
-    NSArray *possibleProfilePaths = @[
-        @"/var/mobile/Library/WeaponX/Profiles",
-        @"/private/var/mobile/Library/WeaponX/Profiles"
-    ];
-    
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    for (NSString *profileBasePath in possibleProfilePaths) {
-        if ([fileManager fileExistsAtPath:profileBasePath]) {
-            NSString *currentProfileInfoPath = [profileBasePath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:currentProfileInfoPath];
-            NSString *profileId = currentProfileInfo[@"ProfileId"];
-            
-            if (profileId) {
-                identityDir = [[profileBasePath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-                break;
-            }
-        }
-    }
-    
-    if (identityDir) {
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+    NSString *identityDir = PXActiveProfileIdentityPath();
+    NSString *deviceIdsPath = PXActiveProfileDeviceIDsPath();
+
+    if (identityDir.length) {
+        NSDictionary *deviceIds = deviceIdsPath.length ? [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath] : nil;
         NSString *value = deviceIds[@"PasteboardUUID"];
         
         if (value) {
@@ -220,27 +145,21 @@ static NSString *getSpoofedPasteboardUUID(void) {
 }
 
 static NSInteger getCustomChangeCount(NSString *bundleID, NSInteger originalCount) {
-    if (!customChangeCountMap) {
-        customChangeCountMap = [NSMutableDictionary dictionary];
-    }
-    
+    PXEnsurePasteboardState();
+    os_unfair_lock_lock(&gPasteboardStateLock);
     NSNumber *currentValue = customChangeCountMap[bundleID];
-    if (!currentValue) {
-        customChangeCountMap[bundleID] = @(originalCount);
-        return originalCount;
-    }
-    
-    return [currentValue integerValue];
+    if (!currentValue) customChangeCountMap[bundleID] = @(originalCount);
+    NSInteger result = currentValue ? [currentValue integerValue] : originalCount;
+    os_unfair_lock_unlock(&gPasteboardStateLock);
+    return result;
 }
 
 static void incrementCustomChangeCount(NSString *bundleID) {
-    if (!customChangeCountMap) {
-        customChangeCountMap = [NSMutableDictionary dictionary];
-    }
-    
+    PXEnsurePasteboardState();
+    os_unfair_lock_lock(&gPasteboardStateLock);
     NSNumber *currentValue = customChangeCountMap[bundleID];
-    NSInteger newValue = currentValue ? [currentValue integerValue] + 1 : 1;
-    customChangeCountMap[bundleID] = @(newValue);
+    customChangeCountMap[bundleID] = @([currentValue integerValue] + 1);
+    os_unfair_lock_unlock(&gPasteboardStateLock);
 }
 
 static NSString *getPasteboardContentHash(UIPasteboard *pasteboard) {
@@ -278,16 +197,14 @@ static NSString *getPasteboardContentHash(UIPasteboard *pasteboard) {
 
 static BOOL hasPasteboardContentChanged(NSString *bundleID, UIPasteboard *pasteboard) {
     @try {
-        if (!lastKnownPasteboardData) {
-            lastKnownPasteboardData = [NSMutableDictionary dictionary];
-        }
-        
+        PXEnsurePasteboardState();
         NSString *newHash = getPasteboardContentHash(pasteboard);
+        os_unfair_lock_lock(&gPasteboardStateLock);
         NSString *oldHash = lastKnownPasteboardData[bundleID];
-        
         lastKnownPasteboardData[bundleID] = newHash;
-        
-        return !oldHash || ![oldHash isEqualToString:newHash];
+        BOOL changed = !oldHash || ![oldHash isEqualToString:newHash];
+        os_unfair_lock_unlock(&gPasteboardStateLock);
+        return changed;
         
     } @catch (NSException *exception) {
         PXLog(@"[WeaponX] ⚠️ Exception checking pasteboard changes: %@", exception);
@@ -686,16 +603,8 @@ static void hook_setItems(id self, SEL _cmd, NSArray *items) {
 
 // Log unsupported-selector once, then continue.
 static void logUnsupportedSelectorOnce(NSString *selectorName) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        loggedUnsupportedSelectors = [NSMutableSet set];
-    });
-    
-    @synchronized(loggedUnsupportedSelectors) {
-        if (![loggedUnsupportedSelectors containsObject:selectorName]) {
-            [loggedUnsupportedSelectors addObject:selectorName];
-            PXLog(@"[PasteboardHooks] unsupported-selector: %@", selectorName);
-        }
+    if (PXLogOnceClaim(@"PasteboardHooks.unsupportedSelector", selectorName)) {
+        PXLog(@"[PasteboardHooks] unsupported-selector: %@", selectorName);
     }
 }
 
@@ -898,10 +807,7 @@ static void installPasteboardHooks(void) {
             return;
         }
         
-        // Initialize caches
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-        customChangeCountMap = [NSMutableDictionary dictionary];
-        lastKnownPasteboardData = [NSMutableDictionary dictionary];
+        PXEnsurePasteboardState();
         
         // Register for settings change notifications
         CFNotificationCenterAddObserver(
@@ -919,6 +825,14 @@ static void installPasteboardHooks(void) {
             NULL,
             clearCacheCallback,
             CFSTR("com.hydra.projectx.profileChanged"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            clearCacheCallback,
+            CFSTR("com.hydra.projectx.scopedAppsChanged"),
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately
         );

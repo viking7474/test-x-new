@@ -39,7 +39,10 @@
 #import "PXNativeHookCoordinator.h"
 #import "PXScope.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXRuntimeUtilities.h"
+#import "PXPaths.h"
 #import "PXFileDebug.h"
+#import <os/lock.h>
 #import <CoreFoundation/CoreFoundation.h>
 
 __attribute__((constructor(101))) static void PXProjectXTweakEarlyLoadMarker(void) {
@@ -565,8 +568,6 @@ BOOL gOwnerMGInstalled = NO;
 BOOL gOwnerCFSystemInstalled = NO;
 
 // Missing-key logging
-static NSMutableSet *gMissingLogSeen = nil;
-
 // Security settings helpers
 static id PXReadSecuritySettingObject(NSString *key) {
     if (!key.length) return nil;
@@ -627,7 +628,6 @@ static void PXHookMissingLogLine(NSString *line) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         lock = [NSObject new];
-        gMissingLogSeen = [NSMutableSet set];
     });
     NSString *path = PXHookMissingLogPath();
     NSString *out = [line stringByAppendingString:@"\n"];
@@ -651,21 +651,9 @@ static void PXHookMissingLogLine(NSString *line) {
 }
 
 static void PXHookMissingLogOnce(NSString *signature, NSString *line) {
-    if (!signature.length) {
+    if (!signature.length || PXLogOnceClaim(@"Tweak.missingKey", signature)) {
         PXHookMissingLogLine(line);
-        return;
     }
-    static NSObject *lock = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        lock = [NSObject new];
-        if (!gMissingLogSeen) gMissingLogSeen = [NSMutableSet set];
-    });
-    @synchronized(lock) {
-        if ([gMissingLogSeen containsObject:signature]) return;
-        [gMissingLogSeen addObject:signature];
-    }
-    PXHookMissingLogLine(line);
 }
 
 static NSString *PXISO8601Now(void) {
@@ -678,63 +666,68 @@ static NSString *PXISO8601Now(void) {
     return [df stringFromDate:[NSDate date]];
 }
 
-// Snapshot loader/cache
+// Immutable device_ids snapshot cache. Disk reads happen outside the lock;
+// publication and invalidation are serialized by gDeviceIDsSnapshotLock.
+static os_unfair_lock gDeviceIDsSnapshotLock = OS_UNFAIR_LOCK_INIT;
 static NSDictionary *gCachedDeviceIds = nil;
 static NSString *gCachedProfileId = nil;
 static NSNumber *gCachedGen = nil;
 
-static NSString *PXCurrentProfileId(void) {
-    NSArray<NSString *> *bases = @[
-        @"/var/mobile/Library/WeaponX/Profiles",
-        @"/private/var/mobile/Library/WeaponX/Profiles"
-    ];
-    for (NSString *base in bases) {
-        NSString *infoPath = [base stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
-        NSString *pid = info[@"ProfileId"];
-        if (pid.length) return pid;
-    }
-    return nil;
+static void PXInvalidateDeviceIdsSnapshot(void) {
+    os_unfair_lock_lock(&gDeviceIDsSnapshotLock);
+    gCachedDeviceIds = nil;
+    gCachedProfileId = nil;
+    gCachedGen = nil;
+    os_unfair_lock_unlock(&gDeviceIDsSnapshotLock);
 }
 
-static NSDictionary *PXLoadDeviceIdsForProfile(NSString *profileId) {
-    if (!profileId.length) return nil;
-    NSArray<NSString *> *bases = @[
-        @"/var/mobile/Library/WeaponX/Profiles",
-        @"/private/var/mobile/Library/WeaponX/Profiles"
-    ];
-    for (NSString *base in bases) {
-        NSString *identityDir = [[base stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-        NSString *path = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSDictionary *ids = [NSDictionary dictionaryWithContentsOfFile:path];
-        if (ids.count > 0) return ids;
-    }
-    return nil;
+static void PXIdentitySnapshotChanged(CFNotificationCenterRef center,
+                                      void *observer,
+                                      CFStringRef name,
+                                      const void *object,
+                                      CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXInvalidateDeviceIdsSnapshot();
+    PXInvalidateScopeDecisionCache();
 }
 
 static NSDictionary *PXGetDeviceIdsSnapshot(NSString **outProfileId, NSNumber **outGen) {
-    NSString *profileId = PXCurrentProfileId();
-    NSDictionary *ids = PXLoadDeviceIdsForProfile(profileId);
-    NSNumber *gen = nil;
-    if ([ids[@"GenerationCounter"] respondsToSelector:@selector(integerValue)]) {
-        gen = @([ids[@"GenerationCounter"] integerValue]);
+    NSString *profileId = PXActiveProfileID();
+    NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileId);
+    NSDictionary *diskIDs = deviceIDsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
+        : nil;
+    NSDictionary *immutableIDs = [diskIDs isKindOfClass:[NSDictionary class]] && diskIDs.count
+        ? [diskIDs copy]
+        : nil;
+    NSNumber *generation = nil;
+    if ([immutableIDs[@"GenerationCounter"] respondsToSelector:@selector(integerValue)]) {
+        generation = @([immutableIDs[@"GenerationCounter"] integerValue]);
     }
-    if (!profileId.length || !ids) {
-        if (outProfileId) *outProfileId = profileId;
-        if (outGen) *outGen = gen;
-        return ids;
+
+    NSDictionary *publishedIDs = nil;
+    NSString *publishedProfile = nil;
+    NSNumber *publishedGeneration = nil;
+
+    os_unfair_lock_lock(&gDeviceIDsSnapshotLock);
+    BOOL sameGeneration = (gCachedGen == generation) || [gCachedGen isEqual:generation];
+    if (immutableIDs && [gCachedProfileId isEqualToString:profileId] && sameGeneration && gCachedDeviceIds) {
+        publishedIDs = gCachedDeviceIds;
+        publishedProfile = gCachedProfileId;
+        publishedGeneration = gCachedGen;
+    } else {
+        gCachedDeviceIds = immutableIDs;
+        gCachedProfileId = [profileId copy];
+        gCachedGen = generation;
+        publishedIDs = gCachedDeviceIds;
+        publishedProfile = gCachedProfileId;
+        publishedGeneration = gCachedGen;
     }
-    if ([gCachedProfileId isEqualToString:profileId] && ((gCachedGen && [gCachedGen isEqual:gen]) || (!gCachedGen && !gen)) && gCachedDeviceIds) {
-        if (outProfileId) *outProfileId = gCachedProfileId;
-        if (outGen) *outGen = gCachedGen;
-        return gCachedDeviceIds;
-    }
-    gCachedProfileId = profileId;
-    gCachedGen = gen;
-    gCachedDeviceIds = ids;
-    if (outProfileId) *outProfileId = profileId;
-    if (outGen) *outGen = gen;
-    return ids;
+    os_unfair_lock_unlock(&gDeviceIDsSnapshotLock);
+
+    if (outProfileId) *outProfileId = publishedProfile;
+    if (outGen) *outGen = publishedGeneration;
+    return publishedIDs;
 }
 
 static BOOL PXRequireKeysAll(NSDictionary *ids, NSArray<NSString *> *keys, NSString *api, NSString *req, NSString *bundleID, NSString *profileId, NSNumber *gen) {
@@ -1997,55 +1990,30 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 %hook CLLocationManager
 
 - (void)setDelegate:(id)delegate {
-    // First, pass through to the original implementation
     %orig;
-    
+
     @try {
-        // Only log spoofing info for non-Apple apps, and avoid excessive logging
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (bundleID && ![bundleID hasPrefix:@"com.apple."]) {
-            // Get the manager instance outside the synchronized block to prevent deadlocks
+        if (bundleID.length && ![bundleID hasPrefix:@"com.apple."]) {
             LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-            
-            // Log only on the first delegation or periodically (using a static variable)
-            static NSMutableSet *handledDelegates = nil;
-            static dispatch_once_t onceToken;
-            dispatch_once(&onceToken, ^{
-                handledDelegates = [NSMutableSet set];
-            });
-            
-            @synchronized(handledDelegates) {
-                // Create identifier for this delegate/manager pair
-                NSString *delegateID = [NSString stringWithFormat:@"%p-%p", delegate, self];
-                
-                // Only log if we haven't seen this delegate before
-                if (![handledDelegates containsObject:delegateID]) {
-                    [handledDelegates addObject:delegateID];
-                    
-                    if (manager && bundleID) {
-                        BOOL isSpoofingEnabled = [manager isSpoofingEnabled];
-                        BOOL shouldSpoofApp = PXLocationManagerShouldSpoof(manager, bundleID);
-                        
-                        if (isSpoofingEnabled && shouldSpoofApp) {
-                            double lat = [manager getSpoofedLatitude];
-                            double lon = [manager getSpoofedLongitude];
-                            PXLog(@"[WeaponX] GPS spoofing is enabled for %@. Using: %.6f, %.6f", 
-                                  bundleID, lat, lon);
-                        } else if (isSpoofingEnabled) {
-                            PXLog(@"[WeaponX] GPS spoofing is enabled globally but not for %@", bundleID);
-                        }
-                        
-                        // In iOS 15+, make sure position variations are enabled
-                        if (isSpoofingEnabled && shouldSpoofApp && manager.jitterEnabled) {
-                            // Set position variations to match jitter setting for consistency
-                            manager.positionVariationsEnabled = YES;
-                        }
-                    }
+            NSString *delegateID = [NSString stringWithFormat:@"%p-%p", delegate, self];
+            if (PXLogOnceClaim(@"Tweak.locationDelegate", delegateID) && manager) {
+                BOOL isSpoofingEnabled = [manager isSpoofingEnabled];
+                BOOL shouldSpoofApp = PXLocationManagerShouldSpoof(manager, bundleID);
+                if (isSpoofingEnabled && shouldSpoofApp) {
+                    double lat = [manager getSpoofedLatitude];
+                    double lon = [manager getSpoofedLongitude];
+                    PXLog(@"[WeaponX] GPS spoofing is enabled for %@. Using: %.6f, %.6f",
+                          bundleID, lat, lon);
+                } else if (isSpoofingEnabled) {
+                    PXLog(@"[WeaponX] GPS spoofing is enabled globally but not for %@", bundleID);
+                }
+                if (isSpoofingEnabled && shouldSpoofApp && manager.jitterEnabled) {
+                    manager.positionVariationsEnabled = YES;
                 }
             }
         }
     } @catch (NSException *exception) {
-        // Just log the exception and don't interfere with normal operation
         PXLog(@"[WeaponX] Exception in CLLocationManager.setDelegate: %@", exception);
     }
 }
@@ -3922,6 +3890,19 @@ static char* hook_GSSystemGetSerialNo(void) {
         return;
     }
 
+    CFNotificationCenterRef identityCenter = CFNotificationCenterGetDarwinNotifyCenter();
+    if (identityCenter) {
+        CFNotificationCenterAddObserver(identityCenter, NULL, PXIdentitySnapshotChanged,
+                                        CFSTR("com.hydra.projectx.settings.changed"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(identityCenter, NULL, PXIdentitySnapshotChanged,
+                                        CFSTR("com.hydra.projectx.profileChanged"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(identityCenter, NULL, PXIdentitySnapshotChanged,
+                                        CFSTR("com.hydra.projectx.scopedAppsChanged"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
+
     PXFileDebugLoadMarker("ProjectXTweak.Tweak.ctor");
     PXFileDebugAIDA64Log("[Tweak.ctor] enter");
     // Debug flag files only when explicitly debugging (avoid /tmp I/O on every app launch).
@@ -4249,16 +4230,11 @@ static char* hook_GSSystemGetSerialNo(void) {
         }
         dlclose(GSHandle);
     }
-    void *libcHandle = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
-    if (!libcHandle) libcHandle = dlopen("/usr/lib/system/libsystem_c.dylib", RTLD_NOW);
-    if (libcHandle) {
-        void *unamePtr = dlsym(libcHandle, "uname");
-        if (unamePtr && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
-            MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
-            gOwnerUnameInstalled = YES;
-            PXLog(@"[WeaponX] ✅ uname hook registered successfully");
-        }
-        dlclose(libcHandle);
+    void *unamePtr = dlsym(RTLD_DEFAULT, "uname");
+    if (unamePtr && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+        MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
+        gOwnerUnameInstalled = YES;
+        PXLog(@"[WeaponX] uname hook registered successfully");
     }
     PXFileDebugAIDA64Log("[Tweak.ctor] after uname/GS hooks");
 

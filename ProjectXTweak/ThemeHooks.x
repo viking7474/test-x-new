@@ -5,19 +5,14 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 
 #import "PXScope.h"
+#import "PXRuntimeUtilities.h"
+#import "PXPaths.h"
+#import <os/lock.h>
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
 
-// Cache for bundle decisions and theme values
-static NSMutableDictionary *cachedBundleDecisions = nil;
+// Theme value and timestamp are published as one lock-owned cache unit.
+static os_unfair_lock gThemeCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSString *cachedThemeValue = nil;
 static NSDate *cacheTimestamp = nil;
 static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes in seconds
@@ -51,67 +46,7 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
-    @try {
-        // Check if cache is valid
-        if (scopedAppsCache && scopedAppsCacheTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        // Initialize cache if needed
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        // Try each possible path for the scoped apps file
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            // Don't log this error too frequently to avoid spam
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) { // 5 minutes
-                PXLog(@"[ThemeHooks] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Load the plist file safely
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Get the scoped apps dictionary
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Copy the scoped apps to our cache
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
+    return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
@@ -157,78 +92,39 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 
 // Helper function to get theme value from profile
 static WeaponXThemeStyle getThemeStyleFromProfile(void) {
-    // Skip cache if it's more than 5 minutes old
-    BOOL shouldRefresh = NO;
-    if (!cacheTimestamp || [[NSDate date] timeIntervalSinceDate:cacheTimestamp] > kCacheValidityDuration) {
-        shouldRefresh = YES;
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gThemeCacheLock);
+    NSString *cachedValue = cachedThemeValue;
+    NSDate *loadedAt = cacheTimestamp;
+    os_unfair_lock_unlock(&gThemeCacheLock);
+
+    if (cachedValue.length && loadedAt && [now timeIntervalSinceDate:loadedAt] <= kCacheValidityDuration) {
+        if ([cachedValue isEqualToString:@"Dark"]) return WeaponXThemeStyleDark;
+        if ([cachedValue isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
     }
-    
-    // Use cached value if available and not expired
-    if (!shouldRefresh && cachedThemeValue) {
-        if ([cachedThemeValue isEqualToString:@"Dark"]) {
-            return WeaponXThemeStyleDark;
-        } else if ([cachedThemeValue isEqualToString:@"Light"]) {
-            return WeaponXThemeStyleLight;
-        }
+
+    NSString *identityPath = PXActiveProfileIdentityPath();
+    NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIDs = deviceIDsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
+        : nil;
+    NSString *themeValue = [deviceIDs[@"DeviceTheme"] isKindOfClass:[NSString class]]
+        ? deviceIDs[@"DeviceTheme"]
+        : nil;
+    if (!themeValue.length && identityPath.length) {
+        NSDictionary *themeInfo = [NSDictionary dictionaryWithContentsOfFile:
+            [identityPath stringByAppendingPathComponent:@"device_theme.plist"]];
+        themeValue = [themeInfo[@"value"] isKindOfClass:[NSString class]] ? themeInfo[@"value"] : nil;
     }
-    
-    // Read theme value directly from profile files
-    NSString *themeValue = nil;
-    
-    // Try to get the current profile directory
-    NSArray *possibleProfilePaths = @[
-        @"/var/mobile/Library/WeaponX/Profiles",
-        @"/private/var/mobile/Library/WeaponX/Profiles", 
-        @"/var/mobile/Library/WeaponX/Profiles"
-    ];
-    
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    for (NSString *profileBasePath in possibleProfilePaths) {
-        if ([fileManager fileExistsAtPath:profileBasePath]) {
-            // Get current profile ID
-            NSString *currentProfileInfoPath = [profileBasePath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:currentProfileInfoPath];
-            NSString *profileId = currentProfileInfo[@"ProfileId"];
-            
-            if (profileId) {
-                // Try to read theme from device_ids.plist
-                NSString *identityDir = [[profileBasePath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                themeValue = deviceIds[@"DeviceTheme"];
-                
-                if (themeValue) {
-                    break;
-                }
-                
-                // Try to read from device_theme.plist
-                NSString *deviceThemePath = [identityDir stringByAppendingPathComponent:@"device_theme.plist"];
-                NSDictionary *deviceTheme = [NSDictionary dictionaryWithContentsOfFile:deviceThemePath];
-                themeValue = deviceTheme[@"value"];
-                
-                if (themeValue) {
-                    break;
-                }
-            }
-        }
-    }
-    
-    // Fallback to default if nothing found
-    if (!themeValue) {
-        themeValue = @"Light"; // Default to light theme
-    }
-    
-    // Update cache
-    cachedThemeValue = themeValue;
-    cacheTimestamp = [NSDate date];
-    
-    // Return the appropriate theme style
-    if ([themeValue isEqualToString:@"Dark"]) {
-        return WeaponXThemeStyleDark;
-    } else if ([themeValue isEqualToString:@"Light"]) {
-        return WeaponXThemeStyleLight;
-    }
-    
+    if (!themeValue.length) themeValue = @"Light";
+
+    os_unfair_lock_lock(&gThemeCacheLock);
+    cachedThemeValue = [themeValue copy];
+    cacheTimestamp = now;
+    os_unfair_lock_unlock(&gThemeCacheLock);
+
+    if ([themeValue isEqualToString:@"Dark"]) return WeaponXThemeStyleDark;
+    if ([themeValue isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
     return WeaponXThemeStyleUnspecified;
 }
 
@@ -262,16 +158,10 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
         if (themeStyle != WeaponXThemeStyleUnspecified) {
             UIUserInterfaceStyle spoofedStyle = mapThemeStyleToUIUserInterfaceStyle(themeStyle);
             
-            // Log the first time we spoof for an app (to reduce spam)
-            static NSMutableSet *loggedApps = nil;
-            if (!loggedApps) {
-                loggedApps = [NSMutableSet set];
-            }
-            
-            if (![loggedApps containsObject:bundleID]) {
-                [loggedApps addObject:bundleID];
-                PXLog(@"[WeaponX] 🎨 Spoofing device theme for %@ to: %@", 
-                      bundleID, 
+            // Log the first time we spoof for an app (to reduce spam).
+            if (PXLogOnceClaim(@"ThemeHooks.bundle", bundleID)) {
+                PXLog(@"[WeaponX] Spoofing device theme for %@ to: %@",
+                      bundleID,
                       (spoofedStyle == UIUserInterfaceStyleDark) ? @"Dark" : @"Light");
             }
             
@@ -416,15 +306,14 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 
 // Notification handler to refresh theme settings when toggled
 static void themeSettingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    PXInvalidateScopeDecisionCache();
     NSString *notificationName = (__bridge NSString *)name;
     PXLog(@"[WeaponX] Received settings notification: %@", notificationName);
     
-    // Clear cached info to force refresh
+    os_unfair_lock_lock(&gThemeCacheLock);
     cachedThemeValue = nil;
     cacheTimestamp = nil;
-    
-    // Clear the bundle decisions cache too
-    [cachedBundleDecisions removeAllObjects];
+    os_unfair_lock_unlock(&gThemeCacheLock);
 }
 
 // Constructor to initialize hooks
@@ -484,6 +373,14 @@ static void themeSettingsChanged(CFNotificationCenterRef center, void *observer,
                 NULL,
                 themeSettingsChanged,
                 CFSTR("com.hydra.projectx.profileChanged"),
+                NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately
+            );
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL,
+                themeSettingsChanged,
+                CFSTR("com.hydra.projectx.scopedAppsChanged"),
                 NULL,
                 CFNotificationSuspensionBehaviorDeliverImmediately
             );

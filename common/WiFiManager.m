@@ -137,9 +137,8 @@
     
     self.currentProfileId = profileId;
     
-    // Build path to WiFi info file in profile directory
-    NSString *profileDir = [NSString stringWithFormat:@"/var/mobile/Library/WeaponX/Profiles/%@", profileId];
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
+    // Build canonical identity/device paths through PXPaths.
+    NSString *identityDir = PXProfileIdentityPath(profileId);
     NSString *wifiInfoPath = [identityDir stringByAppendingPathComponent:@"wifi_info.plist"];
     
     // Ensure directory exists
@@ -155,7 +154,7 @@
     [self.wifiInfo writeToFile:wifiInfoPath atomically:YES];
     
     // Also update the combined device_ids.plist to include WiFi info
-    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSString *deviceIdsPath = PXProfileDeviceIDsPath(profileId);
     NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: 
                                      [NSMutableDictionary dictionary];
     deviceIds[@"SSID"] = self.wifiInfo[@"ssid"];

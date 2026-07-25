@@ -8,21 +8,10 @@
 #import "PXScope.h"
 
 static NSString *const kSecuritySettingsPath_LTZ = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-static NSString *const kScopedAppsPath_LTZ = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1_LTZ = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
 
 static BOOL LTZIsInScopedAppsList(void) {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID.length) return NO;
-        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:kScopedAppsPath_LTZ];
-        if (!plist) plist = [NSDictionary dictionaryWithContentsOfFile:kScopedAppsPathAlt1_LTZ];
-        NSDictionary *scopedApps = [plist isKindOfClass:[NSDictionary class]] ? plist[@"ScopedApps"] : nil;
-        NSDictionary *entry = [scopedApps isKindOfClass:[NSDictionary class]] ? scopedApps[bundleID] : nil;
-        return [entry isKindOfClass:[NSDictionary class]] ? [entry[@"enabled"] boolValue] : NO;
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    return PXBundleIsEnabledInScope(bundleID);
 }
 
 static BOOL LTZShouldApply(void) {

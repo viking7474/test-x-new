@@ -260,7 +260,7 @@
 - (BOOL)loadFromProfile:(NSString *)profileId {
     if (!profileId) return NO;
     
-    NSString *profileDir = [NSString stringWithFormat:@"/var/mobile/Library/WeaponX/Profiles/%@", profileId];
+    NSString *profileDir = PXProfileRootPath(profileId);
     NSString *storagePath = [profileDir stringByAppendingPathComponent:@"storage.plist"];
     
     NSDictionary *savedSettings = [NSDictionary dictionaryWithContentsOfFile:storagePath];

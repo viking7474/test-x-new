@@ -14,7 +14,9 @@
 #import <mach-o/dyld.h>
 
 #import "PXScope.h"
+#import "PXPaths.h"
 #import "PXFileDebug.h"
+#import <os/lock.h>
 
 // Constants for proper size calculations - use only marketing units (1000-based)
 #define BYTES_PER_KB (1000ULL)
@@ -38,15 +40,7 @@
 // Standard APFS block size
 #define DEFAULT_BLOCK_SIZE (4096ULL)
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 60.0; // 1 minute
 
 // IOKit function pointer
 static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options);
@@ -71,67 +65,7 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
-    @try {
-        // Check if cache is valid
-        if (scopedAppsCache && scopedAppsCacheTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-            return scopedAppsCache;
-        }
-        
-        // Initialize cache if needed
-        if (!scopedAppsCache) {
-            scopedAppsCache = [NSMutableDictionary dictionary];
-        } else {
-            [scopedAppsCache removeAllObjects];
-        }
-        
-        // Try each possible path for the scoped apps file
-        NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *validPath = nil;
-        
-        for (NSString *path in possiblePaths) {
-            if ([fileManager fileExistsAtPath:path]) {
-                validPath = path;
-                break;
-            }
-        }
-        
-        if (!validPath) {
-            // Don't log this error too frequently to avoid spam
-            static NSDate *lastErrorLog = nil;
-            if (!lastErrorLog || [[NSDate date] timeIntervalSinceDate:lastErrorLog] > 300.0) { // 5 minutes
-                PXLog(@"[StorageHooks] Could not find scoped apps file");
-                lastErrorLog = [NSDate date];
-            }
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Load the plist file safely
-        NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-        if (!plistDict || ![plistDict isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Get the scoped apps dictionary
-        NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-        if (!scopedApps || ![scopedApps isKindOfClass:[NSDictionary class]]) {
-            scopedAppsCacheTimestamp = [NSDate date];
-            return scopedAppsCache;
-        }
-        
-        // Copy the scoped apps to our cache
-        [scopedAppsCache addEntriesFromDictionary:scopedApps];
-        scopedAppsCacheTimestamp = [NSDate date];
-        
-        return scopedAppsCache;
-        
-    } @catch (NSException *e) {
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache ?: [NSMutableDictionary dictionary];
-    }
+    return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
@@ -162,16 +96,52 @@ static BOOL isInScopedAppsList(void) {
     }
 }
 
-// Helper function to get consistent storage values directly from storage.plist
+// Storage values and timestamp are one lock-owned immutable cache unit.
+static os_unfair_lock gStorageCacheLock = OS_UNFAIR_LOCK_INIT;
+static NSDictionary *gCachedStorageValues = nil;
+static NSTimeInterval gStorageCacheLoadedAt = 0;
+
+static NSDictionary *PXStorageCachedValues(NSTimeInterval now) {
+    os_unfair_lock_lock(&gStorageCacheLock);
+    NSDictionary *cached = (gCachedStorageValues && now - gStorageCacheLoadedAt < 30.0)
+        ? gCachedStorageValues
+        : nil;
+    os_unfair_lock_unlock(&gStorageCacheLock);
+    return cached;
+}
+
+static NSDictionary *PXStoragePublishValues(NSDictionary *values, NSTimeInterval now) {
+    NSDictionary *immutable = [values isKindOfClass:[NSDictionary class]] ? [values copy] : nil;
+    os_unfair_lock_lock(&gStorageCacheLock);
+    gCachedStorageValues = immutable;
+    gStorageCacheLoadedAt = immutable ? now : 0;
+    NSDictionary *published = gCachedStorageValues;
+    os_unfair_lock_unlock(&gStorageCacheLock);
+    return published;
+}
+
+static void PXStorageInvalidateCache(void) {
+    os_unfair_lock_lock(&gStorageCacheLock);
+    gCachedStorageValues = nil;
+    gStorageCacheLoadedAt = 0;
+    os_unfair_lock_unlock(&gStorageCacheLock);
+}
+
+static void PXStorageSettingsChanged(CFNotificationCenterRef center,
+                                     void *observer,
+                                     CFStringRef name,
+                                     const void *object,
+                                     CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXStorageInvalidateCache();
+    PXInvalidateScopeDecisionCache();
+}
+
+// Helper function to get consistent storage values directly from storage.plist.
 static NSDictionary *getStorageValues() {
-    static NSDictionary *cachedStorageValues = nil;
-    static NSTimeInterval lastLoadTime = 0;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    
-    // Increased cache duration from 5 to 30 seconds to reduce I/O and CPU overhead
-    if (cachedStorageValues && (now - lastLoadTime < 30.0)) {
-        return cachedStorageValues;
-    }
+    NSDictionary *cached = PXStorageCachedValues(now);
+    if (cached) return cached;
     
     // First check if the feature is globally enabled
     BOOL storageSystemEnabled = NO;
@@ -193,22 +163,12 @@ static NSDictionary *getStorageValues() {
     }
     
     @try {
-        // First try to get active profile ID
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles/current_profile_info.plist";
-        NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:profilesPath];
-        NSString *profileId = currentProfileInfo[@"ProfileId"];
-        
-        if (profileId) {
-            // Build path to storage.plist for this profile
-            NSString *profileDir = [NSString stringWithFormat:@"/var/mobile/Library/WeaponX/Profiles/%@", profileId];
-            NSString *storagePath = [profileDir stringByAppendingPathComponent:@"storage.plist"];
-            
-            // Try to load values from storage.plist
-            NSDictionary *storageDict = [NSDictionary dictionaryWithContentsOfFile:storagePath];
-            if (storageDict && storageDict[@"TotalStorage"] && storageDict[@"FreeStorage"]) {
-                cachedStorageValues = [storageDict copy];
-                lastLoadTime = now;
-                return cachedStorageValues;
+        NSString *profileRoot = PXActiveProfileRootPath();
+        if (profileRoot.length) {
+            NSDictionary *storageDict = [NSDictionary dictionaryWithContentsOfFile:
+                [profileRoot stringByAppendingPathComponent:@"storage.plist"]];
+            if (storageDict[@"TotalStorage"] && storageDict[@"FreeStorage"]) {
+                return PXStoragePublishValues(storageDict, now);
             }
         }
         
@@ -219,12 +179,10 @@ static NSDictionary *getStorageValues() {
             NSString *freeStorage = [storageManager freeStorageSpace];
             
             if (totalStorage && freeStorage) {
-                cachedStorageValues = @{
+                return PXStoragePublishValues(@{
                     @"TotalStorage": totalStorage,
                     @"FreeStorage": freeStorage
-                };
-                lastLoadTime = now;
-                return cachedStorageValues;
+                }, now);
             }
         }
     } @catch (NSException *exception) {
@@ -232,12 +190,10 @@ static NSDictionary *getStorageValues() {
     }
     
     // Final fallback
-    cachedStorageValues = @{
+    return PXStoragePublishValues(@{
         @"TotalStorage": @"128",
         @"FreeStorage": @"38.4"
-    };
-    lastLoadTime = now;
-    return cachedStorageValues;
+    }, now);
 }
 
 // Helper to convert GB string to bytes using marketing units (1000-based)
@@ -930,6 +886,17 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             }
             
             PXLog(@"[StorageHooks] App %@ is scoped, setting up storage hooks", currentBundleID);
+
+            CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+            for (NSString *notificationName in @[
+                @"com.hydra.projectx.settings.changed",
+                @"com.hydra.projectx.profileChanged",
+                @"com.hydra.projectx.scopedAppsChanged"
+            ]) {
+                CFNotificationCenterAddObserver(center, NULL, PXStorageSettingsChanged,
+                    (__bridge CFStringRef)notificationName, NULL,
+                    CFNotificationSuspensionBehaviorDeliverImmediately);
+            }
             
             // statfs family: post-processors on coordinator (no MSHookFunction).
             // IOKit identity remains Tweak-owned; storage may still register IOKit post if needed later.

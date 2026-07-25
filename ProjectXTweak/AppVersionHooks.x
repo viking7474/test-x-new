@@ -9,23 +9,29 @@
 
 #import "AppVersionHooks.h"
 #import "PXScope.h"
+#import "PXPaths.h"
 #import "PXFileDebug.h"
-
-static NSString *const kSecuritySettingsPlist1 = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-static NSString *const kSecuritySettingsPlist2 = @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-
-static NSString *const kVersionSpoofPlist1 = @"/var/mobile/Library/Preferences/com.hydra.projectx.version_spoof.plist";
-static NSString *const kVersionSpoofPlist2 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.version_spoof.plist";
-
-static NSString *const kProfilesBase1 = @"/var/mobile/Library/WeaponX/Profiles";
-static NSString *const kProfilesBase2 = @"/private/var/mobile/Library/WeaponX/Profiles";
+#import <os/lock.h>
 
 static NSDictionary *gCachedVersionSpoofPlist = nil;
 static NSDate *gCachedVersionSpoofMTime = nil;
 static NSString *gCachedVersionSpoofPath = nil;
 
+static os_unfair_lock gAppVersionCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary<NSString *, NSDictionary *> *gCachedProfileVersionPlists = nil;
 static NSMutableDictionary<NSString *, NSDate *> *gCachedProfileVersionMTime = nil;
+
+static void PXEnsureAppVersionProfileCaches(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        gCachedProfileVersionPlists = [NSMutableDictionary dictionary];
+        gCachedProfileVersionMTime = [NSMutableDictionary dictionary];
+    });
+}
+
+static NSString *PXVersionSpoofPlistPath(void) {
+    return [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.projectx.version_spoof.plist"];
+}
 
 // Full-dictionary CF cache: stable retained CFDictionary per (bundleID + localized + generation)
 static _Atomic int32_t gAppVersionCacheGeneration = 0;
@@ -119,50 +125,38 @@ static NSString *PXResolveExistingPath(NSArray<NSString *> *candidates) {
             return p;
         }
     }
-    return candidates.firstObject;
+    return [candidates firstObject];
 }
 
 BOOL PXAppVersionSpoofMasterEnabled(void) {
-    NSDictionary *s = PXReadPlist(PXResolveExistingPath(@[kSecuritySettingsPlist1, kSecuritySettingsPlist2]));
-    return [s[@"appVersionSpoofingEnabled"] boolValue];
+    NSDictionary *settings = PXReadPlist(PXSecuritySettingsPath());
+    return [settings[@"appVersionSpoofingEnabled"] boolValue];
 }
 
 static NSDictionary *PXLoadVersionSpoofPlistCached(void) {
-    NSString *path = PXResolveExistingPath(@[kVersionSpoofPlist1, kVersionSpoofPlist2]);
+    NSString *path = PXVersionSpoofPlistPath();
     NSDate *mtime = PXFileMTime(path);
 
-    if (gCachedVersionSpoofPlist && gCachedVersionSpoofMTime && [path isEqualToString:gCachedVersionSpoofPath]) {
-        if ((!mtime && !gCachedVersionSpoofMTime) || (mtime && [mtime isEqualToDate:gCachedVersionSpoofMTime])) {
-            return gCachedVersionSpoofPlist;
-        }
-    }
+    os_unfair_lock_lock(&gAppVersionCacheLock);
+    BOOL valid = gCachedVersionSpoofPlist && [path isEqualToString:gCachedVersionSpoofPath] &&
+        ((!mtime && !gCachedVersionSpoofMTime) ||
+         (mtime && gCachedVersionSpoofMTime && [mtime isEqualToDate:gCachedVersionSpoofMTime]));
+    NSDictionary *cached = valid ? gCachedVersionSpoofPlist : nil;
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    if (cached) return cached;
 
-    NSDictionary *d = PXReadPlist(path);
-    gCachedVersionSpoofPlist = d;
-    gCachedVersionSpoofMTime = mtime;
-    gCachedVersionSpoofPath = path;
-    return d;
+    NSDictionary *loaded = PXReadPlist(path);
+    os_unfair_lock_lock(&gAppVersionCacheLock);
+    gCachedVersionSpoofPlist = [loaded copy];
+    gCachedVersionSpoofMTime = [mtime copy];
+    gCachedVersionSpoofPath = [path copy];
+    NSDictionary *published = gCachedVersionSpoofPlist;
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    return published;
 }
 
 static NSString *PXReadActiveProfileId(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *bases = @[kProfilesBase1, kProfilesBase2];
-    for (NSString *base in bases) {
-        if (![fm fileExistsAtPath:base]) continue;
-        NSString *p = [base stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:p];
-        NSString *pid = [info[@"ProfileId"] isKindOfClass:[NSString class]] ? info[@"ProfileId"] : nil;
-        if (pid.length) return pid;
-    }
-
-    // Legacy file (outside Profiles directory)
-    NSDictionary *legacy1 = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/WeaponX/active_profile_info.plist"];
-    NSString *pid2 = [legacy1[@"ProfileId"] isKindOfClass:[NSString class]] ? legacy1[@"ProfileId"] : nil;
-    if (pid2.length) return pid2;
-
-    NSDictionary *legacy2 = [NSDictionary dictionaryWithContentsOfFile:@"/private/var/mobile/Library/WeaponX/active_profile_info.plist"];
-    NSString *pid3 = [legacy2[@"ProfileId"] isKindOfClass:[NSString class]] ? legacy2[@"ProfileId"] : nil;
-    return pid3.length ? pid3 : nil;
+    return PXActiveProfileID();
 }
 
 static NSString *PXSafeBundleFilename(NSString *bundleID) {
@@ -173,45 +167,35 @@ static NSString *PXSafeBundleFilename(NSString *bundleID) {
 
 static NSDictionary *PXLoadProfileAppVersionPlist(NSString *bundleID) {
     if (!bundleID.length) return nil;
-
-    if (!gCachedProfileVersionPlists) {
-        gCachedProfileVersionPlists = [NSMutableDictionary dictionary];
-        gCachedProfileVersionMTime = [NSMutableDictionary dictionary];
-    }
+    PXEnsureAppVersionProfileCaches();
 
     NSString *profileId = PXReadActiveProfileId();
-    if (!profileId.length) return nil;
-
+    NSString *profileRoot = PXProfileRootPath(profileId);
     NSString *fileName = PXSafeBundleFilename(bundleID);
-    if (!fileName.length) return nil;
+    if (!profileRoot.length || !fileName.length) return nil;
 
-    NSArray *bases = @[kProfilesBase1, kProfilesBase2];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *foundPath = nil;
-    for (NSString *base in bases) {
-        if (![fm fileExistsAtPath:base]) continue;
-        NSString *p = [[base stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"app_versions"];
-        p = [p stringByAppendingPathComponent:fileName];
-        if ([fm fileExistsAtPath:p]) {
-            foundPath = p;
-            break;
-        }
-    }
-    if (!foundPath.length) return nil;
+    NSString *path = [[profileRoot stringByAppendingPathComponent:@"app_versions"]
+        stringByAppendingPathComponent:fileName];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+    NSDate *mtime = PXFileMTime(path);
 
-    NSDate *mtime = PXFileMTime(foundPath);
-    NSDictionary *cached = gCachedProfileVersionPlists[foundPath];
-    NSDate *cachedMTime = gCachedProfileVersionMTime[foundPath];
-    if (cached && cachedMTime && mtime && [cachedMTime isEqualToDate:mtime]) {
-        return cached;
-    }
+    os_unfair_lock_lock(&gAppVersionCacheLock);
+    NSDictionary *cached = gCachedProfileVersionPlists[path];
+    NSDate *cachedMTime = gCachedProfileVersionMTime[path];
+    BOOL valid = cached && ((!mtime && !cachedMTime) ||
+        (mtime && cachedMTime && [mtime isEqualToDate:cachedMTime]));
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    if (valid) return cached;
 
-    NSDictionary *d = PXReadPlist(foundPath);
-    if (d) {
-        gCachedProfileVersionPlists[foundPath] = d;
-        if (mtime) gCachedProfileVersionMTime[foundPath] = mtime;
-    }
-    return d;
+    NSDictionary *loaded = PXReadPlist(path);
+    if (!loaded) return nil;
+    os_unfair_lock_lock(&gAppVersionCacheLock);
+    gCachedProfileVersionPlists[path] = [loaded copy];
+    if (mtime) gCachedProfileVersionMTime[path] = [mtime copy];
+    else [gCachedProfileVersionMTime removeObjectForKey:path];
+    NSDictionary *published = gCachedProfileVersionPlists[path];
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    return published;
 }
 
 BOOL PXGetSpoofedAppVersionForBundle(NSString *bundleID, NSString **outVersion, NSString **outBuild) {
@@ -267,15 +251,15 @@ static void PXReleaseCFInfoDictCacheEntry(PXCFInfoDictCacheEntry *entry) {
 }
 
 void PXAppVersionHooksInvalidateCache(void) {
+    PXEnsureAppVersionProfileCaches();
+    atomic_fetch_add(&gAppVersionCacheGeneration, 1);
+
+    os_unfair_lock_lock(&gAppVersionCacheLock);
     gCachedVersionSpoofPlist = nil;
     gCachedVersionSpoofMTime = nil;
     gCachedVersionSpoofPath = nil;
     [gCachedProfileVersionPlists removeAllObjects];
     [gCachedProfileVersionMTime removeAllObjects];
-
-    // Bump generation so any live full-dict cache is considered stale.
-    atomic_fetch_add(&gAppVersionCacheGeneration, 1);
-
     PXReleaseCFInfoDictCacheEntry(&gCFInfoDictCache);
     PXReleaseCFInfoDictCacheEntry(&gCFLocalInfoDictCache);
     gNSInfoDictCache = nil;
@@ -284,6 +268,8 @@ void PXAppVersionHooksInvalidateCache(void) {
     gNSLocalizedInfoDictCache = nil;
     gNSLocalizedInfoDictBundleID = nil;
     gNSLocalizedInfoDictGeneration = -1;
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    PXInvalidateScopeDecisionCache();
 }
 
 #pragma mark - Full dictionary helpers
@@ -358,18 +344,22 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
             result = original;
         } else {
             int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-            if (gNSInfoDictCache &&
-                gNSInfoDictGeneration == gen &&
-                gNSInfoDictBundleID &&
-                [gNSInfoDictBundleID isEqualToString:mainBundleID]) {
-                result = gNSInfoDictCache;
+            os_unfair_lock_lock(&gAppVersionCacheLock);
+            BOOL valid = gNSInfoDictCache && gNSInfoDictGeneration == gen &&
+                [gNSInfoDictBundleID isEqualToString:mainBundleID];
+            NSDictionary *cached = valid ? gNSInfoDictCache : nil;
+            os_unfair_lock_unlock(&gAppVersionCacheLock);
+            if (cached) {
+                result = cached;
             } else {
                 NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
                 if (spoofed) {
-                    gNSInfoDictCache = spoofed;
+                    os_unfair_lock_lock(&gAppVersionCacheLock);
+                    gNSInfoDictCache = [spoofed copy];
                     gNSInfoDictBundleID = [mainBundleID copy];
                     gNSInfoDictGeneration = gen;
-                    result = spoofed;
+                    result = gNSInfoDictCache;
+                    os_unfair_lock_unlock(&gAppVersionCacheLock);
                 }
             }
         }
@@ -397,18 +387,22 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
             result = original; // may legitimately be nil
         } else {
             int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-            if (gNSLocalizedInfoDictCache &&
-                gNSLocalizedInfoDictGeneration == gen &&
-                gNSLocalizedInfoDictBundleID &&
-                [gNSLocalizedInfoDictBundleID isEqualToString:mainBundleID]) {
-                result = gNSLocalizedInfoDictCache;
+            os_unfair_lock_lock(&gAppVersionCacheLock);
+            BOOL valid = gNSLocalizedInfoDictCache && gNSLocalizedInfoDictGeneration == gen &&
+                [gNSLocalizedInfoDictBundleID isEqualToString:mainBundleID];
+            NSDictionary *cached = valid ? gNSLocalizedInfoDictCache : nil;
+            os_unfair_lock_unlock(&gAppVersionCacheLock);
+            if (cached) {
+                result = cached;
             } else {
                 NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(original, ver, build);
                 if (spoofed) {
-                    gNSLocalizedInfoDictCache = spoofed;
+                    os_unfair_lock_lock(&gAppVersionCacheLock);
+                    gNSLocalizedInfoDictCache = [spoofed copy];
                     gNSLocalizedInfoDictBundleID = [mainBundleID copy];
                     gNSLocalizedInfoDictGeneration = gen;
-                    result = spoofed;
+                    result = gNSLocalizedInfoDictCache;
+                    os_unfair_lock_unlock(&gAppVersionCacheLock);
                 }
             }
         }
@@ -464,30 +458,38 @@ static CFDictionaryRef PXCachedOrBuildCFInfoDict(CFBundleRef bundle,
     }
 
     int32_t gen = atomic_load(&gAppVersionCacheGeneration);
-    if (cache->valid &&
-        cache->dict &&
-        cache->generation == gen &&
-        cache->localized == localized &&
-        cache->bundleID &&
-        CFEqual(cache->bundleID, (__bridge CFStringRef)mainBundleID)) {
-        return cache->dict;
-    }
+    os_unfair_lock_lock(&gAppVersionCacheLock);
+    BOOL valid = cache->valid && cache->dict && cache->generation == gen &&
+        cache->localized == localized && cache->bundleID &&
+        CFEqual(cache->bundleID, (__bridge CFStringRef)mainBundleID);
+    CFDictionaryRef cached = valid ? cache->dict : NULL;
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    if (cached) return cached;
 
     NSDictionary *nsOrig = (__bridge NSDictionary *)original;
     NSDictionary *spoofed = PXApplyAppVersionToInfoDictionary(nsOrig, ver, build);
     if (!spoofed) return original;
-
-    // Retained cache — CF Get APIs do not transfer ownership to the caller.
     CFDictionaryRef retained = CFBridgingRetain(spoofed);
     if (!retained) return original;
 
-    PXReleaseCFInfoDictCacheEntry(cache);
-    cache->dict = retained;
-    cache->bundleID = CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)mainBundleID);
-    cache->generation = gen;
-    cache->localized = localized;
-    cache->valid = YES;
-    return cache->dict;
+    os_unfair_lock_lock(&gAppVersionCacheLock);
+    BOOL anotherValid = cache->valid && cache->dict && cache->generation == gen &&
+        cache->localized == localized && cache->bundleID &&
+        CFEqual(cache->bundleID, (__bridge CFStringRef)mainBundleID);
+    if (anotherValid) {
+        CFRelease(retained);
+    } else {
+        PXReleaseCFInfoDictCacheEntry(cache);
+        cache->dict = retained;
+        cache->bundleID = CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)mainBundleID);
+        cache->generation = gen;
+        cache->localized = localized;
+        cache->valid = YES;
+    }
+    CFDictionaryRef published = cache->dict;
+    os_unfair_lock_unlock(&gAppVersionCacheLock);
+    return published;
+
 }
 
 static CFDictionaryRef replaced_CFBundleGetInfoDictionary(CFBundleRef bundle) {
@@ -549,8 +551,7 @@ static void PXAppVersionCacheInvalidateNotification(CFNotificationCenterRef cent
 }
 
 %dtor {
-    PXReleaseCFInfoDictCacheEntry(&gCFInfoDictCache);
-    PXReleaseCFInfoDictCacheEntry(&gCFLocalInfoDictCache);
+    PXAppVersionHooksInvalidateCache();
 }
 
 %ctor {
@@ -577,6 +578,9 @@ static void PXAppVersionCacheInvalidateNotification(CFNotificationCenterRef cent
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(darwin, NULL, PXAppVersionCacheInvalidateNotification,
                                         CFSTR("com.hydra.projectx.profileChanged"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(darwin, NULL, PXAppVersionCacheInvalidateNotification,
+                                        CFSTR("com.hydra.projectx.scopedAppsChanged"), NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(darwin, NULL, PXAppVersionCacheInvalidateNotification,
                                         CFSTR("com.hydra.projectx.appVersionSpoofChanged"), NULL,

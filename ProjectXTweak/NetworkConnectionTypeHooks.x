@@ -16,6 +16,8 @@
 #import "CarrierDB.h"
 
 #import "PXScope.h"
+#import "PXPaths.h"
+#import <os/lock.h>
 
 // Constants for connection types
 typedef NS_ENUM(NSInteger, NetworkConnectionType) {
@@ -28,10 +30,8 @@ typedef NS_ENUM(NSInteger, NetworkConnectionType) {
 // Path to security settings plist
 static NSString *const kSecuritySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
 
-// Path to scoped apps plist
-static NSString *const kScopedAppsPath = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
-static NSString *const kScopedAppsPathAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist";
+// All network cache values/timestamps are protected by one process-local lock.
+static os_unfair_lock gNetworkCacheLock = OS_UNFAIR_LOCK_INIT;
 
 // Cache for quick lookup
 static NSInteger cachedConnectionType = -1;
@@ -39,10 +39,6 @@ static BOOL cachedNetworkDataSpoofEnabled = NO;
 static NSDate *cacheTimestamp = nil;
 static const NSTimeInterval kCacheValidDuration = 5.0; // 5 seconds
 
-// Scoped apps cache
-static NSMutableDictionary *scopedAppsCache = nil;
-static NSDate *scopedAppsCacheTimestamp = nil;
-static const NSTimeInterval kScopedAppsCacheValidDuration = 30.0; // 30 seconds
 
 // Default cellular identity (US T-Mobile) — never use product name "ProjectX" as carrier.
 // Profile/target-region values override these when present.
@@ -103,6 +99,32 @@ static NSString *currentCellularNetworkType = nil;
 static NSDate *lastNetworkTypeChangeTime = nil;
 static const NSTimeInterval kMinNetworkTypeChangeDuration = 120.0; // Minimum 2 minutes between technology changes
 
+static BOOL PXNetworkDataSpoofEnabledCached(void) {
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    BOOL enabled = cachedNetworkDataSpoofEnabled;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return enabled;
+}
+
+static void PXNetworkInvalidateCaches(void) {
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    cachedConnectionType = -1;
+    cachedNetworkDataSpoofEnabled = NO;
+    cacheTimestamp = nil;
+    cachedISOCountryCode = nil;
+    isoCountryCodeCacheTimestamp = nil;
+    cachedCarrierName = nil;
+    cachedMobileCountryCode = nil;
+    cachedMobileNetworkCode = nil;
+    carrierDetailsCacheTimestamp = nil;
+    cachedTargetRegion = nil;
+    targetRegionCacheTimestamp = nil;
+    lastSignalUpdateTime = nil;
+    lastNetworkTypeChangeTime = nil;
+    currentCellularNetworkType = nil;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+}
+
 #pragma mark - Helper Functions
 
 // Get the current bundle ID
@@ -118,92 +140,73 @@ static NSString *getCurrentBundleID() {
 
 // Get the current ISO country code from security settings
 static NSString *getCurrentISOCountryCode() {
-    // Check cache validity
-    if (cachedISOCountryCode && isoCountryCodeCacheTimestamp && 
-        [[NSDate date] timeIntervalSinceDate:isoCountryCodeCacheTimestamp] < kISOCountryCodeCacheValidDuration) {
-        return cachedISOCountryCode;
-    }
-    
-    // Read from security settings
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    BOOL valid = cachedISOCountryCode && isoCountryCodeCacheTimestamp &&
+        [now timeIntervalSinceDate:isoCountryCodeCacheTimestamp] < kISOCountryCodeCacheValidDuration;
+    NSString *cached = valid ? cachedISOCountryCode : nil;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (cached) return cached;
+
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
-
-    // TargetRegion follows IP override
+    NSString *isoCode = nil;
     if ([settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
-        NSString *pinnedISO = settings[@"targetRegionPinnedCarrierISO"];
-        if ([pinnedISO isKindOfClass:[NSString class]] && pinnedISO.length) {
-            NSString *isoCode = [pinnedISO lowercaseString];
-            cachedISOCountryCode = isoCode;
-            isoCountryCodeCacheTimestamp = [NSDate date];
-            PXLog(@"[NetworkHook] Using pinned TargetRegion ISO country code: %@", isoCode);
-            return isoCode;
-        }
+        NSString *pinnedISO = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]]
+            ? settings[@"targetRegionPinnedCarrierISO"]
+            : nil;
+        if (pinnedISO.length) isoCode = [pinnedISO lowercaseString];
+    }
+    if (!isoCode.length) {
+        NSString *configured = [settings[@"networkISOCountryCode"] isKindOfClass:[NSString class]]
+            ? settings[@"networkISOCountryCode"]
+            : nil;
+        isoCode = configured.length ? [configured lowercaseString] : @"us";
     }
 
-    NSString *isoCode = [settings objectForKey:@"networkISOCountryCode"];
-    
-    // Use default if not set
-    if (!isoCode) {
-        isoCode = @"us";
-    }
-    
-    // Update cache
-    cachedISOCountryCode = isoCode;
-    isoCountryCodeCacheTimestamp = [NSDate date];
-    
-    PXLog(@"[NetworkHook] Read ISO country code: %@", isoCode);
-    return isoCode;
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    cachedISOCountryCode = [isoCode copy];
+    isoCountryCodeCacheTimestamp = now;
+    NSString *published = cachedISOCountryCode;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return published;
 }
 
 static NSDictionary *getTargetRegionPinnedOverrides(void) {
-    // Return cached if fresh
-    if (cachedTargetRegion && targetRegionCacheTimestamp &&
-        [[NSDate date] timeIntervalSinceDate:targetRegionCacheTimestamp] < kTargetRegionCacheValidDuration) {
-        return cachedTargetRegion;
-    }
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    BOOL valid = targetRegionCacheTimestamp &&
+        [now timeIntervalSinceDate:targetRegionCacheTimestamp] < kTargetRegionCacheValidDuration;
+    NSDictionary *cached = valid ? cachedTargetRegion : nil;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (valid) return cached;
+
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
-    if (![settings isKindOfClass:[NSDictionary class]]) {
-        cachedTargetRegion = nil;
-        targetRegionCacheTimestamp = [NSDate date];
-        return nil;
-    }
-    if (![settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
-        cachedTargetRegion = nil;
-        targetRegionCacheTimestamp = [NSDate date];
-        return nil;
-    }
-
-    NSString *mcc = settings[@"targetRegionPinnedCarrierMCC"];
-    NSString *mnc = settings[@"targetRegionPinnedCarrierMNC"];
-    NSString *iso = settings[@"targetRegionPinnedCarrierISO"];
-    NSString *name = settings[@"targetRegionPinnedCarrierName"];
-    if (![mcc isKindOfClass:[NSString class]] || !mcc.length) mcc = nil;
-    if (![mnc isKindOfClass:[NSString class]] || !mnc.length) mnc = nil;
-    if (![iso isKindOfClass:[NSString class]] || !iso.length) iso = nil;
-    if (![name isKindOfClass:[NSString class]] || !name.length) name = nil;
-
-    if (!mcc.length || !mnc.length) {
-        cachedTargetRegion = nil;
-        targetRegionCacheTimestamp = [NSDate date];
-        return nil;
+    NSDictionary *resolved = nil;
+    if ([settings isKindOfClass:[NSDictionary class]] && [settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
+        NSString *mcc = [settings[@"targetRegionPinnedCarrierMCC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMCC"] : nil;
+        NSString *mnc = [settings[@"targetRegionPinnedCarrierMNC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMNC"] : nil;
+        NSString *iso = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierISO"] : nil;
+        NSString *name = [settings[@"targetRegionPinnedCarrierName"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierName"] : nil;
+        if (mcc.length && mnc.length) {
+            NSString *resolvedName = name.length ? name : PXCarrierNameForMCCMNC(mcc, mnc);
+            if ([resolvedName isEqualToString:@"ProjectX"] || [resolvedName hasPrefix:@"ProjectX"]) {
+                resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
+            }
+            resolved = @{
+                @"carrierName": resolvedName ?: kFakeCarrierName,
+                @"mobileCountryCode": mcc,
+                @"mobileNetworkCode": mnc,
+                @"carrierISO": iso ?: @""
+            };
+        }
     }
 
-    NSString *resolvedName = name;
-    if (!resolvedName.length) {
-        resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
-    }
-    // Never leak product branding as a cellular carrier name.
-    if ([resolvedName isEqualToString:@"ProjectX"] || [resolvedName hasPrefix:@"ProjectX"]) {
-        resolvedName = PXCarrierNameForMCCMNC(mcc, mnc);
-    }
-
-    cachedTargetRegion = @{
-        @"carrierName": resolvedName ?: kFakeCarrierName,
-        @"mobileCountryCode": mcc,
-        @"mobileNetworkCode": mnc,
-        @"carrierISO": (iso ?: @"")
-    };
-    targetRegionCacheTimestamp = [NSDate date];
-    return cachedTargetRegion;
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    cachedTargetRegion = [resolved copy];
+    targetRegionCacheTimestamp = now;
+    NSDictionary *published = cachedTargetRegion;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return published;
 }
 
 static BOOL shouldForceCarrierSpoof(void) {
@@ -216,50 +219,7 @@ static BOOL shouldForceCarrierSpoof(void) {
 
 // Get the path to the current profile's identity directory
 static NSString *getProfileIdentityPath() {
-    // Get current profile ID
-    NSString *profileId = nil;
-    NSString *centralInfoPath = @"/var/mobile/Library/WeaponX/Profiles/current_profile_info.plist";
-    NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-    
-    profileId = centralInfo[@"ProfileId"];
-    if (!profileId) {
-        // If not found, check the legacy active_profile_info.plist
-        NSString *activeInfoPath = @"/var/mobile/Library/WeaponX/active_profile_info.plist";
-        NSDictionary *activeInfo = [NSDictionary dictionaryWithContentsOfFile:activeInfoPath];
-        profileId = activeInfo[@"ProfileId"];
-    }
-    
-    if (!profileId) {
-        // Fallback approach: try to find any profile directory
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSString *profilesDir = @"/var/mobile/Library/WeaponX/Profiles";
-        NSError *error = nil;
-        NSArray *contents = [fileManager contentsOfDirectoryAtPath:profilesDir error:&error];
-        
-        if (!error && contents.count > 0) {
-            // Use the first directory found as a fallback
-            for (NSString *item in contents) {
-                BOOL isDir = NO;
-                NSString *fullPath = [profilesDir stringByAppendingPathComponent:item];
-                [fileManager fileExistsAtPath:fullPath isDirectory:&isDir];
-                
-                if (isDir) {
-                    profileId = item;
-                    break;
-                }
-            }
-        }
-        
-        if (!profileId) {
-            return nil;
-        }
-    }
-    
-    // Build the path to this profile's identity directory
-    NSString *profileDir = [NSString stringWithFormat:@"/var/mobile/Library/WeaponX/Profiles/%@", profileId];
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
-    
-    return identityDir;
+    return PXActiveProfileIdentityPath();
 }
 
 // Get the local IP address from the current profile
@@ -320,60 +280,8 @@ static NSString * __attribute__((unused)) getCurrentLocalIPAddress() {
 }
 
 // Load scoped apps from the plist file
-static NSDictionary *loadScopedApps() {
-    // Check if cache is valid
-    if (scopedAppsCache && scopedAppsCacheTimestamp && 
-        [[NSDate date] timeIntervalSinceDate:scopedAppsCacheTimestamp] < kScopedAppsCacheValidDuration) {
-        return scopedAppsCache;
-    }
-    
-    // Initialize cache if needed
-    if (!scopedAppsCache) {
-        scopedAppsCache = [NSMutableDictionary dictionary];
-    } else {
-        [scopedAppsCache removeAllObjects];
-    }
-    
-    // Try each possible path for the scoped apps file
-    NSArray *possiblePaths = @[kScopedAppsPath, kScopedAppsPathAlt1, kScopedAppsPathAlt2];
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *validPath = nil;
-    
-    for (NSString *path in possiblePaths) {
-        if ([fileManager fileExistsAtPath:path]) {
-            validPath = path;
-            break;
-        }
-    }
-    
-    if (!validPath) {
-        PXLog(@"[NetworkHook] Could not find scoped apps file at any of the expected locations");
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache;
-    }
-    
-    // Load the plist file
-    NSDictionary *plistDict = [NSDictionary dictionaryWithContentsOfFile:validPath];
-    if (!plistDict) {
-        PXLog(@"[NetworkHook] Failed to load scoped apps plist from %@", validPath);
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache;
-    }
-    
-    // Get the scoped apps dictionary
-    NSDictionary *scopedApps = plistDict[@"ScopedApps"];
-    if (!scopedApps) {
-        PXLog(@"[NetworkHook] No ScopedApps key found in plist %@", validPath);
-        scopedAppsCacheTimestamp = [NSDate date];
-        return scopedAppsCache;
-    }
-    
-    // Copy the scoped apps to our cache
-    [scopedAppsCache addEntriesFromDictionary:scopedApps];
-    scopedAppsCacheTimestamp = [NSDate date];
-    
-    PXLog(@"[NetworkHook] Loaded %lu scoped apps from %@", (unsigned long)scopedAppsCache.count, validPath);
-    return scopedAppsCache;
+static NSDictionary *loadScopedApps(void) {
+    return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
@@ -412,37 +320,27 @@ static BOOL isInScopedAppsList() {
 
 // Get the current connection type setting from the plist
 static NetworkConnectionType getNetworkConnectionType() {
-    // Check if cache is valid
-    if (cacheTimestamp && [[NSDate date] timeIntervalSinceDate:cacheTimestamp] < kCacheValidDuration) {
-        return cachedConnectionType;
-    }
-    
-    // Read directly from plist file for speed
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    BOOL valid = cacheTimestamp && [now timeIntervalSinceDate:cacheTimestamp] < kCacheValidDuration;
+    NetworkConnectionType cachedType = (NetworkConnectionType)cachedConnectionType;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (valid) return cachedType;
+
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
-    
-    // Check if network data spoofing is enabled
-    BOOL networkDataSpoofEnabled = [settings[@"networkDataSpoofEnabled"] boolValue];
-    cachedNetworkDataSpoofEnabled = networkDataSpoofEnabled;
-    
-    if (!networkDataSpoofEnabled) {
-        // If spoofing is disabled, return -1 as a signal to use original behavior
-        cachedConnectionType = -1;
-        cacheTimestamp = [NSDate date];
-        return cachedConnectionType;
-    }
-    
-    // Get the connection type value
-    NSNumber *typeNumber = settings[@"networkConnectionType"];
-    NSInteger type = typeNumber ? [typeNumber integerValue] : NetworkConnectionTypeAuto;
-    
-    // Update cache
+    BOOL enabled = [settings[@"networkDataSpoofEnabled"] boolValue];
+    NetworkConnectionType type = enabled
+        ? (NetworkConnectionType)([settings[@"networkConnectionType"] respondsToSelector:@selector(integerValue)]
+            ? [settings[@"networkConnectionType"] integerValue]
+            : NetworkConnectionTypeAuto)
+        : (NetworkConnectionType)-1;
+
+    os_unfair_lock_lock(&gNetworkCacheLock);
     cachedConnectionType = type;
-    cacheTimestamp = [NSDate date];
-    
-    PXLog(@"[NetworkHook] Read connection type: %ld, spoofing enabled: %@", 
-          (long)type, networkDataSpoofEnabled ? @"YES" : @"NO");
-    
-    return cachedConnectionType;
+    cachedNetworkDataSpoofEnabled = enabled;
+    cacheTimestamp = now;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return type;
 }
 
 // For Auto mode, decide randomly between WiFi and Cellular
@@ -464,7 +362,7 @@ static BOOL shouldSpoofConnectionType() {
     NetworkConnectionType type = getNetworkConnectionType();
     
     // If spoofing is disabled or set to "None", don't spoof
-    if (type == -1 || !cachedNetworkDataSpoofEnabled || type == NetworkConnectionTypeNone) {
+    if (type == -1 || !PXNetworkDataSpoofEnabledCached() || type == NetworkConnectionTypeNone) {
         return NO;
     }
     
@@ -507,349 +405,159 @@ static BOOL shouldShowAsCellular() {
 
 // Get carrier details from the current profile
 static NSDictionary *getCarrierDetailsFromProfile() {
-    // TargetRegion follows IP override (pinned)
     NSDictionary *pinned = getTargetRegionPinnedOverrides();
+    NSDate *now = [NSDate date];
     if (pinned) {
-        cachedCarrierName = pinned[@"carrierName"];
-        cachedMobileCountryCode = pinned[@"mobileCountryCode"];
-        cachedMobileNetworkCode = pinned[@"mobileNetworkCode"];
-        carrierDetailsCacheTimestamp = [NSDate date];
-        return @{
-            @"carrierName": cachedCarrierName ?: kFakeCarrierName,
-            @"mobileCountryCode": cachedMobileCountryCode ?: kFakeMobileCountryCode,
-            @"mobileNetworkCode": cachedMobileNetworkCode ?: kFakeMobileNetworkCode
+        NSDictionary *result = @{
+            @"carrierName": pinned[@"carrierName"] ?: kFakeCarrierName,
+            @"mobileCountryCode": pinned[@"mobileCountryCode"] ?: kFakeMobileCountryCode,
+            @"mobileNetworkCode": pinned[@"mobileNetworkCode"] ?: kFakeMobileNetworkCode
         };
+        os_unfair_lock_lock(&gNetworkCacheLock);
+        cachedCarrierName = [result[@"carrierName"] copy];
+        cachedMobileCountryCode = [result[@"mobileCountryCode"] copy];
+        cachedMobileNetworkCode = [result[@"mobileNetworkCode"] copy];
+        carrierDetailsCacheTimestamp = now;
+        os_unfair_lock_unlock(&gNetworkCacheLock);
+        return result;
     }
 
-    // Check cache validity
-    if (cachedCarrierName && cachedMobileCountryCode && cachedMobileNetworkCode && carrierDetailsCacheTimestamp && 
-        [[NSDate date] timeIntervalSinceDate:carrierDetailsCacheTimestamp] < kCarrierDetailsCacheValidDuration) {
-        return @{
-            @"carrierName": cachedCarrierName,
-            @"mobileCountryCode": cachedMobileCountryCode,
-            @"mobileNetworkCode": cachedMobileNetworkCode
-        };
-    }
-    
-    // Default values (fallback)
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    BOOL valid = cachedCarrierName && cachedMobileCountryCode && cachedMobileNetworkCode &&
+        carrierDetailsCacheTimestamp &&
+        [now timeIntervalSinceDate:carrierDetailsCacheTimestamp] < kCarrierDetailsCacheValidDuration;
+    NSDictionary *cached = valid ? @{
+        @"carrierName": cachedCarrierName,
+        @"mobileCountryCode": cachedMobileCountryCode,
+        @"mobileNetworkCode": cachedMobileNetworkCode
+    } : nil;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (cached) return cached;
+
     NSString *carrierName = kFakeCarrierName;
-    NSString *mobileCountryCode = kFakeMobileCountryCode;
-    NSString *mobileNetworkCode = kFakeMobileNetworkCode;
-    
-    // Get the profile identity path
+    NSString *mcc = kFakeMobileCountryCode;
+    NSString *mnc = kFakeMobileNetworkCode;
     NSString *identityDir = getProfileIdentityPath();
-    if (identityDir) {
-        // Build path to carrier_details.plist
-        NSString *carrierDetailsPath = [identityDir stringByAppendingPathComponent:@"carrier_details.plist"];
-        
-        // Check if file exists
-        if ([[NSFileManager defaultManager] fileExistsAtPath:carrierDetailsPath]) {
-            // Read the carrier details from plist
-            NSDictionary *carrierDetails = [NSDictionary dictionaryWithContentsOfFile:carrierDetailsPath];
-            if (carrierDetails) {
-                // Extract values from plist with fallbacks
-                if (carrierDetails[@"carrierName"]) {
-                    carrierName = carrierDetails[@"carrierName"];
-                }
-                
-                if (carrierDetails[@"mcc"]) {
-                    mobileCountryCode = carrierDetails[@"mcc"];
-                } else if (carrierDetails[@"CarrierMCC"]) {
-                    // Also try the alternative field name used in device_ids.plist
-                    mobileCountryCode = carrierDetails[@"CarrierMCC"];
-                }
-                
-                if (carrierDetails[@"mnc"]) {
-                    mobileNetworkCode = carrierDetails[@"mnc"];
-                } else if (carrierDetails[@"CarrierMNC"]) {
-                    // Also try the alternative field name used in device_ids.plist
-                    mobileNetworkCode = carrierDetails[@"CarrierMNC"];
-                }
-                
-                PXLog(@"[NetworkHook] Read carrier details from profile: carrier=%@, MCC=%@, MNC=%@", 
-                     carrierName, mobileCountryCode, mobileNetworkCode);
-            } else {
-                PXLog(@"[NetworkHook] Failed to read carrier details from %@, using default carrier details", carrierDetailsPath);
-            }
-        } else {
-            // If carrier_details.plist not found, try network_settings.plist
-            NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:networkPath]) {
-                NSDictionary *networkDict = [NSDictionary dictionaryWithContentsOfFile:networkPath];
-                if (networkDict) {
-                    // Extract values from network_settings.plist
-                    if (networkDict[@"carrierName"]) {
-                        carrierName = networkDict[@"carrierName"];
-                    }
-                    
-                    if (networkDict[@"mcc"]) {
-                        mobileCountryCode = networkDict[@"mcc"];
-                    }
-                    
-                    if (networkDict[@"mnc"]) {
-                        mobileNetworkCode = networkDict[@"mnc"];
-                    }
-                    
-                    PXLog(@"[NetworkHook] Read carrier details from network_settings.plist: carrier=%@, MCC=%@, MNC=%@", 
-                         carrierName, mobileCountryCode, mobileNetworkCode);
-                }
-            } else {
-                // If network_settings.plist not found, try device_ids.plist
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                if ([[NSFileManager defaultManager] fileExistsAtPath:deviceIdsPath]) {
-                    NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-                    if (deviceIds) {
-                        // Extract values from device_ids.plist
-                        if (deviceIds[@"CarrierName"]) {
-                            carrierName = deviceIds[@"CarrierName"];
-                        }
-                        
-                        if (deviceIds[@"CarrierMCC"]) {
-                            mobileCountryCode = deviceIds[@"CarrierMCC"];
-                        }
-                        
-                        if (deviceIds[@"CarrierMNC"]) {
-                            mobileNetworkCode = deviceIds[@"CarrierMNC"];
-                        }
-                        
-                        PXLog(@"[NetworkHook] Read carrier details from device_ids.plist: carrier=%@, MCC=%@, MNC=%@", 
-                             carrierName, mobileCountryCode, mobileNetworkCode);
-                    }
-                } else {
-                    PXLog(@"[NetworkHook] Carrier details file not found at %@, using default carrier details", carrierDetailsPath);
-                }
-            }
-        }
-    } else {
-        PXLog(@"[NetworkHook] Could not find profile identity directory, using default carrier details");
+    if (identityDir.length) {
+        NSDictionary *carrier = [NSDictionary dictionaryWithContentsOfFile:
+            [identityDir stringByAppendingPathComponent:@"carrier_details.plist"]];
+        NSDictionary *network = [NSDictionary dictionaryWithContentsOfFile:
+            [identityDir stringByAppendingPathComponent:@"network_settings.plist"]];
+        NSDictionary *deviceIDs = [NSDictionary dictionaryWithContentsOfFile:PXActiveProfileDeviceIDsPath()];
+        NSDictionary *source = carrier.count ? carrier : (network.count ? network : deviceIDs);
+        NSString *sourceName = [source[@"carrierName"] isKindOfClass:[NSString class]] ? source[@"carrierName"] : source[@"CarrierName"];
+        NSString *sourceMCC = [source[@"mcc"] isKindOfClass:[NSString class]] ? source[@"mcc"] : source[@"CarrierMCC"];
+        NSString *sourceMNC = [source[@"mnc"] isKindOfClass:[NSString class]] ? source[@"mnc"] : source[@"CarrierMNC"];
+        if (sourceName.length) carrierName = sourceName;
+        if (sourceMCC.length) mcc = sourceMCC;
+        if (sourceMNC.length) mnc = sourceMNC;
     }
-    
-    // Update cache
-    // Sanitize legacy defaults that stored product name as carrier.
-    if (!carrierName.length ||
-        [carrierName isEqualToString:@"ProjectX"] ||
-        [carrierName hasPrefix:@"ProjectX"]) {
-        carrierName = PXCarrierNameForMCCMNC(mobileCountryCode, mobileNetworkCode);
+    if (!carrierName.length || [carrierName isEqualToString:@"ProjectX"] || [carrierName hasPrefix:@"ProjectX"]) {
+        carrierName = PXCarrierNameForMCCMNC(mcc, mnc);
     }
-
-    cachedCarrierName = carrierName;
-    cachedMobileCountryCode = mobileCountryCode;
-    cachedMobileNetworkCode = mobileNetworkCode;
-    carrierDetailsCacheTimestamp = [NSDate date];
-    
-    return @{
-        @"carrierName": carrierName,
-        @"mobileCountryCode": mobileCountryCode,
-        @"mobileNetworkCode": mobileNetworkCode
+    NSDictionary *result = @{
+        @"carrierName": carrierName ?: kFakeCarrierName,
+        @"mobileCountryCode": mcc ?: kFakeMobileCountryCode,
+        @"mobileNetworkCode": mnc ?: kFakeMobileNetworkCode
     };
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    cachedCarrierName = [result[@"carrierName"] copy];
+    cachedMobileCountryCode = [result[@"mobileCountryCode"] copy];
+    cachedMobileNetworkCode = [result[@"mobileNetworkCode"] copy];
+    carrierDetailsCacheTimestamp = now;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return result;
 }
 
 // Get a realistic WiFi signal strength in dBm that changes gradually over time
 static int getWiFiSignalStrength() {
-    // Check if we need to update the signal (approximately every 30-60 seconds)
-    NSTimeInterval timeSinceLastUpdate = lastSignalUpdateTime ? [[NSDate date] timeIntervalSinceDate:lastSignalUpdateTime] : 60.0;
-    
-    // Update signal strength every 30-60 seconds with small random fluctuations
-    if (timeSinceLastUpdate >= 30.0 || !lastSignalUpdateTime) {
-        // Determine the base signal strength based on connection type
-        NetworkConnectionType connectionType = getNetworkConnectionType();
-        int targetSignal;
-        
-        if (connectionType == NetworkConnectionTypeWiFi || 
-            (connectionType == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode())) {
-            // For WiFi mode, generally have good to excellent signal (realistic for most environments)
-            int signalBase = arc4random_uniform(100);
-            if (signalBase < 60) {
-                // 60% chance of excellent signal
-                targetSignal = kWiFiSignalStrengthExcellent + (arc4random_uniform(10) - 5); // -50 to -40 dBm
-            } else if (signalBase < 90) {
-                // 30% chance of good signal
-                targetSignal = kWiFiSignalStrengthGood + (arc4random_uniform(8) - 4);  // -64 to -56 dBm
-            } else {
-                // 10% chance of fair signal
-                targetSignal = kWiFiSignalStrengthFair + (arc4random_uniform(8) - 4);  // -74 to -66 dBm
-            }
-        } else if (connectionType == NetworkConnectionTypeCellular ||
-                  (connectionType == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
-            // For cellular mode, have slightly weaker WiFi (realistic for mobile scenarios)
-            int signalBase = arc4random_uniform(100);
-            if (signalBase < 20) {
-                // 20% chance of excellent signal
-                targetSignal = kWiFiSignalStrengthExcellent + (arc4random_uniform(10) - 5); // -50 to -40 dBm
-            } else if (signalBase < 50) {
-                // 30% chance of good signal
-                targetSignal = kWiFiSignalStrengthGood + (arc4random_uniform(8) - 4);  // -64 to -56 dBm
-            } else if (signalBase < 80) {
-                // 30% chance of fair signal
-                targetSignal = kWiFiSignalStrengthFair + (arc4random_uniform(8) - 4);  // -74 to -66 dBm
-            } else {
-                // 20% chance of poor signal
-                targetSignal = kWiFiSignalStrengthPoor + (arc4random_uniform(8) - 4);  // -84 to -76 dBm
-            }
-        } else {
-            // For None mode or default, have variable signal (less predictable)
-            targetSignal = -45 - (arc4random_uniform(45)); // -45 to -90 dBm
-        }
-        
-        // Move gradually toward the target signal (max +/- 3 dBm change per update)
-        int signalDiff = targetSignal - currentWiFiSignalStrength;
-        int maxChange = 3; // Maximum dBm change per update
-        
-        // Limit the change to ensure realistic gradual signal fluctuations
-        if (signalDiff > maxChange) {
-            currentWiFiSignalStrength += maxChange;
-        } else if (signalDiff < -maxChange) {
-            currentWiFiSignalStrength -= maxChange;
-        } else {
-            currentWiFiSignalStrength = targetSignal;
-        }
-        
-        // Add small random fluctuation (+/- 1 dBm) for realism
-        currentWiFiSignalStrength += (arc4random_uniform(3) - 1);
-        
-        // Enforce realistic bounds for WiFi signal strength
-        if (currentWiFiSignalStrength > -40) currentWiFiSignalStrength = -40;  // Never too perfect
-        if (currentWiFiSignalStrength < -90) currentWiFiSignalStrength = -90;  // Never too terrible
-        
-        // Update last update time
-        lastSignalUpdateTime = [NSDate date];
-        
-        PXLog(@"[NetworkHook] Updated WiFi signal strength to %d dBm", currentWiFiSignalStrength);
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    int current = currentWiFiSignalStrength;
+    NSDate *last = lastSignalUpdateTime;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (last && [now timeIntervalSinceDate:last] < 30.0) return current;
+
+    NetworkConnectionType type = getNetworkConnectionType();
+    int target = -65;
+    if (type == NetworkConnectionTypeWiFi || (type == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode())) {
+        target = -45 - (int)arc4random_uniform(20);
+    } else if (type == NetworkConnectionTypeCellular || (type == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
+        target = -60 - (int)arc4random_uniform(25);
+    } else {
+        target = -45 - (int)arc4random_uniform(45);
     }
-    
-    return currentWiFiSignalStrength;
+    int diff = target - current;
+    if (diff > 3) current += 3;
+    else if (diff < -3) current -= 3;
+    else current = target;
+    current += (int)arc4random_uniform(3) - 1;
+    current = MAX(-90, MIN(-40, current));
+
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    currentWiFiSignalStrength = current;
+    lastSignalUpdateTime = now;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return current;
 }
 
 // Get realistic cellular signal bars (1-5) that change gradually over time
 static int getCellularSignalBars() {
-    // Check if we need to update the signal (use the same timing as WiFi for consistency)
-    NSTimeInterval timeSinceLastUpdate = lastSignalUpdateTime ? [[NSDate date] timeIntervalSinceDate:lastSignalUpdateTime] : 60.0;
-    
-    // Update signal bars every 30-60 seconds
-    if (timeSinceLastUpdate >= 30.0 || !lastSignalUpdateTime) {
-        // Determine the base signal bars based on connection type
-        NetworkConnectionType connectionType = getNetworkConnectionType();
-        int targetBars;
-        
-        if (connectionType == NetworkConnectionTypeCellular || 
-            (connectionType == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
-            // For cellular mode, generally have good signal (3-5 bars)
-            int signalBase = arc4random_uniform(100);
-            if (signalBase < 40) {
-                // 40% chance of 5 bars
-                targetBars = 5;
-            } else if (signalBase < 80) {
-                // 40% chance of 4 bars
-                targetBars = 4;
-            } else {
-                // 20% chance of 3 bars
-                targetBars = 3;
-            }
-        } else if (connectionType == NetworkConnectionTypeWiFi ||
-                  (connectionType == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode())) {
-            // For WiFi mode, have slightly weaker cellular (1-4 bars, realistic for indoor WiFi scenarios)
-            int signalBase = arc4random_uniform(100);
-            if (signalBase < 20) {
-                // 20% chance of 4 bars
-                targetBars = 4;
-            } else if (signalBase < 50) {
-                // 30% chance of 3 bars
-                targetBars = 3;
-            } else if (signalBase < 80) {
-                // 30% chance of 2 bars
-                targetBars = 2;
-            } else {
-                // 20% chance of 1 bar
-                targetBars = 1;
-            }
-        } else {
-            // For None mode or default, random bars
-            targetBars = 1 + (arc4random_uniform(5)); // 1-5 bars
-        }
-        
-        // Move gradually toward the target bars (max +/- 1 bar change per update)
-        int barsDiff = targetBars - currentCellularSignalBars;
-        
-        // Limit the change to ensure realistic gradual signal fluctuations
-        if (barsDiff > 1) {
-            currentCellularSignalBars += 1;
-        } else if (barsDiff < -1) {
-            currentCellularSignalBars -= 1;
-        } else {
-            currentCellularSignalBars = targetBars;
-        }
-        
-        // Enforce bounds
-        if (currentCellularSignalBars < 1) currentCellularSignalBars = 1;
-        if (currentCellularSignalBars > 5) currentCellularSignalBars = 5;
-        
-        PXLog(@"[NetworkHook] Updated cellular signal bars to %d", currentCellularSignalBars);
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    int current = currentCellularSignalBars;
+    NSDate *last = lastSignalUpdateTime;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (last && [now timeIntervalSinceDate:last] < 30.0) return current;
+
+    NetworkConnectionType type = getNetworkConnectionType();
+    int target = 3;
+    if (type == NetworkConnectionTypeCellular || (type == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
+        target = 3 + (int)arc4random_uniform(3);
+    } else if (type == NetworkConnectionTypeWiFi || (type == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode())) {
+        target = 1 + (int)arc4random_uniform(4);
+    } else {
+        target = 1 + (int)arc4random_uniform(5);
     }
-    
-    return currentCellularSignalBars;
+    if (target > current) current += 1;
+    else if (target < current) current -= 1;
+    current = MAX(1, MIN(5, current));
+
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    currentCellularSignalBars = current;
+    lastSignalUpdateTime = now;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return current;
 }
 
 // Get a realistic cellular network type (4G/5G) that changes based on signal strength
 static NSString *getCurrentCellularNetworkType() {
-    // Initialize the network type if not set
-    if (!currentCellularNetworkType) {
-        // Default to LTE (4G) initially
-        currentCellularNetworkType = kCellularNetworkType4G;
-        lastNetworkTypeChangeTime = [NSDate date];
-    }
-    
-    // Only consider changing network type after a minimum duration
-    NSTimeInterval timeSinceLastChange = [[NSDate date] timeIntervalSinceDate:lastNetworkTypeChangeTime];
-    if (timeSinceLastChange < kMinNetworkTypeChangeDuration) {
-        return currentCellularNetworkType;
-    }
-    
-    // Only change network type occasionally (10% chance per check)
-    if (arc4random_uniform(100) >= 10) {
-        return currentCellularNetworkType;
-    }
-    
-    // Determine probability of 5G based on signal strength
-    // Higher signal = higher chance of 5G
-    CGFloat probabilityOf5G = 0.0;
-    
-    // Map signal bars (1-5) to 5G probability
-    switch (currentCellularSignalBars) {
-        case 5: probabilityOf5G = 0.85; break; // Excellent signal: 85% chance of 5G
-        case 4: probabilityOf5G = 0.65; break; // Good signal: 65% chance of 5G
-        case 3: probabilityOf5G = 0.40; break; // Fair signal: 40% chance of 5G
-        case 2: probabilityOf5G = 0.15; break; // Poor signal: 15% chance of 5G
-        case 1: probabilityOf5G = 0.05; break; // Very poor signal: 5% chance of 5G
-        default: probabilityOf5G = 0.0;        // No signal: 0% chance of 5G
-    }
-    
-    // Random decision based on probability
-    CGFloat random = (CGFloat)arc4random_uniform(100) / 100.0;
-    
-    NSString *newNetworkType;
-    if (random < probabilityOf5G) {
-        // Decide between standalone 5G and NSA 5G
-        // NSA is more common in early 5G deployments
-        if (arc4random_uniform(100) < 70) {
-            newNetworkType = kCellularNetworkType5GNSA; // 70% of 5G is NSA
-        } else {
-            newNetworkType = kCellularNetworkType5G;    // 30% of 5G is standalone
+    NSDate *now = [NSDate date];
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    NSString *currentType = currentCellularNetworkType ?: kCellularNetworkType4G;
+    NSDate *lastChange = lastNetworkTypeChangeTime;
+    int bars = currentCellularSignalBars;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+
+    if (!lastChange || [now timeIntervalSinceDate:lastChange] >= kMinNetworkTypeChangeDuration) {
+        if (arc4random_uniform(100) < 10) {
+            CGFloat probability = bars >= 5 ? 0.85 : bars == 4 ? 0.65 : bars == 3 ? 0.40 : bars == 2 ? 0.15 : 0.05;
+            CGFloat random = (CGFloat)arc4random_uniform(100) / 100.0;
+            currentType = random < probability
+                ? (arc4random_uniform(100) < 70 ? kCellularNetworkType5GNSA : kCellularNetworkType5G)
+                : kCellularNetworkType4G;
+            lastChange = now;
+        } else if (!lastChange) {
+            lastChange = now;
         }
-    } else {
-        newNetworkType = kCellularNetworkType4G;        // Default to 4G
     }
-    
-    // Only log if network type actually changed
-    if (![newNetworkType isEqualToString:currentCellularNetworkType]) {
-        PXLog(@"[NetworkHook] Changed cellular network type from %@ to %@", 
-              currentCellularNetworkType, newNetworkType);
-        
-        // Update stored values
-        currentCellularNetworkType = newNetworkType;
-        lastNetworkTypeChangeTime = [NSDate date];
-    }
-    
-    return currentCellularNetworkType;
+
+    os_unfair_lock_lock(&gNetworkCacheLock);
+    currentCellularNetworkType = [currentType copy];
+    lastNetworkTypeChangeTime = lastChange;
+    NSString *published = currentCellularNetworkType;
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    return published;
 }
 
 #pragma mark - SCNetworkReachability Hooks
@@ -1139,42 +847,33 @@ static int hooked_getifaddrs(struct ifaddrs **ifap) {
 
 // Notification callback for settings changes
 static void networkSettingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear cache when notification received
-    cacheTimestamp = nil;
-    isoCountryCodeCacheTimestamp = nil; // Also clear ISO country code cache
-    PXLog(@"[NetworkHook] Received settings change notification, cache cleared");
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXNetworkInvalidateCaches();
 }
 
 // Notification callback for ISO country code changes
 static void isoCountryCodeChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear ISO country code cache when notification received
-    isoCountryCodeCacheTimestamp = nil;
-    PXLog(@"[NetworkHook] Received ISO country code change notification, cache cleared");
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXNetworkInvalidateCaches();
 }
 
 // Notification callback for scoped apps changes
 static void scopedAppsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear cache when notification received
-    scopedAppsCacheTimestamp = nil;
-    PXLog(@"[NetworkHook] Received scoped apps change notification, cache cleared");
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXNetworkInvalidateCaches();
+    PXInvalidateScopeDecisionCache();
 }
 
 // Notification callback for carrier details changes
 static void carrierDetailsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear carrier details cache when notification received
-    carrierDetailsCacheTimestamp = nil;
-    PXLog(@"[NetworkHook] Received carrier details change notification, cache cleared");
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXNetworkInvalidateCaches();
 }
 
 // Notification callback for signal strength settings changes
 static void signalStrengthSettingsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    // Clear cache when notification received
-    lastSignalUpdateTime = nil;
-    
-    // Also reset the network type change timer to allow immediate change
-    lastNetworkTypeChangeTime = nil;
-    
-    PXLog(@"[NetworkHook] Received signal strength settings change notification, cache cleared");
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXNetworkInvalidateCaches();
 }
 
 // Hook for WiFi signal strength (CNCopyCurrentNetworkInfo)
@@ -1247,8 +946,6 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
         BOOL isScoped = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         if (!isScoped) return;
-
-        scopedAppsCache = [NSMutableDictionary dictionary];
         PXLog(@"[NetworkHook] Installing network hooks for %@", bundleID ?: @"(unknown)");
 
         {
@@ -1282,6 +979,12 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
             
             // Register for notification when settings change
             CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
+            CFNotificationCenterAddObserver(darwinCenter, NULL, networkSettingsChanged,
+                                           CFSTR("com.hydra.projectx.settings.changed"), NULL,
+                                           CFNotificationSuspensionBehaviorDeliverImmediately);
+            CFNotificationCenterAddObserver(darwinCenter, NULL, networkSettingsChanged,
+                                           CFSTR("com.hydra.projectx.profileChanged"), NULL,
+                                           CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(darwinCenter,
                                            NULL,
                                            networkSettingsChanged,

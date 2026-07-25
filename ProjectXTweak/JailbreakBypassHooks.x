@@ -4735,8 +4735,8 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         // JBAppSpecific: Logos Foundation hooks plus runtime detector table
         // JBAggressiveRuntime: dyld/dlsym/task_info (experimental toggles only)
         // P0-B: syscall and sandbox_check are intentionally not production capabilities.
-        void *libSystem = dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW);
-        if (libSystem) {
+        {
+            // libSystem is already loaded; FindSymbol resolves through RTLD_DEFAULT.
             void *sym = NULL;
 
             sym = FindSymbol("stat");
@@ -5133,7 +5133,6 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
                 }
             }
 
-            dlclose(libSystem);
         }
 
         %init;

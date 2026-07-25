@@ -3,6 +3,8 @@
 #import "IdentifierManager.h"
 #import "ProjectXLogging.h"
 #import "PXScope.h"
+#import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
 #import "PXFileDebug.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -11,6 +13,27 @@
 // Cache for device model values
 static NSMutableDictionary *modelCache = nil;
 static NSDate *cacheTimestamp = nil;
+
+static void PXEnsureDeviceModelCache(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        modelCache = [NSMutableDictionary dictionary];
+    });
+}
+
+static void PXDeviceModelCacheChanged(CFNotificationCenterRef center,
+                                      void *observer,
+                                      CFStringRef name,
+                                      const void *object,
+                                      CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXEnsureDeviceModelCache();
+    @synchronized(modelCache) {
+        [modelCache removeAllObjects];
+        cacheTimestamp = nil;
+    }
+    PXInvalidateScopeDecisionCache();
+}
 
 #pragma mark - Helper Functions
 
@@ -40,12 +63,7 @@ static BOOL isDeviceModelSpoofingEnabled(void) {
 // Get the spoofed device model (machine id like iPhone15,3) from profile.
 // Used only to derive the Apple product family for UIDevice.model / localizedModel.
 static NSString* getSpoofedDeviceModel(void) {
-    // Initialize cache if needed
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        modelCache = [NSMutableDictionary dictionary];
-        cacheTimestamp = [NSDate date];
-    });
+    PXEnsureDeviceModelCache();
     
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!currentBundleID) return nil;
@@ -71,18 +89,13 @@ static NSString* getSpoofedDeviceModel(void) {
             }
         }
 
-        // METHOD 1: Try direct access from profile plist (device_ids.plist)
+        // METHOD 1: Try direct access from the canonical active profile.
         if (!deviceModel.length) {
-            NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-            NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-            NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-
-            NSString *profileId = centralInfo[@"ProfileId"];
-            if (profileId) {
-                NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-                NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-                deviceModel = deviceIds[@"DeviceModel"];
-            }
+            NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
+            NSDictionary *deviceIDs = deviceIDsPath.length
+                ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
+                : nil;
+            deviceModel = PXProfileString(deviceIDs[@"DeviceModel"]);
         }
         
         // METHOD 2: DeviceModelManager as last resort (do not generate here)
@@ -217,6 +230,17 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
         }
         
         PXLog(@"[model] Successfully retrieved spoofed model: %@ — installing DeviceModelFoundation (UIDevice.model/localizedModel only)", testModel);
+        CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+        for (NSString *notificationName in @[
+            @"com.hydra.projectx.settings.changed",
+            @"com.hydra.projectx.profileChanged",
+            @"com.hydra.projectx.scopedAppsChanged"
+        ]) {
+            CFNotificationCenterAddObserver(center, NULL, PXDeviceModelCacheChanged,
+                (__bridge CFStringRef)notificationName, NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+        }
+
         PXFileDebugAIDA64Log("[DeviceModel.ctor] before %%init DeviceModelFoundation");
         %init(DeviceModelFoundation);
         PXFileDebugAIDA64Log("[DeviceModel.ctor] after %%init DeviceModelFoundation exit");

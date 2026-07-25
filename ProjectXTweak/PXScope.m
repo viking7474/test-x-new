@@ -1,4 +1,5 @@
 #import "PXScope.h"
+#import "PXPaths.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <fcntl.h>
 #import <os/lock.h>
@@ -79,18 +80,52 @@ static BOOL PXReadSecuritySettingBool(NSString *key) {
 
 // Immutable snapshot for hot-path scope decisions.
 @interface PXScopeSnapshot : NSObject
-@property (nonatomic, assign) BOOL deviceSpoofEnabled;
-@property (nonatomic, assign) BOOL safariStackEnabled;
-@property (nonatomic, assign) BOOL fullSpoofTestModeEnabled;
-@property (nonatomic, assign) BOOL displayUIScaleEnabled;
-@property (nonatomic, assign) BOOL displayPixelMetricsEnabled;
-@property (nonatomic, assign) BOOL displayWebScreenEnabled;
-@property (nonatomic, copy) NSDictionary *scopedApps; // immutable copy
-@property (nonatomic, assign) uint64_t generation;
-@property (nonatomic, assign) NSTimeInterval expirationTime;
+@property (nonatomic, assign, readonly) BOOL deviceSpoofEnabled;
+@property (nonatomic, assign, readonly) BOOL safariStackEnabled;
+@property (nonatomic, assign, readonly) BOOL fullSpoofTestModeEnabled;
+@property (nonatomic, assign, readonly) BOOL displayUIScaleEnabled;
+@property (nonatomic, assign, readonly) BOOL displayPixelMetricsEnabled;
+@property (nonatomic, assign, readonly) BOOL displayWebScreenEnabled;
+@property (nonatomic, copy, readonly) NSDictionary *scopedApps;
+@property (nonatomic, assign, readonly) uint64_t generation;
+@property (nonatomic, assign, readonly) NSTimeInterval expirationTime;
+- (instancetype)initWithDeviceSpoofEnabled:(BOOL)deviceSpoofEnabled
+                        safariStackEnabled:(BOOL)safariStackEnabled
+                  fullSpoofTestModeEnabled:(BOOL)fullSpoofTestModeEnabled
+                     displayUIScaleEnabled:(BOOL)displayUIScaleEnabled
+                displayPixelMetricsEnabled:(BOOL)displayPixelMetricsEnabled
+                    displayWebScreenEnabled:(BOOL)displayWebScreenEnabled
+                                scopedApps:(NSDictionary *)scopedApps
+                                generation:(uint64_t)generation
+                            expirationTime:(NSTimeInterval)expirationTime;
 @end
 
 @implementation PXScopeSnapshot
+
+- (instancetype)initWithDeviceSpoofEnabled:(BOOL)deviceSpoofEnabled
+                        safariStackEnabled:(BOOL)safariStackEnabled
+                  fullSpoofTestModeEnabled:(BOOL)fullSpoofTestModeEnabled
+                     displayUIScaleEnabled:(BOOL)displayUIScaleEnabled
+                displayPixelMetricsEnabled:(BOOL)displayPixelMetricsEnabled
+                    displayWebScreenEnabled:(BOOL)displayWebScreenEnabled
+                                scopedApps:(NSDictionary *)scopedApps
+                                generation:(uint64_t)generation
+                            expirationTime:(NSTimeInterval)expirationTime {
+    self = [super init];
+    if (self) {
+        _deviceSpoofEnabled = deviceSpoofEnabled;
+        _safariStackEnabled = safariStackEnabled;
+        _fullSpoofTestModeEnabled = fullSpoofTestModeEnabled;
+        _displayUIScaleEnabled = displayUIScaleEnabled;
+        _displayPixelMetricsEnabled = displayPixelMetricsEnabled;
+        _displayWebScreenEnabled = displayWebScreenEnabled;
+        _scopedApps = [scopedApps copy] ?: @{};
+        _generation = generation;
+        _expirationTime = expirationTime;
+    }
+    return self;
+}
+
 @end
 
 static os_unfair_lock gSnapshotLock = OS_UNFAIR_LOCK_INIT;
@@ -99,7 +134,6 @@ static os_unfair_lock gDecisionLogLock = OS_UNFAIR_LOCK_INIT;
 static PXScopeSnapshot *gSnapshot = nil; // immutable once published
 static uint64_t gScopeGeneration = 1;
 static NSMutableDictionary *gDecisionLogTimes = nil; // protected by gDecisionLogLock
-static NSString *gWebKitHostBundle = nil; // process-lifetime immutable after first resolve
 
 static BOOL PXScopeFileDebugEnabled(void) {
     return access("/tmp/px_debug_scope", F_OK) == 0 || access("/tmp/px_debug_all", F_OK) == 0;
@@ -137,18 +171,9 @@ static void PXScopeFileLog(NSString *format, ...) {
 }
 
 static NSDictionary *PXLoadScopedAppsFromDisk(void) {
-    NSArray<NSString *> *paths = @[
-        @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-        @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"
-    ];
-    for (NSString *path in paths) {
-        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
-        NSDictionary *scoped = [dict isKindOfClass:[NSDictionary class]] ? dict[@"ScopedApps"] : nil;
-        if ([scoped isKindOfClass:[NSDictionary class]]) {
-            return [scoped copy];
-        }
-    }
-    return @{};
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+    NSDictionary *scoped = [dict isKindOfClass:[NSDictionary class]] ? dict[@"ScopedApps"] : nil;
+    return [scoped isKindOfClass:[NSDictionary class]] ? [scoped copy] : @{};
 }
 
 static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
@@ -181,17 +206,16 @@ static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
 
     NSDictionary *scoped = PXLoadScopedAppsFromDisk();
 
-    PXScopeSnapshot *snap = [[PXScopeSnapshot alloc] init];
-    snap.deviceSpoofEnabled = deviceEnabled;
-    snap.fullSpoofTestModeEnabled = (deviceEnabled && fullTest);
-    snap.safariStackEnabled = safariEnabled;
-    snap.displayUIScaleEnabled = uiScaleEnabled;
-    snap.displayPixelMetricsEnabled = pixelMetricsEnabled;
-    snap.displayWebScreenEnabled = webScreenEnabled;
-    snap.scopedApps = scoped ?: @{};
-    snap.generation = generation;
-    snap.expirationTime = [NSDate timeIntervalSinceReferenceDate] + 1.0;
-    return snap;
+    return [[PXScopeSnapshot alloc]
+        initWithDeviceSpoofEnabled:deviceEnabled
+        safariStackEnabled:safariEnabled
+        fullSpoofTestModeEnabled:(deviceEnabled && fullTest)
+        displayUIScaleEnabled:uiScaleEnabled
+        displayPixelMetricsEnabled:pixelMetricsEnabled
+        displayWebScreenEnabled:webScreenEnabled
+        scopedApps:scoped ?: @{}
+        generation:generation
+        expirationTime:[NSDate timeIntervalSinceReferenceDate] + 1.0];
 }
 
 static PXScopeSnapshot *PXCurrentSnapshot(void) {
@@ -201,49 +225,40 @@ static PXScopeSnapshot *PXCurrentSnapshot(void) {
     os_unfair_lock_lock(&gSnapshotLock);
     local = gSnapshot;
     BOOL needsRefresh = (!local || now >= local.expirationTime);
-    uint64_t gen = gScopeGeneration;
     os_unfair_lock_unlock(&gSnapshotLock);
+    if (!needsRefresh) return local;
 
-    if (!needsRefresh) {
-        return local;
-    }
-
-    // Only one thread reloads disk; others keep using the last valid snapshot.
+    // Only one thread reloads disk; other threads may use the last valid snapshot.
     if (!os_unfair_lock_trylock(&gRefreshLock)) {
-        // Another thread is refreshing; return best available snapshot.
         os_unfair_lock_lock(&gSnapshotLock);
         local = gSnapshot;
         os_unfair_lock_unlock(&gSnapshotLock);
         if (local) return local;
-        // No snapshot yet — fall through and wait for refresh lock.
         os_unfair_lock_lock(&gRefreshLock);
     }
 
-    // Re-check after acquiring refresh lock.
-    os_unfair_lock_lock(&gSnapshotLock);
-    local = gSnapshot;
-    now = [NSDate timeIntervalSinceReferenceDate];
-    needsRefresh = (!local || now >= local.expirationTime);
-    gen = gScopeGeneration;
-    os_unfair_lock_unlock(&gSnapshotLock);
-
-    if (needsRefresh) {
-        PXScopeSnapshot *built = PXBuildSnapshot(gen);
-        os_unfair_lock_lock(&gSnapshotLock);
-        // Only publish if generation still matches (no invalidate during build).
-        if (gScopeGeneration == gen) {
-            gSnapshot = built;
-            local = built;
-        } else {
-            // Stale build; keep existing if any, else use built as best-effort.
-            if (!gSnapshot) gSnapshot = built;
-            local = gSnapshot;
-        }
-        os_unfair_lock_unlock(&gSnapshotLock);
-    } else {
+    for (;;) {
         os_unfair_lock_lock(&gSnapshotLock);
         local = gSnapshot;
+        now = [NSDate timeIntervalSinceReferenceDate];
+        needsRefresh = (!local || now >= local.expirationTime);
+        uint64_t generation = gScopeGeneration;
         os_unfair_lock_unlock(&gSnapshotLock);
+        if (!needsRefresh) break;
+
+        PXScopeSnapshot *built = PXBuildSnapshot(generation);
+        os_unfair_lock_lock(&gSnapshotLock);
+        if (gScopeGeneration == generation) {
+            gSnapshot = built;
+            local = built;
+            os_unfair_lock_unlock(&gSnapshotLock);
+            break;
+        }
+        // A notification invalidated the cache while disk I/O was in flight.
+        // Never publish the stale build; retry using the new generation.
+        local = gSnapshot;
+        os_unfair_lock_unlock(&gSnapshotLock);
+        if (local) break;
     }
 
     os_unfair_lock_unlock(&gRefreshLock);
@@ -276,12 +291,52 @@ static BOOL PXScopedBundleEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bun
     return [entry[@"enabled"] boolValue];
 }
 
+NSDictionary<NSString *, NSDictionary *> *PXScopedAppsSnapshot(void) {
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    return [snap.scopedApps isKindOfClass:[NSDictionary class]] ? snap.scopedApps : @{};
+}
+
+BOOL PXBundleIsEnabledInScope(NSString *bundleID) {
+    return PXScopedBundleEnabledInSnapshot(PXCurrentSnapshot(), bundleID);
+}
+
+NSArray<NSString *> *PXBrowserBundleIdentifierPrefixes(void) {
+    static NSArray<NSString *> *prefixes = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        prefixes = @[
+            @"com.apple.mobilesafari",
+            @"com.google.chrome",
+            @"org.mozilla.ios.Firefox",
+            @"com.brave.ios",
+            @"com.microsoft.msedge",
+            @"com.opera"
+        ];
+    });
+    return prefixes;
+}
+
+BOOL PXIsBrowserBundleIdentifier(NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
+    for (NSString *prefix in PXBrowserBundleIdentifierPrefixes()) {
+        if ([bundleID isEqualToString:prefix] || [bundleID hasPrefix:prefix]) return YES;
+    }
+    return NO;
+}
+
+BOOL PXIsSafariBrowserBundleIdentifier(NSString *bundleID) {
+    NSString *safariPrefix = [PXBrowserBundleIdentifierPrefixes() firstObject];
+    return safariPrefix.length &&
+        ([bundleID isEqualToString:safariPrefix] || [bundleID hasPrefix:safariPrefix]);
+}
+
 __attribute__((constructor))
 static void PXScopeInit(void) {
     CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
     if (!center) return;
     CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.projectx.settings.changed"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.projectx.profileChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.projectx.scopedAppsChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.projectx.safariStackSpoofToggleChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 }
 
@@ -363,30 +418,29 @@ BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
 }
 
 NSString *PXWebKitHostBundleIdentifier(void) {
-    // Process-lifetime immutable cache; fail closed if not found.
-    if (gWebKitHostBundle) {
-        return gWebKitHostBundle.length ? gWebKitHostBundle : nil;
-    }
-
-    NSString *resolved = nil;
-    NSArray<NSString *> *homeCandidates = @[
-        NSHomeDirectory() ?: @"",
-        [[[NSProcessInfo processInfo] environment][@"HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"HOME"] : @"",
-        [[[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] : @""
-    ];
-    for (NSString *home in homeCandidates) {
-        if (![home isKindOfClass:[NSString class]] || !home.length) continue;
-        NSString *metadataPath = [home stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
-        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        NSString *identifier = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-        if (identifier.length) {
-            resolved = [identifier copy];
-            break;
+    static NSString *resolvedHostBundle = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *resolved = nil;
+        NSArray<NSString *> *homeCandidates = @[
+            NSHomeDirectory() ?: @"",
+            [[[NSProcessInfo processInfo] environment][@"HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"HOME"] : @"",
+            [[[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] : @""
+        ];
+        for (NSString *home in homeCandidates) {
+            if (![home isKindOfClass:[NSString class]] || !home.length) continue;
+            NSString *metadataPath = [home stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+            NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+            NSString *identifier = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
+            if (identifier.length) {
+                resolved = [identifier copy];
+                break;
+            }
         }
-    }
-    // Sentinel empty string means "looked up, not found" (fail closed).
-    gWebKitHostBundle = resolved ?: @"";
-    return resolved;
+        // Empty sentinel means resolution completed with no host bundle.
+        resolvedHostBundle = resolved ?: @"";
+    });
+    return resolvedHostBundle.length ? resolvedHostBundle : nil;
 }
 
 BOOL PXWebKitHostIsScopedForSpoofing(void) {
@@ -401,14 +455,14 @@ BOOL PXWebKitHostIsScopedForSpoofing(void) {
 
 BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName) {
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
-    if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) return YES;
+    if (PXIsSafariBrowserBundleIdentifier(bundleID)) return YES;
     if ([bundleID isEqualToString:@"com.apple.webapp"]) return YES;
     if ([bundleID isEqualToString:@"com.apple.SafariViewService"]) return YES;
     if ([bundleID hasPrefix:@"com.apple.WebKit"]) return YES;
 
     BOOL appleWebKitBundle = [bundleID hasPrefix:@"com.apple.WebKit"] ||
         [bundleID hasPrefix:@"com.apple.Safari"] ||
-        [bundleID isEqualToString:@"com.apple.mobilesafari"] ||
+        PXIsSafariBrowserBundleIdentifier(bundleID) ||
         [bundleID isEqualToString:@"com.apple.SafariViewService"];
     if ([processName isKindOfClass:[NSString class]] && processName.length) {
         if (appleWebKitBundle &&

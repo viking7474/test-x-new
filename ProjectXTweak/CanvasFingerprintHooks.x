@@ -9,20 +9,27 @@
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXFileDebug.h"
+#import <os/lock.h>
 
 extern void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController);
 
-// Cache for bundle decisions
+// Decision and seed maps are initialized once and protected by one lock.
+static os_unfair_lock gCanvasCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary *cachedBundleDecisions = nil;
-static NSDate *cacheTimestamp = nil;
-static NSTimeInterval kCacheValidityDuration = 300.0; // 5 minutes in seconds
+static NSMutableDictionary *noiseSeedCache = nil;
+static NSTimeInterval kCacheValidityDuration = 300.0;
+
+static void PXEnsureCanvasCache(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cachedBundleDecisions = [NSMutableDictionary dictionary];
+        noiseSeedCache = [NSMutableDictionary dictionary];
+    });
+}
 
 // Configuration for fingerprint noise
 static CGFloat kNoiseIntensity = 0.02;  // Default noise intensity (2% variation)
 static BOOL kConsistentNoise = YES;     // Whether to use consistent noise per session
-
-// Cache for noise seed values (to keep consistent noise per app session)
-static NSMutableDictionary *noiseSeedCache = nil;
 
 #pragma mark - Helper Functions
 
@@ -767,49 +774,54 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
 
 // Update shouldProtectBundle to use only the new function
 static BOOL shouldProtectBundle(NSString *bundleID) {
-    if (!bundleID) return NO;
-    // Check cache first
-    if (!cachedBundleDecisions) {
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-    } else {
-        NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
-        NSDate *decisionTimestamp = cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]];
-        if (cachedDecision && decisionTimestamp && 
-            [[NSDate date] timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration) {
-            return [cachedDecision boolValue];
-        }
-    }
+    if (!bundleID.length) return NO;
+    PXEnsureCanvasCache();
+    NSString *timestampKey = [bundleID stringByAppendingString:@"_timestamp"];
+    NSDate *now = [NSDate date];
+
+    os_unfair_lock_lock(&gCanvasCacheLock);
+    NSNumber *cachedDecision = cachedBundleDecisions[bundleID];
+    NSDate *decisionTimestamp = cachedBundleDecisions[timestampKey];
+    BOOL valid = cachedDecision && decisionTimestamp &&
+        [now timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration;
+    BOOL cachedValue = [cachedDecision boolValue];
+    os_unfair_lock_unlock(&gCanvasCacheLock);
+    if (valid) return cachedValue;
+
     BOOL shouldProtect = isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled();
+    os_unfair_lock_lock(&gCanvasCacheLock);
     cachedBundleDecisions[bundleID] = @(shouldProtect);
-    cachedBundleDecisions[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
+    cachedBundleDecisions[timestampKey] = now;
+    os_unfair_lock_unlock(&gCanvasCacheLock);
     return shouldProtect;
 }
 
 // Get or create a noise seed for consistent variations
 static NSInteger getNoiseSeedForBundle(NSString *bundleID) {
-    if (!noiseSeedCache) {
-        noiseSeedCache = [NSMutableDictionary dictionary];
-    }
-    
+    if (!bundleID.length) return 1;
+    PXEnsureCanvasCache();
+    os_unfair_lock_lock(&gCanvasCacheLock);
     NSNumber *cachedSeed = noiseSeedCache[bundleID];
-    if (cachedSeed) {
-        return [cachedSeed integerValue];
+    os_unfair_lock_unlock(&gCanvasCacheLock);
+    if (cachedSeed) return [cachedSeed integerValue];
+
+    NSInteger candidate = arc4random_uniform(1000000) + 1;
+    os_unfair_lock_lock(&gCanvasCacheLock);
+    cachedSeed = noiseSeedCache[bundleID];
+    if (!cachedSeed) {
+        cachedSeed = @(candidate);
+        noiseSeedCache[bundleID] = cachedSeed;
     }
-    
-    // Create a new random seed
-    NSInteger seed = arc4random_uniform(1000000);
-    noiseSeedCache[bundleID] = @(seed);
-    
-    return seed;
+    os_unfair_lock_unlock(&gCanvasCacheLock);
+    return [cachedSeed integerValue];
 }
 
 // Add subtle noise to image data based on seed
 static void addNoiseToImageData(NSMutableData *imageData, NSString *bundleID) {
     if (!imageData || imageData.length == 0) return;
     
-    NSInteger seed = kConsistentNoise ? getNoiseSeedForBundle(bundleID) : arc4random_uniform(1000000);
-    srand((unsigned int)seed);
-    
+    uint32_t state = (uint32_t)(kConsistentNoise ? getNoiseSeedForBundle(bundleID) : arc4random_uniform(UINT32_MAX));
+    if (state == 0) state = 1;
     UInt8 *bytes = (UInt8 *)imageData.mutableBytes;
     NSUInteger length = imageData.length;
     
@@ -818,10 +830,12 @@ static void addNoiseToImageData(NSMutableData *imageData, NSString *bundleID) {
     
     // Add subtle noise to pixel values
     for (NSUInteger i = startOffset; i < length; i++) {
-        // Apply noise with probability based on intensity
-        if ((CGFloat)rand() / RAND_MAX < kNoiseIntensity) {
-            // Add -1, 0, or +1 variation to byte value
-            int variation = (rand() % 3) - 1;
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        if ((CGFloat)(state & 0xFFFFu) / 65535.0f < kNoiseIntensity) {
+            state = state * 1664525u + 1013904223u;
+            int variation = (int)(state % 3u) - 1;
             
             // Apply variation ensuring value stays within 0-255 range
             int newValue = bytes[i] + variation;
@@ -979,9 +993,12 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
 static void refreshSettings(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     NSString *notificationName = (__bridge NSString *)name;
     PXLog(@"[CanvasFingerprint] Received settings notification: %@", notificationName);
+    PXInvalidateScopeDecisionCache();
+    PXEnsureCanvasCache();
+    os_unfair_lock_lock(&gCanvasCacheLock);
     [cachedBundleDecisions removeAllObjects];
-    cacheTimestamp = [NSDate date];
-        [noiseSeedCache removeAllObjects];
+    [noiseSeedCache removeAllObjects];
+    os_unfair_lock_unlock(&gCanvasCacheLock);
     PXStageDocumentStartScriptsForExistingWebViews();
 }
 
@@ -1003,10 +1020,7 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
             PXLog(@"[CanvasFingerprint] App is not scoped, skipping hook installation");
             return;
         }
-        // Initialize caches
-        cachedBundleDecisions = [NSMutableDictionary dictionary];
-        noiseSeedCache = [NSMutableDictionary dictionary];
-        cacheTimestamp = [NSDate date];
+        PXEnsureCanvasCache();
         // Register for notifications about profile or settings changes
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
@@ -1021,6 +1035,14 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
             NULL,
             refreshSettings,
             CFSTR("com.hydra.projectx.profileChanged"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            refreshSettings,
+            CFSTR("com.hydra.projectx.scopedAppsChanged"),
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately
         );

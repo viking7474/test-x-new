@@ -7,6 +7,8 @@
 #import "ProjectXLogging.h"
 
 #import "PXScope.h"
+#import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
 
 // Helper declarations
 static BOOL isSpoofingEnabled(void);
@@ -78,22 +80,9 @@ static NSDictionary* getSpecsForModel(NSString *model) {
 
 // Reuse helper from DeviceModelHooks.x (simplified duplication for safety)
 static NSString* getSpoofedModel() {
-    // Try to get from property first if feasible, but here we can just read from file directly 
-    // to avoid cross-file dependency issues if symbols aren't exported.
-    // For simplicity, let's try to get it from profile directly.
-    @try {
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        NSString *profileId = centralInfo[@"ProfileId"];
-        
-        if (profileId) {
-            NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-            return deviceIds[@"DeviceModel"];
-        }
-    } @catch (NSException *e) {}
-    return nil;
+    NSString *path = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIDs = path.length ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+    return PXProfileString(deviceIDs[@"DeviceModel"]);
 }
 
 static BOOL isSpoofingGlobalEnabled() {
@@ -108,23 +97,7 @@ static BOOL isSpoofingGlobalEnabled() {
 
 // Helper to get GPU name from Chip
 static BOOL isInScopedAppsList_Missing(void) {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID.length) return NO;
-        NSArray *paths = @[@"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/private/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist",
-                           @"/var/mobile/Library/Preferences/com.hydra.projectx.global_scope.plist"];
-        NSDictionary *plist = nil;
-        for (NSString *p in paths) {
-            plist = [NSDictionary dictionaryWithContentsOfFile:p];
-            if (plist) break;
-        }
-        NSDictionary *scopedApps = [plist isKindOfClass:[NSDictionary class]] ? plist[@"ScopedApps"] : nil;
-        NSDictionary *entry = [scopedApps isKindOfClass:[NSDictionary class]] ? scopedApps[bundleID] : nil;
-        return [entry isKindOfClass:[NSDictionary class]] ? [entry[@"enabled"] boolValue] : NO;
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    return PXBundleIsEnabledInScope([[NSBundle mainBundle] bundleIdentifier]);
 }
 
 static BOOL shouldSpoofForCurrentProcess_Missing(void) {
@@ -135,21 +108,10 @@ static BOOL shouldSpoofForCurrentProcess_Missing(void) {
 }
 
 static NSString *getSpoofedGPUFamily(void) {
-    @try {
-        NSString *profilesPath = @"/var/mobile/Library/WeaponX/Profiles";
-        NSString *centralInfoPath = [profilesPath stringByAppendingPathComponent:@"current_profile_info.plist"];
-        NSDictionary *centralInfo = [NSDictionary dictionaryWithContentsOfFile:centralInfoPath];
-        NSString *profileId = centralInfo[@"ProfileId"];
-        if (!profileId.length) return nil;
-        NSString *identityDir = [[profilesPath stringByAppendingPathComponent:profileId] stringByAppendingPathComponent:@"identity"];
-        NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-        NSString *gpuFamily = [deviceIds[@"GPUFamily"] isKindOfClass:[NSString class]] ? deviceIds[@"GPUFamily"] : nil;
-        if (gpuFamily.length) return gpuFamily;
-        NSString *webgl = [deviceIds[@"WebGLRenderer"] isKindOfClass:[NSString class]] ? deviceIds[@"WebGLRenderer"] : nil;
-        return webgl.length ? webgl : nil;
-    } @catch (__unused NSException *e) {
-        return nil;
-    }
+    NSString *path = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIDs = path.length ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+    NSString *gpuFamily = PXProfileString(deviceIDs[@"GPUFamily"]);
+    return gpuFamily ?: PXProfileString(deviceIDs[@"WebGLRenderer"]);
 }
 
 // Hook MTLDevice name
