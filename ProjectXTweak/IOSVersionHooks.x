@@ -15,6 +15,7 @@
 
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXIdentitySnapshot.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
 
@@ -202,10 +203,8 @@ static NSDictionary *getIOSVersionInfo() {
     NSDictionary *cached = PXIOSVersionCachedInfo(now);
     if (cached) return cached;
 
-    NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
-    NSDictionary *deviceIds = deviceIDsPath.length
-        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
-        : nil;
+    PXIdentitySnapshot *identitySnapshot = PXCurrentIdentitySnapshot();
+    NSDictionary *deviceIds = identitySnapshot.valid ? identitySnapshot.deviceIDs : nil;
     NSString *formattedVersion = [deviceIds[@"IOSVersion"] isKindOfClass:[NSString class]]
         ? deviceIds[@"IOSVersion"]
         : nil;

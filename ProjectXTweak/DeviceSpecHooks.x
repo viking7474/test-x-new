@@ -28,6 +28,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentitySnapshot.h"
 #import "PXRuntimeUtilities.h"
 #import "PXFileDebug.h"
 
@@ -176,7 +177,6 @@ static __thread NXArchInfo g_deviceSpecThreadArchInfo;
 
 static NSObject *gDeviceSpecSnapshotLock;
 static PXDeviceSpecSnapshot *gDeviceSpecSnapshot;
-static uint64_t gDeviceSpecSnapshotGeneration;
 static __thread BOOL gDeviceSpecSnapshotBuildInProgress;
 
 // Cache to track which memory hooks have been called for logging.
@@ -569,15 +569,11 @@ static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
                                                         source:@"scope-denied"];
     }
 
-    NSString *profileID = PXActiveProfileID();
-    NSString *profileRoot = PXProfileRootPath(profileID);
-    NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileID);
-    NSDictionary *settings = profileRoot.length
-        ? [NSDictionary dictionaryWithContentsOfFile:[profileRoot stringByAppendingPathComponent:@"settings.plist"]]
-        : nil;
-    NSDictionary *deviceIDs = deviceIDsPath.length
-        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
-        : nil;
+    PXIdentitySnapshot *identitySnapshot = PXCurrentIdentitySnapshot();
+    NSString *profileID = identitySnapshot.profileID;
+    NSDictionary *settings = identitySnapshot.settings;
+    NSDictionary *deviceIDs = identitySnapshot.deviceIDs;
+    generation = identitySnapshot.generation;
 
     IdentifierManager *identifierManager = nil;
     Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
@@ -600,8 +596,8 @@ static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
     NSString *source = @"disabled";
 
     if (requestedEnabled && deviceModel.length) {
-        specs = PXDeviceSpecificationsFromDeviceIDs(deviceIDs);
-        source = @"device_ids";
+        specs = identitySnapshot.specs;
+        source = identitySnapshot.source ?: @"device_ids";
     }
 
     if (requestedEnabled && !specs.count && deviceModel.length) {
@@ -649,10 +645,9 @@ static PXDeviceSpecSnapshot *PXReloadDeviceSpecSnapshot(NSString *reason) {
         return existing;
     }
 
-    uint64_t generation = 0;
-    @synchronized(lock) {
-        generation = ++gDeviceSpecSnapshotGeneration;
-    }
+    // DeviceSpec publications use the persisted canonical profile generation.
+    // Reload request ordering is owned by PXIdentitySnapshot, not a local counter.
+    uint64_t generation = [PXCurrentIdentitySnapshot() generation];
 
     gDeviceSpecSnapshotBuildInProgress = YES;
     PXDeviceSpecSnapshot *candidate = nil;
@@ -1377,6 +1372,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 CFNotificationSuspensionBehaviorDeliverImmediately
             );
             
+            PXIdentitySnapshotStartObserving();
             PXDeviceSpecSnapshot *initialSnapshot = PXReloadDeviceSpecSnapshot(@"constructor");
             PXLog(@"[DeviceSpec] App %@ is scoped; snapshot generation=%llu enabled=%d source=%@",
                   currentBundleID,

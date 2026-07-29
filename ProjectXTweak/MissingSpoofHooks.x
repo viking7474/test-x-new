@@ -9,6 +9,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentitySnapshot.h"
 
 // Helper declarations
 static BOOL isSpoofingEnabled(void);
@@ -80,9 +81,8 @@ static NSDictionary* getSpecsForModel(NSString *model) {
 
 // Reuse helper from DeviceModelHooks.x (simplified duplication for safety)
 static NSString* getSpoofedModel() {
-    NSString *path = PXActiveProfileDeviceIDsPath();
-    NSDictionary *deviceIDs = path.length ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
-    return PXProfileString(deviceIDs[@"DeviceModel"]);
+    PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+    return snapshot.valid ? snapshot.deviceModel : nil;
 }
 
 static BOOL isSpoofingGlobalEnabled() {
@@ -108,8 +108,8 @@ static BOOL shouldSpoofForCurrentProcess_Missing(void) {
 }
 
 static NSString *getSpoofedGPUFamily(void) {
-    NSString *path = PXActiveProfileDeviceIDsPath();
-    NSDictionary *deviceIDs = path.length ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+    PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+    NSDictionary *deviceIDs = snapshot.valid ? snapshot.deviceIDs : nil;
     NSString *gpuFamily = PXProfileString(deviceIDs[@"GPUFamily"]);
     return gpuFamily ?: PXProfileString(deviceIDs[@"WebGLRenderer"]);
 }

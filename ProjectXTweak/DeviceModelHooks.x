@@ -5,6 +5,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentitySnapshot.h"
 #import "PXFileDebug.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -78,24 +79,17 @@ static NSString* getSpoofedDeviceModel(void) {
     
     NSString *deviceModel = nil;
     @try {
-        // METHOD 0: Use IdentifierManager as the single source of truth
-        if (NSClassFromString(@"IdentifierManager")) {
+        // METHOD 0: The immutable identity snapshot is the canonical source.
+        PXIdentitySnapshot *identitySnapshot = PXCurrentIdentitySnapshot();
+        deviceModel = identitySnapshot.valid ? identitySnapshot.deviceModel : nil;
+
+        // METHOD 1: IdentifierManager is a compatibility fallback only.
+        if (!deviceModel.length && NSClassFromString(@"IdentifierManager")) {
             IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
             if (manager) {
                 NSString *m = [manager currentValueForIdentifier:@"DeviceModel"];
-                if (m.length > 0) {
-                    deviceModel = m;
-                }
+                if (m.length > 0) deviceModel = m;
             }
-        }
-
-        // METHOD 1: Try direct access from the canonical active profile.
-        if (!deviceModel.length) {
-            NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
-            NSDictionary *deviceIDs = deviceIDsPath.length
-                ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
-                : nil;
-            deviceModel = PXProfileString(deviceIDs[@"DeviceModel"]);
         }
         
         // METHOD 2: DeviceModelManager as last resort (do not generate here)

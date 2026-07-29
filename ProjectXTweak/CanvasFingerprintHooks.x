@@ -8,6 +8,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentitySnapshot.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
 
@@ -53,10 +54,8 @@ static BOOL isCanvasFingerprintProtectionEnabledForCurrentApp(void) {
 
 static NSDictionary *PXReadCurrentDeviceIdsForFingerprint(void) {
     @try {
-        NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
-        if (!deviceIDsPath.length) return nil;
-        NSDictionary *deviceIDs = [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath];
-        return [deviceIDs isKindOfClass:[NSDictionary class]] && deviceIDs.count ? deviceIDs : nil;
+        PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+        return snapshot.valid ? snapshot.deviceIDs : nil;
     } @catch (__unused NSException *exception) {
         return nil;
     }

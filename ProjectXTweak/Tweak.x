@@ -39,6 +39,7 @@
 #import "PXNativeHookCoordinator.h"
 #import "PXScope.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentitySnapshot.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
 #import "PXFileDebug.h"
@@ -666,68 +667,20 @@ static NSString *PXISO8601Now(void) {
     return [df stringFromDate:[NSDate date]];
 }
 
-// Immutable device_ids snapshot cache. Disk reads happen outside the lock;
-// publication and invalidation are serialized by gDeviceIDsSnapshotLock.
-static os_unfair_lock gDeviceIDsSnapshotLock = OS_UNFAIR_LOCK_INIT;
-static NSDictionary *gCachedDeviceIds = nil;
-static NSString *gCachedProfileId = nil;
-static NSNumber *gCachedGen = nil;
-
-static void PXInvalidateDeviceIdsSnapshot(void) {
-    os_unfair_lock_lock(&gDeviceIDsSnapshotLock);
-    gCachedDeviceIds = nil;
-    gCachedProfileId = nil;
-    gCachedGen = nil;
-    os_unfair_lock_unlock(&gDeviceIDsSnapshotLock);
-}
-
+// Compatibility wrapper over the process-wide immutable identity snapshot.
+// Native, MobileGestalt, IORegistry and DeviceSpec providers now share the same
+// profile ID + persisted GenerationCounter publication.
 static void PXIdentitySnapshotChanged(CFNotificationCenterRef center,
                                       void *observer,
                                       CFStringRef name,
                                       const void *object,
                                       CFDictionaryRef userInfo) {
     (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
-    PXInvalidateDeviceIdsSnapshot();
     PXInvalidateScopeDecisionCache();
 }
 
 static NSDictionary *PXGetDeviceIdsSnapshot(NSString **outProfileId, NSNumber **outGen) {
-    NSString *profileId = PXActiveProfileID();
-    NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileId);
-    NSDictionary *diskIDs = deviceIDsPath.length
-        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
-        : nil;
-    NSDictionary *immutableIDs = [diskIDs isKindOfClass:[NSDictionary class]] && diskIDs.count
-        ? [diskIDs copy]
-        : nil;
-    NSNumber *generation = nil;
-    if ([immutableIDs[@"GenerationCounter"] respondsToSelector:@selector(integerValue)]) {
-        generation = @([immutableIDs[@"GenerationCounter"] integerValue]);
-    }
-
-    NSDictionary *publishedIDs = nil;
-    NSString *publishedProfile = nil;
-    NSNumber *publishedGeneration = nil;
-
-    os_unfair_lock_lock(&gDeviceIDsSnapshotLock);
-    BOOL sameGeneration = (gCachedGen == generation) || [gCachedGen isEqual:generation];
-    if (immutableIDs && [gCachedProfileId isEqualToString:profileId] && sameGeneration && gCachedDeviceIds) {
-        publishedIDs = gCachedDeviceIds;
-        publishedProfile = gCachedProfileId;
-        publishedGeneration = gCachedGen;
-    } else {
-        gCachedDeviceIds = immutableIDs;
-        gCachedProfileId = [profileId copy];
-        gCachedGen = generation;
-        publishedIDs = gCachedDeviceIds;
-        publishedProfile = gCachedProfileId;
-        publishedGeneration = gCachedGen;
-    }
-    os_unfair_lock_unlock(&gDeviceIDsSnapshotLock);
-
-    if (outProfileId) *outProfileId = publishedProfile;
-    if (outGen) *outGen = publishedGeneration;
-    return publishedIDs;
+    return PXDeviceIDsSnapshot(outProfileId, outGen);
 }
 
 static BOOL PXRequireKeysAll(NSDictionary *ids, NSArray<NSString *> *keys, NSString *api, NSString *req, NSString *bundleID, NSString *profileId, NSNumber *gen) {
@@ -3889,6 +3842,8 @@ static char* hook_GSSystemGetSerialNo(void) {
         });
         return;
     }
+
+    PXIdentitySnapshotStartObserving();
 
     CFNotificationCenterRef identityCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (identityCenter) {
