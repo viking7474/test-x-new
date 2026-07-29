@@ -1,5 +1,6 @@
 #import "PXIdentitySnapshot.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentityValidator.h"
 #import "PXPaths.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
@@ -13,6 +14,7 @@
                          settings:(NSDictionary *)settings
                             specs:(NSDictionary *)specs
                            source:(NSString *)source
+                 validationIssues:(NSDictionary<NSString *, NSString *> *)validationIssues
                             valid:(BOOL)valid;
 @end
 
@@ -25,6 +27,7 @@
     NSDictionary *_specs;
     NSString *_deviceModel;
     NSString *_source;
+    NSDictionary *_validationIssues;
     BOOL _valid;
 }
 
@@ -36,6 +39,7 @@
 @synthesize specs = _specs;
 @synthesize deviceModel = _deviceModel;
 @synthesize source = _source;
+@synthesize validationIssues = _validationIssues;
 @synthesize valid = _valid;
 
 - (instancetype)initWithProfileID:(NSString * _Nullable)profileID
@@ -44,6 +48,7 @@
                          settings:(NSDictionary *)settings
                             specs:(NSDictionary *)specs
                            source:(NSString *)source
+                 validationIssues:(NSDictionary<NSString *, NSString *> *)validationIssues
                             valid:(BOOL)valid {
     self = [super init];
     if (self) {
@@ -55,6 +60,7 @@
         _specs = [specs copy] ?: @{};
         _deviceModel = [PXProfileString(_deviceIDs[@"DeviceModel"]) copy];
         _source = [source copy] ?: @"unknown";
+        _validationIssues = [validationIssues copy] ?: @{};
         _valid = valid;
     }
     return self;
@@ -111,13 +117,15 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
         ? [NSDictionary dictionaryWithContentsOfFile:[rootPath stringByAppendingPathComponent:@"settings.plist"]]
         : nil;
 
-    NSDictionary *deviceIDs = [diskDeviceIDs isKindOfClass:[NSDictionary class]]
+    NSDictionary *rawDeviceIDs = [diskDeviceIDs isKindOfClass:[NSDictionary class]]
         ? PXIdentityDeepImmutableCopy(diskDeviceIDs)
         : @{};
     NSDictionary *settings = [diskSettings isKindOfClass:[NSDictionary class]]
         ? PXIdentityDeepImmutableCopy(diskSettings)
         : @{};
 
+    PXIdentityValidationResult *validation = PXValidateDeviceIDs(rawDeviceIDs);
+    NSDictionary *deviceIDs = validation.deviceIDs;
     uint64_t generation = 0;
     id generationValue = deviceIDs[@"GenerationCounter"];
     if ([generationValue respondsToSelector:@selector(unsignedLongLongValue)]) {
@@ -125,8 +133,9 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
     }
 
     NSDictionary *specs = PXDeviceSpecificationsFromDeviceIDs(deviceIDs) ?: @{};
-    BOOL valid = profileID.length > 0 && deviceIDs.count > 0;
-    NSString *source = valid ? (generation > 0 ? @"device_ids" : @"device_ids-legacy-generation")
+    BOOL valid = profileID.length > 0 && validation.inputValid && deviceIDs.count > 0;
+    NSString *source = valid ? (validation.issues.count ? @"device_ids-validated-with-rejections" :
+                                (generation > 0 ? @"device_ids" : @"device_ids-legacy-generation"))
                              : (profileID.length ? @"device_ids-unavailable" : @"missing-profile");
 
     return [[PXIdentitySnapshot alloc] initWithProfileID:profileID
@@ -135,6 +144,7 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
                                                 settings:settings
                                                    specs:specs
                                                   source:source
+                                        validationIssues:validation.issues
                                                    valid:valid];
 }
 
@@ -153,6 +163,7 @@ PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
                                                                  settings:@{}
                                                                     specs:@{}
                                                                    source:@"recursive-build"
+                                                         validationIssues:@{}
                                                                     valid:NO];
     }
 
@@ -173,6 +184,7 @@ PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
                                                          settings:@{}
                                                             specs:@{}
                                                            source:@"exception"
+                                                 validationIssues:@{@"$": @"exception"}
                                                             valid:NO];
     } @finally {
         gPXIdentityBuildInProgress = NO;

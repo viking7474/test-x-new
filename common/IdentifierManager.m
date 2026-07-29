@@ -25,6 +25,7 @@
 #import "AppContainerUUIDManager.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentityValidator.h"
 #import <Security/Security.h>
 
 @interface LSApplicationWorkspace
@@ -3011,40 +3012,14 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
     return meid;
 }
 
-// IMEI validation: 15 digits, Luhn valid, US TAC
+// IMEI policy is shared across all writers/readers; TAC is not region-locked.
 - (BOOL)isValidIMEI:(NSString *)imei {
-    if (imei.length != 15) return NO;
-    if (![self isAllDigits:imei]) return NO;
-    // Check TAC
-    NSArray *usTACs = @[ @"353918", @"356938", @"359254", @"353915", @"353920", @"353929", @"353997", @"354994" ];
-    NSString *tac = [imei substringToIndex:6];
-    if (![usTACs containsObject:tac]) return NO;
-    // Luhn check
-    int sum = 0;
-    for (int i = 0; i < 14; i++) {
-        int digit = [imei characterAtIndex:i] - '0';
-        if (i % 2 == 1) digit *= 2;
-        if (digit > 9) digit -= 9;
-        sum += digit;
-    }
-    int checkDigit = (10 - (sum % 10)) % 10;
-    return (checkDigit == ([imei characterAtIndex:14] - '0'));
+    return PXValidateIdentityValue(imei, PXIdentityValueKindIMEI, NO);
 }
 
-// MEID validation: 14 hex body + Luhn base-16 check digit, US prefix.
+// MEID policy is shared across all writers/readers.
 - (BOOL)isValidMEID:(NSString *)meid {
-    if (meid.length != 15) return NO;
-    NSArray *usMEIDPrefixes = @[ @"A00000", @"A10000", @"990000" ];
-    NSString *prefix = [meid substringToIndex:6];
-    if (![usMEIDPrefixes containsObject:prefix]) return NO;
-    NSCharacterSet *hexSet = [NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEFabcdef"];
-    for (NSUInteger i = 0; i < meid.length; i++) {
-        unichar c = [meid characterAtIndex:i];
-        if (![hexSet characterIsMember:c]) return NO;
-    }
-    NSString *body = [meid substringToIndex:14];
-    NSInteger checkDigit = PXMEIDLuhnCheckDigit(body);
-    return checkDigit >= 0 && PXHexValue([meid characterAtIndex:14]) == checkDigit;
+    return PXValidateIdentityValue(meid, PXIdentityValueKindMEID, NO);
 }
 
 - (BOOL)isAllDigits:(NSString *)string {
@@ -3125,18 +3100,7 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 }
 
 - (BOOL)validateUUID:(NSString *)uuid {
-    if (!uuid) return NO;
-    
-    // Verify format: 8-4-4-4-12 hexadecimal characters
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" 
-                                                                           options:NSRegularExpressionCaseInsensitive 
-                                                                             error:nil];
-    
-    NSUInteger matches = [regex numberOfMatchesInString:uuid 
-                                                options:0 
-                                                  range:NSMakeRange(0, uuid.length)];
-    
-    return matches == 1;
+    return PXValidateIdentityValue(uuid, PXIdentityValueKindUUID, NO);
 }
 
 #pragma mark - Device Model Specifications

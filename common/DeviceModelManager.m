@@ -1,6 +1,7 @@
 #import "DeviceModelManager.h"
 #import "ProjectXLogging.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXIdentityValidator.h"
 #import <Security/Security.h>
 #import <UIKit/UIKit.h>
 
@@ -828,30 +829,8 @@
 }
 
 - (BOOL)isValidDeviceModel:(NSString *)deviceModel {
-    // Basic validation: non-empty, matches known pattern
-    if (!deviceModel || deviceModel.length < 6 || deviceModel.length > 20) return NO;
-    
-    // Get current device type
-    BOOL isIPad = ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad);
-    
-    // Check if device model matches current device type
-    BOOL isIPadModel = [deviceModel hasPrefix:@"iPad"];
-    
-    // If device types don't match, validation fails
-    if (isIPad != isIPadModel) return NO;
-    
-    // Regular expression validation based on device type
-    NSString *pattern;
-    if (isIPad) {
-        pattern = @"^iPad[0-9]{1,2},[0-9]{1,2}$";
-    } else {
-        pattern = @"^iPhone[0-9]{1,2},[0-9]{1,2}$";
-    }
-    
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
-    NSUInteger matches = [regex numberOfMatchesInString:deviceModel options:0 range:NSMakeRange(0, deviceModel.length)];
-    
-    return matches == 1;
+    // Validation must describe the spoof target, not the physical host idiom.
+    return PXValidateIdentityValue(deviceModel, PXIdentityValueKindDeviceModel, NO);
 }
 
 - (NSError *)lastError {

@@ -15,6 +15,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSDictionary *specs;
 @property (nonatomic, copy, readonly, nullable) NSString *deviceModel;
 @property (nonatomic, copy, readonly) NSString *source;
+/// Managed fields rejected by the unified validator (key -> stable reason).
+@property (nonatomic, copy, readonly) NSDictionary<NSString *, NSString *> *validationIssues;
 @property (nonatomic, readonly, getter=isValid) BOOL valid;
 
 @end

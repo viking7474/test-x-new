@@ -1,4 +1,5 @@
 #import "KeychainUUIDManager.h"
+#import "PXIdentityValidator.h"
 #import "ProjectXLogging.h"
 #import <Security/Security.h>
 
@@ -90,18 +91,7 @@
 }
 
 - (BOOL)isValidUUID:(NSString *)uuid {
-    if (!uuid) return NO;
-    
-    // Verify format: 8-4-4-4-12 hexadecimal characters
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" 
-                                                                           options:NSRegularExpressionCaseInsensitive 
-                                                                             error:nil];
-    
-    NSUInteger matches = [regex numberOfMatchesInString:uuid 
-                                                options:0 
-                                                  range:NSMakeRange(0, uuid.length)];
-    
-    return matches == 1;
+    return PXValidateIdentityValue(uuid, PXIdentityValueKindUUID, NO);
 }
 
 - (NSError *)lastError {

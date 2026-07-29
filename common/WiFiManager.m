@@ -2,6 +2,7 @@
 #import "ProfileManager.h"
 #import "ProjectXLogging.h"
 #import "PXPaths.h"
+#import "PXIdentityValidator.h"
 #import <Security/Security.h>
 
 @interface WiFiManager ()
@@ -594,50 +595,19 @@
 #pragma mark - Validation
 
 - (BOOL)isValidSSID:(NSString *)ssid {
-    if (!ssid) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
-                                         code:3002 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"SSID cannot be nil"}];
-        return NO;
-    }
-    
-    // SSID must be 1-32 bytes
-    NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
-    if (ssidData.length < 1 || ssidData.length > 32) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
-                                         code:3003 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"SSID must be 1-32 bytes"}];
-        return NO;
-    }
-    
-    return YES;
+    BOOL valid = PXValidateIdentityValue(ssid, PXIdentityValueKindSSID, NO);
+    if (!valid) self.error = [NSError errorWithDomain:PXIdentityValidationErrorDomain
+                                                 code:3003
+                                             userInfo:@{NSLocalizedDescriptionKey: @"SSID must be valid UTF-8 and 1-32 bytes"}];
+    return valid;
 }
 
 - (BOOL)isValidBSSID:(NSString *)bssid {
-    if (!bssid) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
-                                         code:3004 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"BSSID cannot be nil"}];
-        return NO;
-    }
-    
-    // BSSID must match MAC address format XX:XX:XX:XX:XX:XX
-    NSString *pattern = @"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$";
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern
-                                                                         options:0
-                                                                           error:nil];
-    NSUInteger matches = [regex numberOfMatchesInString:bssid
-                                               options:0
-                                                 range:NSMakeRange(0, bssid.length)];
-    
-    if (matches != 1) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
-                                         code:3005 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"BSSID must be in format XX:XX:XX:XX:XX:XX"}];
-        return NO;
-    }
-    
-    return YES;
+    BOOL valid = PXValidateIdentityValue(bssid, PXIdentityValueKindMACAddress, NO);
+    if (!valid) self.error = [NSError errorWithDomain:PXIdentityValidationErrorDomain
+                                                 code:3005
+                                             userInfo:@{NSLocalizedDescriptionKey: @"BSSID must be a nonzero MAC address"}];
+    return valid;
 }
 
 #pragma mark - Error Handling
