@@ -1091,40 +1091,117 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     return 0;
 }
 
-// Hook for uname() system call - used by many apps to detect device model
+// IOS-05: complete uname() projection from one immutable identity snapshot.
+// Field contract:
+//   sysname="Darwin", release=Darwin, version=KernelVersion  (IOSVersion toggle)
+//   nodename=DeviceName                                  (DeviceName toggle)
+//   machine=DeviceModel                                  (DeviceModel toggle)
+// The native result remains untouched when scope, toggle, validation, or capacity fails.
 static int (*uname_orig)(struct utsname *);
+static __thread BOOL px_uname_in_hook = NO;
+
+static BOOL PXUnameWriteField(char *destination, size_t capacity, NSString *value) {
+    if (!destination || capacity == 0 || !PXProfileString(value)) return NO;
+    const char *utf8 = value.UTF8String;
+    if (!utf8) return NO;
+    size_t length = strlen(utf8);
+    if (length >= capacity) return NO;
+    memset(destination, 0, capacity);
+    memcpy(destination, utf8, length);
+    destination[length] = '\0';
+    return YES;
+}
+
 static int uname_hook(struct utsname *buf) {
-    if (!uname_orig) return -1;
-    int ret = uname_orig(buf);
-    if (ret != 0) return ret;
-    
-    @try {
-        if (!%c(IdentifierManager)) return ret;
-        IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        NSString *proc = [NSProcessInfo processInfo].processName;
-        if (!manager || !bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return ret;
-        
-        if ([manager isIdentifierEnabled:@"DeviceModel"]) {
-            NSString *profileId = nil;
-            NSNumber *gen = nil;
-            NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
-            if (!PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"uname", @"utsname.machine", bundleID, profileId, gen)) {
-                return ret;
+    if (!uname_orig) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (px_uname_in_hook) return uname_orig(buf);
+
+    int result = uname_orig(buf);
+    int nativeErrno = errno;
+    if (result != 0 || !buf) {
+        errno = nativeErrno;
+        return result;
+    }
+
+    px_uname_in_hook = YES;
+    @autoreleasepool {
+        @try {
+            if (!%c(IdentifierManager)) {
+                errno = nativeErrno;
+                px_uname_in_hook = NO;
+                return result;
             }
-            NSString *model = deviceIds[@"DeviceModel"];
-            const char *modelStr = [model UTF8String];
-            if (modelStr && buf) {
-                if (strlen(modelStr) < sizeof(buf->machine)) {
-                    strcpy(buf->machine, modelStr);
-                    PXLog(@"[WeaponX] 🎯 Spoofed uname() machine to: %@", model);
+
+            IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            NSString *processName = [NSProcessInfo processInfo].processName;
+            if (!manager || !bundleID ||
+                !PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) {
+                errno = nativeErrno;
+                px_uname_in_hook = NO;
+                return result;
+            }
+
+            NSString *profileID = nil;
+            NSNumber *generation = nil;
+            NSDictionary *deviceIDs = PXGetDeviceIdsSnapshot(&profileID, &generation);
+            struct utsname candidate = *buf;
+            BOOL changed = NO;
+
+            if ([manager isIdentifierEnabled:@"IOSVersion"] &&
+                PXRequireKeysAll(deviceIDs, @[@"Darwin", @"KernelVersion"], @"uname",
+                                 @"utsname.sysname/release/version", bundleID, profileID, generation)) {
+                struct utsname versionCandidate = candidate;
+                BOOL valid = PXUnameWriteField(versionCandidate.sysname, sizeof(versionCandidate.sysname), @"Darwin") &&
+                             PXUnameWriteField(versionCandidate.release, sizeof(versionCandidate.release), deviceIDs[@"Darwin"]) &&
+                             PXUnameWriteField(versionCandidate.version, sizeof(versionCandidate.version), deviceIDs[@"KernelVersion"]);
+                if (valid) {
+                    candidate = versionCandidate;
+                    changed = YES;
                 }
             }
+
+            if ([manager isIdentifierEnabled:@"DeviceName"] &&
+                PXRequireKeysAll(deviceIDs, @[@"DeviceName"], @"uname",
+                                 @"utsname.nodename", bundleID, profileID, generation)) {
+                struct utsname nameCandidate = candidate;
+                if (PXUnameWriteField(nameCandidate.nodename, sizeof(nameCandidate.nodename), deviceIDs[@"DeviceName"])) {
+                    candidate = nameCandidate;
+                    changed = YES;
+                }
+            }
+
+            if ([manager isIdentifierEnabled:@"DeviceModel"] &&
+                PXRequireKeysAll(deviceIDs, @[@"DeviceModel"], @"uname",
+                                 @"utsname.machine", bundleID, profileID, generation)) {
+                struct utsname modelCandidate = candidate;
+                if (PXUnameWriteField(modelCandidate.machine, sizeof(modelCandidate.machine), deviceIDs[@"DeviceModel"])) {
+                    candidate = modelCandidate;
+                    changed = YES;
+                }
+            }
+
+            if (changed) {
+                // Publish one complete struct only after all selected field groups validate.
+                *buf = candidate;
+                NSString *signature = [NSString stringWithFormat:@"%@|%@", profileID ?: @"", generation ?: @""];
+                if (PXLogOnceClaim(@"Tweak.uname", signature)) {
+                    PXLog(@"[WeaponX] uname projected profile=%@ gen=%@ sysname=%s nodename=%s release=%s version=%s machine=%s",
+                          profileID ?: @"", generation ?: @"", buf->sysname, buf->nodename,
+                          buf->release, buf->version, buf->machine);
+                }
+            }
+        } @catch (NSException *exception) {
+            PXLog(@"[WeaponX] Exception in uname hook: %@", exception);
         }
-    } @catch (NSException *e) {
-        PXLog(@"[WeaponX] Exception in uname hook: %@", e);
     }
-    return ret;
+
+    px_uname_in_hook = NO;
+    errno = nativeErrno;
+    return result;
 }
 
 // Define hook group for main identifier spoofing
@@ -4186,10 +4263,12 @@ static char* hook_GSSystemGetSerialNo(void) {
         dlclose(GSHandle);
     }
     void *unamePtr = dlsym(RTLD_DEFAULT, "uname");
-    if (unamePtr && dlsym(RTLD_DEFAULT, "MSHookFunction")) {
+    void *substrateHook = dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!gOwnerUnameInstalled && unamePtr && substrateHook && unamePtr != (void *)uname_hook) {
         MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
-        gOwnerUnameInstalled = YES;
-        PXLog(@"[WeaponX] uname hook registered successfully");
+        gOwnerUnameInstalled = (uname_orig != NULL && uname_orig != uname_hook);
+        PXLog(@"[WeaponX] uname hook install %@ original=%p",
+              gOwnerUnameInstalled ? @"succeeded" : @"failed", uname_orig);
     }
     PXFileDebugAIDA64Log("[Tweak.ctor] after uname/GS hooks");
 
