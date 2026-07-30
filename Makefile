@@ -191,5 +191,14 @@ after-package::
 	@ls -la $(THEOS_STAGING_DIR)/../debug/Library/WeaponX/Guardian/ || echo "❌ Guardian directory not found!"
 	@echo "Package check completed!"
 
+.PHONY: release-hardening release-package
+
+release-hardening:
+	python3 scripts/release_hardening.py regression --iterations 2 --report release-hardening-report.json
+
+release-package:
+	$(MAKE) clean
+	$(MAKE) package FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
+
 # SUBPROJECTS += ProjectXTweak
 # include $(THEOS_MAKE_PATH)/aggregate.mk

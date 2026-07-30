@@ -85,6 +85,12 @@ jobs:
             "$FI_ROOT/PXResolvedContainer.o"
           build_domain OPTIONAL PXOptionalRestoreTransaction.m
 
+      - name: Phase 10 repeated regression and performance gate
+        run: |
+          python3 scripts/release_hardening.py regression \
+            --iterations 2 \
+            --report release-hardening-report.json
+
       - name: Install build dependencies
         run: |
           brew update
@@ -120,10 +126,18 @@ jobs:
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Build
+      - name: Build release package
         run: |
           make clean
-          make package ARCHS="$ARCHS" SDKVERSION="$SDKVERSION" TARGET="$TARGET"
+          make package ARCHS="$ARCHS" SDKVERSION="$SDKVERSION" TARGET="$TARGET" \
+            FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
+
+      - name: Audit final release package
+        run: |
+          PACKAGE_FILE="$(ls -t packages/*.deb | head -1)"
+          python3 scripts/release_hardening.py package \
+            --artifact "$PACKAGE_FILE" \
+            --report package-hardening-report.json
 
       - name: Build and check standalone test tweak
         run: |
@@ -180,4 +194,6 @@ jobs:
             .theos/obj/**/ProjectX.app
             .theos/obj/**/ProjectXTweak.dylib
             .theos/obj/**/ProjectXDaemon
+            release-hardening-report.json
+            package-hardening-report.json
           if-no-files-found: warn

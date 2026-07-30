@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {"id":"iphone-xs-ios12","model":"iPhone11,2","family":"iPhone","iosVersion":"12.5.7","build":"16H81","cellular":true,"generation":1},
+    {"id":"iphone-11-ios13","model":"iPhone12,1","family":"iPhone","iosVersion":"13.7","build":"17H35","cellular":true,"generation":2},
+    {"id":"iphone-12-ios14","model":"iPhone13,2","family":"iPhone","iosVersion":"14.8.1","build":"18H107","cellular":true,"generation":3},
+    {"id":"iphone-13-ios15","model":"iPhone14,5","family":"iPhone","iosVersion":"15.7.9","build":"19H365","cellular":true,"generation":4},
+    {"id":"iphone-14-pro-ios16","model":"iPhone15,2","family":"iPhone","iosVersion":"16.7.8","build":"20H343","cellular":true,"generation":5},
+    {"id":"iphone-14-promax-ios17","model":"iPhone15,3","family":"iPhone","iosVersion":"17.5.1","build":"21F90","cellular":true,"generation":6},
+    {"id":"iphone-15-pro-ios17","model":"iPhone16,1","family":"iPhone","iosVersion":"17.6","build":"21G80","cellular":true,"generation":7},
+    {"id":"ipad-mini-ios15","model":"iPad14,1","family":"iPad","iosVersion":"15.7.9","build":"19H365","cellular":false,"generation":8},
+    {"id":"ipad-pro11-ios16","model":"iPad14,3","family":"iPad","iosVersion":"16.7.8","build":"20H343","cellular":false,"generation":9},
+    {"id":"ipad-pro129-ios17","model":"iPad14,5","family":"iPad","iosVersion":"17.5.1","build":"21F90","cellular":false,"generation":10},
+    {"id":"iphone-se-ios16","model":"iPhone14,6","family":"iPhone","iosVersion":"16.7.8","build":"20H343","cellular":true,"generation":11},
+    {"id":"ipad-air-ios17","model":"iPad13,16","family":"iPad","iosVersion":"17.6","build":"21G80","cellular":false,"generation":12}
+  ]
+}

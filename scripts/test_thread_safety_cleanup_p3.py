@@ -25,6 +25,7 @@ SOURCES = {
     "runtime": read("common/PXRuntimeUtilities.m"),
     "paths_h": read("common/PXPaths.h"),
     "paths": read("common/PXPaths.m"),
+    "identity": read("common/PXIdentitySnapshot.m"),
     "tweak": read("ProjectXTweak/Tweak.x"),
     "ios": read("ProjectXTweak/IOSVersionHooks.x"),
     "battery": read("ProjectXTweak/BatteryHooks.x"),
@@ -175,7 +176,7 @@ def run_source_matrix(matrix: Matrix) -> None:
 
     lock_expectations = {
         "scope": "gSnapshotLock",
-        "tweak": "gDeviceIDsSnapshotLock",
+        "identity": "gPXIdentitySnapshotLock",
         "ios": "gIOSVersionCacheLock",
         "battery": "gBatterySnapshotLock",
         "boot": "gBootTimeCacheLock",
@@ -206,7 +207,7 @@ def run_source_matrix(matrix: Matrix) -> None:
         "network", "app_version", "device_model", "user_defaults", "missing",
         "storage_manager", "wifi_manager", "network_manager",
     ]
-    matrix.check("source: profile consumers import/use PXPaths", all("PX" in SOURCES[name] and any(token in SOURCES[name] for token in ["PXActiveProfile", "PXProfileRootPath", "PXProfileIdentityPath", "PXProfileDeviceIDsPath"]) for name in profile_path_consumers))
+    matrix.check("source: profile consumers use canonical paths or identity snapshot", all("PX" in SOURCES[name] and any(token in SOURCES[name] for token in ["PXActiveProfile", "PXProfileRootPath", "PXProfileIdentityPath", "PXProfileDeviceIDsPath", "PXIdentitySnapshot", "PXCurrentIdentitySnapshot"]) for name in profile_path_consumers))
     matrix.check("source: no absolute Profiles root remains", "/var/mobile/Library/WeaponX/Profiles" not in PROJECT_TWEAK_TEXT and "/var/mobile/Library/WeaponX/Profiles" not in COMMON_TEXT)
     matrix.check("source: no arbitrary first-profile fallback remains in network/wifi paths", "contentsOfDirectoryAtPath" not in SOURCES["network"] and "contentsOfDirectoryAtPath" not in SOURCES["wifi"] and "contentsOfDirectoryAtPath" not in SOURCES["network_manager"])
 
@@ -228,7 +229,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: no unnecessary libSystem handle remains in project hooks", "libSystemHandle" not in PROJECT_TWEAK_TEXT and "libcHandle" not in PROJECT_TWEAK_TEXT and "dlclose(libSystem)" not in PROJECT_TWEAK_TEXT)
     matrix.check("source: system symbols resolve through RTLD_DEFAULT", all(token in libsystem_targets for token in ['dlsym(RTLD_DEFAULT, "uname")', 'dlsym(RTLD_DEFAULT, "host_statistics64")', 'dlsym(RTLD_DEFAULT, "NXGetLocalArchInfo")']) and 'return symbol ? dlsym(RTLD_DEFAULT, symbol) : NULL;' in read("ProjectXTweak/JailbreakBypassHooks.x"))
 
-    matrix.check("source: identity notification clears identity and scope caches", "PXInvalidateDeviceIdsSnapshot();" in SOURCES["tweak"] and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["tweak"], "PXIdentitySnapshotChanged"))
+    matrix.check("source: identity notifications refresh canonical identity and scope caches", "PXReloadIdentitySnapshot" in function_body(SOURCES["identity"], "PXIdentitySnapshotNotification") and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["tweak"], "PXIdentitySnapshotChanged"))
     matrix.check("source: WiFi notification clears WiFi and scope caches", "PXWiFiInvalidateCache();" in function_body(SOURCES["wifi"], "settingsChanged") and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["wifi"], "settingsChanged"))
     matrix.check("source: Network scoped notification clears network and scope caches", "PXNetworkInvalidateCaches();" in function_body(SOURCES["network"], "scopedAppsChanged") and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["network"], "scopedAppsChanged"))
     matrix.check("source: Storage notification clears storage and scope caches", "PXStorageInvalidateCache();" in function_body(SOURCES["storage"], "PXStorageSettingsChanged") and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["storage"], "PXStorageSettingsChanged"))
