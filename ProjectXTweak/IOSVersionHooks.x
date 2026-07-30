@@ -16,6 +16,7 @@
 #import "PXPaths.h"
 #import "PXIdentitySnapshot.h"
 #import "PXSystemVersionTransformer.h"
+#import "PXUserAgentNormalizer.h"
 #import "IdentifierManager.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
@@ -626,60 +627,16 @@ static void PXUASyncApplyToWebViewsForHost(NSString *host, NSString *ua) {
     });
 }
 
-// Helper function to modify a user agent string with the spoofed iOS version
+// Compatibility wrapper: every UA surface delegates to the central normalizer.
 static void modifyUserAgentString(NSString **userAgentString, NSString *originalVersion, NSString *spoofedVersion) {
-    if (!userAgentString || !*userAgentString || !spoofedVersion || !originalVersion) {
-        return;
-    }
-    
-    NSString *originalUA = *userAgentString;
-    
-    // Common patterns to handle:
-    // 1. Mobile/15E148 (for older formats)
-    // 2. OS 15_4 like Mac (for newer formats)
-    // 3. Version/15.4 (for Safari)
-    // 4. CPU OS 15_4 (for iPad)
-    // 5. Mozilla/5.0 (iPhone; CPU iPhone OS 15_4 like Mac OS X)
-    // 6. AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15
-    
-    // Pattern 1: Mobile/15E148
-    // Keep the original Mobile/<build> token by default. Spoofing it can break sites.
-    NSString *updatedUA = originalUA;
-    if (PXUAShouldSpoofMobileBuildToken()) {
-        NSRegularExpression *mobileRegex = [NSRegularExpression regularExpressionWithPattern:@"(Mobile)/\\d+[A-Z]\\d+" options:0 error:nil];
-        NSString *spoofedBuild = getIOSVersionInfo()[@"build"];
-        if (spoofedBuild) {
-            updatedUA = [mobileRegex stringByReplacingMatchesInString:updatedUA options:0 range:NSMakeRange(0, updatedUA.length) withTemplate:[NSString stringWithFormat:@"$1/%@", spoofedBuild]];
-        }
-    }
-    
-    // Pattern 2: OS 15_4 like Mac
-    NSString *underscoreVersion = [spoofedVersion stringByReplacingOccurrencesOfString:@"." withString:@"_"];
-    NSRegularExpression *osRegex = [NSRegularExpression regularExpressionWithPattern:@"(OS\\s+)\\d+[_\\.]\\d+(?:[_\\.]\\d+)?(\\s+like\\s+Mac)" options:0 error:nil];
-    updatedUA = [osRegex stringByReplacingMatchesInString:updatedUA options:0 range:NSMakeRange(0, updatedUA.length) withTemplate:[NSString stringWithFormat:@"$1%@$2", underscoreVersion]];
-    
-    // Pattern 3: Version/15.4
-    NSRegularExpression *versionRegex = [NSRegularExpression regularExpressionWithPattern:@"(Version/)\\d+\\.\\d+(?:\\.\\d+)?" options:0 error:nil];
-    updatedUA = [versionRegex stringByReplacingMatchesInString:updatedUA options:0 range:NSMakeRange(0, updatedUA.length) withTemplate:[NSString stringWithFormat:@"$1%@", spoofedVersion]];
-    
-    // Pattern 4: CPU OS 15_4
-    NSRegularExpression *cpuOSRegex = [NSRegularExpression regularExpressionWithPattern:@"(CPU\\s+OS\\s+)\\d+[_\\.]\\d+(?:[_\\.]\\d+)?(\\s+like)" options:0 error:nil];
-    updatedUA = [cpuOSRegex stringByReplacingMatchesInString:updatedUA options:0 range:NSMakeRange(0, updatedUA.length) withTemplate:[NSString stringWithFormat:@"$1%@$2", underscoreVersion]];
-    
-    // Pattern 5: CPU iPhone OS 15_4
-    NSRegularExpression *iPhoneOSRegex = [NSRegularExpression regularExpressionWithPattern:@"(CPU iPhone OS\\s+)\\d+[_\\.]\\d+(?:[_\\.]\\d+)?(\\s+like)" options:0 error:nil];
-    updatedUA = [iPhoneOSRegex stringByReplacingMatchesInString:updatedUA options:0 range:NSMakeRange(0, updatedUA.length) withTemplate:[NSString stringWithFormat:@"$1%@$2", underscoreVersion]];
-    
-    // Pattern 6: Mozilla/5.0 (iPhone; ... OS X)
-    NSRegularExpression *mozillaRegex = [NSRegularExpression regularExpressionWithPattern:@"(Mozilla/5\\.0 \\([^;]+; [^;]+; [^\\s]+\\s+OS\\s+)\\d+[_\\.]\\d+(?:[_\\.]\\d+)?(\\s+like)" options:0 error:nil];
-    updatedUA = [mozillaRegex stringByReplacingMatchesInString:updatedUA options:0 range:NSMakeRange(0, updatedUA.length) withTemplate:[NSString stringWithFormat:@"$1%@$2", underscoreVersion]];
-    
-    if (![updatedUA isEqualToString:originalUA]) {
-        *userAgentString = updatedUA;
-        IOSVERSION_LOG(@"Modified UA: %@ → %@", originalUA, updatedUA);
-    } else {
-        IOSVERSION_LOG(@"Failed to modify UA: %@", originalUA);
-    }
+    (void)originalVersion;
+    if (!userAgentString || !*userAgentString || !spoofedVersion.length) return;
+    NSDictionary *versionInfo = getIOSVersionInfo();
+    NSString *normalized = PXNormalizeUserAgent(*userAgentString,
+                                                 spoofedVersion,
+                                                 versionInfo[@"build"],
+                                                 PXUAShouldSpoofMobileBuildToken());
+    if (normalized.length) *userAgentString = normalized;
 }
 
 #pragma mark - Canonical WKWebView User Agent
@@ -751,8 +708,9 @@ static NSString *PXUASyntheticSpoofedUserAgent(WKWebViewConfiguration *configura
 }
 
 static BOOL PXUAShouldApplyForHost(NSString *bundleID, NSString *processName, NSString *host) {
-    BOOL safariStack = PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack) &&
-                       PXIsSafariStackProcess(bundleID, processName);
+    BOOL safariPermission = PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack);
+    BOOL safariStack = safariPermission && PXIsSafariStackProcess(bundleID, processName);
+    if (!PXWebKitHelperProcessIsInScope(bundleID, processName, safariPermission)) return NO;
     if (!safariStack && !shouldSpoofForBundle(bundleID)) return NO;
 
     if (!PXFullSpoofTestModeEnabled()) {
@@ -1163,6 +1121,22 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 
 - (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
     @try {
+        NSSet *managedIdentityHeaders = [NSSet setWithArray:@[@"accept-language", @"sec-ch-ua-platform", @"sec-ch-ua-mobile"]];
+        NSString *canonicalField = [field lowercaseString];
+        if (value && [managedIdentityHeaders containsObject:canonicalField]) {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            NSString *proc = [NSProcessInfo processInfo].processName;
+            if (PXUAShouldApplyForHost(bundleID, proc, self.URL.host)) {
+                NSDictionary *canonical = PXCanonicalWebIdentityHeaders(@{field: value},
+                    [NSLocale currentLocale].localeIdentifier, UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone);
+                for (NSString *name in canonical) {
+                    if ([name caseInsensitiveCompare:field] == NSOrderedSame) {
+                        %orig(canonical[name], field);
+                        return;
+                    }
+                }
+            }
+        }
         if ([field isEqualToString:@"User-Agent"] && value) {
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
             NSString *proc = [NSProcessInfo processInfo].processName;

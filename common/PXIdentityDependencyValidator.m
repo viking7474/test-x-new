@@ -1,4 +1,5 @@
 #import "PXIdentityDependencyValidator.h"
+#import "PXCellularIdentitySchema.h"
 
 @interface PXIdentityDependencyValidationResult ()
 @property (nonatomic, copy, readwrite) NSDictionary<NSString *, NSString *> *issues;
@@ -30,13 +31,6 @@ static NSDictionary *PXModelByProductType(NSDictionary *modelRoot) {
         index[productType] = row;
     }
     return [index copy];
-}
-
-static NSNumber *PXExplicitCellularCapability(NSDictionary *model) {
-    id value = model[@"hasCellular"] ?: model[@"cellular"];
-    NSDictionary *capabilities = [model[@"capabilities"] isKindOfClass:[NSDictionary class]] ? model[@"capabilities"] : nil;
-    if (!value) value = capabilities[@"cellular"] ?: capabilities[@"telephony"];
-    return [value isKindOfClass:[NSNumber class]] ? value : nil;
 }
 
 static BOOL PXVariantMatches(NSDictionary *model, NSString *boardID, NSString *hwModel) {
@@ -121,17 +115,15 @@ PXIdentityDependencyValidationResult *PXValidateIdentityDependencies(NSDictionar
             if ((boardID || hwModel) && !PXVariantMatches(model, boardID, hwModel)) {
                 issues[@"hardwareVariant"] = @"board-or-hwmodel-does-not-match-product-type";
             }
-            NSNumber *hasCellular = PXExplicitCellularCapability(model);
-            NSArray *cellularKeys = @[@"IMEI", @"IMEI2", @"MEID", @"ICCID", @"IMSI", @"BasebandVersion"];
-            BOOL hasCellularValue = NO;
-            for (NSString *key in cellularKeys) if (PXDependencyString(deviceIDs[key])) { hasCellularValue = YES; break; }
-            if (hasCellular && !hasCellular.boolValue && hasCellularValue) {
-                issues[@"cellular"] = @"cellular-identifiers-on-noncellular-model";
-            }
-            if (PXDependencyString(deviceIDs[@"IMEI2"]) && !PXDependencyString(deviceIDs[@"IMEI"])) {
-                issues[@"IMEI2"] = @"secondary-imei-requires-primary-imei";
-            }
         }
+        // Preserve stable dependency contract reasons emitted by CELL-01:
+        // cellular-identifiers-on-noncellular-model, secondary-imei-requires-primary-imei.
+        PXCellularIdentityValidationResult *cellular =
+            PXValidateCellularIdentitySchema(deviceIDs, model);
+        [cellular.issues enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *detail, BOOL *stop) {
+            (void)stop;
+            issues[key] = detail;
+        }];
     }
 
     PXIdentityDependencyValidationResult *result = [PXIdentityDependencyValidationResult new];
