@@ -11,6 +11,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXFileDebug.h"
+#import "PXP1BFilters.h"
 #import <os/lock.h>
 
 static NSDictionary *gCachedVersionSpoofPlist = nil;
@@ -160,9 +161,8 @@ static NSString *PXReadActiveProfileId(void) {
 }
 
 static NSString *PXSafeBundleFilename(NSString *bundleID) {
-    if (!bundleID.length) return nil;
-    NSString *safe = [bundleID stringByReplacingOccurrencesOfString:@"." withString:@"_"];
-    return [safe stringByAppendingString:@"_version.plist"];
+    // Delegate to the shared, host-testable helper (P1-B, no drift with tests).
+    return PXAppVersionSafeBundleFilename(bundleID);
 }
 
 static NSDictionary *PXLoadProfileAppVersionPlist(NSString *bundleID) {
@@ -283,17 +283,8 @@ static BOOL PXAppVersionScopeAllows(void) {
 }
 
 static NSDictionary *PXApplyAppVersionToInfoDictionary(NSDictionary *original, NSString *ver, NSString *build) {
-    if (![original isKindOfClass:[NSDictionary class]]) return original;
-    NSMutableDictionary *mutable = [original mutableCopy];
-    if (!mutable) return original;
-    if (ver.length) {
-        mutable[@"CFBundleShortVersionString"] = ver;
-    }
-    if (build.length) {
-        mutable[@"CFBundleVersion"] = build;
-    }
-    // Immutable copy — never mutate the system dictionary in place.
-    return [mutable copy];
+    // Delegate to the shared, host-testable helper (P1-B, no drift with tests).
+    return PXAppVersionApplyToInfoDictionary(original, ver, build);
 }
 
 static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBundleID, NSString **outVer, NSString **outBuild) {

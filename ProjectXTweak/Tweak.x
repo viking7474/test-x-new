@@ -43,6 +43,7 @@
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
 #import "PXFileDebug.h"
+#import "PXP1BFilters.h"
 #import <os/lock.h>
 #import <CoreFoundation/CoreFoundation.h>
 
@@ -4035,11 +4036,9 @@ static char* hook_GSSystemGetSerialNo(void) {
                     NSString *deviceName = [manager currentValueForIdentifier:@"DeviceName"];
                     if (!deviceName.length) return NO;
                     const char *cstr = deviceName.UTF8String;
-                    if (!cstr || cstr[0] == '\0') return NO;
-                    size_t len = strlen(cstr);
-                    size_t copyLen = (len < namelen - 1) ? len : (namelen - 1);
-                    memcpy(name, cstr, copyLen);
-                    name[copyLen] = '\0';
+                    // Delegate the bounded, NUL-terminating copy to the shared,
+                    // host-testable helper (P1-B, no drift with tests).
+                    if (!PXGethostnameWriteValue(name, namelen, cstr)) return NO;
                     if (outResult) *outResult = 0;
                     return YES;
                 } @catch (__unused NSException *e) {
