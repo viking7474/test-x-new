@@ -75,6 +75,7 @@ ifeq ($(INTERNAL_SECURITY_RESEARCH),1)
 # Explicit allowlist only: never use a research/*.m wildcard.
 ProjectXTweak_FILES += research/PXLockdownResearchSafety.m
 ProjectXTweak_FILES += research/PXLockdownSoftwareModelProvider.m
+ProjectXTweak_FILES += research/PXLockdownDeviceIdentityProvider.m
 ProjectXTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=1 -I./research
 else
 ProjectXTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=0
