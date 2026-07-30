@@ -1,0 +1,186 @@
+{
+  "databaseVersion": "ios-db-from-IOS.db",
+  "models": [
+    {
+      "boardID": "D221AP",
+      "hwModel": "D221AP",
+      "maxIOS": "16.7.9",
+      "name": "iPhone X",
+      "productType": "iPhone10,3"
+    },
+    {
+      "maxIOS": "16.7.9",
+      "name": "iPhone 8",
+      "productType": "iPhone10,4"
+    },
+    {
+      "maxIOS": "16.7.9",
+      "name": "iPhone 8 Plus",
+      "productType": "iPhone10,5"
+    },
+    {
+      "maxIOS": "16.7.9",
+      "name": "iPhone X",
+      "productType": "iPhone10,6"
+    },
+    {
+      "boardID": "D321AP",
+      "hwModel": "D321AP",
+      "maxIOS": "18.7.3",
+      "name": "iPhone XS",
+      "productType": "iPhone11,2"
+    },
+    {
+      "boardID": "D331AP",
+      "hwModel": "D331AP",
+      "maxIOS": "18.7.3",
+      "name": "iPhone XS Max",
+      "productType": "iPhone11,6"
+    },
+    {
+      "boardID": "N841AP",
+      "hwModel": "D331AP",
+      "maxIOS": "18.7.3",
+      "name": "iPhone XR",
+      "productType": "iPhone11,8"
+    },
+    {
+      "boardID": "N104AP",
+      "hwModel": "D421AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 11",
+      "productType": "iPhone12,1"
+    },
+    {
+      "boardID": "D431AP",
+      "hwModel": "D431AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 11 Pro",
+      "productType": "iPhone12,3"
+    },
+    {
+      "boardID": "D441AP",
+      "hwModel": "D441AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 11 Pro Max",
+      "productType": "iPhone12,5"
+    },
+    {
+      "boardID": "D79AP",
+      "hwModel": "D79AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone  SE 2",
+      "productType": "iPhone12,8"
+    },
+    {
+      "boardID": "D52gAP",
+      "hwModel": "D52gAP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 12 mini",
+      "productType": "iPhone13,1"
+    },
+    {
+      "boardID": "D53gAP",
+      "hwModel": "D53gAP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 12",
+      "productType": "iPhone13,2"
+    },
+    {
+      "boardID": "D53pAP",
+      "hwModel": "D53pAP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 12 Pro",
+      "productType": "iPhone13,3"
+    },
+    {
+      "boardID": "D54pAP",
+      "hwModel": "D54pAP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 12 Pro Max",
+      "productType": "iPhone13,4"
+    },
+    {
+      "boardID": "D63AP",
+      "hwModel": "D63AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 13 Pro",
+      "productType": "iPhone14,2"
+    },
+    {
+      "boardID": "D64AP",
+      "hwModel": "D64AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 13 Pro Max",
+      "productType": "iPhone14,3"
+    },
+    {
+      "boardID": "D16AP",
+      "hwModel": "D16AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 13 mini",
+      "productType": "iPhone14,4"
+    },
+    {
+      "boardID": "D17AP",
+      "hwModel": "D17AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 13",
+      "productType": "iPhone14,5"
+    },
+    {
+      "boardID": "D27AP",
+      "hwModel": "D27AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 14",
+      "productType": "iPhone14,7"
+    },
+    {
+      "boardID": "D28AP",
+      "hwModel": "D28AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 14 Plus",
+      "productType": "iPhone14,8"
+    },
+    {
+      "boardID": "D73AP",
+      "hwModel": "D73AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 14 Pro",
+      "productType": "iPhone15,2"
+    },
+    {
+      "boardID": "D74AP",
+      "hwModel": "D74AP",
+      "maxIOS": "26.2.0",
+      "name": "iPhone 14 Pro Max",
+      "productType": "iPhone15,3"
+    },
+    {
+      "maxIOS": "15.8.5",
+      "name": "iPhone 6s",
+      "productType": "iPhone8,1"
+    },
+    {
+      "maxIOS": "15.8.5",
+      "name": "iPhone 6s Plus",
+      "productType": "iPhone8,2"
+    },
+    {
+      "maxIOS": "15.8.5",
+      "name": "iPhone SE",
+      "productType": "iPhone8,4"
+    },
+    {
+      "maxIOS": "15.8.5",
+      "name": "iPhone 7",
+      "productType": "iPhone9,3"
+    },
+    {
+      "maxIOS": "15.8.5",
+      "name": "iPhone 7 Plus",
+      "productType": "iPhone9,4"
+    }
+  ],
+  "schemaVersion": 1
+}

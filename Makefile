@@ -164,6 +164,15 @@ internal-stage::
 		chmod 644 $(THEOS_STAGING_DIR)/Library/WeaponX/Data/carrier_db.json; \
 		chmod 644 $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/carrier_db.json; \
 	fi
+	@echo "Installing versioned iOS database..."
+	@for f in ios_build_db.json iphone_model_db.json; do \
+		if [ -f "data/$$f" ]; then \
+			cp -a "data/$$f" $(THEOS_STAGING_DIR)/Library/WeaponX/Data/; \
+			cp -a "data/$$f" $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/; \
+			chmod 644 "$(THEOS_STAGING_DIR)/Library/WeaponX/Data/$$f"; \
+			chmod 644 "$(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/$$f"; \
+		fi; \
+	done
 
 export CFLAGS = -fobjc-arc -Wno-error
 
