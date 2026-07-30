@@ -156,7 +156,12 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
     }
 
     NSDictionary *specs = PXDeviceSpecificationsFromDeviceIDs(deviceIDs) ?: @{};
-    BOOL valid = profileID.length > 0 && validation.inputValid && dependencies.valid && deviceIDs.count > 0;
+    // NOTE: dependencies.valid intentionally NOT part of the hard gate.
+    // Regression (ae3ddac) made snapshot fail-closed on any dependency mismatch,
+    // which nil-ed out DeviceIDs and reverted Device Model / Device Type / iOS Version
+    // to the real device values. We keep validating and recording issues below for
+    // diagnostics, but a dependency mismatch must NOT disable identity spoofing.
+    BOOL valid = profileID.length > 0 && validation.inputValid && deviceIDs.count > 0;
     NSString *source = valid ? (validation.issues.count ? @"device_ids-validated-with-rejections" :
                                 (generation > 0 ? @"device_ids" : @"device_ids-legacy-generation"))
                              : (!profileID.length ? @"missing-profile" :
