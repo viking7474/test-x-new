@@ -40,6 +40,7 @@
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentitySnapshot.h"
 #import "PXSystemVersionTransformer.h"
+#import "PXIdentitySurfaceRegistry.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
 #import "PXFileDebug.h"
@@ -1214,67 +1215,23 @@ static int uname_hook(struct utsname *buf) {
         }
     }
     
-    // Device model / hardware identifiers (keep consistent across sysctl/IOKit/MobileGestalt)
-    if (propertyString) {
-        BOOL deviceModelEnabled = [manager isIdentifierEnabled:@"DeviceModel"];
-        if (deviceModelEnabled) {
-            if (propertyString.length > 0) {
-                if ([propertyString isEqualToString:@"ProductType"]) {
-                    if (!PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"MG", @"ProductType", currentBundleID, profileId, gen)) {
-                        return %orig;
-                    }
-                    return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)deviceIds[@"DeviceModel"]);
-                }
-
-                if ([propertyString isEqualToString:@"HWModelStr"] ||
-                    [propertyString isEqualToString:@"HardwareModel"] ||
-                    [propertyString isEqualToString:@"HWModel"] ||
-                    [propertyString isEqualToString:@"hw-model"]) {
-                    if (!PXRequireKeysAll(deviceIds, @[@"HwModel"], @"MG", @"HWModel", currentBundleID, profileId, gen)) {
-                        return %orig;
-                    }
-                    NSString *hwModel = deviceIds[@"HwModel"];
-                    return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)hwModel);
-                }
-
-                if ([propertyString isEqualToString:@"BoardId"] ||
-                    [propertyString isEqualToString:@"board-id"]) {
-                    if (!PXRequireKeysAll(deviceIds, @[@"BoardID"], @"MG", @"BoardId", currentBundleID, profileId, gen)) {
-                        return %orig;
-                    }
-                    NSString *boardID = deviceIds[@"BoardID"];
-                    return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)boardID);
-                }
+    // HOOK-02: resolve MobileGestalt aliases, toggles and snapshot sources centrally.
+    PXIdentitySurfaceEntry *surfaceEntry =
+        PXIdentitySurfaceEntryForKey(propertyString, PXIdentitySurfaceMobileGestalt);
+    if (surfaceEntry && [manager isIdentifierEnabled:surfaceEntry.toggle]) {
+        NSString *surfaceValue = PXIdentitySurfaceResolveValue(surfaceEntry, deviceIds);
+        BOOL sourceReady = surfaceEntry.constantValue.length > 0;
+        if (!sourceReady && surfaceEntry.deviceIDKey.length) {
+            sourceReady = PXRequireKeysAll(deviceIds, @[surfaceEntry.deviceIDKey], @"MG",
+                                           propertyString, currentBundleID, profileId, gen);
+        }
+        if (sourceReady && surfaceValue.length) {
+            if (surfaceEntry.expectedType == PXIdentityExpectedTypeData) {
+                return (CFTypeRef)PXCreateCFDataFromNSString(surfaceValue);
             }
+            return (CFTypeRef)PXCreateCFStringFromNSString(surfaceValue);
         }
-    }
-
-    // iOS build number (AIDA64 reads this on some paths)
-    if (propertyString && [manager isIdentifierEnabled:@"IOSVersion"]) {
-        if ([propertyString isEqualToString:@"ReleaseType"]) {
-            return CFStringCreateCopy(kCFAllocatorDefault, CFSTR("User"));
-        }
-
-        if ([propertyString isEqualToString:@"ProductBuildVersion"] ||
-            [propertyString isEqualToString:@"BuildVersion"]) {
-            if (!PXRequireKeysAll(deviceIds, @[@"IOSBuild"], @"MG", propertyString, currentBundleID, profileId, gen)) {
-                return %orig;
-            }
-            NSString *build = deviceIds[@"IOSBuild"];
-            PXLog(@"[WeaponX] 🎯 Spoofing MGCopyAnswer %@ with build: %@", propertyString, build);
-            return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)build);
-        }
-    }
-
-    // Model number (Axxxx) from MobileGestalt
-    if (propertyString && [propertyString isEqualToString:@"ModelNumber"]) {
-        if ([manager isIdentifierEnabled:@"DeviceModel"]) {
-            if (!PXRequireKeysAll(deviceIds, @[@"ModelNumber"], @"MG", @"ModelNumber", currentBundleID, profileId, gen)) {
-                return %orig;
-            }
-            NSString *modelNumber = deviceIds[@"ModelNumber"];
-            return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)modelNumber);
-        }
+        return %orig;
     }
 
     // Handle various identifier types
@@ -3220,9 +3177,13 @@ static BOOL PXIOKitShouldSpoof(IdentifierManager *manager, NSString *bundleID) {
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
 }
 
-static CFTypeRef PXIOKitCreateReplacementMatchingOriginal(CFTypeRef original, NSString *value) {
+static CFTypeRef PXIOKitCreateReplacementMatchingOriginal(CFTypeRef original, NSString *key, NSString *value) {
     if (!value.length) return NULL;
-    if (original && CFGetTypeID(original) == CFDataGetTypeID()) {
+    PXIdentitySurfaceEntry *entry =
+        PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceIORegistry);
+    BOOL originalIsData = original && CFGetTypeID(original) == CFDataGetTypeID();
+    BOOL registryRequiresData = !original && entry.expectedType == PXIdentityExpectedTypeData;
+    if (originalIsData || registryRequiresData) {
         return (CFTypeRef)PXCreateCFDataFromNSString(value);
     }
     return (CFTypeRef)PXCreateCFStringFromNSString(value);
@@ -3344,7 +3305,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
             NSString *spoofedSerial = [manager currentValueForIdentifier:@"SerialNumber"];
             if (spoofedSerial.length) {
                 CFTypeRef original = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
-                CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedSerial);
+                CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedSerial);
                 if (repl) {
                     if (original) CFRelease(original);
                     return repl;
@@ -3398,7 +3359,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
             NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
             if (spoofedUUID.length) {
                 CFTypeRef original = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
-                CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
+                CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedUUID);
                 if (repl) {
                     if (original) CFRelease(original);
                     return repl;
@@ -3437,12 +3398,9 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                         return original;
                     }
                     NSString *deviceModel = deviceIds[@"DeviceModel"];
-                    if (original && CFGetTypeID(original) == CFDataGetTypeID()) {
-                        CFRelease(original);
-                        return PXCreateCFDataFromNSString(deviceModel);
-                    }
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, deviceModel);
                     if (original) CFRelease(original);
-                    return PXCreateCFStringFromNSString(deviceModel);
+                    return repl;
                 }
 
                 if (wantsBoardID) {
@@ -3450,12 +3408,9 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                         return original;
                     }
                     NSString *boardID = deviceIds[@"BoardID"];
-                    if (original && CFGetTypeID(original) == CFDataGetTypeID()) {
-                        CFRelease(original);
-                        return PXCreateCFDataFromNSString(boardID);
-                    }
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, boardID);
                     if (original) CFRelease(original);
-                    return PXCreateCFStringFromNSString(boardID);
+                    return repl;
                 }
 
                 if (wantsHWModel) {
@@ -3463,12 +3418,9 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                         return original;
                     }
                     NSString *hwModel = deviceIds[@"HwModel"];
-                    if (original && CFGetTypeID(original) == CFDataGetTypeID()) {
-                        CFRelease(original);
-                        return PXCreateCFDataFromNSString(hwModel);
-                    }
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, hwModel);
                     if (original) CFRelease(original);
-                    return PXCreateCFStringFromNSString(hwModel);
+                    return repl;
                 }
 
                 if (wantsCompatible) {
@@ -3486,7 +3438,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                         return original;
                     }
                     NSString *modelNumber = deviceIds[@"ModelNumber"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, modelNumber);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, modelNumber);
                     if (original) CFRelease(original);
                     return repl;
                 }
@@ -3497,7 +3449,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
                         return original;
                     }
                     NSString *hwModel = deviceIds[@"HwModel"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, hwModel);
                     if (original) CFRelease(original);
                     return repl;
                 }
@@ -3571,25 +3523,25 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                 // Serial/UUID platform identifiers
                 if ([keyString isEqualToString:@"IOPlatformSerialNumber"] && [manager isIdentifierEnabled:@"SerialNumber"]) {
                     NSString *spoofedSerial = [manager currentValueForIdentifier:@"SerialNumber"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedSerial);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedSerial);
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
                 }
                 if (([keyString isEqualToString:@"serial-number"] || [keyString isEqualToString:@"mlb-serial-number"]) && [manager isIdentifierEnabled:@"SerialNumber"]) {
                     NSString *spoofedSerial = [manager currentValueForIdentifier:@"SerialNumber"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedSerial);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedSerial);
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
                 }
                 if ([keyString isEqualToString:@"IOPlatformUUID"] && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
                     NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedUUID);
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
                 }
                 if ([keyString isEqualToString:@"system-id"] && [manager isIdentifierEnabled:@"SystemBootUUID"]) {
                     NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedUUID);
                     if (repl) props[keyString] = (__bridge_transfer id)repl;
                     continue;
                 }
@@ -3599,7 +3551,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     if ([keyString isEqualToString:@"device-model"] || [keyString isEqualToString:@"product-name"] || [keyString isEqualToString:@"hw.machine"]) {
                         if (PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *deviceModel = deviceIds[@"DeviceModel"];
-                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, deviceModel);
+                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, deviceModel);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
@@ -3608,7 +3560,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     if ([keyString isEqualToString:@"board-id"] || [keyString isEqualToString:@"BoardId"]) {
                         if (PXRequireKeysAll(deviceIds, @[@"BoardID"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *boardID = deviceIds[@"BoardID"];
-                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, boardID);
+                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, boardID);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
@@ -3617,7 +3569,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     if ([keyString isEqualToString:@"model"] || [keyString isEqualToString:@"hw.model"]) {
                         if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *hwModel = deviceIds[@"HwModel"];
-                                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, hwModel);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
@@ -3626,7 +3578,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     if ([keyString isEqualToString:@"model-number"]) {
                         if (PXRequireKeysAll(deviceIds, @[@"ModelNumber"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *modelNumber = deviceIds[@"ModelNumber"];
-                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, modelNumber);
+                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, modelNumber);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
@@ -3635,7 +3587,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                     if ([keyString isEqualToString:@"platform-name"]) {
                         if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKit", keyString, currentBundleID, profileId, gen)) {
                             NSString *hwModel = deviceIds[@"HwModel"];
-                                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, hwModel);
                             if (repl) props[keyString] = (__bridge_transfer id)repl;
                         }
                         continue;
@@ -3658,17 +3610,17 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                 // Best-effort: only if key matches and targetRegion is enabled.
                 if (targetRegionFollowsIP) {
                     if ([keyString isEqualToString:@"MobileSubscriberCountryCode"] && pinnedMCC.length) {
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, pinnedMCC);
+                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, pinnedMCC);
                         if (repl) props[keyString] = (__bridge_transfer id)repl;
                         continue;
                     }
                     if ([keyString isEqualToString:@"MobileSubscriberNetworkCode"] && pinnedMNC.length) {
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, pinnedMNC);
+                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, pinnedMNC);
                         if (repl) props[keyString] = (__bridge_transfer id)repl;
                         continue;
                     }
                     if ([keyString isEqualToString:@"RegionCode"] && pinnedCountryCode.length) {
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, [pinnedCountryCode uppercaseString]);
+                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, [pinnedCountryCode uppercaseString]);
                         if (repl) props[keyString] = (__bridge_transfer id)repl;
                         continue;
                     }
@@ -3714,7 +3666,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
             if ([keyString isEqualToString:@"IOPlatformSerialNumber"] || [keyString isEqualToString:@"serial-number"] || [keyString isEqualToString:@"mlb-serial-number"]) {
                 if ([manager isIdentifierEnabled:@"SerialNumber"]) {
                     NSString *spoofedSerial = [manager currentValueForIdentifier:@"SerialNumber"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedSerial);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedSerial);
                     if (repl) {
                         if (original) CFRelease(original);
                         return repl;
@@ -3726,7 +3678,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
             if ([keyString isEqualToString:@"IOPlatformUUID"] || [keyString isEqualToString:@"system-id"]) {
                 if ([manager isIdentifierEnabled:@"SystemBootUUID"]) {
                     NSString *spoofedUUID = [manager currentValueForIdentifier:@"SystemBootUUID"];
-                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, spoofedUUID);
+                    CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, spoofedUUID);
                     if (repl) {
                         if (original) CFRelease(original);
                         return repl;
@@ -3743,7 +3695,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
                 if ([keyString isEqualToString:@"model-number"]) {
                     if (PXRequireKeysAll(deviceIds, @[@"ModelNumber"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
                         NSString *modelNumber = deviceIds[@"ModelNumber"];
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, modelNumber);
+                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, modelNumber);
                         if (repl) {
                             if (original) CFRelease(original);
                             return repl;
@@ -3755,7 +3707,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
                 if ([keyString isEqualToString:@"device-model"] || [keyString isEqualToString:@"product-name"] || [keyString isEqualToString:@"hw.machine"]) {
                     if (PXRequireKeysAll(deviceIds, @[@"DeviceModel"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
                         NSString *deviceModel = deviceIds[@"DeviceModel"];
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, deviceModel);
+                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, deviceModel);
                         if (repl) {
                             if (original) CFRelease(original);
                             return repl;
@@ -3767,7 +3719,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
                 if ([keyString isEqualToString:@"board-id"] || [keyString isEqualToString:@"BoardId"]) {
                     if (PXRequireKeysAll(deviceIds, @[@"BoardID"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
                         NSString *boardID = deviceIds[@"BoardID"];
-                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, boardID);
+                        CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, boardID);
                         if (repl) {
                             if (original) CFRelease(original);
                             return repl;
@@ -3779,7 +3731,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
                 if ([keyString isEqualToString:@"model"] || [keyString isEqualToString:@"hw.model"] || [keyString isEqualToString:@"platform-name"]) {
                     if (PXRequireKeysAll(deviceIds, @[@"HwModel"], @"IOKitSearch", keyString, currentBundleID, profileId, gen)) {
                         NSString *hwModel = deviceIds[@"HwModel"];
-                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, hwModel);
+                            CFTypeRef repl = PXIOKitCreateReplacementMatchingOriginal(original, keyString, hwModel);
                         if (repl) {
                             if (original) CFRelease(original);
                             return repl;
