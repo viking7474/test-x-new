@@ -5,6 +5,14 @@ INSTALL_TARGET_PROCESSES = SpringBoard ProjectX
 DEBUG=1
 FINALPACKAGE=0
 
+# Phase 4: Research code is opt-in and forbidden in final/release packages.
+INTERNAL_SECURITY_RESEARCH ?= 0
+ifeq ($(INTERNAL_SECURITY_RESEARCH),1)
+ifneq ($(filter 1 YES yes true TRUE,$(FINALPACKAGE)),)
+$(error INTERNAL_SECURITY_RESEARCH must be 0 when FINALPACKAGE is enabled)
+endif
+endif
+
 # Note: This project now includes a Notification Service Extension for rich push notifications
 # The extension needs to be manually added in Xcode after installing this package
 # See /NotificationServiceExtension/README.md for integration instructions
@@ -62,6 +70,14 @@ ProjectXTweak_FILES = $(wildcard ProjectXTweak/*.x) $(wildcard ProjectXTweak/*.m
 
 # CFlags - Adjusted include paths
 ProjectXTweak_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I./common -I./include -D USES_LIBUNDIRECT=1 -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1
+
+ifeq ($(INTERNAL_SECURITY_RESEARCH),1)
+# Explicit allowlist only: never use a research/*.m wildcard.
+ProjectXTweak_FILES += research/PXLockdownResearchSafety.m
+ProjectXTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=1 -I./research
+else
+ProjectXTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=0
+endif
 
 # Frameworks and Libraries
 ProjectXTweak_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security CoreLocation CoreFoundation Network CoreTelephony SystemConfiguration WebKit SafariServices   
