@@ -3189,6 +3189,34 @@ static CFTypeRef PXIOKitCreateReplacementMatchingOriginal(CFTypeRef original, NS
     return (CFTypeRef)PXCreateCFStringFromNSString(value);
 }
 
+// HOOK-02/03: use the registry for key aliases, owning toggle, snapshot source,
+// validation and ABI projection on every IORegistry lookup path. "compatible"
+// remains special because it may be an array containing mixed String/Data values.
+static CFTypeRef PXIOKitCreateRegistryReplacement(CFTypeRef original,
+                                                   NSString *key,
+                                                   IdentifierManager *manager,
+                                                   NSDictionary *deviceIDs,
+                                                   NSString *surface,
+                                                   NSString *bundleID,
+                                                   NSString *profileID,
+                                                   NSNumber *generation,
+                                                   BOOL *handled) {
+    if (handled) *handled = NO;
+    PXIdentitySurfaceEntry *entry = PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceIORegistry);
+    if (!entry || [entry.canonicalKey isEqualToString:@"compatible"]) return NULL;
+    if (handled) *handled = YES;
+
+    if (![manager isIdentifierEnabled:entry.toggle]) return NULL;
+    if (entry.deviceIDKey.length &&
+        !PXRequireKeysAll(deviceIDs, @[entry.deviceIDKey], surface, key,
+                          bundleID, profileID, generation)) {
+        return NULL;
+    }
+
+    NSString *value = PXIdentitySurfaceResolveValue(entry, deviceIDs);
+    return PXIOKitCreateReplacementMatchingOriginal(original, key, value);
+}
+
 static CFTypeRef PXIOKitPatchCompatibleValue(CFTypeRef original, NSString *hwModel, NSString *deviceModel) {
     if (!original) {
         // Fallback: return hwModel as string.
@@ -3279,6 +3307,28 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
         
         // Convert CoreFoundation key to NSString for easier handling
         NSString *keyString = (__bridge NSString *)key;
+
+        // Registry-backed identities share one snapshot and one alias/type policy.
+        // This intentionally runs before all legacy branches so app-specific values
+        // cannot override the active profile.
+        NSString *profileId = nil;
+        NSNumber *gen = nil;
+        NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
+        PXIdentitySurfaceEntry *registryEntry =
+            PXIdentitySurfaceEntryForKey(keyString, PXIdentitySurfaceIORegistry);
+        if (registryEntry && ![registryEntry.canonicalKey isEqualToString:@"compatible"]) {
+            CFTypeRef original = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
+            BOOL handled = NO;
+            CFTypeRef replacement = PXIOKitCreateRegistryReplacement(original, keyString, manager,
+                                                                      deviceIds, @"IOKit", currentBundleID,
+                                                                      profileId, gen, &handled);
+            if (replacement) {
+                if (original) CFRelease(original);
+                return replacement;
+            }
+            if (handled) return original;
+            if (original) CFRelease(original);
+        }
         
         // Serial Number / aliases
         if ([keyString isEqualToString:@"IOPlatformSerialNumber"]) {
@@ -3520,6 +3570,17 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                 id valueObj = props[keyString];
                 CFTypeRef original = valueObj ? (__bridge CFTypeRef)valueObj : NULL;
 
+                PXIdentitySurfaceEntry *registryEntry =
+                    PXIdentitySurfaceEntryForKey(keyString, PXIdentitySurfaceIORegistry);
+                if (registryEntry && ![registryEntry.canonicalKey isEqualToString:@"compatible"]) {
+                    BOOL handled = NO;
+                    CFTypeRef replacement = PXIOKitCreateRegistryReplacement(original, keyString, manager,
+                                                                              deviceIds, @"IOKitBulk", currentBundleID,
+                                                                              profileId, gen, &handled);
+                    if (replacement) props[keyString] = (__bridge_transfer id)replacement;
+                    if (handled) continue;
+                }
+
                 // Serial/UUID platform identifiers
                 if ([keyString isEqualToString:@"IOPlatformSerialNumber"] && [manager isIdentifierEnabled:@"SerialNumber"]) {
                     NSString *spoofedSerial = [manager currentValueForIdentifier:@"SerialNumber"];
@@ -3661,6 +3722,19 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
             if (!keyString.length) {
                 return original;
             }
+
+            NSString *profileId = nil;
+            NSNumber *gen = nil;
+            NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
+            BOOL registryHandled = NO;
+            CFTypeRef registryReplacement = PXIOKitCreateRegistryReplacement(original, keyString, manager,
+                                                                               deviceIds, @"IOKitSearch", currentBundleID,
+                                                                               profileId, gen, &registryHandled);
+            if (registryReplacement) {
+                if (original) CFRelease(original);
+                return registryReplacement;
+            }
+            if (registryHandled) return original;
 
             // Handle platform identifiers + common IODeviceTree aliases.
             if ([keyString isEqualToString:@"IOPlatformSerialNumber"] || [keyString isEqualToString:@"serial-number"] || [keyString isEqualToString:@"mlb-serial-number"]) {

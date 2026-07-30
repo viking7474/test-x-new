@@ -55,7 +55,9 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
             PXEntry(@"model-number", @[], @"DeviceModel", @"ModelNumber", nil, io, PXIdentityExpectedTypeData),
             PXEntry(@"compatible", @[], @"DeviceModel", @"DeviceModel", nil, io, PXIdentityExpectedTypeStringOrDataArray),
             PXEntry(@"IOPlatformSerialNumber", @[], @"SerialNumber", @"SerialNumber", nil, io, PXIdentityExpectedTypeString),
-            PXEntry(@"serial-number", @[@"mlb-serial-number"], @"SerialNumber", @"SerialNumber", nil, io, PXIdentityExpectedTypeData),
+            PXEntry(@"serial-number", @[], @"SerialNumber", @"SerialNumber", nil, io, PXIdentityExpectedTypeData),
+            // MLB is a separate hardware identity. Never alias it to the device serial.
+            PXEntry(@"mlb-serial-number", @[], @"MLBSerialNumber", @"MLBSerialNumber", nil, io, PXIdentityExpectedTypeData),
             PXEntry(@"IOPlatformUUID", @[], @"SystemBootUUID", @"SystemBootUUID", nil, io, PXIdentityExpectedTypeString),
             PXEntry(@"system-id", @[], @"SystemBootUUID", @"SystemBootUUID", nil, io, PXIdentityExpectedTypeData),
             PXEntry(@"kIMEIKey", @[@"InternationalMobileEquipmentIdentity"], @"IMEI", @"IMEI", nil, io, PXIdentityExpectedTypeString),

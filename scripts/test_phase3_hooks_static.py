@@ -20,6 +20,7 @@ require("ProjectXTweak/Tweak.x", [
     'PXIdentitySurfaceEntryForKey(propertyString, PXIdentitySurfaceMobileGestalt)',
     'PXIdentitySurfaceResolveValue(surfaceEntry, deviceIds)',
     'PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceIORegistry)',
+    'PXIOKitCreateRegistryReplacement', '@"IOKitBulk"', '@"IOKitSearch"',
     'PXIdentityExpectedTypeData',
 ])
 require("tests/PXIdentitySurfaceRegistryTests.m", [

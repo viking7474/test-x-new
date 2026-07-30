@@ -17,7 +17,9 @@ Lookup luôn bị giới hạn theo surface, nên alias của MobileGestalt khô
 ## Hook integration
 
 - MobileGestalt dùng registry cho product type, hardware model, board ID, model number và iOS version/build/release type.
+- Cả ba đường IORegistry (`CreateCFProperty`, bulk `CreateCFProperties`, `SearchCFProperty`) đều resolve alias, toggle, snapshot source và expected type qua cùng registry.
 - IORegistry replacement dùng expected type từ registry khi original property không tồn tại; nếu original tồn tại thì giữ ABI type thực tế.
+- `serial-number` và `mlb-serial-number` dùng hai source độc lập (`SerialNumber`/`MLBSerialNumber`), không còn collapse MLB vào serial thiết bị.
 - `compatible` tiếp tục giữ semantics array/data đặc thù.
 
 ## Kiểm thử
