@@ -2,7 +2,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-FOUNDATION_EXPORT nullable NSDictionary<NSString *, id> *PXCreateBackupProvenance(
+FOUNDATION_EXPORT NSDictionary<NSString *, id> * _Nullable PXCreateBackupProvenance(
     NSString *bundleIdentifier,
     NSString *profileIdentifier,
     NSNumber *profileGeneration,
