@@ -2,19 +2,22 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Loads iOS build metadata from external JSON and allows querying per device.
-/// Schema (v1):
-/// {
-///   "schemaVersion": 1,
-///   "buildToMeta": { "22F79": {"version": "18.5", "darwin": "24.5.0", "xnu": "...", "kernel_version": "..." }, ... },
-///   "deviceToBuilds": { "iPhone16,2": ["22F79", ...], ... }
-/// }
+/// Loads iOS build metadata from the versioned iOS database publication.
 @interface IOSBuildDB : NSObject
 
 + (instancetype)sharedManager;
 
-/// Loads the DB from disk if not loaded. Returns NO on error.
 - (BOOL)loadIfNeeded:(NSError * _Nullable * _Nullable)error;
+
+/// Version metadata shared with IPhoneModelDB.
+@property (nonatomic, copy, readonly, nullable) NSString *databaseVersion;
+@property (nonatomic, copy, readonly) NSDictionary *databaseMetadata;
+
+/// Reload atomically; the current generation remains usable if validation fails.
+- (BOOL)reload:(NSError * _Nullable * _Nullable)error;
+
+/// Drop cached roots so the next query loads one complete database generation.
+- (void)invalidate;
 
 /// Returns a random build meta for the given device model, constrained by version range.
 /// The returned dictionary includes the selected build under key "build".

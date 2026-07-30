@@ -1,4 +1,5 @@
 #import "IOSBuildDB.h"
+#import "PXVersionedIOSDatabase.h"
 #import "VersionCompare.h"
 #import "DBDebugLogger.h"
 #import <Security/Security.h>
@@ -12,20 +13,6 @@ static NSUInteger PXRandomIndex(NSUInteger upperBoundExclusive) {
         return (NSUInteger)(r % (uint32_t)upperBoundExclusive);
     }
     return (NSUInteger)arc4random_uniform((uint32_t)upperBoundExclusive);
-}
-
-static NSDictionary * _Nullable PXLoadJSONDictionaryAtPath(NSString *path, NSError **error) {
-    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
-    if (!data) return nil;
-
-    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
-    if (!obj || ![obj isKindOfClass:[NSDictionary class]]) {
-        if (error && !*error) {
-            *error = [NSError errorWithDomain:kIOSBuildDBErrorDomain code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid JSON root (expected dictionary)"}];
-        }
-        return nil;
-    }
-    return (NSDictionary *)obj;
 }
 
 @interface IOSBuildDB ()
@@ -46,55 +33,52 @@ static NSDictionary * _Nullable PXLoadJSONDictionaryAtPath(NSString *path, NSErr
 }
 
 - (BOOL)loadIfNeeded:(NSError **)error {
-    if (self.db) return YES;
+    PXVersionedIOSDatabase *database = [PXVersionedIOSDatabase sharedDatabase];
+    NSDictionary *root = [database rootForKey:@"iosBuildDB" error:error];
+    if (!root) return NO;
+    if (self.db == root) return YES;
 
-    NSArray<NSString *> *paths = @[
-        @"/var/mobile/Library/WeaponX/Data/ios_build_db.json",
-        @"/private/var/mobile/Library/WeaponX/Data/ios_build_db.json"
-    ];
-
-    NSError *lastErr = nil;
-    NSDictionary *root = nil;
-    for (NSString *p in paths) {
-        if ([[NSFileManager defaultManager] fileExistsAtPath:p]) {
-            root = PXLoadJSONDictionaryAtPath(p, &lastErr);
-            if (root) break;
-        }
-    }
-
-    if (!root) {
-        if (error) {
-            *error = lastErr ?: [NSError errorWithDomain:kIOSBuildDBErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: @"ios_build_db.json not found"}];
-        }
-        PXDBLog(@"IOSBuildDB: failed to load JSON (paths=%@) err=%@", paths, lastErr.localizedDescription ?: @"nil");
+    NSDictionary *btm = [root[@"buildToMeta"] isKindOfClass:[NSDictionary class]] ? root[@"buildToMeta"] : nil;
+    NSDictionary *dtb = [root[@"deviceToBuilds"] isKindOfClass:[NSDictionary class]] ? root[@"deviceToBuilds"] : nil;
+    if (!btm || !dtb) {
+        if (error) *error = [NSError errorWithDomain:kIOSBuildDBErrorDomain code:4 userInfo:@{NSLocalizedDescriptionKey: @"Missing buildToMeta/deviceToBuilds"}];
+        PXDBLog(@"IOSBuildDB: rejected version=%@; missing buildToMeta/deviceToBuilds", database.databaseVersion ?: @"unknown");
         return NO;
     }
 
-    NSNumber *schema = root[@"schemaVersion"];
-    if (![schema isKindOfClass:[NSNumber class]] || schema.integerValue != 1) {
-        if (error) {
-            *error = [NSError errorWithDomain:kIOSBuildDBErrorDomain code:3 userInfo:@{NSLocalizedDescriptionKey: @"Unsupported schemaVersion"}];
-        }
-        PXDBLog(@"IOSBuildDB: unsupported schemaVersion=%@", schema);
-        return NO;
-    }
-
-    NSDictionary *btm = root[@"buildToMeta"];
-    NSDictionary *dtb = root[@"deviceToBuilds"];
-    if (![btm isKindOfClass:[NSDictionary class]] || ![dtb isKindOfClass:[NSDictionary class]]) {
-        if (error) {
-            *error = [NSError errorWithDomain:kIOSBuildDBErrorDomain code:4 userInfo:@{NSLocalizedDescriptionKey: @"Missing buildToMeta/deviceToBuilds"}];
-        }
-        PXDBLog(@"IOSBuildDB: missing buildToMeta/deviceToBuilds (btm=%@ dtb=%@)", NSStringFromClass([btm class]), NSStringFromClass([dtb class]));
-        return NO;
-    }
-
-    self.db = root;
+    // Publish all derived indexes together only after the complete root validates.
     self.buildToMeta = btm;
     self.deviceToBuilds = dtb;
-
-    PXDBLog(@"IOSBuildDB: loaded buildToMeta=%lu deviceToBuilds=%lu", (unsigned long)self.buildToMeta.count, (unsigned long)self.deviceToBuilds.count);
+    self.db = root;
+    PXDBLog(@"IOSBuildDB: loaded version=%@ builds=%lu devices=%lu legacy=%@",
+            database.databaseVersion ?: @"unknown",
+            (unsigned long)btm.count,
+            (unsigned long)dtb.count,
+            database.isLegacy ? @"YES" : @"NO");
     return YES;
+}
+
+- (NSString *)databaseVersion {
+    return [PXVersionedIOSDatabase sharedDatabase].databaseVersion;
+}
+
+- (NSDictionary *)databaseMetadata {
+    return [PXVersionedIOSDatabase sharedDatabase].metadata;
+}
+
+- (BOOL)reload:(NSError **)error {
+    if (![[PXVersionedIOSDatabase sharedDatabase] reload:error]) return NO;
+    self.db = nil;
+    self.buildToMeta = nil;
+    self.deviceToBuilds = nil;
+    return [self loadIfNeeded:error];
+}
+
+- (void)invalidate {
+    self.db = nil;
+    self.buildToMeta = nil;
+    self.deviceToBuilds = nil;
+    [[PXVersionedIOSDatabase sharedDatabase] invalidate];
 }
 
 - (NSDictionary *)randomMetaForDevice:(NSString *)productType

@@ -1,4 +1,5 @@
 #import "IPhoneModelDB.h"
+#import "PXVersionedIOSDatabase.h"
 #import "VersionCompare.h"
 #import "DBDebugLogger.h"
 #import <Security/Security.h>
@@ -12,19 +13,6 @@ static NSUInteger PXRandomIndex2(NSUInteger upperBoundExclusive) {
         return (NSUInteger)(r % (uint32_t)upperBoundExclusive);
     }
     return (NSUInteger)arc4random_uniform((uint32_t)upperBoundExclusive);
-}
-
-static NSDictionary * _Nullable PXLoadJSONDictionaryAtPath2(NSString *path, NSError **error) {
-    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
-    if (!data) return nil;
-    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
-    if (!obj || ![obj isKindOfClass:[NSDictionary class]]) {
-        if (error && !*error) {
-            *error = [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid JSON root (expected dictionary)"}];
-        }
-        return nil;
-    }
-    return (NSDictionary *)obj;
 }
 
 @interface IPhoneModelDB ()
@@ -45,82 +33,73 @@ static NSDictionary * _Nullable PXLoadJSONDictionaryAtPath2(NSString *path, NSEr
 }
 
 - (BOOL)loadIfNeeded:(NSError **)error {
-    if (self.db) return YES;
+    PXVersionedIOSDatabase *database = [PXVersionedIOSDatabase sharedDatabase];
+    NSDictionary *root = [database rootForKey:@"iphoneModelDB" error:error];
+    if (!root) return NO;
+    if (self.db == root) return YES;
 
-    NSArray<NSString *> *paths = @[
-        @"/var/mobile/Library/WeaponX/Data/iphone_model_db.json",
-        @"/private/var/mobile/Library/WeaponX/Data/iphone_model_db.json"
-    ];
-
-    NSError *lastErr = nil;
-    NSDictionary *root = nil;
-    for (NSString *p in paths) {
-        if ([[NSFileManager defaultManager] fileExistsAtPath:p]) {
-            root = PXLoadJSONDictionaryAtPath2(p, &lastErr);
-            if (root) break;
-        }
-    }
-
-    if (!root) {
-        if (error) {
-            *error = lastErr ?: [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: @"iphone_model_db.json not found"}];
-        }
-        PXDBLog(@"IPhoneModelDB: failed to load JSON (paths=%@) err=%@", paths, lastErr.localizedDescription ?: @"nil");
-        return NO;
-    }
-
-    NSNumber *schema = root[@"schemaVersion"];
-    if (![schema isKindOfClass:[NSNumber class]] || schema.integerValue != 1) {
-        if (error) {
-            *error = [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:3 userInfo:@{NSLocalizedDescriptionKey: @"Unsupported schemaVersion"}];
-        }
-        PXDBLog(@"IPhoneModelDB: unsupported schemaVersion=%@", schema);
-        return NO;
-    }
-
-    id modelsObj = root[@"models"];
-    if (![modelsObj isKindOfClass:[NSArray class]]) {
-        if (error) {
-            *error = [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:4 userInfo:@{NSLocalizedDescriptionKey: @"Missing models array"}];
-        }
-        PXDBLog(@"IPhoneModelDB: missing models array (type=%@)", NSStringFromClass([modelsObj class]));
+    NSArray *modelsObject = [root[@"models"] isKindOfClass:[NSArray class]] ? root[@"models"] : nil;
+    if (!modelsObject) {
+        if (error) *error = [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:4 userInfo:@{NSLocalizedDescriptionKey: @"Missing models array"}];
+        PXDBLog(@"IPhoneModelDB: rejected version=%@; missing models array", database.databaseVersion ?: @"unknown");
         return NO;
     }
 
     NSMutableArray<NSDictionary *> *models = [NSMutableArray array];
     NSMutableDictionary<NSString *, NSDictionary *> *byType = [NSMutableDictionary dictionary];
-    NSUInteger total = 0;
     NSUInteger invalid = 0;
-    for (id item in (NSArray *)modelsObj) {
-        total += 1;
-        if (![item isKindOfClass:[NSDictionary class]]) continue;
-        NSDictionary *m = (NSDictionary *)item;
-        NSString *pt = m[@"productType"];
-        NSString *maxIOS = m[@"maxIOS"];
-        if (![pt isKindOfClass:[NSString class]] || ![pt hasPrefix:@"iPhone"]) { invalid += 1; continue; }
-        if (![maxIOS isKindOfClass:[NSString class]] || maxIOS.length == 0) { invalid += 1; continue; }
-        [models addObject:m];
-        if (!byType[pt]) {
-            byType[pt] = m;
+    for (id item in modelsObject) {
+        if (![item isKindOfClass:[NSDictionary class]]) { invalid += 1; continue; }
+        NSDictionary *model = item;
+        NSString *productType = model[@"productType"];
+        NSString *maxIOS = model[@"maxIOS"];
+        if (![productType isKindOfClass:[NSString class]] || ![productType hasPrefix:@"iPhone"] ||
+            ![maxIOS isKindOfClass:[NSString class]] || maxIOS.length == 0 || byType[productType]) {
+            invalid += 1;
+            continue;
         }
+        [models addObject:model];
+        byType[productType] = model;
     }
-
     if (models.count == 0) {
-        if (error) {
-            *error = [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:5 userInfo:@{NSLocalizedDescriptionKey: @"No valid iPhone models in DB"}];
-        }
-        PXDBLog(@"IPhoneModelDB: no valid models (total=%lu invalid=%lu)", (unsigned long)total, (unsigned long)invalid);
+        if (error) *error = [NSError errorWithDomain:kIPhoneModelDBErrorDomain code:5 userInfo:@{NSLocalizedDescriptionKey: @"No valid iPhone models in DB"}];
+        PXDBLog(@"IPhoneModelDB: rejected version=%@; no valid models", database.databaseVersion ?: @"unknown");
         return NO;
     }
 
-    if (invalid > 0) {
-        PXDBLog(@"IPhoneModelDB: loaded models=%lu (skipped invalid=%lu)", (unsigned long)models.count, (unsigned long)invalid);
-    }
-
-    self.db = root;
+    // Publish root and derived indexes only after validation is complete.
     self.models = [models copy];
     self.byProductType = [byType copy];
+    self.db = root;
+    PXDBLog(@"IPhoneModelDB: loaded version=%@ models=%lu skipped=%lu legacy=%@",
+            database.databaseVersion ?: @"unknown",
+            (unsigned long)models.count,
+            (unsigned long)invalid,
+            database.isLegacy ? @"YES" : @"NO");
     return YES;
+}
+
+- (NSString *)databaseVersion {
+    return [PXVersionedIOSDatabase sharedDatabase].databaseVersion;
+}
+
+- (NSDictionary *)databaseMetadata {
+    return [PXVersionedIOSDatabase sharedDatabase].metadata;
+}
+
+- (BOOL)reload:(NSError **)error {
+    if (![[PXVersionedIOSDatabase sharedDatabase] reload:error]) return NO;
+    self.db = nil;
+    self.models = nil;
+    self.byProductType = nil;
+    return [self loadIfNeeded:error];
+}
+
+- (void)invalidate {
+    self.db = nil;
+    self.models = nil;
+    self.byProductType = nil;
+    [[PXVersionedIOSDatabase sharedDatabase] invalidate];
 }
 
 - (NSDictionary *)randomModelMinIOS:(NSString *)minIOS error:(NSError **)error {

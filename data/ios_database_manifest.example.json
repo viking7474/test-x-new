@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "databaseVersion": "2026.07.1",
+  "minimumReaderVersion": 1,
+  "generatedAt": "2026-07-30T00:00:00Z",
+  "files": {
+    "iosBuildDB": {
+      "path": "ios/2026.07.1/ios_build_db.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "iphoneModelDB": {
+      "path": "ios/2026.07.1/iphone_model_db.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}
