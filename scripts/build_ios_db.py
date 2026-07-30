@@ -2,46 +2,24 @@
 """Convert the embedded legacy layout/Library/IOS.db (SQLite) into the versioned
 iOS database JSON files consumed by PXVersionedIOSDatabase (legacy route):
   data/ios_build_db.json    -> {schemaVersion,buildToMeta,deviceToBuilds}
-  data/iphone_model_db.json -> {schemaVersion,models:[{productType,maxIOS,boardID,hwModel}]}
+  data/iphone_model_db.json -> {schemaVersion,models:[{productType,name,maxIOS,
+                                                       variants,modelNumbers}]}
 
-boardID/hwModel are mirrored from common/DeviceModelManager.m so the generated
-model DB matches exactly what IdentifierManager writes into device_ids.plist.
+Board IDs / hw.models and model numbers are sourced directly from the
+authoritative KMDevices table (internal_name / anumber) so every iPhone gets
+coherent variants + modelNumbers. This matches the reader contract in
+common/IdentifierManager.m:
+  - PXPickHardwareVariantFromModelSpec reads models[].variants[].{boardID,hwModel}
+  - PXPickModelNumberFromModelSpec  reads models[].modelNumbers[]
+The previous hardcoded BOARD_MAP mirror is dropped: it was incomplete (missing
+boards -> <nil> board/hwModel at runtime) and had wrong entries (e.g. it mapped
+iPhone10,3 -> D221AP, which is actually the board for iPhone10,6).
 """
 import sqlite3, json, re, os
 
 ROOT = r"C:\Users\VanVan\Documents\github\test-x"
 DB = os.path.join(ROOT, "layout", "Library", "IOS.db")
 DATA = os.path.join(ROOT, "data")
-
-# Mirror of the iPhone Board ID / hw.model map in common/DeviceModelManager.m.
-BOARD_MAP = {
-    "iPhone10,2": ("D211AP", "D211AP"),
-    "iPhone10,3": ("D221AP", "D221AP"),
-    "iPhone11,8": ("N841AP", "D331AP"),
-    "iPhone11,2": ("D321AP", "D321AP"),
-    "iPhone11,6": ("D331AP", "D331AP"),
-    "iPhone12,1": ("N104AP", "D421AP"),
-    "iPhone12,3": ("D431AP", "D431AP"),
-    "iPhone12,5": ("D441AP", "D441AP"),
-    "iPhone12,8": ("D79AP", "D79AP"),
-    "iPhone13,1": ("D52gAP", "D52gAP"),
-    "iPhone13,2": ("D53gAP", "D53gAP"),
-    "iPhone13,3": ("D53pAP", "D53pAP"),
-    "iPhone13,4": ("D54pAP", "D54pAP"),
-    "iPhone14,4": ("D16AP", "D16AP"),
-    "iPhone14,5": ("D17AP", "D17AP"),
-    "iPhone14,2": ("D63AP", "D63AP"),
-    "iPhone14,3": ("D64AP", "D64AP"),
-    "iPhone14,6": ("D49AP", "D49AP"),
-    "iPhone14,7": ("D27AP", "D27AP"),
-    "iPhone14,8": ("D28AP", "D28AP"),
-    "iPhone15,2": ("D73AP", "D73AP"),
-    "iPhone15,3": ("D74AP", "D74AP"),
-    "iPhone15,4": ("D37AP", "D37AP"),
-    "iPhone15,5": ("D38AP", "D38AP"),
-    "iPhone16,1": ("D83AP", "D83AP"),
-    "iPhone16,2": ("D84AP", "D84AP"),
-}
 
 
 def sortver_to_ios(s):
@@ -80,25 +58,43 @@ for version, build, sortv, kver, ktime in cur.execute(
     }
     kmos.append((sortv, build))
 
-# ---- devices from KMDevices (iPhone only, dedupe by identifier) ----
-devices = {}
-for ident, dosv, mosv, gen in cur.execute(
-        "SELECT identifier, defaultOSV, maxOSV, generation FROM KMDevices WHERE identifier LIKE 'iPhone%'"):
-    if not ident or ident in devices or not mosv:
+# ---- devices from KMDevices (iPhone only), aggregate ALL region rows per id ----
+# Each identifier has multiple rows (one per region/anumber). We keep the first
+# row's name + OS range (identical across rows for a given identifier) and
+# aggregate the distinct boards (internal_name) and model numbers (anumber).
+order = []
+agg = {}
+for ident, board, anum, gen, dosv, mosv in cur.execute(
+        "SELECT identifier, internal_name, anumber, generation, defaultOSV, maxOSV "
+        "FROM KMDevices WHERE identifier LIKE 'iPhone%'"):
+    if not ident or not mosv:
         continue
-    devices[ident] = (dosv, mosv, gen)
+    if ident not in agg:
+        agg[ident] = {"name": (gen or "").strip(), "dosv": dosv, "mosv": mosv,
+                      "boards": set(), "nums": set()}
+        order.append(ident)
+    e = agg[ident]
+    b = (board or "").strip()
+    if b:
+        e["boards"].add(b)
+    a = (anum or "").strip()
+    if a:
+        e["nums"].add(a)
 
 deviceToBuilds = {}
 models = []
-for ident in sorted(devices):
-    dosv, mosv, gen = devices[ident]
+for ident in sorted(agg):
+    e = agg[ident]
+    dosv, mosv = e["dosv"], e["mosv"]
     builds = sorted({b for (sv, b) in kmos if (not dosv or sv >= dosv) and sv <= mosv})
-    board, hwm = BOARD_MAP.get(ident, (None, None))
-    model = {"productType": ident, "name": gen or "", "maxIOS": sortver_to_ios(mosv)}
-    if board:
-        model["boardID"] = board
-    if hwm:
-        model["hwModel"] = hwm
+    name = re.sub(r"\s+", " ", e["name"]).strip()
+    model = {"productType": ident, "name": name, "maxIOS": sortver_to_ios(mosv)}
+    variants = [{"boardID": b, "hwModel": b} for b in sorted(e["boards"])]
+    if variants:
+        model["variants"] = variants
+    nums = sorted(e["nums"])
+    if nums:
+        model["modelNumbers"] = nums
     models.append(model)
     if builds:
         deviceToBuilds[ident] = builds
@@ -129,3 +125,5 @@ print(f"iPhone10,3: builds={len(i103)} has19E258={'19E258' in i103}")
 print("19E258 meta:", json.dumps(buildToMeta.get("19E258"), ensure_ascii=False))
 m103 = next((m for m in models if m["productType"] == "iPhone10,3"), None)
 print("iPhone10,3 model:", json.dumps(m103, ensure_ascii=False))
+m106 = next((m for m in models if m["productType"] == "iPhone10,6"), None)
+print("iPhone10,6 model:", json.dumps(m106, ensure_ascii=False))

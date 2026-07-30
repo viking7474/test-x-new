@@ -84,7 +84,13 @@ check(BUILD in dtb.get(PT, []), f"{BUILD} listed in deviceToBuilds[{PT}]")
 
 meta = btm.get(BUILD, {})
 model = next((m for m in models if m.get("productType") == PT), {})
-# IdentifierManager copies meta fields verbatim into device_ids.plist.
+# IdentifierManager copies meta fields verbatim into device_ids.plist and picks a
+# hardware variant via PXPickHardwareVariantFromModelSpec (variants[] first, then
+# the flat boardID/hwModel fallback).
+variants = model.get("variants") if isinstance(model.get("variants"), list) else []
+picked = variants[0] if variants else {}
+boardID = picked.get("boardID") or model.get("boardID")
+hwModel = picked.get("hwModel") or model.get("hwModel")
 profile = {
     "DeviceModel": PT,
     "IOSVersion": meta.get("version"),
@@ -92,16 +98,19 @@ profile = {
     "Darwin": meta.get("darwin"),
     "XNU": meta.get("xnu"),
     "KernelVersion": meta.get("kernel_version"),
-    "BoardID": model.get("boardID"),
-    "HwModel": model.get("hwModel"),
+    "BoardID": boardID,
+    "HwModel": hwModel,
 }
 print("  profile:", json.dumps(profile, ensure_ascii=False))
 
 # Assert the expected D06 target values are what the DB yields.
+# iPhone10,3 (iPhone X global) board is D22AP per the authoritative IOS.db
+# (D221AP is iPhone10,6). The reader picks this from models[].variants[].
 check(profile["IOSVersion"] == "15.4.1", "IOSVersion resolves to 15.4.1")
 check(profile["Darwin"] == "21.4.0", "Darwin resolves to 21.4.0")
 check(profile["XNU"] == "8020.102.3~1", "XNU resolves to 8020.102.3~1")
-check(profile["BoardID"] == "D221AP" and profile["HwModel"] == "D221AP", "Board/HwModel == D221AP")
+check(profile["BoardID"] == "D22AP" and profile["HwModel"] == "D22AP", "Board/HwModel == D22AP")
+check(isinstance(model.get("modelNumbers"), list) and model.get("modelNumbers"), "iPhone10,3 has modelNumbers")
 
 
 def variant_matches(model, boardID, hwModel):
