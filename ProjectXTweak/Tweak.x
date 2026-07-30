@@ -3927,7 +3927,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     PXFileDebugAIDA64Log("[Tweak.ctor] enter");
     // Debug flag files only when explicitly debugging (avoid /tmp I/O on every app launch).
     if (access("/tmp/px_debug_all", F_OK) == 0 || access("/tmp/px_debug_aida64", F_OK) == 0) {
-        [@"ctor_entry" writeToFile:@"/tmp/weaponx_ctor_started.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"ctor_entry" writeToFile:@"/tmp/px_ctor_started.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
         NSString *flagPath = [NSString stringWithFormat:@"/tmp/weaponx_loaded_%@.txt", currentProcessName];
         [@"Constructor executed!" writeToFile:flagPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
