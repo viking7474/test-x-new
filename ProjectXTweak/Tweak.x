@@ -40,6 +40,7 @@
 #import "PXScope.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentitySnapshot.h"
+#import "PXSystemVersionTransformer.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
 #import "PXFileDebug.h"
@@ -866,76 +867,40 @@ static int PXWriteSysctlInt64(const char *name, int64_t v, void *oldp, size_t *o
     return -1;
 }
 
-// CoreFoundation system version dictionary
+// CoreFoundation system version dictionary. IOS-06 routes this surface through
+// the same transformer used by file-backed SystemVersion.plist reads.
 static CFDictionaryRef (*CFCopySystemVersionDictionary_orig)(void);
 
 static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
     CFDictionaryRef original = CFCopySystemVersionDictionary_orig ? CFCopySystemVersionDictionary_orig() : NULL;
-
     @autoreleasepool {
         @try {
-            if (!%c(IdentifierManager)) {
-                return original;
-            }
-
+            if (!%c(IdentifierManager)) return original;
             IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-            NSString *proc = [NSProcessInfo processInfo].processName;
-            if (!manager || !bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack) || ![manager isIdentifierEnabled:@"IOSVersion"]) {
+            NSString *processName = [NSProcessInfo processInfo].processName;
+            if (!manager || !bundleID || ![manager isIdentifierEnabled:@"IOSVersion"] ||
+                !PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) {
                 return original;
             }
 
-            NSString *profileId = nil;
-            NSNumber *gen = nil;
-            NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
+            PXSystemVersionProjection *projection = PXCurrentSystemVersionProjection();
+            if (!projection) return original;
+            NSDictionary *base = original ? (__bridge NSDictionary *)original : @{};
+            NSDictionary *transformed = PXTransformSystemVersionDictionary(base, projection);
+            if (transformed == base) return original;
 
-            if (!PXRequireKeysAll(deviceIds, @[@"IOSVersion", @"IOSBuild"], @"CFSystem", @"CFCopySystemVersionDictionary", bundleID, profileId, gen)) {
-                return original;
+            NSString *signature = [NSString stringWithFormat:@"%@|%@", projection.profileID ?: @"", projection.generation];
+            if (PXLogOnceClaim(@"Tweak.SystemVersion", signature)) {
+                PXLog(@"[WeaponX] SystemVersion transformed profile=%@ gen=%@ version=%@ build=%@",
+                      projection.profileID ?: @"", projection.generation,
+                      projection.productVersion, projection.productBuildVersion);
             }
-
-            NSString *spoofedVersion = deviceIds[@"IOSVersion"];
-            NSString *spoofedBuild = deviceIds[@"IOSBuild"];
-
-            CFMutableDictionaryRef dict = NULL;
-            if (original) {
-                dict = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, original);
-            } else {
-                dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-            }
-
-            if (!dict) {
-                return original;
-            }
-
-            if (spoofedVersion.length) {
-                CFStringRef v = CFStringCreateWithCString(kCFAllocatorDefault, [spoofedVersion UTF8String], kCFStringEncodingUTF8);
-                if (v) {
-                    CFDictionarySetValue(dict, CFSTR("ProductVersion"), v);
-                    CFRelease(v);
-                }
-            }
-
-            if (spoofedBuild.length) {
-                CFStringRef b = CFStringCreateWithCString(kCFAllocatorDefault, [spoofedBuild UTF8String], kCFStringEncodingUTF8);
-                if (b) {
-                    CFDictionarySetValue(dict, CFSTR("ProductBuildVersion"), b);
-                    CFRelease(b);
-                }
-            }
-
-            // Some tools (including AIDA64) use ReleaseType to display OS state.
-            // Ensure the key exists so the UI doesn't end up blank.
-            if (!CFDictionaryGetValue(dict, CFSTR("ReleaseType"))) {
-                CFDictionarySetValue(dict, CFSTR("ReleaseType"), CFSTR("User"));
-            }
-
-            if (original) {
-                CFRelease(original);
-            }
-
-            PXLog(@"[WeaponX] 🎯 Spoofed CFCopySystemVersionDictionary for %@ (build=%@)", bundleID, spoofedBuild ?: @"<nil>");
-            return dict;
-        } @catch (NSException *e) {
+            CFDictionaryRef result = CFBridgingRetain(transformed);
+            if (original) CFRelease(original);
+            return result;
+        } @catch (NSException *exception) {
+            PXLog(@"[WeaponX] SystemVersion transformer exception: %@", exception);
             return original;
         }
     }

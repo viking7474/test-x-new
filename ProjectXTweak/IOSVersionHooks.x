@@ -16,6 +16,8 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXIdentitySnapshot.h"
+#import "PXSystemVersionTransformer.h"
+#import "IdentifierManager.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
 
@@ -91,15 +93,8 @@ static void PXIOSVersionInvalidateCache(void) {
 // Throttling variables to prevent excessive function calls
 static uint64_t lastSystemVersionCallTime = 0;
 static NSString *cachedSystemVersionResult = nil;
-static uint64_t lastDictCallTime = 0;
-static CFDictionaryRef cachedDictResult = NULL;
-
 // Define constants
 #define THROTTLE_INTERVAL_NSEC 100000000  // 100ms in nanoseconds
-
-// SystemVersion.plist path constants
-#define SYSTEM_VERSION_PATH @"/System/Library/CoreServices/SystemVersion.plist"
-#define ROOTLESS_SYSTEM_VERSION_PATH @"/System/Library/CoreServices/SystemVersion.plist"
 
 #pragma mark - Helper Functions
 
@@ -1321,154 +1316,30 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 
 #pragma mark - CoreFoundation Version Dictionary Hook
 
-// Hook CFCopySystemVersionDictionary to spoof iOS version information at the CoreFoundation level
+// Hook CFCopySystemVersionDictionary through the IOS-06 unified transformer.
 static CFDictionaryRef (*original_CFCopySystemVersionDictionary)(void);
 CFDictionaryRef replaced_CFCopySystemVersionDictionary(void) {
-    @try {
-        // Rate limiting to prevent excessive calls
-        uint64_t currentTime = mach_absolute_time();
-        if (cachedDictResult != NULL && 
-            (currentTime - lastDictCallTime) < THROTTLE_INTERVAL_NSEC) {
-            // Return cached result to reduce CPU usage
-            return CFRetain(cachedDictResult);
+    CFDictionaryRef original = original_CFCopySystemVersionDictionary ? original_CFCopySystemVersionDictionary() : NULL;
+    @autoreleasepool {
+        @try {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            IdentifierManager *manager = [IdentifierManager sharedManager];
+            if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return original;
+
+            PXSystemVersionProjection *projection = PXCurrentSystemVersionProjection();
+            if (!projection) return original;
+            NSDictionary *base = original ? (__bridge NSDictionary *)original : @{};
+            NSDictionary *transformed = PXTransformSystemVersionDictionary(base, projection);
+            if (transformed == base) return original;
+
+            CFDictionaryRef result = CFBridgingRetain(transformed);
+            if (original) CFRelease(original);
+            return result;
+        } @catch (NSException *exception) {
+            IOSVERSION_LOG(@"Error in unified SystemVersion transformer: %@", exception);
+            return original;
         }
-        
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            // Create a fallback dictionary if original function is NULL
-            CFDictionaryRef originalDict = NULL;
-            BOOL usingFallback = NO;
-            
-            if (original_CFCopySystemVersionDictionary) {
-                originalDict = original_CFCopySystemVersionDictionary();
-            } else {
-                // Create a basic dictionary with current system version
-                NSString *actualVersion = [[UIDevice currentDevice] systemVersion];
-                CFStringRef versionKey = CFSTR("ProductVersion");
-                CFStringRef buildKey = CFSTR("ProductBuildVersion");
-                
-                // Use a default build number based on version
-                NSString *actualBuild = [NSString stringWithFormat:@"%@000", [actualVersion stringByReplacingOccurrencesOfString:@"." withString:@""]];
-                
-                CFStringRef versionValue = CFStringCreateWithCString(NULL, [actualVersion UTF8String], kCFStringEncodingUTF8);
-                CFStringRef buildValue = CFStringCreateWithCString(NULL, [actualBuild UTF8String], kCFStringEncodingUTF8);
-                
-                CFMutableDictionaryRef fallbackDict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-                
-                if (fallbackDict && versionValue && buildValue) {
-                    CFDictionarySetValue(fallbackDict, versionKey, versionValue);
-                    CFDictionarySetValue(fallbackDict, buildKey, buildValue);
-                    
-                    CFRelease(versionValue);
-                    CFRelease(buildValue);
-                    
-                    originalDict = fallbackDict;
-                    usingFallback = YES;
-                    
-                    IOSVERSION_LOG(@"📝 Created fallback dictionary for CFCopySystemVersionDictionary");
-                }
-            }
-            
-            if (!originalDict) {
-                IOSVERSION_LOG(@"⚠️ Failed to get system version dictionary");
-                return NULL;
-            }
-            
-            // Get spoofed version info
-            NSDictionary *versionInfo = getIOSVersionInfo();
-            if (!versionInfo || !versionInfo[@"version"] || !versionInfo[@"build"]) {
-                IOSVERSION_LOG(@"⚠️ Missing version info for CFCopySystemVersionDictionary");
-                if (cachedDictResult != NULL) {
-                    CFRelease(cachedDictResult);
-                }
-                cachedDictResult = CFRetain(originalDict);
-                lastDictCallTime = currentTime;
-                return originalDict;
-            }
-            
-            NSString *spoofedVersion = versionInfo[@"version"];
-            NSString *spoofedBuild = versionInfo[@"build"];
-            
-            // Log original values only occasionally to reduce overhead
-            if (lastDictCallTime == 0 || (currentTime - lastDictCallTime) > THROTTLE_INTERVAL_NSEC * 10) {
-                CFStringRef origVersionKey = CFSTR("ProductVersion");
-                CFStringRef origBuildKey = CFSTR("ProductBuildVersion");
-                CFStringRef origVersionValue = CFDictionaryGetValue(originalDict, origVersionKey);
-                CFStringRef origBuildValue = CFDictionaryGetValue(originalDict, origBuildKey);
-                
-                if (origVersionValue && origBuildValue) {
-                    IOSVERSION_LOG(@"🔍 CFCopySystemVersionDictionary original: version=%@ build=%@", 
-                          (__bridge NSString *)origVersionValue,
-                          (__bridge NSString *)origBuildValue);
-                }
-            }
-            
-            // Create mutable copy to modify
-            CFMutableDictionaryRef mutableDict = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, originalDict);
-            if (!mutableDict) {
-                IOSVERSION_LOG(@"⚠️ Failed to create mutable copy of system version dictionary");
-                if (cachedDictResult != NULL) {
-                    CFRelease(cachedDictResult);
-                }
-                cachedDictResult = CFRetain(originalDict);
-                lastDictCallTime = currentTime;
-                return originalDict;
-            }
-            
-            // Update version and build number
-            CFStringRef versionKey = CFSTR("ProductVersion");
-            CFStringRef buildKey = CFSTR("ProductBuildVersion");
-            
-            CFStringRef versionValue = CFStringCreateWithCString(NULL, [spoofedVersion UTF8String], kCFStringEncodingUTF8);
-            CFStringRef buildValue = CFStringCreateWithCString(NULL, [spoofedBuild UTF8String], kCFStringEncodingUTF8);
-            
-            if (versionValue) {
-                CFDictionarySetValue(mutableDict, versionKey, versionValue);
-                CFRelease(versionValue);
-            }
-            
-            if (buildValue) {
-                CFDictionarySetValue(mutableDict, buildKey, buildValue);
-                CFRelease(buildValue);
-            }
-            
-            // Log the newly set values only occasionally
-            if (lastDictCallTime == 0 || (currentTime - lastDictCallTime) > THROTTLE_INTERVAL_NSEC * 10) {
-                IOSVERSION_LOG(@"✅ CFCopySystemVersionDictionary spoofed: version=%@ build=%@", 
-                      spoofedVersion, spoofedBuild);
-            }
-            
-            // Release the original dictionary since we're returning a new one
-            if (!usingFallback) {
-                CFRelease(originalDict);
-            }
-            
-            // Cache the result and update timestamp
-            if (cachedDictResult != NULL) {
-                CFRelease(cachedDictResult);
-            }
-            cachedDictResult = CFRetain(mutableDict);
-            lastDictCallTime = currentTime;
-            
-            return mutableDict;
-        }
-    } @catch (NSException *e) {
-        IOSVERSION_LOG(@"❌ Error in CFCopySystemVersionDictionary hook: %@", e);
     }
-    
-    // Call original function or return NULL if it's not available
-    CFDictionaryRef result = original_CFCopySystemVersionDictionary ? original_CFCopySystemVersionDictionary() : NULL;
-    
-    // Update cache
-    if (result) {
-        if (cachedDictResult != NULL) {
-            CFRelease(cachedDictResult);
-        }
-        cachedDictResult = CFRetain(result);
-        lastDictCallTime = mach_absolute_time();
-    }
-    
-    return result;
 }
 
 #pragma mark - sysctlbyname Hook
@@ -1872,15 +1743,8 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 
 #pragma mark - Constructor
 
-// Cleanup function to be called on process termination
+// Cleanup function to be called on process termination.
 %dtor {
-    // Free any retained CF objects to prevent memory leaks
-    if (cachedDictResult != NULL) {
-        CFRelease(cachedDictResult);
-        cachedDictResult = NULL;
-    }
-    
-    // Clear other caches
     cachedSystemVersionResult = nil;
     PXIOSVersionInvalidateCache();
 }
@@ -2074,122 +1938,46 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 
 #pragma mark - File Access Hooks for SystemVersion.plist
 
-// Function to check if a path is a system version file
 static BOOL isSystemVersionFile(NSString *path) {
-    if (!path) return NO;
-    
-    // Normalize path before comparing
-    path = [path stringByStandardizingPath];
-    return [path isEqualToString:SYSTEM_VERSION_PATH] || 
-           [path isEqualToString:ROOTLESS_SYSTEM_VERSION_PATH] ||
-           [path hasSuffix:@"SystemVersion.plist"];
+    return PXIsSystemVersionPlistPath(path);
 }
 
-// Function to spoof a system version plist
+static PXSystemVersionProjection *PXScopedSystemVersionProjection(void) {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    IdentifierManager *manager = [IdentifierManager sharedManager];
+    if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return nil;
+    return PXCurrentSystemVersionProjection();
+}
+
 static NSDictionary *spoofSystemVersionPlist(NSDictionary *originalPlist) {
     if (!originalPlist) return nil;
-    
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!shouldSpoofForBundle(bundleID)) return originalPlist;
-    
-    // Get our spoofed values
-    NSDictionary *versionInfo = getIOSVersionInfo();
-    if (!versionInfo || !versionInfo[@"version"] || !versionInfo[@"build"]) {
-        return originalPlist;
-    }
-    
-    // Make a copy with our spoofed values
-    NSMutableDictionary *modifiedPlist = [originalPlist mutableCopy];
-    
-    // Modify the values we want to spoof
-    [modifiedPlist setValue:versionInfo[@"version"] forKey:@"ProductVersion"];
-    [modifiedPlist setValue:versionInfo[@"build"] forKey:@"ProductBuildVersion"];
-    
-    // Only log occasionally to reduce overhead
-    static uint64_t lastPlistLogTime = 0;
-    uint64_t currentTime = mach_absolute_time();
-    if (lastPlistLogTime == 0 || (currentTime - lastPlistLogTime) > THROTTLE_INTERVAL_NSEC * 10) {
-        IOSVERSION_LOG(@"📄 Spoofed SystemVersion.plist access: %@ → %@, %@ → %@",
-              originalPlist[@"ProductVersion"], versionInfo[@"version"],
-              originalPlist[@"ProductBuildVersion"], versionInfo[@"build"]);
-        lastPlistLogTime = currentTime;
-    }
-    
-    return modifiedPlist;
+    PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
+    return projection ? PXTransformSystemVersionDictionary(originalPlist, projection) : originalPlist;
 }
 
-// Hook NSData dataWithContentsOfFile: to intercept SystemVersion.plist reads
-NSData* replaced_NSData_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
-    NSData *originalData = original_NSData_dataWithContentsOfFile(self, _cmd, path);
-    
-    if (isSystemVersionFile(path)) {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            // Get the plist as a dictionary from the data
-            NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:originalData 
-                                                                            options:0 
-                                                                             format:NULL 
-                                                                              error:NULL];
-            if (plist) {
-                // Spoof the values
-                NSDictionary *spoofedPlist = spoofSystemVersionPlist(plist);
-                
-                // Convert back to data
-                NSData *spoofedData = [NSPropertyListSerialization dataWithPropertyList:spoofedPlist
-                                                                                 format:NSPropertyListXMLFormat_v1_0
-                                                                                options:0
-                                                                                  error:NULL];
-                if (spoofedData) {
-                    return spoofedData;
-                }
-            }
-        }
-    }
-    
-    return originalData;
+NSData *replaced_NSData_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
+    NSData *originalData = original_NSData_dataWithContentsOfFile
+        ? original_NSData_dataWithContentsOfFile(self, _cmd, path)
+        : nil;
+    if (!originalData || !isSystemVersionFile(path)) return originalData;
+    PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
+    return projection ? PXTransformSystemVersionData(originalData, projection) : originalData;
 }
 
-// Hook NSDictionary dictionaryWithContentsOfFile: to intercept SystemVersion.plist reads
-NSDictionary* replaced_NSDictionary_dictionaryWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
-    NSDictionary *originalDict = original_NSDictionary_dictionaryWithContentsOfFile(self, _cmd, path);
-    
-    if (isSystemVersionFile(path) && originalDict) {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            return spoofSystemVersionPlist(originalDict);
-        }
-    }
-    
-    return originalDict;
+NSDictionary *replaced_NSDictionary_dictionaryWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
+    NSDictionary *originalDictionary = original_NSDictionary_dictionaryWithContentsOfFile
+        ? original_NSDictionary_dictionaryWithContentsOfFile(self, _cmd, path)
+        : nil;
+    if (!originalDictionary || !isSystemVersionFile(path)) return originalDictionary;
+    return spoofSystemVersionPlist(originalDictionary);
 }
 
-// Hook NSString stringWithContentsOfFile:encoding:error: to intercept text file reads
-id replaced_NSString_stringWithContentsOfFile(Class self, SEL _cmd, NSString *path, NSStringEncoding enc, NSError **error) {
-    id originalString = original_NSString_stringWithContentsOfFile(self, _cmd, path, enc, error);
-    
-    if (isSystemVersionFile(path) && originalString) {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            // For handling XML/plist files as raw strings
-            NSDictionary *versionInfo = getIOSVersionInfo();
-            if (versionInfo && versionInfo[@"version"] && versionInfo[@"build"]) {
-                NSString *modifiedString = [originalString mutableCopy];
-                modifiedString = [modifiedString stringByReplacingOccurrencesOfString:
-                                      [NSString stringWithFormat:@"<key>ProductVersion</key>\\s*<string>[^<]+</string>"]
-                                      withString:[NSString stringWithFormat:@"<key>ProductVersion</key><string>%@</string>", versionInfo[@"version"]]
-                                      options:NSRegularExpressionSearch
-                                      range:NSMakeRange(0, [modifiedString length])];
-                                      
-                modifiedString = [modifiedString stringByReplacingOccurrencesOfString:
-                                      [NSString stringWithFormat:@"<key>ProductBuildVersion</key>\\s*<string>[^<]+</string>"]
-                                      withString:[NSString stringWithFormat:@"<key>ProductBuildVersion</key><string>%@</string>", versionInfo[@"build"]]
-                                      options:NSRegularExpressionSearch
-                                      range:NSMakeRange(0, [modifiedString length])];
-                                      
-                return modifiedString;
-            }
-        }
-    }
-    
-    return originalString;
-} 
+id replaced_NSString_stringWithContentsOfFile(Class self, SEL _cmd, NSString *path,
+                                               NSStringEncoding encoding, NSError **error) {
+    NSString *originalString = original_NSString_stringWithContentsOfFile
+        ? original_NSString_stringWithContentsOfFile(self, _cmd, path, encoding, error)
+        : nil;
+    if (!originalString || !isSystemVersionFile(path)) return originalString;
+    PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
+    return projection ? PXTransformSystemVersionString(originalString, encoding, projection) : originalString;
+}
