@@ -28,6 +28,7 @@
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import "common/UIButton+SafeConfiguration.h"
+#import "PXInjectionFilter.h"
 
 @interface NSTask : NSObject
 @property (nonatomic, copy) NSString *launchPath;
@@ -396,33 +397,15 @@ static int PXRunShellCommand(NSString *command) {
     }
 }
 
-static NSString * const kPXNoInjectionPlaceholder = @"com.hydra.projectx.no-injection-placeholder";
-
 static NSArray<NSString *> *PXEnabledScopeBundleIDs(void) {
+    // Single source of truth: PXInjectionFilter (shared with the mount daemon).
     NSDictionary *scopePlist = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
-    NSDictionary *scopedApps = [scopePlist[@"ScopedApps"] isKindOfClass:[NSDictionary class]] ? scopePlist[@"ScopedApps"] : nil;
-    NSMutableArray<NSString *> *bundleIDs = [NSMutableArray array];
-    [scopedApps enumerateKeysAndObjectsUsingBlock:^(NSString *bundleID, NSDictionary *entry, BOOL *stop) {
-        (void)stop;
-        if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return;
-        if (PXBundleIDIsProjectXApp(bundleID)) return;
-        if ([bundleID hasPrefix:@"com.apple.WebKit"] || [bundleID isEqualToString:@"com.apple.SafariViewService"]) return;
-        if ([entry isKindOfClass:[NSDictionary class]] && ![entry[@"enabled"] boolValue]) return;
-        [bundleIDs addObject:bundleID];
-    }];
-    return [bundleIDs sortedArrayUsingSelector:@selector(compare:)];
+    return PXInjectionEnabledMainBundlesFromScopePlist(scopePlist);
 }
 
 /// Sort + unique non-empty bundle IDs for stable filter output / comparison.
 static NSArray<NSString *> *PXNormalizedBundleList(NSArray *bundles) {
-    NSMutableOrderedSet<NSString *> *set = [NSMutableOrderedSet orderedSet];
-    for (id obj in bundles) {
-        if (![obj isKindOfClass:[NSString class]]) continue;
-        NSString *bid = (NSString *)obj;
-        if (!bid.length) continue;
-        [set addObject:bid];
-    }
-    return [set.array sortedArrayUsingSelector:@selector(compare:)];
+    return PXInjectionNormalizeBundleList(bundles);
 }
 
 static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
@@ -433,58 +416,23 @@ static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
     return PXNormalizedBundleList(bundles ?: @[]);
 }
 
-static BOOL PXBundleIsAppleOrWebKit(NSString *bundleID) {
-    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return YES;
-    if ([bundleID hasPrefix:@"com.apple."]) return YES;
-    // Defensive: any WebKit-named helper outside the com.apple. prefix set.
-    if ([bundleID rangeOfString:@"WebKit" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
-    return NO;
-}
-
 /// Rebuild substrate filter plists from full enabled global_scope only.
-/// Never accepts a partial/just-added list; empty scope → placeholder-only (never Bundles=[]).
+/// Never accepts a partial/just-added list; empty scope → SpringBoard-only tweak filter
+/// (never Bundles=[]), and the keychain bridge collapses to the no-injection placeholder.
 /// Always includes SpringBoard so Profile Indicator (and other SB-hosted UI) can load.
+/// Canonical union/empty-state rules live in PXInjectionFilter (shared with the daemon).
 static void PXWriteSubstrateFilterPlists(void) {
-    // 1–3. Enabled mains from global_scope → expand extensions + WebKit cluster → unique+sort.
+    // 1–5. Canonical filter computation lives in PXInjectionFilter (single source of
+    // truth shared with the mount daemon): enabled mains from global_scope → expand
+    // extensions + WebKit cluster → tweak list (+SpringBoard, never empty, never the
+    // placeholder) → keychain bridge (third-party only, placeholder when empty).
     NSArray<NSString *> *enabledMain = PXEnabledScopeBundleIDs();
     NSArray<NSString *> *expanded = PXExpandedResetBundleIDs(enabledMain);
-    NSMutableArray<NSString *> *withSystem = [NSMutableArray arrayWithArray:expanded ?: @[]];
-    // Profile Indicator runs inside SpringBoard; scope apps alone never inject there.
-    if (![withSystem containsObject:@"com.apple.springboard"]) {
-        [withSystem addObject:@"com.apple.springboard"];
-    }
-    NSArray<NSString *> *validBundles = PXNormalizedBundleList(withSystem);
+    NSArray<NSString *> *validBundles = PXInjectionComputeTweakBundles(expanded);
+    NSArray<NSString *> *bridgeBundles = PXInjectionComputeBridgeBundles(validBundles);
 
-    // 4. Empty after expand: still keep SpringBoard (NEVER Bundles=[]).
-    if (validBundles.count == 0) {
-        validBundles = @[@"com.apple.springboard", kPXNoInjectionPlaceholder];
-        validBundles = PXNormalizedBundleList(validBundles);
-    }
-
-    // 5. Bridge: third-party app/extensions only (drop Apple/WebKit); empty → placeholder.
-    NSMutableArray<NSString *> *bridgeBuilder = [NSMutableArray array];
-    for (NSString *bundleID in validBundles) {
-        if ([bundleID isEqualToString:kPXNoInjectionPlaceholder]) continue;
-        if (PXBundleIsAppleOrWebKit(bundleID)) continue;
-        [bridgeBuilder addObject:bundleID];
-    }
-    NSArray<NSString *> *bridgeBundles = PXNormalizedBundleList(bridgeBuilder);
-    if (bridgeBundles.count == 0) {
-        bridgeBundles = @[kPXNoInjectionPlaceholder];
-    }
-
-    NSDictionary *tweakPlist = @{
-        @"Filter": @{
-            @"Bundles": validBundles,
-            @"Mode": @"Any"
-        }
-    };
-    NSDictionary *bridgePlist = @{
-        @"Filter": @{
-            @"Bundles": bridgeBundles,
-            @"Mode": @"Any"
-        }
-    };
+    NSDictionary *tweakPlist = PXInjectionFilterPlistDictionary(validBundles);
+    NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridgeBundles);
     NSArray<NSString *> *dirs = @[
         @"/Library/MobileSubstrate/DynamicLibraries",
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries"

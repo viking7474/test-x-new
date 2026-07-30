@@ -9,6 +9,7 @@
 #import <errno.h>
 #import <notify.h>
 #import <string.h>
+#import "PXInjectionFilter.h"
 
 // Constants
 static const int kCheckInterval = 5; // Check every 5 seconds
@@ -234,60 +235,13 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 }
 
 - (BOOL)filterPlistIsValid:(NSDictionary *)plist bundles:(NSArray **)outBundles reason:(NSString **)reason {
-    if (![plist isKindOfClass:[NSDictionary class]]) {
-        if (reason) *reason = @"plist-not-dictionary";
-        return NO;
-    }
-    NSDictionary *filter = [plist[@"Filter"] isKindOfClass:[NSDictionary class]] ? plist[@"Filter"] : nil;
-    if (!filter) {
-        if (reason) *reason = @"missing-Filter";
-        return NO;
-    }
-    NSString *mode = [filter[@"Mode"] isKindOfClass:[NSString class]] ? filter[@"Mode"] : nil;
-    if (mode.length && ![mode isEqualToString:@"Any"]) {
-        if (reason) *reason = @"invalid-Mode";
-        return NO;
-    }
-    NSArray *bundles = [filter[@"Bundles"] isKindOfClass:[NSArray class]] ? filter[@"Bundles"] : nil;
-    if (!bundles.count) {
-        if (reason) *reason = @"empty-Bundles";
-        return NO;
-    }
-    for (id obj in bundles) {
-        if (![obj isKindOfClass:[NSString class]] || ![(NSString *)obj length]) {
-            if (reason) *reason = @"invalid-bundle-item";
-            return NO;
-        }
-        NSString *bundleID = (NSString *)obj;
-        if ([bundleID isEqualToString:@"com.apple.UIKit"]) {
-            if (reason) *reason = @"blocked-com.apple.UIKit";
-            return NO;
-        }
-        if ([bundleID containsString:@"*"]) {
-            if (reason) *reason = @"wildcard-not-allowed";
-            return NO;
-        }
-        if ([bundleID isEqualToString:@"com.hydra.projectx.no-injection-placeholder"] && bundles.count > 1) {
-            if (reason) *reason = @"placeholder-with-real-bundles";
-            return NO;
-        }
-    }
-    if (outBundles) *outBundles = bundles;
-    return YES;
+    // Single source of truth: PXInjectionFilter (shared with the app-side writer).
+    return PXInjectionFilterPlistIsValid(plist, outBundles, reason);
 }
 
 /// Stable checksum of filter bundle list (sorted join). Used in filter_daemon_debug.plist.
 static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
-    NSMutableArray<NSString *> *items = [NSMutableArray array];
-    for (id obj in bundles) {
-        if ([obj isKindOfClass:[NSString class]] && [(NSString *)obj length]) {
-            [items addObject:(NSString *)obj];
-        }
-    }
-    [items sortUsingSelector:@selector(compare:)];
-    NSString *joined = [items componentsJoinedByString:@","];
-    // Include count + joined list so debug plists are human-readable and comparable.
-    return [NSString stringWithFormat:@"%lu:%@", (unsigned long)items.count, joined ?: @""];
+    return PXInjectionBundlesChecksum(bundles);
 }
 
 - (NSDictionary *)atomicInstallPlistFromPath:(NSString *)src toPath:(NSString *)dst bundles:(NSArray *)bundles {
