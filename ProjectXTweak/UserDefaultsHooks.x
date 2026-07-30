@@ -9,6 +9,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXP1AFilters.h"
 
 // Function declarations
 static NSString *getSpoofedUserDefaultsUUID(void);
@@ -142,55 +143,15 @@ static id processDictionaryValues(id object) {
 
 // Helper to check if a string looks like a UUID (8-4-4-4-12 format)
 static BOOL looksLikeUUIDString(NSString *str) {
-    if (!str || str.length < 32) return NO;
-    // Standard UUID format with dashes
-    if (str.length == 36) {
-        return [str rangeOfString:@"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" 
-                          options:NSRegularExpressionSearch].location != NSNotFound;
-    }
-    // UUID without dashes (32 hex chars)
-    if (str.length == 32) {
-        return [str rangeOfString:@"^[0-9a-fA-F]{32}$" 
-                          options:NSRegularExpressionSearch].location != NSNotFound;
-    }
-    return NO;
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXUserDefaultsLooksLikeUUIDString(str);
 }
 
 // Stricter isUUIDKey - only match keys that are definitely UUID-related
 // Removed generic terms like 'token', 'tracking', 'device', 'identifier' that can match non-UUID values
 static BOOL isUUIDKey(NSString *key) {
-    if (!key) return NO;
-    
-    NSString *lowercaseKey = [key lowercaseString];
-    
-    // Strict UUID-related key patterns only
-    NSArray *uuidPatterns = @[
-        @"uuid", @"udid", 
-        @"deviceuuid", @"device_uuid", @"device-uuid",
-        @"uniqueid", @"unique-id", @"unique_id",
-        @"vendorid", @"vendor-id", @"vendor_id", 
-        @"idfa", @"idfv", @"adid", @"advertisingid", @"advertising_id",
-        @"installationid", @"installation_id"
-    ];
-    
-    // Check for exact matches only
-    for (NSString *pattern in uuidPatterns) {
-        if ([lowercaseKey isEqualToString:pattern]) {
-            return YES;
-        }
-    }
-    
-    // Check for common suffixes with separators
-    NSArray *strictSuffixes = @[@"uuid", @"udid", @"idfv", @"idfa"];
-    for (NSString *suffix in strictSuffixes) {
-        if ([lowercaseKey hasSuffix:[@"." stringByAppendingString:suffix]] ||
-            [lowercaseKey hasSuffix:[@"-" stringByAppendingString:suffix]] ||
-            [lowercaseKey hasSuffix:[@"_" stringByAppendingString:suffix]]) {
-            return YES;
-        }
-    }
-    
-    return NO;
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXUserDefaultsIsUUIDKey(key);
 }
 
 #pragma mark - NSUserDefaults Hooks

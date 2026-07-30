@@ -10,6 +10,7 @@
 #import "PXScope.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
+#import "PXP1AFilters.h"
 #import <os/lock.h>
 
 
@@ -215,23 +216,8 @@ static BOOL hasPasteboardContentChanged(NSString *bundleID, UIPasteboard *pasteb
 // Build deterministic custom pasteboard name from PasteboardUUID.
 // General pasteboard name must never be rewritten by callers.
 static NSString *deterministicPasteboardName(NSString *originalName, NSString *uuidString) {
-    if (!originalName.length || !uuidString.length) {
-        return originalName;
-    }
-    
-    NSString *shortUUID = [uuidString componentsSeparatedByString:@"-"].firstObject;
-    if (!shortUUID.length) {
-        return originalName;
-    }
-    
-    NSArray *components = [originalName componentsSeparatedByString:@"."];
-    if (components.count > 0) {
-        NSMutableArray *newComponents = [NSMutableArray arrayWithArray:components];
-        newComponents[newComponents.count - 1] = shortUUID;
-        return [newComponents componentsJoinedByString:@"."];
-    }
-    
-    return [NSString stringWithFormat:@"%@.%@", originalName, shortUUID];
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXPasteboardDeterministicName(originalName, uuidString);
 }
 
 #pragma mark - Per-selector original IMPs
@@ -611,13 +597,8 @@ static void logUnsupportedSelectorOnce(NSString *selectorName) {
 // Compare type encodings loosely: accept exact match or same leading return/arg count pattern.
 // Does not add selectors that don't exist.
 static BOOL typeEncodingCompatible(const char *existing, const char *expected) {
-    if (!existing || !expected) return NO;
-    if (strcmp(existing, expected) == 0) return YES;
-    
-    // Allow minor encoding differences (e.g. optional signedness / architecture width)
-    // by comparing return type and number of arguments after self/_cmd.
-    // Fall back to requiring first character (return type) match.
-    return existing[0] == expected[0];
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXPasteboardTypeEncodingCompatible(existing, expected);
 }
 
 // Install instance method hook if method exists and encoding is compatible.

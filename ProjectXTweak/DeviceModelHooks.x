@@ -7,6 +7,7 @@
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentitySnapshot.h"
 #import "PXFileDebug.h"
+#import "PXP1AFilters.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
@@ -116,22 +117,8 @@ static NSString* getSpoofedDeviceModel(void) {
 // Map machine id / model string to Apple UIDevice.model family name.
 // UIDevice.model must NOT return machine identifiers like "iPhone15,3".
 static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString *original) {
-    if (!spoofedModel.length) {
-        return original;
-    }
-    
-    if ([spoofedModel hasPrefix:@"iPhone"]) {
-        return @"iPhone";
-    }
-    if ([spoofedModel hasPrefix:@"iPad"]) {
-        return @"iPad";
-    }
-    if ([spoofedModel hasPrefix:@"iPod"]) {
-        return @"iPod touch";
-    }
-    
-    // Unknown prefix → keep original UIDevice value
-    return original;
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXDeviceModelUIDeviceFamily(spoofedModel, original);
 }
 
 #pragma mark - Foundation UIDevice Hooks Only
