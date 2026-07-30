@@ -16,6 +16,11 @@ typedef NS_ENUM(NSInteger, PXDataContainerResolverErrorCode) {
 __attribute__((objc_subclassing_restricted))
 @interface PXDataContainerResolver : NSObject
 
+/// Process-local validated cache. Every hit is revalidated against the directory,
+/// metadata file and exact MCM identifier before it can be returned.
++ (void)invalidateCachedContainerForIdentifier:(NSString *)identifier;
++ (void)invalidateAllCachedContainers;
+
 - (nullable PXResolvedContainer *)resolveDataContainerForIdentifier:(NSString *)identifier
                                                                kind:(PXResolvedContainerKind)kind
                                                                root:(PXResolvedContainerRoot)root

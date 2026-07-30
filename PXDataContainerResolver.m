@@ -94,7 +94,67 @@ static BOOL PXResolverMetadataFileIsValid(NSString *path) {
     return S_ISREG(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
 }
 
+// CLEAR-03: one process-local cache shared by short-lived resolver instances.
+// There is no TTL: a hit is accepted only after the physical container and MCM
+// metadata are revalidated, and explicit invalidation is available for install/
+// uninstall/container-generation changes.
+static NSMutableDictionary<NSString *, PXResolvedContainer *> *PXResolverValidatedCache(void) {
+    static NSMutableDictionary<NSString *, PXResolvedContainer *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    return cache;
+}
+
+static NSString *PXResolverCacheKey(NSString *identifier,
+                                    PXResolvedContainerKind kind,
+                                    PXResolvedContainerRoot root) {
+    return [NSString stringWithFormat:@"%lu|%lu|%@",
+            (unsigned long)kind, (unsigned long)root, identifier ?: @""];
+}
+
+static BOOL PXResolverCachedContainerIsValid(PXResolvedContainer *container,
+                                             NSString *identifier,
+                                             PXResolvedContainerKind kind,
+                                             PXResolvedContainerRoot root,
+                                             NSString *basePath) {
+    if (![container isKindOfClass:[PXResolvedContainer class]] ||
+        container.kind != kind || container.root != root ||
+        ![container.requestedIdentifier isEqualToString:identifier] ||
+        ![container.metadataIdentifier isEqualToString:identifier] ||
+        [[NSUUID alloc] initWithUUIDString:container.containerUUID] == nil) return NO;
+
+    NSString *expectedPath = [basePath stringByAppendingPathComponent:container.containerUUID];
+    if (![container.containerPath isEqualToString:expectedPath] ||
+        !PXResolverImmediateDirectoryIsValid(expectedPath)) return NO;
+
+    NSString *metadataPath = [expectedPath stringByAppendingPathComponent:
+                              @".com.apple.mobile_container_manager.metadata.plist"];
+    if (!PXResolverMetadataFileIsValid(metadataPath)) return NO;
+    NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+    id metadataIdentifier = [metadata isKindOfClass:[NSDictionary class]]
+        ? metadata[@"MCMMetadataIdentifier"] : nil;
+    return [metadataIdentifier isKindOfClass:[NSString class]] &&
+           [(NSString *)metadataIdentifier isEqualToString:identifier];
+}
+
 @implementation PXDataContainerResolver
+
++ (void)invalidateCachedContainerForIdentifier:(NSString *)identifier {
+    if (![identifier isKindOfClass:[NSString class]] || identifier.length == 0) return;
+    NSString *suffix = [@"|" stringByAppendingString:identifier];
+    @synchronized (self) {
+        NSArray<NSString *> *keys = [PXResolverValidatedCache().allKeys copy];
+        for (NSString *key in keys) {
+            if ([key hasSuffix:suffix]) [PXResolverValidatedCache() removeObjectForKey:key];
+        }
+    }
+}
+
++ (void)invalidateAllCachedContainers {
+    @synchronized (self) {
+        [PXResolverValidatedCache() removeAllObjects];
+    }
+}
 
 - (PXResolvedContainer *)resolveDataContainerForIdentifier:(NSString *)identifier
                                                        kind:(PXResolvedContainerKind)kind
@@ -119,6 +179,20 @@ static BOOL PXResolverMetadataFileIsValid(NSString *path) {
                               PXDataContainerResolverErrorInvalidInput,
                               @"Invalid data container resolution request");
         return nil;
+    }
+
+    NSString *cacheKey = PXResolverCacheKey(identifier, kind, root);
+    PXResolvedContainer *cached = nil;
+    @synchronized ([PXDataContainerResolver class]) {
+        cached = PXResolverValidatedCache()[cacheKey];
+    }
+    if (cached) {
+        if (PXResolverCachedContainerIsValid(cached, identifier, kind, root, basePath)) {
+            return cached;
+        }
+        @synchronized ([PXDataContainerResolver class]) {
+            [PXResolverValidatedCache() removeObjectForKey:cacheKey];
+        }
     }
 
     NSFileManager *fileManager = [NSFileManager defaultManager];
@@ -199,7 +273,11 @@ static BOOL PXResolverMetadataFileIsValid(NSString *path) {
                               @"Multiple exact data container matches were found");
         return nil;
     }
-    return matches.firstObject;
+    PXResolvedContainer *resolved = matches.firstObject;
+    @synchronized ([PXDataContainerResolver class]) {
+        PXResolverValidatedCache()[cacheKey] = resolved;
+    }
+    return resolved;
 }
 
 - (PXResolvedContainer *)resolveApplicationDataContainerForIdentifier:(NSString *)identifier

@@ -1761,7 +1761,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                  selectedGroups:selectedGroups
                                                authorizedGroups:authorizedGroups
                                           applicationIdentifier:applicationIdentifier
-                                               plannedPassCount:(systemApplication ? 1u : 2u)
+                                               plannedPassCount:1u
                                                      skipDetail:nil
                                             planningFailureCode:0
                                          planningFailureMessage:nil];
@@ -2037,8 +2037,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                                                                failure:nil];
         return PXKeychainComponentResultIsStructurallyValid(result) ? result : nil;
     }
-    if ((plan.plannedPassCount != 1 && plan.plannedPassCount != 2) ||
-        passResults.count != plan.plannedPassCount) {
+    if (plan.plannedPassCount != 1 || passResults.count != 1) {
         PXClearFailure *failure = PXKeychainFailure(PXKeychainClearFailureCodeInternalResultFailure,
                                                     @"Keychain execution accounting is incomplete");
         PXClearComponentResult *result = [[PXClearComponentResult alloc] initWithScope:PXClearScopeKeychain
@@ -2051,22 +2050,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         return PXKeychainComponentResultIsStructurallyValid(result) ? result : nil;
     }
 
-    NSUInteger succeeded = 0;
-    PXClearFailure *firstFailure = nil;
-    for (NSUInteger index = 0; index < passResults.count; index++) {
-        BOOL passSucceeded = [passResults[index] respondsToSelector:@selector(boolValue)] &&
-                             [passResults[index] boolValue];
-        if (passSucceeded) {
-            succeeded++;
-        } else if (!firstFailure) {
-            PXKeychainClearFailureCode code = index == 0
-                ? PXKeychainClearFailureCodeInitialPassFailed
-                : PXKeychainClearFailureCodeFinalPassFailed;
-            firstFailure = PXKeychainFailure(code,
-                index == 0 ? @"Initial keychain wipe pass failed" : @"Final keychain wipe pass failed");
-        }
-    }
-    NSUInteger failed = plan.plannedPassCount - succeeded;
+    BOOL passSucceeded = [passResults.firstObject respondsToSelector:@selector(boolValue)] &&
+                         [passResults.firstObject boolValue];
+    NSUInteger succeeded = passSucceeded ? 1u : 0u;
+    PXClearFailure *firstFailure = passSucceeded ? nil : PXKeychainFailure(
+        PXKeychainClearFailureCodeInitialPassFailed,
+        @"Single keychain wipe pass failed");
+    NSUInteger failed = 1u - succeeded;
     PXClearComponentResult *result = [[PXClearComponentResult alloc]
         initWithScope:PXClearScopeKeychain
                status:(failed == 0 ? PXClearComponentStatusSucceeded : PXClearComponentStatusFailed)
@@ -2901,6 +2891,39 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         return nil;
     }
 
+    // CLEAR-05: Quick remains inside the canonical four-scope authority but
+    // executes only application data. The other exact scopes are represented
+    // explicitly as skipped so result ordering/accounting stays stable.
+    if (!PXClearModeIncludesExtendedContainers(request.mode)) {
+        PXClearRequest *applicationRequest =
+            [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
+                                                      scopes:PXClearScopeApplicationData
+                                                        mode:request.mode];
+        PXClearComponentResult *applicationResult = applicationRequest
+            ? [self _completeAppDataWipeForApplicationDataRequest:applicationRequest]
+            : nil;
+        if (!PXApplicationDataComponentResultIsStructurallyValid(applicationResult)) {
+            applicationResult = PXApplicationDataFailedComponent(
+                PXApplicationDataClearFailureCodeInternalResultFailure,
+                @"ApplicationData internal result validation failed");
+        }
+        PXClearComponentResult *extensionResult = [[PXClearComponentResult alloc]
+            initWithScope:PXClearScopeExtensionData status:PXClearComponentStatusSkipped
+            attemptedUnitCount:0 succeededUnitCount:0 failedUnitCount:0
+            detail:@"Quick mode excludes extension-data containers" failure:nil];
+        PXClearComponentResult *appGroupsResult = [[PXClearComponentResult alloc]
+            initWithScope:PXClearScopeAppGroups status:PXClearComponentStatusSkipped
+            attemptedUnitCount:0 succeededUnitCount:0 failedUnitCount:0
+            detail:@"Quick mode excludes App Group containers" failure:nil];
+        PXClearComponentResult *pluginKitResult = [[PXClearComponentResult alloc]
+            initWithScope:PXClearScopePluginKitData status:PXClearComponentStatusSkipped
+            attemptedUnitCount:0 succeededUnitCount:0 failedUnitCount:0
+            detail:@"Quick mode excludes PluginKit containers" failure:nil];
+        PXClearResult *quickResult = [[PXClearResult alloc] initWithRequest:request
+            componentResults:@[applicationResult, extensionResult, appGroupsResult, pluginKitResult]];
+        return PXMigratedDataClearResultIsStructurallyValid(quickResult) ? quickResult : nil;
+    }
+
     NSError *extensionDiscoveryError = nil;
     NSArray<NSString *> *extensionIdentifiers =
         [self _exactInstalledExtensionIdentifiersForApplicationIdentifier:request.bundleIdentifier
@@ -2914,7 +2937,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     PXClearRequest *applicationRequest =
         [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
                                                   scopes:PXClearScopeApplicationData
-                                               deepClean:request.deepClean];
+                                                    mode:request.mode];
     PXClearComponentResult *applicationResult = applicationRequest
         ? [self _completeAppDataWipeForApplicationDataRequest:applicationRequest]
         : nil;
@@ -3028,15 +3051,29 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 #pragma mark - Main Public Methods
 
 - (void)clearDataForBundleID:(NSString *)bundleID completion:(void (^)(BOOL, NSError *))completion {
-    [self logMessage:@"[AppDataCleaner] === STARTING data clearing for %@ ===", bundleID];
+    PXClearMode persistedMode = [self _deepCleanEnabled] ? PXClearModeDeep : PXClearModeFull;
+    [self clearDataForBundleID:bundleID mode:persistedMode completion:completion];
+}
 
-    BOOL deepClean = [self _deepCleanEnabled];
+- (void)clearDataForBundleID:(NSString *)bundleID
+                        mode:(PXClearMode)mode
+                  completion:(void (^)(BOOL, NSError *))completion {
+    CFAbsoluteTime requestStartedAt = CFAbsoluteTimeGetCurrent();
+    [self logMessage:@"[AppDataCleaner] === STARTING %@ data clearing for %@ ===",
+        PXClearModeName(mode), bundleID];
+
+    if (!PXClearModeIsValid(mode)) {
+        NSError *modeError = PXMigratedInternalError(@"Invalid Clear mode");
+        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(NO, modeError); });
+        return;
+    }
+    BOOL deepClean = PXClearModeIncludesDeepDiagnostics(mode);
     PXClearRequest *fullRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                             scopes:PXMigratedFullClearScopes
-                                                                         deepClean:deepClean];
+                                                                              mode:mode];
     PXClearRequest *dataRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                             scopes:PXMigratedDataClearScopes
-                                                                         deepClean:deepClean];
+                                                                              mode:mode];
     if (!fullRequest || !dataRequest) {
         NSError *requestError = PXMigratedInternalError(@"Invalid full Clear request");
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -3078,6 +3115,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     [[UIApplication sharedApplication] endBackgroundTask:taskToEnd];
                 });
             }
+            [PXDataContainerResolver invalidateCachedContainerForIdentifier:bundleID];
+            [weakSelf logMessage:@"[AppDataCleaner][metric] mode=%@ total_ms=%.0f success=%d",
+                PXClearModeName(mode),
+                (CFAbsoluteTimeGetCurrent() - requestStartedAt) * 1000.0,
+                success];
             [weakSelf logMessage:@"[AppDataCleaner] Calling completion handler (success=%d)", success];
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(success, error);
@@ -3088,7 +3130,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     };
 
     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
-    int timeoutSec = (deepClean || isSystemApp) ? (30 * 60) : 120;
+    int timeoutSec = (deepClean || isSystemApp) ? (30 * 60)
+        : (mode == PXClearModeQuick ? 90 : 300);
     watchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
         dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
     dispatch_source_set_timer(watchdogTimer,
@@ -3112,16 +3155,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             __strong typeof(weakSelf) strongSelf = weakSelf;
             [strongSelf logMessage:@"[AppDataCleaner] Background cleaning started for %@", bundleID];
             @try {
-                [strongSelf logMessage:@"[AppDataCleaner] Step 0: Kill application..."];
-                [strongSelf logMessage:@"[AppDataCleaner] Deep Clean (verify scan) = %@", deepClean ? @"ON" : @"OFF"];
+                CFAbsoluteTime killStartedAt = CFAbsoluteTimeGetCurrent();
+                [strongSelf logMessage:@"[AppDataCleaner] Step 0: Kill application (mode=%@)...", PXClearModeName(mode)];
                 PXKillAppProcessBestEffort(strongSelf, bundleID);
-                [NSThread sleepForTimeInterval:0.5];
-                if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) {
+                [NSThread sleepForTimeInterval:(mode == PXClearModeQuick ? 0.1 : 0.5)];
+                [strongSelf logMessage:@"[AppDataCleaner][metric] step=kill duration_ms=%.0f",
+                    (CFAbsoluteTimeGetCurrent() - killStartedAt) * 1000.0];
+                if (mode != PXClearModeQuick && [bundleID isEqualToString:@"com.apple.mobilesafari"]) {
                     [strongSelf logMessage:@"[AppDataCleaner] MobileSafari: stopping WebKit/Safari helper processes..."];
                     PXStopSafariDaemonsBestEffort(strongSelf);
                 }
 
-                [strongSelf logMessage:@"[AppDataCleaner] Step 1: Planning and running initial Keychain pass..."];
+                CFAbsoluteTime keychainStartedAt = CFAbsoluteTimeGetCurrent();
+                [strongSelf logMessage:@"[AppDataCleaner] Step 1: Planning and running single Keychain pass..."];
                 PXKeychainClearPlan *keychainPlan =
                     [strongSelf _keychainClearPlanForBundleIdentifier:fullRequest.bundleIdentifier];
                 NSMutableArray<NSNumber *> *keychainPassResults = [NSMutableArray array];
@@ -3143,8 +3189,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     }
                 }
 
-                [strongSelf logMessage:@"[AppDataCleaner] Step 2: Clearing URL credentials..."];
-                [strongSelf clearURLCredentialsForBundleID:bundleID];
+                [strongSelf logMessage:@"[AppDataCleaner][metric] step=keychain duration_ms=%.0f passes=%lu",
+                    (CFAbsoluteTimeGetCurrent() - keychainStartedAt) * 1000.0,
+                    (unsigned long)keychainPassResults.count];
+
+                if (mode != PXClearModeQuick) {
+                    [strongSelf logMessage:@"[AppDataCleaner] Step 2: Clearing URL credentials..."];
+                    [strongSelf clearURLCredentialsForBundleID:bundleID];
+                }
                 [strongSelf logMessage:@"[AppDataCleaner] Step 3: Clearing app state data..."];
                 [strongSelf _internalClearAppStateData:bundleID];
 
@@ -3155,7 +3207,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     frozeForThisClear = [freezer isApplicationFrozen:bundleID];
                 }
 
-                [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running four-scope data aggregate..."];
+                CFAbsoluteTime dataStartedAt = CFAbsoluteTimeGetCurrent();
+                [strongSelf logMessage:@"[AppDataCleaner] Step 4: Running canonical data aggregate..."];
                 PXClearResult *dataResult = [strongSelf _completeDataWipeForMigratedRequest:dataRequest];
                 NSArray<PXClearComponentResult *> *dataComponents = nil;
                 if (PXMigratedDataClearResultIsStructurallyValid(dataResult)) {
@@ -3180,31 +3233,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     ];
                 }
 
-                [strongSelf logMessage:@"[AppDataCleaner] Step 5: Clearing HTTP cookies from memory..."];
-                NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-                NSArray *allCookies = [[cookieStorage cookies] copy];
-                for (NSHTTPCookie *cookie in allCookies) [cookieStorage deleteCookie:cookie];
-                [strongSelf logMessage:@"[AppDataCleaner] Cleared %lu cookies from memory",
-                    (unsigned long)allCookies.count];
-
-                [strongSelf logMessage:@"[AppDataCleaner] Step 6: Running planned final Keychain pass..."];
-                if (keychainPlan.planningFailureCode == 0 &&
-                    keychainPlan.skipDetail.length == 0 &&
-                    keychainPlan.plannedPassCount == 2) {
-                    NSError *finalPassError = nil;
-                    BOOL finalPassSucceeded = [strongSelf
-                        _executeKeychainWipeForBundleIdentifier:keychainPlan.bundleIdentifier
-                                                selectedGroups:keychainPlan.selectedGroups
-                                         applicationIdentifier:keychainPlan.applicationIdentifier
-                                            systemApplication:keychainPlan.systemApplication
-                                                        error:&finalPassError];
-                    [keychainPassResults addObject:@(finalPassSucceeded)];
-                    if (!finalPassSucceeded) {
-                        [strongSelf logMessage:@"[AppDataCleaner] Final Keychain pass failed (%@:%ld)",
-                            finalPassError.domain ?: PXKeychainClearFailureDomain,
-                            (long)finalPassError.code];
-                    }
-                }
+                [strongSelf logMessage:@"[AppDataCleaner][metric] step=data_aggregate duration_ms=%.0f",
+                    (CFAbsoluteTimeGetCurrent() - dataStartedAt) * 1000.0];
+                // The target application's container cleanup owns its cookies.
+                // Never delete this process's global in-memory cookie jar.
 
                 PXClearComponentResult *keychainComponent =
                     [strongSelf _keychainComponentForPlan:keychainPlan passResults:keychainPassResults];
@@ -3222,14 +3254,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                               failure:failure];
                 }
 
-                [strongSelf logMessage:@"[AppDataCleaner] Step 7: Syncing filesystem..."];
-                sync();
-                [strongSelf logMessage:@"[AppDataCleaner] Step 8: Verifying clear result (log-only)..."];
-                BOOL clearVerified = [strongSelf verifyDataCleared:bundleID];
-                if (!clearVerified) {
-                    [strongSelf logMessage:@"[AppDataCleaner] WARNING: broad verification found residual data"];
-                }
-
+                // CLEAR-07/08: no process-wide sync and no redundant broad scan
+                // for Quick/Full. Exact component postconditions are the manifest.
                 NSMutableArray<PXClearComponentResult *> *fullComponents =
                     [NSMutableArray arrayWithArray:dataComponents ?: @[]];
                 [fullComponents addObject:keychainComponent];
@@ -3240,6 +3266,19 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     safeCompletion(NO, PXMigratedInternalError(@"Full Clear returned an invalid aggregate result"));
                     return;
                 }
+
+                CFAbsoluteTime verificationStartedAt = CFAbsoluteTimeGetCurrent();
+                BOOL manifestVerified = YES; // structural validation + exact component postconditions
+                if (PXClearModeIncludesDeepDiagnostics(mode)) {
+                    manifestVerified = [strongSelf verifyDataCleared:bundleID];
+                    if (!manifestVerified) {
+                        [strongSelf logMessage:@"[AppDataCleaner] Deep residual scan reported remaining data"];
+                    }
+                }
+                [strongSelf logMessage:@"[AppDataCleaner][metric] step=verification duration_ms=%.0f strategy=%@ passed=%d",
+                    (CFAbsoluteTimeGetCurrent() - verificationStartedAt) * 1000.0,
+                    PXClearModeIncludesDeepDiagnostics(mode) ? @"deep_residual_scan" : @"component_manifest",
+                    manifestVerified];
 
                 NSError *callbackError = nil;
                 NSArray<NSNumber *> *failurePrecedence = @[
@@ -3464,7 +3503,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self clearAppReceiptData:bundleID withBundleUUID:nil];
     
     // Extra cleanup for MobileMail: email/account display is primarily system-scoped (Accounts3 + /var/mobile/Library/Mail).
-    if ([bundleID isEqualToString:@"com.apple.mobilemail"]) {
+    if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilemail"]) {
         [self logMessage:@"[AppDataCleaner] MobileMail: wiping /var/mobile/Library/Mail and mail prefs"]; 
 
         // Stop mail-related daemons and wait for exit to avoid maild SIGABRT on detached DB.
@@ -3621,10 +3660,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self logMessage:@"[AppDataCleaner] Skipping RootHide cleaning (optimization)"];
 
     // Clear iCloud-related data
-    [self logMessage:@"[AppDataCleaner] Clearing iCloud-related data"]; 
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    [self clearICloudData:bundleID];
-    [self logMessage:@"[AppDataCleaner] iCloud cleanup took %.2fs", CFAbsoluteTimeGetCurrent() - t0];
+    if (PXClearModeIncludesExtendedContainers(request.mode)) {
+        [self logMessage:@"[AppDataCleaner] Clearing iCloud-related data"];
+        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        [self clearICloudData:bundleID];
+        [self logMessage:@"[AppDataCleaner] iCloud cleanup took %.2fs", CFAbsoluteTimeGetCurrent() - t0];
+    }
     
     // Clear app state data - SKIP second call to avoid respring
     // [self _internalClearAppStateData:bundleID];
@@ -3632,12 +3673,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     // URL credentials are cleared by clearDataForBundleID.
     
     // Clear encrypted data 
-    [self logMessage:@"[AppDataCleaner] DEBUG: Clearing encrypted data..."];
-    [self _internalClearEncryptedDataOutsideMainApplicationContainer:bundleID deepClean:request.deepClean];
-    
-    // Clear Spotlight data
-    [self logMessage:@"[AppDataCleaner] DEBUG: Clearing Spotlight indexes..."];
-    [self clearSpotlightIndexes:bundleID];
+    if (PXClearModeIncludesExtendedContainers(request.mode)) {
+        [self logMessage:@"[AppDataCleaner] DEBUG: Clearing encrypted data..."];
+        [self _internalClearEncryptedDataOutsideMainApplicationContainer:bundleID deepClean:request.deepClean];
+        [self logMessage:@"[AppDataCleaner] DEBUG: Clearing Spotlight indexes..."];
+        [self clearSpotlightIndexes:bundleID];
+    }
     
     // Skip slow media/health/safari clearing for now
     [self logMessage:@"[AppDataCleaner] DEBUG: Skipping media/health/safari (optimization)"];
@@ -3646,27 +3687,33 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
     // Safari is special: it uses system-scoped stores under /var/mobile/Library.
     // Without clearing those, sessions/cookies can persist even after wiping the app container.
-    if ([bundleID isEqualToString:@"com.apple.mobilesafari"]) {
+    if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilesafari"]) {
         [self _wipeMobileSafariSystemStores];
     }
     
     // Clean SiriAnalytics
-    [self logMessage:@"[AppDataCleaner] DEBUG: Cleaning Siri analytics..."];
-    [self cleanSiriAnalyticsDatabase:bundleID];
+    if (request.mode == PXClearModeDeep) {
+        [self logMessage:@"[AppDataCleaner] DEBUG: Deep-only Siri analytics cleanup..."];
+        [self cleanSiriAnalyticsDatabase:bundleID];
+    }
     
     // Skip these - they modify system state and can cause respring:
     // [self cleanIconStatePlist:bundleID];
     // [self cleanLaunchServicesDatabase:bundleID];
     
     // SAFE to run now (modified to avoid respring)
-    [self refreshSystemServices];
+    if (PXClearModeIncludesExtendedContainers(request.mode)) {
+        [self refreshSystemServices];
+    }
     
     [self logMessage:@"[AppDataCleaner] Skipped unsafe system state modifications"];
     
     // NOTE: Universal keychain wipe removed (too broad / can delete unrelated items).
 
     // Sweep for crash logs and system logs.
-    [self removeCrashLogsForBundleID:bundleID];
+    if (request.mode == PXClearModeDeep) {
+        [self removeCrashLogsForBundleID:bundleID];
+    }
 
     // Main application-data final sweep is read-only and consumes the canonical path cache directly.
     for (NSString *canonicalPath in (_wipeCacheApplicationDataCanonicalPaths ?: @[])) {

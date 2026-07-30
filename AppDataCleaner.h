@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "PXClearRequest.h"
 
 @interface AppDataCleaner : NSObject
 
@@ -6,9 +7,14 @@
 
 #pragma mark - Main Public Methods
 
-// Clear all data for a specific app
-- (void)clearDataForBundleID:(NSString *)bundleID 
+// Clear all data for a specific app using the persisted Full/Deep preference.
+- (void)clearDataForBundleID:(NSString *)bundleID
                  completion:(void (^)(BOOL success, NSError *error))completion;
+
+// Explicit Phase-8 Quick/Full/Deep execution policy.
+- (void)clearDataForBundleID:(NSString *)bundleID
+                        mode:(PXClearMode)mode
+                  completion:(void (^)(BOOL success, NSError *error))completion;
 
 // Check if app has any data to clear
 - (BOOL)hasDataToClear:(NSString *)bundleID;
@@ -64,4 +70,4 @@
 - (NSArray *)findExtensionDataContainersForBundleID:(NSString *)bundleID;
 - (BOOL)hasKeychainItemsForBundleID:(NSString *)bundleID;
 
-@end 
+@end

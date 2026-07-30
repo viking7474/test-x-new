@@ -596,6 +596,7 @@ def positions_strictly_increasing(positions: Sequence[int]) -> bool:
 PUBLIC_CLASS_SELECTORS = ("sharedManager",)
 PUBLIC_INSTANCE_SELECTORS = (
     "clearDataForBundleID:completion:",
+    "clearDataForBundleID:mode:completion:",
     "hasDataToClear:",
     "completeAppDataWipe:",
     "cleanIconStatePlist:",
@@ -759,11 +760,11 @@ def guard_public_and_removed_api(sources: Mapping[str, SourceFile], collector: G
     collector.check("BRH-API-PUBLIC-CLASS-EXACT", Counter(class_methods) == Counter(PUBLIC_CLASS_SELECTORS),
                     header.path, 1, "AppDataCleaner class-method interface differs from the exact sharedManager set")
     collector.check("BRH-API-PUBLIC-INSTANCE-EXACT", Counter(instance_methods) == Counter(PUBLIC_INSTANCE_SELECTORS),
-                    header.path, 1, "AppDataCleaner instance-method interface differs from the exact 24-selector set")
+                    header.path, 1, "AppDataCleaner instance-method interface differs from the exact 25-selector set")
     collector.check("BRH-API-PUBLIC-CLASS-COUNT", len(class_methods) == 1,
                     header.path, 1, "AppDataCleaner must expose exactly one class method")
-    collector.check("BRH-API-PUBLIC-INSTANCE-COUNT", len(instance_methods) == 24,
-                    header.path, 1, "AppDataCleaner must expose exactly 24 instance methods")
+    collector.check("BRH-API-PUBLIC-INSTANCE-COUNT", len(instance_methods) == 25,
+                    header.path, 1, "AppDataCleaner must expose exactly 25 instance methods")
     for selector in PUBLIC_CLASS_SELECTORS:
         slug = guard_slug(selector)
         collector.check(f"BRH-API-PUBLIC-CLASS-{slug}", class_methods.count(selector) == 1,
@@ -995,7 +996,7 @@ def guard_clear(sources: Mapping[str, SourceFile], collector: GuardCollector) ->
                     "PXMigratedFullClearScopes must contain the exact five-scope set")
 
     methods = method_records(cleaner)
-    full_matches = [method for method in methods if method.selector == "clearDataForBundleID:completion:" and method.is_definition]
+    full_matches = [method for method in methods if method.selector == "clearDataForBundleID:mode:completion:" and method.is_definition]
     data_matches = [method for method in methods if method.selector == "completeAppDataWipe:" and method.is_definition]
     collector.check("BRH-CLR-FULL-DEFINITION", len(full_matches) == 1, cleaner.path, 1,
                     "full typed Clear authority must have exactly one implementation")
