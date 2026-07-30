@@ -24,7 +24,7 @@ pure module, wires both callers to it, and fixes the empty-state rule.
 | `PXInjectionBundleIsAppleOrWebKit` | Apple- or WebKit-family classifier (nil → YES, defensive). |
 | `PXInjectionDefaultWebKitHelperBundleIDs` | Safari/WebKit helper cluster added when ≥1 app is scoped. |
 | `PXInjectionEnabledMainBundlesFromScopePlist` | Enabled third-party mains from a loaded `global_scope.plist`. |
-| `PXInjectionComputeTweakBundles` | Tweak filter = expanded scope + SpringBoard, normalized. |
+| `PXInjectionComputeTweakBundles` | Tweak filter = scope + SpringBoard when apps are scoped, else placeholder-only. |
 | `PXInjectionComputeBridgeBundles` | Keychain bridge filter = third-party app/extensions only. |
 | `PXInjectionFilterPlistDictionary` | Build `{ Filter: { Bundles, Mode: "Any" } }`. |
 | `PXInjectionFilterPlistIsValid` | Daemon-side validation (returns reason on failure). |
@@ -41,11 +41,12 @@ Constants: `PXInjectionPlaceholderBundleID` = `com.hydra.projectx.no-injection-p
 2. **Union, not partial** — the writer always rebuilds from the full enabled
    scope (expand extensions → append WebKit cluster → normalize). It never passes
    the just-added app's expanded list into the writer.
-3. **Tweak filter (`ProjectXTweak.plist`)** — expanded scope **plus SpringBoard**
-   (Profile Indicator runs in SpringBoard). Because SpringBoard is always present
-   the list is never empty, so it never contains the placeholder.
-4. **Empty scope** — tweak collapses to SpringBoard-only (never `Bundles=[]`,
-   never SpringBoard + placeholder). This is the IOS-08 bug fix.
+3. **Tweak filter (`ProjectXTweak.plist`)** — when ≥1 app is scoped: expanded
+   scope **plus SpringBoard** (Profile Indicator runs in SpringBoard), normalized.
+   A non-empty list never contains the placeholder.
+4. **Empty scope** — tweak collapses to the placeholder alone (never `Bundles=[]`,
+   never SpringBoard-only), matching the keychain bridge and the Newplan
+   acceptance rule "remove all apps → installed filter only placeholder".
 5. **Keychain bridge (`WeaponXKeychainBridge.plist`)** — third-party app and
    extension bundles only (Apple/WebKit and the placeholder are dropped). When
    empty it collapses to the placeholder alone.

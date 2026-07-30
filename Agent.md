@@ -36,7 +36,7 @@ Hệ thống can thiệp API hệ thống tại runtime sử dụng Substrate/El
 - **Hạ tầng Hooking cốt lõi (Kiến trúc quan trọng):**
   - `ProjectXTweak/MethodSwizzler.m` (và `.h`)
   - `ProjectXTweak/PXScope.m` (và `.h`)
-  - `ProjectXTweak/HookOwnership.h`
+  - `ProjectXTweak/PXNativeHookCoordinator.h` (điều phối sở hữu native hook — thay thế HookOwnership.h/gOwner* đã loại bỏ)
   - `ProjectXTweak/MobileGestalt.h`
 - **Logic Hooking thực tế (Các module đã hoàn thiện):**
   - Khởi tạo chính: `ProjectXTweak/Tweak.x`

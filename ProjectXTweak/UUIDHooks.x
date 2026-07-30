@@ -2,7 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "ProjectXLogging.h"
-#import "HookOwnership.h"
 #import "IdentifierManager.h"
 #import "SystemUUIDManager.h"
 #import "DyldCacheUUIDManager.h"
@@ -313,7 +312,7 @@ static void PXUUIDRegisterIOKitProviders(void) {
 // Placeholder kept for structure; real registration is below near setupAdditionalSystemUUIDHooks.
 #if 0
 %hookf(CFTypeRef, IORegistryEntryCreateCFProperty, io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
-    if (gOwnerIOKitInstalled) {
+    if (0 /* legacy: IOKit ownership now handled by PXNativeHookCoordinator */) {
         return %orig;
     }
     @try {

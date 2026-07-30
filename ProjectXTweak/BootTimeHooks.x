@@ -1,7 +1,6 @@
 #import "ProjectX.h"
 #import "UptimeManager.h"
 #import "ProjectXLogging.h"
-#import "HookOwnership.h"
 #import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
 #import <sys/sysctl.h>

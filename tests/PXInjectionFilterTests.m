@@ -68,12 +68,12 @@ static void PXTTestTweakBundles(void) {
     PXT_ASSERT(![tweak containsObject:PXInjectionPlaceholderBundleID], "tweak never contains placeholder");
     PXT_ASSERT(PXTArrayEquals(tweak, PXInjectionNormalizeBundleList(tweak)), "tweak output is normalized");
 
-    // Empty scope: tweak collapses to SpringBoard-only (NEVER springboard + placeholder).
+    // Empty scope: tweak collapses to placeholder-only (matches plan + keychain bridge; never Bundles=[]).
     NSArray *emptyTweak = PXInjectionComputeTweakBundles(@[]);
-    PXT_ASSERT(PXTArrayEquals(emptyTweak, (@[PXInjectionSpringBoardBundleID])),
-               "empty scope -> SpringBoard-only tweak filter");
-    PXT_ASSERT(![emptyTweak containsObject:PXInjectionPlaceholderBundleID],
-               "empty tweak must not mix placeholder with SpringBoard (daemon would reject it)");
+    PXT_ASSERT(PXTArrayEquals(emptyTweak, (@[PXInjectionPlaceholderBundleID])),
+               "empty scope -> placeholder-only tweak filter");
+    PXT_ASSERT(![emptyTweak containsObject:PXInjectionSpringBoardBundleID],
+               "empty tweak drops SpringBoard when no apps are scoped");
 }
 
 static void PXTTestBridgeBundles(void) {
@@ -146,7 +146,7 @@ static void PXTTestConsistencyRoundTrip(void) {
     NSArray *emptyTweak = PXInjectionComputeTweakBundles(@[]);
     NSArray *emptyBridge = PXInjectionComputeBridgeBundles(emptyTweak);
     PXT_ASSERT(PXInjectionFilterPlistIsValid(PXInjectionFilterPlistDictionary(emptyTweak), NULL, &reason),
-               "round-trip: empty-scope tweak plist valid (SpringBoard-only)");
+               "round-trip: empty-scope tweak plist valid (placeholder-only)");
     PXT_ASSERT(PXInjectionFilterPlistIsValid(PXInjectionFilterPlistDictionary(emptyBridge), NULL, &reason),
                "round-trip: empty-scope bridge plist valid (placeholder-only)");
 }

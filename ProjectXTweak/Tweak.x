@@ -35,7 +35,6 @@
 #import "LocationSpoofingManager.h" // Import location spoofing manager
 #import "MobileGestalt.h"
 #import "IOSVersionInfo.h"
-#import "HookOwnership.h"
 #import "PXNativeHookCoordinator.h"
 #import "PXScope.h"
 #import "PXDeviceProfileSchema.h"
@@ -561,13 +560,10 @@ static void PXInstallCompatibilityShims(void) {
     }
 }
 
-// Owner hook installation flags
-BOOL gOwnerSysctlInstalled = NO;
-BOOL gOwnerSysctlBynameInstalled = NO;
-BOOL gOwnerUnameInstalled = NO;
-BOOL gOwnerIOKitInstalled = NO;
-BOOL gOwnerMGInstalled = NO;
-BOOL gOwnerCFSystemInstalled = NO;
+// uname is the only Tweak-owned exclusive native symbol (not managed by the
+// coordinator). Track its install state file-locally; every other native symbol
+// is owned by PXNativeHookCoordinator (see scripts/audit_native_hooks.sh).
+static BOOL sPXUnameHookInstalled = NO;
 
 // Missing-key logging
 // Security settings helpers
@@ -4082,11 +4078,6 @@ static char* hook_GSSystemGetSerialNo(void) {
             } post:nil];
         });
 
-        gOwnerSysctlInstalled = [coord isSymbolInstalled:kPXNativeSymbolSysctl];
-        gOwnerSysctlBynameInstalled = [coord isSymbolInstalled:kPXNativeSymbolSysctlByname];
-        gOwnerIOKitInstalled = [coord isSymbolInstalled:kPXNativeSymbolIORegistryEntryCreateCFProperty];
-        gOwnerCFSystemInstalled = [coord isSymbolInstalled:kPXNativeSymbolCFCopySystemVersionDictionary];
-        gOwnerUnameInstalled = NO; // uname still installed below (not coordinator-owned)
         PXLog(@"[WeaponX] Native coordinator installed. diagnostics=%@", [coord diagnostics]);
     }
     
@@ -4105,7 +4096,6 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXFileDebugAIDA64Log("[Tweak.ctor] before init Identifiers");
         %init(Identifiers);
         PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
-        gOwnerMGInstalled = YES;
 
         // ATT (iOS 14+): install only if class/selectors exist. Active when IDFA identifier enabled.
         // Legacy iOS uses ASIdentifierManager.isAdvertisingTrackingEnabled / advertisingIdentifier above.
@@ -4229,11 +4219,11 @@ static char* hook_GSSystemGetSerialNo(void) {
     }
     void *unamePtr = dlsym(RTLD_DEFAULT, "uname");
     void *substrateHook = dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (!gOwnerUnameInstalled && unamePtr && substrateHook && unamePtr != (void *)uname_hook) {
+    if (!sPXUnameHookInstalled && unamePtr && substrateHook && unamePtr != (void *)uname_hook) {
         MSHookFunction(unamePtr, (void *)uname_hook, (void **)&uname_orig);
-        gOwnerUnameInstalled = (uname_orig != NULL && uname_orig != uname_hook);
+        sPXUnameHookInstalled = (uname_orig != NULL && uname_orig != uname_hook);
         PXLog(@"[WeaponX] uname hook install %@ original=%p",
-              gOwnerUnameInstalled ? @"succeeded" : @"failed", uname_orig);
+              sPXUnameHookInstalled ? @"succeeded" : @"failed", uname_orig);
     }
     PXFileDebugAIDA64Log("[Tweak.ctor] after uname/GS hooks");
 

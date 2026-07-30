@@ -2,7 +2,6 @@
 #import "IdentifierManager.h"
 #import "StorageManager.h"
 #import "ProjectXLogging.h"
-#import "HookOwnership.h"
 #import "PXNativeHookCoordinator.h"
 #import <Foundation/Foundation.h>
 #import <sys/mount.h>
@@ -573,7 +572,8 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
     // Call original first
     CFTypeRef result = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
 
-    if (gOwnerIOKitInstalled) {
+    if ([[PXNativeHookCoordinator sharedCoordinator] isSymbolInstalled:kPXNativeSymbolIORegistryEntryCreateCFProperty]) {
+        // IOKit identity is owned by the native coordinator; storage never re-spoofs it here.
         return result;
     }
     

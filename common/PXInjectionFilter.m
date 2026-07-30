@@ -52,10 +52,16 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary *s
 }
 
 NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> *expandedEnabledBundles) {
-    NSMutableArray<NSString *> *withSystem = [NSMutableArray arrayWithArray:expandedEnabledBundles ?: @[]];
-    // Profile Indicator runs inside SpringBoard; scope apps alone never inject there.
-    // Because SpringBoard is always present the tweak list is never empty, so it never
-    // needs (and must never contain) the no-injection placeholder.
+    NSArray<NSString *> *normalizedEnabled = PXInjectionNormalizeBundleList(expandedEnabledBundles ?: @[]);
+    // Empty state (no scoped apps): write the no-injection placeholder ONLY — never Bundles=[]
+    // and never SpringBoard — so the tweak filter matches the keychain bridge and the daemon
+    // accepts a placeholder-only plist (Newplan: "remove all apps -> installed filter only placeholder").
+    if (normalizedEnabled.count == 0) {
+        return @[PXInjectionPlaceholderBundleID];
+    }
+    // Non-empty scope: Profile Indicator runs inside SpringBoard, so add it alongside the scoped
+    // apps. The list is guaranteed non-empty here, so it must never carry the placeholder.
+    NSMutableArray<NSString *> *withSystem = [NSMutableArray arrayWithArray:normalizedEnabled];
     if (![withSystem containsObject:PXInjectionSpringBoardBundleID]) {
         [withSystem addObject:PXInjectionSpringBoardBundleID];
     }
