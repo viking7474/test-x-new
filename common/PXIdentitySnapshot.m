@@ -1,6 +1,8 @@
 #import "PXIdentitySnapshot.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
+#import "PXIdentityDependencyValidator.h"
+#import "PXVersionedIOSDatabase.h"
 #import "PXPaths.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
@@ -126,6 +128,27 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
 
     PXIdentityValidationResult *validation = PXValidateDeviceIDs(rawDeviceIDs);
     NSDictionary *deviceIDs = validation.deviceIDs;
+
+    // Phase 2 dependency validation uses the two roots from one IOS-03
+    // publication. A malformed/missing database never permits a model/software
+    // tuple to be published partially.
+    PXVersionedIOSDatabase *database = [PXVersionedIOSDatabase sharedDatabase];
+    NSError *databaseError = nil;
+    NSDictionary *buildRoot = [database rootForKey:@"iosBuildDB" error:&databaseError];
+    NSDictionary *modelRoot = buildRoot ? [database rootForKey:@"iphoneModelDB" error:&databaseError] : nil;
+    PXIdentityDependencyValidationResult *dependencies =
+        PXValidateIdentityDependencies(deviceIDs, buildRoot, modelRoot);
+
+    NSMutableDictionary<NSString *, NSString *> *allIssues = [validation.issues mutableCopy] ?:
+        [NSMutableDictionary dictionary];
+    [dependencies.issues enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
+        (void)stop;
+        allIssues[key] = value;
+    }];
+    if (databaseError && dependencies.issues[@"database"] && !allIssues[@"databaseDetail"]) {
+        allIssues[@"databaseDetail"] = databaseError.localizedDescription ?: @"database-load-failed";
+    }
+
     uint64_t generation = 0;
     id generationValue = deviceIDs[@"GenerationCounter"];
     if ([generationValue respondsToSelector:@selector(unsignedLongLongValue)]) {
@@ -133,10 +156,11 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
     }
 
     NSDictionary *specs = PXDeviceSpecificationsFromDeviceIDs(deviceIDs) ?: @{};
-    BOOL valid = profileID.length > 0 && validation.inputValid && deviceIDs.count > 0;
+    BOOL valid = profileID.length > 0 && validation.inputValid && dependencies.valid && deviceIDs.count > 0;
     NSString *source = valid ? (validation.issues.count ? @"device_ids-validated-with-rejections" :
                                 (generation > 0 ? @"device_ids" : @"device_ids-legacy-generation"))
-                             : (profileID.length ? @"device_ids-unavailable" : @"missing-profile");
+                             : (!profileID.length ? @"missing-profile" :
+                                (dependencies.valid ? @"device_ids-unavailable" : @"dependency-validation-failed"));
 
     return [[PXIdentitySnapshot alloc] initWithProfileID:profileID
                                               generation:generation
@@ -144,7 +168,7 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
                                                 settings:settings
                                                    specs:specs
                                                   source:source
-                                        validationIssues:validation.issues
+                                        validationIssues:[allIssues copy]
                                                    valid:valid];
 }
 
@@ -197,6 +221,7 @@ PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
              [gPXIdentitySnapshot.profileID isEqualToString:candidate.profileID]);
         BOOL transientFailure = !candidate.valid &&
             ([candidate.source isEqualToString:@"device_ids-unavailable"] ||
+             [candidate.source isEqualToString:@"dependency-validation-failed"] ||
              [candidate.source isEqualToString:@"exception"]);
 
         // Keep the last complete generation only for a transient read of the same
