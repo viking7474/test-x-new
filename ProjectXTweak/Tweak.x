@@ -4233,6 +4233,9 @@ static char* hook_GSSystemGetSerialNo(void) {
     
     // IOKit / sysctl / CFCopySystemVersionDictionary are owned by PXNativeHookCoordinator (installed above).
     // uname remains a Tweak-owned exclusive symbol (not multi-module).
+    // IOS-04 (Phase 11): canonical uname owner. The uname MSHookFunction install below is the
+    // single source of truth; no other hook module installs a uname hook. Ownership is asserted
+    // statically by scripts/test_phase11_p2_static.py.
     PXFileDebugAIDA64Log("[Tweak.ctor] before uname/GS hooks");
     void *GSHandle = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW);
     if (GSHandle) {

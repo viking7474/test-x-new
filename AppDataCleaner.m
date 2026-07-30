@@ -6661,7 +6661,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/Caches/com.apple.CFNetwork 2>/dev/null || true"]; 
     [self runCommandWithPrivileges:@"rm -rf /private/var/mobile/Library/Caches/com.apple.CFNetwork 2>/dev/null || true"]; 
 
-    sync();
+    // CLEAR-07 (Phase 11): removed process-wide sync(). This legacy Safari-specific cleanup
+    // relies on the per-command rm results above and must not block on a global filesystem flush.
 }
 
 - (NSArray *)findExtensionDataContainersForBundleID:(NSString *)bundleID {
@@ -6752,39 +6753,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM data WHERE bundleid = '%@';\" 2>/dev/null || true", dbPath, bundleID]];
         [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM items WHERE bundleid = '%@';\" 2>/dev/null || true", dbPath, bundleID]];
         
-        // Add specific cleaning for Lyft and Zimride names in tables
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE data LIKE '%%lyft%%' OR bundleid LIKE '%%lyft%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM apps WHERE data LIKE '%%lyft%%' OR bundleid LIKE '%%lyft%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM data WHERE data LIKE '%%lyft%%' OR bundleid LIKE '%%lyft%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM items WHERE data LIKE '%%lyft%%' OR bundleid LIKE '%%lyft%%';\" 2>/dev/null || true", dbPath]];
-        
-        // Specific case for com.lyft.ios bundle ID
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE bundleid = 'com.lyft.ios' OR data LIKE '%%com.lyft.ios%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM apps WHERE bundleid = 'com.lyft.ios' OR data LIKE '%%com.lyft.ios%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM data WHERE bundleid = 'com.lyft.ios' OR data LIKE '%%com.lyft.ios%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM items WHERE bundleid = 'com.lyft.ios' OR data LIKE '%%com.lyft.ios%%';\" 2>/dev/null || true", dbPath]];
-        
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE data LIKE '%%zimride%%' OR bundleid LIKE '%%zimride%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM apps WHERE data LIKE '%%zimride%%' OR bundleid LIKE '%%zimride%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM data WHERE data LIKE '%%zimride%%' OR bundleid LIKE '%%zimride%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM items WHERE data LIKE '%%zimride%%' OR bundleid LIKE '%%zimride%%';\" 2>/dev/null || true", dbPath]];
-        // Add specific cleaning for Uber and Helix names in tables
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE data LIKE '%%uber%%' OR bundleid LIKE '%%uber%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM apps WHERE data LIKE '%%uber%%' OR bundleid LIKE '%%uber%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM data WHERE data LIKE '%%uber%%' OR bundleid LIKE '%%uber%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM items WHERE data LIKE '%%uber%%' OR bundleid LIKE '%%uber%%';\" 2>/dev/null || true", dbPath]];
-        
-        // Specific case for com.ubercab.UberClient bundle ID
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE bundleid = 'com.ubercab.UberClient' OR data LIKE '%%com.ubercab.UberClient%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM apps WHERE bundleid = 'com.ubercab.UberClient' OR data LIKE '%%com.ubercab.UberClient%%';\" 2>/dev/null || true", dbPath]];
-//         [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' "DELETE FROM main WHERE bundleid = 'com.ubercab.UberClient' OR data LIKE '%%com.ubercab.UberClient%%';\" 2>/dev/null || true", dbPath]];
-//         [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' "DELETE FROM apps WHERE bundleid = 'com.ubercab.UberClient' OR data LIKE '%%com.ubercab.UberClient%%';\" 2>/dev/null || true", dbPath]];
-//         [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' "DELETE FROM data WHERE bundleid = 'com.ubercab.UberClient' OR data LIKE '%%com.ubercab.UberClient%%';\" 2>/dev/null || true", dbPath]];
-//         [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' "DELETE FROM items WHERE bundleid = 'com.ubercab.UberClient' OR data LIKE '%%com.ubercab.UberClient%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE data LIKE '%%helix%%' OR bundleid LIKE '%%helix%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM apps WHERE data LIKE '%%helix%%' OR bundleid LIKE '%%helix%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM data WHERE data LIKE '%%helix%%' OR bundleid LIKE '%%helix%%';\" 2>/dev/null || true", dbPath]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM items WHERE data LIKE '%%helix%%' OR bundleid LIKE '%%helix%%';\" 2>/dev/null || true", dbPath]];         
+        // CLEAR-09 (Phase 11): removed hard-coded competitor-brand SQL (Lyft/Zimride/Uber/Helix
+        // and the Lyft iOS / Uber client bundle special cases). Deletions are now driven
+        // only by the requested bundleID plus its derived appName/companyName below, so this
+        // helper no longer carries app-specific bundle logic.
         // Also try to delete data based on app name and company name
         if (appName.length > 0) {
             [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"DELETE FROM main WHERE data LIKE '%%%@%%';\" 2>/dev/null || true", dbPath, appName]];

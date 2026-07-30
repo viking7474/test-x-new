@@ -1,0 +1,22 @@
+{
+  "description": "App-owned test mocks for Phase 11 P2 contracts (TIME-01 / CLEAR-09 / IOS-04). Static-only fixtures; no live device state.",
+  "owner": "app",
+  "phase": 11,
+  "securitySettings": {
+    "timeOffsetEnabled": false,
+    "timeOffsetSeconds": 0,
+    "jailbreakDetectionEnabled": false
+  },
+  "cleanDatabaseFile": {
+    "bundleID": "com.testfixture.appdata",
+    "appName": "Fixture App",
+    "companyName": "Fixture Co"
+  },
+  "timeOffset": {
+    "disabledOffsetSeconds": 0,
+    "enabledSampleOffsetSeconds": 3600,
+    "overRangeOffsetSeconds": 999999,
+    "clampedExpectedSeconds": 86400,
+    "maxAbsoluteSeconds": 86400
+  }
+}
