@@ -1,4 +1,5 @@
 #import "SecurityTabViewController.h"
+#import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
 #import "ProjectXLogging.h"
 #import "IdentifierManager.h"
@@ -137,6 +138,11 @@
 }
 
 - (void)startAnimation {
+    // Respect Accessibility > Reduce Motion: skip the animated matrix rain.
+    if (WXReduceMotionEnabled()) {
+        [self stopAnimation];
+        return;
+    }
     if (!self.displayLink) {
         self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateMatrix)];
         // Use an even lower frame rate (20 fps) to reduce CPU usage further

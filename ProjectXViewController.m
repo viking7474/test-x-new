@@ -1,4 +1,5 @@
 #import "ProjectX.h"
+#import "WeaponXTheme.h"
 #import "IdentifierManager.h"
 #import "UptimeManager.h"
 #import "CopyHelper.h"
@@ -169,7 +170,8 @@ static UIColor *PXAppPickerBorderColor(void) {
 
     self.appNameLabel = [[UILabel alloc] init];
     self.appNameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appNameLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+    self.appNameLabel.font = WXScaledFont(17.0, UIFontWeightSemibold);
+    self.appNameLabel.adjustsFontForContentSizeCategory = YES;
     self.appNameLabel.numberOfLines = 1;
     self.appNameLabel.adjustsFontSizeToFitWidth = YES;
     self.appNameLabel.minimumScaleFactor = 0.82;
@@ -177,7 +179,8 @@ static UIColor *PXAppPickerBorderColor(void) {
 
     self.appDetailLabel = [[UILabel alloc] init];
     self.appDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appDetailLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    self.appDetailLabel.font = WXScaledFont(13.5, UIFontWeightRegular);
+    self.appDetailLabel.adjustsFontForContentSizeCategory = YES;
     self.appDetailLabel.textColor = PXAppPickerSecondaryTextColor();
     self.appDetailLabel.numberOfLines = 1;
     self.appDetailLabel.adjustsFontSizeToFitWidth = YES;

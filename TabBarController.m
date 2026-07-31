@@ -1,4 +1,5 @@
 #import "TabBarController.h"
+#import "WeaponXToast.h"
 #import "ProjectXViewController.h"
 #import "SecurityTabViewController.h"
 #import <objc/runtime.h>
@@ -171,6 +172,12 @@
 
 // Enhanced method to show a beautiful toast message
 - (void)showToastMessage:(NSString *)message withDuration:(CGFloat)duration isSuccess:(BOOL)isSuccess {
+    // Consolidated into WeaponXToast (single source of truth for toasts).
+    [WeaponXToast showMessage:message isSuccess:isSuccess duration:duration];
+}
+
+#if 0  // Legacy inline toast implementation, replaced by WeaponXToast.
+- (void)wx_legacyShowToastMessage:(NSString *)message withDuration:(CGFloat)duration isSuccess:(BOOL)isSuccess {
     // Create container view for better styling
     UIView *toastContainer = [[UIView alloc] init];
     
@@ -325,6 +332,8 @@
 
 
 
+
+#endif  // Legacy inline toast implementation, replaced by WeaponXToast.
 
 // Add this method to update notification badges on refresh
 - (void)updateNotificationBadges {

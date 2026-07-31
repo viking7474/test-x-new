@@ -1,5 +1,6 @@
 #import "AppVersionSpoofingViewController.h"
 #import "common/PXPaths.h"
+#import "WeaponXToast.h"
 
 // Class extension for private method declaration
 @interface AppVersionSpoofingViewController ()
@@ -37,33 +38,8 @@
 
 // Helper method to show a toast-like notification at the top
 - (void)showToastWithMessage:(NSString *)message {
-    CGFloat toastHeight = 60.0;
-    CGFloat padding = 16.0;
-    UILabel *toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(padding, 44 + padding, self.view.frame.size.width - 2 * padding, toastHeight)];
-    toastLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-    toastLabel.textColor = [UIColor whiteColor];
-    toastLabel.textAlignment = NSTextAlignmentCenter;
-    toastLabel.font = [UIFont boldSystemFontOfSize:16.0];
-    toastLabel.text = message;
-    toastLabel.numberOfLines = 2;
-    toastLabel.layer.cornerRadius = 12;
-    toastLabel.layer.masksToBounds = YES;
-    toastLabel.alpha = 0.0;
-    toastLabel.userInteractionEnabled = NO;
-    toastLabel.adjustsFontSizeToFitWidth = YES;
-    [self.view addSubview:toastLabel];
-
-    [UIView animateWithDuration:0.3 animations:^{
-        toastLabel.alpha = 1.0;
-    } completion:^(BOOL finished) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [UIView animateWithDuration:0.3 animations:^{
-                toastLabel.alpha = 0.0;
-            } completion:^(BOOL finished2) {
-                [toastLabel removeFromSuperview];
-            }];
-        });
-    }];
+    // Consolidated into WeaponXToast; anchored to this VC's view since it may be modal.
+    [WeaponXToast showMessage:message isSuccess:YES inView:self.view];
 }
 
 
