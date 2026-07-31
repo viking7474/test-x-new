@@ -234,6 +234,15 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
 @end
 
+#pragma mark - Sequence Sheet VC (interface)
+
+@interface PXRRSSequenceSheetViewController : UIViewController
+@property (nonatomic, copy) void (^onModeSelected)(NSInteger mode);
+@property (nonatomic, copy) void (^onRangeEdited)(NSInteger begin, NSInteger end);
+@property (nonatomic, copy) void (^onRestoreNext)(void);
+@property (nonatomic, copy) NSDictionary *(^nextInfoProvider)(void);
+@end
+
 #pragma mark - Manager VC
 
 @interface PXRRSManagerViewController () <UISearchResultsUpdating>
@@ -247,7 +256,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 @property (nonatomic, strong) UIButton *deleteFooterButton;
 @property (nonatomic, strong) UIView *footerContainer;
 @property (nonatomic, strong) UIVisualEffectView *footerBlur;
-@property (nonatomic, strong) UILabel *footerHintLabel;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *footerHostConstraints;
 @property (nonatomic, strong) UISearchController *searchController;
 @end
 
@@ -272,14 +281,13 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
             : UINavigationItemLargeTitleDisplayModeAlways;
     }
     self.title = @"RRS";
-    // Clear awkward prompt leftover if any.
     self.navigationItem.prompt = nil;
 
-    UIImage *backImg = [UIImage systemImageNamed:@"chevron.left"];
-    self.closeButton = [[UIBarButtonItem alloc] initWithImage:backImg
-                                                        style:UIBarButtonItemStylePlain
-                                                       target:self
-                                                       action:@selector(closeTapped)];
+    UIImage *backImg = nil;
+    if (@available(iOS 13.0, *)) backImg = [UIImage systemImageNamed:@"chevron.left"];
+    self.closeButton = backImg
+        ? [[UIBarButtonItem alloc] initWithImage:backImg style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)]
+        : [[UIBarButtonItem alloc] initWithTitle:@"Đóng" style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)];
     self.selectButton = [[UIBarButtonItem alloc] initWithTitle:@"Chọn"
                                                          style:UIBarButtonItemStylePlain
                                                         target:self
@@ -306,19 +314,48 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.tableView.estimatedRowHeight = 84;
     self.tableView.allowsMultipleSelectionDuringEditing = YES;
     self.tableView.separatorInset = UIEdgeInsetsMake(0, 68, 0, 16);
-    if (@available(iOS 11.0, *)) {
-        self.tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
-    }
 
     [self buildFooterBar];
     [self refreshChrome];
 }
 
+// Footer lives in the navigation controller's view (NOT the table view). A
+// UITableViewController's view IS the scroll view, so pinning an overlay to it
+// anchors the button to content coordinates -> taps miss. Hosting it outside the
+// scroll view makes the button hit-test reliably.
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    UIView *host = self.navigationController.view ?: self.view;
+    if (self.footerContainer && self.footerContainer.superview != host) {
+        [self.footerContainer removeFromSuperview];
+        [host addSubview:self.footerContainer];
+        self.footerHostConstraints = @[
+            [self.footerContainer.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+            [self.footerContainer.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+            [self.footerContainer.bottomAnchor constraintEqualToAnchor:host.bottomAnchor]
+        ];
+        [NSLayoutConstraint activateConstraints:self.footerHostConstraints];
+    }
+    [host bringSubviewToFront:self.footerContainer];
+    [self refreshChrome];
+    [self.view setNeedsLayout];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    // Not called for the overFullScreen sequence sheet, so the footer stays put
+    // behind it; removed when pushing Detail or dismissing the manager.
+    [self.footerContainer removeFromSuperview];
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    [self.view bringSubviewToFront:self.footerContainer];
     CGFloat h = CGRectGetHeight(self.footerContainer.bounds);
-    if (h < 1) h = 104;
+    if (h < 1) {
+        CGFloat safe = 0;
+        if (@available(iOS 11.0, *)) safe = self.view.safeAreaInsets.bottom;
+        h = 70 + safe;
+    }
     UIEdgeInsets inset = self.tableView.contentInset;
     UIEdgeInsets ind = self.tableView.scrollIndicatorInsets;
     if (fabs(inset.bottom - (h + 8)) > 0.5) {
@@ -335,14 +372,12 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.footerContainer = [[UIView alloc] init];
     self.footerContainer.translatesAutoresizingMaskIntoConstraints = NO;
     self.footerContainer.backgroundColor = [UIColor clearColor];
-    [self.view addSubview:self.footerContainer];
 
     UIBlurEffectStyle style = UIBlurEffectStyleExtraLight;
-    if (@available(iOS 13.0, *)) {
-        style = UIBlurEffectStyleSystemChromeMaterial;
-    }
+    if (@available(iOS 13.0, *)) style = UIBlurEffectStyleSystemChromeMaterial;
     self.footerBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:style]];
     self.footerBlur.translatesAutoresizingMaskIntoConstraints = NO;
+    self.footerBlur.userInteractionEnabled = NO;
     [self.footerContainer addSubview:self.footerBlur];
 
     UIView *sep = [[UIView alloc] init];
@@ -350,21 +385,15 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     sep.backgroundColor = [UIColor separatorColor];
     [self.footerContainer addSubview:sep];
 
-    self.footerHintLabel = [[UILabel alloc] init];
-    self.footerHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.footerHintLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    self.footerHintLabel.textColor = [UIColor secondaryLabelColor];
-    self.footerHintLabel.textAlignment = NSTextAlignmentCenter;
-    self.footerHintLabel.adjustsFontSizeToFitWidth = YES;
-    self.footerHintLabel.minimumScaleFactor = 0.85;
-    [self.footerContainer addSubview:self.footerHintLabel];
+    UIColor *fill = [UIColor colorWithWhite:0.5 alpha:0.16];
+    if (@available(iOS 13.0, *)) fill = [UIColor secondarySystemFillColor];
 
     self.sequenceFooterButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.sequenceFooterButton.translatesAutoresizingMaskIntoConstraints = NO;
-    self.sequenceFooterButton.backgroundColor = [UIColor systemBlueColor];
-    [self.sequenceFooterButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.sequenceFooterButton.backgroundColor = fill;
+    [self.sequenceFooterButton setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
     self.sequenceFooterButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    self.sequenceFooterButton.layer.cornerRadius = 14;
+    self.sequenceFooterButton.layer.cornerRadius = 12;
     self.sequenceFooterButton.clipsToBounds = YES;
     [self.sequenceFooterButton setTitle:@"Restore theo thứ tự…" forState:UIControlStateNormal];
     [self.sequenceFooterButton addTarget:self action:@selector(presentSequenceSheet) forControlEvents:UIControlEventTouchUpInside];
@@ -375,18 +404,14 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.deleteFooterButton.backgroundColor = [UIColor systemRedColor];
     [self.deleteFooterButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     self.deleteFooterButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    self.deleteFooterButton.layer.cornerRadius = 14;
+    self.deleteFooterButton.layer.cornerRadius = 12;
     self.deleteFooterButton.clipsToBounds = YES;
     self.deleteFooterButton.hidden = YES;
     [self.deleteFooterButton addTarget:self action:@selector(deleteSelectedTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.footerContainer addSubview:self.deleteFooterButton];
 
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    UILayoutGuide *safe = self.footerContainer.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [self.footerContainer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.footerContainer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.footerContainer.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-
         [self.footerBlur.topAnchor constraintEqualToAnchor:self.footerContainer.topAnchor],
         [self.footerBlur.leadingAnchor constraintEqualToAnchor:self.footerContainer.leadingAnchor],
         [self.footerBlur.trailingAnchor constraintEqualToAnchor:self.footerContainer.trailingAnchor],
@@ -397,14 +422,10 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         [sep.trailingAnchor constraintEqualToAnchor:self.footerContainer.trailingAnchor],
         [sep.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
 
-        [self.footerHintLabel.topAnchor constraintEqualToAnchor:self.footerContainer.topAnchor constant:8],
-        [self.footerHintLabel.leadingAnchor constraintEqualToAnchor:self.footerContainer.leadingAnchor constant:16],
-        [self.footerHintLabel.trailingAnchor constraintEqualToAnchor:self.footerContainer.trailingAnchor constant:-16],
-
-        [self.sequenceFooterButton.topAnchor constraintEqualToAnchor:self.footerHintLabel.bottomAnchor constant:8],
+        [self.sequenceFooterButton.topAnchor constraintEqualToAnchor:self.footerContainer.topAnchor constant:10],
         [self.sequenceFooterButton.leadingAnchor constraintEqualToAnchor:self.footerContainer.leadingAnchor constant:16],
         [self.sequenceFooterButton.trailingAnchor constraintEqualToAnchor:self.footerContainer.trailingAnchor constant:-16],
-        [self.sequenceFooterButton.heightAnchor constraintEqualToConstant:48],
+        [self.sequenceFooterButton.heightAnchor constraintEqualToConstant:50],
         [self.sequenceFooterButton.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-10],
 
         [self.deleteFooterButton.topAnchor constraintEqualToAnchor:self.sequenceFooterButton.topAnchor],
@@ -458,19 +479,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
 - (void)refreshChrome {
     NSUInteger count = self.entries.count;
-    // Avoid navigationItem.prompt (awkward on 6s). Count goes in title.
     self.navigationItem.prompt = nil;
-    if (!self.editingSelection) {
-        self.title = count ? [NSString stringWithFormat:@"RRS (%lu)", (unsigned long)count] : @"RRS";
-    }
-
-    NSDictionary *next = [self nextEntry];
-    NSString *nextName = PXRRSString(next, @"appName");
-    if (!nextName.length) nextName = next ? @"RRS" : @"—";
-    self.footerHintLabel.text = [NSString stringWithFormat:@"%@ · NEXT #%ld · %@",
-                                 [self sequenceModeLabel],
-                                 (long)(self.nextIndex + 1),
-                                 nextName];
 
     if (self.editingSelection) {
         NSUInteger n = self.selectedDirs.count;
@@ -481,17 +490,16 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
                                                                                  target:self
                                                                                  action:@selector(selectAllTapped)];
         self.sequenceFooterButton.hidden = YES;
-        self.footerHintLabel.hidden = YES;
         self.deleteFooterButton.hidden = NO;
         NSString *delTitle = n ? [NSString stringWithFormat:@"Xóa %lu RRS", (unsigned long)n] : @"Xóa";
         [self.deleteFooterButton setTitle:delTitle forState:UIControlStateNormal];
         self.deleteFooterButton.enabled = n > 0;
         self.deleteFooterButton.alpha = n > 0 ? 1.0 : 0.45;
     } else {
+        self.title = count ? [NSString stringWithFormat:@"RRS (%lu)", (unsigned long)count] : @"RRS";
         self.navigationItem.leftBarButtonItem = self.closeButton;
         self.navigationItem.rightBarButtonItem = self.selectButton;
         self.sequenceFooterButton.hidden = NO;
-        self.footerHintLabel.hidden = NO;
         self.deleteFooterButton.hidden = YES;
         self.selectButton.enabled = count > 0;
         self.sequenceFooterButton.enabled = count > 0;
@@ -577,7 +585,8 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
 - (UIView *)emptyStateView {
     UIView *v = [[UIView alloc] initWithFrame:self.tableView.bounds];
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"externaldrive"]];
+    UIImageView *icon = [[UIImageView alloc] init];
+    if (@available(iOS 13.0, *)) icon.image = [UIImage systemImageNamed:@"externaldrive"];
     icon.translatesAutoresizingMaskIntoConstraints = NO;
     icon.tintColor = [UIColor tertiaryLabelColor];
     icon.contentMode = UIViewContentModeScaleAspectFit;
@@ -796,80 +805,66 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 #pragma mark - Sequence sheet
 
 - (void)presentSequenceSheet {
-    NSDictionary *next = [self nextEntry];
-    NSString *nextName = PXRRSString(next, @"appName");
-    if (!nextName.length) nextName = next ? @"RRS" : @"(hết)";
-    NSString *msg = [NSString stringWithFormat:
-                     @"Hiện tại: %@\nNEXT #%ld · %@\n\nChọn thứ tự trước, rồi bấm Restore NEXT.",
-                     [self sequenceModeLabel],
-                     (long)(self.nextIndex + 1),
-                     nextName];
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Restore theo thứ tự"
-                                                                   message:msg
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-
-    void (^setMode)(NSInteger) = ^(NSInteger mode) {
-        weakSelf.sequenceMode = mode;
-        if (mode == 0 || mode == 1) {
-            weakSelf.nextIndex = 0;
-            weakSelf.rangeBegin = 0;
-            weakSelf.rangeEnd = 0;
-            if (weakSelf.onSequenceChanged) weakSelf.onSequenceChanged(mode, 0, 0);
-            if (weakSelf.onNextChanged) weakSelf.onNextChanged(0);
-            [weakSelf refreshChrome];
-            [weakSelf.tableView reloadData];
-        } else {
-            [weakSelf promptBeginEnd];
-        }
-    };
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Thứ tự: Từ đầu → cuối" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { setMode(0); }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Thứ tự: Ngược lại" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { setMode(1); }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Thứ tự: Theo số (begin/end)…" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { setMode(2); }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Lưu RRS & Restore NEXT" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        [weakSelf confirmRestoreNext];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        sheet.popoverPresentationController.sourceView = self.sequenceFooterButton;
-        sheet.popoverPresentationController.sourceRect = self.sequenceFooterButton.bounds;
+    if (!self.entries.count) {
+        [self showMessage:@"Chưa có RRS" message:@"Không có bản RRS nào để restore."];
+        return;
     }
+    PXRRSSequenceSheetViewController *sheet = [[PXRRSSequenceSheetViewController alloc] init];
+    sheet.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    sheet.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    __weak typeof(self) weakSelf = self;
+    sheet.nextInfoProvider = ^NSDictionary *{
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s) return @{};
+        NSDictionary *n = [s nextEntry];
+        NSString *nm = PXRRSString(n, @"appName");
+        if (!nm.length) nm = n ? @"RRS" : @"—";
+        return @{ @"name": nm,
+                  @"index": @(s.nextIndex + 1),
+                  @"size": PXRRSString(n, @"size"),
+                  @"available": @(n != nil),
+                  @"total": @(s.entries.count),
+                  @"begin": @(s.rangeBegin),
+                  @"end": @(s.rangeEnd),
+                  @"mode": @(s.sequenceMode) };
+    };
+    sheet.onModeSelected = ^(NSInteger mode) { [weakSelf applySequenceMode:mode]; };
+    sheet.onRangeEdited = ^(NSInteger begin, NSInteger end) { [weakSelf applyRangeBegin:begin end:end]; };
+    sheet.onRestoreNext = ^{
+        [weakSelf dismissViewControllerAnimated:YES completion:^{
+            [weakSelf confirmRestoreNext];
+        }];
+    };
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)promptBeginEnd {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Theo số thứ tự"
-                                                                   message:@"begin/end là số 1-based trong danh sách đang hiện. Để trống end = đến cuối."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"begin (vd: 1)";
-        tf.keyboardType = UIKeyboardTypeNumberPad;
-        if (self.rangeBegin > 0) tf.text = [NSString stringWithFormat:@"%ld", (long)self.rangeBegin];
-        else tf.text = [NSString stringWithFormat:@"%ld", (long)(self.nextIndex + 1)];
-    }];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"end (tuỳ chọn)";
-        tf.keyboardType = UIKeyboardTypeNumberPad;
-        if (self.rangeEnd > 0) tf.text = [NSString stringWithFormat:@"%ld", (long)self.rangeEnd];
-    }];
-    __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Áp dụng" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        NSInteger begin = [alert.textFields[0].text integerValue];
-        NSInteger end = [alert.textFields[1].text integerValue];
-        weakSelf.sequenceMode = 2;
-        weakSelf.rangeBegin = begin;
-        weakSelf.rangeEnd = end;
-        weakSelf.nextIndex = begin > 0 ? (begin - 1) : 0;
-        if (weakSelf.onSequenceChanged) weakSelf.onSequenceChanged(2, begin, end);
-        if (weakSelf.onNextChanged) weakSelf.onNextChanged(weakSelf.nextIndex);
-        [weakSelf refreshChrome];
-        [weakSelf.tableView reloadData];
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
+- (void)applySequenceMode:(NSInteger)mode {
+    self.sequenceMode = mode;
+    if (mode == 0 || mode == 1) {
+        self.nextIndex = 0;
+        self.rangeBegin = 0;
+        self.rangeEnd = 0;
+        if (self.onSequenceChanged) self.onSequenceChanged(mode, 0, 0);
+        if (self.onNextChanged) self.onNextChanged(0);
+    } else {
+        if (self.rangeBegin <= 0) self.rangeBegin = 1;
+        self.nextIndex = self.rangeBegin - 1;
+        if (self.onSequenceChanged) self.onSequenceChanged(2, self.rangeBegin, self.rangeEnd);
+        if (self.onNextChanged) self.onNextChanged(self.nextIndex);
+    }
+    [self refreshChrome];
+    [self.tableView reloadData];
+}
+
+- (void)applyRangeBegin:(NSInteger)begin end:(NSInteger)end {
+    self.sequenceMode = 2;
+    self.rangeBegin = begin;
+    self.rangeEnd = end;
+    self.nextIndex = begin > 0 ? (begin - 1) : 0;
+    if (self.onSequenceChanged) self.onSequenceChanged(2, begin, end);
+    if (self.onNextChanged) self.onNextChanged(self.nextIndex);
+    [self refreshChrome];
+    [self.tableView reloadData];
 }
 
 - (void)confirmRestoreNext {
@@ -927,6 +922,254 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end
+
+#pragma mark - Sequence Sheet VC (impl)
+
+@interface PXRRSSequenceSheetViewController ()
+@property (nonatomic, strong) UISegmentedControl *segmented;
+@property (nonatomic, strong) UILabel *nextNameLabel;
+@property (nonatomic, strong) UILabel *nextIndexLabel;
+@property (nonatomic, strong) UIStackView *rangeRow;
+@property (nonatomic, strong) UITextField *beginField;
+@property (nonatomic, strong) UITextField *endField;
+@property (nonatomic, strong) UIButton *primaryButton;
+@property (nonatomic, weak) UIView *cardRef;
+@end
+
+@implementation PXRRSSequenceSheetViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.4];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(backdropTapped:)];
+    tap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:tap];
+
+    UIView *card = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    if (@available(iOS 13.0, *)) card.backgroundColor = [UIColor systemBackgroundColor];
+    else card.backgroundColor = [UIColor whiteColor];
+    card.layer.cornerRadius = 16;
+    if (@available(iOS 11.0, *)) card.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+    card.clipsToBounds = YES;
+    [self.view addSubview:card];
+    self.cardRef = card;
+
+    UIView *grabber = [[UIView alloc] init];
+    grabber.translatesAutoresizingMaskIntoConstraints = NO;
+    grabber.backgroundColor = [UIColor colorWithWhite:0.6 alpha:0.4];
+    grabber.layer.cornerRadius = 2.5;
+    [card addSubview:grabber];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.text = @"Restore theo thứ tự";
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    title.textAlignment = NSTextAlignmentCenter;
+
+    UILabel *subtitle = [[UILabel alloc] init];
+    subtitle.text = @"Chọn cách duyệt danh sách RRS";
+    subtitle.font = [UIFont systemFontOfSize:13];
+    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textAlignment = NSTextAlignmentCenter;
+    subtitle.numberOfLines = 0;
+
+    self.segmented = [[UISegmentedControl alloc] initWithItems:@[ @"Từ đầu→cuối", @"Ngược lại", @"Theo số" ]];
+    [self.segmented addTarget:self action:@selector(segmentChanged) forControlEvents:UIControlEventValueChanged];
+
+    UIView *nextBox = [[UIView alloc] init];
+    nextBox.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.08];
+    nextBox.layer.cornerRadius = 12;
+    nextBox.layer.borderWidth = 1;
+    nextBox.layer.borderColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.25].CGColor;
+
+    UILabel *nextCaption = [[UILabel alloc] init];
+    nextCaption.text = @"Bản tiếp theo (NEXT)";
+    nextCaption.font = [UIFont systemFontOfSize:13];
+    nextCaption.textColor = [UIColor secondaryLabelColor];
+
+    self.nextNameLabel = [[UILabel alloc] init];
+    self.nextNameLabel.font = [UIFont systemFontOfSize:13];
+    self.nextNameLabel.textColor = [UIColor secondaryLabelColor];
+    self.nextNameLabel.numberOfLines = 1;
+    self.nextNameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    UIStackView *nextTextStack = [[UIStackView alloc] initWithArrangedSubviews:@[ nextCaption, self.nextNameLabel ]];
+    nextTextStack.axis = UILayoutConstraintAxisVertical;
+    nextTextStack.spacing = 2;
+    nextTextStack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    self.nextIndexLabel = [[UILabel alloc] init];
+    self.nextIndexLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    self.nextIndexLabel.textColor = [UIColor systemBlueColor];
+    self.nextIndexLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.nextIndexLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [self.nextIndexLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+    [nextBox addSubview:nextTextStack];
+    [nextBox addSubview:self.nextIndexLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [nextTextStack.leadingAnchor constraintEqualToAnchor:nextBox.leadingAnchor constant:12],
+        [nextTextStack.topAnchor constraintEqualToAnchor:nextBox.topAnchor constant:12],
+        [nextTextStack.bottomAnchor constraintEqualToAnchor:nextBox.bottomAnchor constant:-12],
+        [self.nextIndexLabel.trailingAnchor constraintEqualToAnchor:nextBox.trailingAnchor constant:-12],
+        [self.nextIndexLabel.centerYAnchor constraintEqualToAnchor:nextBox.centerYAnchor],
+        [self.nextIndexLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:nextTextStack.trailingAnchor constant:8]
+    ]];
+
+    UIView *beginBox = [self fieldBoxWithCaption:@"Begin" field:&_beginField];
+    UIView *endBox = [self fieldBoxWithCaption:@"End" field:&_endField];
+    self.rangeRow = [[UIStackView alloc] initWithArrangedSubviews:@[ beginBox, endBox ]];
+    self.rangeRow.axis = UILayoutConstraintAxisHorizontal;
+    self.rangeRow.distribution = UIStackViewDistributionFillEqually;
+    self.rangeRow.spacing = 10;
+
+    UIColor *fill = [UIColor colorWithWhite:0.5 alpha:0.16];
+    if (@available(iOS 13.0, *)) fill = [UIColor secondarySystemFillColor];
+
+    self.primaryButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.primaryButton.backgroundColor = [UIColor systemBlueColor];
+    [self.primaryButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.primaryButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    self.primaryButton.titleLabel.adjustsFontSizeToFitWidth = YES;
+    self.primaryButton.titleLabel.minimumScaleFactor = 0.85;
+    self.primaryButton.layer.cornerRadius = 12;
+    self.primaryButton.clipsToBounds = YES;
+    [self.primaryButton setTitle:@"Lưu RRS hiện tại & Restore NEXT" forState:UIControlStateNormal];
+    [self.primaryButton addTarget:self action:@selector(restoreTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.primaryButton.heightAnchor constraintEqualToConstant:50].active = YES;
+
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeBtn.backgroundColor = fill;
+    [closeBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    closeBtn.layer.cornerRadius = 12;
+    closeBtn.clipsToBounds = YES;
+    [closeBtn setTitle:@"Đóng" forState:UIControlStateNormal];
+    [closeBtn addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [closeBtn.heightAnchor constraintEqualToConstant:50].active = YES;
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ title, subtitle, self.segmented, nextBox, self.rangeRow, self.primaryButton, closeBtn ]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 14;
+    stack.alignment = UIStackViewAlignmentFill;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    if (@available(iOS 11.0, *)) {
+        [stack setCustomSpacing:6 afterView:title];
+        [stack setCustomSpacing:8 afterView:self.primaryButton];
+    }
+    [card addSubview:stack];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [card.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [card.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [card.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [grabber.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
+        [grabber.centerXAnchor constraintEqualToAnchor:card.centerXAnchor],
+        [grabber.widthAnchor constraintEqualToConstant:36],
+        [grabber.heightAnchor constraintEqualToConstant:5],
+
+        [stack.topAnchor constraintEqualToAnchor:grabber.bottomAnchor constant:12],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
+        [stack.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-16]
+    ]];
+
+    [self refreshAll];
+}
+
+- (UIView *)fieldBoxWithCaption:(NSString *)caption field:(UITextField * __strong *)outField {
+    UIView *box = [[UIView alloc] init];
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    UIColor *bg = [UIColor colorWithWhite:0.95 alpha:1.0];
+    if (@available(iOS 13.0, *)) bg = [UIColor secondarySystemBackgroundColor];
+    box.backgroundColor = bg;
+    box.layer.cornerRadius = 12;
+
+    UILabel *cap = [[UILabel alloc] init];
+    cap.translatesAutoresizingMaskIntoConstraints = NO;
+    cap.text = [caption uppercaseString];
+    cap.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    cap.textColor = [UIColor secondaryLabelColor];
+
+    UITextField *tf = [[UITextField alloc] init];
+    tf.translatesAutoresizingMaskIntoConstraints = NO;
+    tf.keyboardType = UIKeyboardTypeNumberPad;
+    tf.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+    tf.textColor = [UIColor systemBlueColor];
+    tf.placeholder = @"—";
+    [tf addTarget:self action:@selector(rangeChanged) forControlEvents:UIControlEventEditingChanged];
+
+    [box addSubview:cap];
+    [box addSubview:tf];
+    [NSLayoutConstraint activateConstraints:@[
+        [cap.topAnchor constraintEqualToAnchor:box.topAnchor constant:8],
+        [cap.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:12],
+        [cap.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-12],
+        [tf.topAnchor constraintEqualToAnchor:cap.bottomAnchor constant:2],
+        [tf.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:12],
+        [tf.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-12],
+        [tf.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-8]
+    ]];
+    if (outField) *outField = tf;
+    return box;
+}
+
+- (void)refreshAll {
+    NSDictionary *info = self.nextInfoProvider ? self.nextInfoProvider() : @{};
+    NSInteger mode = [info[@"mode"] integerValue];
+    if (mode >= 0 && mode <= 2) self.segmented.selectedSegmentIndex = mode;
+    BOOL rangeMode = (mode == 2);
+    self.rangeRow.hidden = !rangeMode;
+    NSInteger begin = [info[@"begin"] integerValue];
+    NSInteger end = [info[@"end"] integerValue];
+    self.beginField.text = begin > 0 ? [NSString stringWithFormat:@"%ld", (long)begin] : @"";
+    self.endField.text = end > 0 ? [NSString stringWithFormat:@"%ld", (long)end] : @"";
+    [self refreshNextBox];
+}
+
+- (void)refreshNextBox {
+    NSDictionary *info = self.nextInfoProvider ? self.nextInfoProvider() : @{};
+    BOOL available = [info[@"available"] boolValue];
+    NSString *name = info[@"name"] ?: @"—";
+    NSString *size = info[@"size"] ?: @"";
+    NSInteger idx = [info[@"index"] integerValue];
+    self.nextNameLabel.text = available ? (size.length ? [NSString stringWithFormat:@"%@ · %@", name, size] : name) : @"Đã hết bản để restore";
+    self.nextIndexLabel.text = available ? [NSString stringWithFormat:@"#%ld", (long)idx] : @"—";
+    self.primaryButton.enabled = available;
+    self.primaryButton.alpha = available ? 1.0 : 0.4;
+}
+
+- (void)segmentChanged {
+    NSInteger mode = self.segmented.selectedSegmentIndex;
+    if (self.onModeSelected) self.onModeSelected(mode);
+    [self refreshAll];
+}
+
+- (void)rangeChanged {
+    NSInteger b = [self.beginField.text integerValue];
+    NSInteger e = [self.endField.text integerValue];
+    if (self.onRangeEdited) self.onRangeEdited(b, e);
+    [self refreshNextBox];
+}
+
+- (void)restoreTapped {
+    if (self.onRestoreNext) self.onRestoreNext();
+}
+
+- (void)closeTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)backdropTapped:(UITapGestureRecognizer *)g {
+    CGPoint p = [g locationInView:self.view];
+    if (self.cardRef && CGRectContainsPoint(self.cardRef.frame, p)) return;
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 @end
