@@ -1,5 +1,6 @@
 #import "ProjectX.h"
 #import "WeaponXTheme.h"
+#import "PXRRSManagerViewController.h"
 #import "PXDashboardAppPickerCell.h"
 #import "IdentifierManager.h"
 #import "UptimeManager.h"
@@ -843,225 +844,6 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 @end
 
-@interface PXRRSManagerViewController : UITableViewController <UISearchBarDelegate>
-@property (nonatomic, copy) NSArray<NSDictionary *> *entries;
-@property (nonatomic, strong) NSMutableSet<NSString *> *selectedDirs;
-@property (nonatomic, copy) NSString *filterText;
-@property (nonatomic, assign) NSInteger nextIndex;
-@property (nonatomic, assign) NSInteger sequenceMode;
-@property (nonatomic, strong) UITextField *beginTextField;
-@property (nonatomic, strong) UITextField *endTextField;
-@property (nonatomic, strong) UILabel *nextValueLabel;
-@property (nonatomic, strong) UIButton *sequenceButton;
-@property (nonatomic, copy) void (^onDelete)(NSArray<NSString *> *dirs);
-@property (nonatomic, copy) void (^onSaveAndRestore)(NSString *backupDir);
-@property (nonatomic, copy) void (^onSequenceChanged)(NSInteger mode, NSInteger begin, NSInteger end);
-@property (nonatomic, copy) void (^onNextChanged)(NSInteger nextIndex);
-@property (nonatomic, copy) NSArray<NSDictionary *> *(^onReload)(void);
-@end
-
-@implementation PXRRSManagerViewController
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = [NSString stringWithFormat:@"%lu RRS", (unsigned long)self.entries.count];
-    self.selectedDirs = [NSMutableSet set];
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
-    self.tableView.delegate = self;
-    self.tableView.dataSource = self;
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"chevron.left"] style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)];
-    [self setupHeaderFooter];
-}
-
-- (void)setupHeaderFooter {
-    CGFloat width = CGRectGetWidth(self.view.bounds);
-    if (width <= 0) width = CGRectGetWidth(UIScreen.mainScreen.bounds);
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 58)];
-    header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    UIStackView *row = [[UIStackView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.axis = UILayoutConstraintAxisHorizontal;
-    row.spacing = 8;
-    UIButton *selectAll = [UIButton buttonWithType:UIButtonTypeSystem];
-    [selectAll setImage:[UIImage systemImageNamed:@"square"] forState:UIControlStateNormal];
-    [selectAll addTarget:self action:@selector(selectAllTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [selectAll.widthAnchor constraintEqualToConstant:40].active = YES;
-    UISearchBar *search = [[UISearchBar alloc] init];
-    search.placeholder = @"Lọc RRS";
-    search.delegate = self;
-    UIButton *delete = [UIButton buttonWithType:UIButtonTypeSystem];
-    [delete setTitle:@"Xóa" forState:UIControlStateNormal];
-    delete.backgroundColor = [UIColor systemBlueColor];
-    delete.tintColor = [UIColor whiteColor];
-    delete.layer.cornerRadius = 8;
-    delete.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
-    [delete.widthAnchor constraintEqualToConstant:54].active = YES;
-    [delete addTarget:self action:@selector(deleteTapped) forControlEvents:UIControlEventTouchUpInside];
-    [row addArrangedSubview:selectAll];
-    [row addArrangedSubview:search];
-    [row addArrangedSubview:delete];
-    [header addSubview:row];
-    [NSLayoutConstraint activateConstraints:@[
-        [row.topAnchor constraintEqualToAnchor:header.topAnchor constant:8],
-        [row.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:14],
-        [row.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-14],
-        [row.heightAnchor constraintEqualToConstant:44]
-    ]];
-    self.tableView.tableHeaderView = header;
-
-    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 132)];
-    footer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    UILabel *next = [[UILabel alloc] initWithFrame:CGRectMake(18, 8, 220, 18)];
-    next.text = @"NEXT:";
-    next.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-    [footer addSubview:next];
-    self.nextValueLabel = [[UILabel alloc] initWithFrame:CGRectMake(18, 30, 96, 34)];
-    self.nextValueLabel.textAlignment = NSTextAlignmentCenter;
-    self.nextValueLabel.text = [NSString stringWithFormat:@"%ld", (long)self.nextIndex + 1];
-    self.nextValueLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-    self.nextValueLabel.layer.borderColor = [UIColor systemBlueColor].CGColor;
-    self.nextValueLabel.layer.borderWidth = 0.6;
-    self.nextValueLabel.layer.cornerRadius = 7;
-    self.nextValueLabel.clipsToBounds = YES;
-    [footer addSubview:self.nextValueLabel];
-
-    self.beginTextField = [[UITextField alloc] initWithFrame:CGRectMake(126, 30, 96, 34)];
-    self.beginTextField.placeholder = @"begin";
-    self.beginTextField.textAlignment = NSTextAlignmentCenter;
-    self.beginTextField.keyboardType = UIKeyboardTypeNumberPad;
-    self.beginTextField.borderStyle = UITextBorderStyleRoundedRect;
-    [footer addSubview:self.beginTextField];
-
-    self.endTextField = [[UITextField alloc] initWithFrame:CGRectMake(234, 30, 96, 34)];
-    self.endTextField.placeholder = @"end";
-    self.endTextField.textAlignment = NSTextAlignmentCenter;
-    self.endTextField.keyboardType = UIKeyboardTypeNumberPad;
-    self.endTextField.borderStyle = UITextBorderStyleRoundedRect;
-    [footer addSubview:self.endTextField];
-
-    UIButton *saveRestore = [UIButton buttonWithType:UIButtonTypeSystem];
-    saveRestore.frame = CGRectMake(18, 82, 170, 30);
-    [saveRestore setTitle:@"Lưu RRS & Restore" forState:UIControlStateNormal];
-    saveRestore.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
-    [saveRestore addTarget:self action:@selector(saveRestoreTapped) forControlEvents:UIControlEventTouchUpInside];
-    [footer addSubview:saveRestore];
-    self.sequenceButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.sequenceButton.frame = CGRectMake(200, 82, 160, 30);
-    [self.sequenceButton setTitle:[NSString stringWithFormat:@"Trình tự restore: %ld", (long)self.sequenceMode] forState:UIControlStateNormal];
-    self.sequenceButton.titleLabel.font = [UIFont systemFontOfSize:14];
-    [self.sequenceButton addTarget:self action:@selector(sequenceTapped) forControlEvents:UIControlEventTouchUpInside];
-    [footer addSubview:self.sequenceButton];
-    self.tableView.tableFooterView = footer;
-}
-
-- (NSArray<NSDictionary *> *)visibleEntries {
-    if (!self.filterText.length) return self.entries ?: @[];
-    NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, NSDictionary *bindings) {
-        NSString *hay = [NSString stringWithFormat:@"%@ %@ %@ %@", e[@"note"] ?: @"", e[@"checksum"] ?: @"", e[@"ip"] ?: @"", e[@"appName"] ?: @""];
-        return [hay rangeOfString:self.filterText options:NSCaseInsensitiveSearch].location != NSNotFound;
-    }];
-    return [self.entries filteredArrayUsingPredicate:p];
-}
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return [self visibleEntries].count; }
-- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath { return 112; }
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-    NSDictionary *e = [self visibleEntries][(NSUInteger)indexPath.row];
-    BOOL selected = [self.selectedDirs containsObject:e[@"dir"] ?: @""];
-    cell.textLabel.text = [NSString stringWithFormat:@"%@  %ld", selected ? @"☑" : @"☐", (long)indexPath.row + 1];
-    cell.textLabel.font = [UIFont systemFontOfSize:13];
-    cell.detailTextLabel.numberOfLines = 5;
-    cell.detailTextLabel.text = [NSString stringWithFormat:@"%@\n%@\nip reset: %@\n%@\n%@", e[@"note"] ?: @"", e[@"checksum"] ?: @"", e[@"ip"] ?: @"", e[@"backupDate"] ?: @"", e[@"restoreDate"] ?: @"(null)"];
-    UILabel *right = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 135, 80)];
-    right.numberOfLines = 4;
-    right.textAlignment = NSTextAlignmentRight;
-    right.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    right.textColor = [UIColor systemBlueColor];
-    right.text = [NSString stringWithFormat:@"%@\n%@", e[@"size"] ?: @"", e[@"appName"] ?: @""];
-    cell.accessoryView = right;
-    return cell;
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    NSDictionary *e = [self visibleEntries][(NSUInteger)indexPath.row];
-    NSString *dir = e[@"dir"];
-    if ([self.selectedDirs containsObject:dir]) [self.selectedDirs removeObject:dir]; else [self.selectedDirs addObject:dir];
-    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
-}
-
-- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText { self.filterText = searchText; [self.tableView reloadData]; }
-- (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (void)selectAllTapped:(UIButton *)sender { if (self.selectedDirs.count == [self visibleEntries].count) [self.selectedDirs removeAllObjects]; else for (NSDictionary *e in [self visibleEntries]) [self.selectedDirs addObject:e[@"dir"]]; [self.tableView reloadData]; }
-- (void)deleteTapped { if (self.onDelete) self.onDelete(self.selectedDirs.allObjects); if (self.onReload) self.entries = self.onReload(); [self.selectedDirs removeAllObjects]; self.title = [NSString stringWithFormat:@"%lu RRS", (unsigned long)self.entries.count]; [self.tableView reloadData]; }
-- (void)showRRSMessage:(NSString *)title message:(NSString *)message {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)refreshRRSListAfterAction {
-    if (self.onReload) self.entries = self.onReload();
-    self.title = [NSString stringWithFormat:@"%lu RRS", (unsigned long)self.entries.count];
-    self.nextValueLabel.text = [NSString stringWithFormat:@"%ld", (long)self.nextIndex + 1];
-    [self.tableView reloadData];
-}
-
-- (void)saveRestoreTapped {
-    NSDictionary *target = nil;
-    NSArray *visible = [self visibleEntries];
-    if (!visible.count) {
-        [self showRRSMessage:@"Chưa có RRS" message:@"Không có file RRS để restore."];
-        return;
-    }
-    if (self.selectedDirs.count) {
-        for (NSDictionary *e in [self visibleEntries]) {
-            if ([self.selectedDirs containsObject:e[@"dir"]]) { target = e; break; }
-        }
-    } else {
-        NSInteger begin = [self.beginTextField.text integerValue];
-        NSInteger idx = begin > 0 ? begin - 1 : self.nextIndex;
-        NSInteger end = [self.endTextField.text integerValue];
-        if (end > 0 && idx >= end) {
-            [self showRRSMessage:@"Đã hết RRS" message:[NSString stringWithFormat:@"Vị trí hiện tại đã vượt end (%ld).", (long)end]];
-            return;
-        }
-        if (idx >= 0 && idx < (NSInteger)visible.count) target = visible[(NSUInteger)idx];
-    }
-    if (!target) {
-        [self showRRSMessage:@"Thiếu RRS" message:@"Không tìm thấy file RRS theo vị trí đã chọn."];
-        return;
-    }
-    if (self.onSaveAndRestore) self.onSaveAndRestore(target[@"dir"]);
-    if (!self.selectedDirs.count) self.nextIndex += 1;
-    if (self.onNextChanged) self.onNextChanged(self.nextIndex);
-    [self refreshRRSListAfterAction];
-}
-
-- (void)sequenceTapped {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Trình tự restore" message:@"Chọn thứ tự restore" preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    void (^applyMode)(NSInteger) = ^(NSInteger mode) {
-        weakSelf.sequenceMode = mode;
-        if (mode == 0) weakSelf.nextIndex = 0;
-        if (mode == 1) weakSelf.nextIndex = 0;
-        NSInteger begin = [weakSelf.beginTextField.text integerValue];
-        NSInteger end = [weakSelf.endTextField.text integerValue];
-        if (mode == 2 && begin > 0) weakSelf.nextIndex = begin - 1;
-        [weakSelf.sequenceButton setTitle:[NSString stringWithFormat:@"Trình tự restore: %ld", (long)mode] forState:UIControlStateNormal];
-        weakSelf.nextValueLabel.text = [NSString stringWithFormat:@"%ld", (long)weakSelf.nextIndex + 1];
-        if (weakSelf.onSequenceChanged) weakSelf.onSequenceChanged(mode, begin, end);
-    };
-    [alert addAction:[UIAlertAction actionWithTitle:@"0. Từ đầu đến cuối" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { applyMode(0); }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"1. Ngược lại" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { applyMode(1); }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"2. Theo số thứ tự" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) { applyMode(2); }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) { alert.popoverPresentationController.sourceView = self.view; alert.popoverPresentationController.sourceRect = self.view.bounds; }
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-@end
 
 @interface PXFakeInfoViewController : UITableViewController
 @property (nonatomic, copy) NSDictionary *preview;
@@ -6916,7 +6698,15 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     PXRRSManagerViewController *vc = [[PXRRSManagerViewController alloc] initWithStyle:PXCompatibleInsetGroupedStyle()];
     vc.entries = [self rrsEntries];
     vc.nextIndex = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
-    vc.sequenceMode = [self.rrsRestoreOrder isEqualToString:@"newestFirst"] ? 1 : 0;
+    NSInteger endBound = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreEndKey]];
+    vc.rangeEnd = endBound;
+    if (endBound > 0) {
+        vc.sequenceMode = 2;
+        vc.rangeBegin = vc.nextIndex + 1;
+    } else {
+        vc.sequenceMode = [self.rrsRestoreOrder isEqualToString:@"newestFirst"] ? 1 : 0;
+        vc.rangeBegin = 0;
+    }
     __weak typeof(self) weakSelf = self;
     vc.onReload = ^NSArray<NSDictionary *> *{ return [weakSelf rrsEntries]; };
     vc.onDelete = ^(NSArray<NSString *> *dirs) {

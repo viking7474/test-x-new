@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ProjectX — RRS Manager Mockup</title>
+<style>
+  :root {
+    --brand: #0A84FF;
+    --success: #30D158;
+    --danger: #FF453A;
+    --warning: #FF9F0A;
+    --bg: #F2F2F7;
+    --card: #FFFFFF;
+    --text: #000000;
+    --text2: rgba(60,60,67,0.60);
+    --text3: rgba(60,60,67,0.30);
+    --sep: rgba(60,60,67,0.12);
+    --fill: rgba(120,120,128,0.16);
+    --tabbar: rgba(255,255,255,0.92);
+    --nav: rgba(249,249,249,0.94);
+    --shadow: 0 1px 3px rgba(0,0,0,0.06);
+    --r-sm: 12px; --r-md: 16px; --r-lg: 20px;
+  }
+  body.dark {
+    --bg: #000000;
+    --card: #1C1C1E;
+    --text: #FFFFFF;
+    --text2: rgba(235,235,245,0.60);
+    --text3: rgba(235,235,245,0.30);
+    --sep: rgba(84,84,88,0.65);
+    --fill: rgba(120,120,128,0.32);
+    --tabbar: rgba(28,28,30,0.92);
+    --nav: rgba(28,28,30,0.94);
+    --shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    background: #1a1a1e;
+    color: var(--text);
+    min-height: 100vh;
+    padding: 28px 16px 60px;
+  }
+  h1.page-title { color: #fff; text-align: center; font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  p.page-sub { color: rgba(255,255,255,0.55); text-align: center; font-size: 13px; margin-bottom: 22px; }
+  .toolbar { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 24px; }
+  .toolbar button {
+    border: 0; border-radius: 20px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+    cursor: pointer; background: #2c2c30; color: #fff;
+  }
+  .toolbar button.active { background: var(--brand); }
+  .phones { display: flex; gap: 28px; justify-content: center; flex-wrap: wrap; align-items: flex-start; }
+  .phone-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .phone-label { color: rgba(255,255,255,0.7); font-size: 13px; font-weight: 600; }
+  .phone {
+    width: 390px; height: 844px; border-radius: 48px; background: #111; padding: 12px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.55), inset 0 0 0 2px #333; position: relative;
+  }
+  .phone-inner {
+    width: 100%; height: 100%; border-radius: 38px; background: var(--bg);
+    overflow: hidden; position: relative; display: flex; flex-direction: column;
+  }
+  .notch {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 120px; height: 34px; background: #000; border-radius: 20px; z-index: 50;
+  }
+  .status-bar {
+    height: 54px; padding: 16px 28px 0; display: flex; justify-content: space-between;
+    align-items: center; font-size: 14px; font-weight: 600; color: var(--text); flex-shrink: 0;
+  }
+  .nav {
+    padding: 2px 16px 10px; background: var(--nav); backdrop-filter: blur(20px);
+    border-bottom: 0.5px solid var(--sep); flex-shrink: 0;
+  }
+  .nav-row { display: flex; justify-content: space-between; align-items: center; min-height: 32px; }
+  .nav-link { color: var(--brand); font-size: 17px; background: none; border: 0; cursor: pointer; font-weight: 400; }
+  .nav-link.danger { color: var(--danger); font-weight: 600; }
+  .nav-link.disabled { color: var(--text3); }
+  .nav-title { font-size: 17px; font-weight: 600; }
+  .nav-large { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; margin-top: 2px; }
+  .nav-sub { font-size: 13px; color: var(--text2); margin-top: 2px; }
+  .content { flex: 1; overflow-y: auto; padding: 12px 16px 110px; -webkit-overflow-scrolling: touch; }
+  .content::-webkit-scrollbar { width: 0; }
+  .search {
+    display: flex; align-items: center; gap: 8px; background: var(--fill);
+    border-radius: 12px; padding: 10px 12px; margin-bottom: 14px;
+  }
+  .search .ic { color: var(--text2); font-size: 15px; }
+  .search span { color: var(--text2); font-size: 16px; }
+  .sec-label {
+    font-size: 13px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.3px;
+    margin: 18px 4px 8px;
+  }
+  .card {
+    background: var(--card); border-radius: var(--r-md); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; min-height: 64px;
+    border-bottom: 0.5px solid var(--sep);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row.compact { min-height: 52px; }
+  .app-icon {
+    width: 44px; height: 44px; border-radius: 11px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 16px;
+  }
+  .app-icon.fb { background: linear-gradient(135deg,#5AC8FA,#007AFF); }
+  .app-icon.ig { background: linear-gradient(135deg,#F58529,#DD2A7B,#8134AF); }
+  .app-icon.tt { background: #111; border: 1px solid var(--sep); }
+  .app-icon.yt { background: #FF3B30; }
+  .check {
+    width: 24px; height: 24px; border-radius: 12px; border: 2px solid var(--text3);
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: #fff; font-weight: 700;
+  }
+  .check.on { background: var(--brand); border-color: var(--brand); }
+  .row-body { flex: 1; min-width: 0; }
+  .row-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .row-sub { font-size: 13px; color: var(--text2); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-note { font-size: 13px; color: var(--text2); margin-top: 2px; font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-value { font-size: 15px; color: var(--text2); }
+  .row-value.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  .chevron { color: var(--text3); font-size: 18px; font-weight: 500; }
+  .pill {
+    display: inline-flex; align-items: center; border-radius: 20px;
+    padding: 2px 8px; font-size: 11px; font-weight: 600;
+  }
+  .pill.restored { background: rgba(100,210,255,0.18); color: #0071A4; }
+  body.dark .pill.restored { color: #64D2FF; }
+  .pill.next { background: rgba(10,132,255,0.15); color: var(--brand); }
+  .footer-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; min-height: 84px;
+    padding: 10px 16px 28px; background: var(--tabbar); backdrop-filter: blur(24px);
+    border-top: 0.5px solid var(--sep);
+  }
+  .footer-btn {
+    width: 100%; border: 0; border-radius: var(--r-sm); padding: 14px;
+    font-size: 16px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .footer-btn.primary { background: var(--brand); color: #fff; }
+  .footer-btn.danger { background: var(--danger); color: #fff; }
+  .footer-btn.secondary { background: var(--fill); color: var(--brand); }
+  .footer-btn:disabled, .footer-btn.disabled { opacity: 0.4; }
+  .footer-row { display: flex; gap: 10px; }
+  .footer-row .footer-btn { flex: 1; }
+  .empty {
+    text-align: center; padding: 48px 24px; color: var(--text2);
+  }
+  .empty .ic { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+  .empty .t { font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .empty .s { font-size: 14px; line-height: 1.4; }
+  .detail-hero {
+    background: var(--card); border-radius: var(--r-lg); padding: 18px; box-shadow: var(--shadow);
+    display: flex; gap: 14px; align-items: center; margin-bottom: 8px;
+  }
+  .detail-hero .app-icon { width: 56px; height: 56px; border-radius: 14px; font-size: 20px; }
+  .detail-hero .t { font-size: 20px; font-weight: 700; }
+  .detail-hero .s { font-size: 13px; color: var(--text2); margin-top: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .copy-btn {
+    border: 0; background: var(--fill); color: var(--brand);
+    border-radius: 8px; padding: 5px 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .btn-stack { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .btn-primary, .btn-danger, .btn-secondary {
+    width: 100%; border: 0; border-radius: var(--r-sm); padding: 14px;
+    font-size: 16px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .btn-primary { background: var(--brand); color: #fff; }
+  .btn-danger { background: rgba(255,69,58,0.12); color: var(--danger); }
+  body.dark .btn-danger { background: rgba(255,69,58,0.2); }
+  .btn-secondary { background: var(--fill); color: var(--brand); }
+  .sheet-backdrop {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.35); z-index: 20;
+    display: flex; align-items: flex-end;
+  }
+  .sheet {
+    width: 100%; background: var(--card); border-radius: 16px 16px 0 0;
+    padding: 10px 16px 34px; box-shadow: 0 -8px 30px rgba(0,0,0,0.15);
+  }
+  .sheet-handle {
+    width: 36px; height: 5px; border-radius: 3px; background: var(--fill);
+    margin: 4px auto 14px;
+  }
+  .sheet-title { font-size: 17px; font-weight: 700; text-align: center; margin-bottom: 4px; }
+  .sheet-sub { font-size: 13px; color: var(--text2); text-align: center; margin-bottom: 16px; }
+  .segmented {
+    display: flex; background: var(--fill); border-radius: 9px; padding: 2px; margin-bottom: 14px;
+  }
+  .segmented button {
+    flex: 1; border: 0; background: transparent; color: var(--text);
+    font-size: 12px; font-weight: 500; padding: 8px 4px; border-radius: 7px; cursor: pointer;
+  }
+  .segmented button.on {
+    background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,0.12); font-weight: 600;
+  }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .field {
+    background: var(--bg); border-radius: 12px; padding: 10px 12px; border: 0.5px solid var(--sep);
+  }
+  .field label { display: block; font-size: 11px; color: var(--text2); margin-bottom: 4px; text-transform: uppercase; }
+  .field .val { font-size: 20px; font-weight: 700; color: var(--brand); }
+  .next-box {
+    background: rgba(10,132,255,0.08); border: 1px solid rgba(10,132,255,0.25);
+    border-radius: 12px; padding: 12px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;
+  }
+  .next-box .l { font-size: 13px; color: var(--text2); }
+  .next-box .n { font-size: 22px; font-weight: 700; color: var(--brand); }
+  .alert-backdrop {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.4); z-index: 30;
+    display: flex; align-items: center; justify-content: center; padding: 28px;
+  }
+  .alert {
+    width: 100%; max-width: 280px; background: var(--card); border-radius: 14px;
+    overflow: hidden; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+  }
+  .alert-body { padding: 20px 16px 14px; }
+  .alert-title { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+  .alert-msg { font-size: 13px; color: var(--text2); line-height: 1.4; }
+  .alert-actions { display: flex; border-top: 0.5px solid var(--sep); }
+  .alert-actions button {
+    flex: 1; border: 0; background: transparent; padding: 12px; font-size: 17px;
+    cursor: pointer; font-family: inherit;
+  }
+  .alert-actions button + button { border-left: 0.5px solid var(--sep); }
+  .alert-actions .cancel { color: var(--brand); font-weight: 400; }
+  .alert-actions .destroy { color: var(--danger); font-weight: 600; }
+  .swipe-hint {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 72px;
+    background: var(--danger); color: #fff; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+  }
+  .row-wrap { position: relative; overflow: hidden; }
+  .row-wrap .row { background: var(--card); position: relative; z-index: 1; }
+  .legend {
+    max-width: 900px; margin: 32px auto 0; color: rgba(255,255,255,0.7);
+    font-size: 13px; line-height: 1.55; background: #242428; border-radius: 16px; padding: 18px 20px;
+  }
+  .legend h3 { color: #fff; font-size: 14px; margin-bottom: 8px; }
+  .legend ul { padding-left: 18px; }
+  .legend li { margin: 4px 0; }
+  .footnote { text-align: center; color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 28px; line-height: 1.5; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <h1 class="page-title">Quản lý RRS — UI Mockup</h1>
+  <p class="page-sub">List · Edit/Delete confirm · Detail · Sequence sheet · iOS native</p>
+
+  <div class="toolbar">
+    <button class="active" id="btnLight" onclick="setTheme(false)">Light</button>
+    <button id="btnDark" onclick="setTheme(true)">Dark</button>
+  </div>
+
+  <div class="phones">
+
+    <!-- 1. LIST -->
+    <div class="phone-wrap">
+      <div class="phone-label">1. Danh sách RRS</div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar"><span>9:41</span><span>100%</span></div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Dashboard</button>
+              <button class="nav-link">Chọn</button>
+            </div>
+            <div class="nav-large">RRS</div>
+            <div class="nav-sub">8 bản · 245 MB</div>
+          </div>
+          <div class="content">
+            <div class="search"><span class="ic">🔍</span><span>Tìm app, note, IP…</span></div>
+
+            <div class="card">
+              <div class="row">
+                <div class="app-icon fb">f</div>
+                <div class="row-body">
+                  <div class="row-title">Facebook <span class="pill restored">Đã restore</span></div>
+                  <div class="row-sub">Backup 2 ngày trước · 12,4 MB</div>
+                  <div class="row-note">“trước khi reset IP”</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="app-icon ig">ig</div>
+                <div class="row-body">
+                  <div class="row-title">Instagram <span class="pill next">NEXT</span></div>
+                  <div class="row-sub">Backup hôm qua · 8,1 MB</div>
+                  <div class="row-note">“acc main · clean”</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="app-icon tt">♪</div>
+                <div class="row-body">
+                  <div class="row-title">TikTok</div>
+                  <div class="row-sub">Backup 5 ngày trước · 21,0 MB</div>
+                  <div class="row-note">“seed 03”</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="app-icon yt">▶</div>
+                <div class="row-body">
+                  <div class="row-title">YouTube</div>
+                  <div class="row-sub">Backup 1 tuần trước · 4,6 MB</div>
+                  <div class="row-note">—</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Gợi ý thao tác</div>
+            <div class="card">
+              <div class="row compact">
+                <div class="row-body">
+                  <div class="row-title" style="font-weight:400;font-size:14px;color:var(--text2)">Vuốt trái để xóa · Vuốt phải để restore nhanh</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="footer-bar">
+            <button class="footer-btn secondary">Restore theo thứ tự…</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. EDIT + CONFIRM -->
+    <div class="phone-wrap">
+      <div class="phone-label">2. Chọn nhiều + Confirm xóa</div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar"><span>9:41</span><span>100%</span></div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">Hủy</button>
+              <span class="nav-title">Đã chọn 2</span>
+              <button class="nav-link">Tất cả</button>
+            </div>
+          </div>
+          <div class="content">
+            <div class="search"><span class="ic">🔍</span><span>Tìm app, note, IP…</span></div>
+            <div class="card">
+              <div class="row">
+                <div class="check on">✓</div>
+                <div class="app-icon fb">f</div>
+                <div class="row-body">
+                  <div class="row-title">Facebook</div>
+                  <div class="row-sub">2 ngày trước · 12,4 MB</div>
+                </div>
+              </div>
+              <div class="row">
+                <div class="check"></div>
+                <div class="app-icon ig">ig</div>
+                <div class="row-body">
+                  <div class="row-title">Instagram</div>
+                  <div class="row-sub">Hôm qua · 8,1 MB</div>
+                </div>
+              </div>
+              <div class="row">
+                <div class="check on">✓</div>
+                <div class="app-icon tt">♪</div>
+                <div class="row-body">
+                  <div class="row-title">TikTok</div>
+                  <div class="row-sub">5 ngày trước · 21,0 MB</div>
+                </div>
+              </div>
+              <div class="row">
+                <div class="check"></div>
+                <div class="app-icon yt">▶</div>
+                <div class="row-body">
+                  <div class="row-title">YouTube</div>
+                  <div class="row-sub">1 tuần trước · 4,6 MB</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="footer-bar">
+            <button class="footer-btn danger">Xóa 2 RRS</button>
+          </div>
+
+          <!-- Confirm alert -->
+          <div class="alert-backdrop">
+            <div class="alert">
+              <div class="alert-body">
+                <div class="alert-title">Xóa 2 RRS?</div>
+                <div class="alert-msg">Facebook, TikTok sẽ bị xóa vĩnh viễn. Không thể hoàn tác.</div>
+              </div>
+              <div class="alert-actions">
+                <button class="cancel">Hủy</button>
+                <button class="destroy">Xóa</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. DETAIL -->
+    <div class="phone-wrap">
+      <div class="phone-label">3. Chi tiết RRS</div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar"><span>9:41</span><span>100%</span></div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ RRS</button>
+              <span class="nav-title">Chi tiết</span>
+              <span style="width:60px"></span>
+            </div>
+          </div>
+          <div class="content">
+            <div class="detail-hero">
+              <div class="app-icon ig">ig</div>
+              <div>
+                <div class="t">Instagram</div>
+                <div class="s">com.burbn.instagram</div>
+                <div style="margin-top:6px"><span class="pill next">NEXT · #2</span></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Thông tin</div>
+            <div class="card">
+              <div class="row compact">
+                <div class="row-body"><div class="row-title" style="font-weight:400">Dung lượng</div></div>
+                <span class="row-value">8,1 MB</span>
+              </div>
+              <div class="row compact">
+                <div class="row-body"><div class="row-title" style="font-weight:400">Backup</div></div>
+                <span class="row-value">Hôm qua, 18:42</span>
+              </div>
+              <div class="row compact">
+                <div class="row-body"><div class="row-title" style="font-weight:400">Restore lần cuối</div></div>
+                <span class="row-value">Chưa restore</span>
+              </div>
+              <div class="row compact">
+                <div class="row-body"><div class="row-title" style="font-weight:400">IP reset</div></div>
+                <span class="row-value mono">203.162.•••.42</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Ghi chú</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title" style="font-weight:400;white-space:normal">acc main · clean — trước khi fake device</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec-label">Checksum</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-value mono" style="white-space:normal;word-break:break-all;line-height:1.35">a3f9c2e1b8d04765…9e21</div>
+                </div>
+                <button class="copy-btn">Copy</button>
+              </div>
+            </div>
+
+            <div class="btn-stack">
+              <button class="btn-primary">Lưu RRS hiện tại &amp; Restore</button>
+              <button class="btn-secondary">Chỉ Restore (không lưu mới)</button>
+              <button class="btn-danger">Xóa RRS này</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. SEQUENCE SHEET -->
+    <div class="phone-wrap">
+      <div class="phone-label">4. Restore theo thứ tự</div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar"><span>9:41</span><span>100%</span></div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Dashboard</button>
+              <button class="nav-link">Chọn</button>
+            </div>
+            <div class="nav-large">RRS</div>
+            <div class="nav-sub">8 bản · 245 MB</div>
+          </div>
+          <div class="content" style="opacity:0.35;pointer-events:none">
+            <div class="search"><span class="ic">🔍</span><span>Tìm…</span></div>
+            <div class="card">
+              <div class="row"><div class="app-icon fb">f</div><div class="row-body"><div class="row-title">Facebook</div></div></div>
+              <div class="row"><div class="app-icon ig">ig</div><div class="row-body"><div class="row-title">Instagram</div></div></div>
+            </div>
+          </div>
+
+          <div class="sheet-backdrop">
+            <div class="sheet">
+              <div class="sheet-handle"></div>
+              <div class="sheet-title">Restore theo thứ tự</div>
+              <div class="sheet-sub">Chọn cách duyệt danh sách RRS</div>
+
+              <div class="segmented">
+                <button class="on">Từ đầu→cuối</button>
+                <button>Ngược lại</button>
+                <button>Theo số</button>
+              </div>
+
+              <div class="next-box">
+                <div>
+                  <div class="l">Bản tiếp theo (NEXT)</div>
+                  <div style="font-size:13px;color:var(--text2);margin-top:2px">Instagram · 8,1 MB</div>
+                </div>
+                <div class="n">#2</div>
+              </div>
+
+              <div class="field-row">
+                <div class="field">
+                  <label>Begin</label>
+                  <div class="val">1</div>
+                </div>
+                <div class="field">
+                  <label>End</label>
+                  <div class="val">8</div>
+                </div>
+              </div>
+
+              <button class="footer-btn primary" style="margin-bottom:8px">Lưu RRS hiện tại &amp; Restore NEXT</button>
+              <button class="footer-btn secondary">Đóng</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="legend">
+    <h3>Spec map sang code (PXRRSManagerViewController)</h3>
+    <ul>
+      <li><b>Màn 1 List</b> — thay header/footer frame cứng + glyph ☑/☐. Dùng large title, UISearchController, cell reuse, pill “Đã restore” / “NEXT”.</li>
+      <li><b>Màn 2 Edit</b> — pattern Photos: nav “Đã chọn N”, checkbox tròn, nút Xóa đỏ. <b>Bắt buộc UIAlertController confirm</b> trước onDelete (hiện tại xóa thẳng filesystem).</li>
+      <li><b>Màn 3 Detail</b> — màn mới (push). Bundle ID + copy, size, dates, IP, note, checksum. Primary = saveCurrentRRSThenRestoreBackupDirectory.</li>
+      <li><b>Màn 4 Sequence sheet</b> — gộp footer begin/end + presentRRSSequenceModal thành 1 sheet. Segmented: oldestFirst / newestFirst / theo số. NEXT rõ ràng.</li>
+      <li><b>Swipe</b> — trailing delete (confirm), leading restore.</li>
+      <li><b>Empty state</b> — khi entries.count == 0.</li>
+      <li><b>Giữ logic</b> — onDelete / onSaveAndRestore / onSequenceChanged / onNextChanged / onReload không đổi contract.</li>
+    </ul>
+  </div>
+
+  <p class="footnote">
+    File: <code>docs/ui-rrs-manager-mockup.html</code><br/>
+    C:\\Users\\VanVan\\Documents\\github\\test-x\\docs\\ui-rrs-manager-mockup.html
+  </p>
+
+<script>
+  function setTheme(dark) {
+    document.body.classList.toggle('dark', dark);
+    document.getElementById('btnLight').classList.toggle('active', !dark);
+    document.getElementById('btnDark').classList.toggle('active', dark);
+  }
+</script>
+</body>
+</html>
