@@ -38,7 +38,7 @@ static _Atomic(uint_fast64_t) gPXClearSqliteNanos = 0;
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
 
-@class PXKeychainClearPlan;
+#import "PXKeychainClearPlan.h"
 
 @interface AppDataCleaner ()
 // CLEAR-01: dry-run capable execution (internal). When dryRun is YES the clear
@@ -136,84 +136,6 @@ static _Atomic(uint_fast64_t) gPXClearSqliteNanos = 0;
 - (void)clearAppStateData:(NSString *)bundleID;
 @end
 
-@interface PXKeychainClearPlan : NSObject {
-@private
-    NSString *_bundleIdentifier;
-    BOOL _enabled;
-    BOOL _systemApplication;
-    BOOL _systemPolicyAllowed;
-    NSArray<NSString *> *_selectedGroups;
-    NSArray<NSString *> *_authorizedGroups;
-    NSString *_applicationIdentifier;
-    NSUInteger _plannedPassCount;
-    NSString *_skipDetail;
-    NSInteger _planningFailureCode;
-    NSString *_planningFailureMessage;
-}
-@property (nonatomic, copy, readonly) NSString *bundleIdentifier;
-@property (nonatomic, assign, readonly, getter=isEnabled) BOOL enabled;
-@property (nonatomic, assign, readonly, getter=isSystemApplication) BOOL systemApplication;
-@property (nonatomic, assign, readonly, getter=isSystemPolicyAllowed) BOOL systemPolicyAllowed;
-@property (nonatomic, copy, readonly) NSArray<NSString *> *selectedGroups;
-@property (nonatomic, copy, readonly) NSArray<NSString *> *authorizedGroups;
-@property (nonatomic, copy, readonly) NSString *applicationIdentifier;
-@property (nonatomic, assign, readonly) NSUInteger plannedPassCount;
-@property (nonatomic, copy, readonly) NSString *skipDetail;
-@property (nonatomic, assign, readonly) NSInteger planningFailureCode;
-@property (nonatomic, copy, readonly) NSString *planningFailureMessage;
-- (instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
-                                 enabled:(BOOL)enabled
-                       systemApplication:(BOOL)systemApplication
-                     systemPolicyAllowed:(BOOL)systemPolicyAllowed
-                          selectedGroups:(NSArray<NSString *> *)selectedGroups
-                        authorizedGroups:(NSArray<NSString *> *)authorizedGroups
-                   applicationIdentifier:(NSString *)applicationIdentifier
-                        plannedPassCount:(NSUInteger)plannedPassCount
-                              skipDetail:(NSString *)skipDetail
-                     planningFailureCode:(NSInteger)planningFailureCode
-                  planningFailureMessage:(NSString *)planningFailureMessage;
-@end
-
-@implementation PXKeychainClearPlan
-@synthesize bundleIdentifier = _bundleIdentifier;
-@synthesize enabled = _enabled;
-@synthesize systemApplication = _systemApplication;
-@synthesize systemPolicyAllowed = _systemPolicyAllowed;
-@synthesize selectedGroups = _selectedGroups;
-@synthesize authorizedGroups = _authorizedGroups;
-@synthesize applicationIdentifier = _applicationIdentifier;
-@synthesize plannedPassCount = _plannedPassCount;
-@synthesize skipDetail = _skipDetail;
-@synthesize planningFailureCode = _planningFailureCode;
-@synthesize planningFailureMessage = _planningFailureMessage;
-- (instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
-                                 enabled:(BOOL)enabled
-                       systemApplication:(BOOL)systemApplication
-                     systemPolicyAllowed:(BOOL)systemPolicyAllowed
-                          selectedGroups:(NSArray<NSString *> *)selectedGroups
-                        authorizedGroups:(NSArray<NSString *> *)authorizedGroups
-                   applicationIdentifier:(NSString *)applicationIdentifier
-                        plannedPassCount:(NSUInteger)plannedPassCount
-                              skipDetail:(NSString *)skipDetail
-                     planningFailureCode:(NSInteger)planningFailureCode
-                  planningFailureMessage:(NSString *)planningFailureMessage {
-    self = [super init];
-    if (self) {
-        _bundleIdentifier = [bundleIdentifier copy] ?: @"";
-        _enabled = enabled;
-        _systemApplication = systemApplication;
-        _systemPolicyAllowed = systemPolicyAllowed;
-        _selectedGroups = [selectedGroups copy] ?: @[];
-        _authorizedGroups = [authorizedGroups copy] ?: @[];
-        _applicationIdentifier = [applicationIdentifier copy];
-        _plannedPassCount = plannedPassCount;
-        _skipDetail = [skipDetail copy];
-        _planningFailureCode = planningFailureCode;
-        _planningFailureMessage = [planningFailureMessage copy];
-    }
-    return self;
-}
-@end
 
 static NSString *PXClearJournalDirectory(void) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
