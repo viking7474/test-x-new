@@ -28,6 +28,7 @@ PHASE_TESTS = [
     "scripts/test_phase10_release_hardening_static.py",
     "scripts/test_phase11_p2_static.py",
     "scripts/test_phase12_lockdown_observe_static.py",
+    "scripts/test_phase13_lockdown_hook_wiring_static.py",
 ]
 EXTENDED_PYTHON_TESTS = [
     "scripts/test_device_spec_p1_1.py",
