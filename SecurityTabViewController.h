@@ -74,7 +74,8 @@
 
 // Deep Clean control
 @property (nonatomic, strong) UILabel *deepCleanLabel;
-@property (nonatomic, strong) UISwitch *deepCleanToggleSwitch;
+@property (nonatomic, strong) UISegmentedControl *deepCleanModeControl;
+@property (nonatomic, strong) UILabel *deepCleanHintLabel;
 @property (nonatomic, strong) UIButton *deepCleanInfoButton;
 
 // System Keychain Wipe control

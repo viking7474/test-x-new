@@ -11,6 +11,7 @@
 #import <string.h>
 #import <sqlite3.h>
 #import <notify.h>
+#import <stdatomic.h>
 
 #import "AppEntitlementsReader.h"
 #import "CommandRunner.h"
@@ -28,12 +29,24 @@ static NSString * const PXFindExecutablePath = @"/usr/bin/find";
 static const NSTimeInterval PXFindCommandTimeoutSec = 120.0;
 static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 
+// 7.4 Clear Data metrics: process-lifetime cumulative counters. The Clear entry
+// point snapshots these before a run and reports per-run deltas in a [metric] line.
+static _Atomic(uint_fast64_t) gPXClearShellProcessCount = 0;
+static _Atomic(uint_fast64_t) gPXClearPathsScannedCount = 0;
+static _Atomic(uint_fast64_t) gPXClearSqliteNanos = 0;
+
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
 
 @class PXKeychainClearPlan;
 
 @interface AppDataCleaner ()
+// CLEAR-01: dry-run capable execution (internal). When dryRun is YES the clear
+// only plans and journals the work and performs no destructive operations.
+- (void)clearDataForBundleID:(NSString *)bundleID
+                        mode:(PXClearMode)mode
+                      dryRun:(BOOL)dryRun
+                  completion:(void (^)(BOOL success, NSError *error))completion;
 - (NSString *)runCommandAndGetOutput:(NSString *)command
                           timeoutSec:(NSTimeInterval)timeoutSec;
 - (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments;
@@ -202,6 +215,44 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 }
 @end
 
+static NSString *PXClearJournalDirectory(void) {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString *base = paths.firstObject ?: NSTemporaryDirectory();
+    return [base stringByAppendingPathComponent:@"PXClearJournal"];
+}
+
+// CLEAR-01: append-only transaction journal for Clear Data runs. Records phase
+// transitions (begin / dry_run_plan / dry_run_commit) as atomic binary plists.
+// Stores only bundle id, mode, scopes, phase and a small non-secret info dict.
+static BOOL PXClearWriteJournal(NSString *bundleID, PXClearMode mode, PXClearScope scopes, BOOL dryRun, NSString *phase, NSDictionary *info) {
+    if (bundleID.length == 0 || phase.length == 0) return NO;
+    NSString *dir = PXClearJournalDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *dirError = nil;
+    if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+        return NO;
+    }
+    NSMutableDictionary *journalEntry = [NSMutableDictionary dictionary];
+    journalEntry[@"schemaVersion"] = @1;
+    journalEntry[@"bundleID"] = bundleID;
+    journalEntry[@"mode"] = PXClearModeName(mode) ?: @"unknown";
+    journalEntry[@"scopes"] = @((unsigned long long)scopes);
+    journalEntry[@"dryRun"] = @(dryRun);
+    journalEntry[@"phase"] = phase;
+    journalEntry[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+    if (info) journalEntry[@"info"] = info;
+    NSError *plistError = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:journalEntry
+                                                             format:NSPropertyListBinaryFormat_v1_0
+                                                            options:0
+                                                              error:&plistError];
+    if (!data) return NO;
+    NSString *safeBundle = [bundleID stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    NSString *fileName = [NSString stringWithFormat:@"clear-%@-%@-%.0f.plist", safeBundle, phase, [[NSDate date] timeIntervalSince1970] * 1000.0];
+    NSString *path = [dir stringByAppendingPathComponent:fileName];
+    return [data writeToFile:path atomically:YES];
+}
+
 static void PXLogQuarantinedLegacyClearSelector(SEL selector) {
     NSLog(@"[AppDataCleaner] Legacy Clear selector %@ is quarantined; use clearDataForBundleID:completion:.",
           NSStringFromSelector(selector));
@@ -234,8 +285,10 @@ static void PXLogQuarantinedLegacyClearSelector(SEL selector) {
     }
     sqlite3_busy_timeout(db, 3000);
 
+    CFAbsoluteTime pxSqliteExecStart = CFAbsoluteTimeGetCurrent();
     char *errMsg = NULL;
     rc = sqlite3_exec(db, sql.UTF8String, NULL, NULL, &errMsg);
+    atomic_fetch_add(&gPXClearSqliteNanos, (uint_fast64_t)((CFAbsoluteTimeGetCurrent() - pxSqliteExecStart) * 1e9));
     BOOL ok = (rc == SQLITE_OK);
     if (!ok && errorOut) {
         NSString *e = errMsg ? [NSString stringWithUTF8String:errMsg] : @"sqlite exec failed";
@@ -252,8 +305,10 @@ static BOOL PXSQLiteExec(sqlite3 *db, NSString *sql, NSString **errorOut) {
         if (errorOut) *errorOut = @"invalid args";
         return NO;
     }
+    CFAbsoluteTime pxSqliteStaticExecStart = CFAbsoluteTimeGetCurrent();
     char *errMsg = NULL;
     int rc = sqlite3_exec(db, sql.UTF8String, NULL, NULL, &errMsg);
+    atomic_fetch_add(&gPXClearSqliteNanos, (uint_fast64_t)((CFAbsoluteTimeGetCurrent() - pxSqliteStaticExecStart) * 1e9));
     BOOL ok = (rc == SQLITE_OK);
     if (!ok && errorOut) {
         NSString *e = errMsg ? [NSString stringWithUTF8String:errMsg] : @"sqlite exec failed";
@@ -3055,6 +3110,37 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     [self clearDataForBundleID:bundleID mode:persistedMode completion:completion];
 }
 
+// CLEAR-01: dry-run capable Clear entry point. When dryRun is YES this only
+// plans and journals the intended work; it performs no destructive operations.
+// When dryRun is NO it delegates to the canonical Full/Deep clear authority.
+- (void)clearDataForBundleID:(NSString *)bundleID mode:(PXClearMode)mode dryRun:(BOOL)dryRun completion:(void (^)(BOOL success, NSError *error))completion {
+    if (!dryRun) {
+        [self clearDataForBundleID:bundleID mode:mode completion:completion];
+        return;
+    }
+    CFAbsoluteTime dryRunStartedAt = CFAbsoluteTimeGetCurrent();
+    [self logMessage:@"[AppDataCleaner] DRY-RUN: planning %@ clear for %@ (no destructive operations)",
+        PXClearModeName(mode), bundleID];
+    PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_plan",
+                        @{ @"deepClean": @(PXClearModeIncludesDeepDiagnostics(mode)) });
+    NSDictionary *pxDryRunPlan = @{
+        @"mode": PXClearModeName(mode) ?: @"unknown",
+        @"scopes": @((unsigned long long)PXMigratedFullClearScopes),
+        @"wouldKillApp": @YES,
+        @"wouldClearKeychain": @YES,
+        @"wouldClearURLCredentials": @(mode != PXClearModeQuick),
+        @"wouldRunDataAggregate": @YES,
+        @"wouldRunDeepResidualScan": @(PXClearModeIncludesDeepDiagnostics(mode))
+    };
+    PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_commit", pxDryRunPlan);
+    [self logMessage:@"[AppDataCleaner][metric] mode=%@ dry_run=1 total_ms=%.0f success=1",
+        PXClearModeName(mode),
+        (CFAbsoluteTimeGetCurrent() - dryRunStartedAt) * 1000.0];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (completion) completion(YES, nil);
+    });
+}
+
 - (void)clearDataForBundleID:(NSString *)bundleID
                         mode:(PXClearMode)mode
                   completion:(void (^)(BOOL, NSError *))completion {
@@ -3081,6 +3167,17 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         });
         return;
     }
+
+    // 7.4: snapshot cumulative metric counters so this run reports per-run deltas.
+    uint_fast64_t pxMetricShellAtStart = atomic_load(&gPXClearShellProcessCount);
+    uint_fast64_t pxMetricPathsAtStart = atomic_load(&gPXClearPathsScannedCount);
+    uint_fast64_t pxMetricSqliteNanosAtStart = atomic_load(&gPXClearSqliteNanos);
+    __block double pxResolveContainerMs = 0.0;
+    __block uint_fast64_t pxTimeoutFallbackCount = 0;
+
+    // CLEAR-01: write the transaction begin journal before any destructive step.
+    PXClearWriteJournal(bundleID, mode, fullRequest.scopes, NO, @"begin",
+                        @{ @"deepClean": @(deepClean) });
 
     __block BOOL completionCalled = NO;
     __block dispatch_semaphore_t completionLock = dispatch_semaphore_create(1);
@@ -3120,6 +3217,34 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 PXClearModeName(mode),
                 (CFAbsoluteTimeGetCurrent() - requestStartedAt) * 1000.0,
                 success];
+            {
+                // 7.4: per-run granular metrics computed as deltas from the pre-run snapshot.
+                uint_fast64_t pxShellProcesses = atomic_load(&gPXClearShellProcessCount) - pxMetricShellAtStart;
+                uint_fast64_t pxPathsScanned = atomic_load(&gPXClearPathsScannedCount) - pxMetricPathsAtStart;
+                double pxSqliteMs = (double)(atomic_load(&gPXClearSqliteNanos) - pxMetricSqliteNanosAtStart) / 1e6;
+                NSUserDefaults *pxMetricStore = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+                NSUInteger pxTotalAttempts = 0;
+                NSUInteger pxFirstAttemptSuccesses = 0;
+                if (pxMetricStore) {
+                    pxTotalAttempts = (NSUInteger)[pxMetricStore integerForKey:@"clearAttemptCount"] + 1;
+                    pxFirstAttemptSuccesses = (NSUInteger)[pxMetricStore integerForKey:@"clearFirstAttemptSuccessCount"];
+                    if (success && pxTimeoutFallbackCount == 0) {
+                        pxFirstAttemptSuccesses += 1;
+                    }
+                    [pxMetricStore setInteger:(NSInteger)pxTotalAttempts forKey:@"clearAttemptCount"];
+                    [pxMetricStore setInteger:(NSInteger)pxFirstAttemptSuccesses forKey:@"clearFirstAttemptSuccessCount"];
+                }
+                double pxFirstAttemptSuccessPct = pxTotalAttempts > 0 ? ((double)pxFirstAttemptSuccesses / (double)pxTotalAttempts) * 100.0 : 0.0;
+                [weakSelf logMessage:@"[AppDataCleaner][metric] mode=%@ resolve_container_ms=%.0f sqlite_ms=%.0f shell_processes=%llu paths_scanned=%llu timeout_fallback_count=%llu first_attempt_success=%d first_attempt_success_pct=%.1f",
+                    PXClearModeName(mode),
+                    pxResolveContainerMs,
+                    pxSqliteMs,
+                    (unsigned long long)pxShellProcesses,
+                    (unsigned long long)pxPathsScanned,
+                    (unsigned long long)pxTimeoutFallbackCount,
+                    (success && pxTimeoutFallbackCount == 0),
+                    pxFirstAttemptSuccessPct];
+            }
             [weakSelf logMessage:@"[AppDataCleaner] Calling completion handler (success=%d)", success];
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(success, error);
@@ -3143,6 +3268,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         BOOL alreadyCompleted = completionCalled;
         dispatch_semaphore_signal(completionLock);
         if (alreadyCompleted) return;
+        pxTimeoutFallbackCount += 1;
+        [weakSelf logMessage:@"[AppDataCleaner][metric] timeout_fallback event=watchdog timeout_sec=%d", timeoutSec];
         [weakSelf logMessage:@"[AppDataCleaner] WATCHDOG: %d second timeout reached", timeoutSec];
         safeCompletion(NO, [NSError errorWithDomain:@"AppDataCleaner"
                                                code:-100
@@ -3155,6 +3282,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             __strong typeof(weakSelf) strongSelf = weakSelf;
             [strongSelf logMessage:@"[AppDataCleaner] Background cleaning started for %@", bundleID];
             @try {
+                CFAbsoluteTime pxResolveStartedAt = CFAbsoluteTimeGetCurrent();
+                NSString *pxResolvedDataUUID = [strongSelf findDataContainerUUIDForBundleID:bundleID];
+                pxResolveContainerMs = (CFAbsoluteTimeGetCurrent() - pxResolveStartedAt) * 1000.0;
+                [strongSelf logMessage:@"[AppDataCleaner][metric] step=resolve_container duration_ms=%.0f found=%d",
+                    pxResolveContainerMs, (pxResolvedDataUUID.length > 0)];
                 CFAbsoluteTime killStartedAt = CFAbsoluteTimeGetCurrent();
                 [strongSelf logMessage:@"[AppDataCleaner] Step 0: Kill application (mode=%@)...", PXClearModeName(mode)];
                 PXKillAppProcessBestEffort(strongSelf, bundleID);
@@ -3214,6 +3346,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 if (PXMigratedDataClearResultIsStructurallyValid(dataResult)) {
                     dataComponents = dataResult.componentResults;
                 } else {
+                    pxTimeoutFallbackCount += 1;
                     [strongSelf logMessage:@"[AppDataCleaner] Four-scope data aggregate is structurally invalid"];
                     dataComponents = @[
                         PXApplicationDataFailedComponent(
@@ -4510,6 +4643,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         }
     }
 
+    atomic_fetch_add(&gPXClearShellProcessCount, 1);
     CommandResult *result =
         [[CommandRunner shared] runExecutableAndCapture:PXFindExecutablePath
                                               arguments:arguments
@@ -4539,10 +4673,12 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     NSString *output = result.stdoutString ?: @"";
     NSArray<NSString *> *parts =
         [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    return [parts filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+    NSArray<NSString *> *matchedPaths = [parts filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
         (void)bindings;
         return [object isKindOfClass:[NSString class]] && [(NSString *)object length] > 0;
     }]];
+    atomic_fetch_add(&gPXClearPathsScannedCount, (uint_fast64_t)matchedPaths.count);
+    return matchedPaths;
 }
 
 - (NSArray *)findPathsMatchingPattern:(NSString *)pattern {
@@ -4664,6 +4800,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     }
 
     NSTimeInterval effectiveTimeout = timeoutSec <= 0 ? 60.0 : timeoutSec;
+    atomic_fetch_add(&gPXClearShellProcessCount, 1);
     return [[CommandRunner shared] runAndCapture:command
                                       timeoutSec:effectiveTimeout
                                   maxOutputBytes:PXPrivilegedCommandMaxOutputBytes];
@@ -6784,239 +6921,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             // If the main database doesn't exist, we can safely remove these files
             NSLog(@"[AppDataCleaner] Removing SQLite auxiliary file: %@", dbPath);
             [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -f '%@'", dbPath]];
-        }
-    }
-}
-
-- (void)clearAppIssuesForIOS15:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Fixing iOS 15+ specific issues for %@", bundleID);
-    
-    // Fix location services registration issues
-    NSArray *locationPaths = @[
-        // Location caches that might contain bad registrations
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/locationd/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/locationd/%@*", bundleID],
-        // Special case for Lyft/Zimride
-        @"/var/mobile/Library/Caches/locationd/*lyft*",
-        @"/var/mobile/Library/Caches/locationd/*lyft*",
-        @"/var/mobile/Library/Caches/locationd/*zimride*",
-        @"/var/mobile/Library/Caches/locationd/*zimride*",
-        // Extra case for com.lyft.ios specifically
-        @"/var/mobile/Library/Caches/locationd/com.lyft.ios*",
-        @"/var/mobile/Library/Caches/locationd/com.lyft.ios*",
-        // Special case for Uber/Helix
-        @"/var/mobile/Library/Caches/locationd/*uber*",
-        @"/var/mobile/Library/Caches/locationd/*uber*",
-        @"/var/mobile/Library/Caches/locationd/*helix*",
-        @"/var/mobile/Library/Caches/locationd/*helix*",
-        // Location client registrations
-        [NSString stringWithFormat:@"/var/mobile/Library/locationd/clients.plist"],
-        [NSString stringWithFormat:@"/var/mobile/Library/locationd/clients.plist"],
-        // Extra case for com.ubercab.UberClient specifically
-        @"/var/mobile/Library/Caches/locationd/com.ubercab.UberClient*",
-        @"/var/mobile/Library/Caches/locationd/com.ubercab.UberClient*",
-        // Special case for Uber/Helix
-        @"/var/mobile/Library/Caches/locationd/*uber*",
-        @"/var/mobile/Library/Caches/locationd/*uber*",
-        @"/var/mobile/Library/Caches/locationd/*helix*",
-        @"/var/mobile/Library/Caches/locationd/*helix*",
-        // Extra case for com.ubercab.UberClient specifically
-        @"/var/mobile/Library/Caches/locationd/com.ubercab.UberClient*",
-        @"/var/mobile/Library/Caches/locationd/com.ubercab.UberClient*",
-        // Location client registrations
-        [NSString stringWithFormat:@"/var/mobile/Library/locationd/clients.plist"],
-        [NSString stringWithFormat:@"/var/mobile/Library/locationd/clients.plist"]
-    ];
-    
-    // Clear location cache files
-    for (NSString *pattern in locationPaths) {
-        if ([pattern hasSuffix:@".plist"]) {
-            // For plist files, we need to modify them rather than delete
-            if ([_fileManager fileExistsAtPath:pattern]) {
-                NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"clients.plist.temp"];
-                [_fileManager copyItemAtPath:pattern toPath:tempPath error:nil];
-                
-                NSMutableDictionary *clients = [NSMutableDictionary dictionaryWithContentsOfFile:tempPath];
-                if (clients) {
-                    // Remove any entries for this bundle ID
-                    NSMutableArray *keysToRemove = [NSMutableArray arrayWithArray:[clients.allKeys filteredArrayUsingPredicate:
-                                           [NSPredicate predicateWithFormat:@"SELF CONTAINS[cd] %@", bundleID]]];
-                    
-                    // Also remove Lyft and Zimride entries
-                    [keysToRemove addObjectsFromArray:[clients.allKeys filteredArrayUsingPredicate:
-                                           [NSPredicate predicateWithFormat:@"SELF CONTAINS[cd] %@", @"lyft"]]];
-                    [keysToRemove addObjectsFromArray:[clients.allKeys filteredArrayUsingPredicate:
-                                           [NSPredicate predicateWithFormat:@"SELF CONTAINS[cd] %@", @"zimride"]]];
-                    
-                    // Also remove Uber and Helix entries
-                    [keysToRemove addObjectsFromArray:[clients.allKeys filteredArrayUsingPredicate:
-                                           [NSPredicate predicateWithFormat:@"SELF CONTAINS[cd] %@", @"uber"]]];
-                    [keysToRemove addObjectsFromArray:[clients.allKeys filteredArrayUsingPredicate:
-                                           [NSPredicate predicateWithFormat:@"SELF CONTAINS[cd] %@", @"helix"]]];
-                    
-                    if (keysToRemove.count > 0) {
-                        NSLog(@"[AppDataCleaner] Found %lu location client registrations to remove", (unsigned long)keysToRemove.count);
-                        [keysToRemove enumerateObjectsUsingBlock:^(id key, NSUInteger idx, BOOL *stop) {
-                            [clients removeObjectForKey:key];
-                        }];
-                        
-                        [clients writeToFile:tempPath atomically:YES];
-                        [self runCommandWithPrivileges:[NSString stringWithFormat:@"cp '%@' '%@'", tempPath, pattern]];
-                    }
-                }
-                
-                [_fileManager removeItemAtPath:tempPath error:nil];
-            }
-        } else {
-            // Pattern-based file deletion
-            NSArray *matches = [self findPathsMatchingPattern:pattern];
-            for (NSString *path in matches) {
-                NSLog(@"[AppDataCleaner] Wiping location cache file: %@", path);
-                [self securelyWipeFile:path];
-            }
-        }
-    }
-    
-    // Fix UI state issues specific to iOS 15+
-    NSArray *uiStatePaths = @[
-        // UISplitViewController state
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/com.apple.UIKit.plist"],
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/com.apple.UIKit.plist"],
-        // App-specific UI state 
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@-UI-State.plist", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@-UI-State.plist", bundleID],
-        // Special case for Lyft/Zimride
-        @"/var/mobile/Library/Preferences/*lyft*-UI-State.plist",
-        @"/var/mobile/Library/Preferences/*lyft*-UI-State.plist",
-        @"/var/mobile/Library/Preferences/*zimride*-UI-State.plist",
-        @"/var/mobile/Library/Preferences/*zimride*-UI-State.plist",
-        // Extra case for com.lyft.ios specifically
-        @"/var/mobile/Library/Preferences/com.lyft.ios-UI-State.plist",
-        @"/var/mobile/Library/Preferences/com.lyft.ios-UI-State.plist",
-        // Special case for Uber/Helix
-        @"/var/mobile/Library/Preferences/*uber*-UI-State.plist",
-        @"/var/mobile/Library/Preferences/*uber*-UI-State.plist",
-        @"/var/mobile/Library/Preferences/*helix*-UI-State.plist",
-        // Extra case for com.ubercab.UberClient specifically
-        @"/var/mobile/Library/Preferences/com.ubercab.UberClient-UI-State.plist",
-        @"/var/mobile/Library/Preferences/com.ubercab.UberClient-UI-State.plist",
-        @"/var/mobile/Library/Preferences/*helix*-UI-State.plist",
-        // SplitView controller state
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.%@.plist", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.%@.plist", bundleID],
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*lyft*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*lyft*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*zimride*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*zimride*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*uber*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*uber*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*helix*.plist",
-        @"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.*helix*.plist"
-    ];
-    
-    for (NSString *path in uiStatePaths) {
-        // For patterns with wildcards, use findPathsMatchingPattern
-        if ([path containsString:@"*"]) {
-            NSArray *matches = [self findPathsMatchingPattern:path];
-            for (NSString *matchPath in matches) {
-                NSLog(@"[AppDataCleaner] Wiping UI state file: %@", matchPath);
-                [self securelyWipeFile:matchPath];
-            }
-        } else if ([_fileManager fileExistsAtPath:path]) {
-            NSLog(@"[AppDataCleaner] Wiping UI state file: %@", path);
-            [self securelyWipeFile:path];
-        }
-    }
-    
-    // Fix snapshot denylisting for iOS 15+
-    NSArray *snapshotPaths = @[
-        [NSString stringWithFormat:@"/var/mobile/Library/SplashBoard/Snapshots/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/SplashBoard/Snapshots/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/Snapshots/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/Snapshots/%@*", bundleID],
-        // Special case for Lyft/Zimride
-        @"/var/mobile/Library/SplashBoard/Snapshots/*lyft*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/*lyft*",
-        @"/var/mobile/Library/Caches/Snapshots/*lyft*",
-        @"/var/mobile/Library/Caches/Snapshots/*lyft*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/*zimride*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/*zimride*",
-        @"/var/mobile/Library/Caches/Snapshots/*zimride*",
-        @"/var/mobile/Library/Caches/Snapshots/*zimride*",
-        // Extra case for com.lyft.ios specifically
-        @"/var/mobile/Library/SplashBoard/Snapshots/com.lyft.ios*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/com.lyft.ios*",
-        @"/var/mobile/Library/Caches/Snapshots/com.lyft.ios*",
-        @"/var/mobile/Library/Caches/Snapshots/com.lyft.ios*",
-        // Special case for Uber/Helix
-        @"/var/mobile/Library/SplashBoard/Snapshots/*uber*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/*uber*",
-        @"/var/mobile/Library/Caches/Snapshots/*uber*",
-        @"/var/mobile/Library/Caches/Snapshots/*uber*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/*helix*",
-        // Extra case for com.ubercab.UberClient specifically
-        @"/var/mobile/Library/SplashBoard/Snapshots/com.ubercab.UberClient*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/com.ubercab.UberClient*",
-        @"/var/mobile/Library/Caches/Snapshots/com.ubercab.UberClient*",
-        @"/var/mobile/Library/Caches/Snapshots/com.ubercab.UberClient*",
-        @"/var/mobile/Library/SplashBoard/Snapshots/*helix*",
-        @"/var/mobile/Library/Caches/Snapshots/*helix*",
-        @"/var/mobile/Library/Caches/Snapshots/*helix*",
-        // Snapshot deny list
-        @"/var/mobile/Library/SpringBoard/ApplicationDenyList.plist",
-        @"/var/mobile/Library/SpringBoard/ApplicationDenyList.plist"
-    ];
-    
-    for (NSString *pattern in snapshotPaths) {
-        if ([pattern hasSuffix:@"DenyList.plist"]) {
-            // For deny list, we need to modify it rather than delete
-            if ([_fileManager fileExistsAtPath:pattern]) {
-                NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"denylist.plist.temp"];
-                [_fileManager copyItemAtPath:pattern toPath:tempPath error:nil];
-                
-                NSMutableDictionary *denyList = [NSMutableDictionary dictionaryWithContentsOfFile:tempPath];
-                if (denyList) {
-                    // Create list of keys to remove
-                    NSMutableArray *keysToRemove = [NSMutableArray array];
-                    
-                    // Remove this app from the deny list
-                    if ([denyList objectForKey:bundleID]) {
-                        [keysToRemove addObject:bundleID];
-                    }
-                    
-                    // Check for Lyft and Zimride entries
-                    for (NSString *key in denyList.allKeys) {
-                        if ([key containsString:@"lyft"] || [key containsString:@"zimride"]) {
-                            [keysToRemove addObject:key];
-                        }
-                    }
-                    
-                    // Also remove Uber and Helix entries
-                    for (NSString *key in denyList.allKeys) {
-                        if ([key containsString:@"uber"] || [key containsString:@"helix"]) {
-                            [keysToRemove addObject:key];
-                        }
-                    }
-                    
-                    if (keysToRemove.count > 0) {
-                        NSLog(@"[AppDataCleaner] Removing %lu entries from snapshot deny list", (unsigned long)keysToRemove.count);
-                        for (NSString *key in keysToRemove) {
-                            [denyList removeObjectForKey:key];
-                        }
-                        [denyList writeToFile:tempPath atomically:YES];
-                        [self runCommandWithPrivileges:[NSString stringWithFormat:@"cp '%@' '%@'", tempPath, pattern]];
-                    }
-                }
-                
-                [_fileManager removeItemAtPath:tempPath error:nil];
-            }
-        } else {
-            // Pattern-based file deletion
-            NSArray *matches = [self findPathsMatchingPattern:pattern];
-            for (NSString *path in matches) {
-                NSLog(@"[AppDataCleaner] Wiping snapshot file: %@", path);
-                [self securelyWipeFile:path];
-            }
         }
     }
 }

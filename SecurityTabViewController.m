@@ -1344,8 +1344,6 @@
     [self setupAlertChecksSection:contentView];
     // Add Time Spoofing control
     [self setupTimeSpoofingControl:contentView];
-    // Add Canvas Fingerprinting control
-    [self setupCanvasFingerprintingControl:contentView];
     
     // Add HYDRA copyright at bottom
     [self setupCopyrightLabel:contentView];
@@ -4339,7 +4337,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [contentView addSubview:controlView];
 
     self.deepCleanLabel = [[UILabel alloc] init];
-    self.deepCleanLabel.text = @"Deep Clean";
+    self.deepCleanLabel.text = @"Clear Data Mode";
     self.deepCleanLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
     self.deepCleanLabel.textColor = [UIColor labelColor];
     self.deepCleanLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4357,39 +4355,27 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self.deepCleanInfoButton addTarget:self action:@selector(showDeepCleanInfo) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.deepCleanInfoButton];
 
-    UIView *bottomRowContainer = [[UIView alloc] init];
-    bottomRowContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    [controlView.contentView addSubview:bottomRowContainer];
-
-    UIView *sparkBgView = [[UIView alloc] init];
-    sparkBgView.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
-    sparkBgView.layer.cornerRadius = 12;
-    sparkBgView.translatesAutoresizingMaskIntoConstraints = NO;
-    [bottomRowContainer addSubview:sparkBgView];
-
-    UIImageView *sparkIconView = [[UIImageView alloc] init];
+    self.deepCleanModeControl = [[UISegmentedControl alloc] initWithItems:@[@"Full", @"Deep"]];
+    self.deepCleanModeControl.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        sparkIconView.image = [UIImage systemImageNamed:@"sparkles"];
+        self.deepCleanModeControl.selectedSegmentTintColor = [UIColor systemBlueColor];
     }
-    sparkIconView.tintColor = [UIColor systemBlueColor];
-    sparkIconView.contentMode = UIViewContentModeScaleAspectFit;
-    sparkIconView.translatesAutoresizingMaskIntoConstraints = NO;
-    [sparkBgView addSubview:sparkIconView];
+    [self.deepCleanModeControl setTitleTextAttributes:@{ NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold] } forState:UIControlStateSelected];
+    [self.deepCleanModeControl setTitleTextAttributes:@{ NSForegroundColorAttributeName: [UIColor labelColor], NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium] } forState:UIControlStateNormal];
+    BOOL deepEnabled = [self.securitySettings boolForKey:@"deepCleanEnabled"];
+    self.deepCleanModeControl.selectedSegmentIndex = deepEnabled ? 1 : 0;
+    [self.deepCleanModeControl addTarget:self action:@selector(deepCleanModeChanged:) forControlEvents:UIControlEventValueChanged];
+    [controlView.contentView addSubview:self.deepCleanModeControl];
 
-    UILabel *modeLabel = [[UILabel alloc] init];
-    modeLabel.text = @"Deep verify scan";
-    modeLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    modeLabel.textColor = [UIColor labelColor];
-    modeLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [bottomRowContainer addSubview:modeLabel];
-
-    self.deepCleanToggleSwitch = [[UISwitch alloc] init];
-    self.deepCleanToggleSwitch.onTintColor = [UIColor systemBlueColor];
-    self.deepCleanToggleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    BOOL enabled = [self.securitySettings boolForKey:@"deepCleanEnabled"];
-    [self.deepCleanToggleSwitch setOn:enabled animated:NO];
-    [self.deepCleanToggleSwitch addTarget:self action:@selector(deepCleanToggleChanged:) forControlEvents:UIControlEventValueChanged];
-    [bottomRowContainer addSubview:self.deepCleanToggleSwitch];
+    self.deepCleanHintLabel = [[UILabel alloc] init];
+    self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:deepEnabled];
+    self.deepCleanHintLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    self.deepCleanHintLabel.textColor = [UIColor secondaryLabelColor];
+    self.deepCleanHintLabel.numberOfLines = 1;
+    self.deepCleanHintLabel.adjustsFontSizeToFitWidth = YES;
+    self.deepCleanHintLabel.minimumScaleFactor = 0.8;
+    self.deepCleanHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [controlView.contentView addSubview:self.deepCleanHintLabel];
 
     [NSLayoutConstraint activateConstraints:@[
         [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:900],
@@ -4408,26 +4394,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [self.deepCleanInfoButton.centerXAnchor constraintEqualToAnchor:infoBgView.centerXAnchor],
         [self.deepCleanInfoButton.centerYAnchor constraintEqualToAnchor:infoBgView.centerYAnchor],
 
-        [bottomRowContainer.centerXAnchor constraintEqualToAnchor:controlView.contentView.centerXAnchor],
-        [bottomRowContainer.topAnchor constraintEqualToAnchor:self.deepCleanLabel.bottomAnchor constant:15],
-        [bottomRowContainer.heightAnchor constraintEqualToConstant:30],
+        [self.deepCleanModeControl.trailingAnchor constraintEqualToAnchor:controlView.contentView.trailingAnchor constant:-20],
+        [self.deepCleanModeControl.centerYAnchor constraintEqualToAnchor:self.deepCleanLabel.centerYAnchor],
+        [self.deepCleanModeControl.widthAnchor constraintEqualToConstant:140],
+        [self.deepCleanModeControl.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoBgView.trailingAnchor constant:10],
 
-        [sparkBgView.leadingAnchor constraintEqualToAnchor:bottomRowContainer.leadingAnchor],
-        [sparkBgView.centerYAnchor constraintEqualToAnchor:bottomRowContainer.centerYAnchor],
-        [sparkBgView.widthAnchor constraintEqualToConstant:24],
-        [sparkBgView.heightAnchor constraintEqualToConstant:24],
-
-        [sparkIconView.centerXAnchor constraintEqualToAnchor:sparkBgView.centerXAnchor],
-        [sparkIconView.centerYAnchor constraintEqualToAnchor:sparkBgView.centerYAnchor],
-        [sparkIconView.widthAnchor constraintEqualToConstant:16],
-        [sparkIconView.heightAnchor constraintEqualToConstant:16],
-
-        [modeLabel.leadingAnchor constraintEqualToAnchor:sparkBgView.trailingAnchor constant:10],
-        [modeLabel.centerYAnchor constraintEqualToAnchor:bottomRowContainer.centerYAnchor],
-
-        [self.deepCleanToggleSwitch.leadingAnchor constraintEqualToAnchor:modeLabel.trailingAnchor constant:10],
-        [self.deepCleanToggleSwitch.centerYAnchor constraintEqualToAnchor:bottomRowContainer.centerYAnchor],
-        [self.deepCleanToggleSwitch.trailingAnchor constraintEqualToAnchor:bottomRowContainer.trailingAnchor]
+        [self.deepCleanHintLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.deepCleanHintLabel.trailingAnchor constraintEqualToAnchor:controlView.contentView.trailingAnchor constant:-20],
+        [self.deepCleanHintLabel.topAnchor constraintEqualToAnchor:self.deepCleanLabel.bottomAnchor constant:15]
     ]];
 }
 
@@ -4526,21 +4500,27 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)showDeepCleanInfo {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Deep Clean"
-                                                                   message:@"Global Clear Data mode.\n\nON: Deep verify scan (slow) - scans inside containers for token/encrypted leftovers after wipe.\n\nOFF: Fast mode - assumes wiped containers are clean."
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Data Mode"
+                                                                   message:@"Global Clear Data mode applied to every Clear Data action.\n\nFull: standard wipe of 4 scopes (App, Extension, App Groups, PluginKit) plus Keychain. Fast - recommended for everyday use.\n\nDeep: after wiping, scans inside containers for leftover tokens/encrypted data. More thorough but slower."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)deepCleanToggleChanged:(UISwitch *)sender {
-    BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"deepCleanEnabled"];
+- (void)deepCleanModeChanged:(UISegmentedControl *)sender {
+    BOOL deepEnabled = (sender.selectedSegmentIndex == 1);
+    [self.securitySettings setBool:deepEnabled forKey:@"deepCleanEnabled"];
     [self.securitySettings synchronize];
+
+    self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:deepEnabled];
 
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
+}
+
+- (NSString *)deepCleanHintTextForDeep:(BOOL)deep {
+    return deep ? @"Deep: scans containers for leftover tokens (slower)" : @"Full: standard 4-scope + Keychain wipe (faster)";
 }
 
 - (void)showFixVersionInfo {

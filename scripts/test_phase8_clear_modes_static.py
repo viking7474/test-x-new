@@ -78,4 +78,25 @@ require("request.mode == PXClearModeDeep" in app_wipe_body,
 require("PXClearModeIncludesExtendedContainers(request.mode)" in app_wipe_body,
         "Quick residual-cleanup exclusion missing")
 
+# CLEAR-01: dry-run + transaction journal (Phase 14)
+require("dryRun:(BOOL)dryRun" not in cleaner_h, "CLEAR-01 dry-run must stay off the public 25-selector header")
+require("dryRun:(BOOL)dryRun" in cleaner_m, "CLEAR-01 dry-run implementation missing")
+require("PXClearWriteJournal(" in cleaner_m, "CLEAR-01 journal writer missing")
+require("dry_run_plan" in cleaner_m, "CLEAR-01 dry-run plan journal phase missing")
+require("dry_run_commit" in cleaner_m, "CLEAR-01 dry-run commit journal phase missing")
+require("no destructive operations" in cleaner_m, "CLEAR-01 dry-run guard log missing")
+
+# 7.4: granular Clear metrics (Phase 14)
+for field in ("step=resolve_container", "resolve_container_ms=", "sqlite_ms=",
+              "shell_processes=", "paths_scanned=", "timeout_fallback_count=",
+              "first_attempt_success_pct="):
+    require(field in cleaner_m, f"7.4 metric field missing: {field}")
+for counter in ("gPXClearShellProcessCount", "gPXClearPathsScannedCount", "gPXClearSqliteNanos"):
+    require(counter in cleaner_m, f"7.4 metric counter missing: {counter}")
+
+# CLEAR-09: dead brand-specific iOS15 clear path removed (Phase 14)
+require("clearAppIssuesForIOS15" not in cleaner_m, "CLEAR-09 dead method still present")
+for brand in ("lyft", "zimride", "helix"):
+    require(brand not in cleaner_m, f"CLEAR-09 residual brand token present: {brand}")
+
 print("Phase 8 Clear Data static contracts: PASS")
