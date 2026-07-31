@@ -799,7 +799,7 @@
     // Create coordinates label
     UILabel *coordsLabel = [[UILabel alloc] init];
     coordsLabel.textColor = [UIColor secondaryLabelColor];
-    coordsLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+    coordsLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     coordsLabel.translatesAutoresizingMaskIntoConstraints = NO;
     coordsLabel.adjustsFontSizeToFitWidth = YES;
     coordsLabel.minimumScaleFactor = 0.8;
@@ -834,7 +834,7 @@
     // Create IP label
     UILabel *ipLabel = [[UILabel alloc] init];
     ipLabel.textColor = [UIColor secondaryLabelColor];
-    ipLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+    ipLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     ipLabel.translatesAutoresizingMaskIntoConstraints = NO;
     ipLabel.adjustsFontSizeToFitWidth = YES;
     ipLabel.minimumScaleFactor = 0.8;
@@ -897,7 +897,7 @@
                 NSAttributedString *attributedText = [[NSAttributedString alloc] initWithString:
                     [NSString stringWithFormat:@"%@ %.4f, %.4f", flag, lat, lon]
                     attributes:@{
-                        NSFontAttributeName: [UIFont systemFontOfSize:10 weight:UIFontWeightRegular],
+                        NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightRegular],
                         NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
                     }];
                 coordsLabel.attributedText = attributedText;
@@ -3263,7 +3263,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                     [attributedString appendAttributedString:[[NSAttributedString alloc] 
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
-                            NSFontAttributeName: [UIFont systemFontOfSize:10],
+                            NSFontAttributeName: [UIFont systemFontOfSize:12],
                             NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
                         }]];
                 }
@@ -3310,7 +3310,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                     [attributedString appendAttributedString:[[NSAttributedString alloc] 
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
-                            NSFontAttributeName: [UIFont systemFontOfSize:10],
+                            NSFontAttributeName: [UIFont systemFontOfSize:12],
                             NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
                         }]];
                 }
@@ -3446,7 +3446,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                     [attributedString appendAttributedString:[[NSAttributedString alloc] 
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
-                            NSFontAttributeName: [UIFont systemFontOfSize:10],
+                            NSFontAttributeName: [UIFont systemFontOfSize:12],
                             NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
                         }]];
                 }
@@ -3493,7 +3493,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                     [attributedString appendAttributedString:[[NSAttributedString alloc] 
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
-                            NSFontAttributeName: [UIFont systemFontOfSize:10],
+                            NSFontAttributeName: [UIFont systemFontOfSize:12],
                             NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
                         }]];
                 }
@@ -3659,7 +3659,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     self.webCompatIOSRangeWarningLabel = [[UILabel alloc] init];
     self.webCompatIOSRangeWarningLabel.text = @"WebCompat is ON, but this profile uses iOS > 16.3.1. Regenerate to apply.";
-    self.webCompatIOSRangeWarningLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+    self.webCompatIOSRangeWarningLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     self.webCompatIOSRangeWarningLabel.textColor = [UIColor systemOrangeColor];
     self.webCompatIOSRangeWarningLabel.numberOfLines = 2;
     self.webCompatIOSRangeWarningLabel.translatesAutoresizingMaskIntoConstraints = NO;

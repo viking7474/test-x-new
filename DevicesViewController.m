@@ -134,7 +134,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     // Create status label
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+    self.statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
     [self.statusBadge addSubview:self.statusLabel];
     
@@ -601,7 +601,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     // Create "DEVICES USED" label with dynamic colors
     UILabel *devicesUsedLabel = [[UILabel alloc] init];
     devicesUsedLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    devicesUsedLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    devicesUsedLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
     devicesUsedLabel.textAlignment = NSTextAlignmentCenter;
     devicesUsedLabel.text = @"DEVICES USED";
     if (@available(iOS 13.0, *)) {

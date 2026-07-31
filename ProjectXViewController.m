@@ -720,7 +720,7 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Chon Fake";
+    self.title = @"Chọn Fake";
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
@@ -739,7 +739,7 @@ static void PXWriteSubstrateFilterPlists(void) {
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger row = [self fakeRowForIndexPath:indexPath];
     if (row == 1 || row == 3) return 52;
-    if (row == 8) return 34;
+    if (row == 8) return 44;
     return 44;
 }
 

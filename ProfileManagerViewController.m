@@ -482,7 +482,7 @@
     // "Current" text (top line)
     UILabel *currentLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 2, 40, 14)];
     currentLabel.text = @"Current";
-    currentLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+    currentLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     currentLabel.textColor = [UIColor secondaryLabelColor];
     currentLabel.textAlignment = NSTextAlignmentRight;
     currentLabel.adjustsFontSizeToFitWidth = YES;
@@ -492,7 +492,7 @@
     // "Profile" text (bottom line)
     UILabel *profileSubLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 16, 40, 14)];
     profileSubLabel.text = @"Profile";
-    profileSubLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+    profileSubLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     profileSubLabel.textColor = [UIColor secondaryLabelColor];
     profileSubLabel.textAlignment = NSTextAlignmentRight;
     profileSubLabel.adjustsFontSizeToFitWidth = YES;

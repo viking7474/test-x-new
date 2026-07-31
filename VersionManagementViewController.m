@@ -368,7 +368,7 @@
                 UILabel *activeText = [[UILabel alloc] initWithFrame:activeBadge.bounds];
                 activeText.text = @"ACTIVE";
                 activeText.textColor = [UIColor whiteColor];
-                activeText.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+                activeText.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
                 activeText.textAlignment = NSTextAlignmentCenter;
                 [activeBadge addSubview:activeText];
             } else {

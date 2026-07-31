@@ -69,7 +69,7 @@
             config.imagePadding = 8;
             
             // Configure text attributes
-            UIFont *font = [UIFont systemFontOfSize:8 weight:UIFontWeightMedium];
+            UIFont *font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
             NSDictionary *attributeDict = @{NSFontAttributeName: font};
             NSAttributedString *attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:attributeDict];
             config.attributedTitle = attributedTitle;
@@ -97,10 +97,10 @@
         [button addTarget:self action:@selector(manageProfilesTapped) forControlEvents:UIControlEventTouchUpInside];
     }
     
-    // Set size constraints
+    // Set size constraints (min touch target ~44pt; slightly taller for 11pt label)
     [NSLayoutConstraint activateConstraints:@[
-        [button.widthAnchor constraintEqualToConstant:45],
-        [button.heightAnchor constraintEqualToConstant:45]
+        [button.widthAnchor constraintEqualToConstant:48],
+        [button.heightAnchor constraintEqualToConstant:52]
     ]];
     
     return button;
@@ -111,7 +111,7 @@
 - (void)applyFallbackStyleToButton:(UIButton *)button iconName:(NSString *)iconName title:(NSString *)title {
     [button setTitle:title forState:UIControlStateNormal];
     [button setTintColor:[UIColor systemBlueColor]];
-    button.titleLabel.font = [UIFont systemFontOfSize:8 weight:UIFontWeightMedium];
+    button.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     
     // Set image for iOS 13+
     if (@available(iOS 13.0, *)) {

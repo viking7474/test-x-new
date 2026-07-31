@@ -122,16 +122,10 @@ extern void StartWeaponXGuardian(void);
         // Map tab indices to descriptive names
         switch (selectedIndex) {
             case 0:
-                screenName = @"Map Tab";
-                break;
-            case 1:
                 screenName = @"Home Tab";
                 break;
-            case 2:
+            case 1:
                 screenName = @"Security Tab";
-                break;
-            case 3:
-                screenName = @"Account Tab";
                 break;
             default:
                 screenName = [NSString stringWithFormat:@"Tab %ld", (long)selectedIndex];

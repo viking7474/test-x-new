@@ -83,7 +83,7 @@
     self.viewControllers = @[identityNav, securityNav];
     
     // Set Home tab as default selected tab
-    self.selectedIndex = 1;
+    self.selectedIndex = 0;
     
     // Configure tab bar appearance
     self.tabBar.tintColor = [UIColor systemBlueColor];
@@ -138,16 +138,10 @@
     // Get the appropriate tab name based on the selected index
     switch (selectedIndex) {
         case 0:
-            tabName = @"Map Tab";
-            break;
-        case 1:
             tabName = @"Home Tab";
             break;
-        case 2:
+        case 1:
             tabName = @"Security Tab";
-            break;
-        case 3:
-            tabName = @"Support Tab";
             break;
         default:
             tabName = [NSString stringWithFormat:@"Tab %ld", (long)selectedIndex];
