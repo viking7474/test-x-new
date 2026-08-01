@@ -1,5 +1,6 @@
 #import "CanvasDetailViewController.h"
 #import "ProjectXLogging.h"
+#import "IdentifierManager.h"
 #import <notify.h>
 
 @interface CanvasDetailViewController ()
