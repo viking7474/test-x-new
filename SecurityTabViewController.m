@@ -14,6 +14,7 @@
 #import "DomainBlockingSettings.h"
 #import "DomainManagementViewController.h"
 #import "DeepCleanDetailViewController.h"
+#import "NetworkDataDetailViewController.h"
 #import <notify.h>  // Add this import for Darwin notification functions
 #import "common/UIButton+SafeConfiguration.h"
 #import "common/VersionCompare.h"
@@ -1495,7 +1496,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkDataSpoofInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     self.networkDataSpoofInfoButton.tintColor = [UIColor systemBlueColor];
     self.networkDataSpoofInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.networkDataSpoofInfoButton addTarget:self action:@selector(showNetworkDataSpoofInfo) forControlEvents:UIControlEventTouchUpInside];
+    [self.networkDataSpoofInfoButton addTarget:self action:@selector(openNetworkDataDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.networkDataSpoofInfoButton];
     
     // Network Data Spoof toggle switch
@@ -2461,6 +2462,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
     
     [rootVC presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)openNetworkDataDetail {
+    NetworkDataDetailViewController *vc = [[NetworkDataDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 - (void)showNetworkDataSpoofInfo {
