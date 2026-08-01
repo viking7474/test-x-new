@@ -1,0 +1,1972 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ProjectX — Security Tab · Chi tiết thành phần</title>
+<style>
+  :root {
+    --brand: #0A84FF;
+    --success: #30D158;
+    --danger: #FF453A;
+    --warning: #FF9F0A;
+    --matrix: #32D74B;
+    --purple: #BF5AF2;
+    --teal: #64D2FF;
+    --bg: #F2F2F7;
+    --card: #FFFFFF;
+    --text: #000000;
+    --text2: rgba(60,60,67,0.60);
+    --text3: rgba(60,60,67,0.30);
+    --sep: rgba(60,60,67,0.12);
+    --fill: rgba(120,120,128,0.16);
+    --tabbar: rgba(255,255,255,0.82);
+    --nav: rgba(249,249,249,0.94);
+    --shadow: 0 1px 3px rgba(0,0,0,0.06);
+    --r-sm: 12px; --r-md: 16px; --r-lg: 20px;
+  }
+  body.dark {
+    --bg: #000000;
+    --card: #1C1C1E;
+    --text: #FFFFFF;
+    --text2: rgba(235,235,245,0.60);
+    --text3: rgba(235,235,245,0.30);
+    --sep: rgba(84,84,88,0.65);
+    --fill: rgba(120,120,128,0.32);
+    --tabbar: rgba(28,28,30,0.88);
+    --nav: rgba(28,28,30,0.94);
+    --shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    background: #1a1a1e;
+    color: var(--text);
+    min-height: 100vh;
+    padding: 32px 20px 80px;
+  }
+  h1.page-title {
+    color: #fff; text-align: center; font-size: 22px; font-weight: 700;
+    margin-bottom: 6px; letter-spacing: -0.3px;
+  }
+  p.page-sub {
+    color: rgba(255,255,255,0.55); text-align: center; font-size: 13px;
+    margin-bottom: 20px;
+  }
+  .toolbar {
+    display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+    margin-bottom: 28px;
+  }
+  .toolbar button {
+    border: 0; border-radius: 20px; padding: 8px 16px; font-size: 13px;
+    font-weight: 600; cursor: pointer; background: #2c2c30; color: #fff;
+  }
+  .toolbar button.active { background: var(--brand); }
+  .toolbar button:hover { filter: brightness(1.15); }
+
+  .section-head {
+    max-width: 1280px; margin: 0 auto 14px;
+    color: rgba(255,255,255,0.85); font-size: 15px; font-weight: 700;
+    letter-spacing: 0.2px; padding: 0 8px;
+  }
+  .section-head span {
+    display: inline-block; margin-left: 10px; font-weight: 500;
+    color: rgba(255,255,255,0.45); font-size: 12px;
+  }
+
+  .phones {
+    display: flex; gap: 28px; justify-content: center; flex-wrap: wrap;
+    align-items: flex-start; margin-bottom: 40px;
+  }
+  .phone-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .phone-label {
+    color: rgba(255,255,255,0.72); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.2px; text-align: center; max-width: 300px; line-height: 1.35;
+  }
+  .phone-tag {
+    display: inline-block; margin-top: 4px; font-size: 10px; font-weight: 600;
+    color: var(--brand); background: rgba(10,132,255,0.15);
+    border-radius: 8px; padding: 2px 8px;
+  }
+
+  .phone {
+    width: 320px; height: 692px;
+    border-radius: 40px;
+    background: #111;
+    padding: 10px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.5), inset 0 0 0 2px #333;
+    position: relative;
+  }
+  .phone.tall { height: 760px; }
+  .phone-inner {
+    width: 100%; height: 100%;
+    border-radius: 32px;
+    background: var(--bg);
+    overflow: hidden;
+    position: relative;
+    display: flex; flex-direction: column;
+  }
+  .notch {
+    position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    width: 96px; height: 28px; background: #000; border-radius: 16px; z-index: 50;
+  }
+  .status-bar {
+    height: 46px; padding: 14px 22px 0;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; font-weight: 600; color: var(--text); flex-shrink: 0;
+  }
+  .status-bar .right { display: flex; gap: 5px; align-items: center; font-size: 11px; }
+
+  .nav {
+    padding: 2px 12px 8px;
+    background: var(--nav);
+    backdrop-filter: blur(20px);
+    border-bottom: 0.5px solid var(--sep);
+    flex-shrink: 0;
+  }
+  .nav-row {
+    display: flex; justify-content: space-between; align-items: center; min-height: 32px;
+  }
+  .nav-title { font-size: 16px; font-weight: 600; text-align: center; flex: 1; }
+  .nav-large { font-size: 28px; font-weight: 700; letter-spacing: -0.4px; margin-top: 2px; }
+  .nav-link {
+    color: var(--brand); font-size: 15px; font-weight: 400;
+    background: none; border: 0; cursor: pointer; min-width: 52px;
+  }
+  .nav-link.right { text-align: right; }
+  .nav-spacer { min-width: 52px; }
+
+  .content {
+    flex: 1; overflow-y: auto; padding: 12px 12px 88px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .content.no-tab { padding-bottom: 24px; }
+  .content::-webkit-scrollbar { width: 0; }
+
+  .sec-label {
+    font-size: 11px; font-weight: 400; color: var(--text2);
+    text-transform: uppercase; letter-spacing: 0.4px;
+    margin: 16px 4px 6px; padding-left: 4px;
+  }
+  .sec-label:first-child { margin-top: 2px; }
+  .sec-footer {
+    font-size: 11px; color: var(--text2); line-height: 1.4;
+    margin: 6px 8px 0; padding: 0 4px;
+  }
+
+  .card {
+    background: var(--card);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .card + .card { margin-top: 10px; }
+
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; min-height: 46px;
+    border-bottom: 0.5px solid var(--sep);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row.tappable { cursor: pointer; }
+  .row-icon {
+    width: 28px; height: 28px; border-radius: 7px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: #fff; flex-shrink: 0; font-weight: 700;
+  }
+  .row-icon.sm { width: 24px; height: 24px; border-radius: 6px; font-size: 12px; }
+  .row-icon.blue { background: #0A84FF; }
+  .row-icon.green { background: #30D158; }
+  .row-icon.orange { background: #FF9F0A; }
+  .row-icon.purple { background: #BF5AF2; }
+  .row-icon.red { background: #FF453A; }
+  .row-icon.teal { background: #64D2FF; color: #003a57; }
+  .row-icon.gray { background: #8E8E93; }
+  .row-icon.matrix { background: #32D74B; color: #003a12; }
+  .row-icon.indigo { background: #5E5CE6; }
+  .row-body { flex: 1; min-width: 0; }
+  .row-title { font-size: 14px; font-weight: 400; }
+  .row-title.bold { font-weight: 600; }
+  .row-sub { font-size: 11px; color: var(--text2); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-value { font-size: 13px; color: var(--text2); flex-shrink: 0; }
+  .row-value.brand { color: var(--brand); font-weight: 500; }
+  .row-value.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  .chevron { color: var(--text3); font-size: 13px; font-weight: 600; flex-shrink: 0; }
+
+  .switch {
+    width: 46px; height: 28px; border-radius: 14px; background: var(--fill);
+    position: relative; flex-shrink: 0;
+  }
+  .switch.on { background: var(--success); }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 24px; height: 24px; border-radius: 50%; background: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  }
+  .switch.on::after { transform: translateX(18px); }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 3px;
+    border-radius: 20px; padding: 2px 7px; font-size: 10px; font-weight: 600;
+  }
+  .pill.on { background: rgba(48,209,88,0.16); color: #248A3D; }
+  body.dark .pill.on { color: #30D158; }
+  .pill.off { background: var(--fill); color: var(--text2); }
+  .pill.warn { background: rgba(255,159,10,0.18); color: #C93400; }
+  body.dark .pill.warn { color: #FF9F0A; }
+  .pill.danger { background: rgba(255,69,58,0.16); color: #D70015; }
+  body.dark .pill.danger { color: #FF453A; }
+
+  .sec-hero {
+    border-radius: var(--r-lg); padding: 14px 14px;
+    background: var(--card);
+    border: 1px solid rgba(50,215,75,0.25);
+    box-shadow: var(--shadow);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .sec-hero .shield {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: rgba(50,215,75,0.15); color: var(--matrix);
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+  }
+  .sec-hero .t { font-size: 15px; font-weight: 700; }
+  .sec-hero .s { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+  .progress-ring {
+    width: 44px; height: 44px; border-radius: 22px;
+    background: conic-gradient(var(--matrix) 0 75%, var(--fill) 75% 100%);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .progress-ring .inner {
+    width: 34px; height: 34px; border-radius: 17px; background: var(--card);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: var(--matrix);
+  }
+
+  .segmented {
+    display: flex; background: var(--fill); border-radius: 9px; padding: 2px; margin-bottom: 10px;
+  }
+  .segmented button {
+    flex: 1; border: 0; background: transparent; color: var(--text);
+    font-size: 12px; font-weight: 500; padding: 7px 4px; border-radius: 7px; cursor: pointer;
+  }
+  .segmented button.on {
+    background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,0.12); font-weight: 600;
+  }
+
+  .btn-primary {
+    width: 100%; border: 0; border-radius: var(--r-sm);
+    background: var(--brand); color: #fff;
+    font-size: 15px; font-weight: 600; padding: 13px;
+    cursor: pointer; margin-top: 10px;
+  }
+  .btn-secondary {
+    width: 100%; border: 0; border-radius: var(--r-sm);
+    background: var(--fill); color: var(--brand);
+    font-size: 15px; font-weight: 600; padding: 13px;
+    cursor: pointer; margin-top: 8px;
+  }
+  .btn-danger {
+    width: 100%; border: 0; border-radius: var(--r-sm);
+    background: rgba(255,69,58,0.12); color: var(--danger);
+    font-size: 15px; font-weight: 600; padding: 13px;
+    cursor: pointer; margin-top: 8px;
+  }
+  .btn-danger.solid {
+    background: var(--danger); color: #fff;
+  }
+
+  .field {
+    background: var(--card); border-radius: var(--r-md);
+    padding: 10px 12px; margin-bottom: 8px;
+    box-shadow: var(--shadow);
+  }
+  .field label {
+    display: block; font-size: 11px; color: var(--text2); margin-bottom: 4px; font-weight: 500;
+  }
+  .field .val {
+    font-size: 15px; font-weight: 500; color: var(--text);
+  }
+  .field .val.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  }
+  .field .val.placeholder { color: var(--text3); font-weight: 400; }
+  .field-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  }
+
+  .map-preview {
+    height: 140px; border-radius: var(--r-md); overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(10,132,255,0.08), transparent 40%),
+      repeating-linear-gradient(0deg, transparent, transparent 18px, rgba(10,132,255,0.06) 18px, rgba(10,132,255,0.06) 19px),
+      repeating-linear-gradient(90deg, transparent, transparent 18px, rgba(10,132,255,0.06) 18px, rgba(10,132,255,0.06) 19px),
+      #dce8f5;
+    position: relative; margin-bottom: 10px;
+    box-shadow: var(--shadow);
+  }
+  body.dark .map-preview { background-color: #1a2430; }
+  .map-pin {
+    position: absolute; left: 50%; top: 46%; transform: translate(-50%, -100%);
+    width: 22px; height: 22px; border-radius: 50% 50% 50% 0; transform-origin: center;
+    background: var(--brand); transform: translate(-50%, -100%) rotate(-45deg);
+    box-shadow: 0 4px 12px rgba(10,132,255,0.45);
+  }
+  .map-pin::after {
+    content: ""; position: absolute; inset: 6px; border-radius: 50%; background: #fff;
+  }
+  .map-badge {
+    position: absolute; left: 10px; bottom: 10px;
+    background: rgba(255,255,255,0.92); backdrop-filter: blur(8px);
+    border-radius: 10px; padding: 6px 10px; font-size: 11px; font-weight: 600;
+    color: #111; box-shadow: var(--shadow);
+  }
+  body.dark .map-badge { background: rgba(28,28,30,0.9); color: #fff; }
+
+  .check-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 12px; border-bottom: 0.5px solid var(--sep);
+  }
+  .check-row:last-child { border-bottom: 0; }
+  .radio {
+    width: 20px; height: 20px; border-radius: 10px;
+    border: 2px solid var(--text3); flex-shrink: 0; position: relative;
+  }
+  .radio.on { border-color: var(--brand); }
+  .radio.on::after {
+    content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--brand);
+  }
+  .check {
+    width: 20px; height: 20px; border-radius: 6px;
+    border: 2px solid var(--text3); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: #fff; font-weight: 700;
+  }
+  .check.on { background: var(--brand); border-color: var(--brand); }
+
+  .ip-hero {
+    background: var(--card); border-radius: var(--r-lg); padding: 16px;
+    box-shadow: var(--shadow); text-align: center; margin-bottom: 10px;
+  }
+  .ip-hero .flag { font-size: 28px; margin-bottom: 6px; }
+  .ip-hero .ip {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 20px; font-weight: 700; letter-spacing: -0.3px;
+  }
+  .ip-hero .loc { font-size: 13px; color: var(--text2); margin-top: 4px; }
+  .ip-stats {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 12px;
+  }
+  .ip-stat {
+    background: var(--fill); border-radius: 10px; padding: 8px 4px;
+  }
+  .ip-stat .n { font-size: 12px; font-weight: 700; }
+  .ip-stat .l { font-size: 10px; color: var(--text2); margin-top: 2px; }
+
+  .warn-banner {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: rgba(255,159,10,0.12); border: 1px solid rgba(255,159,10,0.28);
+    border-radius: var(--r-md); padding: 12px; margin-bottom: 10px;
+  }
+  .warn-banner.danger {
+    background: rgba(255,69,58,0.10); border-color: rgba(255,69,58,0.28);
+  }
+  .warn-banner .ic { font-size: 18px; flex-shrink: 0; line-height: 1.2; }
+  .warn-banner .t { font-size: 13px; font-weight: 600; }
+  .warn-banner .s { font-size: 11px; color: var(--text2); margin-top: 2px; line-height: 1.35; }
+
+  .slider-block { padding: 12px 14px; }
+  .slider-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .slider-track {
+    height: 4px; border-radius: 2px; background: var(--fill); position: relative;
+  }
+  .slider-track .fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 42%;
+    background: var(--brand); border-radius: 2px;
+  }
+  .slider-track .knob {
+    position: absolute; top: 50%; left: 42%; transform: translate(-50%, -50%);
+    width: 22px; height: 22px; border-radius: 11px; background: #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.25); border: 0.5px solid var(--sep);
+  }
+
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; }
+  .chip {
+    border: 0; border-radius: 14px; padding: 6px 10px; font-size: 12px; font-weight: 600;
+    background: var(--fill); color: var(--text); cursor: pointer;
+  }
+  .chip.on { background: rgba(10,132,255,0.16); color: var(--brand); }
+
+  .domain-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-bottom: 0.5px solid var(--sep);
+  }
+  .domain-item:last-child { border-bottom: 0; }
+  .domain-dot {
+    width: 8px; height: 8px; border-radius: 4px; background: var(--danger); flex-shrink: 0;
+  }
+  .domain-dot.allow { background: var(--success); }
+  .domain-name {
+    flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .domain-del {
+    border: 0; background: transparent; color: var(--danger);
+    font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+
+  .stepper {
+    display: flex; align-items: center; gap: 0;
+    background: var(--fill); border-radius: 8px; overflow: hidden;
+  }
+  .stepper button {
+    width: 32px; height: 28px; border: 0; background: transparent;
+    color: var(--brand); font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  .stepper .n {
+    min-width: 36px; text-align: center; font-size: 13px; font-weight: 600;
+    border-left: 0.5px solid var(--sep); border-right: 0.5px solid var(--sep);
+    padding: 0 4px;
+  }
+
+  .tabbar {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    height: 72px; padding: 6px 0 18px;
+    background: var(--tabbar);
+    backdrop-filter: blur(24px);
+    border-top: 0.5px solid var(--sep);
+    display: flex; justify-content: space-around;
+  }
+  .tab {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    color: var(--text2); font-size: 9px; font-weight: 500; min-width: 56px;
+  }
+  .tab.active { color: var(--brand); }
+  .tab .ti { font-size: 18px; line-height: 1; }
+
+  .legend {
+    max-width: 980px; margin: 12px auto 0; color: rgba(255,255,255,0.7);
+    font-size: 13px; line-height: 1.6;
+    background: #242428; border-radius: 16px; padding: 18px 20px;
+  }
+  .legend h3 { color: #fff; font-size: 14px; margin-bottom: 8px; }
+  .legend ul { padding-left: 18px; }
+  .legend li { margin: 4px 0; }
+  .legend code {
+    background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px;
+    font-size: 12px;
+  }
+  .footnote {
+    text-align: center; color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 28px;
+    line-height: 1.5;
+  }
+  .comp-grid {
+    max-width: 1100px; margin: 0 auto 36px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px;
+  }
+  .comp-card {
+    background: #242428; border-radius: 14px; padding: 14px 16px;
+    color: rgba(255,255,255,0.78); font-size: 12px; line-height: 1.5;
+  }
+  .comp-card h4 {
+    color: #fff; font-size: 13px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px;
+  }
+  .comp-card .swatch {
+    width: 18px; height: 18px; border-radius: 5px; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 10px; color: #fff;
+  }
+  .comp-card ul { padding-left: 16px; margin-top: 4px; }
+  .comp-card li { margin: 2px 0; }
+</style>
+</head>
+<body>
+  <h1 class="page-title">Security Tab — Chi tiết thành phần</h1>
+  <p class="page-sub">Bám design system <code style="color:#8ab4ff">ui-redesign-mockup.html</code> · iOS native · InsetGrouped · WXControlRow</p>
+
+  <div class="toolbar">
+    <button class="active" id="btnLight" onclick="setTheme(false)">Light</button>
+    <button id="btnDark" onclick="setTheme(true)">Dark</button>
+  </div>
+
+  <!-- ========== COMPONENT LEGEND ========== -->
+  <div class="section-head">0 · Design tokens &amp; primitives <span>dùng lại toàn tab</span></div>
+  <div class="comp-grid">
+    <div class="comp-card">
+      <h4><span class="swatch" style="background:#0A84FF">●</span> Tokens</h4>
+      brand <code>#0A84FF</code> · success <code>#30D158</code><br/>
+      danger <code>#FF453A</code> · warning <code>#FF9F0A</code><br/>
+      matrix <code>#32D74B</code> · purple <code>#BF5AF2</code><br/>
+      bg grouped · card white/1C1C1E · radius 12/16/20
+    </div>
+    <div class="comp-card">
+      <h4><span class="swatch" style="background:#32D74B">⛨</span> WXControlRow</h4>
+      <ul>
+        <li>Icon 28pt bo 7 + title + optional sub</li>
+        <li>Trailing: Switch / value+chevron / chevron</li>
+        <li>min-height 46 · sep 0.5px</li>
+      </ul>
+    </div>
+    <div class="comp-card">
+      <h4><span class="swatch" style="background:#5E5CE6">☰</span> Section card</h4>
+      <ul>
+        <li>sec-label UPPERCASE 11pt text2</li>
+        <li>card radius 16 + shadow nhẹ</li>
+        <li>footer note 11pt dưới card</li>
+      </ul>
+    </div>
+    <div class="comp-card">
+      <h4><span class="swatch" style="background:#FF9F0A">!</span> States</h4>
+      <ul>
+        <li>Switch on = success green</li>
+        <li>Pill on / off / warn / danger</li>
+        <li>Warn banner orange · danger red</li>
+        <li>Destructive = btn-danger</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ========== 1. MAIN SECURITY LIST ========== -->
+  <div class="section-head">1 · Security root <span>large title · hero summary · 5 section cards · tabbar</span></div>
+  <div class="phones">
+    <!-- Root list -->
+    <div class="phone-wrap">
+      <div class="phone-label">Security — Root list<div class="phone-tag">Tab root</div></div>
+      <div class="phone tall">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-large">Security</div>
+          </div>
+          <div class="content">
+            <div class="sec-hero">
+              <div class="progress-ring"><div class="inner">9/12</div></div>
+              <div>
+                <div class="t">9 / 12 lớp đang bật</div>
+                <div class="s">Matrix rain tắt · Reduce Motion</div>
+              </div>
+            </div>
+
+            <div class="sec-label">Bypass phát hiện</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon matrix">⛨</div>
+                <div class="row-body">
+                  <div class="row-title">Jailbreak Detection</div>
+                  <div class="row-sub">Ẩn dấu hiệu jailbreak</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row">
+                <div class="row-icon blue">VPN</div>
+                <div class="row-body">
+                  <div class="row-title">VPN / Proxy Detection</div>
+                  <div class="row-sub">Bypass kiểm tra VPN</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row">
+                <div class="row-icon purple">⬚</div>
+                <div class="row-body">
+                  <div class="row-title">Canvas Fingerprint</div>
+                  <div class="row-sub">Nhiễu canvas API</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Mạng &amp; vị trí</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon teal">⌂</div>
+                <div class="row-body">
+                  <div class="row-title">Network Data Spoof</div>
+                  <div class="row-sub">Carrier · MCC/MNC</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row tappable">
+                <div class="row-icon blue">⇄</div>
+                <div class="row-body"><div class="row-title">Connection Type</div></div>
+                <span class="row-value">Wi-Fi</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row tappable">
+                <div class="row-icon orange">◎</div>
+                <div class="row-body">
+                  <div class="row-title">IP Status</div>
+                  <div class="row-sub">203.162.•••.•• · VN</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row tappable">
+                <div class="row-icon green">⌖</div>
+                <div class="row-body"><div class="row-title">Location Spoof</div></div>
+                <span class="row-value">Off</span>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Spoof thiết bị &amp; app</div>
+            <div class="card">
+              <div class="row tappable">
+                <div class="row-icon gray">📱</div>
+                <div class="row-body">
+                  <div class="row-title">Device Spoofing</div>
+                  <div class="row-sub">Model · name · serial</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-icon purple">v</div>
+                <div class="row-body"><div class="row-title">App Version Spoof</div></div>
+                <div class="switch"></div>
+              </div>
+              <div class="row">
+                <div class="row-icon orange">⏱</div>
+                <div class="row-body"><div class="row-title">Time Spoofing</div></div>
+                <div class="switch"></div>
+              </div>
+              <div class="row tappable">
+                <div class="row-icon blue">✓</div>
+                <div class="row-body">
+                  <div class="row-title">Fix Version</div>
+                  <div class="row-sub">Runtime-capped</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Dữ liệu &amp; Keychain</div>
+            <div class="card">
+              <div class="row tappable">
+                <div class="row-icon red">⌫</div>
+                <div class="row-body"><div class="row-title">Deep Clean Mode</div></div>
+                <span class="row-value">Standard</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-icon orange">🔑</div>
+                <div class="row-body">
+                  <div class="row-title">System Keychain Wipe</div>
+                  <div class="row-sub">Cẩn trọng — destructive</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+              <div class="row tappable">
+                <div class="row-icon gray">🚫</div>
+                <div class="row-body"><div class="row-title">Domain Blocking</div></div>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Giao diện</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon matrix">雨</div>
+                <div class="row-body">
+                  <div class="row-title">Matrix Rain</div>
+                  <div class="row-sub">Tắt khi Reduce Motion</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+              <div class="row">
+                <div class="row-icon blue">◉</div>
+                <div class="row-body">
+                  <div class="row-title">Profile Indicator</div>
+                  <div class="row-sub">Hiện trên SpringBoard</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+          </div>
+          <div class="tabbar">
+            <div class="tab"><div class="ti">⌂</div>Home</div>
+            <div class="tab active"><div class="ti">⛨</div>Security</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hero + row anatomy -->
+    <div class="phone-wrap">
+      <div class="phone-label">Anatomy — Hero &amp; row types<div class="phone-tag">Primitives</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Components</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="sec-label">Hero summary</div>
+            <div class="sec-hero">
+              <div class="shield">⛨</div>
+              <div>
+                <div class="t">9 / 12 lớp đang bật</div>
+                <div class="s">Ring 75% · matrix accent border</div>
+              </div>
+            </div>
+            <div class="sec-footer">Dùng ở đầu root list. Cập nhật khi toggle thay đổi.</div>
+
+            <div class="sec-label">Row = Switch</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon matrix">⛨</div>
+                <div class="row-body">
+                  <div class="row-title">Jailbreak Detection</div>
+                  <div class="row-sub">Subtitle giải thích ngắn</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row">
+                <div class="row-icon orange">⏱</div>
+                <div class="row-body">
+                  <div class="row-title">Time Spoofing</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Row = Value + chevron</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon blue">⇄</div>
+                <div class="row-body"><div class="row-title">Connection Type</div></div>
+                <span class="row-value">Wi-Fi</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-icon red">⌫</div>
+                <div class="row-body"><div class="row-title">Deep Clean Mode</div></div>
+                <span class="row-value">Standard</span>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Row = Push only</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon gray">📱</div>
+                <div class="row-body">
+                  <div class="row-title">Device Spoofing</div>
+                  <div class="row-sub">Model · name · serial</div>
+                </div>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Destructive hint</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon orange">🔑</div>
+                <div class="row-body">
+                  <div class="row-title">System Keychain Wipe</div>
+                  <div class="row-sub">Cẩn trọng — destructive</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+            </div>
+            <div class="sec-footer">Subtitle cam / đỏ cảnh báo trước khi bật.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 2. NETWORK & LOCATION DETAILS ========== -->
+  <div class="section-head">2 · Mạng &amp; vị trí <span>Connection Type · IP Status · Location · Network Data</span></div>
+  <div class="phones">
+    <!-- Connection Type -->
+    <div class="phone-wrap">
+      <div class="phone-label">Connection Type<div class="phone-tag">Radio list</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Connection</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="sec-label">Loại kết nối giả lập</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="radio on"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Wi-Fi</div>
+                  <div class="row-sub">CTRadioAccessTechnology… không dùng</div>
+                </div>
+                <span class="pill on">Active</span>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Cellular 5G</div>
+                  <div class="row-sub">NR / NRNSA</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Cellular 4G LTE</div>
+                  <div class="row-sub">LTE</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Cellular 3G</div>
+                  <div class="row-sub">WCDMA / HSDPA</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Không có mạng</div>
+                  <div class="row-sub">Not reachable</div>
+                </div>
+              </div>
+            </div>
+            <div class="sec-footer">Giá trị hiển thị trên root row: “Wi-Fi”. Chọn xong pop về Security.</div>
+
+            <div class="sec-label">Tùy chọn thêm</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title">Force expensive path</div>
+                  <div class="row-sub">NWPathMonitor.isExpensive</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title">Force constrained</div>
+                  <div class="row-sub">Low Data Mode</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- IP Status -->
+    <div class="phone-wrap">
+      <div class="phone-label">IP Status<div class="phone-tag">Status + actions</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">IP Status</div>
+              <button class="nav-link right">Refresh</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="ip-hero">
+              <div class="flag">🇻🇳</div>
+              <div class="ip">203.162.4.••</div>
+              <div class="loc">Ho Chi Minh · Vietnam · VN</div>
+              <div class="ip-stats">
+                <div class="ip-stat"><div class="n">IPv4</div><div class="l">Public</div></div>
+                <div class="ip-stat"><div class="n">ISP</div><div class="l">VNPT</div></div>
+                <div class="ip-stat"><div class="n">Ping</div><div class="l">28 ms</div></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Chi tiết</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body"><div class="row-title">IPv6</div></div>
+                <span class="row-value mono">—</span>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">ASN</div></div>
+                <span class="row-value">AS45899</span>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Timezone</div></div>
+                <span class="row-value">Asia/Ho_Chi_Minh</span>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">VPN detected</div></div>
+                <span class="pill off">No</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Hành động</div>
+            <button class="btn-secondary">Copy IP</button>
+            <button class="btn-secondary">Mở IP lookup</button>
+            <div class="sec-footer" style="margin-top:10px">Root row hiển thị IP che giữa + mã quốc gia.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Location Spoof -->
+    <div class="phone-wrap">
+      <div class="phone-label">Location Spoof<div class="phone-tag">Map + coords</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Location</div>
+              <button class="nav-link right">Lưu</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon green">⌖</div>
+                <div class="row-body">
+                  <div class="row-title">Bật Location Spoof</div>
+                  <div class="row-sub">Ghi đè CLLocationManager</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+            </div>
+
+            <div class="map-preview">
+              <div class="map-pin"></div>
+              <div class="map-badge">📍 HCM · 10.82, 106.63</div>
+            </div>
+
+            <div class="field-row">
+              <div class="field">
+                <label>Latitude</label>
+                <div class="val mono">10.8231</div>
+              </div>
+              <div class="field">
+                <label>Longitude</label>
+                <div class="val mono">106.6297</div>
+              </div>
+            </div>
+            <div class="field">
+              <label>Địa điểm gợi ý</label>
+              <div class="val">Ho Chi Minh City</div>
+            </div>
+
+            <div class="sec-label">Độ chính xác giả</div>
+            <div class="card">
+              <div class="slider-block">
+                <div class="slider-top">
+                  <span class="row-title">Accuracy</span>
+                  <span class="row-value brand">±12 m</span>
+                </div>
+                <div class="slider-track"><div class="fill"></div><div class="knob"></div></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Preset nhanh</div>
+            <div class="card">
+              <div class="chip-row">
+                <button class="chip on">TP.HCM</button>
+                <button class="chip">Hà Nội</button>
+                <button class="chip">Đà Nẵng</button>
+                <button class="chip">Bangkok</button>
+                <button class="chip">Singapore</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Network Data Spoof -->
+    <div class="phone-wrap">
+      <div class="phone-label">Network Data Spoof<div class="phone-tag">Carrier form</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Network Data</div>
+              <button class="nav-link right">Lưu</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon teal">⌂</div>
+                <div class="row-body">
+                  <div class="row-title">Bật Network Spoof</div>
+                  <div class="row-sub">CTTelephony / carrier</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Nhà mạng</div>
+            <div class="field">
+              <label>Carrier name</label>
+              <div class="val">Vinaphone</div>
+            </div>
+            <div class="field-row">
+              <div class="field">
+                <label>MCC</label>
+                <div class="val mono">452</div>
+              </div>
+              <div class="field">
+                <label>MNC</label>
+                <div class="val mono">02</div>
+              </div>
+            </div>
+            <div class="field">
+              <label>ISO country</label>
+              <div class="val">vn</div>
+            </div>
+
+            <div class="sec-label">Preset</div>
+            <div class="card">
+              <div class="chip-row">
+                <button class="chip on">Vinaphone</button>
+                <button class="chip">Viettel</button>
+                <button class="chip">Mobifone</button>
+                <button class="chip">AT&amp;T</button>
+                <button class="chip">Verizon</button>
+              </div>
+            </div>
+
+            <div class="sec-label">Radio tech (khi cellular)</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body"><div class="row-title">Current radio</div></div>
+                <span class="row-value">LTE</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Allows VOIP</div></div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 3. DEVICE & APP SPOOF ========== -->
+  <div class="section-head">3 · Spoof thiết bị &amp; app <span>Device · App Version · Time · Fix Version</span></div>
+  <div class="phones">
+    <!-- Device Spoofing -->
+    <div class="phone-wrap">
+      <div class="phone-label">Device Spoofing<div class="phone-tag">Form fields</div></div>
+      <div class="phone tall">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Device Spoof</div>
+              <button class="nav-link right">Lưu</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon gray">📱</div>
+                <div class="row-body">
+                  <div class="row-title">Bật Device Spoofing</div>
+                  <div class="row-sub">uname · UIDevice · sysctl</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Model</div>
+            <div class="field">
+              <label>Product model</label>
+              <div class="val">iPhone 13</div>
+            </div>
+            <div class="field">
+              <label>Machine (hw.machine)</label>
+              <div class="val mono">iPhone14,5</div>
+            </div>
+            <div class="field">
+              <label>Device name</label>
+              <div class="val">iPhone của An</div>
+            </div>
+
+            <div class="sec-label">Identifiers</div>
+            <div class="field">
+              <label>Serial Number</label>
+              <div class="val mono">C02X1A2B3C4D</div>
+            </div>
+            <div class="field">
+              <label>Hardware model</label>
+              <div class="val mono">D17AP</div>
+            </div>
+
+            <div class="sec-label">Preset thiết bị</div>
+            <div class="card">
+              <div class="chip-row">
+                <button class="chip on">iPhone 13</button>
+                <button class="chip">iPhone 14</button>
+                <button class="chip">iPhone 11</button>
+                <button class="chip">iPhone SE</button>
+                <button class="chip">Random</button>
+              </div>
+            </div>
+
+            <button class="btn-secondary">Randomize all</button>
+            <button class="btn-secondary">Reset về máy thật</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- App Version Spoof -->
+    <div class="phone-wrap">
+      <div class="phone-label">App Version Spoof<div class="phone-tag">Per-app list</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">App Version</div>
+              <button class="nav-link right">+</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon purple">v</div>
+                <div class="row-body">
+                  <div class="row-title">Bật App Version Spoof</div>
+                  <div class="row-sub">CFBundleShortVersionString</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">App đã cấu hình</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon blue" style="background:linear-gradient(135deg,#5AC8FA,#007AFF);font-size:11px">f</div>
+                <div class="row-body">
+                  <div class="row-title bold">Facebook</div>
+                  <div class="row-sub">com.facebook.Facebook</div>
+                </div>
+                <span class="row-value">14.2.0</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-icon" style="background:linear-gradient(135deg,#F58529,#DD2A7B);font-size:10px">ig</div>
+                <div class="row-body">
+                  <div class="row-title bold">Instagram</div>
+                  <div class="row-sub">com.burbn.instagram</div>
+                </div>
+                <span class="row-value">312.0</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-icon" style="background:#111;font-size:12px">♪</div>
+                <div class="row-body">
+                  <div class="row-title bold">TikTok</div>
+                  <div class="row-sub">com.zhiliaoapp.musically</div>
+                </div>
+                <span class="row-value">34.5.0</span>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Mặc định global</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title">Default spoof version</div>
+                  <div class="row-sub">Áp khi app chưa có rule</div>
+                </div>
+                <span class="row-value">Off</span>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+            <button class="btn-secondary">+ Thêm app</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Time Spoofing -->
+    <div class="phone-wrap">
+      <div class="phone-label">Time Spoofing<div class="phone-tag">Offset editor</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Time Spoof</div>
+              <button class="nav-link right">Lưu</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon orange">⏱</div>
+                <div class="row-body">
+                  <div class="row-title">Bật Time Spoofing</div>
+                  <div class="row-sub">gettimeofday · NSDate</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="ip-hero">
+              <div class="flag">🕒</div>
+              <div class="ip" style="font-size:18px">31/07/2026 · 14:42</div>
+              <div class="loc">Giờ giả lập (local)</div>
+            </div>
+
+            <div class="sec-label">Chế độ</div>
+            <div class="segmented">
+              <button class="on">Offset</button>
+              <button>Fixed</button>
+              <button>Freeze</button>
+            </div>
+
+            <div class="sec-label">Offset</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body"><div class="row-title">Ngày</div></div>
+                <div class="stepper">
+                  <button>−</button><div class="n">0</div><button>+</button>
+                </div>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Giờ</div></div>
+                <div class="stepper">
+                  <button>−</button><div class="n">+3</div><button>+</button>
+                </div>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Phút</div></div>
+                <div class="stepper">
+                  <button>−</button><div class="n">0</div><button>+</button>
+                </div>
+              </div>
+            </div>
+            <div class="sec-footer">Root toggle off = không vào màn hình này; bật từ root hoặc deep-link.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Fix Version -->
+    <div class="phone-wrap">
+      <div class="phone-label">Fix Version<div class="phone-tag">Runtime cap</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Fix Version</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="warn-banner">
+              <div class="ic">ℹ️</div>
+              <div>
+                <div class="t">Runtime-capped</div>
+                <div class="s">Chỉ áp trong phiên app mục tiêu. Không ghi đè binary trên disk.</div>
+              </div>
+            </div>
+
+            <div class="sec-label">iOS reported</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title">Spoof system version</div>
+                  <div class="row-sub">UIDevice.systemVersion</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Reported version</div></div>
+                <span class="row-value brand">16.6</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Build number</div></div>
+                <span class="row-value mono">20G75</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Gợi ý phiên bản</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body"><div class="row-title">15.8.3</div></div>
+              </div>
+              <div class="check-row">
+                <div class="radio on"></div>
+                <div class="row-body"><div class="row-title bold">16.6</div></div>
+                <span class="pill on">Selected</span>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body"><div class="row-title">17.5.1</div></div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body"><div class="row-title">18.1</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 4. DATA & KEYCHAIN ========== -->
+  <div class="section-head">4 · Dữ liệu &amp; Keychain <span>Deep Clean · Keychain Wipe · Domain Blocking</span></div>
+  <div class="phones">
+    <!-- Deep Clean Mode -->
+    <div class="phone-wrap">
+      <div class="phone-label">Deep Clean Mode<div class="phone-tag">Radio + scopes</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Deep Clean</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="sec-label">Mức độ</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Light</div>
+                  <div class="row-sub">Cache + tmp only</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="radio on"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Standard</div>
+                  <div class="row-sub">Data container + app group</div>
+                </div>
+                <span class="pill on">Default</span>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Deep</div>
+                  <div class="row-sub">+ Preferences · Cookies · Caches</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Nuclear</div>
+                  <div class="row-sub">Full mask 5 scope · chậm hơn</div>
+                </div>
+                <span class="pill warn">Advanced</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Scope khi Standard+</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">Application data</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">App groups</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">Keychain (app)</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check"></div>
+                <div class="row-body"><div class="row-title">Safari system stores</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check"></div>
+                <div class="row-body"><div class="row-title">Blob / media leftovers</div></div>
+              </div>
+            </div>
+            <div class="sec-footer">Root value = tên mode đã chọn (Standard).</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Keychain Wipe confirm -->
+    <div class="phone-wrap">
+      <div class="phone-label">System Keychain Wipe<div class="phone-tag">Confirm sheet</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Keychain</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="warn-banner danger">
+              <div class="ic">⚠️</div>
+              <div>
+                <div class="t">Thao tác phá hủy</div>
+                <div class="s">Xóa keychain system có thể buộc đăng xuất Apple ID / Wi-Fi / app banking. Không hoàn tác.</div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon orange">🔑</div>
+                <div class="row-body">
+                  <div class="row-title">Cho phép System Keychain Wipe</div>
+                  <div class="row-sub">Master switch — mặc định TẮT</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Phạm vi khi bật</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body">
+                  <div class="row-title">Generic passwords</div>
+                  <div class="row-sub">kSecClassGenericPassword</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body">
+                  <div class="row-title">Internet passwords</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check"></div>
+                <div class="row-body">
+                  <div class="row-title">Keys &amp; certificates</div>
+                </div>
+              </div>
+            </div>
+
+            <button class="btn-danger solid" style="opacity:0.45">Chạy wipe ngay…</button>
+            <div class="sec-footer" style="margin-top:8px">Nút solid chỉ enable khi master switch ON + confirm alert 2 bước.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Domain Blocking -->
+    <div class="phone-wrap">
+      <div class="phone-label">Domain Blocking<div class="phone-tag">Blocklist editor</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Domains</div>
+              <button class="nav-link right">+</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon gray">🚫</div>
+                <div class="row-body">
+                  <div class="row-title">Bật Domain Blocking</div>
+                  <div class="row-sub">Hook resolve / NSURLSession</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="segmented">
+              <button class="on">Blocked (6)</button>
+              <button>Allowed</button>
+            </div>
+
+            <div class="card">
+              <div class="domain-item">
+                <div class="domain-dot"></div>
+                <div class="domain-name">graph.facebook.com</div>
+                <button class="domain-del">Xóa</button>
+              </div>
+              <div class="domain-item">
+                <div class="domain-dot"></div>
+                <div class="domain-name">app-measurement.com</div>
+                <button class="domain-del">Xóa</button>
+              </div>
+              <div class="domain-item">
+                <div class="domain-dot"></div>
+                <div class="domain-name">firebaselogging.googleapis.com</div>
+                <button class="domain-del">Xóa</button>
+              </div>
+              <div class="domain-item">
+                <div class="domain-dot"></div>
+                <div class="domain-name">device-provisioning.com</div>
+                <button class="domain-del">Xóa</button>
+              </div>
+              <div class="domain-item">
+                <div class="domain-dot"></div>
+                <div class="domain-name">metrics.icloud.com</div>
+                <button class="domain-del">Xóa</button>
+              </div>
+              <div class="domain-item">
+                <div class="domain-dot"></div>
+                <div class="domain-name">xp.apple.com</div>
+                <button class="domain-del">Xóa</button>
+              </div>
+            </div>
+
+            <button class="btn-secondary">+ Thêm domain</button>
+            <button class="btn-secondary">Import list…</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add domain sheet-ish -->
+    <div class="phone-wrap">
+      <div class="phone-label">Thêm domain + empty state<div class="phone-tag">Editor / empty</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">Hủy</button>
+              <div class="nav-title">Thêm domain</div>
+              <button class="nav-link right">Thêm</button>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="sec-label">Domain hoặc host</div>
+            <div class="field">
+              <label>Host</label>
+              <div class="val placeholder">ví dụ: ads.example.com</div>
+            </div>
+
+            <div class="sec-label">Loại</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="radio on"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Block</div>
+                  <div class="row-sub">Chặn resolve / request</div>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body">
+                  <div class="row-title bold">Allow</div>
+                  <div class="row-sub">Ngoại lệ khi dùng block-all</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec-label">Match</div>
+            <div class="card">
+              <div class="check-row">
+                <div class="radio on"></div>
+                <div class="row-body"><div class="row-title">Exact host</div></div>
+              </div>
+              <div class="check-row">
+                <div class="radio"></div>
+                <div class="row-body"><div class="row-title">*.domain.com (wildcard)</div></div>
+              </div>
+            </div>
+
+            <div class="sec-label" style="margin-top:20px">Empty state (khi list rỗng)</div>
+            <div class="card" style="padding:28px 16px;text-align:center">
+              <div style="font-size:32px;margin-bottom:8px;opacity:0.5">🚫</div>
+              <div class="row-title bold">Chưa có domain nào</div>
+              <div class="row-sub" style="white-space:normal;margin-top:4px">Thêm host để chặn tracker / telemetry.</div>
+              <button class="btn-primary" style="margin-top:14px">+ Thêm domain đầu tiên</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 5. UI + BYPASS DETAIL ========== -->
+  <div class="section-head">5 · Bypass &amp; Giao diện <span>Canvas detail · Matrix · Profile indicator</span></div>
+  <div class="phones">
+    <!-- Canvas detail -->
+    <div class="phone-wrap">
+      <div class="phone-label">Canvas Fingerprint<div class="phone-tag">Noise controls</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Canvas</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="card" style="margin-bottom:10px">
+              <div class="row">
+                <div class="row-icon purple">⬚</div>
+                <div class="row-body">
+                  <div class="row-title">Bật Canvas Noise</div>
+                  <div class="row-sub">toDataURL · getImageData</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+
+            <div class="sec-label">Cường độ nhiễu</div>
+            <div class="card">
+              <div class="slider-block">
+                <div class="slider-top">
+                  <span class="row-title">Noise level</span>
+                  <span class="row-value brand">Low</span>
+                </div>
+                <div class="slider-track" style="margin-bottom:8px"><div class="fill" style="width:28%"></div><div class="knob" style="left:28%"></div></div>
+                <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2)">
+                  <span>Off</span><span>Low</span><span>Med</span><span>High</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec-label">Phạm vi</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-body"><div class="row-title">WebKit only</div></div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Native CGContext</div></div>
+                <div class="switch"></div>
+              </div>
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title">Stable per-boot seed</div>
+                  <div class="row-sub">Cùng nhiễu trong 1 phiên</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Matrix + Profile -->
+    <div class="phone-wrap">
+      <div class="phone-label">Giao diện — Matrix &amp; Indicator<div class="phone-tag">UI toggles</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Giao diện</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="sec-label">Matrix Rain</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon matrix">雨</div>
+                <div class="row-body">
+                  <div class="row-title">Hiệu ứng Matrix Rain</div>
+                  <div class="row-sub">Nền Home / Security</div>
+                </div>
+                <div class="switch"></div>
+              </div>
+              <div class="row">
+                <div class="row-body">
+                  <div class="row-title">Tắt khi Reduce Motion</div>
+                  <div class="row-sub">Tôn trọng Accessibility</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="slider-block">
+                <div class="slider-top">
+                  <span class="row-title">Opacity</span>
+                  <span class="row-value brand">35%</span>
+                </div>
+                <div class="slider-track"><div class="fill" style="width:35%"></div><div class="knob" style="left:35%"></div></div>
+              </div>
+            </div>
+            <div class="sec-footer">Mặc định TẮT. Không chạy nền khi user chưa bật.</div>
+
+            <div class="sec-label">Profile Indicator</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon blue">◉</div>
+                <div class="row-body">
+                  <div class="row-title">Hiện trên SpringBoard</div>
+                  <div class="row-sub">Chấm / pill profile đang active</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Vị trí</div></div>
+                <span class="row-value">Top-trailing</span>
+                <span class="chevron">›</span>
+              </div>
+              <div class="row">
+                <div class="row-body"><div class="row-title">Kiểu</div></div>
+                <span class="row-value">Dot</span>
+                <span class="chevron">›</span>
+              </div>
+            </div>
+
+            <div class="sec-label">Preview</div>
+            <div class="card" style="padding:16px;position:relative;height:90px;background:linear-gradient(180deg,#5AC8FA22,#007AFF11)">
+              <div style="position:absolute;top:12px;right:14px;width:10px;height:10px;border-radius:5px;background:var(--brand);box-shadow:0 0 8px var(--brand)"></div>
+              <div style="position:absolute;bottom:12px;left:14px;font-size:11px;color:var(--text2)">SpringBoard preview</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- JB + VPN detail -->
+    <div class="phone-wrap">
+      <div class="phone-label">Jailbreak &amp; VPN Detection<div class="phone-tag">Bypass detail</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-row">
+              <button class="nav-link">‹ Security</button>
+              <div class="nav-title">Bypass</div>
+              <span class="nav-spacer"></span>
+            </div>
+          </div>
+          <div class="content no-tab">
+            <div class="sec-label">Jailbreak Detection</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon matrix">⛨</div>
+                <div class="row-body">
+                  <div class="row-title">Master bypass</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">Hide scheme / file checks</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">Dyld image path filter</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">Sandbox / fork hooks</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check"></div>
+                <div class="row-body"><div class="row-title">ObjC runtime probes</div></div>
+              </div>
+            </div>
+
+            <div class="sec-label">VPN / Proxy Detection</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon blue">VPN</div>
+                <div class="row-body">
+                  <div class="row-title">Master bypass</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">Hide utun / ipsec interfaces</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">CFNetwork proxy settings</div></div>
+              </div>
+              <div class="check-row">
+                <div class="check on">✓</div>
+                <div class="row-body"><div class="row-title">NEVPN status spoof</div></div>
+              </div>
+            </div>
+            <div class="sec-footer">Root chỉ hiện master switch; chi tiết mở khi tap row (optional push).</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alert patterns -->
+    <div class="phone-wrap">
+      <div class="phone-label">Patterns — Alert &amp; toast<div class="phone-tag">System chrome</div></div>
+      <div class="phone">
+        <div class="phone-inner">
+          <div class="notch"></div>
+          <div class="status-bar">
+            <span>9:41</span>
+            <span class="right">●●●●  Wi-Fi  100%</span>
+          </div>
+          <div class="nav">
+            <div class="nav-large">Security</div>
+          </div>
+          <div class="content" style="filter:brightness(0.55)">
+            <div class="sec-hero">
+              <div class="shield">⛨</div>
+              <div>
+                <div class="t">9 / 12 lớp đang bật</div>
+                <div class="s">Matrix rain tắt</div>
+              </div>
+            </div>
+            <div class="sec-label">Dữ liệu &amp; Keychain</div>
+            <div class="card">
+              <div class="row">
+                <div class="row-icon orange">🔑</div>
+                <div class="row-body">
+                  <div class="row-title">System Keychain Wipe</div>
+                </div>
+                <div class="switch on"></div>
+              </div>
+            </div>
+          </div>
+          <!-- dim + alert -->
+          <div style="position:absolute;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:28px;z-index:40">
+            <div style="background:var(--card);border-radius:14px;width:100%;overflow:hidden;box-shadow:0 20px 40px rgba(0,0,0,0.35)">
+              <div style="padding:18px 16px 12px;text-align:center">
+                <div style="font-size:16px;font-weight:700;margin-bottom:6px">Bật Keychain Wipe?</div>
+                <div style="font-size:12px;color:var(--text2);line-height:1.4">Thao tác có thể đăng xuất dịch vụ hệ thống. Bạn chắc chứ?</div>
+              </div>
+              <div style="border-top:0.5px solid var(--sep);display:flex">
+                <button style="flex:1;border:0;background:transparent;padding:12px;font-size:16px;color:var(--brand);font-weight:400;border-right:0.5px solid var(--sep)">Hủy</button>
+                <button style="flex:1;border:0;background:transparent;padding:12px;font-size:16px;color:var(--danger);font-weight:600">Bật</button>
+              </div>
+            </div>
+          </div>
+          <!-- toast -->
+          <div style="position:absolute;left:16px;right:16px;top:58px;z-index:50;background:rgba(28,28,30,0.92);color:#fff;border-radius:12px;padding:10px 14px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;box-shadow:0 8px 24px rgba(0,0,0,0.3)">
+            <span style="color:var(--success)">✓</span> Đã lưu Connection Type
+          </div>
+          <div class="tabbar">
+            <div class="tab"><div class="ti">⌂</div>Home</div>
+            <div class="tab active"><div class="ti">⛨</div>Security</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <h3>Map sang code (Security tab)</h3>
+    <ul>
+      <li><b>Root</b> — <code>SecurityTabViewController</code>: large title, hero 9/12, 5 section cards InsetGrouped, giữ tabbar 2 tab.</li>
+      <li><b>WXControlRow</b> — icon màu + title + sub + trailing Switch | value+› | ›. Destructive dùng subtitle cảnh báo, không dùng chữ đỏ cho title thường.</li>
+      <li><b>Push details</b> — Connection Type, IP Status, Location, Network Data, Device Spoof, App Version, Time, Fix Version, Deep Clean, Domain Blocking (± Canvas/JB optional).</li>
+      <li><b>Inline toggles</b> — Jailbreak, VPN, Canvas, Network Data master, App Version, Time, Keychain Wipe master, Matrix, Profile Indicator.</li>
+      <li><b>Confirm</b> — UIAlert 2 nút cho Keychain Wipe / Nuclear clean; toast top sau khi Lưu.</li>
+      <li><b>Tokens</b> — WeaponXTheme brand/success/danger/warning/matrix + systemGrouped backgrounds (light/dark).</li>
+      <li><b>Không đổi IA navigation</b> — vẫn Home + Security; Tools ở Home.</li>
+    </ul>
+  </div>
+
+  <p class="footnote">
+    File: <code>docs/ui-security-detail-mockup.html</code><br/>
+    Mở bằng trình duyệt (Light/Dark) → chụp từng cụm màn hình.<br/>
+    Design system kế thừa: <code>docs/ui-redesign-mockup.html</code>
+  </p>
+
+<script>
+  function setTheme(dark) {
+    document.body.classList.toggle('dark', dark);
+    document.getElementById('btnLight').classList.toggle('active', !dark);
+    document.getElementById('btnDark').classList.toggle('active', dark);
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+  }
+</script>
+</body>
+</html>

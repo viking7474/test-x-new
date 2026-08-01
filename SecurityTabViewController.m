@@ -60,6 +60,9 @@
 @property (nonatomic, strong) NSString *currentTimeZoneId;
 @property (nonatomic, strong) UITextField *localIPv6Field;
 @property (nonatomic, strong) UIButton *localIPv6GenerateButton;
+@property (nonatomic, strong) UIStackView *cardsStack;
+@property (nonatomic, strong) UILabel *heroCountLabel;
+@property (nonatomic, strong) UILabel *heroSubtitleLabel;
 
 @end
 
@@ -270,11 +273,11 @@
 - (void)setupIPMonitorControl:(UIView *)contentView {
     // Create a glassmorphic control for IP Monitor
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
 
     // Title label
     UILabel *titleLabel = [[UILabel alloc] init];
@@ -440,9 +443,6 @@
 
     // Layout constraints
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:1260],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:200],
 
         [titleLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:16],
@@ -1011,53 +1011,61 @@
         [contentView.widthAnchor constraintEqualToAnchor:scrollView.widthAnchor]
     ]];
     
-    // Add Matrix Rain toggle control
-    [self setupMatrixControl:contentView];
-    
-    // Add Profile Indicator toggle control
-    [self setupProfileIndicatorControl:contentView];
-    
-    // Add Jailbreak Detection Bypass toggle control
+    // === Redesign Phase 1: grouped stack layout ===
+    UIStackView *cardsStack = [[UIStackView alloc] init];
+    cardsStack.axis = UILayoutConstraintAxisVertical;
+    cardsStack.alignment = UIStackViewAlignmentFill;
+    cardsStack.distribution = UIStackViewDistributionFill;
+    cardsStack.spacing = 12;
+    cardsStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:cardsStack];
+    self.cardsStack = cardsStack;
+    [NSLayoutConstraint activateConstraints:@[
+        [cardsStack.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:16],
+        [cardsStack.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
+        [cardsStack.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
+        [cardsStack.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-16]
+    ]];
+
+    // Hero summary header
+    [self.cardsStack addArrangedSubview:[self buildSecurityHeroView]];
+
+    // Section 1 — Bypass phát hiện
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"BYPASS PHÁT HIỆN"]];
     [self setupJailbreakDetectionControl:contentView];
-    
-    // Add Network Data Spoof toggle control
-    [self setupNetworkDataSpoofControl:contentView];
-    
-    // Add Network Connection Type control (WiFi/Cellular)
-    [self setupNetworkConnectionTypeControl:contentView];
-    
-    // Add Device Specific Spoofing control
-    [self setupDeviceSpecificSpoofingControl:contentView];
-    
-    // Add App Version Spoofing control
-    [self setupAppVersionSpoofingControl:contentView];
-
-    // Deep Clean (global clear-data verify scan)
-    [self setupDeepCleanControl:contentView];
-
-    // Allow system-app keychain wipe (dangerous)
-    [self setupSystemKeychainWipeControl:contentView];
-
-    // Fix Version (runtime-capped) control
-    [self setupFixVersionControl:contentView];
-    
-    // Add Domain Blocking control
-    [self setupDomainBlockingControl:contentView];
-    
-    // Add Canvas Fingerprinting Protection control
-    [self setupCanvasFingerprintingControl:contentView];
-    
-    // Add IP Monitor control above Setup Alert Check
-    [self setupIPMonitorControl:contentView];
-    // Add VPN Detection Bypass control
     [self setupVPNDetectionBypassControl:contentView];
-    // Add Setup Alert Check control
+    [self setupCanvasFingerprintingControl:contentView];
     [self setupAlertChecksSection:contentView];
-    // Add Time Spoofing control
+
+    // Section 2 — Mạng & vị trí
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"MẠNG & VỊ TRÍ"]];
+    [self setupNetworkDataSpoofControl:contentView];
+    [self setupNetworkConnectionTypeControl:contentView];
+    [self setupIPMonitorControl:contentView];
+
+    // Section 3 — Spoof thiết bị & app
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"SPOOF THIẾT BỊ & APP"]];
+    [self setupDeviceSpecificSpoofingControl:contentView];
+    [self setupAppVersionSpoofingControl:contentView];
     [self setupTimeSpoofingControl:contentView];
-    
-    // Add HYDRA copyright at bottom
+    [self setupFixVersionControl:contentView];
+
+    // Section 4 — Dữ liệu & Keychain
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"DỮ LIỆU & KEYCHAIN"]];
+    [self setupDeepCleanControl:contentView];
+    [self setupSystemKeychainWipeControl:contentView];
+    [self setupDomainBlockingControl:contentView];
+
+    // Section 5 — Giao diện
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"GIAO DIỆN"]];
+    [self setupMatrixControl:contentView];
+    [self setupProfileIndicatorControl:contentView];
+
+    // Footer
     [self setupCopyrightLabel:contentView];
+
+    // Compute hero summary from actual toggle states
+    [self updateSecurityHeroCount];
 }
 
 static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
@@ -1235,11 +1243,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupMatrixControl:(UIView *)contentView {
     // Create a simple glassmorphic control for Matrix Rain toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Matrix label
     self.matrixLabel = [[UILabel alloc] init];
@@ -1272,9 +1280,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position toggle control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:20],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:60],
         
         [self.matrixLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -1296,11 +1301,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupProfileIndicatorControl:(UIView *)contentView {
     // Create a glassmorphic control for Profile Indicator toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Profile indicator label
     self.profileIndicatorLabel = [[UILabel alloc] init];
@@ -1341,9 +1346,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control under the matrix control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:100], // Position below Matrix control
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:60],
         
         [self.profileIndicatorLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -1365,11 +1367,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupJailbreakDetectionControl:(UIView *)contentView {
     // Create a glassmorphic control for Jailbreak Detection Bypass toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Jailbreak detection bypass label
     self.jailbreakDetectionLabel = [[UILabel alloc] init];
@@ -1406,9 +1408,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control under the profile indicator control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:180], // Position below Profile Indicator control
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:60],
         
         [self.jailbreakDetectionLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -1430,11 +1429,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupNetworkDataSpoofControl:(UIView *)contentView {
     // Create a glassmorphic control for Network Data Spoof toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Network Data Spoof label
     self.networkDataSpoofLabel = [[UILabel alloc] init];
@@ -1480,9 +1479,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control under the jailbreak detection control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:260], // Position below Jailbreak Detection control
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:60],
         
         [self.networkDataSpoofLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -1511,12 +1507,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Create a glassmorphic control for Network Connection Type selection
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
     controlView.alpha = networkDataSpoofEnabled ? 0.8 : 0.4; // Dim if network spoofing is disabled
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
     controlView.tag = 1001; // Tag for easy reference
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Network Connection Type label
     self.networkConnectionTypeLabel = [[UILabel alloc] init];
@@ -1803,9 +1799,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control under the network data spoof control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:340], // Position below Network Data Spoof control
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:200], // Increased height to accommodate carrier details and local IP
         
         // Position label at the top with info button beside it
@@ -2625,11 +2618,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupVPNDetectionBypassControl:(UIView *)contentView {
     // Create a glassmorphic control for VPN/PROXY Detection Bypass
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
 
     // Label
     self.vpnDetectionLabel = [[UILabel alloc] init];
@@ -2663,9 +2656,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     // Position above Setup Alert Checks (e.g., top: 790)
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:1470],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:60],
 
         [self.vpnDetectionLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -2687,11 +2677,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupAlertChecksSection:(UIView *)contentView {
     // Create a glassmorphic container for alert checks
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Section title label
     UILabel *titleLabel = [[UILabel alloc] init];
@@ -2759,9 +2749,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control between app version spoofing and copyright
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:self.vpnDetectionLabel.superview.bottomAnchor constant:15], // Directly below VPN/PROXY Detection Bypass card
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:215], // Increased height for six items
         
         // Position title at the top
@@ -2803,12 +2790,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupTimeSpoofingControl:(UIView *)contentView {
     // Create glassmorphic control
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
     controlView.tag = 2001;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
 
     // Label
     UILabel *label = [[UILabel alloc] init];
@@ -2863,9 +2850,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     // Layout constraints
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:1780],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:140],
         
         [label.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
@@ -3058,7 +3042,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.copyrightLabel.textAlignment = NSTextAlignmentCenter;
     self.copyrightLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.copyrightLabel.alpha = 0.7;
-    [contentView addSubview:self.copyrightLabel];
+    [self.cardsStack addArrangedSubview:self.copyrightLabel];
     
     // Add subtle glow effect
     self.copyrightLabel.layer.shadowColor = [UIColor colorWithRed:0.0 green:1.0 blue:0.0 alpha:1.0].CGColor;
@@ -3068,10 +3052,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position at the bottom of the page after the Canvas Fingerprinting control
     [NSLayoutConstraint activateConstraints:@[
-        [self.copyrightLabel.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
-        [self.copyrightLabel.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
-        [self.copyrightLabel.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:2220], // Positioned after Canvas Fingerprinting
-        [self.copyrightLabel.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-30] // More bottom padding
     ]];
     
     // Add subtle pulsing animation
@@ -3233,11 +3213,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupDeviceSpecificSpoofingControl:(UIView *)contentView {
     // Create a glassmorphic control for Device Specific Spoofing
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Device specific spoofing label
     self.deviceSpoofingLabel = [[UILabel alloc] init];
@@ -3435,9 +3415,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control under the network connection type control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:520], // Increased spacing below Network Connection Type
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:240], // Extra rows for Safari/Auth stack + WebCompat + Test toggles
         
         // Position label at the top
@@ -3754,11 +3731,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupAppVersionSpoofingControl:(UIView *)contentView {
     // Create a glassmorphic control for App Version Spoofing
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // App version spoofing label
     self.appVersionSpoofingLabel = [[UILabel alloc] init];
@@ -3865,9 +3842,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control under the device specific spoofing control
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:780], // Increased spacing below Device Specific Spoofing
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:100], // Increased height to accommodate vertical layout
         
         // Position label at the top
@@ -3912,11 +3886,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupFixVersionControl:(UIView *)contentView {
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
 
     self.fixVersionLabel = [[UILabel alloc] init];
     self.fixVersionLabel.text = @"Fix Version";
@@ -3996,9 +3970,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [bottomRowContainer addSubview:self.fixVersionToggleSwitch];
 
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:1140],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:100],
 
         [self.fixVersionLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -4041,11 +4012,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupDeepCleanControl:(UIView *)contentView {
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
 
     self.deepCleanLabel = [[UILabel alloc] init];
     self.deepCleanLabel.text = @"Clear Data Mode";
@@ -4089,9 +4060,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [controlView.contentView addSubview:self.deepCleanHintLabel];
 
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:900],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:100],
 
         [self.deepCleanLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -4118,11 +4086,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupSystemKeychainWipeControl:(UIView *)contentView {
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
 
     self.systemKeychainWipeLabel = [[UILabel alloc] init];
     self.systemKeychainWipeLabel.text = @"System Keychain Wipe";
@@ -4163,9 +4131,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [bottomRowContainer addSubview:self.systemKeychainWipeToggleSwitch];
 
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:1020],
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:100],
 
         [self.systemKeychainWipeLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
@@ -4739,11 +4704,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupDomainBlockingControl:(UIView *)contentView {
     // Create a glassmorphic control for Domain Blocking
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Title label
     UILabel *titleLabel = [[UILabel alloc] init];
@@ -4789,9 +4754,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Layout constraints
     [NSLayoutConstraint activateConstraints:@[
         // Control view
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:1940], // Position between App Version Spoofing and Canvas Fingerprinting
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:120],
         
         // Title label
@@ -4822,11 +4784,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupCanvasFingerprintingControl:(UIView *)contentView {
     // Create a glassmorphic control with EXACT same style as other cells (like VPN/PROXY Detection Bypass)
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
-    controlView.layer.cornerRadius = 20;
+    controlView.layer.cornerRadius = 16;
     controlView.clipsToBounds = YES;
-    controlView.alpha = 0.8;
+    controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:controlView];
+    [self.cardsStack addArrangedSubview:controlView];
     
     // Set background color to match other controls
     if (@available(iOS 13.0, *)) {
@@ -4965,9 +4927,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Position control between Domain Blocking and Copyright label
     [NSLayoutConstraint activateConstraints:@[
-        [controlView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:2080], // Moved down to be below Domain Blocking
-        [controlView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [controlView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
         [controlView.heightAnchor constraintEqualToConstant:120],
         
         // Position label at the top
@@ -5201,6 +5160,115 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
+}
+
+#pragma mark - Redesign Phase 1 Helpers
+
+- (UIView *)buildSecurityHeroView {
+    UIView *hero = [[UIView alloc] init];
+    hero.translatesAutoresizingMaskIntoConstraints = NO;
+    if (@available(iOS 13.0, *)) {
+        hero.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    } else {
+        hero.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    }
+    hero.layer.cornerRadius = 16;
+    hero.clipsToBounds = YES;
+
+    UIView *ring = [[UIView alloc] init];
+    ring.translatesAutoresizingMaskIntoConstraints = NO;
+    ring.layer.cornerRadius = 30;
+    ring.layer.borderWidth = 3.0;
+    ring.layer.borderColor = [UIColor systemBlueColor].CGColor;
+    ring.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.10];
+    [hero addSubview:ring];
+
+    UILabel *countLabel = [[UILabel alloc] init];
+    countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    countLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    countLabel.textColor = [UIColor labelColor];
+    countLabel.textAlignment = NSTextAlignmentCenter;
+    countLabel.text = @"0/0";
+    self.heroCountLabel = countLabel;
+    [ring addSubview:countLabel];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    title.textColor = [UIColor labelColor];
+    title.text = @"Security";
+    [hero addSubview:title];
+
+    UILabel *subtitle = [[UILabel alloc] init];
+    subtitle.translatesAutoresizingMaskIntoConstraints = NO;
+    subtitle.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
+    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.numberOfLines = 2;
+    subtitle.text = @"lớp bảo mật đang bật";
+    self.heroSubtitleLabel = subtitle;
+    [hero addSubview:subtitle];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [hero.heightAnchor constraintEqualToConstant:104],
+
+        [ring.leadingAnchor constraintEqualToAnchor:hero.leadingAnchor constant:16],
+        [ring.centerYAnchor constraintEqualToAnchor:hero.centerYAnchor],
+        [ring.widthAnchor constraintEqualToConstant:60],
+        [ring.heightAnchor constraintEqualToConstant:60],
+
+        [countLabel.centerXAnchor constraintEqualToAnchor:ring.centerXAnchor],
+        [countLabel.centerYAnchor constraintEqualToAnchor:ring.centerYAnchor],
+
+        [title.leadingAnchor constraintEqualToAnchor:ring.trailingAnchor constant:16],
+        [title.trailingAnchor constraintEqualToAnchor:hero.trailingAnchor constant:-16],
+        [title.topAnchor constraintEqualToAnchor:ring.topAnchor constant:2],
+
+        [subtitle.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
+        [subtitle.trailingAnchor constraintEqualToAnchor:hero.trailingAnchor constant:-16],
+        [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:4]
+    ]];
+
+    return hero;
+}
+
+- (UILabel *)securitySectionHeaderWithTitle:(NSString *)title {
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = title;
+    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    label.textColor = [UIColor secondaryLabelColor];
+    if (self.cardsStack && self.cardsStack.arrangedSubviews.count > 0) {
+        [self.cardsStack setCustomSpacing:22 afterView:self.cardsStack.arrangedSubviews.lastObject];
+    }
+    return label;
+}
+
+- (NSUInteger)countEnabledSecurityLayers:(NSUInteger *)totalOut {
+    NSMutableArray<UISwitch *> *all = [NSMutableArray array];
+    void (^add)(UISwitch *) = ^(UISwitch *sw){ if (sw) [all addObject:sw]; };
+    add(self.jailbreakDetectionToggleSwitch);
+    add(self.vpnDetectionToggleSwitch);
+    add(self.canvasFingerprintingToggleSwitch);
+    add(self.networkDataSpoofToggleSwitch);
+    add(self.deviceSpoofingToggleSwitch);
+    add(self.appVersionSpoofingToggleSwitch);
+    add(self.fixVersionToggleSwitch);
+    add(self.systemKeychainWipeToggleSwitch);
+    add(self.domainBlockingToggleSwitch);
+    add(self.matrixToggleSwitch);
+    add(self.profileIndicatorToggleSwitch);
+    add(self.ipMonitorToggleSwitch);
+    NSUInteger on = 0;
+    for (UISwitch *sw in all) { if (sw.isOn) on++; }
+    if (totalOut) *totalOut = all.count;
+    return on;
+}
+
+- (void)updateSecurityHeroCount {
+    NSUInteger total = 0;
+    NSUInteger on = [self countEnabledSecurityLayers:&total];
+    self.heroCountLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)on, (unsigned long)total];
+    self.heroSubtitleLabel.text = [NSString stringWithFormat:@"%lu/%lu lớp bảo mật đang bật", (unsigned long)on, (unsigned long)total];
 }
 
 @end
