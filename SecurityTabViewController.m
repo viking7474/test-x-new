@@ -274,6 +274,7 @@
     // Create a glassmorphic control for IP Monitor
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -286,6 +287,9 @@
     titleLabel.textColor = [UIColor labelColor];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:titleLabel];
+    // Icon chip (redesign)
+    UIView *ipmChip = [self securityIconChip:@"globe" color:[UIColor systemTealColor]];
+    [controlView.contentView addSubview:ipmChip];
 
     // Info button
     UIButton *ipInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
@@ -446,7 +450,9 @@
         [controlView.heightAnchor constraintEqualToConstant:200],
 
         [titleLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:16],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:ipmChip.trailingAnchor constant:12],
+        [ipmChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [ipmChip.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
         [ipInfoButton.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
         [ipInfoButton.leadingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor constant:8],
         [ipInfoButton.widthAnchor constraintEqualToConstant:24],
@@ -1244,6 +1250,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a simple glassmorphic control for Matrix Rain toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1256,6 +1263,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.matrixLabel.textColor = [UIColor labelColor];
     self.matrixLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.matrixLabel];
+    // Icon chip (redesign)
+    UIView *mxChip = [self securityIconChip:@"square.grid.3x3" color:[UIColor systemGreenColor]];
+    [controlView.contentView addSubview:mxChip];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -1282,8 +1292,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:60],
         
-        [self.matrixLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.matrixLabel.leadingAnchor constraintEqualToAnchor:mxChip.trailingAnchor constant:12],
         [self.matrixLabel.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
+        [mxChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [mxChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.matrixLabel.trailingAnchor constant:10],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
@@ -1302,6 +1314,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for Profile Indicator toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1314,6 +1327,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.profileIndicatorLabel.textColor = [UIColor labelColor];
     self.profileIndicatorLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.profileIndicatorLabel];
+    // Icon chip (redesign)
+    UIView *pfChip = [self securityIconChip:@"person.crop.circle" color:[UIColor systemPurpleColor]];
+    [controlView.contentView addSubview:pfChip];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -1348,8 +1364,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:60],
         
-        [self.profileIndicatorLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.profileIndicatorLabel.leadingAnchor constraintEqualToAnchor:pfChip.trailingAnchor constant:12],
         [self.profileIndicatorLabel.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
+        [pfChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [pfChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.profileIndicatorLabel.trailingAnchor constant:10],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
@@ -1368,6 +1386,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for Jailbreak Detection Bypass toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1380,6 +1399,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.jailbreakDetectionLabel.textColor = [UIColor labelColor];
     self.jailbreakDetectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.jailbreakDetectionLabel];
+    
+    // Icon chip (redesign pilot)
+    UIView *jbChip = [self securityIconChip:@"lock.shield" color:[UIColor systemBlueColor]];
+    [controlView.contentView addSubview:jbChip];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -1410,8 +1433,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:60],
         
-        [self.jailbreakDetectionLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.jailbreakDetectionLabel.leadingAnchor constraintEqualToAnchor:jbChip.trailingAnchor constant:12],
         [self.jailbreakDetectionLabel.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
+        [jbChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [jbChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.jailbreakDetectionLabel.trailingAnchor constant:10],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
@@ -1430,6 +1455,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for Network Data Spoof toggle
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1442,6 +1468,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkDataSpoofLabel.textColor = [UIColor labelColor];
     self.networkDataSpoofLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.networkDataSpoofLabel];
+    // Icon chip (redesign)
+    UIView *ndChip = [self securityIconChip:@"antenna.radiowaves.left.and.right" color:[UIColor systemTealColor]];
+    [controlView.contentView addSubview:ndChip];
     
     // Optional label (yellow text)
     UILabel *optionalLabel = [[UILabel alloc] init];
@@ -1481,8 +1510,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:60],
         
-        [self.networkDataSpoofLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.networkDataSpoofLabel.leadingAnchor constraintEqualToAnchor:ndChip.trailingAnchor constant:12],
         [self.networkDataSpoofLabel.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
+        [ndChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [ndChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         
         // Position optional label to the right of the Network Data Spoof label
         [optionalLabel.leadingAnchor constraintEqualToAnchor:self.networkDataSpoofLabel.trailingAnchor constant:5],
@@ -1508,6 +1539,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for Network Connection Type selection
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = networkDataSpoofEnabled ? 0.8 : 0.4; // Dim if network spoofing is disabled
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1521,6 +1553,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkConnectionTypeLabel.textColor = [UIColor labelColor];
     self.networkConnectionTypeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.networkConnectionTypeLabel];
+    // Icon chip (redesign)
+    UIView *nctChip = [self securityIconChip:@"wifi" color:[UIColor systemTealColor]];
+    [controlView.contentView addSubview:nctChip];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -1802,7 +1837,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [controlView.heightAnchor constraintEqualToConstant:200], // Increased height to accommodate carrier details and local IP
         
         // Position label at the top with info button beside it
-        [self.networkConnectionTypeLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.networkConnectionTypeLabel.leadingAnchor constraintEqualToAnchor:nctChip.trailingAnchor constant:12],
+        [nctChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [nctChip.centerYAnchor constraintEqualToAnchor:self.networkConnectionTypeLabel.centerYAnchor],
         [self.networkConnectionTypeLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
         
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.networkConnectionTypeLabel.trailingAnchor constant:10],
@@ -2619,6 +2656,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for VPN/PROXY Detection Bypass
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2631,6 +2669,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.vpnDetectionLabel.textColor = [UIColor labelColor];
     self.vpnDetectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.vpnDetectionLabel];
+    // Icon chip (redesign)
+    UIView *vpnChip = [self securityIconChip:@"network.badge.shield.half.filled" color:[UIColor systemBlueColor]];
+    [controlView.contentView addSubview:vpnChip];
 
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -2658,8 +2699,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:60],
 
-        [self.vpnDetectionLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.vpnDetectionLabel.leadingAnchor constraintEqualToAnchor:vpnChip.trailingAnchor constant:12],
         [self.vpnDetectionLabel.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
+        [vpnChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [vpnChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
 
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.vpnDetectionLabel.trailingAnchor constant:10],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
@@ -2678,6 +2721,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic container for alert checks
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2690,6 +2734,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     titleLabel.textColor = [UIColor systemRedColor];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:titleLabel];
+    // Icon chip (redesign)
+    UIView *acChip = [self securityIconChip:@"exclamationmark.triangle" color:[UIColor systemOrangeColor]];
+    [controlView.contentView addSubview:acChip];
     
     // Add "Recommended" label
     UILabel *recommendedLabel = [[UILabel alloc] init];
@@ -2753,7 +2800,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         
         // Position title at the top
         [titleLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:acChip.trailingAnchor constant:12],
+        [acChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [acChip.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
         
         // Position "Recommended" label to the right of the title
         [recommendedLabel.leadingAnchor constraintEqualToAnchor:titleLabel.trailingAnchor constant:8],
@@ -2791,6 +2840,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create glassmorphic control
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2804,6 +2854,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     label.textColor = [UIColor labelColor];
     label.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:label];
+    // Icon chip (redesign)
+    UIView *tsChip = [self securityIconChip:@"clock" color:[UIColor systemOrangeColor]];
+    [controlView.contentView addSubview:tsChip];
     
     // IP Label
     self.ipLabel = [[UILabel alloc] init];
@@ -2853,7 +2906,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [controlView.heightAnchor constraintEqualToConstant:140],
         
         [label.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
-        [label.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [label.leadingAnchor constraintEqualToAnchor:tsChip.trailingAnchor constant:12],
+        [tsChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [tsChip.centerYAnchor constraintEqualToAnchor:label.centerYAnchor],
         
         [infoBgView.leadingAnchor constraintEqualToAnchor:label.trailingAnchor constant:8],
         [infoBgView.centerYAnchor constraintEqualToAnchor:label.centerYAnchor],
@@ -3214,6 +3269,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for Device Specific Spoofing
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3226,6 +3282,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.deviceSpoofingLabel.textColor = [UIColor labelColor];
     self.deviceSpoofingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.deviceSpoofingLabel];
+    // Icon chip (redesign)
+    UIView *dsChip = [self securityIconChip:@"iphone" color:[UIColor systemBlueColor]];
+    [controlView.contentView addSubview:dsChip];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -3418,7 +3477,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [controlView.heightAnchor constraintEqualToConstant:240], // Extra rows for Safari/Auth stack + WebCompat + Test toggles
         
         // Position label at the top
-        [self.deviceSpoofingLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.deviceSpoofingLabel.leadingAnchor constraintEqualToAnchor:dsChip.trailingAnchor constant:12],
+        [dsChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [dsChip.centerYAnchor constraintEqualToAnchor:self.deviceSpoofingLabel.centerYAnchor],
         [self.deviceSpoofingLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
         
         // Position info button to the right of the label
@@ -3732,6 +3793,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for App Version Spoofing
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3744,6 +3806,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.appVersionSpoofingLabel.textColor = [UIColor labelColor];
     self.appVersionSpoofingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.appVersionSpoofingLabel];
+    // Icon chip (redesign)
+    UIView *avChip = [self securityIconChip:@"app.badge" color:[UIColor systemBlueColor]];
+    [controlView.contentView addSubview:avChip];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -3845,7 +3910,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [controlView.heightAnchor constraintEqualToConstant:100], // Increased height to accommodate vertical layout
         
         // Position label at the top
-        [self.appVersionSpoofingLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.appVersionSpoofingLabel.leadingAnchor constraintEqualToAnchor:avChip.trailingAnchor constant:12],
+        [avChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [avChip.centerYAnchor constraintEqualToAnchor:self.appVersionSpoofingLabel.centerYAnchor],
         [self.appVersionSpoofingLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
         
         // Position info button to the right of the label
@@ -3887,6 +3954,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupFixVersionControl:(UIView *)contentView {
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3898,6 +3966,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.fixVersionLabel.textColor = [UIColor labelColor];
     self.fixVersionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.fixVersionLabel];
+    // Icon chip (redesign)
+    UIView *fvChip = [self securityIconChip:@"wrench.and.screwdriver" color:[UIColor systemOrangeColor]];
+    [controlView.contentView addSubview:fvChip];
 
     UIView *infoBgView = [[UIView alloc] init];
     infoBgView.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
@@ -3972,7 +4043,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:100],
 
-        [self.fixVersionLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.fixVersionLabel.leadingAnchor constraintEqualToAnchor:fvChip.trailingAnchor constant:12],
+        [fvChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [fvChip.centerYAnchor constraintEqualToAnchor:self.fixVersionLabel.centerYAnchor],
         [self.fixVersionLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
 
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.fixVersionLabel.trailingAnchor constant:10],
@@ -4013,6 +4086,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupDeepCleanControl:(UIView *)contentView {
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4024,6 +4098,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.deepCleanLabel.textColor = [UIColor labelColor];
     self.deepCleanLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.deepCleanLabel];
+    // Icon chip (redesign)
+    UIView *dcChip = [self securityIconChip:@"trash" color:[UIColor systemRedColor]];
+    [controlView.contentView addSubview:dcChip];
 
     UIView *infoBgView = [[UIView alloc] init];
     infoBgView.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
@@ -4062,7 +4139,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:100],
 
-        [self.deepCleanLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.deepCleanLabel.leadingAnchor constraintEqualToAnchor:dcChip.trailingAnchor constant:12],
+        [dcChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [dcChip.centerYAnchor constraintEqualToAnchor:self.deepCleanLabel.centerYAnchor],
         [self.deepCleanLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
 
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.deepCleanLabel.trailingAnchor constant:10],
@@ -4087,6 +4166,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)setupSystemKeychainWipeControl:(UIView *)contentView {
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4098,6 +4178,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.systemKeychainWipeLabel.textColor = [UIColor labelColor];
     self.systemKeychainWipeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.systemKeychainWipeLabel];
+    // Icon chip (redesign)
+    UIView *skChip = [self securityIconChip:@"key" color:[UIColor systemRedColor]];
+    [controlView.contentView addSubview:skChip];
 
     UIView *infoBgView = [[UIView alloc] init];
     infoBgView.backgroundColor = [UIColor.systemRedColor colorWithAlphaComponent:0.12];
@@ -4133,7 +4216,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NSLayoutConstraint activateConstraints:@[
         [controlView.heightAnchor constraintEqualToConstant:100],
 
-        [self.systemKeychainWipeLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.systemKeychainWipeLabel.leadingAnchor constraintEqualToAnchor:skChip.trailingAnchor constant:12],
+        [skChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [skChip.centerYAnchor constraintEqualToAnchor:self.systemKeychainWipeLabel.centerYAnchor],
         [self.systemKeychainWipeLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
 
         [infoBgView.leadingAnchor constraintEqualToAnchor:self.systemKeychainWipeLabel.trailingAnchor constant:10],
@@ -4705,6 +4790,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control for Domain Blocking
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4716,6 +4802,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:titleLabel];
+    // Icon chip (redesign)
+    UIView *dmChip = [self securityIconChip:@"globe.badge.chevron.backward" color:[UIColor systemGreenColor]];
+    [controlView.contentView addSubview:dmChip];
     
     // Description label
     UILabel *descriptionLabel = [[UILabel alloc] init];
@@ -4758,7 +4847,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         
         // Title label
         [titleLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:15],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:dmChip.trailingAnchor constant:12],
+        [dmChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [dmChip.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
         
         // Info button
         [infoButton.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
@@ -4785,6 +4876,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create a glassmorphic control with EXACT same style as other cells (like VPN/PROXY Detection Bypass)
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
     controlView.layer.cornerRadius = 16;
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4804,6 +4896,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.canvasFingerprintingLabel.textColor = [UIColor labelColor];
     self.canvasFingerprintingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.canvasFingerprintingLabel];
+    // Icon chip (redesign)
+    UIView *cvChip = [self securityIconChip:@"paintbrush.pointed" color:[UIColor systemPurpleColor]];
+    [controlView.contentView addSubview:cvChip];
     
     // Info button with circular background (styled EXACTLY like other info buttons)
     UIView *infoBgView = [[UIView alloc] init];
@@ -4930,7 +5025,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [controlView.heightAnchor constraintEqualToConstant:120],
         
         // Position label at the top
-        [self.canvasFingerprintingLabel.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:20],
+        [self.canvasFingerprintingLabel.leadingAnchor constraintEqualToAnchor:cvChip.trailingAnchor constant:12],
+        [cvChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
+        [cvChip.centerYAnchor constraintEqualToAnchor:self.canvasFingerprintingLabel.centerYAnchor],
         [self.canvasFingerprintingLabel.topAnchor constraintEqualToAnchor:controlView.contentView.topAnchor constant:15],
         
         // Position info button to the right of the label
@@ -5269,6 +5366,33 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     NSUInteger on = [self countEnabledSecurityLayers:&total];
     self.heroCountLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)on, (unsigned long)total];
     self.heroSubtitleLabel.text = [NSString stringWithFormat:@"%lu/%lu lớp bảo mật đang bật", (unsigned long)on, (unsigned long)total];
+}
+
+#pragma mark - Redesign icon chip
+
+- (UIView *)securityIconChip:(NSString *)symbolName color:(UIColor *)color {
+    UIView *chip = [[UIView alloc] init];
+    chip.translatesAutoresizingMaskIntoConstraints = NO;
+    chip.backgroundColor = [color colorWithAlphaComponent:0.15];
+    chip.layer.cornerRadius = 7;
+    chip.clipsToBounds = YES;
+    UIImageView *iv = [[UIImageView alloc] init];
+    iv.translatesAutoresizingMaskIntoConstraints = NO;
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.tintColor = color;
+    if (@available(iOS 13.0, *)) {
+        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    [chip addSubview:iv];
+    [NSLayoutConstraint activateConstraints:@[
+        [chip.widthAnchor constraintEqualToConstant:30],
+        [chip.heightAnchor constraintEqualToConstant:30],
+        [iv.centerXAnchor constraintEqualToAnchor:chip.centerXAnchor],
+        [iv.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+        [iv.widthAnchor constraintEqualToConstant:17],
+        [iv.heightAnchor constraintEqualToConstant:17]
+    ]];
+    return chip;
 }
 
 @end
