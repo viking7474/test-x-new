@@ -18,6 +18,8 @@
 #import "ConnectionTypeDetailViewController.h"
 #import "TimeSpoofDetailViewController.h"
 #import "CanvasDetailViewController.h"
+#import "JailbreakDetailViewController.h"
+#import "SystemKeychainWipeDetailViewController.h"
 #import <notify.h>  // Add this import for Darwin notification functions
 #import "common/UIButton+SafeConfiguration.h"
 #import "common/VersionCompare.h"
@@ -1422,7 +1424,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.jailbreakDetectionInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     self.jailbreakDetectionInfoButton.tintColor = [UIColor systemBlueColor];
     self.jailbreakDetectionInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.jailbreakDetectionInfoButton addTarget:self action:@selector(showJailbreakDetectionInfo) forControlEvents:UIControlEventTouchUpInside];
+    [self.jailbreakDetectionInfoButton addTarget:self action:@selector(openJailbreakDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.jailbreakDetectionInfoButton];
     
     // Jailbreak Detection Bypass toggle switch
@@ -2405,6 +2407,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
     
     [rootVC presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)openJailbreakDetail {
+    JailbreakDetailViewController *vc = [[JailbreakDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 - (void)showJailbreakDetectionInfo {
@@ -4241,7 +4254,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.systemKeychainWipeInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     self.systemKeychainWipeInfoButton.tintColor = [UIColor systemRedColor];
     self.systemKeychainWipeInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.systemKeychainWipeInfoButton addTarget:self action:@selector(showSystemKeychainWipeInfo) forControlEvents:UIControlEventTouchUpInside];
+    [self.systemKeychainWipeInfoButton addTarget:self action:@selector(openSystemKeychainWipeDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.systemKeychainWipeInfoButton];
 
     UIView *bottomRowContainer = [[UIView alloc] init];
@@ -4290,6 +4303,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [self.systemKeychainWipeToggleSwitch.centerYAnchor constraintEqualToAnchor:bottomRowContainer.centerYAnchor],
         [self.systemKeychainWipeToggleSwitch.trailingAnchor constraintEqualToAnchor:bottomRowContainer.trailingAnchor]
     ]];
+}
+
+- (void)openSystemKeychainWipeDetail {
+    SystemKeychainWipeDetailViewController *vc = [[SystemKeychainWipeDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 - (void)showSystemKeychainWipeInfo {
