@@ -4252,9 +4252,26 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)systemKeychainWipeToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"allowSystemKeychainWipeEnabled"];
+    if (enabled) {
+        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Allow System Keychain Wipe?"
+                                                                        message:@"This lets Clear Data also wipe com.apple.* system keychain items for scoped apps. It can sign you out of system services and is hard to undo. Continue?"
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+            [sender setOn:NO animated:YES];
+        }]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Allow" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+            [self.securitySettings setBool:YES forKey:@"allowSystemKeychainWipeEnabled"];
+            [self.securitySettings synchronize];
+            [self showToastWithMessage:@"System Keychain Wipe allowed"];
+            UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+            [gen prepare];
+            [gen impactOccurred];
+        }]];
+        [self presentViewController:confirm animated:YES completion:nil];
+        return;
+    }
+    [self.securitySettings setBool:NO forKey:@"allowSystemKeychainWipeEnabled"];
     [self.securitySettings synchronize];
-
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
