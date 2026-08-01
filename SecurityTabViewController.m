@@ -20,6 +20,8 @@
 #import "CanvasDetailViewController.h"
 #import "JailbreakDetailViewController.h"
 #import "SystemKeychainWipeDetailViewController.h"
+#import "VPNDetectionDetailViewController.h"
+#import "AppVersionListDetailViewController.h"
 #import <notify.h>  // Add this import for Darwin notification functions
 #import "common/UIButton+SafeConfiguration.h"
 #import "common/VersionCompare.h"
@@ -2726,7 +2728,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.vpnDetectionInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     self.vpnDetectionInfoButton.tintColor = [UIColor systemBlueColor];
     self.vpnDetectionInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.vpnDetectionInfoButton addTarget:self action:@selector(showVPNDetectionInfo) forControlEvents:UIControlEventTouchUpInside];
+    [self.vpnDetectionInfoButton addTarget:self action:@selector(openVPNDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.vpnDetectionInfoButton];
 
     // Toggle
@@ -3198,6 +3200,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self.securitySettings setBool:enabled forKey:@"vpnDetectionBypassEnabled"];
     [self.securitySettings synchronize];
     // TODO: Add logic to enable/disable VPN/Proxy detection bypass in your backend
+}
+
+- (void)openVPNDetail {
+    VPNDetectionDetailViewController *vc = [[VPNDetectionDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 - (void)showVPNDetectionInfo {
@@ -4513,11 +4526,15 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [[IdentifierManager sharedManager] refreshScopedAppsInfoIfNeeded];
     
     // Pass toast message to AppVersionSpoofingViewController and present it
-    AppVersionSpoofingViewController *appVersionVC = [[AppVersionSpoofingViewController alloc] init];
-    appVersionVC.toastMessageToShow = @"Scoped Apps Info Updated\nAPPS real Version / Build";
-    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:appVersionVC];
-    navController.modalPresentationStyle = UIModalPresentationFullScreen;
-    [self presentViewController:navController animated:YES completion:nil];
+    // Open the redesigned per-app list screen
+    AppVersionListDetailViewController *appVersionListVC = [[AppVersionListDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:appVersionListVC animated:YES];
+    } else {
+        UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:appVersionListVC];
+        navController.modalPresentationStyle = UIModalPresentationFullScreen;
+        [self presentViewController:navController animated:YES completion:nil];
+    }
 }
 // Helper method to show a toast-like notification at the top
 - (void)showToastWithMessage:(NSString *)message {
