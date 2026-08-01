@@ -15,6 +15,9 @@
 #import "DomainManagementViewController.h"
 #import "DeepCleanDetailViewController.h"
 #import "NetworkDataDetailViewController.h"
+#import "ConnectionTypeDetailViewController.h"
+#import "TimeSpoofDetailViewController.h"
+#import "CanvasDetailViewController.h"
 #import <notify.h>  // Add this import for Darwin notification functions
 #import "common/UIButton+SafeConfiguration.h"
 #import "common/VersionCompare.h"
@@ -1572,7 +1575,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkConnectionTypeInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     self.networkConnectionTypeInfoButton.tintColor = [UIColor systemBlueColor];
     self.networkConnectionTypeInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.networkConnectionTypeInfoButton addTarget:self action:@selector(showNetworkConnectionTypeInfo) forControlEvents:UIControlEventTouchUpInside];
+    [self.networkConnectionTypeInfoButton addTarget:self action:@selector(openConnectionTypeDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.networkConnectionTypeInfoButton];
     
     // Network Connection Type segmented control
@@ -2487,6 +2490,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)openConnectionTypeDetail {
+    ConnectionTypeDetailViewController *vc = [[ConnectionTypeDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
+}
+
 - (void)showNetworkConnectionTypeInfo {
     UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Network Connection Type"
                                                                              message:@"Select how apps should see your network connection:\n\n• Auto - Randomly switches between WiFi and Cellular based on profile settings\n• WiFi - Always shows as connected via WiFi\n• Cellular - Always shows as connected via Cellular data\n• None - Never shows any network connection\n\nThis setting only works when Network Data Spoof is enabled."
@@ -2904,7 +2918,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     infoButton.tintColor = [UIColor systemBlueColor];
     infoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [infoButton addTarget:self action:@selector(showTimeSpoofingInfo) forControlEvents:UIControlEventTouchUpInside];
+    [infoButton addTarget:self action:@selector(openTimeSpoofDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:infoButton];
 
     // Segmented control
@@ -3093,6 +3107,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                 self.locationLabel.text = @"Location: Not available";
             }
         }
+    }
+}
+
+- (void)openTimeSpoofDetail {
+    TimeSpoofDetailViewController *vc = [[TimeSpoofDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
     }
 }
 
@@ -4969,7 +4994,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
     self.canvasFingerprintingInfoButton.tintColor = [UIColor systemBlueColor];
     self.canvasFingerprintingInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.canvasFingerprintingInfoButton addTarget:self action:@selector(canvasFingerprintingInfoButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.canvasFingerprintingInfoButton addTarget:self action:@selector(openCanvasDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.canvasFingerprintingInfoButton];
     
     // Container view for bottom row elements
@@ -5206,6 +5231,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     PXLog(@"[SecurityTab] 🎨 Canvas Fingerprinting %@: Persistent settings updated across all domains", 
            enabled ? @"ENABLED" : @"DISABLED");
+}
+
+- (void)openCanvasDetail {
+    CanvasDetailViewController *vc = [[CanvasDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 - (void)canvasFingerprintingInfoButtonTapped:(UIButton *)sender {
