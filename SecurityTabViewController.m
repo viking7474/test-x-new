@@ -350,6 +350,9 @@
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
+        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.imagePlacement = NSDirectionalRectEdgeTrailing;
+        config.imagePadding = 6;
         [self.ipMonitorCheckButton safeSetConfiguration:config];
     } else {
         [self.ipMonitorCheckButton setTitle:@"Check IP" forState:UIControlStateNormal];
@@ -3332,6 +3335,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
+        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.imagePlacement = NSDirectionalRectEdgeTrailing;
+        config.imagePadding = 6;
         [self.deviceSpoofingAccessButton safeSetConfiguration:config];
     } else {
         [self.deviceSpoofingAccessButton setTitle:@"Access" forState:UIControlStateNormal];
@@ -3856,6 +3862,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
+        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.imagePlacement = NSDirectionalRectEdgeTrailing;
+        config.imagePadding = 6;
         [self.appVersionSpoofingAccessButton safeSetConfiguration:config];
     } else {
         [self.appVersionSpoofingAccessButton setTitle:@"Access" forState:UIControlStateNormal];
@@ -4012,6 +4021,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
+        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.imagePlacement = NSDirectionalRectEdgeTrailing;
+        config.imagePadding = 6;
         [self.fixVersionAppsButton safeSetConfiguration:config];
     } else {
         [self.fixVersionAppsButton setTitle:@"Apps" forState:UIControlStateNormal];
@@ -4853,6 +4865,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Manage domains button
     self.domainManagementButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.domainManagementButton setTitle:@"Manage Domains" forState:UIControlStateNormal];
+    [self.domainManagementButton setImage:[UIImage systemImageNamed:@"chevron.forward"] forState:UIControlStateNormal];
+    self.domainManagementButton.semanticContentAttribute = UISemanticContentAttributeForceRightToLeft;
     self.domainManagementButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.domainManagementButton addTarget:self action:@selector(showDomainManagement) forControlEvents:UIControlEventTouchUpInside];
     [controlView.contentView addSubview:self.domainManagementButton];
