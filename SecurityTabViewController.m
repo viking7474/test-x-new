@@ -13,6 +13,7 @@
 #import "IPStatusCacheManager.h" // Import for IP and location data saving
 #import "DomainBlockingSettings.h"
 #import "DomainManagementViewController.h"
+#import "DeepCleanDetailViewController.h"
 #import <notify.h>  // Add this import for Darwin notification functions
 #import "common/UIButton+SafeConfiguration.h"
 #import "common/VersionCompare.h"
@@ -4123,7 +4124,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.deepCleanInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     self.deepCleanInfoButton.tintColor = [UIColor systemBlueColor];
     self.deepCleanInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.deepCleanInfoButton addTarget:self action:@selector(showDeepCleanInfo) forControlEvents:UIControlEventTouchUpInside];
+    [self.deepCleanInfoButton addTarget:self action:@selector(openDeepCleanDetail) forControlEvents:UIControlEventTouchUpInside];
     [infoBgView addSubview:self.deepCleanInfoButton];
 
     self.deepCleanModeControl = [[UISegmentedControl alloc] initWithItems:@[@"Full", @"Deep"]];
@@ -4295,6 +4296,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)openDeepCleanDetail {
+    DeepCleanDetailViewController *vc = [[DeepCleanDetailViewController alloc] init];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 - (void)deepCleanModeChanged:(UISegmentedControl *)sender {
