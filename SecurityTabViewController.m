@@ -977,7 +977,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     [self refreshPinnedCoordinates];
-    self.view.backgroundColor = [UIColor systemBackgroundColor]; // Use system theme color
+    if (@available(iOS 13.0, *)) { self.view.backgroundColor = [UIColor systemGroupedBackgroundColor]; } else { self.view.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0]; } // Grouped bg so white cards pop
     
     // Initialize security settings
     self.securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
