@@ -323,7 +323,7 @@
     UIImageView *ipIconView = [[UIImageView alloc] init];
     UIImage *iconImg = nil;
     if (@available(iOS 13.0, *)) {
-        iconImg = [UIImage systemImageNamed:@"network"];
+        iconImg = [UIImage systemImageNamed:@"antenna.radiowaves.left.and.right"];
     }
     // Fallback to a default image if SF Symbol fails
     if (!iconImg) {
@@ -1411,6 +1411,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.jailbreakDetectionLabel.textColor = [UIColor labelColor];
     self.jailbreakDetectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.jailbreakDetectionLabel];
+    self.jailbreakDetectionLabel.numberOfLines = 1;
+    self.jailbreakDetectionLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.jailbreakDetectionLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     
     // Icon chip (redesign pilot)
     UIView *jbChip = [self securityIconChip:@"lock.shield" color:[UIColor systemBlueColor]];
@@ -1450,7 +1453,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [jbChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
         [jbChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         
-        [infoBgView.leadingAnchor constraintEqualToAnchor:self.jailbreakDetectionLabel.trailingAnchor constant:10],
+        [infoBgView.trailingAnchor constraintEqualToAnchor:self.jailbreakDetectionToggleSwitch.leadingAnchor constant:-12],
+        [self.jailbreakDetectionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:infoBgView.leadingAnchor constant:-8],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         [infoBgView.widthAnchor constraintEqualToConstant:24],
         [infoBgView.heightAnchor constraintEqualToConstant:24],
@@ -1480,6 +1484,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkDataSpoofLabel.textColor = [UIColor labelColor];
     self.networkDataSpoofLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.networkDataSpoofLabel];
+    self.networkDataSpoofLabel.numberOfLines = 1;
+    self.networkDataSpoofLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.networkDataSpoofLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     // Icon chip (redesign)
     UIView *ndChip = [self securityIconChip:@"antenna.radiowaves.left.and.right" color:[UIColor systemTealColor]];
     [controlView.contentView addSubview:ndChip];
@@ -1492,6 +1499,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     optionalLabel.textColor = [UIColor secondaryLabelColor];
     optionalLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:optionalLabel];
+    [optionalLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     
     // Info button with circular background
     UIView *infoBgView = [[UIView alloc] init];
@@ -1531,7 +1539,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [optionalLabel.leadingAnchor constraintEqualToAnchor:self.networkDataSpoofLabel.trailingAnchor constant:5],
         [optionalLabel.bottomAnchor constraintEqualToAnchor:self.networkDataSpoofLabel.bottomAnchor constant:-2],
         
-        [infoBgView.leadingAnchor constraintEqualToAnchor:optionalLabel.trailingAnchor constant:10],
+        [infoBgView.trailingAnchor constraintEqualToAnchor:self.networkDataSpoofToggleSwitch.leadingAnchor constant:-12],
+        [optionalLabel.trailingAnchor constraintLessThanOrEqualToAnchor:infoBgView.leadingAnchor constant:-6],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         [infoBgView.widthAnchor constraintEqualToConstant:24],
         [infoBgView.heightAnchor constraintEqualToConstant:24],
@@ -2714,6 +2723,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.vpnDetectionLabel.textColor = [UIColor labelColor];
     self.vpnDetectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.vpnDetectionLabel];
+    self.vpnDetectionLabel.numberOfLines = 1;
+    self.vpnDetectionLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.vpnDetectionLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     // Icon chip (redesign)
     UIView *vpnChip = [self securityIconChip:@"network.badge.shield.half.filled" color:[UIColor systemBlueColor]];
     [controlView.contentView addSubview:vpnChip];
@@ -2749,7 +2761,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [vpnChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
         [vpnChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
 
-        [infoBgView.leadingAnchor constraintEqualToAnchor:self.vpnDetectionLabel.trailingAnchor constant:10],
+        [infoBgView.trailingAnchor constraintEqualToAnchor:self.vpnDetectionToggleSwitch.leadingAnchor constant:-12],
+        [self.vpnDetectionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:infoBgView.leadingAnchor constant:-8],
         [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
         [infoBgView.widthAnchor constraintEqualToConstant:24],
         [infoBgView.heightAnchor constraintEqualToConstant:24],
@@ -5513,7 +5526,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        UIImage *chipImg = [UIImage systemImageNamed:symbolName];
+        if (!chipImg) {
+            NSDictionary *chipFallback = @{ @"network.badge.shield.half.filled": @"lock.shield", @"paintbrush.pointed": @"paintbrush", @"globe.badge.chevron.backward": @"globe" };
+            NSString *altName = chipFallback[symbolName];
+            if (altName) chipImg = [UIImage systemImageNamed:altName];
+        }
+        if (!chipImg) chipImg = [UIImage systemImageNamed:@"shield"];
+        iv.image = [chipImg imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
