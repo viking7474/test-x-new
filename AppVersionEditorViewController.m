@@ -226,14 +226,116 @@
 
 - (void)fetchTapped {
     [self.view endEditing:YES];
-    NSDictionary *appInfo = @{ @"name": (self.appName ?: self.bundleID), @"bundleID": self.bundleID };
-    VersionManagementViewController *vc = [[VersionManagementViewController alloc] initWithBundleID:self.bundleID appInfo:appInfo];
-    vc.delegate = self;
-    vc.title = [NSString stringWithFormat:@"%@ Versions", (self.appName.length > 0 ? self.appName : @"App")];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-    [self presentViewController:nav animated:YES completion:^{
-        [vc fetchVersionsButtonTapped];
+    if (self.bundleID.length == 0) { [self showToast:@"Thi\u1ebfu bundle ID"]; return; }
+
+    UIActivityIndicatorView *spinner;
+    if (@available(iOS 13.0, *)) {
+        spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    } else {
+        spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
+        spinner.color = [UIColor labelColor];
+    }
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:spinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [spinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [spinner.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+    ]];
+    [spinner startAnimating];
+    self.view.userInteractionEnabled = NO;
+
+    NSString *lookupStr = [NSString stringWithFormat:@"https://itunes.apple.com/lookup?bundleId=%@&entity=software&country=us", self.bundleID];
+    NSURL *lookupUrl = [NSURL URLWithString:lookupStr];
+    if (!lookupUrl) {
+        [spinner stopAnimating]; [spinner removeFromSuperview];
+        self.view.userInteractionEnabled = YES;
+        [self showToast:@"URL kh\u00f4ng h\u1ee3p l\u1ec7"];
+        return;
+    }
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:lookupUrl completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSDictionary *appStoreInfo = nil;
+        if (data && !error) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSArray *results = json[@"results"];
+            if ([results isKindOfClass:[NSArray class]] && results.count > 0) {
+                appStoreInfo = results.firstObject;
+            }
+        }
+        if (![appStoreInfo isKindOfClass:[NSDictionary class]]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [spinner stopAnimating]; [spinner removeFromSuperview];
+                self.view.userInteractionEnabled = YES;
+                [self showToast:@"Kh\u00f4ng t\u00ecm th\u1ea5y app tr\u00ean App Store"];
+            });
+            return;
+        }
+        NSString *appId = [NSString stringWithFormat:@"%@", appStoreInfo[@"trackId"]];
+        NSString *curVer = [self coerceString:appStoreInfo[@"version"]];
+        NSString *curBuild = [self coerceString:appStoreInfo[@"build"]];
+        NSString *histStr = [NSString stringWithFormat:@"https://apis.bilin.eu.org/history/%@", appId];
+        NSURL *histUrl = [NSURL URLWithString:histStr];
+        NSURLSessionDataTask *ht = [[NSURLSession sharedSession] dataTaskWithURL:histUrl completionHandler:^(NSData *hd, NSURLResponse *hr, NSError *he) {
+            NSMutableArray *items = [NSMutableArray array];
+            if (curVer.length > 0) {
+                [items addObject:@{ @"version": curVer, @"build": (curBuild ?: @"") }];
+            }
+            if (hd && !he) {
+                NSDictionary *hj = [NSJSONSerialization JSONObjectWithData:hd options:0 error:nil];
+                NSArray *versions = hj[@"data"];
+                if ([versions isKindOfClass:[NSArray class]]) {
+                    for (NSDictionary *v in versions) {
+                        if (![v isKindOfClass:[NSDictionary class]]) { continue; }
+                        NSString *ver = [self coerceString:v[@"bundle_version"]];
+                        if (ver.length == 0) { continue; }
+                        NSString *bn = [self coerceString:v[@"build"]];
+                        if (bn.length == 0) { bn = [self coerceString:v[@"build_number"]]; }
+                        [items addObject:@{ @"version": ver, @"build": (bn ?: @"") }];
+                    }
+                }
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [spinner stopAnimating]; [spinner removeFromSuperview];
+                self.view.userInteractionEnabled = YES;
+                if (items.count == 0) { [self showToast:@"Kh\u00f4ng l\u1ea5y \u0111\u01b0\u1ee3c phi\u00ean b\u1ea3n"]; return; }
+                [self showVersionPicker:items];
+            });
+        }];
+        [ht resume];
     }];
+    [task resume];
+}
+
+- (NSString *)coerceString:(id)v {
+    if ([v isKindOfClass:[NSString class]]) { return v; }
+    if ([v isKindOfClass:[NSNumber class]]) { return [v stringValue]; }
+    return nil;
+}
+
+- (void)showVersionPicker:(NSArray *)items {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Ch\u1ecdn phi\u00ean b\u1ea3n" message:@"Ch\u1ecdn phi\u00ean b\u1ea3n \u0111\u1ec3 spoof cho app n\u00e0y" preferredStyle:UIAlertControllerStyleActionSheet];
+    NSInteger maxCount = MIN((NSInteger)items.count, 40);
+    for (NSInteger k = 0; k < maxCount; k++) {
+        NSDictionary *it = items[k];
+        NSString *ver = it[@"version"];
+        NSString *bld = it[@"build"];
+        NSString *title = (bld.length > 0) ? [NSString stringWithFormat:@"%@ (build %@)", ver, bld] : ver;
+        UIAlertAction *a = [UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            self.versionField.text = ver;
+            self.buildField.text = bld;
+            [self saveVersion:ver build:bld];
+            [self.perAppSwitch setOn:YES animated:YES];
+            [self showToast:@"\u0110\u00e3 l\u01b0u"];
+        }];
+        [sheet addAction:a];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"H\u1ee7y" style:UIAlertActionStyleCancel handler:nil]];
+    if (sheet.popoverPresentationController) {
+        sheet.popoverPresentationController.sourceView = self.view;
+        sheet.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+        sheet.popoverPresentationController.permittedArrowDirections = 0;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - VersionManagementViewControllerDelegate
