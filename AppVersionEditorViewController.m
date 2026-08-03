@@ -92,7 +92,7 @@
     [fetchBtn.heightAnchor constraintEqualToConstant:48].active = YES;
     [stack addArrangedSubview:fetchBtn];
 
-    [stack addArrangedSubview:[self noteLabel:@"S\u1ed1 phi\u00ean b\u1ea3n (CFBundleShortVersionString) s\u1ebd \u0111\u01b0\u1ee3c spoof ri\u00eng cho app n\u00e0y. L\u01b0u s\u1ebd t\u1ef1 b\u1eadt spoof cho app."]];
+    [stack addArrangedSubview:[self noteLabel:@"S\u1ed1 phi\u00ean b\u1ea3n (CFBundleShortVersionString) s\u1ebd \u0111\u01b0\u1ee3c spoof ri\u00eang cho app n\u00e0y. L\u01b0u s\u1ebd t\u1ef1 b\u1eadt spoof cho app."]];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
