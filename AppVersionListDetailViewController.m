@@ -1,5 +1,5 @@
 #import "AppVersionListDetailViewController.h"
-#import "AppVersionSpoofingViewController.h"
+#import "AppVersionEditorViewController.h"
 
 @interface AppVersionListDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -166,6 +166,7 @@
     NSInteger idx = 0;
     for (NSDictionary *app in self.configuredApps) {
         UIView *row = [self appRowForApp:app showSeparator:(idx > 0)];
+        row.tag = idx;
         [self.appsStack addArrangedSubview:row];
         idx++;
     }
@@ -242,7 +243,7 @@
         [bundle.trailingAnchor constraintLessThanOrEqualToAnchor:value.leadingAnchor constant:-8],
     ]];
 
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(appRowTapped)];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(appRowTapped:)];
     [row addGestureRecognizer:tap];
     return row;
 }
@@ -279,15 +280,21 @@
     [generator impactOccurred];
 }
 
-- (void)appRowTapped {
-    [self openFullList];
+- (void)appRowTapped:(UITapGestureRecognizer *)recognizer {
+    NSInteger i = recognizer.view.tag;
+    if (i < 0 || i >= (NSInteger)self.configuredApps.count) { return; }
+    NSDictionary *app = self.configuredApps[i];
+    [self openEditorForBundleID:app[@"bundleID"] name:app[@"name"]];
 }
 
 - (void)addButtonTapped {
-    [self openFullList];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Th\u00eam app" message:@"H\u00e3y th\u00eam app v\u00e0o Scope \u1edf tab ProjectX (Home). Sau \u0111\u00f3 app s\u1ebd hi\u1ec7n \u1edf \u0111\u00e2y \u0111\u1ec3 ch\u1ec9nh phi\u00ean b\u1ea3n." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)openFullList {
+- (void)openEditorForBundleID:(NSString *)bundleID name:(NSString *)name {
+    if (bundleID.length == 0) { return; }
     if (![self.securitySettings boolForKey:@"appVersionSpoofingEnabled"]) {
         [self showToast:@"B\u1eadt App Version Spoof tr\u01b0\u1edbc"];
         return;
@@ -297,7 +304,6 @@
     [generator prepare];
     [generator impactOccurred];
 
-    // Refresh scoped apps info if IdentifierManager is available (optional, no header dependency)
     Class idManagerClass = NSClassFromString(@"IdentifierManager");
     if (idManagerClass && [idManagerClass respondsToSelector:@selector(sharedManager)]) {
         id idManager = [idManagerClass performSelector:@selector(sharedManager)];
@@ -306,12 +312,11 @@
         }
     }
 
-    AppVersionSpoofingViewController *appVersionVC = [[AppVersionSpoofingViewController alloc] init];
-    appVersionVC.toastMessageToShow = @"Scoped Apps Info Updated\nAPPS real Version / Build";
+    AppVersionEditorViewController *editor = [[AppVersionEditorViewController alloc] initWithBundleID:bundleID appName:name];
     if (self.navigationController) {
-        [self.navigationController pushViewController:appVersionVC animated:YES];
+        [self.navigationController pushViewController:editor animated:YES];
     } else {
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:appVersionVC];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:editor];
         nav.modalPresentationStyle = UIModalPresentationFullScreen;
         [self presentViewController:nav animated:YES completion:nil];
     }
