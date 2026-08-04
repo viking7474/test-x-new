@@ -361,19 +361,7 @@
     [self createDirectoryIfNeeded:identityDir];
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:identityDir error:nil];
     
-    // Create appdata.plist
-    NSString *appDataInfoPath = [profileDir stringByAppendingPathComponent:@"appdata.plist"];
-    NSDictionary *appDataInfoDict = @{
-        @"ProfileName": profile.name,
-        @"ProfileID": profile.profileId,
-        @"ShortDescription": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
-        @"Creation": profile.createdAt ?: [NSDate date],
-        @"LastUsed": profile.lastUsed ?: [NSDate date]
-    };
-    [appDataInfoDict writeToFile:appDataInfoPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:appDataInfoPath error:nil];
-    
-    // Create identifiers.plist
+    // Create identifiers.plist (kept: used for profile display name in the UI)
     NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
     NSDictionary *identifiersDict = @{
         @"DisplayName": profile.name,
@@ -383,15 +371,9 @@
     [identifiersDict writeToFile:identifiersPath atomically:YES];
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
     
-    // Create scoped-apps.plist
-    NSString *scopedAppsPath = [profileDir stringByAppendingPathComponent:@"scoped-apps.plist"];
-    NSDictionary *scopedAppsDict = @{
-        @"ProfileName": profile.name,
-        @"ProfileDescription": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
-        @"Apps": @[]
-    };
-    [scopedAppsDict writeToFile:scopedAppsPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:scopedAppsPath error:nil];
+    // NOTE: appdata.plist (write-only, no reader) and per-profile scoped-apps.plist
+    // (always empty; real scope lives in com.hydra.projectx.global_scope.plist) are
+    // intentionally no longer created here.
     
     // Add profile to array
     [self.mutableProfiles addObject:profile];
@@ -1485,19 +1467,7 @@
     [self createDirectoryIfNeeded:identityDir];
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:identityDir error:nil];
     
-    // Create appdata.plist
-    NSString *appDataInfoPath = [profileDir stringByAppendingPathComponent:@"appdata.plist"];
-    NSDictionary *appDataInfoDict = @{
-        @"ProfileName": defaultProfile.name,
-        @"ProfileID": @"0",
-        @"ShortDescription": @"Default Profile",
-        @"Creation": now,
-        @"LastUsed": now
-    };
-    [appDataInfoDict writeToFile:appDataInfoPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:appDataInfoPath error:nil];
-    
-    // Create identifiers.plist
+    // Create identifiers.plist (kept: used for profile display name in the UI)
     NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
     NSDictionary *identifiersDict = @{
         @"DisplayName": defaultProfile.name,
@@ -1507,15 +1477,8 @@
     [identifiersDict writeToFile:identifiersPath atomically:YES];
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
     
-    // Create scoped-apps.plist
-    NSString *scopedAppsPath = [profileDir stringByAppendingPathComponent:@"scoped-apps.plist"];
-    NSDictionary *scopedAppsDict = @{
-        @"ProfileName": defaultProfile.name,
-        @"ProfileDescription": @"Default Profile",
-        @"Apps": @[]
-    };
-    [scopedAppsDict writeToFile:scopedAppsPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:scopedAppsPath error:nil];
+    // NOTE: appdata.plist and per-profile scoped-apps.plist are intentionally no
+    // longer created here (write-only / always-empty; scope lives in global_scope.plist).
     
     // Add to profiles array
     [self.mutableProfiles addObject:defaultProfile];
@@ -1558,19 +1521,7 @@
     defaultProfile.createdAt = now;
     defaultProfile.lastUsed = now;
     
-    // Create appdata.plist
-    NSString *appDataInfoPath = [profileDir stringByAppendingPathComponent:@"appdata.plist"];
-    NSDictionary *appDataInfoDict = @{
-        @"ProfileName": @"Default",
-        @"ProfileID": @"0",
-        @"ShortDescription": @"Default Profile",
-        @"Creation": now,
-        @"LastUsed": now
-    };
-    [appDataInfoDict writeToFile:appDataInfoPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:appDataInfoPath error:nil];
-    
-    // Create identifiers.plist
+    // Create identifiers.plist (kept: used for profile display name in the UI)
     NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
     NSDictionary *identifiersDict = @{
         @"DisplayName": @"Default",
@@ -1580,15 +1531,8 @@
     [identifiersDict writeToFile:identifiersPath atomically:YES];
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
     
-    // Create scoped-apps.plist
-    NSString *scopedAppsPath = [profileDir stringByAppendingPathComponent:@"scoped-apps.plist"];
-    NSDictionary *scopedAppsDict = @{
-        @"ProfileName": @"Default",
-        @"ProfileDescription": @"Default Profile",
-        @"Apps": @[]
-    };
-    [scopedAppsDict writeToFile:scopedAppsPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:scopedAppsPath error:nil];
+    // NOTE: appdata.plist and per-profile scoped-apps.plist are intentionally no
+    // longer created here (write-only / always-empty; scope lives in global_scope.plist).
     
     // Create device_ids.plist in identity directory for immediate identifier storage
     NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];

@@ -151,8 +151,13 @@ static BOOL shouldSpoofBootTimeForApp(void) {
 }
 
 // Get the current profile path for spoofed values
+// NOTE: Boot time / uptime keys live in the profile identity directory
+// (identity/device_ids.plist, boot_time.plist, system_uptime.plist) — the same
+// location IdentifierManager writes to. Returning the identity path keeps the
+// tweak's reads/writes consistent with the app side and stops duplicate plists
+// from being created in the profile root directory.
 static NSString *getCurrentProfilePath(void) {
-    return PXActiveProfileRootPath();
+    return PXActiveProfileIdentityPath();
 }
 
 // Update cached boot time values from profile data
