@@ -45,7 +45,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static NSString * const PXBackupErrorDomain = @"com.hydra.projectx.backup";
+static NSString * const PXBackupErrorDomain = @"com.hydra.tlinkios.backup";
 static NSString * const PXExactRestoreDestinationErrorDescription =
     @"Exact application data container could not be resolved safely";
 static const NSTimeInterval PXKeychainHelperInvocationTimeoutSeconds = 300.0;

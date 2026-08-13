@@ -12,7 +12,7 @@ NSString * const PXBackupManifestV4DigestAlgorithm = @"sha256";
 NSString * const PXBackupManifestV4PublicationProtocol = @"atomic-directory-v1";
 NSString * const PXBackupManifestV4ContentStateComplete = @"complete";
 NSErrorDomain const PXBackupManifestV4ErrorDomain =
-    @"com.hydra.projectx.backup-manifest-v4";
+    @"com.hydra.tlinkios.backup-manifest-v4";
 NSString * const PXBackupManifestV4ErrorFieldPathKey = @"fieldPath";
 
 static const NSUInteger PXV4MaximumDepth = 64;

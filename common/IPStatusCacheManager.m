@@ -1,6 +1,6 @@
 // IPStatusCacheManager.m
 #import "IPStatusCacheManager.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import <UIKit/UIKit.h>
 
 #define kMaxCacheCount 3

@@ -1,7 +1,8 @@
 #import "PXInjectionFilter.h"
 
-NSString * const PXInjectionPlaceholderBundleID = @"com.hydra.projectx.no-injection-placeholder";
+NSString * const PXInjectionPlaceholderBundleID = @"com.hydra.tlinkios.no-injection-placeholder";
 NSString * const PXInjectionSpringBoardBundleID = @"com.apple.springboard";
+static NSString * const PXInjectionLegacyPlaceholderBundleID = @"com.hydra.projectx.no-injection-placeholder";
 
 NSArray<NSString *> *PXInjectionNormalizeBundleList(NSArray *bundles) {
     NSMutableOrderedSet<NSString *> *set = [NSMutableOrderedSet orderedSet];
@@ -14,9 +15,10 @@ NSArray<NSString *> *PXInjectionNormalizeBundleList(NSArray *bundles) {
     return [set.array sortedArrayUsingSelector:@selector(compare:)];
 }
 
-BOOL PXInjectionBundleIsProjectXApp(NSString *bundleID) {
+BOOL PXInjectionBundleIsTLinkIOSApp(NSString *bundleID) {
     if (![bundleID isKindOfClass:[NSString class]]) return NO;
-    return [bundleID isEqualToString:@"com.hydra.projectx"] ||
+    return [bundleID isEqualToString:@"com.hydra.tlinkios"] ||
+           [bundleID isEqualToString:@"com.hydra.projectx"] ||
            [bundleID isEqualToString:@"com.hydra.weaponx"];
 }
 
@@ -43,7 +45,7 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary *s
     [scopedApps enumerateKeysAndObjectsUsingBlock:^(NSString *bundleID, NSDictionary *entry, BOOL *stop) {
         (void)stop;
         if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return;
-        if (PXInjectionBundleIsProjectXApp(bundleID)) return;
+        if (PXInjectionBundleIsTLinkIOSApp(bundleID)) return;
         if ([bundleID hasPrefix:@"com.apple.WebKit"] || [bundleID isEqualToString:@"com.apple.SafariViewService"]) return;
         if ([entry isKindOfClass:[NSDictionary class]] && ![entry[@"enabled"] boolValue]) return;
         [bundleIDs addObject:bundleID];
@@ -72,7 +74,8 @@ NSArray<NSString *> *PXInjectionComputeBridgeBundles(NSArray<NSString *> *tweakB
     NSMutableArray<NSString *> *builder = [NSMutableArray array];
     for (NSString *bundleID in tweakBundles) {
         if (![bundleID isKindOfClass:[NSString class]]) continue;
-        if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID]) continue;
+        if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID] ||
+            [bundleID isEqualToString:PXInjectionLegacyPlaceholderBundleID]) continue;
         if (PXInjectionBundleIsAppleOrWebKit(bundleID)) continue;
         [builder addObject:bundleID];
     }
@@ -128,7 +131,9 @@ BOOL PXInjectionFilterPlistIsValid(NSDictionary *plist,
             if (outReason) *outReason = @"wildcard-not-allowed";
             return NO;
         }
-        if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID] && bundles.count > 1) {
+        BOOL isPlaceholder = [bundleID isEqualToString:PXInjectionPlaceholderBundleID] ||
+                             [bundleID isEqualToString:PXInjectionLegacyPlaceholderBundleID];
+        if (isPlaceholder && bundles.count > 1) {
             if (outReason) *outReason = @"placeholder-with-real-bundles";
             return NO;
         }

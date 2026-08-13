@@ -276,8 +276,8 @@ void PXIdentitySnapshotStartObserving(void) {
     dispatch_once(&onceToken, ^{
         CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
         if (center) {
-            for (NSString *name in @[@"com.hydra.projectx.settings.changed",
-                                     @"com.hydra.projectx.profileChanged"]) {
+            for (NSString *name in @[@"com.hydra.tlinkios.settings.changed",
+                                     @"com.hydra.tlinkios.profileChanged"]) {
                 CFNotificationCenterAddObserver(center,
                                                 NULL,
                                                 PXIdentitySnapshotNotification,

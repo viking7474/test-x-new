@@ -1,6 +1,6 @@
 //
 //  WeaponXToast.h
-//  ProjectX
+//  TLinkIOS
 //
 //  P1: unified toast presenter. Replaces the duplicated inline toast
 //  implementations in TabBarController and AppVersionSpoofingViewController.

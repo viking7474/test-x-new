@@ -285,7 +285,7 @@
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [gen prepare];
     [gen impactOccurred];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.deepCleanModeChanged" object:nil userInfo:@{ @"deep": @(deep) }];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.deepCleanModeChanged" object:nil userInfo:@{ @"deep": @(deep) }];
 }
 
 @end

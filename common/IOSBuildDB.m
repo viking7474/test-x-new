@@ -4,7 +4,7 @@
 #import "DBDebugLogger.h"
 #import <Security/Security.h>
 
-static NSString *const kIOSBuildDBErrorDomain = @"com.hydra.projectx.ios_build_db";
+static NSString *const kIOSBuildDBErrorDomain = @"com.hydra.tlinkios.ios_build_db";
 
 static NSUInteger PXRandomIndex(NSUInteger upperBoundExclusive) {
     if (upperBoundExclusive == 0) return 0;

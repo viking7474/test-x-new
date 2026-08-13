@@ -12,6 +12,41 @@ mkdir -p "$PREFS_DIR"
 chmod 755 "$PREFS_DIR"
 chown mobile:mobile "$PREFS_DIR"
 
+# One-time migration from ProjectX. Keep the legacy data intact so the
+# migration is recoverable if the package is downgraded.
+LEGACY_DATA_DIR="/var/mobile/Library/ProjectX"
+TLINKIOS_DATA_DIR="/var/mobile/Library/TLinkIOS"
+if [ -d "$LEGACY_DATA_DIR" ] && [ ! -e "$TLINKIOS_DATA_DIR" ]; then
+  echo "Migrating ProjectX application data to TLinkIOS..."
+  cp -Rp "$LEGACY_DATA_DIR" "$TLINKIOS_DATA_DIR"
+fi
+mkdir -p "$TLINKIOS_DATA_DIR"
+chown -R mobile:mobile "$TLINKIOS_DATA_DIR"
+
+for LEGACY_PREF in "$PREFS_DIR"/com.hydra.projectx*.plist; do
+  [ -e "$LEGACY_PREF" ] || continue
+  PREF_BASENAME="${LEGACY_PREF##*/}"
+  NEW_PREF_BASENAME="$(printf '%s' "$PREF_BASENAME" | sed 's/^com\.hydra\.projectx/com.hydra.tlinkios/')"
+  NEW_PREF="$PREFS_DIR/$NEW_PREF_BASENAME"
+  if [ ! -e "$NEW_PREF" ]; then
+    cp -p "$LEGACY_PREF" "$NEW_PREF"
+    chown mobile:mobile "$NEW_PREF"
+    echo "Migrated preference: $PREF_BASENAME"
+  fi
+done
+
+LEGACY_FILTER="$TLINKIOS_DATA_DIR/filter_plists/ProjectXTweak.plist"
+TLINKIOS_FILTER="$TLINKIOS_DATA_DIR/filter_plists/TLinkIOSTweak.plist"
+if [ -f "$LEGACY_FILTER" ] && [ ! -e "$TLINKIOS_FILTER" ]; then
+  cp -p "$LEGACY_FILTER" "$TLINKIOS_FILTER"
+  chown mobile:mobile "$TLINKIOS_FILTER"
+fi
+
+# Avoid loading both generations of the tweak after a package-id migration.
+rm -f /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib
+rm -f /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.plist
+rm -f /usr/bin/projectx-setup
+
 # Create the WeaponX directories if they don't exist
 WEAPONX_DIR="/var/mobile/Library/WeaponX"
 mkdir -p "$WEAPONX_DIR"
@@ -89,7 +124,7 @@ if [ ! -d "${PROFILES_DIR}/1" ]; then
 fi
 
 # Create global scope plist with Lyft enabled by default
-GLOBAL_SCOPE_PLIST="${PREFS_DIR}/com.hydra.projectx.global_scope.plist"
+GLOBAL_SCOPE_PLIST="${PREFS_DIR}/com.hydra.tlinkios.global_scope.plist"
 if [ ! -f "$GLOBAL_SCOPE_PLIST" ]; then
   echo '<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -119,7 +154,7 @@ if [ ! -f "$GLOBAL_SCOPE_PLIST" ]; then
 fi
 
 # Create settings plist if it doesn't exist
-SETTINGS_PLIST="${PREFS_DIR}/com.hydra.projectx.settings.plist"
+SETTINGS_PLIST="${PREFS_DIR}/com.hydra.tlinkios.settings.plist"
 if [ ! -f "$SETTINGS_PLIST" ]; then
   echo '<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEVICE_PATH = ROOT / "ProjectXTweak" / "DeviceSpecHooks.x"
-TWEAK_PATH = ROOT / "ProjectXTweak" / "Tweak.x"
+DEVICE_PATH = ROOT / "TLinkIOSTweak" / "DeviceSpecHooks.x"
+TWEAK_PATH = ROOT / "TLinkIOSTweak" / "Tweak.x"
 RUNTIME_UTIL_PATH = ROOT / "common" / "PXRuntimeUtilities.m"
 PROBE_PATH = ROOT / "scripts" / "probe_device_spec_p1_1.sh"
 DEVICE_SOURCE = DEVICE_PATH.read_text(encoding="utf-8")

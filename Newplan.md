@@ -57,7 +57,7 @@ Triển khai theo 5 workstream, ưu tiên loại bỏ hook trùng và sửa đư
   5. Deduplicate và sort để output ổn định.
 - Không truyền riêng `expandedBundles` của app vừa thêm vào writer.
 - Khi không có app:
-  - Ghi duy nhất `com.hydra.projectx.no-injection-placeholder` cho cả tweak và keychain bridge.
+  - Ghi duy nhất `com.hydra.tlinkios.no-injection-placeholder` cho cả tweak và keychain bridge.
   - Không ghi `Bundles=[]`.
 - Bridge filter loại Apple/WebKit bundles nhưng giữ toàn bộ app/extensions bên thứ ba.
 - Daemon chấp nhận placeholder-only, từ chối placeholder trộn với bundle thật, cài atomically và ghi checksum/debug state.
@@ -121,7 +121,7 @@ Triển khai theo 5 workstream, ưu tiên loại bỏ hook trùng và sửa đư
   - Identifier `UserDefaultsUUID` bật.
   - Key khớp UUID allowlist/heuristic hiện có.
   - Giá trị gốc có type và UUID shape hợp lệ.
-- Không thay arbitrary strings, numbers, settings/security suite hoặc ProjectX preferences.
+- Không thay arbitrary strings, numbers, settings/security suite hoặc TLinkIOS preferences.
 - Read và write path phải trả cùng UUID profile; collection processing giữ nguyên type và immutable/mutable contract.
 - Cache invalidated bởi settings/profile notifications.
 

@@ -248,7 +248,7 @@
     [self.securitySettings synchronize];
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkConnectionTypeChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkConnectionTypeChanged"), NULL, NULL, YES);
 
     for (NSInteger i = 0; i < (NSInteger)self.typeChecks.count; i++) {
         self.typeChecks[i].hidden = (i != selectedType);

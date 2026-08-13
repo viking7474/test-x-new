@@ -63,7 +63,7 @@
     if (!path.length || !bundleID.length) {
         return NO;
     }
-    if ([bundleID isEqualToString:@"com.hydra.projectx"]) {
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
         return NO;
     }
     return [path isEqualToString:@"/var/mobile/Library"] ||

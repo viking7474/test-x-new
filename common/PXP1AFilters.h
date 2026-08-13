@@ -3,7 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 // P1-A — Pure, dependency-free helpers shared by the UserDefaults, DeviceModel
-// and Pasteboard Logos hooks (ProjectXTweak/*.x) so their core decision logic
+// and Pasteboard Logos hooks (TLinkIOSTweak/*.x) so their core decision logic
 // can be exercised by a host-runnable test and can never drift from the code
 // that actually ships inside the hooks.
 

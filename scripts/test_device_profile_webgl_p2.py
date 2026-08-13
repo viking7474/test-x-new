@@ -15,9 +15,9 @@ SCHEMA_H = (ROOT / "common" / "PXDeviceProfileSchema.h").read_text(encoding="utf
 SCHEMA_M = (ROOT / "common" / "PXDeviceProfileSchema.m").read_text(encoding="utf-8")
 IDENTIFIER = (ROOT / "common" / "IdentifierManager.m").read_text(encoding="utf-8")
 DEVICE_MODEL = (ROOT / "common" / "DeviceModelManager.m").read_text(encoding="utf-8")
-DEVICE_SPEC = (ROOT / "ProjectXTweak" / "DeviceSpecHooks.x").read_text(encoding="utf-8")
-CANVAS = (ROOT / "ProjectXTweak" / "CanvasFingerprintHooks.x").read_text(encoding="utf-8")
-TWEAK = (ROOT / "ProjectXTweak" / "Tweak.x").read_text(encoding="utf-8")
+DEVICE_SPEC = (ROOT / "TLinkIOSTweak" / "DeviceSpecHooks.x").read_text(encoding="utf-8")
+CANVAS = (ROOT / "TLinkIOSTweak" / "CanvasFingerprintHooks.x").read_text(encoding="utf-8")
+TWEAK = (ROOT / "TLinkIOSTweak" / "Tweak.x").read_text(encoding="utf-8")
 WORKFLOW = (ROOT / ".github" / "workflows" / "build-ios-arm.yml").read_text(encoding="utf-8")
 
 TARGET_SOURCES = {

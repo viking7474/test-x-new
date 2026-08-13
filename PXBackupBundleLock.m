@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupBundleLockErrorDomain =
-    @"com.hydra.projectx.backup-bundle-lock";
+    @"com.hydra.tlinkios.backup-bundle-lock";
 NSString * const PXBackupBundleLockErrorFieldPathKey = @"fieldPath";
 NSString * const PXBackupBundleLockFileName = @".weaponx-backup.lock";
 

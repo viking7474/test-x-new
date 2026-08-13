@@ -19,28 +19,28 @@ def read(relative: str) -> str:
 
 
 SOURCES = {
-    "scope_h": read("ProjectXTweak/PXScope.h"),
-    "scope": read("ProjectXTweak/PXScope.m"),
+    "scope_h": read("TLinkIOSTweak/PXScope.h"),
+    "scope": read("TLinkIOSTweak/PXScope.m"),
     "runtime_h": read("common/PXRuntimeUtilities.h"),
     "runtime": read("common/PXRuntimeUtilities.m"),
     "paths_h": read("common/PXPaths.h"),
     "paths": read("common/PXPaths.m"),
     "identity": read("common/PXIdentitySnapshot.m"),
-    "tweak": read("ProjectXTweak/Tweak.x"),
-    "ios": read("ProjectXTweak/IOSVersionHooks.x"),
-    "battery": read("ProjectXTweak/BatteryHooks.x"),
-    "boot": read("ProjectXTweak/BootTimeHooks.x"),
-    "theme": read("ProjectXTweak/ThemeHooks.x"),
-    "pasteboard": read("ProjectXTweak/PasteboardHooks.x"),
-    "canvas": read("ProjectXTweak/CanvasFingerprintHooks.x"),
-    "storage": read("ProjectXTweak/StorageHooks.x"),
-    "wifi": read("ProjectXTweak/WiFiHook.x"),
-    "network": read("ProjectXTweak/NetworkConnectionTypeHooks.x"),
-    "app_version": read("ProjectXTweak/AppVersionHooks.x"),
-    "device_model": read("ProjectXTweak/DeviceModelHooks.x"),
-    "user_defaults": read("ProjectXTweak/UserDefaultsHooks.x"),
-    "missing": read("ProjectXTweak/MissingSpoofHooks.x"),
-    "locale": read("ProjectXTweak/LocaleTimeZoneHooks.x"),
+    "tweak": read("TLinkIOSTweak/Tweak.x"),
+    "ios": read("TLinkIOSTweak/IOSVersionHooks.x"),
+    "battery": read("TLinkIOSTweak/BatteryHooks.x"),
+    "boot": read("TLinkIOSTweak/BootTimeHooks.x"),
+    "theme": read("TLinkIOSTweak/ThemeHooks.x"),
+    "pasteboard": read("TLinkIOSTweak/PasteboardHooks.x"),
+    "canvas": read("TLinkIOSTweak/CanvasFingerprintHooks.x"),
+    "storage": read("TLinkIOSTweak/StorageHooks.x"),
+    "wifi": read("TLinkIOSTweak/WiFiHook.x"),
+    "network": read("TLinkIOSTweak/NetworkConnectionTypeHooks.x"),
+    "app_version": read("TLinkIOSTweak/AppVersionHooks.x"),
+    "device_model": read("TLinkIOSTweak/DeviceModelHooks.x"),
+    "user_defaults": read("TLinkIOSTweak/UserDefaultsHooks.x"),
+    "missing": read("TLinkIOSTweak/MissingSpoofHooks.x"),
+    "locale": read("TLinkIOSTweak/LocaleTimeZoneHooks.x"),
     "storage_manager": read("common/StorageManager.m"),
     "wifi_manager": read("common/WiFiManager.m"),
     "network_manager": read("common/NetworkManager.m"),
@@ -48,7 +48,7 @@ SOURCES = {
     "workflow": read(".github/workflows/build-ios-arm.yml"),
 }
 
-PROJECT_TWEAK_FILES = list((ROOT / "ProjectXTweak").glob("*.x")) + list((ROOT / "ProjectXTweak").glob("*.m"))
+PROJECT_TWEAK_FILES = list((ROOT / "TLinkIOSTweak").glob("*.x")) + list((ROOT / "TLinkIOSTweak").glob("*.m"))
 PROJECT_TWEAK_TEXT = "\n".join(path.read_text(encoding="utf-8") for path in PROJECT_TWEAK_FILES)
 COMMON_FILES = list((ROOT / "common").glob("*.m")) + list((ROOT / "common").glob("*.h"))
 COMMON_TEXT = "\n".join(path.read_text(encoding="utf-8") for path in COMMON_FILES)
@@ -154,9 +154,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: stale scope builds are never published", "Never publish the stale build" in scope_current and "if (!gSnapshot) gSnapshot = built" not in scope_current)
     matrix.check("source: PXScope is sole tweak scoped-disk reader", "PXGlobalScopePath()" in scope_load and "global_scope.plist" not in PROJECT_TWEAK_TEXT)
     matrix.check("source: scoped cache invalidation clears snapshot and advances generation", "gSnapshot = nil" in scope_invalidate and "gScopeGeneration++" in scope_invalidate)
-    matrix.check("source: PXScope observes settings notification", 'CFSTR("com.hydra.projectx.settings.changed")' in SOURCES["scope"])
-    matrix.check("source: PXScope observes profile notification", 'CFSTR("com.hydra.projectx.profileChanged")' in SOURCES["scope"])
-    matrix.check("source: PXScope observes scoped-app notification", 'CFSTR("com.hydra.projectx.scopedAppsChanged")' in SOURCES["scope"])
+    matrix.check("source: PXScope observes settings notification", 'CFSTR("com.hydra.tlinkios.settings.changed")' in SOURCES["scope"])
+    matrix.check("source: PXScope observes profile notification", 'CFSTR("com.hydra.tlinkios.profileChanged")' in SOURCES["scope"])
+    matrix.check("source: PXScope observes scoped-app notification", 'CFSTR("com.hydra.tlinkios.scopedAppsChanged")' in SOURCES["scope"])
 
     forbidden_scope_tokens = ["scopedAppsCache", "scopedAppsCacheTimestamp", "kScopedAppsPath", "kScopedAppsCacheValidDuration"]
     for token in forbidden_scope_tokens:
@@ -221,13 +221,13 @@ def run_source_matrix(matrix: Matrix) -> None:
     ]
     matrix.check("source: browser list API is centralized", "PXBrowserBundleIdentifierPrefixes" in SOURCES["scope_h"] and "PXIsBrowserBundleIdentifier" in SOURCES["scope_h"])
     matrix.check("source: each browser literal appears only in PXScope", all(PROJECT_TWEAK_TEXT.count(browser) == SOURCES["scope"].count(browser) == 1 for browser in browser_literals))
-    matrix.check("source: DeviceSpec consumes centralized browser helper", "PXIsBrowserBundleIdentifier(bundleID)" in read("ProjectXTweak/DeviceSpecHooks.x"))
+    matrix.check("source: DeviceSpec consumes centralized browser helper", "PXIsBrowserBundleIdentifier(bundleID)" in read("TLinkIOSTweak/DeviceSpecHooks.x"))
     matrix.check("source: IOSVersion consumes centralized Safari helpers", "PXIsSafariBrowserBundleIdentifier" in SOURCES["ios"] and "PXIsSafariStackProcess" in SOURCES["ios"])
 
-    libsystem_targets = SOURCES["tweak"] + SOURCES["ios"] + read("ProjectXTweak/DeviceSpecHooks.x")
+    libsystem_targets = SOURCES["tweak"] + SOURCES["ios"] + read("TLinkIOSTweak/DeviceSpecHooks.x")
     matrix.check("source: no unnecessary libSystem dlopen remains in project hooks", not re.search(r'dlopen\([^\n]*libSystem', PROJECT_TWEAK_TEXT))
     matrix.check("source: no unnecessary libSystem handle remains in project hooks", "libSystemHandle" not in PROJECT_TWEAK_TEXT and "libcHandle" not in PROJECT_TWEAK_TEXT and "dlclose(libSystem)" not in PROJECT_TWEAK_TEXT)
-    matrix.check("source: system symbols resolve through RTLD_DEFAULT", all(token in libsystem_targets for token in ['dlsym(RTLD_DEFAULT, "uname")', 'dlsym(RTLD_DEFAULT, "host_statistics64")', 'dlsym(RTLD_DEFAULT, "NXGetLocalArchInfo")']) and 'return symbol ? dlsym(RTLD_DEFAULT, symbol) : NULL;' in read("ProjectXTweak/JailbreakBypassHooks.x"))
+    matrix.check("source: system symbols resolve through RTLD_DEFAULT", all(token in libsystem_targets for token in ['dlsym(RTLD_DEFAULT, "uname")', 'dlsym(RTLD_DEFAULT, "host_statistics64")', 'dlsym(RTLD_DEFAULT, "NXGetLocalArchInfo")']) and 'return symbol ? dlsym(RTLD_DEFAULT, symbol) : NULL;' in read("TLinkIOSTweak/JailbreakBypassHooks.x"))
 
     matrix.check("source: identity notifications refresh canonical identity and scope caches", "PXReloadIdentitySnapshot" in function_body(SOURCES["identity"], "PXIdentitySnapshotNotification") and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["tweak"], "PXIdentitySnapshotChanged"))
     matrix.check("source: WiFi notification clears WiFi and scope caches", "PXWiFiInvalidateCache();" in function_body(SOURCES["wifi"], "settingsChanged") and "PXInvalidateScopeDecisionCache();" in function_body(SOURCES["wifi"], "settingsChanged"))

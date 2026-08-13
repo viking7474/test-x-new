@@ -47,7 +47,7 @@
 - (BOOL)isEnvironmentSecure {
     // Check for debugging
     if ([self isBeingDebugged]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                        code:4003 
                                    userInfo:@{NSLocalizedDescriptionKey: @"Debug environment detected"}];
         return NO;
@@ -55,7 +55,7 @@
     
     // Basic integrity check
     if (![self verifyCodeIntegrity]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                        code:4004 
                                    userInfo:@{NSLocalizedDescriptionKey: @"Code integrity check failed"}];
         return NO;
@@ -116,7 +116,7 @@
         if (SecRandomCopyBytes(kSecRandomDefault, sizeof(randomValue), (uint8_t *)&randomValue) == errSecSuccess) {
             [serialNumber appendFormat:@"%c", chars[randomValue % strlen(chars)]];
         } else {
-            self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                            code:4001 
                                        userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number for serial"}];
             return nil;
@@ -130,7 +130,7 @@
         return self.currentIdentifier;
     }
     
-    self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                    code:4002 
                                userInfo:@{NSLocalizedDescriptionKey: @"Generated serial number failed validation"}];
     return nil;

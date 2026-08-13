@@ -1,7 +1,7 @@
 #import "PXKeychainHelperInvocationResult.h"
 
 NSErrorDomain const PXKeychainHelperInvocationResultErrorDomain =
-    @"com.hydra.projectx.keychain-helper-invocation-result";
+    @"com.hydra.tlinkios.keychain-helper-invocation-result";
 NSString * const PXKeychainHelperInvocationResultErrorFieldPathKey = @"fieldPath";
 
 static const NSUInteger PXKeychainHelperInvocationMaximumAccessGroups = 128;

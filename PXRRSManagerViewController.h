@@ -3,7 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /// Modern RRS manager (list / multi-select delete with confirm / detail / sequence sheet).
-/// Callback contracts match the previous inline controller used by ProjectXViewController.
+/// Callback contracts match the previous inline controller used by TLinkIOSViewController.
 @interface PXRRSManagerViewController : UITableViewController
 
 @property (nonatomic, copy) NSArray<NSDictionary *> *entries;

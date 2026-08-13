@@ -1,7 +1,7 @@
 #import "SecurityTabViewController.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "IdentifierManager.h"
 #import "AppVersionSpoofingViewController.h"
 #import "DeviceSpecificSpoofingViewController.h"
@@ -1000,7 +1000,7 @@
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(fixVersionAppsChanged:)
-                                                 name:@"com.hydra.projectx.fixVersionAppsChanged"
+                                                 name:@"com.hydra.tlinkios.fixVersionAppsChanged"
                                                object:nil];
     
     // Create scroll view container
@@ -1128,9 +1128,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.carrierDetailsChanged"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkISOCountryCodeChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.carrierDetailsChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
     }
 }
 
@@ -1240,9 +1240,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         // Notify tweak.
         CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
         if (darwinCenter) {
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.carrierDetailsChanged"), NULL, NULL, YES);
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkISOCountryCodeChanged"), NULL, NULL, YES);
+            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
+            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.carrierDetailsChanged"), NULL, NULL, YES);
+            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2100,8 +2100,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // 2) Suites + in-memory defaults
     NSArray *suiteNames = @[
         @"com.weaponx.securitySettings",
-        @"com.hydra.projectx.SecuritySettings",
-        @"com.hydra.projectx"
+        @"com.hydra.tlinkios.SecuritySettings",
+        @"com.hydra.tlinkios"
     ];
     for (NSString *suiteName in suiteNames) {
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -2111,15 +2111,15 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self.securitySettings setBool:enabled forKey:@"profileIndicatorEnabled"];
     [self.securitySettings synchronize];
 
-    // 3) Ensure SpringBoard is listed in ProjectXTweak filter (Profile Indicator hosts in SB).
+    // 3) Ensure SpringBoard is listed in TLinkIOSTweak filter (Profile Indicator hosts in SB).
     // Spoof hooks remain scope-gated; SB injection is required for the floating bubble.
     NSArray<NSString *> *filterDirs = @[
         @"/Library/MobileSubstrate/DynamicLibraries",
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries",
-        @"/var/mobile/Library/ProjectX/filter_plists"
+        @"/var/mobile/Library/TLinkIOS/filter_plists"
     ];
     for (NSString *dir in filterDirs) {
-        NSString *tweakPath = [dir stringByAppendingPathComponent:@"ProjectXTweak.plist"];
+        NSString *tweakPath = [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
         NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:tweakPath];
         if (!plist) {
             plist = [@{
@@ -2147,7 +2147,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                                                 error:nil];
     }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         CFSTR("com.hydra.projectx.filterPlistChanged"),
+                                         CFSTR("com.hydra.tlinkios.filterPlistChanged"),
                                          NULL, NULL, YES);
     
     // Regular in-process notification with all necessary context
@@ -2158,14 +2158,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Post notification immediately on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleProfileIndicator" 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleProfileIndicator"
                                                             object:nil 
                                                           userInfo:userInfo];
     });
     
     // Also send Darwin notification to reach SpringBoard
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    NSString *notificationName = enabled ? @"com.hydra.projectx.enableProfileIndicator" : @"com.hydra.projectx.disableProfileIndicator";
+    NSString *notificationName = enabled ? @"com.hydra.tlinkios.enableProfileIndicator" : @"com.hydra.tlinkios.disableProfileIndicator";
     
     // Post the Darwin notification synchronously to ensure immediate handling
     CFNotificationCenterPostNotification(darwinCenter, (__bridge CFStringRef)notificationName, NULL, NULL, YES);
@@ -2198,8 +2198,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // 2) Update NSUserDefaults suites
     NSArray *suiteNames = @[
         @"com.weaponx.securitySettings",
-        @"com.hydra.projectx.SecuritySettings",
-        @"com.hydra.projectx"
+        @"com.hydra.tlinkios.SecuritySettings",
+        @"com.hydra.tlinkios"
     ];
     for (NSString *suiteName in suiteNames) {
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -2213,12 +2213,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter,
-                                            CFSTR("com.hydra.projectx.settings.changed"),
+                                            CFSTR("com.hydra.tlinkios.settings.changed"),
                                             NULL,
                                             NULL,
                                             YES);
         CFNotificationCenterPostNotification(darwinCenter,
-                                            CFSTR("com.hydra.projectx.jailbreakBypassChanged"),
+                                            CFSTR("com.hydra.tlinkios.jailbreakBypassChanged"),
                                             NULL,
                                             NULL,
                                             YES);
@@ -2250,8 +2250,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // 2. Update NSUserDefaults in all suites to ensure consistency
     NSArray *suiteNames = @[
         @"com.weaponx.securitySettings",
-        @"com.hydra.projectx.SecuritySettings",
-        @"com.hydra.projectx"
+        @"com.hydra.tlinkios.SecuritySettings",
+        @"com.hydra.tlinkios"
     ];
     
     for (NSString *suiteName in suiteNames) {
@@ -2277,18 +2277,18 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Post notification immediately on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleNetworkDataSpoof" 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleNetworkDataSpoof"
                                                             object:nil 
                                                           userInfo:userInfo];
     });
     
     // Send Darwin notification with enhanced information
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    NSString *notificationName = enabled ? @"com.hydra.projectx.enableNetworkDataSpoof" : @"com.hydra.projectx.disableNetworkDataSpoof";
+    NSString *notificationName = enabled ? @"com.hydra.tlinkios.enableNetworkDataSpoof" : @"com.hydra.tlinkios.disableNetworkDataSpoof";
     CFNotificationCenterPostNotification(darwinCenter, (__bridge CFStringRef)notificationName, NULL, NULL, YES);
     
     // Also send a generic change notification
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkDataSpoofChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkDataSpoofChanged"), NULL, NULL, YES);
     
     // Add haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -2578,7 +2578,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Send notification for updates
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkISOCountryCodeChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
     
     // Haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -2601,7 +2601,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Post Darwin notification to update all processes
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkConnectionTypeChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkConnectionTypeChanged"), NULL, NULL, YES);
     
     // Add message explaining the change
     NSString *message = @"";
@@ -3693,7 +3693,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Broadcast changes so generators/tweaks can react.
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
     }
 }
 
@@ -3714,8 +3714,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.safariStackSpoofToggleChanged"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
     }
 }
 
@@ -3726,7 +3726,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
     }
 }
 
@@ -3740,8 +3740,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Broadcast changes so all tweaks clear caches.
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.safariStackSpoofToggleChanged"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
     }
 }
 
@@ -3837,7 +3837,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Post notification on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleDeviceSpoofing" 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleDeviceSpoofing"
                                                             object:nil 
                                                           userInfo:userInfo];
     });
@@ -3845,8 +3845,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Darwin notifications for injected tweaks (cache invalidation)
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.settings.changed"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.toggleDeviceSpoofing"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.toggleDeviceSpoofing"), NULL, NULL, YES);
     }
     
     // Add haptic feedback
@@ -4425,7 +4425,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self.securitySettings setBool:enabled forKey:@"fixVersionEnabled"];
     [self.securitySettings synchronize];
 
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.fixVersionChanged"
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.fixVersionChanged"
                                                         object:nil
                                                       userInfo:@{ @"enabled": @(enabled) }];
 
@@ -4513,7 +4513,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Post notification on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleAppVersionSpoofing" 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleAppVersionSpoofing"
                                                             object:nil 
                                                           userInfo:userInfo];
     });
@@ -4705,7 +4705,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
             
             // Send notification for updates
             CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkISOCountryCodeChanged"), NULL, NULL, YES);
+            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
             
             // Add haptic feedback
             UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -4789,7 +4789,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Send notification that carrier details changed
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.carrierDetailsChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.carrierDetailsChanged"), NULL, NULL, YES);
 }
 
 // Add method to handle generate button tap
@@ -4889,7 +4889,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Send notification that local IP has changed
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.localIPChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.localIPChanged"), NULL, NULL, YES);
 }
 
 #pragma mark - UITextFieldDelegate
@@ -5243,7 +5243,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Post notification immediately on main thread
     dispatch_async(dispatch_get_main_queue(), ^{
         PXLog(@"[SecurityTab] 🎨 Broadcasting canvas fingerprint protection toggle change: %@", enabled ? @"ON" : @"OFF");
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleCanvasFingerprintProtection" 
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleCanvasFingerprintProtection"
                                                             object:nil 
                                                           userInfo:userInfo];
     });
@@ -5254,23 +5254,23 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Enhanced notification system - send specific state notifications to ensure clarity
     if (enabled) {
         // Specific ON notification
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.enableCanvasFingerprintProtection"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.enableCanvasFingerprintProtection"), NULL, NULL, YES);
         // Generic change notification
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.canvasFingerprintToggleChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.canvasFingerprintToggleChanged"), NULL, NULL, YES);
         // Original notification name for compatibility
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.toggleCanvasFingerprint"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.toggleCanvasFingerprint"), NULL, NULL, YES);
     } else {
         // Specific OFF notification
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.disableCanvasFingerprintProtection"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.disableCanvasFingerprintProtection"), NULL, NULL, YES);
         // Generic change notification
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.canvasFingerprintToggleChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.canvasFingerprintToggleChanged"), NULL, NULL, YES);
         // Original notification name for compatibility
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.toggleCanvasFingerprint"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.toggleCanvasFingerprint"), NULL, NULL, YES);
     }
     
     // Reset NSUserDefaults to ensure data is consistent across all processes
     NSString *resetCmd = enabled ? @"ON" : @"OFF";
-    notify_post([@"com.hydra.projectx.resetCanvasFingerprint." stringByAppendingString:resetCmd].UTF8String);
+    notify_post([@"com.hydra.tlinkios.resetCanvasFingerprint." stringByAppendingString:resetCmd].UTF8String);
     
     // Show simple toast instead of alert (consistent with other controls)
     NSString *message = enabled ? 
@@ -5375,7 +5375,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [NetworkManager saveLocalIPAddress:ipv4]; // This will also update IPv6
     // Send notification that local IP has changed
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.localIPChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.localIPChanged"), NULL, NULL, YES);
 }
 
 - (void)localIPv6GenerateButtonTapped:(UIButton *)sender {

@@ -2,14 +2,14 @@
 """Host-independent contracts for the Lockdown identity runtime hook wiring (plan §4).
 
 Phases 5/6/7 shipped the PXLockdown*Resolve providers plus the L0 observe-only layer,
-but nothing intercepted a live Lockdown lookup to call them. ProjectXTweak/
+but nothing intercepted a live Lockdown lookup to call them. TLinkIOSTweak/
 LockdownIdentityHooks.x is that missing wiring. These checks pin the safety-critical
 invariants so the hook can never regress into an always-on or value-leaking state.
 """
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HOOK = "ProjectXTweak/LockdownIdentityHooks.x"
+HOOK = "TLinkIOSTweak/LockdownIdentityHooks.x"
 
 
 def require(path, needles):
@@ -91,11 +91,11 @@ for banned in ("PXLog(@\"[LockdownIdentityHooks] value", "resolved]", "originalO
     if banned in hook:
         raise AssertionError(f"Lockdown hook must not log raw runtime values ({banned})")
 
-# 5. The Makefile compiles ProjectXTweak/*.x unconditionally (so this file ships in
+# 5. The Makefile compiles TLinkIOSTweak/*.x unconditionally (so this file ships in
 #    research builds) while the research .m sources stay on an explicit allowlist.
 makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-if "$(wildcard ProjectXTweak/*.x)" not in makefile:
-    raise AssertionError("ProjectXTweak/*.x wildcard missing; hook would not compile")
+if "$(wildcard TLinkIOSTweak/*.x)" not in makefile:
+    raise AssertionError("TLinkIOSTweak/*.x wildcard missing; hook would not compile")
 if "$(wildcard research/*.m)" in makefile:
     raise AssertionError("Research source must use an explicit allowlist, not a wildcard")
 

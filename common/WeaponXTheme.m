@@ -1,6 +1,6 @@
 //
 //  WeaponXTheme.m
-//  ProjectX
+//  TLinkIOS
 //
 
 #import "WeaponXTheme.h"

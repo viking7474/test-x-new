@@ -1,10 +1,43 @@
 #!/bin/sh
 
-# Post-installation script for ProjectX (Rootful iOS 12+)
+# Post-installation script for TLinkIOS (Rootful iOS 12+)
 
 # Mark script execution
 echo "Running WeaponX post-installation script..."
 echo "===================================="
+
+# Migrate persistent ProjectX state without removing the legacy copy.
+PREFS_DIR="/var/mobile/Library/Preferences"
+LEGACY_DATA_DIR="/var/mobile/Library/ProjectX"
+TLINKIOS_DATA_DIR="/var/mobile/Library/TLinkIOS"
+if [ -d "$LEGACY_DATA_DIR" ] && [ ! -e "$TLINKIOS_DATA_DIR" ]; then
+    echo "Migrating ProjectX application data to TLinkIOS..."
+    cp -Rp "$LEGACY_DATA_DIR" "$TLINKIOS_DATA_DIR"
+fi
+mkdir -p "$TLINKIOS_DATA_DIR"
+chown -R mobile:mobile "$TLINKIOS_DATA_DIR"
+
+for LEGACY_PREF in "$PREFS_DIR"/com.hydra.projectx*.plist; do
+    [ -e "$LEGACY_PREF" ] || continue
+    PREF_BASENAME="${LEGACY_PREF##*/}"
+    NEW_PREF_BASENAME="$(printf '%s' "$PREF_BASENAME" | sed 's/^com\.hydra\.projectx/com.hydra.tlinkios/')"
+    NEW_PREF="$PREFS_DIR/$NEW_PREF_BASENAME"
+    if [ ! -e "$NEW_PREF" ]; then
+        cp -p "$LEGACY_PREF" "$NEW_PREF"
+        chown mobile:mobile "$NEW_PREF"
+    fi
+done
+
+LEGACY_FILTER="$TLINKIOS_DATA_DIR/filter_plists/ProjectXTweak.plist"
+TLINKIOS_FILTER="$TLINKIOS_DATA_DIR/filter_plists/TLinkIOSTweak.plist"
+if [ -f "$LEGACY_FILTER" ] && [ ! -e "$TLINKIOS_FILTER" ]; then
+    cp -p "$LEGACY_FILTER" "$TLINKIOS_FILTER"
+    chown mobile:mobile "$TLINKIOS_FILTER"
+fi
+
+rm -f /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib
+rm -f /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.plist
+rm -f /usr/bin/projectx-setup
 
 # Create required directories with proper permissions
 echo "📂 Creating required directories..."
@@ -14,10 +47,13 @@ mkdir -p "/var/mobile/Library/WeaponX"
 chmod 755 "/var/mobile/Library/WeaponX"
 chown mobile:mobile "/var/mobile/Library/WeaponX"
 
-# Create Log directory for ProjectX
-mkdir -p "/var/mobile/Library/Logs/ProjectX"
-chmod 777 "/var/mobile/Library/Logs/ProjectX"
-chown mobile:mobile "/var/mobile/Library/Logs/ProjectX"
+# Create Log directory for TLinkIOS
+if [ -d "/var/mobile/Library/Logs/ProjectX" ] && [ ! -e "/var/mobile/Library/Logs/TLinkIOS" ]; then
+    cp -Rp "/var/mobile/Library/Logs/ProjectX" "/var/mobile/Library/Logs/TLinkIOS"
+fi
+mkdir -p "/var/mobile/Library/Logs/TLinkIOS"
+chmod 777 "/var/mobile/Library/Logs/TLinkIOS"
+chown mobile:mobile "/var/mobile/Library/Logs/TLinkIOS"
 
 # Create Sandbox/Profile directory (for LibSandy)
 mkdir -p "/Library/Sandbox/Profile"
@@ -30,9 +66,9 @@ chmod 755 "/Library/libSandy"
 chown root:wheel "/Library/libSandy"
 
 # Define paths for profile file
-LIBSANDY_PROFILE="/Library/libSandy/projectx_filesystem_access.plist"
-MS_PROFILE="/Library/MobileSubstrate/DynamicLibraries/projectx_filesystem_access.plist"
-SANDBOX_PROFILE="/Library/Sandbox/Profile/projectx_filesystem_access.plist"
+LIBSANDY_PROFILE="/Library/libSandy/tlinkios_filesystem_access.plist"
+MS_PROFILE="/Library/MobileSubstrate/DynamicLibraries/tlinkios_filesystem_access.plist"
+SANDBOX_PROFILE="/Library/Sandbox/Profile/tlinkios_filesystem_access.plist"
 
 # Copy profile to libSandy location
 if [ -f "$MS_PROFILE" ]; then
@@ -93,15 +129,15 @@ else
 fi
 
 # Run container fix script if available
-if [ -f "/usr/bin/projectx-fix-containers" ]; then
+if [ -f "/usr/bin/tlinkios-fix-containers" ]; then
     echo "🔧 Running container fix script..."
-    "/usr/bin/projectx-fix-containers"
+    "/usr/bin/tlinkios-fix-containers"
 fi
 
 # CRITICAL: Register app icon and reload MobileSubstrate
 echo "🔄 Registering application with SpringBoard..."
 if command -v uicache > /dev/null 2>&1; then
-    uicache -p /Applications/ProjectX.app
+    uicache -p /Applications/TLinkIOS.app
     echo "✅ App registered successfully"
 else
     echo "⚠️ uicache not found, trying alternative..."

@@ -2,7 +2,7 @@
 
 /// Shared app-picker palette. Adapts to light/dark on iOS 13+, with sensible
 /// fallbacks on older systems. Defined in PXDashboardAppPickerCell.m and also
-/// used by the app-picker screen in ProjectXViewController.
+/// used by the app-picker screen in TLinkIOSViewController.
 UIColor *PXAppPickerBackgroundColor(void);
 UIColor *PXAppPickerCardColor(void);
 UIColor *PXAppPickerSecondaryTextColor(void);

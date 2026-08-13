@@ -1,5 +1,5 @@
 #import "ProfileIndicatorView.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PassThroughWindow.h"
 #import "ProfileManager.h"
 #import "IPStatusViewController.h"
@@ -16,7 +16,7 @@ static void springboardBeenUnlockedCallback(CFNotificationCenterRef center, void
 static NSString *const kPXSecuritySettingsDomain = @"com.weaponx.securitySettings";
 static NSString *const kPXProfileIndicatorEnabledKey = @"profileIndicatorEnabled";
 
-/// Prefer CFPreferences + on-disk plist (shared truth across ProjectX app + SpringBoard).
+/// Prefer CFPreferences + on-disk plist (shared truth across TLinkIOS app + SpringBoard).
 static BOOL PXProfileIndicatorSettingEnabled(void) {
     CFPropertyListRef pref = CFPreferencesCopyAppValue(
         (__bridge CFStringRef)kPXProfileIndicatorEnabledKey,
@@ -135,8 +135,8 @@ static BOOL PXSpringBoardIsLocked(void) {
                                                                              message:nil
                                                                       preferredStyle:UIAlertControllerStyleActionSheet];
         __weak typeof(self) weakSelf = self;
-        // Option 1: Open ProjectX
-        [actionSheet addAction:[UIAlertAction actionWithTitle:@"Open ProjectX"
+        // Option 1: Open TLinkIOS
+        [actionSheet addAction:[UIAlertAction actionWithTitle:@"Open TLinkIOS"
                                                        style:UIAlertActionStyleDefault
                                                      handler:^(UIAlertAction * _Nonnull action) {
             // Trigger the same logic as tap
@@ -476,7 +476,7 @@ static BOOL PXSpringBoardIsLocked(void) {
 
 - (void)updateProfileIndicator {
     // First force a synchronization to make sure we have the latest user defaults
-    NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+    NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
     [sharedDefaults synchronize];
     
     // Get profile path from ProfileManager instead of hardcoding
@@ -501,7 +501,7 @@ static BOOL PXSpringBoardIsLocked(void) {
             PXLog(@"ProfileIndicator: ❌ Failed to read from fallback profile info as well");
             
             // Fallback to NSUserDefaults
-            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
             [sharedDefaults synchronize];
             NSString *fallbackProfileId = [sharedDefaults stringForKey:@"CurrentProfileID"];
             
@@ -678,7 +678,7 @@ static BOOL PXSpringBoardIsLocked(void) {
     // Register for toggle notifications
     [[NSNotificationCenter defaultCenter] addObserver:self 
                                              selector:@selector(toggleIndicator:) 
-                                                 name:@"com.hydra.projectx.toggleProfileIndicator" 
+                                                 name:@"com.hydra.tlinkios.toggleProfileIndicator"
                                                object:nil];
     
     // Also register for Darwin notifications directly
@@ -686,14 +686,14 @@ static BOOL PXSpringBoardIsLocked(void) {
     CFNotificationCenterAddObserver(darwinCenter,
                                    (__bridge const void *)(self),
                                    toggleIndicatorCallback,
-                                   CFSTR("com.hydra.projectx.enableProfileIndicator"),
+                                   CFSTR("com.hydra.tlinkios.enableProfileIndicator"),
                                    NULL,
                                    CFNotificationSuspensionBehaviorDeliverImmediately);
                                    
     CFNotificationCenterAddObserver(darwinCenter,
                                    (__bridge const void *)(self),
                                    toggleIndicatorCallback,
-                                   CFSTR("com.hydra.projectx.disableProfileIndicator"),
+                                   CFSTR("com.hydra.tlinkios.disableProfileIndicator"),
                                    NULL,
                                    CFNotificationSuspensionBehaviorDeliverImmediately);
                                    
@@ -701,7 +701,7 @@ static BOOL PXSpringBoardIsLocked(void) {
     CFNotificationCenterAddObserver(darwinCenter,
                                    (__bridge const void *)(self),
                                    toggleIndicatorCallback,
-                                   CFSTR("com.hydra.projectx.profileChanged"),
+                                   CFSTR("com.hydra.tlinkios.profileChanged"),
                                    NULL,
                                    CFNotificationSuspensionBehaviorDeliverImmediately);
     
@@ -730,7 +730,7 @@ static BOOL PXSpringBoardIsLocked(void) {
         
         if (!newProfileId) {
             // Fall back to shared defaults
-            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
             [sharedDefaults synchronize];
             newProfileId = [sharedDefaults stringForKey:@"CurrentProfileID"];
         }
@@ -939,7 +939,7 @@ static BOOL PXSpringBoardIsLocked(void) {
         
         // If still not found, fallback to NSUserDefaults
         if (!newProfileId) {
-            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
             [sharedDefaults synchronize];
             newProfileId = [sharedDefaults stringForKey:@"CurrentProfileID"];
         }
@@ -966,19 +966,19 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
             indicatorView = [ProfileIndicatorView sharedInstance];
         }
         
-        if ([notificationName isEqualToString:@"com.hydra.projectx.enableProfileIndicator"]) {
+        if ([notificationName isEqualToString:@"com.hydra.tlinkios.enableProfileIndicator"]) {
             // Use dispatch_async to ensure UI updates happen on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
                 PXWriteProfileIndicatorSetting(YES);
                 indicatorView.isDeviceLocked = PXSpringBoardIsLocked();
                 [indicatorView show];
             });
-        } else if ([notificationName isEqualToString:@"com.hydra.projectx.disableProfileIndicator"]) {
+        } else if ([notificationName isEqualToString:@"com.hydra.tlinkios.disableProfileIndicator"]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 PXWriteProfileIndicatorSetting(NO);
                 [indicatorView hide];
             });
-        } else if ([notificationName isEqualToString:@"com.hydra.projectx.profileChanged"]) {
+        } else if ([notificationName isEqualToString:@"com.hydra.tlinkios.profileChanged"]) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 PXLog(@"ProfileIndicator: Profile change Darwin notification received");
                 
@@ -1037,7 +1037,7 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
         PXLog(@"Indicator tap ignored: device is locked");
         return;
     }
-    PXLog(@"Indicator tapped, attempting to open ProjectX app");
+    PXLog(@"Indicator tapped, attempting to open TLinkIOS app");
     
     // Visual feedback for the tap
     [UIView animateWithDuration:0.15 animations:^{
@@ -1051,11 +1051,12 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
     // URLs to try for opening the app
     NSArray *urlSchemes = @[
         @"weaponx://",                     // Primary app scheme
-        @"projectx://",                    // Standard URL scheme
-        @"hydraprojectx://",               // Alternative name
-        @"com.hydra.projectx://",          // Bundle ID URL scheme
+        @"tlinkios://",                    // Standard URL scheme
+        @"projectx://",                    // Legacy scheme during migration
+        @"hydratlinkios://",               // Alternative name
+        @"com.hydra.tlinkios://",          // Bundle ID URL scheme
         @"com.hydra.weaponx://",           // Alternative bundle ID
-        @"ProjectX://",                    // Capitalized variant
+        @"TLinkIOS://",                    // Capitalized variant
         @"WeaponX://"                      // Capitalized alternative
     ];
     
@@ -1092,7 +1093,7 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
 
 - (void)launchAppDirectly {
     NSArray *bundleIds = @[
-        @"com.hydra.projectx",
+        @"com.hydra.tlinkios",
         @"com.hydra.weaponx"
     ];
     
@@ -1158,7 +1159,7 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
         PXLog(@"LSApplicationWorkspace class not found");
     }
     
-    PXLog(@"Failed to open ProjectX app - all methods failed");
+    PXLog(@"Failed to open TLinkIOS app - all methods failed");
 }
 
 // Current mode: Display a + button that adds a temporary shortcut

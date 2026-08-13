@@ -111,8 +111,8 @@
             prefsPath = @"/var/mobile/Library/Preferences";
         }
     }
-    NSString *scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
-    NSString *versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.version_spoof.plist"];
+    NSString *scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
+    NSString *versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"];
     NSDictionary *scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
     NSDictionary *savedApps = scopedAppsDict[@"ScopedApps"];
     NSDictionary *versionSpoofDict = [NSDictionary dictionaryWithContentsOfFile:versionSpoofFile];
@@ -267,7 +267,7 @@
     [userInfo setObject:@(enabled) forKey:@"enabled"];
     [userInfo setObject:@"AppVersionListDetailView" forKey:@"sender"];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleAppVersionSpoofing"
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleAppVersionSpoofing"
                                                             object:nil
                                                           userInfo:userInfo];
     });
@@ -288,7 +288,7 @@
 }
 
 - (void)addButtonTapped {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Th\u00eam app" message:@"H\u00e3y th\u00eam app v\u00e0o Scope \u1edf tab ProjectX (Home). Sau \u0111\u00f3 app s\u1ebd hi\u1ec7n \u1edf \u0111\u00e2y \u0111\u1ec3 ch\u1ec9nh phi\u00ean b\u1ea3n." preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Th\u00eam app" message:@"H\u00e3y th\u00eam app v\u00e0o Scope \u1edf tab TLinkIOS (Home). Sau \u0111\u00f3 app s\u1ebd hi\u1ec7n \u1edf \u0111\u00e2y \u0111\u1ec3 ch\u1ec9nh phi\u00ean b\u1ea3n." preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }

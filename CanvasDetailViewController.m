@@ -1,5 +1,5 @@
 #import "CanvasDetailViewController.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "IdentifierManager.h"
 #import <notify.h>
 
@@ -329,7 +329,7 @@
     [userInfo setObject:@YES forKey:@"forceReload"];
     [userInfo setObject:securitySettingsPath forKey:@"settingsPath"];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleCanvasFingerprintProtection"
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleCanvasFingerprintProtection"
                                                             object:nil
                                                           userInfo:userInfo];
     });
@@ -337,17 +337,17 @@
     // Darwin notifications for system-wide changes
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (enabled) {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.enableCanvasFingerprintProtection"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.canvasFingerprintToggleChanged"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.toggleCanvasFingerprint"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.enableCanvasFingerprintProtection"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.canvasFingerprintToggleChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.toggleCanvasFingerprint"), NULL, NULL, YES);
     } else {
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.disableCanvasFingerprintProtection"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.canvasFingerprintToggleChanged"), NULL, NULL, YES);
-        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.toggleCanvasFingerprint"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.disableCanvasFingerprintProtection"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.canvasFingerprintToggleChanged"), NULL, NULL, YES);
+        CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.toggleCanvasFingerprint"), NULL, NULL, YES);
     }
 
     NSString *resetCmd = enabled ? @"ON" : @"OFF";
-    notify_post([@"com.hydra.projectx.resetCanvasFingerprint." stringByAppendingString:resetCmd].UTF8String);
+    notify_post([@"com.hydra.tlinkios.resetCanvasFingerprint." stringByAppendingString:resetCmd].UTF8String);
 
     NSString *message = enabled ? @"Canvas Fingerprinting Protection Enabled" : @"Canvas Fingerprinting Protection Disabled";
     [self showToast:message];

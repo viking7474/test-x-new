@@ -1,5 +1,5 @@
 #import "BatteryManager.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 
 // Define file paths
@@ -32,7 +32,7 @@ static BatteryManager *sharedManager = nil;
     self = [super init];
     if (self) {
         // Do NOT call -[UIDevice batteryLevel] here.
-        // ProjectXTweak hooks UIDevice.batteryLevel → BatteryManager.sharedManager →
+        // TLinkIOSTweak hooks UIDevice.batteryLevel → BatteryManager.sharedManager →
         // re-enters this init under dispatch_once and SIGTRAPs (once deadlock).
         _currentBatteryLevel = @"0.75";
         _currentLowPowerMode = NO; // Profile default
@@ -152,7 +152,7 @@ static BatteryManager *sharedManager = nil;
     
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        CFSTR("com.hydra.projectx.battery.updated"),
+        CFSTR("com.hydra.tlinkios.battery.updated"),
         NULL,
         NULL,
         YES
@@ -186,7 +186,7 @@ static BatteryManager *sharedManager = nil;
     // Also post CF notification for tweak hooks
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        CFSTR("com.hydra.projectx.battery.updated"),
+        CFSTR("com.hydra.tlinkios.battery.updated"),
         NULL,
         (__bridge CFDictionaryRef)batteryInfo,
         YES

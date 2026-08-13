@@ -11,7 +11,7 @@ def require(condition, message):
         raise AssertionError(message)
 
 ua = text("common/PXUserAgentNormalizer.m")
-hooks = text("ProjectXTweak/IOSVersionHooks.x")
+hooks = text("TLinkIOSTweak/IOSVersionHooks.x")
 cell = text("common/PXCellularIdentitySchema.m")
 deps = text("common/PXIdentityDependencyValidator.m")
 envelope = text("common/PXBackupAuthenticatedEnvelope.m")

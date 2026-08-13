@@ -1,6 +1,6 @@
 #import "StorageManager.h"
 #import "ProfileManager.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 
 // Constants for proper size calculations
@@ -34,7 +34,7 @@
         
         // Load from settings
         NSUserDefaults *defaults = [[NSUserDefaults alloc] 
-                                   initWithSuiteName:@"com.hydra.projectx.settings"];
+                                   initWithSuiteName:@"com.hydra.tlinkios.settings"];
         _isEnabled = [defaults boolForKey:@"StorageSystemEnabled"];
         
         // Load current profile
@@ -286,7 +286,7 @@
     
     // Save to settings
     NSUserDefaults *defaults = [[NSUserDefaults alloc] 
-                               initWithSuiteName:@"com.hydra.projectx.settings"];
+                               initWithSuiteName:@"com.hydra.tlinkios.settings"];
     [defaults setBool:enabled forKey:@"StorageSystemEnabled"];
     [defaults synchronize];
 }

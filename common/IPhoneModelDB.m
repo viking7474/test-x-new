@@ -4,7 +4,7 @@
 #import "DBDebugLogger.h"
 #import <Security/Security.h>
 
-static NSString *const kIPhoneModelDBErrorDomain = @"com.hydra.projectx.iphone_model_db";
+static NSString *const kIPhoneModelDBErrorDomain = @"com.hydra.tlinkios.iphone_model_db";
 
 static NSUInteger PXRandomIndex2(NSUInteger upperBoundExclusive) {
     if (upperBoundExclusive == 0) return 0;

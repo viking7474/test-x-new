@@ -5,7 +5,7 @@ const fs = require("fs");
 const vm = require("vm");
 
 function extractFingerprintScript() {
-    const objectiveC = fs.readFileSync("ProjectXTweak/CanvasFingerprintHooks.x", "utf8");
+    const objectiveC = fs.readFileSync("TLinkIOSTweak/CanvasFingerprintHooks.x", "utf8");
     const functionStart = objectiveC.indexOf("static NSString *PXBuildSeededFingerprintProtectionScript");
     assert.ok(functionStart >= 0, "missing fingerprint script builder");
     const assignmentStart = objectiveC.indexOf("NSString *script =", functionStart);

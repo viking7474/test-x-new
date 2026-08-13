@@ -47,7 +47,7 @@ require("tests/PXLockdownResearchSafetyTests.m", [
 ])
 
 # Release expansion must not contain the research source or research macro.
-if "ProjectXTweak_FILES = $(wildcard ProjectXTweak/*.x) $(wildcard ProjectXTweak/*.m) $(wildcard common/*.m) research/" in makefile:
+if "TLinkIOSTweak_FILES = $(wildcard TLinkIOSTweak/*.x) $(wildcard TLinkIOSTweak/*.m) $(wildcard common/*.m) research/" in makefile:
     raise AssertionError("Research module is unconditionally present in tweak sources")
 
 print("Phase-4 Lockdown safety contracts: PASS")

@@ -14,11 +14,11 @@
 // Constants
 static const int kCheckInterval = 5; // Check every 5 seconds
 static NSString *kGuardianDir = nil; // Will be initialized in init
-static NSString *kProjectXPath = nil; // Will be initialized in init
+static NSString *kTLinkIOSPath = nil; // Will be initialized in init
 static NSString *ROOT_PREFIX = nil; // Will be set based on environment
 static os_log_t weaponx_log = NULL;
 static BOOL debugMode = NO;
-static NSString * const kProjectXFilterChangedNotification = @"com.hydra.projectx.filterPlistChanged";
+static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkios.filterPlistChanged";
 
 // Forward declarations
 extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -31,13 +31,13 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 @property (nonatomic, strong) NSTimer *monitorTimer;
 @property (nonatomic, strong) NSMutableDictionary *processInfo;
 @property (nonatomic, strong) NSMutableArray *protectedProcesses;
-- (void)syncProjectXFilterPlists;
+- (void)syncTLinkIOSFilterPlists;
 @end
 
 static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     (void)center; (void)name; (void)object; (void)userInfo;
     WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
-    [daemon syncProjectXFilterPlists];
+    [daemon syncTLinkIOSFilterPlists];
 }
 
 @implementation WeaponXDaemon
@@ -58,13 +58,13 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
         
         // Set paths directly for rootful
         kGuardianDir = @"/Library/WeaponX/Guardian";
-        kProjectXPath = @"/Applications/ProjectX.app/ProjectX";
+        kTLinkIOSPath = @"/Applications/TLinkIOS.app/TLinkIOS";
         
         _processInfo = [NSMutableDictionary dictionary];
-        _protectedProcesses = [NSMutableArray arrayWithObjects:@"ProjectX", nil];
+        _protectedProcesses = [NSMutableArray arrayWithObjects:@"TLinkIOS", nil];
         
         NSLog(@"Using Guardian dir: %@", kGuardianDir);
-        NSLog(@"Using ProjectX path: %@", kProjectXPath);
+        NSLog(@"Using TLinkIOS path: %@", kTLinkIOSPath);
         
         // Create guardian directory if needed
         [self ensureGuardianDirectoryExists];
@@ -87,7 +87,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                     (__bridge const void *)(self),
                                     PXFilterChangedCallback,
-                                    (__bridge CFStringRef)kProjectXFilterChangedNotification,
+                                    (__bridge CFStringRef)kTLinkIOSFilterChangedNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
     
@@ -110,7 +110,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 
 - (void)checkProcesses {
     [self log:@"Checking processes..." withType:OS_LOG_TYPE_DEBUG];
-    [self syncProjectXFilterPlists];
+    [self syncTLinkIOSFilterPlists];
     
     // Get all running processes
     int numberOfProcesses = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
@@ -178,9 +178,9 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     [self updateStateFile];
 }
 
-- (void)syncProjectXFilterPlists {
+- (void)syncTLinkIOSFilterPlists {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *stagingDir = @"/var/mobile/Library/ProjectX/filter_plists";
+    NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     NSString *targetDir = [self substrateDynamicLibrariesDir];
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:stagingDir isDirectory:&isDir] || !isDir) return;
@@ -196,7 +196,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     result[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
     result[@"targetDir"] = targetDir ?: @"";
-    for (NSString *name in @[@"ProjectXTweak.plist", @"WeaponXKeychainBridge.plist"]) {
+    for (NSString *name in @[@"TLinkIOSTweak.plist", @"WeaponXKeychainBridge.plist"]) {
         NSString *src = [stagingDir stringByAppendingPathComponent:name];
         NSString *dst = [targetDir stringByAppendingPathComponent:name];
         NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:src];
@@ -219,7 +219,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
             [self log:[NSString stringWithFormat:@"Filter sync failed for %@: %@", name, syncResult[@"status"] ?: @"unknown"] withType:OS_LOG_TYPE_ERROR];
         }
     }
-    NSString *debugPath = @"/var/mobile/Library/ProjectX/filter_daemon_debug.plist";
+    NSString *debugPath = @"/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist";
     [result writeToFile:debugPath atomically:YES];
     chmod([debugPath fileSystemRepresentation], 0644);
     chown([debugPath fileSystemRepresentation], 501, 501);
@@ -299,8 +299,8 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
     
     NSString *executablePath = nil;
     
-    if ([processName isEqualToString:@"ProjectX"]) {
-        executablePath = kProjectXPath;
+    if ([processName isEqualToString:@"TLinkIOS"]) {
+        executablePath = kTLinkIOSPath;
     }
     
     if (!executablePath) {

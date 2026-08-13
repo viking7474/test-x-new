@@ -1,6 +1,6 @@
 #import "WiFiManager.h"
 #import "ProfileManager.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 #import "PXIdentityValidator.h"
 #import <Security/Security.h>
@@ -548,7 +548,7 @@
     
     // Validate required fields
     if (!wifiInfo[@"ssid"] || !wifiInfo[@"bssid"]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                          code:3001 
                                      userInfo:@{NSLocalizedDescriptionKey: @"WiFi info must contain SSID and BSSID"}];
         return;

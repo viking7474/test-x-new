@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "Setting up ProjectX app..."
+echo "Setting up TLinkIOS app..."
 
 # Rootful jailbreak - no prefix needed
 JBPREFIX=""
@@ -14,24 +14,24 @@ chmod 755 /Library/MobileSubstrate/DynamicLibraries
 
 # Ensure the dylib has proper permissions
 echo "Setting up tweak permissions..."
-if [ -f "/Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib" ]; then
-    chmod 644 /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib
+if [ -f "/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib" ]; then
+    chmod 644 /Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib
 fi
 
-if [ -f "/Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.plist" ]; then
-    chmod 644 /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.plist
+if [ -f "/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist" ]; then
+    chmod 644 /Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist
 fi
 
 # Ensure app permissions are correct
-if [ -d "/Applications/ProjectX.app" ]; then
+if [ -d "/Applications/TLinkIOS.app" ]; then
     echo "Setting app permissions..."
-    chmod 755 /Applications/ProjectX.app
-    chmod 755 /Applications/ProjectX.app/ProjectX
+    chmod 755 /Applications/TLinkIOS.app
+    chmod 755 /Applications/TLinkIOS.app/TLinkIOS
     
     # Force app registration with SpringBoard
     echo "Registering app with SpringBoard..."
     if command -v uicache >/dev/null 2>&1; then
-        uicache --path /Applications/ProjectX.app
+        uicache --path /Applications/TLinkIOS.app
     fi
 else
     echo "App not found in expected locations"

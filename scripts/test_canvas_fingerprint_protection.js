@@ -204,7 +204,7 @@ const context = {
 context.globalThis = context;
 
 function extractFingerprintScript() {
-    const objectiveC = fs.readFileSync("ProjectXTweak/CanvasFingerprintHooks.x", "utf8");
+    const objectiveC = fs.readFileSync("TLinkIOSTweak/CanvasFingerprintHooks.x", "utf8");
     const assignmentStart = objectiveC.indexOf("NSString *script =");
     const replacementStart = objectiveC.indexOf(
         "script = [script stringByReplacingOccurrencesOfString:@\"__WX_BASE_SEED__\"",

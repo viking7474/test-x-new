@@ -1,6 +1,6 @@
 #import "UptimeManager.h"
 #import <sys/sysctl.h>
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 
 // File paths for persistent storage
 // Removed global paths. All methods now require a profile-specific path.

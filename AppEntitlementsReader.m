@@ -5,7 +5,7 @@
 
 #import <objc/message.h>
 
-static NSString * const PXEntitlementsErrorDomain = @"com.hydra.projectx.entitlements";
+static NSString * const PXEntitlementsErrorDomain = @"com.hydra.tlinkios.entitlements";
 
 @implementation AppEntitlementsReader
 

@@ -98,12 +98,12 @@ NSString *PXActiveProfileDeviceIDsPath(void) {
     return PXProfileDeviceIDsPath(PXActiveProfileID());
 }
 
-NSString *PXProjectXSettingsPath(void) {
-    return [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.projectx.settings.plist"];
+NSString *PXTLinkIOSSettingsPath(void) {
+    return [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.settings.plist"];
 }
 
 NSString *PXGlobalScopePath(void) {
-    return [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+    return [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
 }
 
 NSString *PXSecuritySettingsPath(void) {
@@ -112,7 +112,7 @@ NSString *PXSecuritySettingsPath(void) {
 
 void PXPostSettingsChangedNotification(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         CFSTR("com.hydra.projectx.settings.changed"),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
                                          NULL,
                                          NULL,
                                          true);

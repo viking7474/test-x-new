@@ -15,7 +15,7 @@ require("common/PXIdentitySurfaceRegistry.m", [
     '@"device-model"', '@"product-name"', '@"model"', '@"board-id"',
     '@"compatible"', 'PXIdentityExpectedTypeData', 'duplicate surface alias',
 ])
-require("ProjectXTweak/Tweak.x", [
+require("TLinkIOSTweak/Tweak.x", [
     '#import "PXIdentitySurfaceRegistry.h"',
     'PXIdentitySurfaceEntryForKey(propertyString, PXIdentitySurfaceMobileGestalt)',
     'PXIdentitySurfaceResolveValue(surfaceEntry, deviceIds)',

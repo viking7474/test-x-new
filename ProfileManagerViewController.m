@@ -1586,7 +1586,7 @@
                 // Also post a Darwin notification for the floating indicator
                 CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
                 CFNotificationCenterPostNotification(darwinCenter, 
-                                                     CFSTR("com.hydra.projectx.profileChanged"), 
+                                                     CFSTR("com.hydra.tlinkios.profileChanged"),
                                                      NULL, 
                                                      NULL, 
                                                      YES);
@@ -2309,7 +2309,7 @@
         if (!info || ![info[@"enabled"] boolValue]) continue;
         NSString *bundleID = [info[@"originalBundleID"] isKindOfClass:[NSString class]] ? info[@"originalBundleID"] : info[@"bundleID"];
         if (!bundleID.length) bundleID = scopedKey;
-        if ([bundleID isEqualToString:@"com.hydra.projectx"] || [bundleID hasPrefix:@"com.apple."]) continue;
+        if ([bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID hasPrefix:@"com.apple."]) continue;
 
         NSString *containerPath = [self dataContainerPathForBundleID:bundleID];
         if (!containerPath.length) continue;

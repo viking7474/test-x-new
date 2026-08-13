@@ -223,8 +223,8 @@
     // 2) Update NSUserDefaults suites
     NSArray *suiteNames = @[
         @"com.weaponx.securitySettings",
-        @"com.hydra.projectx.SecuritySettings",
-        @"com.hydra.projectx"
+        @"com.hydra.tlinkios.SecuritySettings",
+        @"com.hydra.tlinkios"
     ];
     for (NSString *suiteName in suiteNames) {
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -238,12 +238,12 @@
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter,
-                                            CFSTR("com.hydra.projectx.settings.changed"),
+                                            CFSTR("com.hydra.tlinkios.settings.changed"),
                                             NULL,
                                             NULL,
                                             YES);
         CFNotificationCenterPostNotification(darwinCenter,
-                                            CFSTR("com.hydra.projectx.jailbreakBypassChanged"),
+                                            CFSTR("com.hydra.tlinkios.jailbreakBypassChanged"),
                                             NULL,
                                             NULL,
                                             YES);

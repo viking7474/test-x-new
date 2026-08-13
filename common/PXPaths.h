@@ -14,7 +14,7 @@ FOUNDATION_EXPORT NSString * _Nullable PXProfileDeviceIDsPath(NSString * _Nullab
 FOUNDATION_EXPORT NSString * _Nullable PXActiveProfileRootPath(void);
 FOUNDATION_EXPORT NSString * _Nullable PXActiveProfileIdentityPath(void);
 FOUNDATION_EXPORT NSString * _Nullable PXActiveProfileDeviceIDsPath(void);
-FOUNDATION_EXPORT NSString *PXProjectXSettingsPath(void);
+FOUNDATION_EXPORT NSString *PXTLinkIOSSettingsPath(void);
 FOUNDATION_EXPORT NSString *PXGlobalScopePath(void);
 FOUNDATION_EXPORT NSString *PXSecuritySettingsPath(void);
 FOUNDATION_EXPORT void PXPostSettingsChangedNotification(void);

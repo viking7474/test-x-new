@@ -17,7 +17,7 @@ def require(condition, message):
 
 
 cleaner = text("AppDataCleaner.m")
-tweak = text("ProjectXTweak/Tweak.x")
+tweak = text("TLinkIOSTweak/Tweak.x")
 time_h = text("common/PXTimeOffset.h")
 time_m = text("common/PXTimeOffset.m")
 mocks_raw = text("tests/phase11/mocks.json")
@@ -46,10 +46,10 @@ require(tweak.count("MSHookFunction(unamePtr,") == 1,
         "IOS-04: uname must be hooked exactly once, by the Tweak")
 require("sPXUnameHookInstalled" in tweak, "IOS-04: idempotent uname install guard missing")
 for other in (
-    "ProjectXTweak/JailbreakBypassHooks.x",
-    "ProjectXTweak/DeviceSpecHooks.x",
-    "ProjectXTweak/IOSVersionHooks.x",
-    "ProjectXTweak/DeviceModelHooks.x",
+    "TLinkIOSTweak/JailbreakBypassHooks.x",
+    "TLinkIOSTweak/DeviceSpecHooks.x",
+    "TLinkIOSTweak/IOSVersionHooks.x",
+    "TLinkIOSTweak/DeviceModelHooks.x",
 ):
     require("MSHookFunction(unamePtr" not in text(other),
             f"IOS-04: no other hook module may install a uname hook ({other})")

@@ -1,6 +1,6 @@
 #import "KeychainUUIDManager.h"
 #import "PXIdentityValidator.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import <Security/Security.h>
 
 @interface KeychainUUIDManager ()

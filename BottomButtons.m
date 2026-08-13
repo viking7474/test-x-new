@@ -1,5 +1,5 @@
 #import "BottomButtons.h"
-#import "ProjectX.h"
+#import "TLinkIOS.h"
 #import "IdentifierManager.h"
 #import "common/UIButton+SafeConfiguration.h"
 #import <spawn.h>
@@ -530,7 +530,7 @@
     
     // Create a safelist of apps that should NEVER be terminated
     NSArray *safeApps = @[
-        @"com.hydra.projectx",      // The tweak itself
+        @"com.hydra.tlinkios",      // The tweak itself
         @"com.apple.springboard",   // SpringBoard
         @"com.apple.backboardd",    // BackBoard
         @"com.apple.preferences",   // Settings

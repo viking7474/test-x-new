@@ -463,7 +463,7 @@
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.font = [UIFont boldSystemFontOfSize:16];
     titleLabel.textColor = [UIColor labelColor];
-    // Inline pencil icon (like ProjectXViewController)
+    // Inline pencil icon (like TLinkIOSViewController)
     if (@available(iOS 15.0, *)) {
         UIImage *pencilImg = [[UIImage systemImageNamed:@"pencil"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
         NSTextAttachment *iconAttachment = [[NSTextAttachment alloc] init];
@@ -629,7 +629,7 @@
     if ([key isEqualToString:@"IMEI"]) containerView.tag = 200;
     if ([key isEqualToString:@"MEID"]) containerView.tag = 201;
 
-    // --- WIDTH: Match ProjectXViewController ---
+    // --- WIDTH: Match TLinkIOSViewController ---
     // Do NOT set a fixed width. Let the card stretch to fill the parent stack view.
     // Set hugging/compression priorities to allow stretching.
     [containerView setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -863,7 +863,7 @@
     if (value) {
         UIPasteboard.generalPasteboard.string = value;
         if ([UIButton buttonConfigurationClassExists]) {
-            // Enhanced visual feedback for copy action (same as ProjectXViewController)
+            // Enhanced visual feedback for copy action (same as TLinkIOSViewController)
             UIColor *originalColor = sender.tintColor;
             UIButtonConfiguration *originalConfig = sender.configuration;
             UIButtonConfiguration *successConfig = [originalConfig copy];

@@ -6,7 +6,7 @@ static NSString *PXBackupKeychainGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataBackupKeychainGroups_%@", bundleID ?: @""];
 }
 
-static NSString * const PXBackupKeychainGroupsSavedNotification = @"com.hydra.projectx.backupKeychainGroupsSaved";
+static NSString * const PXBackupKeychainGroupsSavedNotification = @"com.hydra.tlinkios.backupKeychainGroupsSaved";
 
 @interface BackupKeychainGroupsViewController () <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
 @property (nonatomic, copy) NSString *bundleID;

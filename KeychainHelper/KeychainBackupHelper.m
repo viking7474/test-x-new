@@ -9,7 +9,7 @@
 #import <sys/stat.h>
 #import <unistd.h>
 
-NSString * const PXKeychainBackupErrorDomain = @"com.hydra.projectx.keychain";
+NSString * const PXKeychainBackupErrorDomain = @"com.hydra.tlinkios.keychain";
 
 @implementation PXKeychainBackupResult
 - (instancetype)init {

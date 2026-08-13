@@ -5,7 +5,7 @@
 #import "PXDestructivePathValidator.h"
 
 NSString * const PXAppGroupRestoreTargetPlanErrorDomain =
-    @"com.hydra.projectx.app-group-restore-target-plan";
+    @"com.hydra.tlinkios.app-group-restore-target-plan";
 NSString * const PXAppGroupRestoreTargetPlanErrorFieldPathKey =
     @"PXAppGroupRestoreTargetPlanErrorFieldPathKey";
 

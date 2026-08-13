@@ -1,6 +1,6 @@
 #import "PasteboardUUIDManager.h"
 #import "PXIdentityValidator.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 
 @interface PasteboardUUIDManager ()
 @property (nonatomic, strong) NSString *currentIdentifier;

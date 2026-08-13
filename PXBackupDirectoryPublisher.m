@@ -21,7 +21,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupDirectoryPublisherErrorDomain =
-    @"com.hydra.projectx.backup-directory-publisher";
+    @"com.hydra.tlinkios.backup-directory-publisher";
 NSString * const PXBackupDirectoryPublisherErrorFieldPathKey = @"fieldPath";
 
 static NSString * const PXBackupDirectoryPublisherField = @"$.publication";

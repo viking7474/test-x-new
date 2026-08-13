@@ -169,7 +169,7 @@
     self.error = nil;
     
     if (self.versionBuildPairs.count == 0) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                          code:5001 
                                      userInfo:@{NSLocalizedDescriptionKey: @"No iOS version data available"}];
         return nil;
@@ -178,7 +178,7 @@
     // Generate a random index within the array bounds
     uint32_t randomIndex;
     if (SecRandomCopyBytes(kSecRandomDefault, sizeof(randomIndex), (uint8_t *)&randomIndex) != errSecSuccess) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                          code:5002 
                                      userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number"}];
         return nil;
@@ -193,7 +193,7 @@
         return self.currentVersionInfo;
     }
     
-    self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                      code:5003 
                                  userInfo:@{NSLocalizedDescriptionKey: @"Generated iOS version info failed validation"}];
     return nil;

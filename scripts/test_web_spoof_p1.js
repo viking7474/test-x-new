@@ -4,9 +4,9 @@ const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
 
-const canvas = fs.readFileSync("ProjectXTweak/CanvasFingerprintHooks.x", "utf8");
-const device = fs.readFileSync("ProjectXTweak/DeviceSpecHooks.x", "utf8");
-const ios = fs.readFileSync("ProjectXTweak/IOSVersionHooks.x", "utf8");
+const canvas = fs.readFileSync("TLinkIOSTweak/CanvasFingerprintHooks.x", "utf8");
+const device = fs.readFileSync("TLinkIOSTweak/DeviceSpecHooks.x", "utf8");
+const ios = fs.readFileSync("TLinkIOSTweak/IOSVersionHooks.x", "utf8");
 
 
 function extractObjectiveCStringAssignment(source, functionMarker, endMarker) {

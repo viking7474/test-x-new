@@ -3,7 +3,7 @@
 
 NSInteger const PXKeychainHelperResultSchemaVersion = 2;
 NSString * const PXKeychainHelperResultOutputPrefix = @"PXKEYCHAIN_HELPER_RESULT_V2=";
-NSErrorDomain const PXKeychainHelperResultErrorDomain = @"com.hydra.projectx.keychain-helper-result";
+NSErrorDomain const PXKeychainHelperResultErrorDomain = @"com.hydra.tlinkios.keychain-helper-result";
 NSString * const PXKeychainHelperResultErrorFieldPathKey = @"fieldPath";
 
 static const NSUInteger PXKeychainHelperResultMaximumCount = 1000000;

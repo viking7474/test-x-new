@@ -1,5 +1,5 @@
 #import "DeviceModelManager.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
 #import <Security/Security.h>

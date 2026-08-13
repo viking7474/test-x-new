@@ -4,7 +4,7 @@
 #import <CommonCrypto/CommonHMAC.h>
 #import <Security/Security.h>
 
-NSErrorDomain const PXBackupAuthenticatedEnvelopeErrorDomain = @"com.hydra.projectx.backup-envelope";
+NSErrorDomain const PXBackupAuthenticatedEnvelopeErrorDomain = @"com.hydra.tlinkios.backup-envelope";
 NSString * const PXBackupAuthenticatedEnvelopeAlgorithm = @"AES-256-CBC+HMAC-SHA256";
 
 static BOOL PXEnvelopeFail(NSError **error, NSInteger code, NSString *message) {
@@ -83,7 +83,7 @@ NSData *PXSealBackupPayload(NSData *plaintext, NSData *associatedData, NSData *e
     if (!ciphertext) return nil;
     NSData *tag = PXHMAC(macKey, PXEnvelopeMACInput(keyID, iv, ciphertext, associatedData));
     NSDictionary *representation = @{
-        @"format": @"projectx.authenticated-envelope.v1",
+        @"format": @"tlinkios.authenticated-envelope.v1",
         @"algorithm": PXBackupAuthenticatedEnvelopeAlgorithm,
         @"keyIdentifier": keyID,
         @"iv": iv,
@@ -108,7 +108,7 @@ NSData *PXOpenBackupPayload(NSData *envelope, NSData *associatedData, NSData *ex
     NSDictionary *representation = [object isKindOfClass:[NSDictionary class]] ? object : nil;
     NSSet *expectedKeys = [NSSet setWithArray:@[@"format", @"algorithm", @"keyIdentifier", @"iv", @"ciphertext", @"authenticationTag"]];
     if (!representation || ![[NSSet setWithArray:representation.allKeys] isEqual:expectedKeys] ||
-        ![representation[@"format"] isEqual:@"projectx.authenticated-envelope.v1"] ||
+        ![representation[@"format"] isEqual:@"tlinkios.authenticated-envelope.v1"] ||
         ![representation[@"algorithm"] isEqual:PXBackupAuthenticatedEnvelopeAlgorithm] ||
         ![representation[@"keyIdentifier"] isEqual:expectedKeyID] ||
         ![representation[@"iv"] isKindOfClass:[NSData class]] || [representation[@"iv"] length] != kCCBlockSizeAES128 ||

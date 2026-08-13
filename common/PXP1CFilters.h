@@ -3,7 +3,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// Pure, host-testable mirrors of the ProjectX Newplan §5 decision logic
+// Pure, host-testable mirrors of the TLinkIOS Newplan §5 decision logic
 // (PXScope immutable snapshot + Jailbreak hook groups / master toggle).
 //
 // These helpers hold no global state, no locks, and perform no disk or

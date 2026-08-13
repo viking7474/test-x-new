@@ -2,9 +2,9 @@
 
 ## Problem
 
-ProjectX no longer uses `com.apple.UIKit` as the tweak filter because that injects into too many UIKit/system helper processes and can break app launch paths.
+TLinkIOS no longer uses `com.apple.UIKit` as the tweak filter because that injects into too many UIKit/system helper processes and can break app launch paths.
 
-Modern apps often use WebKit helper processes for webviews, login, captcha, payment, ads, and Safari/Mail content. If ProjectX only injects into the main app bundle, web fingerprinting can leak through:
+Modern apps often use WebKit helper processes for webviews, login, captcha, payment, ads, and Safari/Mail content. If TLinkIOS only injects into the main app bundle, web fingerprinting can leak through:
 
 - `com.apple.WebKit.WebContent`: JavaScript, canvas, WebGL, screen metrics, UA-visible behavior.
 - `com.apple.WebKit.Networking`: network requests, headers, cookies, UA paths.
@@ -23,11 +23,11 @@ The runtime filter is generated dynamically from `Chọn App RESET`:
   - `com.apple.WebKit.Networking`
   - `com.apple.WebKit.GPU`
 
-The filter is staged by the ProjectX app at:
+The filter is staged by the TLinkIOS app at:
 
 ```text
-/var/mobile/Library/ProjectX/filter_plists/ProjectXTweak.plist
-/var/mobile/Library/ProjectX/filter_plists/WeaponXKeychainBridge.plist
+/var/mobile/Library/TLinkIOS/filter_plists/TLinkIOSTweak.plist
+/var/mobile/Library/TLinkIOS/filter_plists/WeaponXKeychainBridge.plist
 ```
 
 `WeaponXDaemon` runs as root, validates the staging plist, and atomically installs it into:
@@ -42,7 +42,7 @@ The daemon rejects invalid filter plists, `com.apple.UIKit`, and wildcard bundle
 
 WebKit helpers are shared services, so their own bundle ID is not enough to decide whether spoofing should run.
 
-ProjectX now detects the host app using the WebKit helper HOME container metadata:
+TLinkIOS now detects the host app using the WebKit helper HOME container metadata:
 
 ```text
 NSHomeDirectory()/.com.apple.mobile_container_manager.metadata.plist
@@ -112,13 +112,13 @@ Enable WebKit trace:
 
 ```sh
 touch /tmp/px_debug_webkit
-rm -f /var/mobile/Library/ProjectX/webkit_trace.log /tmp/webkit_trace.log
+rm -f /var/mobile/Library/TLinkIOS/webkit_trace.log /tmp/webkit_trace.log
 ```
 
 Open Safari, Mail, or an app with WebView, then inspect:
 
 ```sh
-cat /var/mobile/Library/ProjectX/webkit_trace.log
+cat /var/mobile/Library/TLinkIOS/webkit_trace.log
 cat /tmp/webkit_trace.log
 ```
 
@@ -131,8 +131,8 @@ rm -f /tmp/px_debug_webkit
 Check daemon filter sync:
 
 ```sh
-cat /var/mobile/Library/ProjectX/filter_daemon_debug.plist
-cat /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.plist
+cat /var/mobile/Library/TLinkIOS/filter_daemon_debug.plist
+cat /Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist
 cat /Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist
 ```
 
@@ -144,13 +144,13 @@ Unified logs can miss early or short-lived helper-process messages. Scope decisi
 
 ```sh
 touch /tmp/px_debug_scope
-rm -f /var/mobile/Library/ProjectX/scope_decision.log /tmp/scope_decision.log
+rm -f /var/mobile/Library/TLinkIOS/scope_decision.log /tmp/scope_decision.log
 ```
 
 Read logs:
 
 ```sh
-cat /var/mobile/Library/ProjectX/scope_decision.log
+cat /var/mobile/Library/TLinkIOS/scope_decision.log
 cat /tmp/scope_decision.log
 ```
 

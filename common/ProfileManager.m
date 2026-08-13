@@ -372,7 +372,7 @@
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
     
     // NOTE: appdata.plist (write-only, no reader) and per-profile scoped-apps.plist
-    // (always empty; real scope lives in com.hydra.projectx.global_scope.plist) are
+    // (always empty; real scope lives in com.hydra.tlinkios.global_scope.plist) are
     // intentionally no longer created here.
     
     // Add profile to array
@@ -554,7 +554,7 @@
             }
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.profileChanged" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
             });
         } else {
             NSLog(@"[WeaponX] ❌ Failed to save profile: %@", error);
@@ -652,7 +652,7 @@
             
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.profileChanged" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
             });
         } else {
             NSLog(@"[WeaponX] ❌ Failed to save profile: %@", error);
@@ -696,7 +696,7 @@
             
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.profileChanged" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
             });
         } else {
             NSLog(@"[WeaponX] ❌ Failed to save profiles: %@", error);
@@ -750,7 +750,7 @@
         
         // Create a safelist of apps that should NEVER be terminated
         NSArray *safeApps = @[
-            @"com.hydra.projectx",      // The tweak itself
+            @"com.hydra.tlinkios",      // The tweak itself
             @"com.apple.springboard",   // SpringBoard
             @"com.apple.backboardd",    // BackBoard
             @"com.apple.preferences",   // Settings
@@ -832,7 +832,7 @@
         if (success) {
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.profileChanged" object:nil];
+                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
             });
         }
         if (completion) completion(success, error);
@@ -845,18 +845,18 @@
     
     // Try rootless path first for multi-version data
     NSString *prefsPath = @"/var/mobile/Library/Preferences";
-    NSString *multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+    NSString *multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
     
     // Fallback to standard path if rootless path doesn't exist
     if (![self.fileManager fileExistsAtPath:prefsPath]) {
         // Try Dopamine 2 path
         prefsPath = @"/private/var/mobile/Library/Preferences";
-        multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+        multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
         
         // Fallback to standard path if needed
         if (![self.fileManager fileExistsAtPath:prefsPath]) {
             prefsPath = @"/var/mobile/Library/Preferences";
-            multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+            multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
         }
     }
     
@@ -938,18 +938,18 @@
 - (NSDictionary *)loadScopedAppsInfo {
     // Try to load scoped apps info from global scope file
     NSString *prefsPath = @"/var/mobile/Library/Preferences";
-    NSString *scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+    NSString *scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
     
     // Fallback to standard path if rootless path doesn't exist
     if (![self.fileManager fileExistsAtPath:prefsPath]) {
         // Try Dopamine 2 path
         prefsPath = @"/private/var/mobile/Library/Preferences";
-        scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+        scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
         
         // Fallback to standard path if needed
         if (![self.fileManager fileExistsAtPath:prefsPath]) {
             prefsPath = @"/var/mobile/Library/Preferences";
-            scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+            scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
         }
     }
     
@@ -991,7 +991,7 @@
             }
             
             // Get user defaults for current profile ID
-            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+            NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
             NSString *currentProfileID = [sharedDefaults objectForKey:@"CurrentProfileID"];
             
             // Update profiles array
@@ -1044,7 +1044,7 @@
         NSLog(@"[WeaponX] ✅ Set current profile to last used: %@", lastUsedProfile.name);
         
         // Update shared defaults with the current profile ID
-        NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+        NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
         [sharedDefaults setObject:lastUsedProfile.profileId forKey:@"CurrentProfileID"];
         [sharedDefaults synchronize];
     } else if (self.mutableProfiles.count > 0) {
@@ -1053,7 +1053,7 @@
         NSLog(@"[WeaponX] ✅ Set current profile to first available: %@", self.mutableCurrentProfile.name);
         
         // Update shared defaults with the current profile ID
-        NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+        NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
         [sharedDefaults setObject:self.mutableCurrentProfile.profileId forKey:@"CurrentProfileID"];
         [sharedDefaults synchronize];
     }
@@ -1410,7 +1410,7 @@
     [self saveCentralProfileInfo:infoDict];
     
     // Also update the shared NSUserDefaults for compatibility with existing code
-    NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.shared"];
+    NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
     [sharedDefaults setObject:profile.profileId forKey:@"CurrentProfileID"];
     [sharedDefaults synchronize];
     

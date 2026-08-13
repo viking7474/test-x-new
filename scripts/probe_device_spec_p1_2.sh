@@ -5,7 +5,7 @@
 set -eu
 
 MODE="${1:-verify}"
-PRIMARY_LOG="/var/mobile/Library/ProjectX/aida64_debug.log"
+PRIMARY_LOG="/var/mobile/Library/TLinkIOS/aida64_debug.log"
 FALLBACK_LOG="/tmp/aida64_debug.log"
 FLAG="/tmp/px_debug_aida64"
 

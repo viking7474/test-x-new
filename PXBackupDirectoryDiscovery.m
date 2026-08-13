@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupDirectoryDiscoveryErrorDomain =
-    @"com.hydra.projectx.backup-directory-discovery";
+    @"com.hydra.tlinkios.backup-directory-discovery";
 NSString * const PXBackupDirectoryDiscoveryErrorFieldPathKey = @"fieldPath";
 
 static NSString * const PXDiscoveryInputField = @"$.discovery.input";

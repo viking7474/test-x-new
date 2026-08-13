@@ -1,10 +1,10 @@
 #import "LocationSpoofingManager.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 
 // Constants
 static NSString *PLIST_NAME = @"com.weaponx.gpsspoofing.plist";
-static NSString *GLOBAL_SCOPE_PLIST = @"com.hydra.projectx.global_scope.plist";
+static NSString *GLOBAL_SCOPE_PLIST = @"com.hydra.tlinkios.global_scope.plist";
 
 // File-scope variables for caching
 NSMutableDictionary *appSpoofingCache = nil;
@@ -349,7 +349,7 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
         
         // Try rootless path first
         NSString *prefsPath = @"/var/mobile/Library/Preferences";
-        NSString *scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+        NSString *scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
         PXLog(@"[WeaponX] LocationSpoofingManager: Trying to load scoped apps from: %@", scopedAppsFile);
         
         // Fallback to standard path if rootless path doesn't exist
@@ -358,13 +358,13 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
             PXLog(@"[WeaponX] LocationSpoofingManager: First path not found, trying Dopamine 2 path");
             // Try Dopamine 2 path
             prefsPath = @"/private/var/mobile/Library/Preferences";
-            scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+            scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
             
             // Fallback to older paths if needed
             if (![fileManager fileExistsAtPath:scopedAppsFile]) {
                 PXLog(@"[WeaponX] LocationSpoofingManager: Dopamine 2 path not found, trying legacy path");
                 prefsPath = @"/var/mobile/Library/Preferences";
-                scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.global_scope.plist"];
+                scopedAppsFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.global_scope.plist"];
             }
         }
         

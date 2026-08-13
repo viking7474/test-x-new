@@ -1,5 +1,5 @@
 #import "VersionManagementViewController.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "common/PXPaths.h"
 
 @interface VersionManagementViewController ()
@@ -549,19 +549,19 @@
 - (void)loadVersionsForBundleID:(NSString *)bundleID {
     // Try rootless path first
     NSString *prefsPath = @"/var/mobile/Library/Preferences";
-    NSString *multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+    NSString *multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
     
     // Fallback to standard path if rootless path doesn't exist
     NSFileManager *fileManager = [NSFileManager defaultManager];
     if (![fileManager fileExistsAtPath:prefsPath]) {
         // Try Dopamine 2 path
         prefsPath = @"/private/var/mobile/Library/Preferences";
-        multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+        multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
         
         // Fallback to standard path if needed
         if (![fileManager fileExistsAtPath:prefsPath]) {
             prefsPath = @"/var/mobile/Library/Preferences";
-            multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+            multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
         }
     }
     
@@ -583,19 +583,19 @@
 - (void)saveVersions {
     // Try rootless path first
     NSString *prefsPath = @"/var/mobile/Library/Preferences";
-    NSString *multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+    NSString *multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
     
     // Fallback to standard path if rootless path doesn't exist
     NSFileManager *fileManager = [NSFileManager defaultManager];
     if (![fileManager fileExistsAtPath:prefsPath]) {
         // Try Dopamine 2 path
         prefsPath = @"/private/var/mobile/Library/Preferences";
-        multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+        multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
         
         // Fallback to standard path if needed
         if (![fileManager fileExistsAtPath:prefsPath]) {
             prefsPath = @"/var/mobile/Library/Preferences";
-            multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.multi_version_spoof.plist"];
+            multiVersionFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.multi_version_spoof.plist"];
         }
     }
     
@@ -704,19 +704,19 @@
     
     // Get the shared storage paths as fallback
     NSString *prefsPath = @"/var/mobile/Library/Preferences";
-    NSString *versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.version_spoof.plist"];
+    NSString *versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"];
     
     // Fallback to standard path if rootless path doesn't exist
     NSFileManager *fileManager = [NSFileManager defaultManager];
     if (!usingProfileStorage && ![fileManager fileExistsAtPath:prefsPath]) {
         // Try Dopamine 2 path
         prefsPath = @"/private/var/mobile/Library/Preferences";
-        versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.version_spoof.plist"];
+        versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"];
         
         // Fallback to standard path if needed
         if (![fileManager fileExistsAtPath:prefsPath]) {
             prefsPath = @"/var/mobile/Library/Preferences";
-            versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.projectx.version_spoof.plist"];
+            versionSpoofFile = [prefsPath stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"];
         }
     }
     
@@ -808,7 +808,7 @@
     }
     
     // Post notification to refresh UI
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.appVersionDataChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.appVersionDataChanged" object:nil];
 }
 
 - (void)activateVersionAtIndex:(NSInteger)index {

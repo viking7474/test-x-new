@@ -1,8 +1,8 @@
 #import "CarrierDB.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import <Security/Security.h>
 
-static NSString *const kCarrierDBErrorDomain = @"com.hydra.projectx.carrier_db";
+static NSString *const kCarrierDBErrorDomain = @"com.hydra.tlinkios.carrier_db";
 
 static NSUInteger PXCarrierRandomIndex(NSUInteger upper) {
     if (upper == 0) return 0;
@@ -272,7 +272,7 @@ static NSString *PXNormMNC(NSString *mnc) {
     NSDictionary *row = [self carrierForMCC:mcc mnc:mnc];
     NSString *name = row[@"name"];
     if ([name isKindOfClass:[NSString class]] && name.length &&
-        ![name isEqualToString:@"ProjectX"] && ![name hasPrefix:@"ProjectX"]) {
+        ![name isEqualToString:@"TLinkIOS"] && ![name hasPrefix:@"TLinkIOS"]) {
         return name;
     }
     // Last resort: US default name (never product branding)

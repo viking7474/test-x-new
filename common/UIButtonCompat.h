@@ -1,6 +1,6 @@
 //
 //  UIButtonCompat.h
-//  ProjectX
+//  TLinkIOS
 //
 //  Created for iOS 12+ compatibility.
 //

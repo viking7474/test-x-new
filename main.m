@@ -1,5 +1,5 @@
 #import <UIKit/UIKit.h>
-#import "ProjectX.h"
+#import "TLinkIOS.h"
 #import "TabBarController.h"
 #import <UserNotifications/UserNotifications.h>
 #import "AppDataCleaner.h"

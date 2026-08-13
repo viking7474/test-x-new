@@ -1,6 +1,6 @@
 #import "TabBarController.h"
 #import "WeaponXToast.h"
-#import "ProjectXViewController.h"
+#import "TLinkIOSViewController.h"
 #import "SecurityTabViewController.h"
 #import <objc/runtime.h>
 #import <Security/Security.h>
@@ -64,7 +64,7 @@
     
     
     // Create view controllers
-    ProjectXViewController *identityVC = [[ProjectXViewController alloc] init];
+    TLinkIOSViewController *identityVC = [[TLinkIOSViewController alloc] init];
     SecurityTabViewController *securityVC = [[SecurityTabViewController alloc] init];
 
     // AccountViewController *accountVC = [[AccountViewController alloc] init];

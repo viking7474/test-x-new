@@ -115,7 +115,7 @@
 }
 
 - (NSString *)versionSpoofFile {
-    return [[self prefsPath] stringByAppendingPathComponent:@"com.hydra.projectx.version_spoof.plist"];
+    return [[self prefsPath] stringByAppendingPathComponent:@"com.hydra.tlinkios.version_spoof.plist"];
 }
 
 - (NSDictionary *)currentSpoofInfo {
@@ -180,7 +180,7 @@
     dict[@"LastUpdated"] = [NSDate date];
     [dict writeToFile:file atomically:YES];
 
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.appVersionDataChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.appVersionDataChanged" object:nil];
 }
 
 - (void)persistToggle:(BOOL)enabled {
@@ -197,7 +197,7 @@
     dict[@"SpoofedVersions"] = sv;
     dict[@"LastUpdated"] = [NSDate date];
     [dict writeToFile:file atomically:YES];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.appVersionDataChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.appVersionDataChanged" object:nil];
 }
 
 #pragma mark - Actions

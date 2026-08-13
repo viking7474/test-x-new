@@ -1,6 +1,6 @@
 #import "IPMonitorService.h"
 #import "IPStatusViewController.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <netinet/in.h>
 #import <UIKit/UIKit.h>

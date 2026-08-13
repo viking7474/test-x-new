@@ -3,7 +3,7 @@
 # audit_native_hooks.sh
 #
 # Fails if coordinated native symbols are installed via MSHookFunction / %hookf
-# outside ProjectXTweak/PXNativeHookCoordinator.m.
+# outside TLinkIOSTweak/PXNativeHookCoordinator.m.
 #
 # Usage (from repo root or anywhere):
 #   ./scripts/audit_native_hooks.sh
@@ -19,11 +19,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TWEAK_DIR="$ROOT/ProjectXTweak"
+TWEAK_DIR="$ROOT/TLinkIOSTweak"
 COORDINATOR_NAME="PXNativeHookCoordinator.m"
 
 if [[ ! -d "$TWEAK_DIR" ]]; then
-  echo "error: ProjectXTweak directory not found at: $TWEAK_DIR" >&2
+  echo "error: TLinkIOSTweak directory not found at: $TWEAK_DIR" >&2
   exit 2
 fi
 

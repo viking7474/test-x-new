@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupStaleWorkspaceCleanupErrorDomain =
-    @"com.hydra.projectx.backup-stale-workspace-cleanup";
+    @"com.hydra.tlinkios.backup-stale-workspace-cleanup";
 NSString * const PXBackupStaleWorkspaceCleanupErrorFieldPathKey = @"fieldPath";
 
 static NSString * const PXBackupStaleWorkspaceCleanupField = @"$.staleCleanup";

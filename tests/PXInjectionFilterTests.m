@@ -28,9 +28,10 @@ static void PXTTestNormalize(void) {
 }
 
 static void PXTTestClassifiers(void) {
-    PXT_ASSERT(PXInjectionBundleIsProjectXApp(@"com.hydra.projectx"), "projectx app detected");
-    PXT_ASSERT(PXInjectionBundleIsProjectXApp(@"com.hydra.weaponx"), "weaponx app detected");
-    PXT_ASSERT(!PXInjectionBundleIsProjectXApp(@"com.acme.app"), "third-party not projectx app");
+    PXT_ASSERT(PXInjectionBundleIsTLinkIOSApp(@"com.hydra.tlinkios"), "tlinkios app detected");
+    PXT_ASSERT(PXInjectionBundleIsTLinkIOSApp(@"com.hydra.projectx"), "legacy projectx app detected");
+    PXT_ASSERT(PXInjectionBundleIsTLinkIOSApp(@"com.hydra.weaponx"), "weaponx app detected");
+    PXT_ASSERT(!PXInjectionBundleIsTLinkIOSApp(@"com.acme.app"), "third-party not tlinkios app");
 
     PXT_ASSERT(PXInjectionBundleIsAppleOrWebKit(@"com.apple.springboard"), "com.apple.* is apple");
     PXT_ASSERT(PXInjectionBundleIsAppleOrWebKit(@"com.apple.WebKit.GPU"), "webkit helper is apple");
@@ -45,7 +46,8 @@ static void PXTTestEnabledScope(void) {
             @"com.acme.app":        @{ @"enabled": @YES },
             @"com.beta.app":        @{ @"enabled": @NO },   // disabled -> excluded
             @"com.gamma.app":       @{},                     // no flag -> excluded (enabled must be YES)
-            @"com.hydra.projectx":  @{ @"enabled": @YES },   // self -> excluded
+            @"com.hydra.tlinkios":  @{ @"enabled": @YES },   // self -> excluded
+            @"com.hydra.projectx":  @{ @"enabled": @YES },   // legacy self -> excluded
             @"com.apple.WebKit.GPU":@{ @"enabled": @YES },   // webkit -> excluded
             @"com.apple.SafariViewService": @{ @"enabled": @YES }, // safari helper -> excluded
             @"com.delta.app":       @{ @"enabled": @YES }

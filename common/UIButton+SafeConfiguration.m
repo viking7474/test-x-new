@@ -1,6 +1,6 @@
 //
 //  UIButton+SafeConfiguration.m
-//  ProjectX
+//  TLinkIOS
 //
 //  Created for iOS 12+ compatibility with UIButtonConfiguration.
 //  IMPORTANT: DO NOT use @available checks - Theos compiler bypasses them!

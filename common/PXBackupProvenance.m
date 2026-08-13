@@ -23,7 +23,7 @@ NSDictionary<NSString *, id> *PXCreateBackupProvenance(NSString *bundleIdentifie
         ![algorithm isEqualToString:PXBackupAuthenticatedEnvelopeAlgorithm]) return nil;
     if ([keyID.lowercaseString containsString:@"key="] || [keyID.lowercaseString containsString:@"secret"]) return nil;
     return @{
-        @"schema": @"projectx.backup-provenance.v1",
+        @"schema": @"tlinkios.backup-provenance.v1",
         @"sourceBundleID": bundle,
         @"profileID": profile,
         @"profileGeneration": profileGeneration,
@@ -42,7 +42,7 @@ BOOL PXBackupProvenanceMatchesRestoreContext(NSDictionary<NSString *, id> *prove
                                              NSNumber *profileGeneration,
                                              NSString *selectedScope) {
     if (![provenance isKindOfClass:[NSDictionary class]] ||
-        ![provenance[@"schema"] isEqual:@"projectx.backup-provenance.v1"]) return NO;
+        ![provenance[@"schema"] isEqual:@"tlinkios.backup-provenance.v1"]) return NO;
     NSDictionary *encryption = [provenance[@"encryption"] isKindOfClass:[NSDictionary class]] ? provenance[@"encryption"] : nil;
     return [provenance[@"sourceBundleID"] isEqual:bundleIdentifier] &&
            [provenance[@"profileID"] isEqual:profileIdentifier] &&

@@ -1,7 +1,7 @@
 TARGET := iphone:clang:16.5:12.0
 ARCHS = arm64 arm64e
 LOGOS_DEFAULT_GENERATOR = internal
-INSTALL_TARGET_PROCESSES = SpringBoard ProjectX
+INSTALL_TARGET_PROCESSES = SpringBoard TLinkIOS
 DEBUG=1
 FINALPACKAGE=0
 
@@ -19,23 +19,23 @@ endif
 
 include $(THEOS)/makefiles/common.mk
 
-APPLICATION_NAME = ProjectX
+APPLICATION_NAME = TLinkIOS
 TOOL_NAME = WeaponXDaemon backup_helper
 
 
 
 # App files
-ProjectX_FILES = $(wildcard *.m) $(wildcard common/*.m) KeychainHelper/PXKeychainHelperResult.m
-ProjectX_RESOURCE_DIRS = Assets.xcassets
-ProjectX_RESOURCE_FILES = Info.plist Icon.png LaunchScreen.storyboard
-ProjectX_PRIVATE_FRAMEWORKS = FrontBoardServices SpringBoardServices BackBoardServices StoreKitUI MobileCoreServices
-# ProjectX_LDFLAGS = -I./common
-ProjectX_FRAMEWORKS = Foundation MobileCoreServices CoreServices StoreKit IOKit CoreLocation
+TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m) KeychainHelper/PXKeychainHelperResult.m
+TLinkIOS_RESOURCE_DIRS = Assets.xcassets
+TLinkIOS_RESOURCE_FILES = Info.plist Icon.png LaunchScreen.storyboard
+TLinkIOS_PRIVATE_FRAMEWORKS = FrontBoardServices SpringBoardServices BackBoardServices StoreKitUI MobileCoreServices
+# TLinkIOS_LDFLAGS = -I./common
+TLinkIOS_FRAMEWORKS = Foundation MobileCoreServices CoreServices StoreKit IOKit CoreLocation
 # UIKit, Security and CoreLocationUI are weak-linked for iOS 12+ compatibility
 # UIButtonConfiguration and SecTrustCopyCertificateChain are iOS 15+ only
-ProjectX_LDFLAGS = -weak_framework UIKit -weak_framework CoreLocationUI -weak_framework Security -lsqlite3 -lz
-ProjectX_CODESIGN_FLAGS = -Sent.plist
-ProjectX_CFLAGS = -fobjc-arc -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1 -I./common
+TLinkIOS_LDFLAGS = -weak_framework UIKit -weak_framework CoreLocationUI -weak_framework Security -lsqlite3 -lz
+TLinkIOS_CODESIGN_FLAGS = -Sent.plist
+TLinkIOS_CFLAGS = -fobjc-arc -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1 -I./common
 
 # Daemon files
 # common/PXInjectionFilter.m is the shared IOS-08 injection-filter source of truth
@@ -55,45 +55,45 @@ backup_helper_INSTALL_PATH = /Library/WeaponX
 backup_helper_CODESIGN_FLAGS = -Skeychain_base_ent.plist
 
 # Ensure app is installed to the correct location with proper permissions
-ProjectX_INSTALL_PATH = /Applications
-ProjectX_APPLICATION_MODE = 0755
+TLinkIOS_INSTALL_PATH = /Applications
+TLinkIOS_APPLICATION_MODE = 0755
 
 # Make sure both tweak and application are built
 all::
 	@echo "Building tweak, application, and daemon..."
 
-# Tweak Configuration (Moved from ProjectXTweak/Makefile)
-TWEAK_NAME = ProjectXTweak WeaponXKeychainBridge
+# Tweak Configuration (Moved from TLinkIOSTweak/Makefile)
+TWEAK_NAME = TLinkIOSTweak WeaponXKeychainBridge
 
 # Files - Adjusted paths for root compilation
-ProjectXTweak_FILES = $(wildcard ProjectXTweak/*.x) $(wildcard ProjectXTweak/*.m) $(wildcard common/*.m)
+TLinkIOSTweak_FILES = $(wildcard TLinkIOSTweak/*.x) $(wildcard TLinkIOSTweak/*.m) $(wildcard common/*.m)
 
 # CFlags - Adjusted include paths
-ProjectXTweak_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I./common -I./include -D USES_LIBUNDIRECT=1 -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1
+TLinkIOSTweak_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I./common -I./include -D USES_LIBUNDIRECT=1 -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1
 
 ifeq ($(INTERNAL_SECURITY_RESEARCH),1)
 # Explicit allowlist only: never use a research/*.m wildcard.
-ProjectXTweak_FILES += research/PXLockdownResearchSafety.m
-ProjectXTweak_FILES += research/PXLockdownSoftwareModelProvider.m
-ProjectXTweak_FILES += research/PXLockdownDeviceIdentityProvider.m
-ProjectXTweak_FILES += research/PXLockdownSoCCellularProvider.m
-ProjectXTweak_FILES += research/PXLockdownObservability.m
-ProjectXTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=1 -I./research
+TLinkIOSTweak_FILES += research/PXLockdownResearchSafety.m
+TLinkIOSTweak_FILES += research/PXLockdownSoftwareModelProvider.m
+TLinkIOSTweak_FILES += research/PXLockdownDeviceIdentityProvider.m
+TLinkIOSTweak_FILES += research/PXLockdownSoCCellularProvider.m
+TLinkIOSTweak_FILES += research/PXLockdownObservability.m
+TLinkIOSTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=1 -I./research
 else
-ProjectXTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=0
+TLinkIOSTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=0
 endif
 
 # Frameworks and Libraries
-ProjectXTweak_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security CoreLocation CoreFoundation Network CoreTelephony SystemConfiguration WebKit SafariServices   
-ProjectXTweak_PRIVATE_FRAMEWORKS = MobileCoreServices AppSupport SpringBoardServices 
-ProjectXTweak_LIBRARIES = MobileGestalt
+TLinkIOSTweak_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security CoreLocation CoreFoundation Network CoreTelephony SystemConfiguration WebKit SafariServices
+TLinkIOSTweak_PRIVATE_FRAMEWORKS = MobileCoreServices AppSupport SpringBoardServices
+TLinkIOSTweak_LIBRARIES = MobileGestalt
 
 # Linker Flags
 # -lobjc: force link libobjc
 # -Wl,-ObjC: load all ObjC classes/categories
 # -Wl,-no_fixup_chains: DISABLE chained fixups (Xcode 15+ default) which break iOS 12/13 compatibility
 # -Wl,-undefined,dynamic_lookup: standard for tweaks
-ProjectXTweak_LDFLAGS = -lobjc -Wl,-ObjC -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
+TLinkIOSTweak_LDFLAGS = -lobjc -Wl,-ObjC -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
 
 # Keychain Bridge Tweak (minimal, in-app keychain export/import)
 WeaponXKeychainBridge_FILES = WeaponXKeychainBridge/Tweak.m
@@ -118,17 +118,17 @@ internal-stage::
 	@chmod 755 $(THEOS_STAGING_DIR)/DEBIAN/prerm
 	@echo "Adding setup script to package..."
 	@mkdir -p $(THEOS_STAGING_DIR)/usr/bin
-	@cp -a setup_app.sh $(THEOS_STAGING_DIR)/usr/bin/projectx-setup
-	@chmod 755 $(THEOS_STAGING_DIR)/usr/bin/projectx-setup
+	@cp -a setup_app.sh $(THEOS_STAGING_DIR)/usr/bin/tlinkios-setup
+	@chmod 755 $(THEOS_STAGING_DIR)/usr/bin/tlinkios-setup
 	@echo "Creating MobileSubstrate directories for compatibility..."
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
-	@cp -a $(THEOS_OBJ_DIR)/ProjectXTweak.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
+	@cp -a $(THEOS_OBJ_DIR)/TLinkIOSTweak.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
 	@cp -a $(THEOS_OBJ_DIR)/WeaponXKeychainBridge.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
 	@echo "Ensuring LaunchScreen.storyboard is properly compiled..."
 	@if [ -f "LaunchScreen.storyboard" ]; then \
-		mkdir -p $(THEOS_STAGING_DIR)/Applications/ProjectX.app/; \
-		ibtool --compile $(THEOS_STAGING_DIR)/Applications/ProjectX.app/LaunchScreen.storyboardc LaunchScreen.storyboard || true; \
-		cp -a LaunchScreen.storyboard $(THEOS_STAGING_DIR)/Applications/ProjectX.app/; \
+		mkdir -p $(THEOS_STAGING_DIR)/Applications/TLinkIOS.app/; \
+		ibtool --compile $(THEOS_STAGING_DIR)/Applications/TLinkIOS.app/LaunchScreen.storyboardc LaunchScreen.storyboard || true; \
+		cp -a LaunchScreen.storyboard $(THEOS_STAGING_DIR)/Applications/TLinkIOS.app/; \
 	fi
 	@echo "Adding LaunchDaemon for persistent operation..."
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/LaunchDaemons
@@ -176,16 +176,16 @@ internal-stage::
 
 export CFLAGS = -fobjc-arc -Wno-error
 
-ProjectXCLI_FILES = ProjectXCLIbinary.m DeviceNameManager.m IdentifierManager.m IDFAManager.m IDFVManager.m WiFiManager.m SerialNumberManager.m ProjectXLogging.m ProfileManager.m IOSVersionInfo.m
-ProjectXCLI_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I$(THEOS_VENDOR_INCLUDE_PATH)
-ProjectXCLI_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security
-ProjectXCLI_PRIVATE_FRAMEWORKS = MobileCoreServices AppSupport
-ProjectXCLI_LDFLAGS = -L$(THEOS_VENDOR_LIBRARY_PATH)
+TLinkIOSCLI_FILES = TLinkIOSCLIbinary.m DeviceNameManager.m IdentifierManager.m IDFAManager.m IDFVManager.m WiFiManager.m SerialNumberManager.m TLinkIOSLogging.m ProfileManager.m IOSVersionInfo.m
+TLinkIOSCLI_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I$(THEOS_VENDOR_INCLUDE_PATH)
+TLinkIOSCLI_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security
+TLinkIOSCLI_PRIVATE_FRAMEWORKS = MobileCoreServices AppSupport
+TLinkIOSCLI_LDFLAGS = -L$(THEOS_VENDOR_LIBRARY_PATH)
 
 after-package::
 	@echo "🔍 Checking package contents..."
 	@mkdir -p $(THEOS_STAGING_DIR)/../debug
-	@PACKAGE_FILE="$$(ls -t ./packages/com.hydra.projectx_*_iphoneos-arm.deb | head -1)" && \
+	@PACKAGE_FILE="$$(ls -t ./packages/com.hydra.tlinkios_*_iphoneos-arm.deb | head -1)" && \
 	if [ -f "$$PACKAGE_FILE" ]; then \
 		echo "Extracting $$PACKAGE_FILE"; \
 		(cd $(THEOS_STAGING_DIR)/../debug && ar -x "../../$$PACKAGE_FILE" && tar -xf data.tar.*); \
@@ -210,5 +210,5 @@ release-package:
 	$(MAKE) clean
 	$(MAKE) package FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
 
-# SUBPROJECTS += ProjectXTweak
+# SUBPROJECTS += TLinkIOSTweak
 # include $(THEOS_MAKE_PATH)/aggregate.mk

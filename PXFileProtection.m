@@ -16,7 +16,7 @@ static const int PXFileProtectionCompleteClass = 1;
 #endif
 
 NSErrorDomain const PXFileProtectionErrorDomain =
-    @"com.hydra.projectx.file-protection";
+    @"com.hydra.tlinkios.file-protection";
 NSString * const PXFileProtectionErrorFieldPathKey = @"fieldPath";
 
 static NSString * const PXFileProtectionDescriptorField = @"$.descriptor";

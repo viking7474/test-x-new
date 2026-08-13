@@ -34,7 +34,7 @@
 #endif
 
 NSString * const PXOptionalRestoreStagingErrorDomain =
-    @"com.hydra.projectx.optional-restore-staging";
+    @"com.hydra.tlinkios.optional-restore-staging";
 NSString * const PXOptionalRestoreStagingErrorFieldPathKey =
     @"PXOptionalRestoreStagingErrorFieldPathKey";
 

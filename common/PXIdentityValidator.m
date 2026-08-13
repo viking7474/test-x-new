@@ -1,7 +1,7 @@
 #import "PXIdentityValidator.h"
 #import <CoreFoundation/CoreFoundation.h>
 
-NSString *const PXIdentityValidationErrorDomain = @"com.hydra.projectx.identity-validator";
+NSString *const PXIdentityValidationErrorDomain = @"com.hydra.tlinkios.identity-validator";
 
 @interface PXIdentityValidationResult ()
 - (instancetype)initWithDeviceIDs:(NSDictionary *)deviceIDs

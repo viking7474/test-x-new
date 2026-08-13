@@ -11,8 +11,8 @@ from pathlib import Path
 from types import MappingProxyType
 
 ROOT = Path(__file__).resolve().parents[1]
-DEVICE_PATH = ROOT / "ProjectXTweak" / "DeviceSpecHooks.x"
-CANVAS_PATH = ROOT / "ProjectXTweak" / "CanvasFingerprintHooks.x"
+DEVICE_PATH = ROOT / "TLinkIOSTweak" / "DeviceSpecHooks.x"
+CANVAS_PATH = ROOT / "TLinkIOSTweak" / "CanvasFingerprintHooks.x"
 PATHS_PATH = ROOT / "common" / "PXPaths.m"
 SCHEMA_PATH = ROOT / "common" / "PXDeviceProfileSchema.m"
 PROBE_PATH = ROOT / "scripts" / "probe_device_spec_p1_2.sh"

@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupPublicationWorkspaceErrorDomain =
-    @"com.hydra.projectx.backup-publication-workspace";
+    @"com.hydra.tlinkios.backup-publication-workspace";
 NSString * const PXBackupPublicationWorkspaceErrorFieldPathKey = @"fieldPath";
 NSString * const PXBackupPublicationPartialDirectoryPrefix = @".weaponx-backup-partial-";
 

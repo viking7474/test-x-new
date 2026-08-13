@@ -5195,7 +5195,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         // Calculate usage for UI display
         NSDictionary *usage = [self getDataUsage:bundleID];
         
-        // Store this information in UserDefaults for the ProjectXViewController to access
+        // Store this information in UserDefaults for the TLinkIOSViewController to access
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         [defaults setObject:usage forKey:[NSString stringWithFormat:@"DataUsage_%@", bundleID]];
         [defaults synchronize];
@@ -5273,7 +5273,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
     if (hasData) {
         NSDictionary *usage = [self getDataUsage:bundleID];
         
-        // Store this information in UserDefaults for the ProjectXViewController to access
+        // Store this information in UserDefaults for the TLinkIOSViewController to access
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         [defaults setObject:usage forKey:[NSString stringWithFormat:@"DataUsage_%@", bundleID]];
         [defaults synchronize];

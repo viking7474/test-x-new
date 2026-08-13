@@ -30,10 +30,12 @@
     <true/>
     <key>com.apple.security.application-groups</key>
     <array>
+        <string>group.com.hydra.tlinkios</string>
         <string>group.com.hydra.projectx</string>
     </array>
     <key>keychain-access-groups</key>
     <array>
+        <string>com.hydra.tlinkios</string>
         <string>com.hydra.projectx</string>
     </array>
     <key>com.apple.private.window-management</key>

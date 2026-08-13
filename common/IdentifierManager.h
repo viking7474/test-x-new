@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import "ProjectX.h"
+#import "TLinkIOS.h"
 
 // Declare this in a category to avoid duplicate interface
 @interface IdentifierManager (ProfilePath)
@@ -77,7 +77,7 @@
 - (NSString *)generateIMEI;
 - (NSString *)generateMEID;
 
-// UDID (40-char lowercase hex) — generateUDID / ATT / migrate are declared on IdentifierManager in ProjectX.h
+// UDID (40-char lowercase hex) — generateUDID / ATT / migrate are declared on IdentifierManager in TLinkIOS.h
 - (BOOL)setCustomUDID:(NSString *)value;
 - (BOOL)isValidUDID:(NSString *)value;
 

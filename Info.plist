@@ -5,33 +5,34 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>English</string>
     <key>CFBundleExecutable</key>
-    <string>ProjectX</string>
+    <string>TLinkIOS</string>
     <key>CFBundleIdentifier</key>
-    <string>com.hydra.projectx</string>
+    <string>com.hydra.tlinkios</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>ProjectX</string>
+    <string>TLinkIOS</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.1</string>
+    <string>3.0.0</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>com.hydra.projectx</string>
+            <string>com.hydra.tlinkios</string>
             <key>CFBundleURLSchemes</key>
             <array>
+                <string>tlinkios</string>
                 <string>projectx</string>
                 <string>weaponx</string>
             </array>
         </dict>
     </array>
     <key>CFBundleVersion</key>
-    <string>2.5.1</string>
+    <string>3.0.0</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UIDeviceFamily</key>
@@ -184,7 +185,7 @@
                     <key>UISceneConfigurationName</key>
                     <string>Default Configuration</string>
                     <key>UISceneDelegateClassName</key>
-                    <string>ProjectXSceneDelegate</string>
+                    <string>TLinkIOSSceneDelegate</string>
                 </dict>
             </array>
         </dict>

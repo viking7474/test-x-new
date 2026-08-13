@@ -80,7 +80,7 @@
     [self.securitySettings setObject:toSave forKey:@"fixVersionApps"];
     [self.securitySettings synchronize];
 
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.fixVersionAppsChanged"
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.fixVersionAppsChanged"
                                                         object:nil
                                                       userInfo:@{ @"count": @(toSave.count) }];
     [self.navigationController popViewControllerAnimated:YES];
@@ -110,7 +110,7 @@
         if (!bundleID.length) continue;
 
         // Skip the app itself
-        if ([bundleID isEqualToString:@"com.hydra.projectx"]) continue;
+        if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) continue;
 
         [apps addObject:@{ @"name": name, @"bundleID": bundleID }];
     }

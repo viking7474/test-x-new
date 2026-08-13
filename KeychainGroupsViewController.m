@@ -10,7 +10,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataCleanerKeychainWipeGroups_%@", bundleID ?: @""];
 }
 
-static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.projectx.keychainGroupsSaved";
+static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.tlinkios.keychainGroupsSaved";
 
 @interface KeychainGroupsViewController () <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
 @property (nonatomic, copy) NSString *bundleID;

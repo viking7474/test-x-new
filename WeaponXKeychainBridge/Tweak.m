@@ -3,7 +3,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
 #import <signal.h>
-#import "../ProjectXTweak/PXFileDebug.h"
+#import "../TLinkIOSTweak/PXFileDebug.h"
 
 __attribute__((constructor(101))) static void WXKeychainBridgeEarlyLoadMarker(void) {
     PXFileDebugLoadMarker("WeaponXKeychainBridge.early");

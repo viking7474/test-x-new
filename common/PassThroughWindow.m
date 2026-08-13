@@ -1,5 +1,5 @@
 #import "PassThroughWindow.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 
 @implementation PassThroughWindow
 

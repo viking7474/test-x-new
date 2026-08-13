@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupManifestWriterErrorDomain =
-    @"com.hydra.projectx.backup-manifest-writer";
+    @"com.hydra.tlinkios.backup-manifest-writer";
 NSString * const PXBackupManifestWriterErrorFieldPathKey = @"fieldPath";
 NSString * const PXBackupManifestFinalFileName = @"manifest.plist";
 NSString * const PXBackupManifestTemporaryFilePrefix =

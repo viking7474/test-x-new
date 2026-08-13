@@ -32,7 +32,7 @@
         if (SecRandomCopyBytes(kSecRandomDefault, sizeof(randomValue), (uint8_t *)&randomValue) == errSecSuccess) {
             [idfv appendFormat:@"%c", chars[randomValue % 16]];
         } else {
-            self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                            code:2001 
                                        userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number"}];
             return nil;
@@ -44,7 +44,7 @@
         return self.currentIdentifier;
     }
     
-    self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                    code:2002 
                                userInfo:@{NSLocalizedDescriptionKey: @"Generated IDFV failed validation"}];
     return nil;

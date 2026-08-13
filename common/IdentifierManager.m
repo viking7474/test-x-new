@@ -8,7 +8,7 @@
 #import "IOSBuildDB.h"
 #import "IPhoneModelDB.h"
 #import "DBDebugLogger.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "VersionCompare.h"
 #import "WiFiManager.h"
 #import "StorageManager.h"
@@ -149,7 +149,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
 
     NSString *identityDir = [self profileIdentityPath];
     if (!identityDir.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Could not resolve profile identity path"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Could not resolve profile identity path"}];
         return nil;
     }
 
@@ -197,13 +197,13 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     }
 
     if (!productType.length || !maxIOS.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" code:6002 userInfo:@{NSLocalizedDescriptionKey: @"Invalid model spec (missing productType/maxIOS)"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6002 userInfo:@{NSLocalizedDescriptionKey: @"Invalid model spec (missing productType/maxIOS)"}];
         PXDBLog(@"DeviceProfileGroup: invalid modelSpec missing productType/maxIOS spec=%@", modelSpec);
         return nil;
     }
 
     if (!iosMeta) {
-        self.error = dbErr ?: [NSError errorWithDomain:@"com.hydra.projectx" code:6005 userInfo:@{NSLocalizedDescriptionKey: @"No compatible iOS build found for chosen model"}];
+        self.error = dbErr ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6005 userInfo:@{NSLocalizedDescriptionKey: @"No compatible iOS build found for chosen model"}];
         PXLog(@"[WeaponX] ❌ DeviceProfileGroup: no compatible build for %@ (maxIOS=%@ effectiveMax=%@ webCompat=%@)", productType, maxIOS, effectiveMaxIOS ?: @"<nil>", webCompat ? @"YES" : @"NO");
         PXDBLog(@"DeviceProfileGroup: no compatible build device=%@ maxIOS=%@ effectiveMax=%@ webCompat=%@ err=%@", productType, maxIOS, effectiveMaxIOS ?: @"<nil>", webCompat ? @"YES" : @"NO", dbErr.localizedDescription ?: @"nil");
         return nil;
@@ -215,7 +215,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     NSString *xnu = [iosMeta[@"xnu"] isKindOfClass:[NSString class]] ? iosMeta[@"xnu"] : nil;
     NSString *kernel = [iosMeta[@"kernel_version"] isKindOfClass:[NSString class]] ? iosMeta[@"kernel_version"] : nil;
     if (!iosVersion.length || !iosBuild.length || !darwin.length || !xnu.length || !kernel.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" code:6003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid iOS meta (missing required fields)"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid iOS meta (missing required fields)"}];
         PXDBLog(@"DeviceProfileGroup: invalid iosMeta device=%@ meta=%@", productType, iosMeta);
         return nil;
     }
@@ -296,7 +296,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
 
     BOOL wrote = [deviceIds writeToFile:deviceIdsPath atomically:YES];
     if (!wrote) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" code:6004 userInfo:@{NSLocalizedDescriptionKey: @"Failed to write device_ids.plist"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6004 userInfo:@{NSLocalizedDescriptionKey: @"Failed to write device_ids.plist"}];
         return nil;
     }
 
@@ -392,7 +392,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         valid = [[IPhoneModelDB sharedManager] containsProductType:value];
     }
     if (!valid) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" code:2003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Model"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Model"}];
         return NO;
     }
     NSString *identityDir = [self profileIdentityPath];
@@ -1365,7 +1365,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         
         // Post notification to inform system about WiFi spoofing change
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           CFSTR("com.hydra.projectx.toggleWifiSpoof"),
+                                           CFSTR("com.hydra.tlinkios.toggleWifiSpoof"),
                                            NULL, NULL, YES);
     }
     // For Battery specifically, update the SystemConfiguration plist
@@ -1382,7 +1382,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         
         // Post notification to inform system about Battery spoofing change
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           CFSTR("com.hydra.projectx.toggleBatterySpoof"),
+                                           CFSTR("com.hydra.tlinkios.toggleBatterySpoof"),
                                            NULL, NULL, YES);
     }
     // For DeviceTheme, update the SystemConfiguration plist
@@ -1399,7 +1399,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         
         // Post notification to inform system about DeviceTheme spoofing change
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           CFSTR("com.hydra.projectx.toggleDeviceThemeSpoof"),
+                                           CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof"),
                                            NULL, NULL, YES);
     }
     
@@ -1953,15 +1953,15 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 
 - (void)addApplicationToScope:(NSString *)bundleID {
     if (!bundleID.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                        code:3001 
                                    userInfo:@{NSLocalizedDescriptionKey: @"Invalid bundle ID"}];
         return;
     }
     
     // Prevent the WeaponX app itself from being added to the scope list
-    if ([bundleID isEqualToString:@"com.hydra.projectx"]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                        code:3003 
                                    userInfo:@{NSLocalizedDescriptionKey: @"Cannot add the WeaponX app itself to the scope list"}];
         PXLog(@"[WeaponX] ⚠️ Prevented attempt to add the WeaponX app to the scope list");
@@ -2074,7 +2074,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     }
     
     // Never consider the WeaponX app itself as enabled for spoofing
-    if ([bundleID isEqualToString:@"com.hydra.projectx"]) {
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
         if (shouldLog) {
             PXLog(@"[WeaponX] IdentifierManager DEBUG: WeaponX app itself is never considered enabled for spoofing");
         }
@@ -2203,7 +2203,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 - (void)saveSettings {
     // Get the proper preferences path
     NSString *prefsPath = PXPreferencesPath();
-    NSString *prefsFile = PXProjectXSettingsPath();
+    NSString *prefsFile = PXTLinkIOSSettingsPath();
     
     // Global settings file for scoped apps (universal across all profiles)
     NSString *scopedAppsFile = PXGlobalScopePath();
@@ -2222,7 +2222,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
                     withIntermediateDirectories:YES 
                                      attributes:attributes
                                           error:&dirError]) {
-            self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                             code:4004 
                                         userInfo:@{NSLocalizedDescriptionKey: 
                                                   [NSString stringWithFormat:@"Failed to create preferences directory: %@", 
@@ -2243,7 +2243,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // Save main settings
     BOOL success = [saveDict writeToFile:prefsFile atomically:YES];
     if (!success) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                       code:4005 
                                   userInfo:@{NSLocalizedDescriptionKey: @"Failed to save settings"}];
         return;
@@ -2253,7 +2253,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
     success = [scopedAppsDict writeToFile:scopedAppsFile atomically:YES];
     if (!success) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                       code:4006 
                                   userInfo:@{NSLocalizedDescriptionKey: @"Failed to save global scoped apps"}];
         PXLog(@"[WeaponX] ❌ Failed to save global scoped apps to: %@", scopedAppsFile);
@@ -2272,13 +2272,13 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 - (void)loadSettings {
     PXLog(@"[WeaponX] Loading settings...");
     
-    NSString *prefsFile = PXProjectXSettingsPath();
+    NSString *prefsFile = PXTLinkIOSSettingsPath();
     NSString *scopedAppsFile = PXGlobalScopePath();
     
     NSFileManager *fileManager = [NSFileManager defaultManager];
     if (![fileManager fileExistsAtPath:prefsFile]) {
         PXLog(@"[WeaponX] Settings not found at default path: %@", prefsFile);
-        NSString *legacyPrefsFile = [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.projectx.plist"];
+        NSString *legacyPrefsFile = [PXPreferencesPath() stringByAppendingPathComponent:@"com.hydra.tlinkios.plist"];
         if ([fileManager fileExistsAtPath:legacyPrefsFile]) {
             prefsFile = legacyPrefsFile;
             PXLog(@"[WeaponX] Checking fallback legacy path: %@", prefsFile);
@@ -2430,7 +2430,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (void)addApplicationWithExtensionsToScope:(NSString *)bundleID {
-    if (!bundleID || [bundleID isEqualToString:@"com.hydra.projectx"]) {
+    if (!bundleID || [bundleID isEqualToString:@"com.hydra.tlinkios"]) {
         return;
     }
     [self addApplicationToScope:bundleID];
@@ -2516,7 +2516,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
     BOOL success = [scopedAppsDict writeToFile:scopedAppsFile atomically:YES];
     if (!success) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                       code:4006 
                                   userInfo:@{NSLocalizedDescriptionKey: @"Failed to save global scoped apps"}];
         return;
@@ -2530,7 +2530,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     if (![fileManager setAttributes:fileAttributes
                       ofItemAtPath:scopedAppsFile
                              error:&permError]) {
-        NSLog(@"[ProjectX] Warning: Failed to set global scope file permissions: %@", permError);
+        NSLog(@"[TLinkIOS] Warning: Failed to set global scope file permissions: %@", permError);
     }
     [self.spoofCache removeAllObjects];
     [_appEnabledCache removeAllObjects];
@@ -2541,7 +2541,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     if (!bundleID) return NO;
     
     // Never consider the WeaponX app itself or system apps
-    if ([bundleID isEqualToString:@"com.hydra.projectx"] || [bundleID hasPrefix:@"com.apple."]) {
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID hasPrefix:@"com.apple."]) {
         return NO;
     }
     
@@ -3202,7 +3202,7 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 - (BOOL)setCustomDeviceTheme:(NSString *)value {
     // Validate theme value
     if (![value isEqualToString:@"Light"] && ![value isEqualToString:@"Dark"]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" code:2004 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Theme (must be 'Light' or 'Dark')"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2004 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Theme (must be 'Light' or 'Dark')"}];
         return NO;
     }
     
@@ -3245,7 +3245,7 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
     // Notify change
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        CFSTR("com.hydra.projectx.toggleCanvasFingerprint"),
+        CFSTR("com.hydra.tlinkios.toggleCanvasFingerprint"),
         NULL, NULL, TRUE
     );
     
@@ -3294,7 +3294,7 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
     // Notify about the change
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        CFSTR("com.hydra.projectx.settings.changed"),
+        CFSTR("com.hydra.tlinkios.settings.changed"),
         NULL, NULL, TRUE
     );
     
@@ -3305,7 +3305,7 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
     // Post notification to reset canvas noise seeds
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        CFSTR("com.hydra.projectx.resetCanvasNoise"),
+        CFSTR("com.hydra.tlinkios.resetCanvasNoise"),
         NULL, NULL, TRUE
     );
     

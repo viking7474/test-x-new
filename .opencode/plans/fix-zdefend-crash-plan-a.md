@@ -3,7 +3,7 @@
 ## Problem
 Race condition between `hook__dyld_image_count()` and `hook__dyld_get_image_header(idx)`: ZDefend calls count on a background thread, gets filtered count N, then calls get_image_header(idx) but the `gVisibleToReal` map has been rebuilt between the two calls, causing out-of-bounds access → SIGSEGV at `0x2057da180`.
 
-## File: `ProjectXTweak/JailbreakBypassHooks.x`
+## File: `TLinkIOSTweak/JailbreakBypassHooks.x`
 
 ---
 
@@ -424,7 +424,7 @@ static intptr_t hook__dyld_get_image_vmaddr_slide(uint32_t image_index) {
 
 ## Verification
 After applying all 7 edits:
-1. `grep -n 'gVisibleToReal\|gVisibleCount\|gRealCount\|gDyldLastBuildNs' ProjectXTweak/JailbreakBypassHooks.x`
+1. `grep -n 'gVisibleToReal\|gVisibleCount\|gRealCount\|gDyldLastBuildNs' TLinkIOSTweak/JailbreakBypassHooks.x`
    → Should return 0 matches (all references replaced).
 2. Build the tweak and test on a device with ZDefend-protected app.
 3. Confirm no SIGSEGV in ZDefend on background thread during dyld enumeration.

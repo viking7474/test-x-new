@@ -58,8 +58,8 @@ static NSString * const kWeaponXLaunchDaemonPath = @"/Library/LaunchDaemons/com.
         _isGuardianActive = NO;
         _backgroundTask = UIBackgroundTaskInvalid;
         
-        // Only register ProjectX - let the daemon handle itself
-        [self registerProcess:@"ProjectX"];
+        // Only register TLinkIOS - let the daemon handle itself
+        [self registerProcess:@"TLinkIOS"];
         
         // Register for notifications
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -352,9 +352,9 @@ static NSString * const kWeaponXLaunchDaemonPath = @"/Library/LaunchDaemons/com.
     // Check if we have a path for this process
     NSString *processPath = nil;
     
-    if ([processName isEqualToString:@"ProjectX"]) {
-        // Path to the ProjectX app
-        processPath = @"/Applications/ProjectX.app/ProjectX";
+    if ([processName isEqualToString:@"TLinkIOS"]) {
+        // Path to the TLinkIOS app
+        processPath = @"/Applications/TLinkIOS.app/TLinkIOS";
     } else if ([processName isEqualToString:@"WeaponXDaemon"]) {
         // Path to the daemon
         processPath = @"/Library/WeaponX/WeaponXDaemon";

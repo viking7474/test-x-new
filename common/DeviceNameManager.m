@@ -119,7 +119,7 @@
     // Determine which naming pattern to use
     uint32_t patternSelector;
     if (SecRandomCopyBytes(kSecRandomDefault, sizeof(patternSelector), (uint8_t *)&patternSelector) != errSecSuccess) {
-        self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                        code:3001 
                                    userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number"}];
         return nil;
@@ -212,7 +212,7 @@
         return self.currentIdentifier;
     }
     
-    self.error = [NSError errorWithDomain:@"com.hydra.projectx" 
+    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                    code:3002 
                                userInfo:@{NSLocalizedDescriptionKey: @"Generated device name failed validation"}];
     return nil;

@@ -697,7 +697,7 @@ REQUIRED_FILES = (
     "KeychainHelper/PXKeychainHelperResult.h", "KeychainHelper/PXKeychainHelperResult.m",
     "KeychainHelper/KeychainBackupHelper.h", "KeychainHelper/KeychainBackupHelper.m",
     "KeychainHelper/backup_helper.m", "scripts/keychain_backup.sh",
-    ".github/workflows/build-ios-arm.yml", "Makefile", "ProjectXViewController.m", "main.m",
+    ".github/workflows/build-ios-arm.yml", "Makefile", "TLinkIOSViewController.m", "main.m",
 )
 
 PRODUCTION_EXTENSIONS = {".h", ".m", ".mm", ".xm", ".x", ".c", ".cc", ".cpp"}

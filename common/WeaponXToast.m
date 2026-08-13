@@ -1,6 +1,6 @@
 //
 //  WeaponXToast.m
-//  ProjectX
+//  TLinkIOS
 //
 
 #import "WeaponXToast.h"

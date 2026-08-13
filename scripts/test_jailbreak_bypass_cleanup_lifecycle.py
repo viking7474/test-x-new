@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_PATH = ROOT / "ProjectXTweak" / "JailbreakBypassHooks.x"
+SOURCE_PATH = ROOT / "TLinkIOSTweak" / "JailbreakBypassHooks.x"
 SOURCE = SOURCE_PATH.read_text(encoding="utf-8")
 
 

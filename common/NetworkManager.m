@@ -2,7 +2,7 @@
 #import "CarrierDB.h"
 #import <ifaddrs.h>
 #import <arpa/inet.h>
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 
 @implementation NetworkManager

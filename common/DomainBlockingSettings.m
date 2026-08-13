@@ -1,9 +1,9 @@
 #import "DomainBlockingSettings.h"
 
 // Multiple possible paths for rootless jailbreak compatibility
-static NSString *const kDomainBlockingSettingsFile = @"/var/mobile/Library/Preferences/com.hydra.projectx.domainblocking.plist";
-static NSString *const kDomainBlockingSettingsFileAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.projectx.domainblocking.plist";
-static NSString *const kDomainBlockingSettingsFileAlt2 = @"/var/mobile/Library/Preferences/com.hydra.projectx.domainblocking.plist";
+static NSString *const kDomainBlockingSettingsFile = @"/var/mobile/Library/Preferences/com.hydra.tlinkios.domainblocking.plist";
+static NSString *const kDomainBlockingSettingsFileAlt1 = @"/private/var/mobile/Library/Preferences/com.hydra.tlinkios.domainblocking.plist";
+static NSString *const kDomainBlockingSettingsFileAlt2 = @"/var/mobile/Library/Preferences/com.hydra.tlinkios.domainblocking.plist";
 static NSString *const kIsEnabledKey = @"isEnabled";
 static NSString *const kBlockedDomainsKey = @"blockedDomains";
 static NSString *const kCustomDomainsKey = @"customDomains";

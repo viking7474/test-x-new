@@ -1,6 +1,6 @@
 //
 //  UIButton+SafeConfiguration.h
-//  ProjectX
+//  TLinkIOS
 //
 //  Created for iOS 12+ compatibility with UIButtonConfiguration.
 //  This category provides runtime-safe configuration methods.

@@ -5,7 +5,7 @@
 #import <stdint.h>
 
 NSInteger const PXKeychainItemIdentitySchemaVersion = 1;
-NSErrorDomain const PXKeychainItemIdentityErrorDomain = @"com.hydra.projectx.keychain-item-identity";
+NSErrorDomain const PXKeychainItemIdentityErrorDomain = @"com.hydra.tlinkios.keychain-item-identity";
 NSString * const PXKeychainItemIdentityErrorFieldPathKey = @"fieldPath";
 
 static const NSUInteger PXKeychainItemIdentityMaximumInputEntries = 256;

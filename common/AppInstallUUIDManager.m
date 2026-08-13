@@ -1,6 +1,6 @@
 #import "AppInstallUUIDManager.h"
 #import "PXIdentityValidator.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 
 @interface AppInstallUUIDManager ()
 @property (nonatomic, strong) NSString *currentIdentifier;

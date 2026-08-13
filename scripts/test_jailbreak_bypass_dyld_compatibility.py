@@ -8,7 +8,7 @@ from pathlib import Path
 import test_jailbreak_bypass_matcher_hardening as matcher_model
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "ProjectXTweak" / "JailbreakBypassHooks.x").read_text(encoding="utf-8")
+SOURCE = (ROOT / "TLinkIOSTweak" / "JailbreakBypassHooks.x").read_text(encoding="utf-8")
 
 
 class Matrix:
@@ -122,13 +122,13 @@ def main() -> None:
     matrix.check("dyld: shared name sanitizer used", "PXJBSanitizedImageName(name)" in name_hook)
 
     aliases = extract_aliases()
-    forbidden = ("substrate", "frida", "jailbreak", "projectx", "cy-", "dopamine", "ellekit")
+    forbidden = ("substrate", "frida", "jailbreak", "tlinkios", "cy-", "dopamine", "ellekit")
     matrix.check("alias: pool size is stable", len(aliases) == 16)
     matrix.check("alias: aliases are unique", len(aliases) == len(set(aliases)))
     matrix.check("alias: aliases are absolute system paths", all(x.startswith(("/System/Library/", "/usr/lib/")) for x in aliases))
     matrix.check("alias: no jailbreak fingerprints", all(not any(term in x.lower() for term in forbidden) for x in aliases))
     matrix.check("alias: project matcher leaves every alias visible", all(not matcher_model.artifact_match(x) for x in aliases))
-    sample = "/Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib"
+    sample = "/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"
     matrix.check("alias: hash is case-insensitive", fnv1a_casefold(sample) == fnv1a_casefold(sample.swapcase()))
     matrix.check("alias: hash selects valid entry", fnv1a_casefold(sample) % len(aliases) < len(aliases))
 

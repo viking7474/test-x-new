@@ -3,7 +3,7 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-NSString *const PXVersionedIOSDatabaseErrorDomain = @"com.hydra.projectx.versioned-ios-database";
+NSString *const PXVersionedIOSDatabaseErrorDomain = @"com.hydra.tlinkios.versioned-ios-database";
 NSInteger const PXVersionedIOSDatabaseReaderVersion = 1;
 
 static NSError *PXIOSDBError(NSInteger code, NSString *message) {

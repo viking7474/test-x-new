@@ -272,8 +272,8 @@
 
     NSArray *suiteNames = @[
         @"com.weaponx.securitySettings",
-        @"com.hydra.projectx.SecuritySettings",
-        @"com.hydra.projectx"
+        @"com.hydra.tlinkios.SecuritySettings",
+        @"com.hydra.tlinkios"
     ];
     for (NSString *suiteName in suiteNames) {
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
@@ -288,15 +288,15 @@
     [userInfo setObject:@YES forKey:@"forceReload"];
     [userInfo setObject:securitySettingsPath forKey:@"settingsPath"];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.projectx.toggleNetworkDataSpoof"
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleNetworkDataSpoof"
                                                             object:nil
                                                           userInfo:userInfo];
     });
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-    NSString *notificationName = enabled ? @"com.hydra.projectx.enableNetworkDataSpoof" : @"com.hydra.projectx.disableNetworkDataSpoof";
+    NSString *notificationName = enabled ? @"com.hydra.tlinkios.enableNetworkDataSpoof" : @"com.hydra.tlinkios.disableNetworkDataSpoof";
     CFNotificationCenterPostNotification(darwinCenter, (__bridge CFStringRef)notificationName, NULL, NULL, YES);
-    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.projectx.networkDataSpoofChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkDataSpoofChanged"), NULL, NULL, YES);
 
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];

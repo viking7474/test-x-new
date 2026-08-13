@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 NSErrorDomain const PXBackupArtifactWriterErrorDomain =
-    @"com.hydra.projectx.backup-artifact-writer";
+    @"com.hydra.tlinkios.backup-artifact-writer";
 NSString * const PXBackupArtifactWriterErrorFieldPathKey = @"fieldPath";
 NSString * const PXBackupArtifactTemporaryDirectoryPrefix =
     @".weaponx-artifact-partial-";

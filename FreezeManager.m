@@ -27,7 +27,7 @@
         _frozenApps = [NSMutableDictionary dictionary];
         
         // Load frozen state from UserDefaults - Use suite name to avoid conflicts
-        NSUserDefaults *freezeDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.freezer"];
+        NSUserDefaults *freezeDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.freezer"];
         NSDictionary *savedState = [freezeDefaults dictionaryForKey:@"FrozenApps"];
         if (savedState) {
             [_frozenApps setDictionary:savedState];
@@ -60,7 +60,7 @@
     }
     
     // Skip if the bundleID matches our own tweak's bundle ID
-    if ([bundleID isEqualToString:@"com.hydra.projectx"]) {
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
         NSLog(@"[FreezeManager] Skipping termination of our own tweak");
         return;
     }
@@ -97,7 +97,7 @@
     }
     
     // Skip if the bundleID matches our own tweak's bundle ID
-    if ([bundleID isEqualToString:@"com.hydra.projectx"]) {
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
         NSLog(@"[FreezeManager] Skipping unfreeze of our own tweak");
         return;
     }
@@ -132,7 +132,7 @@
 
 - (void)saveFrozenState {
     // Use suite name to avoid conflicts with other settings
-    NSUserDefaults *freezeDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.projectx.freezer"];
+    NSUserDefaults *freezeDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.freezer"];
     [freezeDefaults setObject:self.frozenApps forKey:@"FrozenApps"];
     [freezeDefaults synchronize];
     
@@ -156,7 +156,7 @@
     }
     
     // Skip system critical processes
-    NSArray *protectedProcesses = @[@"SpringBoard", @"backboardd", @"ProjectX", @"installd", @"assertiond"];
+    NSArray *protectedProcesses = @[@"SpringBoard", @"backboardd", @"TLinkIOS", @"installd", @"assertiond"];
     if ([protectedProcesses containsObject:executableName]) {
         // NSLog(@"[FreezeManager] Skipping protected process: %@", executableName);
         return;

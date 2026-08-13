@@ -1,0 +1,588 @@
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import "TLinkIOSLogging.h"
+#import "IdentifierManager.h"
+#import "UserDefaultsUUIDManager.h"
+// #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
+
+#import "PXScope.h"
+#import "PXPaths.h"
+#import "PXDeviceProfileSchema.h"
+#import "PXP1AFilters.h"
+
+// Function declarations
+static NSString *getSpoofedUserDefaultsUUID(void);
+static BOOL isUUIDKey(NSString *key);
+static id processDictionaryValues(id object);
+
+// Recursion guard to prevent infinite loops when getSpoofedUserDefaultsUUID accesses NSUserDefaults
+static __thread BOOL isInsideHook = NO;
+
+// Callback function for notifications that clear the cache
+static void clearCacheCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    PXInvalidateScopeDecisionCache();
+}
+
+// Helper function to check if we should spoof for this bundle ID (with caching)
+static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    if (!bundleID) return NO;
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
+    if (!NSClassFromString(@"IdentifierManager")) return NO;
+    IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
+    return [manager isIdentifierEnabled:@"UserDefaultsUUID"];
+}
+
+// Add function to get spoofed UserDefaults UUID from manager
+static NSString *getSpoofedUserDefaultsUUID(void) {
+    // Use the UserDefaultsUUIDManager for consistent values across the app and hooks
+    UserDefaultsUUIDManager *manager = [UserDefaultsUUIDManager sharedManager];
+    NSString *uuid = [manager currentUserDefaultsUUID];
+    
+    if (uuid && uuid.length > 0) {
+        return uuid;
+    }
+    
+    // If UserDefaultsUUIDManager failed, read directly from the active profile.
+    NSString *identityDir = PXActiveProfileIdentityPath();
+    NSString *deviceIdsPath = PXActiveProfileDeviceIDsPath();
+    NSDictionary *deviceIds = deviceIdsPath.length
+        ? [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath]
+        : nil;
+    NSString *profileUUID = PXProfileString(deviceIds[@"UserDefaultsUUID"]);
+    if (profileUUID.length) return profileUUID;
+
+    if (identityDir.length) {
+        NSDictionary *userDefaultsInfo = [NSDictionary dictionaryWithContentsOfFile:
+            [identityDir stringByAppendingPathComponent:@"userdefaults_uuid.plist"]];
+        profileUUID = PXProfileString(userDefaultsInfo[@"value"]);
+        if (profileUUID.length) return profileUUID;
+    }
+
+    // If all else fails, use a persistent fallback UUID
+    NSString *fallbackUUIDPath = [PXWeaponXBasePath() stringByAppendingPathComponent:@"fallback_userdefaults_uuid.plist"];
+    NSMutableDictionary *fallbackDict = [NSMutableDictionary dictionaryWithContentsOfFile:fallbackUUIDPath];
+    
+    if (!fallbackDict) {
+        fallbackDict = [NSMutableDictionary dictionary];
+    }
+    
+    NSString *fallbackUUID = fallbackDict[@"UserDefaultsUUID"];
+    if (!fallbackUUID) {
+        // Generate new UUID only if we don't have one saved
+        fallbackUUID = [[NSUUID UUID] UUIDString];
+        fallbackDict[@"UserDefaultsUUID"] = fallbackUUID;
+        [fallbackDict writeToFile:fallbackUUIDPath atomically:YES];
+        PXLog(@"[WeaponX] 🔍 Generated and saved persistent fallback UUID: %@", fallbackUUID);
+    } else {
+        PXLog(@"[WeaponX] 🔍 Using existing fallback UUID: %@", fallbackUUID);
+    }
+    
+    return fallbackUUID;
+}
+
+// Function to recursively process dictionary values and replace UUIDs.
+// Preserves immutable/mutable contract of the original collection when possible.
+static id processDictionaryValues(id object) {
+    // Base case: not a dictionary or array
+    if (!object || (![object isKindOfClass:[NSDictionary class]] && ![object isKindOfClass:[NSArray class]])) {
+        return object;
+    }
+    
+    // For dictionaries, check each key and recursively process values
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)object;
+        BOOL wasMutable = [object isKindOfClass:[NSMutableDictionary class]];
+        NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:dict.count];
+        
+        NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+        
+        for (id key in dict) {
+            // Check if this key is UUID-related
+            if ([key isKindOfClass:[NSString class]] && isUUIDKey(key)) {
+                id value = dict[key];
+                // If value is a string and looks like a UUID, replace it
+                if ([value isKindOfClass:[NSString class]]) {
+                    NSString *strValue = (NSString *)value;
+                    // If the value matches a UUID pattern or is more than 8 chars and contains only hex
+                    if ([strValue rangeOfString:@"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" 
+                                         options:NSRegularExpressionSearch].location != NSNotFound ||
+                        (strValue.length > 8 && [strValue rangeOfString:@"^[0-9a-f]+$" 
+                                                               options:NSRegularExpressionSearch].location != NSNotFound)) {
+                        result[key] = spoofedUUID;
+                        continue;
+                    }
+                }
+            }
+            
+            // Recursively process the value
+            result[key] = processDictionaryValues(dict[key]);
+        }
+        
+        return wasMutable ? result : [result copy];
+    }
+    
+    // For arrays, recursively process each element
+    if ([object isKindOfClass:[NSArray class]]) {
+        NSArray *array = (NSArray *)object;
+        BOOL wasMutable = [object isKindOfClass:[NSMutableArray class]];
+        NSMutableArray *result = [NSMutableArray arrayWithCapacity:array.count];
+        
+        for (id item in array) {
+            [result addObject:processDictionaryValues(item) ?: [NSNull null]];
+        }
+        
+        return wasMutable ? result : [result copy];
+    }
+    
+    // Shouldn't reach here, but just in case
+    return object;
+}
+
+// Helper to check if a string looks like a UUID (8-4-4-4-12 format)
+static BOOL looksLikeUUIDString(NSString *str) {
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXUserDefaultsLooksLikeUUIDString(str);
+}
+
+// Stricter isUUIDKey - only match keys that are definitely UUID-related
+// Removed generic terms like 'token', 'tracking', 'device', 'identifier' that can match non-UUID values
+static BOOL isUUIDKey(NSString *key) {
+    // Delegate to the shared, host-testable helper (P1-A, no drift with tests).
+    return PXUserDefaultsIsUUIDKey(key);
+}
+
+#pragma mark - NSUserDefaults Hooks
+
+%group UserDefaultsHooks
+
+%hook NSUserDefaults
+
+// Base method for getting objects - SAFE VERSION
+// Always get original value first, only spoof if value is actually UUID-like
+- (id)objectForKey:(NSString *)defaultName {
+    // Recursion guard
+    if (isInsideHook || PXScopeIsReadingSecuritySettings()) {
+        return %orig;
+    }
+    
+    // Always get original value first
+    id originalValue = %orig;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (!shouldSpoofForBundle(bundleID)) {
+            return originalValue;
+        }
+        
+        // Only consider spoofing if key looks like UUID key
+        BOOL keyIsUUID = isUUIDKey(defaultName);
+        
+        // Case 1: Value is NSString that looks like UUID
+        if ([originalValue isKindOfClass:[NSString class]]) {
+            NSString *strValue = (NSString *)originalValue;
+            if (keyIsUUID && looksLikeUUIDString(strValue)) {
+                isInsideHook = YES;
+                NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+                isInsideHook = NO;
+                PXLog(@"[WeaponX] 🔍 Spoofing UUID string for key '%@'", defaultName);
+                return spoofedUUID;
+            }
+            return originalValue;
+        }
+        
+        // Case 2: Value is NSUUID 
+        if ([originalValue isKindOfClass:NSClassFromString(@"NSUUID")]) {
+            if (!keyIsUUID) {
+                return originalValue;
+            }
+            isInsideHook = YES;
+            NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+            isInsideHook = NO;
+            // Return as NSUUID to match expected type
+            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:spoofedUUID];
+            PXLog(@"[WeaponX] 🔍 Spoofing NSUUID for key '%@'", defaultName);
+            return uuid ?: originalValue;
+        }
+        
+        // Case 3: Value is NSData 16 bytes (UUID bytes) and key is UUID-related
+        if ([originalValue isKindOfClass:[NSData class]] && keyIsUUID) {
+            NSData *dataValue = (NSData *)originalValue;
+            if (dataValue.length == 16) {
+                isInsideHook = YES;
+                NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+                isInsideHook = NO;
+                NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:spoofedUUID];
+                if (uuid) {
+                    uuid_t uuidBytes;
+                    [uuid getUUIDBytes:uuidBytes];
+                    PXLog(@"[WeaponX] 🔍 Spoofing UUID bytes for key '%@'", defaultName);
+                    return [NSData dataWithBytes:uuidBytes length:16];
+                }
+            }
+            return originalValue;
+        }
+        
+        // Case 4: Value is NSDictionary - process only if key is UUID-related
+        if ([originalValue isKindOfClass:[NSDictionary class]] && keyIsUUID) {
+            isInsideHook = YES;
+            id result = processDictionaryValues(originalValue);
+            isInsideHook = NO;
+            return result;
+        }
+        
+        // Case 5: Value is NSArray - process only if key is UUID-related
+        if ([originalValue isKindOfClass:[NSArray class]] && keyIsUUID) {
+            isInsideHook = YES;
+            id result = processDictionaryValues(originalValue);
+            isInsideHook = NO;
+            return result;
+        }
+        
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in objectForKey hook: %@", exception);
+    }
+    
+    // Default: return original value unchanged
+    return originalValue;
+}
+
+// String-specific method - SAFE VERSION
+// Only spoof if original value looks like UUID
+- (NSString *)stringForKey:(NSString *)defaultName {
+    if (isInsideHook) return %orig;
+    
+    // Always get original value first
+    NSString *originalValue = %orig;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        // Only spoof if key is UUID-related AND original value looks like UUID
+        if (shouldSpoofForBundle(bundleID) && isUUIDKey(defaultName) && looksLikeUUIDString(originalValue)) {
+            isInsideHook = YES;
+            NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+            isInsideHook = NO;
+            PXLog(@"[WeaponX] 🔍 Spoofing string UUID for key '%@'", defaultName);
+            return spoofedUUID;
+        }
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in stringForKey hook: %@", exception);
+    }
+    
+    return originalValue;
+}
+
+// Dictionary method - only process if key looks UUID-related
+- (NSDictionary<NSString *, id> *)dictionaryForKey:(NSString *)defaultName {
+    if (isInsideHook) return %orig;
+    
+    NSDictionary *originalDict = %orig;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        // Only process if key looks UUID-related and dictionary is not empty
+        if (!shouldSpoofForBundle(bundleID) || !isUUIDKey(defaultName) || !originalDict || originalDict.count == 0) {
+            return originalDict;
+        }
+        
+        // Use our recursive processor to handle nested dictionaries
+        isInsideHook = YES;
+        NSDictionary *result = processDictionaryValues(originalDict);
+        isInsideHook = NO;
+        return result;
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in dictionaryForKey hook: %@", exception);
+        return originalDict;
+    }
+}
+
+// Add additional accessor methods
+
+- (NSArray *)arrayForKey:(NSString *)defaultName {
+    if (isInsideHook) return %orig;
+    
+    NSArray *originalArray = %orig;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        // Only process if key looks UUID-related and array is not empty
+        if (!shouldSpoofForBundle(bundleID) || !isUUIDKey(defaultName) || !originalArray || originalArray.count == 0) {
+            return originalArray;
+        }
+        
+        // Use our recursive processor to handle arrays containing dictionaries with UUIDs
+        isInsideHook = YES;
+        NSArray *result = processDictionaryValues(originalArray);
+        isInsideHook = NO;
+        return result;
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in arrayForKey hook: %@", exception);
+        return originalArray;
+    }
+}
+
+// Data method - SAFE VERSION
+// Only spoof if key is UUID AND data is 16 bytes (UUID binary format)
+- (NSData *)dataForKey:(NSString *)defaultName {
+    if (isInsideHook) return %orig;
+    
+    // Always get original value first
+    NSData *originalData = %orig;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        // Only spoof if:
+        // 1. Key is UUID-related
+        // 2. Data is exactly 16 bytes (UUID binary format)
+        if (shouldSpoofForBundle(bundleID) && isUUIDKey(defaultName) && originalData && originalData.length == 16) {
+            isInsideHook = YES;
+            NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+            isInsideHook = NO;
+            
+            // Use NSUUID to get proper UUID bytes
+            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:spoofedUUID];
+            if (uuid) {
+                uuid_t uuidBytes;
+                [uuid getUUIDBytes:uuidBytes];
+                PXLog(@"[WeaponX] 🔍 Spoofing UUID bytes for key '%@'", defaultName);
+                return [NSData dataWithBytes:uuidBytes length:16];
+            }
+        }
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in dataForKey hook: %@", exception);
+    }
+    
+    return originalData;
+}
+
+- (NSURL *)URLForKey:(NSString *)defaultName {
+    // URL values are rarely UUIDs, so use original
+    return %orig;
+}
+
+// KVC accessor - important for accessing dictionaries
+- (id)valueForKey:(NSString *)key {
+    if (isInsideHook) return %orig;
+    
+    @try {
+        // Only override for specific UUID keys to avoid breaking KVC for other properties
+        if (isUUIDKey(key)) {
+            id result = [self objectForKey:key];
+            if (result) {
+                return result;
+            }
+        }
+    } @catch (NSException *exception) {
+        PXLog(@"[WeaponX] ⚠️ Exception in valueForKey hook: %@", exception);
+    }
+    
+    return %orig;
+}
+
+// Subscript accessor - important for dictionary-style access
+- (id)objectForKeyedSubscript:(NSString *)key {
+    if (isInsideHook) return %orig;
+    
+    @try {
+        // This is used when accessing NSUserDefaults with subscript notation: userDefaults[key]
+        if (isUUIDKey(key)) {
+            return [self objectForKey:key];
+        }
+    } @catch (NSException *exception) {
+        PXLog(@"[WeaponX] ⚠️ Exception in objectForKeyedSubscript hook: %@", exception);
+    }
+    
+    return %orig;
+}
+
+// SETTER METHODS
+
+#if 0
+// Disabled: Logos in the current build pipeline generates malformed C for these
+// void setter hooks. Getter hooks above still provide UserDefaults spoofing.
+// Base setter method
+- (void)setObject:(id)value forKey:(NSString *)defaultName {
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    id valueToStore = value;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        if (shouldSpoofForBundle(bundleID)) {
+            // If setting a UUID value, replace with our spoofed UUID
+            if (isUUIDKey(defaultName) && [value isKindOfClass:[NSString class]]) {
+                isInsideHook = YES;
+                NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+                isInsideHook = NO;
+                PXLog(@"[WeaponX] 🔍 Intercepting and spoofing UUID being saved to UserDefaults for key '%@'", defaultName);
+                valueToStore = spoofedUUID;
+            }
+            // If setting a dictionary or array, process it to replace UUIDs
+            else if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+                isInsideHook = YES;
+                valueToStore = processDictionaryValues(value);
+                isInsideHook = NO;
+            }
+        }
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in setObject:forKey: hook: %@", exception);
+    }
+    
+    %orig(valueToStore, defaultName);
+}
+
+// String-specific setter
+- (void)setString:(NSString *)value forKey:(NSString *)defaultName {
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    NSString *valueToStore = value;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        if (shouldSpoofForBundle(bundleID) && isUUIDKey(defaultName)) {
+            isInsideHook = YES;
+            NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+            isInsideHook = NO;
+            PXLog(@"[WeaponX] 🔍 Intercepting and spoofing UUID string being saved to UserDefaults for key '%@'", defaultName);
+            valueToStore = spoofedUUID;
+        }
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in setString:forKey: hook: %@", exception);
+    }
+    
+    %orig(valueToStore, defaultName);
+}
+
+// Dictionary-specific setter
+- (void)setDictionary:(NSDictionary<NSString *,id> *)value forKey:(NSString *)defaultName {
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    NSDictionary *valueToStore = value;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        if (shouldSpoofForBundle(bundleID) && value) {
+            // Process the dictionary to replace any UUIDs
+            isInsideHook = YES;
+            valueToStore = processDictionaryValues(value);
+            isInsideHook = NO;
+        }
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in setDictionary:forKey: hook: %@", exception);
+    }
+    
+    %orig(valueToStore, defaultName);
+}
+
+// Data-specific setter - SAFE VERSION
+// Only spoof if key is UUID AND data is 16 bytes (UUID binary format)
+- (void)setData:(NSData *)value forKey:(NSString *)defaultName {
+    if (isInsideHook) { %orig(value, defaultName); return; }
+    NSData *valueToStore = value;
+    
+    @try {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        
+        // Only spoof if:
+        // 1. Key is UUID-related
+        // 2. Data is exactly 16 bytes (UUID binary format)
+        if (shouldSpoofForBundle(bundleID) && isUUIDKey(defaultName) && value && value.length == 16) {
+            isInsideHook = YES;
+            NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+            isInsideHook = NO;
+            
+            // Use NSUUID to get proper UUID bytes
+            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:spoofedUUID];
+            if (uuid) {
+                uuid_t uuidBytes;
+                [uuid getUUIDBytes:uuidBytes];
+                valueToStore = [NSData dataWithBytes:uuidBytes length:16];
+                PXLog(@"[WeaponX] 🔍 Spoofing UUID bytes being saved for key '%@'", defaultName);
+            }
+        }
+    } @catch (NSException *exception) {
+        isInsideHook = NO;
+        PXLog(@"[WeaponX] ⚠️ Exception in setData:forKey: hook: %@", exception);
+    }
+    
+    %orig(valueToStore, defaultName);
+}
+#endif
+
+%end
+
+%end // %group UserDefaultsHooks
+
+#pragma mark - Constructor
+
+%ctor {
+    @autoreleasepool {
+        // Skip for system processes
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *proc = [NSProcessInfo processInfo].processName;
+        if (PXIsWebKitHelperProcess(bundleID, proc)) {
+            return;
+        }
+        if (!bundleID || !PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
+            return;
+        }
+        
+        // Register for settings change notifications
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            clearCacheCallback,
+            CFSTR("com.hydra.tlinkios.settings.changed"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        
+        // Register for profile change notifications
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            clearCacheCallback,
+            CFSTR("com.hydra.tlinkios.profileChanged"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        
+        // Additional notification for profile switching
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            clearCacheCallback,
+            CFSTR("com.hydra.tlinkios.profileSwitched"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            clearCacheCallback,
+            CFSTR("com.hydra.tlinkios.scopedAppsChanged"),
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+
+        // Activate NSUserDefaults hooks only after scope check
+        %init(UserDefaultsHooks);
+        
+        PXLog(@"[WeaponX] 🔍 UserDefaults hooks initialized for %@", bundleID);
+    }
+}

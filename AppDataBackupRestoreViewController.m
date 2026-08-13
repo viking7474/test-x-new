@@ -14,7 +14,7 @@ static NSString *PXBackupKeychainGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataBackupKeychainGroups_%@", bundleID ?: @""];
 }
 
-static NSString * const PXBackupKeychainGroupsSavedNotification = @"com.hydra.projectx.backupKeychainGroupsSaved";
+static NSString * const PXBackupKeychainGroupsSavedNotification = @"com.hydra.tlinkios.backupKeychainGroupsSaved";
 
 typedef NS_ENUM(NSUInteger, PXBackupAlertOutcome) {
     PXBackupAlertOutcomeSuccessful = 1,
@@ -844,7 +844,7 @@ static NSString *PXRestoreComponentResultsSection(PXRestoreResult *result) {
 
 @implementation AppDataBackupRestoreViewController
 
-static void PXAttemptBringProjectXToFront(void) {
+static void PXAttemptBringTLinkIOSToFront(void) {
     NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
     if (!selfBundle.length) return;
     Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
@@ -1135,11 +1135,11 @@ static void PXAttemptBringProjectXToFront(void) {
         return;
     }
 
-    // Queue and try to bring ProjectX back.
+    // Queue and try to bring TLinkIOS back.
     self.pendingAlertTitle = title;
     self.pendingAlertMessage = message;
     self.pendingCopyPath = copyPath;
-    PXAttemptBringProjectXToFront();
+    PXAttemptBringTLinkIOSToFront();
 }
 
 - (void)dealloc {

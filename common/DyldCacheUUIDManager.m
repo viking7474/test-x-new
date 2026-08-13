@@ -1,6 +1,6 @@
 #import "DyldCacheUUIDManager.h"
 #import "PXIdentityValidator.h"
-#import "ProjectXLogging.h"
+#import "TLinkIOSLogging.h"
 
 @interface DyldCacheUUIDManager ()
 @property (nonatomic, strong) NSString *currentIdentifier;

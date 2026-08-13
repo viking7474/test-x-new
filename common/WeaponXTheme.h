@@ -1,6 +1,6 @@
 //
 //  WeaponXTheme.h
-//  ProjectX
+//  TLinkIOS
 //
 //  P1 design-system: single source of truth for brand colors, radii,
 //  Dynamic Type scaling, and the Reduce Motion accessibility flag.

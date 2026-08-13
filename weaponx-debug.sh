@@ -29,8 +29,8 @@ PROFILES_DIR="$WEAPONX_BASE/Profiles"
 PREFS_DIR="$MOBILE_LIBRARY/Preferences"
 CURRENT_PROFILE_INFO="$PROFILES_DIR/current_profile_info.plist"
 LEGACY_ACTIVE_PROFILE_INFO="$WEAPONX_BASE/active_profile_info.plist"
-SETTINGS_PLIST="$PREFS_DIR/com.hydra.projectx.settings.plist"
-GLOBAL_SCOPE_PLIST="$PREFS_DIR/com.hydra.projectx.global_scope.plist"
+SETTINGS_PLIST="$PREFS_DIR/com.hydra.tlinkios.settings.plist"
+GLOBAL_SCOPE_PLIST="$PREFS_DIR/com.hydra.tlinkios.global_scope.plist"
 SECURITY_SETTINGS_PLIST="$PREFS_DIR/com.weaponx.securitySettings.plist"
 
 LIBRARY_BASE="$(first_existing_dir "/Library" "/var/jb/Library" "/private/var/jb/Library")"
@@ -114,12 +114,12 @@ else
 fi
 
 echo ""
-echo "8. Checking ProjectX app..."
-if [ -d "/Applications/ProjectX.app" ]; then
-    echo "   ✅ ProjectX.app exists"
-    ls -la "/Applications/ProjectX.app/"
+echo "8. Checking TLinkIOS app..."
+if [ -d "/Applications/TLinkIOS.app" ]; then
+    echo "   ✅ TLinkIOS.app exists"
+    ls -la "/Applications/TLinkIOS.app/"
 else
-    echo "   ❌ ProjectX.app NOT found"
+    echo "   ❌ TLinkIOS.app NOT found"
 fi
 
 echo ""
@@ -142,9 +142,9 @@ fi
 
 echo ""
 echo "11. Checking tweak..."
-if [ -f "$TWEAK_DIR/ProjectXTweak.dylib" ]; then
+if [ -f "$TWEAK_DIR/TLinkIOSTweak.dylib" ]; then
     echo "   ✅ Tweak dylib exists"
-    ls -la "$TWEAK_DIR/ProjectXTweak."*
+    ls -la "$TWEAK_DIR/TLinkIOSTweak."*
 else
     echo "   ❌ Tweak dylib NOT found"
 fi
@@ -180,7 +180,7 @@ else
     echo "   ⚠️ Resolve profile/scope state before enabling path hooks"
 fi
 
-if [ -f "$TWEAK_DIR/ProjectXTweak.dylib" ]; then
+if [ -f "$TWEAK_DIR/TLinkIOSTweak.dylib" ]; then
     echo "   ✅ Runtime tweak installed"
 else
     echo "   ⚠️ Runtime tweak not installed; hook validation cannot run"
