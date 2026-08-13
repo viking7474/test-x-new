@@ -16,6 +16,8 @@
 #import "PXPaths.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
+#import <stdatomic.h>
+#import <stdbool.h>
 
 // Constants for proper size calculations - use only marketing units (1000-based)
 #define BYTES_PER_KB (1000ULL)
@@ -48,6 +50,14 @@ static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t ent
 static NSString *getCurrentBundleID(void);
 static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
+static void PXStorageRefreshNativeSnapshot(void);
+
+// Native statfs/getfsstat providers run while CoreServices may hold its
+// non-recursive MountInfo lock. Their call path must remain Foundation-free.
+static _Atomic(bool) gStorageProcessAllowed = false;
+static _Atomic(bool) gStorageNativeRefreshInProgress = false;
+static _Atomic(uint64_t) gStorageNativeTotalBytes = 0;
+static _Atomic(uint64_t) gStorageNativeFreeBytes = 0;
 
 // Get the current bundle ID
 static NSString *getCurrentBundleID(void) {
@@ -134,6 +144,16 @@ static void PXStorageSettingsChanged(CFNotificationCenterRef center,
     (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
     PXStorageInvalidateCache();
     PXInvalidateScopeDecisionCache();
+
+    static dispatch_queue_t refreshQueue = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        refreshQueue = dispatch_queue_create("com.hydra.tlinkios.storage-native-refresh",
+                                             DISPATCH_QUEUE_SERIAL);
+    });
+    dispatch_async(refreshQueue, ^{
+        PXStorageRefreshNativeSnapshot();
+    });
 }
 
 // Helper function to get consistent storage values directly from storage.plist.
@@ -253,15 +273,14 @@ static uint64_t calculateBlockCount(uint64_t bytes, uint32_t blockSize) {
 // Helper function to check if storage spoofing should be applied
 // This centralizes the bundleID checks to avoid repeating them in every hook
 static BOOL shouldApplyStorageSpoofing() {
-    NSString *currentBundleID = getCurrentBundleID();
-    if (!currentBundleID || [currentBundleID length] == 0) {
-        return NO;
-    }
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
-    
-    // Additional blacklist for known problematic apps
-    NSArray *problematicApps = @[
+    return atomic_load_explicit(&gStorageProcessAllowed, memory_order_acquire);
+}
+
+static BOOL PXStorageBundleIsProblematic(NSString *bundleID) {
+    static NSSet<NSString *> *problematicApps = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        problematicApps = [NSSet setWithArray:@[
         @"com.toyopagroup.picaboo",    // Snapchat 
         @"com.atebits.Tweetie2",       // Twitter/X
         @"com.zhiliaoapp.musically",   // TikTok
@@ -273,12 +292,9 @@ static BOOL shouldApplyStorageSpoofing() {
         @"com.hammerandchisel.discord",
         @"com.burbn.instagram",        // Instagram
         @"com.facebook.Facebook"       // Facebook
-    ];
-    
-    if ([problematicApps containsObject:currentBundleID]) {
-        return NO;
-    }
-    return YES;
+        ]];
+    });
+    return bundleID.length && [problematicApps containsObject:bundleID];
 }
 
 // Function to get storage values with universal compatibility
@@ -391,6 +407,44 @@ static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
     }
 }
 
+static void PXStorageRefreshNativeSnapshot(void) {
+    atomic_store_explicit(&gStorageNativeRefreshInProgress, true, memory_order_release);
+
+    uint64_t totalBytes = 0;
+    uint64_t freeBytes = 0;
+    NSString *bundleID = getCurrentBundleID();
+    NSString *processName = [NSProcessInfo processInfo].processName;
+    BOOL allowed = bundleID.length &&
+        !PXStorageBundleIsProblematic(bundleID) &&
+        PXProcessIsAllowedForSpoofing(bundleID,
+                                      processName,
+                                      PXScopeOptionAllowSafariAuthStack);
+    if (allowed) {
+        getStorageValuesForApp(&totalBytes, &freeBytes);
+        allowed = totalBytes > 0;
+    }
+
+    atomic_store_explicit(&gStorageNativeTotalBytes, totalBytes, memory_order_release);
+    atomic_store_explicit(&gStorageNativeFreeBytes, freeBytes, memory_order_release);
+    atomic_store_explicit(&gStorageProcessAllowed, allowed, memory_order_release);
+    atomic_store_explicit(&gStorageNativeRefreshInProgress, false, memory_order_release);
+}
+
+static BOOL PXStorageCopyNativeSnapshot(uint64_t *totalBytes, uint64_t *freeBytes) {
+    if (!totalBytes || !freeBytes ||
+        atomic_load_explicit(&gStorageNativeRefreshInProgress, memory_order_acquire) ||
+        !atomic_load_explicit(&gStorageProcessAllowed, memory_order_acquire)) {
+        return NO;
+    }
+
+    uint64_t total = atomic_load_explicit(&gStorageNativeTotalBytes, memory_order_acquire);
+    uint64_t free = atomic_load_explicit(&gStorageNativeFreeBytes, memory_order_acquire);
+    if (total == 0) return NO;
+    *totalBytes = total;
+    *freeBytes = free;
+    return YES;
+}
+
 // Define NSFileSystem constants as strings since they're just string constants
 #define NSFileSystemSize @"NSFileSystemSize"
 #define NSFileSystemFreeSize @"NSFileSystemFreeSize"
@@ -410,17 +464,15 @@ static int (*orig_getfsstat)(struct statfs *buf, int bufsize, int flags);
 static int (*orig_getfsstat64)(PXStatfs64Buf *buf, int bufsize, int flags);
 
 // Helper to modify statfs struct with spoofed values
-static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
+static void PXStorageModifyStatfsWithValues(struct statfs *buf,
+                                            uint64_t totalBytes,
+                                            uint64_t freeBytes) {
     if (!buf) return;
     
     // Ensure block size is valid
     if (buf->f_bsize == 0) {
         buf->f_bsize = DEFAULT_BLOCK_SIZE; // Standard block size for APFS
     }
-    
-    // Get storage values with appropriate units for this app
-    uint64_t totalBytes, freeBytes;
-    getStorageValuesForApp(&totalBytes, &freeBytes);
     
     // Calculate blocks
     if (totalBytes > 0) {
@@ -431,6 +483,13 @@ static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
         buf->f_bfree = calculateBlockCount(freeBytes, buf->f_bsize);
         buf->f_bavail = buf->f_bfree; // Available blocks = free blocks for non-root
     }
+}
+
+static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
+    uint64_t totalBytes = 0;
+    uint64_t freeBytes = 0;
+    getStorageValuesForApp(&totalBytes, &freeBytes);
+    PXStorageModifyStatfsWithValues(buf, totalBytes, freeBytes);
 }
 
 // Helper to modify statfs64 buffer (alias of struct statfs on Darwin)
@@ -884,6 +943,13 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
                 PXLog(@"[StorageHooks] App %@ is not scoped, skipping hook installation", currentBundleID);
                 return;
             }
+
+            // Resolve every Foundation-backed decision before native mount hooks.
+            PXStorageRefreshNativeSnapshot();
+            if (!shouldApplyStorageSpoofing()) {
+                PXLog(@"[StorageHooks] Storage spoofing disabled for %@", currentBundleID);
+                return;
+            }
             
             PXLog(@"[StorageHooks] App %@ is scoped, setting up storage hooks", currentBundleID);
 
@@ -912,38 +978,46 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
             dispatch_once(&storageProvOnce, ^{
                 // Use shared PXStatfs64Buf (struct statfs on Darwin) — never invent a local struct statfs64.
                 [coord registerStatfsProvider:@"storage.statfs" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, struct statfs * _Nullable buf, int * _Nonnull inoutResult) {
-                    if (*inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    uint64_t totalBytes = 0, freeBytes = 0;
+                    if (*inoutResult != 0 || !buf ||
+                        !PXStorageCopyNativeSnapshot(&totalBytes, &freeBytes)) return;
                     if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
                                  strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
-                        modifyStatfsWithSpoofedValues(buf);
+                        PXStorageModifyStatfsWithValues(buf, totalBytes, freeBytes);
                     }
                 }];
                 [coord registerStatfs64Provider:@"storage.statfs64" priority:PXNativeHookPriorityNetworkStorage post:^(const char * _Nullable path, PXStatfs64Buf * _Nullable buf, int * _Nonnull inoutResult) {
-                    if (*inoutResult != 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    uint64_t totalBytes = 0, freeBytes = 0;
+                    if (*inoutResult != 0 || !buf ||
+                        !PXStorageCopyNativeSnapshot(&totalBytes, &freeBytes)) return;
                     if (path && (strcmp(path, "/") == 0 || strcmp(path, "/var") == 0 || strcmp(path, "/private/var") == 0 ||
                                  strncmp(path, "/var/mobile", 11) == 0 || strncmp(path, "/private/var/mobile", 19) == 0)) {
-                        modifyStatfs64WithSpoofedValues(buf);
+                        PXStorageModifyStatfsWithValues((struct statfs *)buf, totalBytes, freeBytes);
                     }
                 }];
                 [coord registerGetfsstatProvider:@"storage.getfsstat" priority:PXNativeHookPriorityNetworkStorage post:^(struct statfs * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
                     (void)bufsize; (void)flags;
-                    if (*inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    uint64_t totalBytes = 0, freeBytes = 0;
+                    if (*inoutResult <= 0 || !buf ||
+                        !PXStorageCopyNativeSnapshot(&totalBytes, &freeBytes)) return;
                     for (int i = 0; i < *inoutResult; i++) {
                         const char *mountPoint = buf[i].f_mntonname;
                         if (mountPoint && mountPoint[0] &&
                             (strcmp(mountPoint, "/") == 0 || strcmp(mountPoint, "/var") == 0 || strcmp(mountPoint, "/private/var") == 0)) {
-                            modifyStatfsWithSpoofedValues(&buf[i]);
+                            PXStorageModifyStatfsWithValues(&buf[i], totalBytes, freeBytes);
                         }
                     }
                 }];
                 [coord registerGetfsstat64Provider:@"storage.getfsstat64" priority:PXNativeHookPriorityNetworkStorage post:^(PXStatfs64Buf * _Nullable buf, int bufsize, int flags, int * _Nonnull inoutResult) {
                     (void)bufsize; (void)flags;
-                    if (*inoutResult <= 0 || !buf || !shouldApplyStorageSpoofing()) return;
+                    uint64_t totalBytes = 0, freeBytes = 0;
+                    if (*inoutResult <= 0 || !buf ||
+                        !PXStorageCopyNativeSnapshot(&totalBytes, &freeBytes)) return;
                     for (int i = 0; i < *inoutResult; i++) {
                         const char *mountPoint = buf[i].f_mntonname;
                         if (mountPoint && mountPoint[0] &&
                             (strcmp(mountPoint, "/") == 0 || strcmp(mountPoint, "/var") == 0 || strcmp(mountPoint, "/private/var") == 0)) {
-                            modifyStatfs64WithSpoofedValues(&buf[i]);
+                            PXStorageModifyStatfsWithValues((struct statfs *)&buf[i], totalBytes, freeBytes);
                         }
                     }
                 }];

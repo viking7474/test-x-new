@@ -272,6 +272,8 @@ static BOOL PXJBPathContainsComponentSequenceNoCase(const char *path,
 }
 
 static const char *const kPXJBArtifactExactBasenames[] = {
+    "TLinkIOSTweak.dylib",
+    "ProjectXTweak.dylib",
     "MobileSubstrate.dylib",
     "SubstrateLoader.dylib",
     "SubstrateBootstrap.dylib",
@@ -899,6 +901,7 @@ static const PXJBStaticPathRule kPXJBHiddenExactRules[] = {
     PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/libappstoreplus.dylib"),
     PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/ Crane.dylib"),
     PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"),
+    PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib"),
     PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/FilzaHack.dylib"),
     PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/LiveClock.plist"),
     PXJB_PATH_RULE("/Library/MobileSubstrate/DynamicLibraries/Veency.plist"),

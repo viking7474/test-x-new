@@ -129,6 +129,8 @@ def main() -> None:
     matrix.check("alias: no jailbreak fingerprints", all(not any(term in x.lower() for term in forbidden) for x in aliases))
     matrix.check("alias: project matcher leaves every alias visible", all(not matcher_model.artifact_match(x) for x in aliases))
     sample = "/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"
+    matrix.check("rename: current tweak image is hidden", matcher_model.artifact_match(sample))
+    matrix.check("rename: legacy tweak image remains hidden", matcher_model.artifact_match("@rpath/ProjectXTweak.dylib"))
     matrix.check("alias: hash is case-insensitive", fnv1a_casefold(sample) == fnv1a_casefold(sample.swapcase()))
     matrix.check("alias: hash selects valid entry", fnv1a_casefold(sample) % len(aliases) < len(aliases))
 

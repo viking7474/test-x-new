@@ -40,6 +40,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_jailbreak_bypass_dyld_compatibility.py",
     "scripts/test_jailbreak_bypass_matcher_hardening.py",
     "scripts/test_jailbreak_bypass_p2.py",
+    "scripts/test_storage_mount_reentrancy_static.py",
 ]
 NODE_TESTS = [
     "scripts/test_canvas_fingerprint_protection.js",

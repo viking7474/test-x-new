@@ -242,6 +242,8 @@ class Fixture:
 def run_artifact_matrix(matrix: Matrix) -> None:
     fixtures = [
         Fixture("exact basename: libsubstrate", "/usr/lib/libsubstrate.dylib", True),
+        Fixture("renamed tweak basename", "@rpath/TLinkIOSTweak.dylib", True),
+        Fixture("legacy tweak basename", "@rpath/ProjectXTweak.dylib", True),
         Fixture("exact basename is case-insensitive", "@rpath/LIBELLEKIT.DYLIB", True),
         Fixture("basename prefix: versioned FridaGadget", "@rpath/FridaGadget-16.2.dylib", True),
         Fixture("exact component: MobileSubstrate", "/Library/MobileSubstrate/DynamicLibraries/Foo.dylib", True),
