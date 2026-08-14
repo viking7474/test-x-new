@@ -2903,6 +2903,12 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 %end // End CMMotionManager hook
 
 // Add barometer/altitude data spoofing
+// P1 FIX (altimeter key / thread hang): single file-scope associated-object key shared by
+// start/stop. Previously each method declared its OWN local `static char kAltimeterTimerKey;`
+// with a distinct address, so stopRelativeAltitudeUpdates read a different key than
+// startRelativeAltitudeUpdatesToQueue:withHandler: wrote -> the repeating NSTimer was never
+// found or invalidated -> CFRunLoopRun() kept the background thread alive forever (thread hang).
+static char kAltimeterTimerKey;
 %hook CMAltimeter
 
 - (void)startRelativeAltitudeUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMAltitudeData *altitudeData, NSError *error))handler {
@@ -2928,7 +2934,7 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
         void (^strongHandler)(CMAltitudeData *, NSError *) = [handler copy];
         
         // Keep a reference to the timer in an associated object to prevent it from being deallocated
-        static char kAltimeterTimerKey;
+        // NOTE: uses the file-scope kAltimeterTimerKey (shared with stopRelativeAltitudeUpdates)
         
         // Create our own timer to simulate altitude updates
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -3007,7 +3013,7 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 - (void)stopRelativeAltitudeUpdates {
     @try {
         // Clean up our custom timer if it exists
-        static char kAltimeterTimerKey;
+        // NOTE: uses the file-scope kAltimeterTimerKey (shared with startRelativeAltitudeUpdatesToQueue:withHandler:)
         NSTimer *timer = objc_getAssociatedObject(self, &kAltimeterTimerKey);
         if (timer) {
             [timer invalidate];

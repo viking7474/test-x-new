@@ -471,11 +471,18 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
     if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
         // STEALTH: Realistic async failure with delay
         if (handler) {
+            // P1 FIX (callback sai queue): +sendAsynchronousRequest:queue:completionHandler: must
+            // deliver its completion handler on the caller-provided NSOperationQueue (Apple's
+            // contract), not on a global GCD queue. Wrong-queue delivery breaks callers that
+            // expect the handler on their own queue (e.g. main-thread UI updates).
+            NSOperationQueue *targetQueue = queue ?: [NSOperationQueue mainQueue];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
                                                      code:NSURLErrorDNSLookupFailed 
                                                  userInfo:@{NSLocalizedDescriptionKey: @"The host name could not be resolved."}];
-                handler(nil, nil, error);
+                [targetQueue addOperationWithBlock:^{
+                    handler(nil, nil, error);
+                }];
             });
         }
         return;
@@ -500,18 +507,33 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 %group ScopedApps
 
 %hookf(CFReadStreamRef, CFReadStreamCreateForHTTPRequest, CFAllocatorRef alloc, CFHTTPMessageRef request) {
-    NSURL *url = (__bridge NSURL *)CFHTTPMessageCopyRequestURL(request);
-    if (shouldBlockDomain(url.host)) {
-        // STEALTH: No logging, create stream with localhost that will fail naturally
-        CFRelease((__bridge CFTypeRef)url);
+    // P1 FIX (CF lifetime / UAF): CFHTTPMessageCopyRequestURL returns a +1 CF object; own it in
+    // one variable and release it exactly once on every path.
+    CFURLRef requestURL = CFHTTPMessageCopyRequestURL(request);
+    NSURL *url = (__bridge NSURL *)requestURL;
+    if (url.host && shouldBlockDomain(url.host)) {
+        // STEALTH: No logging, create stream with localhost that will fail naturally.
+        if (requestURL) CFRelease(requestURL);
+        // CFHTTPMessageCopyRequestMethod / CFHTTPMessageCopyVersion each return a +1 copy; capture
+        // them so they are released instead of leaked into CFHTTPMessageCreateRequest, and
+        // NULL-guard every created object before use.
         CFURLRef blockURL = CFURLCreateWithString(alloc, CFSTR("https://127.0.0.1:1"), NULL);
-        CFHTTPMessageRef blockRequest = CFHTTPMessageCreateRequest(alloc, CFHTTPMessageCopyRequestMethod(request), blockURL, CFHTTPMessageCopyVersion(request));
-        CFRelease(blockURL);
-        CFReadStreamRef stream = %orig(alloc, blockRequest);
-        CFRelease(blockRequest);
+        CFStringRef method = CFHTTPMessageCopyRequestMethod(request);
+        CFStringRef version = CFHTTPMessageCopyVersion(request);
+        CFReadStreamRef stream = NULL;
+        if (blockURL) {
+            CFHTTPMessageRef blockRequest = CFHTTPMessageCreateRequest(alloc, method, blockURL, version);
+            if (blockRequest) {
+                stream = %orig(alloc, blockRequest);
+                CFRelease(blockRequest);
+            }
+        }
+        if (method) CFRelease(method);
+        if (version) CFRelease(version);
+        if (blockURL) CFRelease(blockURL);
         return stream;
     }
-    if (url) CFRelease((__bridge CFTypeRef)url);
+    if (requestURL) CFRelease(requestURL);
     return %orig;
 }
 
