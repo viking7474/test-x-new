@@ -412,7 +412,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 }
 
 // Additional NEHotspotNetwork property hook for signal strength
-- (NSNumber *)weaponx_signalStrength {
+- (double)weaponx_signalStrength {
     // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
@@ -420,8 +420,10 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
     }
     
     // Return a realistic signal strength (0.7-0.9 range for good strength)
+    // NEHotspotNetwork.signalStrength is a double in [0.0, 1.0]; return the
+    // raw double to match the real ABI (never a boxed NSNumber).
     double strength = 0.7 + ((double)arc4random_uniform(20) / 100.0);
-    return @(strength);
+    return strength;
 }
 
 // Additional NEHotspotNetwork property hook for secure flag
@@ -579,7 +581,7 @@ static void initializeHooks(void) {
                    swizzledSelector:@selector(weaponx_signalStrength)];
                    
         [MethodSwizzler swizzleClass:neHotspotNetworkClass 
-                   originalSelector:@selector(secure) 
+                   originalSelector:@selector(isSecure) 
                    swizzledSelector:@selector(weaponx_secure)];
 
         // +fetchCurrentWithCompletionHandler: (iOS 14+) — CPUDasher / modern readers

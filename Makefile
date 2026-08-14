@@ -66,7 +66,11 @@ all::
 TWEAK_NAME = TLinkIOSTweak WeaponXKeychainBridge
 
 # Files - Adjusted paths for root compilation
-TLinkIOSTweak_FILES = $(wildcard TLinkIOSTweak/*.x) $(wildcard TLinkIOSTweak/*.m) $(wildcard common/*.m)
+# Production safety (BUILD-01/P0): AAA_* files are test-only +load/constructor
+# artifacts that run on EVERY injected process (writing marker files to disk).
+# They must never ship in any build, so filter them out of the wildcard. This
+# stops a stray AAA_* file from silently regressing production.
+TLinkIOSTweak_FILES = $(wildcard TLinkIOSTweak/*.x) $(filter-out TLinkIOSTweak/AAA_%,$(wildcard TLinkIOSTweak/*.m)) $(wildcard common/*.m)
 
 # CFlags - Adjusted include paths
 TLinkIOSTweak_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I./common -I./include -D USES_LIBUNDIRECT=1 -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1
