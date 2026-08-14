@@ -1575,6 +1575,29 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 // Original function pointer for CFBundleGetValueForInfoDictionaryKey
 static CFTypeRef (*original_CFBundleGetValueForInfoDictionaryKey)(CFBundleRef bundle, CFStringRef key);
 
+// CFBundleGetValueForInfoDictionaryKey is a "Get" API: the caller does NOT own
+// the returned reference and must not CFRelease it. Returning a freshly
+// CFStringCreate...'d object here leaked on every call (P1 CF lifetime). Vend
+// process-lifetime CFStrings from a retained cache instead, so the borrowed
+// pointer stays valid for the life of the process with no per-call allocation.
+static CFStringRef PXIOSVersionBorrowedInfoString(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0) return NULL;
+    static NSMutableDictionary<NSString *, NSString *> *cache = nil;
+    static os_unfair_lock cacheLock = OS_UNFAIR_LOCK_INIT;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+    os_unfair_lock_lock(&cacheLock);
+    NSString *stored = cache[value];
+    if (!stored) {
+        stored = [value copy];
+        cache[value] = stored;
+    }
+    os_unfair_lock_unlock(&cacheLock);
+    return (__bridge CFStringRef)stored;
+}
+
 // Replacement function for CFBundleGetValueForInfoDictionaryKey
 CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFStringRef key) {
     @try {
@@ -1593,10 +1616,10 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
                     NSString *spoofBuild = nil;
                     if (PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
                         if (CFEqual(key, CFSTR("CFBundleShortVersionString")) && spoofVer.length) {
-                            return CFStringCreateWithCString(NULL, [spoofVer UTF8String], kCFStringEncodingUTF8);
+                            return PXIOSVersionBorrowedInfoString(spoofVer);
                         }
                         if (CFEqual(key, CFSTR("CFBundleVersion")) && spoofBuild.length) {
-                            return CFStringCreateWithCString(NULL, [spoofBuild UTF8String], kCFStringEncodingUTF8);
+                            return PXIOSVersionBorrowedInfoString(spoofBuild);
                         }
                     }
                 }
@@ -1619,11 +1642,11 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
                         
                         if (![spoofedVersion hasPrefix:@"iOS"]) {
                             NSString *prefixedVersion = [NSString stringWithFormat:@"iOS%@", spoofedVersion];
-                            return CFStringCreateWithCString(NULL, [prefixedVersion UTF8String], kCFStringEncodingUTF8);
+                            return PXIOSVersionBorrowedInfoString(prefixedVersion);
                         }
                     }
                     
-                    return CFStringCreateWithCString(NULL, [spoofedVersion UTF8String], kCFStringEncodingUTF8);
+                    return PXIOSVersionBorrowedInfoString(spoofedVersion);
                 }
             }
         }
@@ -1639,7 +1662,7 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
         if (key && (CFEqual(key, CFSTR("MinimumOSVersion")))) {
             // Return the current device's actual iOS version for MinimumOSVersion
             NSString *actualVersion = [[UIDevice currentDevice] systemVersion];
-            return CFStringCreateWithCString(NULL, [actualVersion UTF8String], kCFStringEncodingUTF8);
+            return PXIOSVersionBorrowedInfoString(actualVersion);
         }
         
         NSLog(@"[iosversion] ℹ️ No original function for CFBundleGetValueForInfoDictionaryKey, returning NULL");

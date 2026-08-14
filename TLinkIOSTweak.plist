@@ -6,7 +6,6 @@
 	<dict>
 		<key>Bundles</key>
 		<array>
-			<string>com.apple.springboard</string>
 			<string>com.hydra.tlinkios.no-injection-placeholder</string>
 		</array>
 		<key>Mode</key>

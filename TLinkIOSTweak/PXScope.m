@@ -23,6 +23,11 @@ static id PXReadSecuritySettingObject(NSString *key) {
 
     CFStringRef cfKey = (__bridge CFStringRef)key;
     CFStringRef appID = CFSTR("com.weaponx.securitySettings");
+    // P1 FIX (toggle/profile gate): injected processes cache the com.weaponx.securitySettings
+    // domain in cfprefsd, so CFPreferencesCopyAppValue keeps returning the OLD toggle value
+    // after the user turns spoofing off or switches profile — the gate never actually flips.
+    // Force a synchronize so the copy re-reads the latest values written by the WeaponX app.
+    CFPreferencesAppSynchronize(appID);
     CFPropertyListRef pref = CFPreferencesCopyAppValue(cfKey, appID);
     if (pref) {
         result = CFBridgingRelease(pref);
@@ -51,6 +56,10 @@ static BOOL PXReadSecuritySettingHasKey(NSString *key) {
 
     CFStringRef cfKey = (__bridge CFStringRef)key;
     CFStringRef appID = CFSTR("com.weaponx.securitySettings");
+    // P1 FIX (toggle/profile gate): mirror PXReadSecuritySettingObject — synchronize before
+    // reading so a freshly toggled or profile-switched value is not masked by a stale cfprefsd
+    // cache in the injected process.
+    CFPreferencesAppSynchronize(appID);
     CFPropertyListRef pref = CFPreferencesCopyAppValue(cfKey, appID);
     if (pref) {
         CFRelease(pref);
