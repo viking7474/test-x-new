@@ -2704,200 +2704,265 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 
 %end // End of LocationSpoofing group
 
+#pragma mark - Sensor transform pipeline (P1: async coverage, no-KVC, no-alloc)
+
+// Snapshot of the spoof decision + motion inputs, captured ONCE per sample so the
+// synchronous getter and the async push callback run byte-for-byte identical logic.
+typedef struct {
+    BOOL active;   // spoofing enabled AND this bundle is in scope
+    double speed;  // lastReportedSpeed (m/s)
+    double course; // lastReportedCourse (degrees)
+} PXSensorSnapshot;
+
+static PXSensorSnapshot PXCurrentSensorSnapshot(void) {
+    PXSensorSnapshot snap = (PXSensorSnapshot){ .active = NO, .speed = 0.0, .course = 0.0 };
+    @try {
+        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
+        if (!manager || ![manager isSpoofingEnabled]) return snap;
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) return snap;
+        snap.active = YES;
+        snap.speed = manager.lastReportedSpeed;
+        snap.course = manager.lastReportedCourse;
+    } @catch (__unused NSException *exception) {
+        // Intentionally silent: runs at sensor-callback frequency (no log spam).
+    }
+    return snap;
+}
+
+// Associated-object keys marking a CoreMotion sample with an override struct. The accessor
+// hooks below read these; we NEVER mutate private ivars via KVC and NEVER alloc/init a sample.
+static const char kPXAccelOverrideKey;
+static const char kPXGyroOverrideKey;
+static const char kPXMagnetOverrideKey;
+
+// Transformers: take the REAL sample and either
+//   - return it byte-for-byte unchanged (OFF / out-of-scope / nil input), OR
+//   - attach an override struct and return the SAME object (pointer + timestamp preserved).
+// The accessor hooks turn that override into the value the app reads. No KVC, no alloc/init.
+// Clear helpers: detach any override previously attached to a (possibly reused) sample object.
+// Setting the association to nil removes it; safe to call on a sample that never had one.
+static void PXClearAccelerometerOverride(CMAccelerometerData *sample) {
+    if (sample) objc_setAssociatedObject(sample, &kPXAccelOverrideKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static void PXClearGyroOverride(CMGyroData *sample) {
+    if (sample) objc_setAssociatedObject(sample, &kPXGyroOverrideKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static void PXClearMagnetometerOverride(CMMagnetometerData *sample) {
+    if (sample) objc_setAssociatedObject(sample, &kPXMagnetOverrideKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static CMAccelerometerData *PXTransformAccelerometerData(CMAccelerometerData *input, PXSensorSnapshot snap) {
+    if (!input) return input;
+    // OFF / out-of-scope: CoreMotion reuses sample instances, so a stale override from a
+    // previous ON pass could still be attached. Strip it before returning, otherwise the
+    // accessor hook would keep serving fake data after spoof is turned off.
+    if (!snap.active) { PXClearAccelerometerOverride(input); return input; }
+    @try {
+        CMAcceleration accel = { .x = 0.0, .y = 0.0, .z = -1.0 }; // gravity baseline
+        if (snap.speed > 0) {
+            double courseRad = snap.course * M_PI / 180.0;
+            double movementFactor = MIN(snap.speed * 0.01, 0.2);
+            accel.x += cos(courseRad) * movementFactor;
+            accel.y += sin(courseRad) * movementFactor;
+            accel.x += ((arc4random() % 100) - 50) / 1000.0;
+            accel.y += ((arc4random() % 100) - 50) / 1000.0;
+            accel.z += ((arc4random() % 100) - 50) / 1000.0;
+        }
+        NSValue *box = [NSValue valueWithBytes:&accel objCType:@encode(CMAcceleration)];
+        objc_setAssociatedObject(input, &kPXAccelOverrideKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } @catch (__unused NSException *exception) {
+        // Never leave a half-written / stale override attached on failure.
+        PXClearAccelerometerOverride(input);
+    }
+    return input;
+}
+
+static CMGyroData *PXTransformGyroData(CMGyroData *input, PXSensorSnapshot snap) {
+    if (!input) return input;
+    if (!snap.active) { PXClearGyroOverride(input); return input; }
+    @try {
+        CMRotationRate rate = { .x = 0.0, .y = 0.0, .z = 0.0 };
+        if (snap.speed > 0) {
+            double courseRad = snap.course * M_PI / 180.0;
+            rate.z = ((arc4random() % 100) - 50) / 1000.0;
+            rate.x += sin(courseRad) * 0.01;
+            rate.y += cos(courseRad) * 0.01;
+        }
+        NSValue *box = [NSValue valueWithBytes:&rate objCType:@encode(CMRotationRate)];
+        objc_setAssociatedObject(input, &kPXGyroOverrideKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } @catch (__unused NSException *exception) {
+        PXClearGyroOverride(input);
+    }
+    return input;
+}
+
+static CMMagnetometerData *PXTransformMagnetometerData(CMMagnetometerData *input, PXSensorSnapshot snap) {
+    if (!input) return input;
+    if (!snap.active) { PXClearMagnetometerOverride(input); return input; }
+    @try {
+        double courseRad = snap.course * M_PI / 180.0;
+        double strength = 30.0; // approximate Earth field magnitude (uT)
+        CMMagneticField field;
+        field.x = strength * cos(courseRad) + ((arc4random() % 100) - 50) / 50.0;
+        field.y = strength * sin(courseRad) + ((arc4random() % 100) - 50) / 50.0;
+        field.z = 0.0 + ((arc4random() % 100) - 50) / 50.0;
+        NSValue *box = [NSValue valueWithBytes:&field objCType:@encode(CMMagneticField)];
+        objc_setAssociatedObject(input, &kPXMagnetOverrideKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } @catch (__unused NSException *exception) {
+        PXClearMagnetometerOverride(input);
+    }
+    return input;
+}
+
+#if defined(DEBUG) || defined(PX_SENSOR_SELFTEST)
+// Lightweight contract test for the transform pipeline. Validates: OFF returns the SAME
+// pointer with no override; ON returns the SAME pointer with a decodable override; nil input
+// passes through. Behavioral accessor/timestamp checks require a live device and are documented.
+static void PXSensorPipelineSelfTest(void) {
+    @autoreleasepool {
+        NSObject *sample = [NSObject new];
+        void *ptr = (__bridge void *)sample;
+        PXSensorSnapshot off = (PXSensorSnapshot){ .active = NO };
+        id r1 = PXTransformAccelerometerData((CMAccelerometerData *)sample, off);
+        BOOL offSamePtr = ((__bridge void *)r1 == ptr);
+        BOOL offNoOverride = (objc_getAssociatedObject(sample, &kPXAccelOverrideKey) == nil);
+        PXSensorSnapshot on = (PXSensorSnapshot){ .active = YES, .speed = 10.0, .course = 90.0 };
+        id r2 = PXTransformAccelerometerData((CMAccelerometerData *)sample, on);
+        BOOL onSamePtr = ((__bridge void *)r2 == ptr);
+        NSValue *box = objc_getAssociatedObject(sample, &kPXAccelOverrideKey);
+        BOOL onDecodable = NO;
+        if (box) { CMAcceleration a; [box getValue:&a]; onDecodable = isfinite(a.x) && isfinite(a.y) && isfinite(a.z); }
+        // Regression for the P1 state-transition bug: ON -> OFF on the SAME reused object
+        // MUST strip the stale override, otherwise the accessor keeps serving fake data.
+        id r4 = PXTransformAccelerometerData((CMAccelerometerData *)sample, off);
+        BOOL offAgainSamePtr = ((__bridge void *)r4 == ptr);
+        BOOL accelStaleCleared = (objc_getAssociatedObject(sample, &kPXAccelOverrideKey) == nil);
+        // Same ON -> OFF chain for gyro and magnetometer, each on its own reused object.
+        NSObject *gyroSample = [NSObject new];
+        PXTransformGyroData((CMGyroData *)gyroSample, on);
+        PXTransformGyroData((CMGyroData *)gyroSample, off);
+        BOOL gyroStaleCleared = (objc_getAssociatedObject(gyroSample, &kPXGyroOverrideKey) == nil);
+        NSObject *magSample = [NSObject new];
+        PXTransformMagnetometerData((CMMagnetometerData *)magSample, on);
+        PXTransformMagnetometerData((CMMagnetometerData *)magSample, off);
+        BOOL magStaleCleared = (objc_getAssociatedObject(magSample, &kPXMagnetOverrideKey) == nil);
+        id r3 = PXTransformAccelerometerData(nil, on);
+        BOOL nilPass = (r3 == nil);
+        PXLog(@"[WeaponX] SensorSelfTest OFF{ptr=%d,noOverride=%d} ON{ptr=%d,override=%d,decodable=%d} ON->OFF{ptr=%d,accelCleared=%d,gyroCleared=%d,magCleared=%d} nil{%d}",
+              offSamePtr, offNoOverride, onSamePtr, (box != nil), onDecodable,
+              offAgainSamePtr, accelStaleCleared, gyroStaleCleared, magStaleCleared, nilPass);
+    }
+}
+#endif
+
 // Add new group for sensor data integration
 %group SensorSpoofing
+
+// Accessor overrides (correct ABI, struct-returning). Only objects previously marked by a
+// transformer carry an override; every other CoreMotion sample falls through to %orig.
+%hook CMAccelerometerData
+- (CMAcceleration)acceleration {
+    NSValue *box = objc_getAssociatedObject(self, &kPXAccelOverrideKey);
+    if (box) { CMAcceleration a; [box getValue:&a]; return a; }
+    return %orig;
+}
+%end
+
+%hook CMGyroData
+- (CMRotationRate)rotationRate {
+    NSValue *box = objc_getAssociatedObject(self, &kPXGyroOverrideKey);
+    if (box) { CMRotationRate r; [box getValue:&r]; return r; }
+    return %orig;
+}
+%end
+
+%hook CMMagnetometerData
+- (CMMagneticField)magneticField {
+    NSValue *box = objc_getAssociatedObject(self, &kPXMagnetOverrideKey);
+    if (box) { CMMagneticField f; [box getValue:&f]; return f; }
+    return %orig;
+}
+%end
 
 // Hook for accelerometer data
 %hook CMMotionManager
 
 - (CMAccelerometerData *)accelerometerData {
-    @try {
-        // Check if we should spoof
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        if (!manager || ![manager isSpoofingEnabled]) {
-            return %orig;
-        }
-        
-        // Get the current bundle ID
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
-            return %orig;
-        }
-        
-        // Get the last spoofed location data
-        double speed = manager.lastReportedSpeed;
-        double course = manager.lastReportedCourse;
-        
-        // Create synthetic accelerometer data based on movement
-        CMAccelerometerData *data = %orig;
-        if (!data) {
-            data = [[objc_getClass("CMAccelerometerData") alloc] init];
-        }
-        
-        // Calculate appropriate accelerometer values
-        double xAccel = 0.0, yAccel = 0.0, zAccel = -1.0; // Default gravity
-        
-        // Modify based on movement
-        if (speed > 0) {
-            // Convert course to radians
-            double courseRad = course * M_PI / 180.0;
-            
-            // Add movement component
-            double movementFactor = MIN(speed * 0.01, 0.2); // Scale with speed
-            xAccel += cos(courseRad) * movementFactor;
-            yAccel += sin(courseRad) * movementFactor;
-            
-            // Add slight vibration for realism
-            xAccel += ((arc4random() % 100) - 50) / 1000.0;
-            yAccel += ((arc4random() % 100) - 50) / 1000.0;
-            zAccel += ((arc4random() % 100) - 50) / 1000.0;
-        }
-        
-        // Set the accelerometer values safely with exception handling
-        @try {
-            [data setValue:@(xAccel) forKey:@"x"];
-            [data setValue:@(yAccel) forKey:@"y"];
-            [data setValue:@(zAccel) forKey:@"z"];
-        } @catch (NSException *exception) {
-            PXLog(@"[WeaponX] Exception setting accelerometer data: %@", exception);
-            // Return original data if there's an error setting values
-            return %orig;
-        }
-        
-        return data;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in accelerometerData: %@", exception);
-        return %orig;
-    }
+    // Read CoreMotion exactly once; the transformer either returns this same object
+    // unchanged (OFF/out-of-scope/nil) or attaches an override and returns it (pointer +
+    // timestamp preserved). No KVC, no alloc/init, no duplicate %orig read.
+    CMAccelerometerData *originalData = %orig;
+    return PXTransformAccelerometerData(originalData, PXCurrentSensorSnapshot());
 }
 
 // Add gyroscope data spoofing for complete motion data
 - (CMGyroData *)gyroData {
-    @try {
-        // Check if we should spoof
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        if (!manager || ![manager isSpoofingEnabled]) {
-            return %orig;
-        }
-        
-        // Get the current bundle ID
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
-            return %orig;
-        }
-        
-        // Get the last spoofed location data
-        double speed = manager.lastReportedSpeed;
-        double course = manager.lastReportedCourse;
-        
-        // Create synthetic gyroscope data
-        CMGyroData *data = %orig;
-        if (!data) {
-            data = [[objc_getClass("CMGyroData") alloc] init];
-        }
-        
-        // Calculate gyroscope values based on movement and course
-        double xRotation = 0.0, yRotation = 0.0, zRotation = 0.0;
-        
-        // Add slight rotation based on course changes (would be more sophisticated in real implementation)
-        if (speed > 0) {
-            // Calculate small rotations that align with course
-            // In a real implementation this would track course changes over time
-            
-            // Use the course value to add a slight rotation based on direction
-            double courseRad = course * M_PI / 180.0;
-            zRotation = ((arc4random() % 100) - 50) / 1000.0; // Small rotation around Z axis for turning
-            
-            // Add small course-based rotation to make movements more realistic
-            xRotation += sin(courseRad) * 0.01;
-            yRotation += cos(courseRad) * 0.01;
-            
-            // Add transportation mode specific movements
-            if (manager.transportationMode == TransportationModeDriving) {
-                // Driving has more yaw (z-axis rotation) for turns
-                zRotation *= 2.5;
-            } else if (manager.transportationMode == TransportationModeWalking) {
-                // Walking has more pitch/roll (x/y-axis rotation) for steps
-                xRotation += sin(CACurrentMediaTime() * 2.0) * 0.05; // Simulate walking motion
-                yRotation += sin(CACurrentMediaTime() * 2.0 + M_PI_2) * 0.02;
-            }
-        }
-        
-        // Set the gyroscope values safely with exception handling
-        @try {
-            [data setValue:@(xRotation) forKey:@"x"];
-            [data setValue:@(yRotation) forKey:@"y"];
-            [data setValue:@(zRotation) forKey:@"z"];
-        } @catch (NSException *exception) {
-            PXLog(@"[WeaponX] Exception setting gyroscope data: %@", exception);
-            // Return original data if there's an error setting values
-            return %orig;
-        }
-        
-        return data;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in gyroData: %@", exception);
-        return %orig;
-    }
+    // Read CoreMotion exactly once; the transformer returns this same object unchanged
+    // (OFF/out-of-scope/nil) or attaches an override and returns it (pointer + timestamp
+    // preserved). No KVC, no alloc/init, no duplicate %orig read.
+    CMGyroData *originalData = %orig;
+    return PXTransformGyroData(originalData, PXCurrentSensorSnapshot());
 }
 
 // Add magnetometer (compass) data spoofing to align with GPS course
 - (CMMagnetometerData *)magnetometerData {
-    @try {
-        // Check if we should spoof
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        if (!manager || ![manager isSpoofingEnabled]) {
-            return %orig;
+    // Read CoreMotion exactly once; the transformer returns this same object unchanged
+    // (OFF/out-of-scope/nil) or attaches an override and returns it (pointer + timestamp
+    // preserved). No KVC, no alloc/init, no duplicate %orig read.
+    CMMagnetometerData *originalData = %orig;
+    return PXTransformMagnetometerData(originalData, PXCurrentSensorSnapshot());
+}
+
+// P1 FIX (sensor async / CoreMotion): the block-based *UpdatesToQueue:withHandler: APIs
+// were NOT hooked, so any app polling motion via the async push API received REAL sensor
+// data and bypassed spoofing. We transform the callback's OWN sample through the shared
+// PXTransform* pipeline (identical to the synchronous getters). We do NOT call
+// [self accelerometerData]/gyroData/magnetometerData here: that would re-read CoreMotion and
+// swap in a different sample (different pointer/timestamp). The transformer returns the same
+// object on OFF/error, preserving pointer + timestamp. self is NOT captured at all (the
+// wrapper only captures the original handler + calls C transformers) so there is no retain
+// cycle. The original handler runs exactly once, on the queue CoreMotion provides.
+
+- (void)startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMAccelerometerData *accelerometerData, NSError *error))handler {
+    if (!handler) { %orig; return; }
+    void (^wrapped)(CMAccelerometerData *, NSError *) = ^(CMAccelerometerData *accelerometerData, NSError *error) {
+        if (error || !accelerometerData) {
+            // On error, passthrough the real result but strip any stale override in case
+            // CoreMotion handed back a reused sample that was spoofed on a previous callback.
+            if (accelerometerData) PXClearAccelerometerOverride(accelerometerData);
+            handler(accelerometerData, error);
+            return;
         }
-        
-        // Get the current bundle ID
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
-            return %orig;
+        handler(PXTransformAccelerometerData(accelerometerData, PXCurrentSensorSnapshot()), error);
+    };
+    %orig(queue, wrapped);
+}
+
+- (void)startGyroUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMGyroData *gyroData, NSError *error))handler {
+    if (!handler) { %orig; return; }
+    void (^wrapped)(CMGyroData *, NSError *) = ^(CMGyroData *gyroData, NSError *error) {
+        if (error || !gyroData) {
+            if (gyroData) PXClearGyroOverride(gyroData);
+            handler(gyroData, error);
+            return;
         }
-        
-        // Get the course from the last spoofed location
-        double course = manager.lastReportedCourse;
-        
-        // Create synthetic magnetometer data
-        CMMagnetometerData *data = %orig;
-        if (!data) {
-            data = [[objc_getClass("CMMagnetometerData") alloc] init];
+        handler(PXTransformGyroData(gyroData, PXCurrentSensorSnapshot()), error);
+    };
+    %orig(queue, wrapped);
+}
+
+- (void)startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMMagnetometerData *magnetometerData, NSError *error))handler {
+    if (!handler) { %orig; return; }
+    void (^wrapped)(CMMagnetometerData *, NSError *) = ^(CMMagnetometerData *magnetometerData, NSError *error) {
+        if (error || !magnetometerData) {
+            if (magnetometerData) PXClearMagnetometerOverride(magnetometerData);
+            handler(magnetometerData, error);
+            return;
         }
-        
-        // Convert course to radians
-        double courseRad = course * M_PI / 180.0;
-        
-        // Calculate magnetometer values that would point to the course direction
-        // This is a simplified model - real magnetometer data would be more complex
-        double magneticField = 30.0; // Approximate strength of Earth's magnetic field
-        
-        // Simplified magnetic field components based on course
-        double xField = magneticField * cos(courseRad);
-        double yField = magneticField * sin(courseRad);
-        double zField = 0.0; // Simplified - assume device is flat
-        
-        // Add some realistic noise
-        xField += ((arc4random() % 100) - 50) / 50.0;
-        yField += ((arc4random() % 100) - 50) / 50.0;
-        zField += ((arc4random() % 100) - 50) / 50.0;
-        
-        // Set the magnetometer values safely with exception handling
-        @try {
-            [data setValue:@(xField) forKey:@"x"];
-            [data setValue:@(yField) forKey:@"y"];
-            [data setValue:@(zField) forKey:@"z"];
-        } @catch (NSException *exception) {
-            PXLog(@"[WeaponX] Exception setting magnetometer data: %@", exception);
-            // Return original data if there's an error setting values
-            return %orig;
-        }
-        
-        return data;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in magnetometerData: %@", exception);
-        return %orig;
-    }
+        handler(PXTransformMagnetometerData(magnetometerData, PXCurrentSensorSnapshot()), error);
+    };
+    %orig(queue, wrapped);
 }
 
 %end // End CMMotionManager hook
@@ -4270,6 +4335,11 @@ static char* hook_GSSystemGetSerialNo(void) {
     PXFileDebugAIDA64Log("[Tweak.ctor] before init SensorSpoofing");
     %init(SensorSpoofing);
     PXFileDebugAIDA64Log("[Tweak.ctor] after init SensorSpoofing");
+#if defined(DEBUG) || defined(PX_SENSOR_SELFTEST)
+    // Validate the raw-sensor transformer pipeline once at load (OFF preserves pointer,
+    // ON attaches a decodable override on the same pointer, nil passes through).
+    PXSensorPipelineSelfTest();
+#endif
     
     PXLog(@"[WeaponX] Location and sensor spoofing hooks initialized");
     PXFileDebugAIDA64Log("[Tweak.ctor] exit");

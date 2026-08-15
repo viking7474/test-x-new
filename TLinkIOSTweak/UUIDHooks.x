@@ -115,7 +115,7 @@ static NSString *getSpoofedSystemBootUUID() {
         SystemUUIDManager *manager = [SystemUUIDManager sharedManager];
         if (!manager) {
             // Generate a safer fallback if manager is unavailable
-            return [[NSUUID UUID] UUIDString];
+            return nil; // install-gate: never fabricate identity
         }
         
         NSString *uuid = [manager currentBootUUID];
@@ -136,7 +136,7 @@ static NSString *getSpoofedSystemBootUUID() {
         // Try to read directly from plist files
         IdentifierManager *idManager = [NSClassFromString(@"IdentifierManager") sharedManager];
         if (!idManager) {
-            return [[NSUUID UUID] UUIDString];
+            return nil; // install-gate: never fabricate identity
         }
         
         NSString *identityDir = [idManager valueForKey:@"profileIdentityPath"];
@@ -186,19 +186,12 @@ static NSString *getSpoofedSystemBootUUID() {
             }
         }
         
-        // If we still don't have a UUID, generate a new one rather than using zeros
-        uuid = [[NSUUID UUID] UUIDString];
-        PXLog(@"[WeaponX] 🔄 Generated fallback UUID: %@", uuid);
-        
-        // Store this for future consistency
-        if ([manager respondsToSelector:@selector(setCurrentBootUUID:)]) {
-            [manager setCurrentBootUUID:uuid];
-        }
-        
-        return uuid;
+        // Install-gate: no profile-backed SystemBootUUID available. Never fabricate
+        // or persist a random identity — return nil so callers fall through to %orig.
+        return nil;
     } @catch (NSException *exception) {
         PXLog(@"[WeaponX] ❌ Exception in getSpoofedSystemBootUUID: %@", exception);
-        return [[NSUUID UUID] UUIDString];
+        return nil; // install-gate: never fabricate identity
     }
 }
 
@@ -208,7 +201,7 @@ static NSString *getSpoofedDyldCacheUUID() {
         DyldCacheUUIDManager *manager = [DyldCacheUUIDManager sharedManager];
         if (!manager) {
             // Generate a safer fallback if manager is unavailable
-            return [[NSUUID UUID] UUIDString];
+            return nil; // install-gate: never fabricate identity
         }
         
         NSString *uuid = [manager currentDyldCacheUUID];
@@ -229,7 +222,7 @@ static NSString *getSpoofedDyldCacheUUID() {
         // Try to read directly from plist files
         IdentifierManager *idManager = [NSClassFromString(@"IdentifierManager") sharedManager];
         if (!idManager) {
-            return [[NSUUID UUID] UUIDString];
+            return nil; // install-gate: never fabricate identity
         }
         
         NSString *identityDir = [idManager valueForKey:@"profileIdentityPath"];
@@ -279,19 +272,12 @@ static NSString *getSpoofedDyldCacheUUID() {
             }
         }
         
-        // If we still don't have a UUID, generate a new one rather than using zeros
-        uuid = [[NSUUID UUID] UUIDString];
-        PXLog(@"[WeaponX] 🔄 Generated fallback UUID: %@", uuid);
-        
-        // Store this for future consistency
-        if ([manager respondsToSelector:@selector(setCurrentDyldCacheUUID:)]) {
-            [manager setCurrentDyldCacheUUID:uuid];
-        }
-        
-        return uuid;
+        // Install-gate: no profile-backed DyldCacheUUID available. Never fabricate
+        // or persist a random identity — return nil so callers fall through to %orig.
+        return nil;
     } @catch (NSException *exception) {
         PXLog(@"[WeaponX] ❌ Exception in getSpoofedDyldCacheUUID: %@", exception);
-        return [[NSUUID UUID] UUIDString];
+        return nil; // install-gate: never fabricate identity
     }
 }
 
@@ -687,6 +673,16 @@ static void setupAdditionalSystemUUIDHooks(void) {
     [[PXNativeHookCoordinator sharedCoordinator] installOwnedSymbolsIfNeeded];
 }
 
+// Install-gate helper: passes only when a real, profile-backed UUID exists for an
+// enabled identifier. Getters never fabricate, so a non-empty value here is real.
+static BOOL PXUUIDInstallGatePasses(void) {
+    @try {
+        if (isSystemBootUUIDEnabled() && getSpoofedSystemBootUUID().length) return YES;
+        if (isDyldCacheUUIDEnabled() && getSpoofedDyldCacheUUID().length) return YES;
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
 // Update constructor to initialize the additional hooks
 %ctor {
     @autoreleasepool {
@@ -752,6 +748,13 @@ static void setupAdditionalSystemUUIDHooks(void) {
             }
             
             // If we get here, the app is configured for spoofing, so we can initialize the hooks
+
+            // Install-gate: only install hooks when a real profile-backed UUID exists.
+            // Mirrors DeviceModelHooks — never install hooks that would spoof without a profile.
+            if (!PXUUIDInstallGatePasses()) {
+                PXLog(@"[WeaponX] ℹ️ No profile-backed UUID available for %@, skipping UUID hooks (install-gate)", bundleID);
+                return;
+            }
             
             // Check iOS version to apply different handling for iOS 18+
             NSOperatingSystemVersion ios18 = {18, 0, 0};
