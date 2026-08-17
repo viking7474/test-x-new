@@ -2856,6 +2856,44 @@ static void PXSensorPipelineSelfTest(void) {
 }
 #endif
 
+// Logos cannot reliably parse Objective-C blocks nested inside %hook methods
+// (its brace counter then treats the next _logos_method_* as being defined inside
+// the previous one: "function definition is not allowed here"). Keep hook bodies
+// brace-simple; build the wrapped handlers here, outside any %hook.
+static CMAccelerometerHandler PXWrapAccelerometerHandler(CMAccelerometerHandler handler) {
+    if (!handler) return handler;
+    return ^(CMAccelerometerData *accelerometerData, NSError *error) {
+        if (error || !accelerometerData) {
+            if (accelerometerData) PXClearAccelerometerOverride(accelerometerData);
+            handler(accelerometerData, error);
+            return;
+        }
+        handler(PXTransformAccelerometerData(accelerometerData, PXCurrentSensorSnapshot()), error);
+    };
+}
+static CMGyroHandler PXWrapGyroHandler(CMGyroHandler handler) {
+    if (!handler) return handler;
+    return ^(CMGyroData *gyroData, NSError *error) {
+        if (error || !gyroData) {
+            if (gyroData) PXClearGyroOverride(gyroData);
+            handler(gyroData, error);
+            return;
+        }
+        handler(PXTransformGyroData(gyroData, PXCurrentSensorSnapshot()), error);
+    };
+}
+static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler handler) {
+    if (!handler) return handler;
+    return ^(CMMagnetometerData *magnetometerData, NSError *error) {
+        if (error || !magnetometerData) {
+            if (magnetometerData) PXClearMagnetometerOverride(magnetometerData);
+            handler(magnetometerData, error);
+            return;
+        }
+        handler(PXTransformMagnetometerData(magnetometerData, PXCurrentSensorSnapshot()), error);
+    };
+}
+
 // Add new group for sensor data integration
 %group SensorSpoofing
 
@@ -2924,45 +2962,16 @@ static void PXSensorPipelineSelfTest(void) {
 // wrapper only captures the original handler + calls C transformers) so there is no retain
 // cycle. The original handler runs exactly once, on the queue CoreMotion provides.
 
-- (void)startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMAccelerometerData *accelerometerData, NSError *error))handler {
-    if (!handler) { %orig; return; }
-    void (^wrapped)(CMAccelerometerData *, NSError *) = ^(CMAccelerometerData *accelerometerData, NSError *error) {
-        if (error || !accelerometerData) {
-            // On error, passthrough the real result but strip any stale override in case
-            // CoreMotion handed back a reused sample that was spoofed on a previous callback.
-            if (accelerometerData) PXClearAccelerometerOverride(accelerometerData);
-            handler(accelerometerData, error);
-            return;
-        }
-        handler(PXTransformAccelerometerData(accelerometerData, PXCurrentSensorSnapshot()), error);
-    };
-    %orig(queue, wrapped);
+- (void)startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMAccelerometerHandler)handler {
+    %orig(queue, PXWrapAccelerometerHandler(handler));
 }
 
-- (void)startGyroUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMGyroData *gyroData, NSError *error))handler {
-    if (!handler) { %orig; return; }
-    void (^wrapped)(CMGyroData *, NSError *) = ^(CMGyroData *gyroData, NSError *error) {
-        if (error || !gyroData) {
-            if (gyroData) PXClearGyroOverride(gyroData);
-            handler(gyroData, error);
-            return;
-        }
-        handler(PXTransformGyroData(gyroData, PXCurrentSensorSnapshot()), error);
-    };
-    %orig(queue, wrapped);
+- (void)startGyroUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMGyroHandler)handler {
+    %orig(queue, PXWrapGyroHandler(handler));
 }
 
-- (void)startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMMagnetometerData *magnetometerData, NSError *error))handler {
-    if (!handler) { %orig; return; }
-    void (^wrapped)(CMMagnetometerData *, NSError *) = ^(CMMagnetometerData *magnetometerData, NSError *error) {
-        if (error || !magnetometerData) {
-            if (magnetometerData) PXClearMagnetometerOverride(magnetometerData);
-            handler(magnetometerData, error);
-            return;
-        }
-        handler(PXTransformMagnetometerData(magnetometerData, PXCurrentSensorSnapshot()), error);
-    };
-    %orig(queue, wrapped);
+- (void)startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMMagnetometerHandler)handler {
+    %orig(queue, PXWrapMagnetometerHandler(handler));
 }
 
 %end // End CMMotionManager hook
