@@ -2,6 +2,7 @@
 #import "IPStatusCacheManager.h"
 #import "LocationSpoofingManager.h"
 #import "IPMonitorService.h"
+#import <CoreLocation/CoreLocation.h>
 
 @interface TimeSpoofDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -12,6 +13,31 @@
 @end
 
 @implementation TimeSpoofDetailViewController
+
+- (void)publishTimeSpoofSettingsChanged {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+}
+
+- (void)resolvePinnedLocationTimeZone {
+    NSDictionary *location = [[LocationSpoofingManager sharedManager] loadSpoofingLocation];
+    NSNumber *latitude = [location[@"latitude"] isKindOfClass:[NSNumber class]] ? location[@"latitude"] : nil;
+    NSNumber *longitude = [location[@"longitude"] isKindOfClass:[NSNumber class]] ? location[@"longitude"] : nil;
+    if (!latitude || !longitude) return;
+
+    CLLocation *point = [[CLLocation alloc] initWithLatitude:latitude.doubleValue longitude:longitude.doubleValue];
+    CLGeocoder *geocoder = [CLGeocoder new];
+    __weak typeof(self) weakSelf = self;
+    [geocoder reverseGeocodeLocation:point completionHandler:^(NSArray<CLPlacemark *> *placemarks, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        NSString *name = error ? nil : placemarks.firstObject.timeZone.name;
+        if (!self || !name.length) return;
+        [self.securitySettings setObject:name forKey:@"timeSpoofLocationTimeZoneName"];
+        [self.securitySettings synchronize];
+        [self publishTimeSpoofSettingsChanged];
+    }];
+}
 
 - (instancetype)init {
     self = [super init];
@@ -273,6 +299,8 @@
 
     [self.securitySettings setInteger:selected forKey:@"timeSpoofingMode"];
     [self.securitySettings synchronize];
+    [self publishTimeSpoofSettingsChanged];
+    if (selected == 2) [self resolvePinnedLocationTimeZone];
 
     for (NSInteger i = 0; i < (NSInteger)self.modeChecks.count; i++) {
         self.modeChecks[i].hidden = (i != selected);

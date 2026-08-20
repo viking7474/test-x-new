@@ -17,6 +17,7 @@
 
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXNativeHookCoordinator.h"
 #import <os/lock.h>
 
 // Constants for connection types
@@ -723,11 +724,9 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 #pragma mark - getifaddrs Hook for Local IP Address
 
 // Enable getifaddrs hook for local IP spoofing
-static int (*original_getifaddrs)(struct ifaddrs **);
-static int hooked_getifaddrs(struct ifaddrs **ifap) {
-    int result = original_getifaddrs(ifap);
-    if (result != 0 || !ifap || !*ifap) {
-        return result;
+static void PXNetworkPostGetifaddrs(struct ifaddrs **ifap, int *inoutResult) {
+    if (!inoutResult || *inoutResult != 0 || !ifap || !*ifap) {
+        return;
     }
     
     // Get spoofed IP values from profile
@@ -740,7 +739,7 @@ static int hooked_getifaddrs(struct ifaddrs **ifap) {
     
     // If no custom IPs are set, don't modify anything
     if (!hasSpoofedIPv4 && !hasSpoofedIPv6) {
-        return result;
+        return;
     }
     
     PXLog(@"[NetworkHook] Spoofing local IPs - IPv4: %@, IPv6: %@", 
@@ -796,7 +795,6 @@ static int hooked_getifaddrs(struct ifaddrs **ifap) {
         ifa = ifa->ifa_next;
     }
     
-    return result;
 }
 
 #pragma mark - Network.framework Hooks (iOS 12+)
@@ -972,7 +970,14 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
             }
             
             // getifaddrs is coordinator-owned — skip direct MSHookFunction (Tweak/network providers).
-            PXLog(@"[NetworkHook] Skipping direct getifaddrs hook (PXNativeHookCoordinator owns symbol)");
+            PXNativeHookCoordinator *nativeCoordinator = [PXNativeHookCoordinator sharedCoordinator];
+            [nativeCoordinator registerGetifaddrsProvider:@"network.local-ip"
+                                                  priority:PXNativeHookPriorityNetworkStorage
+                                                       pre:nil
+                                                      post:^(struct ifaddrs **ifap, int *result) {
+                PXNetworkPostGetifaddrs(ifap, result);
+            }];
+            [nativeCoordinator installOwnedSymbolsIfNeeded];
             
             // Note: We don't hook CNCopySupportedInterfaces or CNCopyCurrentNetworkInfo
             // as they are already handled by WiFiHook.x for SSID/BSSID spoofing

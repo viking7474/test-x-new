@@ -13,6 +13,8 @@
 #import <os/lock.h>
 
 extern void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController);
+extern void PXInstallLocaleTimeZoneUserScript(WKUserContentController *userContentController);
+extern BOOL PXLocaleTimeZoneWebSpoofActive(void);
 
 // Decision and seed maps are initialized once and protected by one lock.
 static os_unfair_lock gCanvasCacheLock = OS_UNFAIR_LOCK_INIT;
@@ -876,6 +878,7 @@ static void PXInstallDocumentStartSpoofScripts(WKUserContentController *controll
     // DeviceSpec owns generation-aware capability deduplication. Always delegate:
     // the legacy marker is compatibility evidence, not an outer installation gate.
     PXInstallDeviceSpecUserScripts(controller);
+    PXInstallLocaleTimeZoneUserScript(controller);
 
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID.length) return;
@@ -1012,7 +1015,7 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
         if (PXIsWebKitHelperProcess(bundleID, proc)) {
             PXFileDebugWebKitTrace(@"Canvas.ctor");
         }
-        PXScopeOptions options = (isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled() || PXDisplayWebScreenSpoofEnabled()) ? PXScopeOptionAllowSafariAuthStack : PXScopeOptionNone;
+        PXScopeOptions options = (isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled() || PXDisplayWebScreenSpoofEnabled() || PXLocaleTimeZoneWebSpoofActive()) ? PXScopeOptionAllowSafariAuthStack : PXScopeOptionNone;
         BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, options);
         PXFileDebugAIDA64Log("[Canvas.ctor] scope allowed=%d options=%lu bundle=%s", allowed, (unsigned long)options, bundleID.UTF8String ?: "<nil>");
         if (!allowed) {

@@ -88,7 +88,7 @@ TLinkIOSTweak_CFLAGS += -DINTERNAL_SECURITY_RESEARCH=0
 endif
 
 # Frameworks and Libraries
-TLinkIOSTweak_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security CoreLocation CoreFoundation Network CoreTelephony SystemConfiguration WebKit SafariServices
+TLinkIOSTweak_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security CoreLocation CoreMotion CoreFoundation Network CoreTelephony SystemConfiguration WebKit SafariServices
 TLinkIOSTweak_PRIVATE_FRAMEWORKS = MobileCoreServices AppSupport SpringBoardServices
 TLinkIOSTweak_LIBRARIES = MobileGestalt
 

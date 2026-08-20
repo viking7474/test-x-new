@@ -208,6 +208,9 @@
     BOOL enabled = sender.isOn;
     [self.securitySettings setBool:enabled forKey:@"vpnDetectionBypassEnabled"];
     [self.securitySettings synchronize];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
 
     NSString *message = enabled ? @"VPN/PROXY Detection Bypass Enabled" : @"VPN/PROXY Detection Bypass Disabled";
     [self showToast:message];

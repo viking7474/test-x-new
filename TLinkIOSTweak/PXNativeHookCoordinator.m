@@ -230,15 +230,21 @@ static int PXCoord_gethostname(char *name, size_t namelen) {
 static int PXCoord_getifaddrs(struct ifaddrs **ifap) {
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetifaddrs];
+    int result = 0;
+    BOOL handled = NO;
     for (PXNativeHookProvider *p in providers) {
         PXGetifaddrsPreBlock pre = p.preBlock;
         if (!pre) continue;
-        int result = 0;
         if (pre(ifap, &result)) {
-            return result;
+            handled = YES;
+            break;
         }
     }
-    int result = g_orig_getifaddrs ? g_orig_getifaddrs(ifap) : -1;
+    if (!handled) {
+        result = g_orig_getifaddrs ? g_orig_getifaddrs(ifap) : -1;
+    }
+    // Post providers are composable sanitizers and must run even when a legacy
+    // pre-provider supplied the base list.
     for (PXNativeHookProvider *p in providers) {
         PXGetifaddrsPostBlock post = p.postBlock;
         if (post) post(ifap, &result);

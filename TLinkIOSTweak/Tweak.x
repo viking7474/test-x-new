@@ -15,6 +15,7 @@
 #import <mach/mach.h>
 #import <ifaddrs.h>
 #import <string.h>
+#import <stdio.h>
 #import <net/if.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -714,6 +715,29 @@ static CFStringRef PXCreateCFStringFromNSString(NSString *s) {
     return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)s);
 }
 
+static CFDataRef PXCreateMGUDIDData(NSString *udid) {
+    if (!udid.length) return NULL;
+    NSData *encoded = nil;
+    if (udid.length == 40) {
+        NSMutableData *bytes = [NSMutableData dataWithCapacity:20];
+        const char *characters = udid.UTF8String;
+        for (NSUInteger index = 0; index + 1 < 40 && characters; index += 2) {
+            unsigned int value = 0;
+            if (sscanf(characters + index, "%02x", &value) != 1) {
+                [bytes setLength:0];
+                break;
+            }
+            uint8_t byte = (uint8_t)value;
+            [bytes appendBytes:&byte length:1];
+        }
+        if (bytes.length == 20) encoded = bytes;
+    }
+    if (!encoded) encoded = [udid dataUsingEncoding:NSUTF8StringEncoding];
+    return encoded.length
+        ? CFDataCreate(kCFAllocatorDefault, encoded.bytes, (CFIndex)encoded.length)
+        : NULL;
+}
+
 static NSString *PXStringFromCFType(CFTypeRef v) {
     if (!v) return nil;
     if (CFGetTypeID(v) == CFStringGetTypeID()) {
@@ -1171,7 +1195,7 @@ static int uname_hook(struct utsname *buf) {
 %group Identifiers
 
 // MGCopyAnswer hook for various system identifiers
-%hookf(CFTypeRef, MGCopyAnswer, CFStringRef property) {
+%hookf(CFTypeRef, MGCopyAnswer, CFStringRef property, CFDictionaryRef options) {
     static int loggedCount = 0;
     if (property && loggedCount < 30) {
         loggedCount++;
@@ -1249,27 +1273,8 @@ static int uname_hook(struct utsname *buf) {
         if ([manager isIdentifierEnabled:@"UDID"]) {
             NSString *spoofedUDID = [manager currentValueForIdentifier:@"UDID"];
             if (spoofedUDID.length) {
-                NSData *hexData = nil;
-                // Prefer raw hex bytes when UDID is 40-char hex; else UTF-8 bytes of the string.
-                if (spoofedUDID.length == 40) {
-                    NSMutableData *md = [NSMutableData dataWithCapacity:20];
-                    const char *c = spoofedUDID.UTF8String;
-                    for (NSUInteger i = 0; i + 1 < 40 && c; i += 2) {
-                        unsigned int byte = 0;
-                        if (sscanf(c + i, "%02x", &byte) == 1) {
-                            uint8_t b = (uint8_t)byte;
-                            [md appendBytes:&b length:1];
-                        }
-                    }
-                    if (md.length == 20) hexData = md;
-                }
-                if (!hexData) {
-                    hexData = [spoofedUDID dataUsingEncoding:NSUTF8StringEncoding];
-                }
-                if (hexData) {
-                    PXLog(@"Spoofing UniqueDeviceIDData (%lu bytes)", (unsigned long)hexData.length);
-                    return CFDataCreate(kCFAllocatorDefault, hexData.bytes, (CFIndex)hexData.length);
-                }
+                CFDataRef data = PXCreateMGUDIDData(spoofedUDID);
+                if (data) return data;
             }
         }
     } 
@@ -1317,6 +1322,109 @@ static int uname_hook(struct utsname *buf) {
 }
 
 // ATT / IDFA consistency helpers (active when identifier IDFA is enabled — no second master toggle)
+// Alternate MobileGestalt entry points use a non-recursive retained-result
+// transformer. Calling MGCopyAnswer from these hooks is unsafe because the system
+// implementation may delegate back to MGCopyAnswerWithError.
+static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
+    if (!property || CFGetTypeID(property) != CFStringGetTypeID() ||
+        !NSClassFromString(@"IdentifierManager")) return NULL;
+    IdentifierManager *manager = [IdentifierManager sharedManager];
+    NSString *key = (__bridge NSString *)property;
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+    NSString *processName = NSProcessInfo.processInfo.processName;
+    if (!manager || !PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) return NULL;
+
+    NSString *profileID = nil;
+    NSNumber *generation = nil;
+    NSDictionary *deviceIDs = PXGetDeviceIdsSnapshot(&profileID, &generation);
+    NSDictionary *security = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+    if ([security[@"targetRegionFollowsIPEnabled"] boolValue]) {
+        NSDictionary *mapping = @{
+            @"RegionCode": @"targetRegionPinnedCountryCode",
+            @"MobileSubscriberCountryCode": @"targetRegionPinnedCarrierMCC",
+            @"MobileSubscriberNetworkCode": @"targetRegionPinnedCarrierMNC"
+        };
+        NSString *settingsKey = mapping[key];
+        id rawValue = settingsKey.length ? security[settingsKey] : nil;
+        NSString *value = [rawValue isKindOfClass:[NSString class]] ? rawValue : nil;
+        if (value.length) {
+            if ([key isEqualToString:@"RegionCode"]) value = value.uppercaseString;
+            return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
+        }
+    }
+
+    PXIdentitySurfaceEntry *entry = PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceMobileGestalt);
+    if (entry && [manager isIdentifierEnabled:entry.toggle]) {
+        NSString *value = PXIdentitySurfaceResolveValue(entry, deviceIDs);
+        BOOL ready = entry.constantValue.length > 0;
+        if (!ready && entry.deviceIDKey.length) {
+            ready = PXRequireKeysAll(deviceIDs, @[entry.deviceIDKey], @"MG", key,
+                                     bundleID, profileID, generation);
+        }
+        if (!ready || !value.length) return NULL;
+        return entry.expectedType == PXIdentityExpectedTypeData
+            ? (CFTypeRef)PXCreateCFDataFromNSString(value)
+            : (CFTypeRef)PXCreateCFStringFromNSString(value);
+    }
+
+    NSDictionary *legacy = @{
+        @"UniqueDeviceID": @"UDID",
+        @"SerialNumber": @"SerialNumber",
+        @"InternationalMobileEquipmentIdentity": @"IMEI",
+        @"MobileEquipmentIdentifier": @"MEID"
+    };
+    NSString *toggle = legacy[key];
+    if (toggle.length && [manager isIdentifierEnabled:toggle]) {
+        NSString *value = [manager currentValueForIdentifier:toggle];
+        if (value.length) return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
+    }
+    if ([key isEqualToString:@"UniqueDeviceIDData"] && [manager isIdentifierEnabled:@"UDID"]) {
+        NSString *value = [manager currentValueForIdentifier:@"UDID"];
+        return PXCreateMGUDIDData(value);
+    }
+    return NULL;
+}
+
+%hookf(CFPropertyListRef, MGCopyAnswerWithError, CFStringRef property, CFDictionaryRef options, int *error) {
+    CFTypeRef projected = PXMGCreateAlternateProjectedAnswer(property);
+    if (projected) {
+        if (error) *error = 0;
+        return projected;
+    }
+    return %orig;
+}
+
+%hookf(CFPropertyListRef, MGCopyMultipleAnswers, CFArrayRef properties, CFDictionaryRef options) {
+    CFPropertyListRef original = %orig;
+    if (!properties || CFGetTypeID(properties) != CFArrayGetTypeID()) return original;
+    NSMutableDictionary *answers = original && CFGetTypeID(original) == CFDictionaryGetTypeID()
+        ? [(__bridge NSDictionary *)original mutableCopy]
+        : [NSMutableDictionary dictionary];
+    BOOL changed = NO;
+    for (id candidate in (__bridge NSArray *)properties) {
+        if (![candidate isKindOfClass:[NSString class]]) continue;
+        CFTypeRef projected = PXMGCreateAlternateProjectedAnswer((__bridge CFStringRef)candidate);
+        if (!projected) continue;
+        answers[candidate] = (__bridge id)projected;
+        CFRelease(projected);
+        changed = YES;
+    }
+    if (!changed) return original;
+    if (original) CFRelease(original);
+    return (__bridge_retained CFDictionaryRef)[answers copy];
+}
+
+%hookf(bool, MGGetBoolAnswer, CFStringRef property) {
+    CFTypeRef projected = PXMGCreateAlternateProjectedAnswer(property);
+    if (!projected) return %orig;
+    bool value;
+    if (CFGetTypeID(projected) == CFBooleanGetTypeID()) value = CFBooleanGetValue((CFBooleanRef)projected);
+    else if (CFGetTypeID(projected) == CFNumberGetTypeID()) value = [(__bridge NSNumber *)projected boolValue];
+    else { CFRelease(projected); return %orig; }
+    CFRelease(projected);
+    return value;
+}
+
 static NSString *const kPXZeroIDFAUUID = @"00000000-0000-0000-0000-000000000000";
 
 static BOOL PXATTSpoofActive(void) {
@@ -2735,6 +2843,27 @@ static PXSensorSnapshot PXCurrentSensorSnapshot(void) {
 static const char kPXAccelOverrideKey;
 static const char kPXGyroOverrideKey;
 static const char kPXMagnetOverrideKey;
+static const char kPXDeviceMotionOverrideKey;
+static const char kPXAttitudeOverrideKey;
+
+// Device-motion values are kept in one immutable payload per CoreMotion sample.
+// Hooked accessors read this payload, so no private ivars/KVC or fabricated
+// CMDeviceMotion/CMAttitude instances are required.
+@interface PXDeviceMotionOverride : NSObject
+@property (nonatomic, assign) double roll;
+@property (nonatomic, assign) double pitch;
+@property (nonatomic, assign) double yaw;
+@property (nonatomic, assign) double heading;
+@property (nonatomic, assign) CMQuaternion quaternion;
+@property (nonatomic, assign) CMRotationMatrix rotationMatrix;
+@property (nonatomic, assign) CMRotationRate rotationRate;
+@property (nonatomic, assign) CMAcceleration gravity;
+@property (nonatomic, assign) CMAcceleration userAcceleration;
+@property (nonatomic, assign) CMCalibratedMagneticField magneticField;
+@end
+
+@implementation PXDeviceMotionOverride
+@end
 
 // Transformers: take the REAL sample and either
 //   - return it byte-for-byte unchanged (OFF / out-of-scope / nil input), OR
@@ -2811,6 +2940,86 @@ static CMMagnetometerData *PXTransformMagnetometerData(CMMagnetometerData *input
         objc_setAssociatedObject(input, &kPXMagnetOverrideKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } @catch (__unused NSException *exception) {
         PXClearMagnetometerOverride(input);
+    }
+    return input;
+}
+
+static void PXClearDeviceMotionOverride(CMDeviceMotion *sample) {
+    if (!sample) return;
+    // Clear the parent first. Otherwise our hooked -attitude accessor would
+    // immediately copy the stale payload back onto the child attitude object.
+    objc_setAssociatedObject(sample, &kPXDeviceMotionOverrideKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        CMAttitude *attitude = sample.attitude;
+        if (attitude) {
+            objc_setAssociatedObject(attitude, &kPXAttitudeOverrideKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
+static double PXNormalizedCourse(double course) {
+    if (!isfinite(course) || course < 0.0) return 0.0;
+    double normalized = fmod(course, 360.0);
+    return normalized < 0.0 ? normalized + 360.0 : normalized;
+}
+
+static CMDeviceMotion *PXTransformDeviceMotionData(CMDeviceMotion *input, PXSensorSnapshot snap) {
+    if (!input) return input;
+    if (!snap.active) {
+        PXClearDeviceMotionOverride(input);
+        return input;
+    }
+
+    @try {
+        double heading = PXNormalizedCourse(snap.course);
+        double yaw = heading * M_PI / 180.0;
+        if (yaw > M_PI) yaw -= 2.0 * M_PI;
+        double c = cos(yaw);
+        double s = sin(yaw);
+        double movement = (isfinite(snap.speed) && snap.speed > 0.0)
+            ? MIN(snap.speed * 0.01, 0.2)
+            : 0.0;
+
+        PXDeviceMotionOverride *payload = [PXDeviceMotionOverride new];
+        payload.roll = 0.0;
+        payload.pitch = 0.0;
+        payload.yaw = yaw;
+        payload.heading = heading;
+        payload.quaternion = (CMQuaternion){
+            .x = 0.0, .y = 0.0, .z = sin(yaw * 0.5), .w = cos(yaw * 0.5)
+        };
+        payload.rotationMatrix = (CMRotationMatrix){
+            .m11 = c,  .m12 = -s, .m13 = 0.0,
+            .m21 = s,  .m22 = c,  .m23 = 0.0,
+            .m31 = 0.0, .m32 = 0.0, .m33 = 1.0
+        };
+        payload.rotationRate = (CMRotationRate){ .x = 0.0, .y = 0.0, .z = 0.0 };
+        payload.gravity = (CMAcceleration){ .x = 0.0, .y = 0.0, .z = -1.0 };
+        payload.userAcceleration = (CMAcceleration){
+            .x = cos(yaw) * movement,
+            .y = sin(yaw) * movement,
+            .z = 0.0
+        };
+        payload.magneticField = (CMCalibratedMagneticField){
+            .field = {
+                .x = 30.0 * cos(yaw),
+                .y = 30.0 * sin(yaw),
+                .z = 0.0
+            },
+            .accuracy = CMMagneticFieldCalibrationAccuracyHigh
+        };
+
+        objc_setAssociatedObject(input, &kPXDeviceMotionOverrideKey, payload,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        CMAttitude *attitude = input.attitude;
+        if (attitude) {
+            objc_setAssociatedObject(attitude, &kPXAttitudeOverrideKey, payload,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    } @catch (__unused NSException *exception) {
+        PXClearDeviceMotionOverride(input);
     }
     return input;
 }
@@ -2893,6 +3102,17 @@ static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler han
         handler(PXTransformMagnetometerData(magnetometerData, PXCurrentSensorSnapshot()), error);
     };
 }
+static CMDeviceMotionHandler PXWrapDeviceMotionHandler(CMDeviceMotionHandler handler) {
+    if (!handler) return handler;
+    return ^(CMDeviceMotion *motion, NSError *error) {
+        if (error || !motion) {
+            if (motion) PXClearDeviceMotionOverride(motion);
+            handler(motion, error);
+            return;
+        }
+        handler(PXTransformDeviceMotionData(motion, PXCurrentSensorSnapshot()), error);
+    };
+}
 
 // Add new group for sensor data integration
 %group SensorSpoofing
@@ -2919,6 +3139,71 @@ static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler han
 - (CMMagneticField)magneticField {
     NSValue *box = objc_getAssociatedObject(self, &kPXMagnetOverrideKey);
     if (box) { CMMagneticField f; [box getValue:&f]; return f; }
+    return %orig;
+}
+%end
+
+%hook CMAttitude
+- (double)roll {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXAttitudeOverrideKey);
+    if (payload) return payload.roll;
+    return %orig;
+}
+- (double)pitch {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXAttitudeOverrideKey);
+    if (payload) return payload.pitch;
+    return %orig;
+}
+- (double)yaw {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXAttitudeOverrideKey);
+    if (payload) return payload.yaw;
+    return %orig;
+}
+- (CMQuaternion)quaternion {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXAttitudeOverrideKey);
+    if (payload) return payload.quaternion;
+    return %orig;
+}
+- (CMRotationMatrix)rotationMatrix {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXAttitudeOverrideKey);
+    if (payload) return payload.rotationMatrix;
+    return %orig;
+}
+%end
+
+%hook CMDeviceMotion
+- (CMAttitude *)attitude {
+    CMAttitude *attitude = %orig;
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXDeviceMotionOverrideKey);
+    if (attitude) {
+        objc_setAssociatedObject(attitude, &kPXAttitudeOverrideKey, payload,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return attitude;
+}
+- (CMRotationRate)rotationRate {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXDeviceMotionOverrideKey);
+    if (payload) return payload.rotationRate;
+    return %orig;
+}
+- (CMAcceleration)gravity {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXDeviceMotionOverrideKey);
+    if (payload) return payload.gravity;
+    return %orig;
+}
+- (CMAcceleration)userAcceleration {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXDeviceMotionOverrideKey);
+    if (payload) return payload.userAcceleration;
+    return %orig;
+}
+- (CMCalibratedMagneticField)magneticField {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXDeviceMotionOverrideKey);
+    if (payload) return payload.magneticField;
+    return %orig;
+}
+- (double)heading {
+    PXDeviceMotionOverride *payload = objc_getAssociatedObject(self, &kPXDeviceMotionOverrideKey);
+    if (payload) return payload.heading;
     return %orig;
 }
 %end
@@ -2952,6 +3237,11 @@ static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler han
     return PXTransformMagnetometerData(originalData, PXCurrentSensorSnapshot());
 }
 
+- (CMDeviceMotion *)deviceMotion {
+    CMDeviceMotion *originalMotion = %orig;
+    return PXTransformDeviceMotionData(originalMotion, PXCurrentSensorSnapshot());
+}
+
 // P1 FIX (sensor async / CoreMotion): the block-based *UpdatesToQueue:withHandler: APIs
 // were NOT hooked, so any app polling motion via the async push API received REAL sensor
 // data and bypassed spoofing. We transform the callback's OWN sample through the shared
@@ -2972,6 +3262,16 @@ static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler han
 
 - (void)startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMMagnetometerHandler)handler {
     %orig(queue, PXWrapMagnetometerHandler(handler));
+}
+
+- (void)startDeviceMotionUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMDeviceMotionHandler)handler {
+    %orig(queue, PXWrapDeviceMotionHandler(handler));
+}
+
+- (void)startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)referenceFrame
+                                             toQueue:(NSOperationQueue *)queue
+                                          withHandler:(CMDeviceMotionHandler)handler {
+    %orig(referenceFrame, queue, PXWrapDeviceMotionHandler(handler));
 }
 
 %end // End CMMotionManager hook

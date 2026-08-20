@@ -603,6 +603,13 @@
         [self getTimeZoneForLocation:coordinate completion:^(NSTimeZone *timeZone, NSString *timeZoneId) {
             if (timeZone) {
                 self.currentTimeZoneId = timeZoneId;
+                if (timeZoneId.length) {
+                    [self.securitySettings setObject:timeZoneId forKey:@"timeSpoofLocationTimeZoneName"];
+                    [self.securitySettings synchronize];
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                                         NULL, NULL, YES);
+                }
                 
                 // Update time immediately
                 [self updateTimeForTimeZone:timeZone];
@@ -704,12 +711,25 @@
         
         // Get timezone info and format current time
         NSString *currentTime = nil;
-        NSString *timezoneName = json[@"timezone"];
+        id rawTimeZone = json[@"timezone"];
+        NSString *timezoneName = [rawTimeZone isKindOfClass:[NSString class]] ? rawTimeZone : nil;
+        if ([rawTimeZone isKindOfClass:[NSDictionary class]]) {
+            id identifier = rawTimeZone[@"id"] ?: rawTimeZone[@"name"];
+            if ([identifier isKindOfClass:[NSString class]]) timezoneName = identifier;
+        }
         
         if (timezoneName) {
             // Create timezone from name (e.g., "America/New_York")
             NSTimeZone *tz = [NSTimeZone timeZoneWithName:timezoneName];
             if (tz) {
+                NSString *savedTimeZone = [self.securitySettings stringForKey:@"timeSpoofIPAddressTimeZoneName"];
+                if (![savedTimeZone isEqualToString:timezoneName]) {
+                    [self.securitySettings setObject:timezoneName forKey:@"timeSpoofIPAddressTimeZoneName"];
+                    [self.securitySettings synchronize];
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                                         NULL, NULL, YES);
+                }
                 // Format current time in the IP's timezone
                 NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
                 formatter.timeZone = tz;
@@ -3042,6 +3062,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     NSInteger selected = sender.selectedSegmentIndex;
     [self.securitySettings setInteger:selected forKey:@"timeSpoofingMode"];
     [self.securitySettings synchronize];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
     
     // Show/hide the appropriate labels
     self.ipLabel.hidden = selected != 1;
@@ -3212,7 +3235,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     BOOL enabled = sender.isOn;
     [self.securitySettings setBool:enabled forKey:@"vpnDetectionBypassEnabled"];
     [self.securitySettings synchronize];
-    // TODO: Add logic to enable/disable VPN/Proxy detection bypass in your backend
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
 }
 
 - (void)openVPNDetail {

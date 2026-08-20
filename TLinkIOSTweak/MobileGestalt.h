@@ -18,9 +18,9 @@ extern "C" {
     
 #pragma mark - API
     
-    CFPropertyListRef MGCopyAnswer(CFStringRef property);
-    CFPropertyListRef MGCopyAnswerWithError(CFStringRef property, int *error);
-    CFPropertyListRef MGCopyMultipleAnswers(CFArrayRef properties, CFDictionaryRef unk);
+    CFPropertyListRef MGCopyAnswer(CFStringRef property, CFDictionaryRef options);
+    CFPropertyListRef MGCopyAnswerWithError(CFStringRef property, CFDictionaryRef options, int *error);
+    CFPropertyListRef MGCopyMultipleAnswers(CFArrayRef properties, CFDictionaryRef options);
     
     bool MGGetBoolAnswer(CFStringRef property);
     
