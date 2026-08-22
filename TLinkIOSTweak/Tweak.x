@@ -1385,17 +1385,26 @@ static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
     return NULL;
 }
 
-%hookf(CFPropertyListRef, MGCopyAnswerWithError, CFStringRef property, CFDictionaryRef options, int *error) {
+static CFPropertyListRef (*PXOrigMGCopyAnswerWithError)(CFStringRef, CFDictionaryRef, int *) = NULL;
+static CFPropertyListRef PXHookMGCopyAnswerWithError(CFStringRef property,
+                                                     CFDictionaryRef options,
+                                                     int *error) {
     CFTypeRef projected = PXMGCreateAlternateProjectedAnswer(property);
     if (projected) {
         if (error) *error = 0;
         return projected;
     }
-    return %orig;
+    return PXOrigMGCopyAnswerWithError
+        ? PXOrigMGCopyAnswerWithError(property, options, error)
+        : NULL;
 }
 
-%hookf(CFPropertyListRef, MGCopyMultipleAnswers, CFArrayRef properties, CFDictionaryRef options) {
-    CFPropertyListRef original = %orig;
+static CFPropertyListRef (*PXOrigMGCopyMultipleAnswers)(CFArrayRef, CFDictionaryRef) = NULL;
+static CFPropertyListRef PXHookMGCopyMultipleAnswers(CFArrayRef properties,
+                                                     CFDictionaryRef options) {
+    CFPropertyListRef original = PXOrigMGCopyMultipleAnswers
+        ? PXOrigMGCopyMultipleAnswers(properties, options)
+        : NULL;
     if (!properties || CFGetTypeID(properties) != CFArrayGetTypeID()) return original;
     NSMutableDictionary *answers = original && CFGetTypeID(original) == CFDictionaryGetTypeID()
         ? [(__bridge NSDictionary *)original mutableCopy]
@@ -1414,15 +1423,34 @@ static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
     return (__bridge_retained CFDictionaryRef)[answers copy];
 }
 
-%hookf(bool, MGGetBoolAnswer, CFStringRef property) {
+static bool (*PXOrigMGGetBoolAnswer)(CFStringRef) = NULL;
+static bool PXHookMGGetBoolAnswer(CFStringRef property) {
     CFTypeRef projected = PXMGCreateAlternateProjectedAnswer(property);
-    if (!projected) return %orig;
+    if (!projected) return PXOrigMGGetBoolAnswer ? PXOrigMGGetBoolAnswer(property) : false;
     bool value;
     if (CFGetTypeID(projected) == CFBooleanGetTypeID()) value = CFBooleanGetValue((CFBooleanRef)projected);
     else if (CFGetTypeID(projected) == CFNumberGetTypeID()) value = [(__bridge NSNumber *)projected boolValue];
-    else { CFRelease(projected); return %orig; }
+    else {
+        CFRelease(projected);
+        return PXOrigMGGetBoolAnswer ? PXOrigMGGetBoolAnswer(property) : false;
+    }
     CFRelease(projected);
     return value;
+}
+
+static void PXInstallAlternateMobileGestaltHooks(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        MSHookFunction((void *)MGCopyAnswerWithError,
+                       (void *)PXHookMGCopyAnswerWithError,
+                       (void **)&PXOrigMGCopyAnswerWithError);
+        MSHookFunction((void *)MGCopyMultipleAnswers,
+                       (void *)PXHookMGCopyMultipleAnswers,
+                       (void **)&PXOrigMGCopyMultipleAnswers);
+        MSHookFunction((void *)MGGetBoolAnswer,
+                       (void *)PXHookMGGetBoolAnswer,
+                       (void **)&PXOrigMGGetBoolAnswer);
+    });
 }
 
 static NSString *const kPXZeroIDFAUUID = @"00000000-0000-0000-0000-000000000000";
@@ -4500,6 +4528,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     if (shouldInstallSpoofHooks) {
         PXFileDebugAIDA64Log("[Tweak.ctor] before init Identifiers");
         %init(Identifiers);
+        PXInstallAlternateMobileGestaltHooks();
         PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
 
         // ATT (iOS 14+): install only if class/selectors exist. Active when IDFA identifier enabled.

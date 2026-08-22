@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+NS_ASSUME_NONNULL_BEGIN
+
 FOUNDATION_EXPORT NSString *PXMobileLibraryPath(void);
 FOUNDATION_EXPORT NSString *PXPreferencesPath(void);
 FOUNDATION_EXPORT NSString *PXWeaponXBasePath(void);
@@ -18,3 +20,5 @@ FOUNDATION_EXPORT NSString *PXTLinkIOSSettingsPath(void);
 FOUNDATION_EXPORT NSString *PXGlobalScopePath(void);
 FOUNDATION_EXPORT NSString *PXSecuritySettingsPath(void);
 FOUNDATION_EXPORT void PXPostSettingsChangedNotification(void);
+
+NS_ASSUME_NONNULL_END

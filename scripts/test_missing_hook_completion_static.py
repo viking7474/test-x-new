@@ -67,12 +67,20 @@ for signature in (
     require(signature in mobile_gestalt_h, f"MobileGestalt ABI declaration is incomplete: {signature}")
 for token in (
     "%hookf(CFTypeRef, MGCopyAnswer, CFStringRef property, CFDictionaryRef options)",
-    "MGCopyAnswerWithError",
-    "MGCopyMultipleAnswers",
-    "MGGetBoolAnswer",
+    "PXHookMGCopyAnswerWithError",
+    "PXHookMGCopyMultipleAnswers",
+    "PXHookMGGetBoolAnswer",
+    "PXInstallAlternateMobileGestaltHooks();",
     "PXMGCreateAlternateProjectedAnswer",
 ):
     require(token in tweak, f"MobileGestalt alternate entry point is missing: {token}")
+for forbidden in (
+    "%hookf(CFPropertyListRef, MGCopyAnswerWithError",
+    "%hookf(CFPropertyListRef, MGCopyMultipleAnswers",
+    "%hookf(bool, MGGetBoolAnswer",
+):
+    require(forbidden not in tweak,
+            f"alternate MobileGestalt hook must avoid the Logos parser path: {forbidden}")
 
 sensor_start = tweak.index("#pragma mark - Sensor transform pipeline")
 sensor_end = tweak.index("// Add barometer/altitude data spoofing", sensor_start)
