@@ -26,6 +26,7 @@
 #import "PXScope.h"
 #import "PXFileDebug.h"
 #import "PXNativeHookCoordinator.h"
+#import "PXP1CFilters.h"
 #import <sys/sysctl.h>
 #if __has_include(<sys/user.h>)
 #import <sys/user.h>
@@ -39,6 +40,10 @@
 #import <stdbool.h>
 #import <stdatomic.h>
 #import <time.h>
+
+// Darwin attrlist is only passed through opaquely by the B-02 wrappers. Keep
+// the declaration SDK-compatible instead of depending on optional Theos headers.
+struct attrlist;
 
 // XPC types — Theos SDK doesn't ship <xpc/xpc.h>.
 // We only need opaque pointers and a few functions.
@@ -482,6 +487,7 @@ enum {
     kPXJBPolicyHideProcMaps               = 1ull << 8,
     kPXJBPolicyHideObjcImages             = 1ull << 9,
     kPXJBPolicyDebugLogging               = 1ull << 10,
+    kPXJBPolicySCDebuggerScalar            = 1ull << 11,
 };
 
 static _Atomic(PXJBPolicyMask) gJBPolicyMask = 0;
@@ -501,6 +507,7 @@ typedef enum {
     kPXJBCapabilityProcMaps,
     kPXJBCapabilityObjcImages,
     kPXJBCapabilityDebugLogging,
+    kPXJBCapabilitySCDebuggerScalar,
     kPXJBCapabilityCount,
 } PXJBCapabilityID;
 
@@ -530,6 +537,7 @@ static PXJBCapabilityRecord gJBCapabilities[kPXJBCapabilityCount] = {
     { .name = "proc-maps",       .policyBit = kPXJBPolicyHideProcMaps },
     { .name = "objc-images",     .policyBit = kPXJBPolicyHideObjcImages },
     { .name = "debug-logging",   .policyBit = kPXJBPolicyDebugLogging },
+    { .name = "sc-debugger",     .policyBit = kPXJBPolicySCDebuggerScalar },
 };
 
 static _Atomic(PXJBPolicyMask) gJBInstalledCapabilityMask = 0;
@@ -685,7 +693,10 @@ static PXJBPolicyMask PXJBBuildRequestedPolicyMask(NSDictionary *settings) {
     if (!atomic_load_explicit(&gJBProcessEligible, memory_order_acquire)) return 0;
     if (!PXJBSettingEnabled(settings, @"jailbreakDetectionEnabled")) return 0;
 
-    PXJBPolicyMask mask = kPXJBPolicyMaster;
+    // C-01 is a framework-level scalar tied to the existing JB master. It is
+    // requested automatically but only becomes effective after its own install
+    // audit proves the runtime symbol/trampoline is available.
+    PXJBPolicyMask mask = kPXJBPolicyMaster | kPXJBPolicySCDebuggerScalar;
     if (PXJBSettingEnabled(settings, @"jbBypassStatfsEnabled")) {
         mask |= kPXJBPolicyStatfs;
     }
@@ -844,6 +855,10 @@ static BOOL PXJBHideObjcImagesEnabled(void) {
 
 static BOOL PXJBDebugLoggingEnabled(void) {
     return PXJBPolicyFeatureEnabled(kPXJBPolicyDebugLogging);
+}
+
+static BOOL PXJBSCDebuggerScalarEnabled(void) {
+    return PXJBPolicyFeatureEnabled(kPXJBPolicySCDebuggerScalar);
 }
 
 // Native hooks only record a counter. Formatting and Foundation logging are
@@ -1200,19 +1215,8 @@ static BOOL PXJBPathMatchesDenyWriteRules(const char *path, int flags) {
     return NO;
 }
 
-// P1-B: one classifier owns path resolution and filesystem policy decisions.
-typedef enum {
-    kPXJBFilesystemAllow = 0,
-    kPXJBFilesystemHide,
-    kPXJBFilesystemDenyWrite,
-    kPXJBFilesystemUnresolved,
-} PXJBFilesystemDisposition;
-
-typedef enum {
-    kPXJBFilesystemOperationRead = 0,
-    kPXJBFilesystemOperationWrite,
-} PXJBFilesystemOperation;
-
+// P1-B/B-00: one classifier owns path resolution and the hidden-path corpus;
+// shared disposition/operation semantics live in PXP1CFilters.
 static PXJBFilesystemDisposition PXJBClassifyFilesystemPathAt(int dirfd,
                                                                const char *path,
                                                                PXJBFilesystemOperation operation,
@@ -1222,18 +1226,18 @@ static PXJBFilesystemDisposition PXJBClassifyFilesystemPathAt(int dirfd,
 static int PXJBOriginalFcntlGetPath(int fd,
                                       char *path,
                                       size_t pathCapacity);
+static PXJBFilesystemDisposition PXJBClassifyFileDescriptorPath(int fd);
 
 static inline BOOL PXJBFilesystemDispositionIsHidden(PXJBFilesystemDisposition disposition) {
-    return disposition == kPXJBFilesystemHide;
+    return PXP1CJBDispositionIsHidden(disposition);
 }
 
 static inline BOOL PXJBFilesystemDispositionBlocksWrite(PXJBFilesystemDisposition disposition) {
-    return disposition == kPXJBFilesystemHide ||
-           disposition == kPXJBFilesystemDenyWrite;
+    return PXP1CJBDispositionBlocksWrite(disposition);
 }
 
 static inline int PXJBFilesystemErrno(PXJBFilesystemDisposition disposition) {
-    return disposition == kPXJBFilesystemDenyWrite ? EACCES : ENOENT;
+    return PXP1CJBErrnoForDisposition(disposition);
 }
 
 // Compatibility helpers keep ObjC hook call sites on the classifier while the
@@ -1409,49 +1413,7 @@ static BOOL PXJBRelativePathLooksLikeProbe(const char *path) {
 }
 
 static BOOL PXJBNormalizeAbsolutePath(const char *inPath, char *out, size_t outsz) {
-    if (!inPath || !out || outsz < 2) return NO;
-    if (inPath[0] != '/') return NO;
-
-    size_t w = 0;
-    out[w++] = '/';
-
-    const char *p = inPath;
-    while (*p) {
-        while (*p == '/') p++;
-        if (!*p) break;
-        const char *seg = p;
-        while (*p && *p != '/') p++;
-        size_t segLen = (size_t)(p - seg);
-        if (segLen == 1 && seg[0] == '.') {
-            continue;
-        }
-        if (segLen == 2 && seg[0] == '.' && seg[1] == '.') {
-            // pop last segment
-            if (w > 1) {
-                // remove trailing slash if any
-                if (out[w - 1] == '/' && w > 1) w--;
-                while (w > 1 && out[w - 1] != '/') w--;
-            }
-            continue;
-        }
-        // append segment
-        if (w > 1 && out[w - 1] != '/') {
-            if (w + 1 >= outsz) return NO;
-            out[w++] = '/';
-        }
-        if (w + segLen + 1 >= outsz) return NO;
-        memcpy(out + w, seg, segLen);
-        w += segLen;
-        out[w] = '\0';
-    }
-
-    if (w == 0) {
-        out[0] = '/';
-        out[1] = '\0';
-    } else {
-        out[w] = '\0';
-    }
-    return YES;
+    return PXP1CJBNormalizeAbsolutePath(inPath, out, outsz);
 }
 
 static BOOL PXJBJoinCwdAndNormalize(const char *relPath, char *out, size_t outsz) {
@@ -1538,8 +1500,10 @@ static FILE *hook_fopen(const char *path, const char *mode) {
 // parent path from opendir/fdopendir until closedir. readdir can therefore
 // classify the full child path instead of applying basename rules globally.
 typedef DIR *(*PXJBOpendirFunction)(const char *);
+typedef DIR *(*PXJBOpenDir2Function)(const char *, int);
 typedef DIR *(*PXJBFdopendirFunction)(int);
 typedef struct dirent *(*PXJBReaddirFunction)(DIR *);
+typedef int (*PXJBReaddirRFunction)(DIR *, struct dirent *, struct dirent **);
 typedef int (*PXJBClosedirFunction)(DIR *);
 
 typedef struct PXJBDirectoryStreamRecord {
@@ -1555,10 +1519,14 @@ _Static_assert((PXJB_DIRECTORY_BUCKET_COUNT & (PXJB_DIRECTORY_BUCKET_COUNT - 1u)
 
 static PXJBOpendirFunction orig_opendir = NULL;
 static PXJBOpendirFunction gJBOpendirEntry = NULL;
+static PXJBOpenDir2Function orig___opendir2 = NULL;
+static PXJBOpenDir2Function gJBOpenDir2Entry = NULL;
 static PXJBFdopendirFunction orig_fdopendir = NULL;
 static PXJBFdopendirFunction gJBFdopendirEntry = NULL;
 static PXJBReaddirFunction orig_readdir = NULL;
 static PXJBReaddirFunction gJBReaddirEntry = NULL;
+static PXJBReaddirRFunction orig_readdir_r = NULL;
+static PXJBReaddirRFunction gJBReaddirREntry = NULL;
 static PXJBClosedirFunction orig_closedir = NULL;
 static PXJBClosedirFunction gJBClosedirEntry = NULL;
 static _Atomic(bool) gJBDirectoryLifecycleReady = false;
@@ -1672,6 +1640,15 @@ static DIR *PXJBOriginalOpendir(const char *path) {
     return function(path);
 }
 
+static DIR *PXJBOriginalOpenDir2(const char *path, int flags) {
+    PXJBOpenDir2Function function = orig___opendir2;
+    if (!function || function == gJBOpenDir2Entry) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return function(path, flags);
+}
+
 static DIR *PXJBOriginalFdopendir(int fd) {
     PXJBFdopendirFunction function = orig_fdopendir;
     if (!function || function == gJBFdopendirEntry) {
@@ -1688,6 +1665,14 @@ static struct dirent *PXJBOriginalReaddir(DIR *stream) {
         return NULL;
     }
     return function(stream);
+}
+
+static int PXJBOriginalReaddirR(DIR *stream,
+                                struct dirent *entry,
+                                struct dirent **result) {
+    PXJBReaddirRFunction function = orig_readdir_r;
+    if (!function || function == gJBReaddirREntry) return ENOSYS;
+    return function(stream, entry, result);
 }
 
 static int PXJBOriginalClosedir(DIR *stream) {
@@ -1794,6 +1779,36 @@ static DIR *hook_opendir(const char *path) {
     return stream;
 }
 
+static DIR *hook___opendir2(const char *path, int flags) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    BOOL lifecycleReady = atomic_load_explicit(&gJBDirectoryLifecycleReady,
+                                                memory_order_acquire);
+    BOOL collectContext = lifecycleReady && pxjbFilesystemScope.entered;
+    char resolvedPath[PATH_MAX];
+    resolvedPath[0] = '\0';
+    PXJBFilesystemDisposition disposition = kPXJBFilesystemUnresolved;
+    if (pxjbFilterFilesystem || collectContext) {
+        disposition = PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                                    path,
+                                                    kPXJBFilesystemOperationRead,
+                                                    O_RDONLY,
+                                                    resolvedPath,
+                                                    sizeof(resolvedPath));
+    }
+    if (pxjbFilterFilesystem && PXJBFilesystemDispositionIsHidden(disposition)) {
+        errno = ENOENT;
+        return NULL;
+    }
+
+    DIR *stream = PXJBOriginalOpenDir2(path, flags);
+    if (stream && collectContext && resolvedPath[0] == '/') {
+        int savedErrno = errno;
+        (void)PXJBRegisterDirectoryStream(stream, resolvedPath);
+        errno = savedErrno;
+    }
+    return stream;
+}
+
 static DIR *hook_fdopendir(int fd) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     BOOL lifecycleReady = atomic_load_explicit(&gJBDirectoryLifecycleReady,
@@ -1848,6 +1863,41 @@ static struct dirent *hook_readdir(DIR *dirp) {
     }
 }
 
+static int hook_readdir_r(DIR *dirp,
+                          struct dirent *entry,
+                          struct dirent **result) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    BOOL lifecycleReady = atomic_load_explicit(&gJBDirectoryLifecycleReady,
+                                                memory_order_acquire);
+    if (!entry || !result || !pxjbFilterFilesystem || !lifecycleReady) {
+        return PXJBOriginalReaddirR(dirp, entry, result);
+    }
+
+    char parentPath[PATH_MAX];
+    BOOL tracked = PXJBCopyDirectoryStreamPath(dirp,
+                                               parentPath,
+                                               sizeof(parentPath),
+                                               NULL);
+    for (;;) {
+        struct dirent *candidate = NULL;
+        int status = PXJBOriginalReaddirR(dirp, entry, &candidate);
+        int savedErrno = errno;
+        if (status != 0 || !candidate) {
+            *result = candidate;
+            errno = savedErrno;
+            return status;
+        }
+        if (!PXJBDirectoryEntryShouldHide(tracked ? parentPath : NULL,
+                                          candidate->d_name)) {
+            *result = candidate;
+            errno = savedErrno;
+            return 0;
+        }
+        PXJBRecordBlockedEvent("readdir_r", candidate->d_name);
+        errno = savedErrno;
+    }
+}
+
 static int hook_closedir(DIR *dirp) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
     PXJBDirectoryStreamRecord *detached = PXJBDetachDirectoryStream(dirp);
@@ -1898,6 +1948,191 @@ static char *hook_realpath(const char *path, char *resolved) {
         }
     }
     return orig_realpath ? orig_realpath(path, resolved) : NULL;
+}
+
+// B-02: read-only native metadata/query parity. These wrappers never rewrite
+// caller buffers or lengths; allowed/unresolved requests are forwarded exactly,
+// preserving libc's sizing probes, option handling and errno behavior.
+static BOOL PXJBRejectHiddenPathReadQuery(const char *path,
+                                          PXJBHiddenReadErrnoPolicy errnoPolicy) {
+    int incomingErrno = errno;
+    PXJBFilesystemDisposition disposition =
+        PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                     path,
+                                     kPXJBFilesystemOperationRead,
+                                     O_RDONLY,
+                                     NULL,
+                                     0);
+    if (!PXJBFilesystemDispositionIsHidden(disposition)) {
+        errno = incomingErrno;
+        return NO;
+    }
+    errno = PXP1CJBErrnoForHiddenRead(errnoPolicy);
+    return YES;
+}
+
+static BOOL PXJBRejectHiddenFDReadQuery(int fd,
+                                        PXJBHiddenReadErrnoPolicy errnoPolicy) {
+    int incomingErrno = errno;
+    PXJBFilesystemDisposition disposition = PXJBClassifyFileDescriptorPath(fd);
+    if (!PXJBFilesystemDispositionIsHidden(disposition)) {
+        errno = incomingErrno;
+        return NO;
+    }
+    errno = PXP1CJBErrnoForHiddenRead(errnoPolicy);
+    return YES;
+}
+
+static long (*orig_pathconf)(const char *, int);
+static long hook_pathconf(const char *path, int name) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenPathReadQuery(path, kPXJBHiddenReadErrnoPathNotFound)) {
+        return -1L;
+    }
+    return orig_pathconf ? orig_pathconf(path, name) : -1L;
+}
+
+static long (*orig_fpathconf)(int, int);
+static long hook_fpathconf(int fd, int name) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenFDReadQuery(fd, kPXJBHiddenReadErrnoBadFileDescriptor)) {
+        return -1L;
+    }
+    return orig_fpathconf ? orig_fpathconf(fd, name) : -1L;
+}
+
+static int (*orig_getattrlist)(const char *, struct attrlist *, void *, size_t, unsigned long);
+static int hook_getattrlist(const char *path,
+                            struct attrlist *attrList,
+                            void *attrBuf,
+                            size_t attrBufSize,
+                            unsigned long options) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenPathReadQuery(path, kPXJBHiddenReadErrnoPathNotFound)) {
+        return -1;
+    }
+    return orig_getattrlist
+        ? orig_getattrlist(path, attrList, attrBuf, attrBufSize, options)
+        : -1;
+}
+
+static int (*orig_fgetattrlist)(int, struct attrlist *, void *, size_t, unsigned long);
+static int hook_fgetattrlist(int fd,
+                             struct attrlist *attrList,
+                             void *attrBuf,
+                             size_t attrBufSize,
+                             unsigned long options) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenFDReadQuery(fd, kPXJBHiddenReadErrnoBadFileDescriptor)) {
+        return -1;
+    }
+    return orig_fgetattrlist
+        ? orig_fgetattrlist(fd, attrList, attrBuf, attrBufSize, options)
+        : -1;
+}
+
+static ssize_t (*orig_getxattr)(const char *, const char *, void *, size_t, uint32_t, int);
+static ssize_t hook_getxattr(const char *path,
+                             const char *name,
+                             void *value,
+                             size_t size,
+                             uint32_t position,
+                             int options) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenPathReadQuery(path, kPXJBHiddenReadErrnoPathNotFound)) {
+        return -1;
+    }
+    return orig_getxattr
+        ? orig_getxattr(path, name, value, size, position, options)
+        : -1;
+}
+
+static ssize_t (*orig_fgetxattr)(int, const char *, void *, size_t, uint32_t, int);
+static ssize_t hook_fgetxattr(int fd,
+                              const char *name,
+                              void *value,
+                              size_t size,
+                              uint32_t position,
+                              int options) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenFDReadQuery(fd, kPXJBHiddenReadErrnoBadFileDescriptor)) {
+        return -1;
+    }
+    return orig_fgetxattr
+        ? orig_fgetxattr(fd, name, value, size, position, options)
+        : -1;
+}
+
+static ssize_t (*orig_listxattr)(const char *, char *, size_t, int);
+static ssize_t hook_listxattr(const char *path,
+                              char *nameBuffer,
+                              size_t size,
+                              int options) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenPathReadQuery(path, kPXJBHiddenReadErrnoPermissionDenied)) {
+        return -1;
+    }
+    return orig_listxattr ? orig_listxattr(path, nameBuffer, size, options) : -1;
+}
+
+static ssize_t (*orig_flistxattr)(int, char *, size_t, int);
+static ssize_t hook_flistxattr(int fd,
+                               char *nameBuffer,
+                               size_t size,
+                               int options) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBRejectHiddenFDReadQuery(fd, kPXJBHiddenReadErrnoBadFileDescriptor)) {
+        return -1;
+    }
+    return orig_flistxattr ? orig_flistxattr(fd, nameBuffer, size, options) : -1;
+}
+
+static BOOL PXJBSocketEndpointShouldHide(const struct sockaddr *address,
+                                         socklen_t addressLength) {
+    if (!address || addressLength < sizeof(struct sockaddr_in) ||
+        address->sa_family != AF_INET) {
+        return NO;
+    }
+    const struct sockaddr_in *ipv4 = (const struct sockaddr_in *)address;
+    return PXP1CJBEndpointPortShouldHide(ntohs(ipv4->sin_port));
+}
+
+static int (*orig_getpeername)(int, struct sockaddr *, socklen_t *);
+static int hook_getpeername(int socketFD,
+                            struct sockaddr *address,
+                            socklen_t *addressLength) {
+    int status = orig_getpeername
+        ? orig_getpeername(socketFD, address, addressLength)
+        : -1;
+    if (status == 0 && PXJBShouldBypassCached() && address && addressLength &&
+        PXJBSocketEndpointShouldHide(address, *addressLength)) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    return status;
+}
+
+static int (*orig_getsockname)(int, struct sockaddr *, socklen_t *);
+static int hook_getsockname(int socketFD,
+                            struct sockaddr *address,
+                            socklen_t *addressLength) {
+    int status = orig_getsockname
+        ? orig_getsockname(socketFD, address, addressLength)
+        : -1;
+    if (status == 0 && PXJBShouldBypassCached() && address && addressLength &&
+        PXJBSocketEndpointShouldHide(address, *addressLength)) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    return status;
 }
 
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
@@ -1996,6 +2231,18 @@ static void PXJBUnsetSuspiciousEnvIfNeeded(void) {
 }
 
 // Phase 2: anti-debug / anti-exec probes
+// C-01: optional SystemConfiguration scalar. iFake resolves the zero-argument
+// symbol at runtime and projects it to false. Keep x-new fail-open when the
+// scoped JB master capability is inactive; symbol absence means no install.
+typedef Boolean (*PXJBSCIsRunningWithDebuggerFunction)(void);
+static PXJBSCIsRunningWithDebuggerFunction orig_SCIsRunningWithDebugger = NULL;
+
+static Boolean hook_SCIsRunningWithDebugger(void) {
+    if (PXJBSCDebuggerScalarEnabled()) return (Boolean)0;
+    PXJBSCIsRunningWithDebuggerFunction original = orig_SCIsRunningWithDebugger;
+    return original ? original() : (Boolean)0;
+}
+
 static int (*orig_ptrace)(int request, pid_t pid, void *addr, int data);
 static int hook_ptrace(int request, pid_t pid, void *addr, int data) {
     if (PXJBShouldBypassCached()) {
@@ -2617,6 +2864,25 @@ static int hook_fstatfs(int fd, struct statfs *buf) {
     return r;
 }
 
+static int (*orig_fstatfs64)(int, PXStatfs64Buf *);
+static int hook_fstatfs64(int fd, PXStatfs64Buf *buf) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBFilesystemDispositionIsHidden(PXJBClassifyFileDescriptorPath(fd))) {
+        errno = EBADF;
+        return -1;
+    }
+
+    int r = orig_fstatfs64 ? orig_fstatfs64(fd, buf) : -1;
+    int savedErrno = errno;
+    if (r == 0 && pxjbFilterFilesystem && PXJBStatfsBypassEnabled() &&
+        PXJBFileDescriptorNeedsReadonlyFilesystemSpoof(fd)) {
+        PXJBNormalizeStatfs((struct statfs *)buf);
+    }
+    errno = savedErrno;
+    return r;
+}
+
 static int (*orig_statvfs)(const char *, struct statvfs *);
 static int hook_statvfs(const char *path, struct statvfs *buf) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
@@ -2644,6 +2910,13 @@ static int hook_fstatvfs(int fd, struct statvfs *buf) {
 // Preserve legitimate process identity and only hide an actual root identity.
 // The fallback remains 501 when a trampoline is unavailable.
 
+static int (*orig_issetugid)(void);
+static int hook_issetugid(void) {
+    int original = orig_issetugid ? orig_issetugid() : 0;
+    if (PXJBShouldBypassCached() && original != 0) return 0;
+    return original;
+}
+
 static uid_t (*orig_getuid)(void);
 static uid_t hook_getuid(void) {
     uid_t original = orig_getuid ? orig_getuid() : 501;
@@ -2670,6 +2943,16 @@ static gid_t hook_getegid(void) {
     gid_t original = orig_getegid ? orig_getegid() : 501;
     if (PXJBShouldBypassCached() && original == 0) return 501;
     return original;
+}
+
+static int (*orig_getgroups)(int, gid_t *);
+static int hook_getgroups(int gidsetsize, gid_t *grouplist) {
+    int count = orig_getgroups ? orig_getgroups(gidsetsize, grouplist) : -1;
+    if (count <= 0 || !PXJBShouldBypassCached() || !grouplist || gidsetsize <= 0 ||
+        count > gidsetsize) {
+        return count;
+    }
+    return PXP1CJBCompactNonRootGroups(grouplist, count);
 }
 
 static int (*orig_setuid)(uid_t);
@@ -2840,25 +3123,10 @@ static BOOL PXJBJoinAbsoluteBaseAndNormalize(const char *basePath,
                                              const char *relativePath,
                                              char *out,
                                              size_t outCapacity) {
-    if (!basePath || basePath[0] != '/' || !relativePath || !out || outCapacity < 2) {
-        return NO;
-    }
-
-    size_t baseLength = strlen(basePath);
-    size_t relativeLength = strlen(relativePath);
-    BOOL needsSlash = (baseLength > 0 && basePath[baseLength - 1] != '/');
-    size_t needed = baseLength + (needsSlash ? 1u : 0u) + relativeLength + 1u;
-    if (needed > PATH_MAX || needed > outCapacity) return NO;
-
-    char joined[PATH_MAX];
-    size_t offset = 0;
-    memcpy(joined + offset, basePath, baseLength);
-    offset += baseLength;
-    if (needsSlash) joined[offset++] = '/';
-    memcpy(joined + offset, relativePath, relativeLength);
-    offset += relativeLength;
-    joined[offset] = '\0';
-    return PXJBNormalizeAbsolutePath(joined, out, outCapacity);
+    return PXP1CJBJoinAbsoluteBaseAndNormalize(basePath,
+                                               relativePath,
+                                               out,
+                                               outCapacity);
 }
 
 static BOOL PXJBResolveAtPathForFiltering(int dirfd,
@@ -2915,40 +3183,52 @@ static PXJBFilesystemDisposition PXJBClassifyFilesystemPathAt(int dirfd,
     }
 
     // Dedicated write-probe targets must remain distinguishable from hidden
-    // filesystem artifacts. They return EACCES/DENY_WRITE even when a broader
-    // hidden-path table also contains the same lexical path.
-    if (operation == kPXJBFilesystemOperationWrite &&
-        PXJBPathMatchesDenyWriteRules(target, flags)) {
-        return kPXJBFilesystemDenyWrite;
-    }
-    if (PXJBPathMatchesHiddenRules(target)) {
-        return kPXJBFilesystemHide;
-    }
-    return kPXJBFilesystemAllow;
+    // filesystem artifacts. The shared B-00 contract gives denied writes
+    // priority so EACCES never collapses into ENOENT.
+    BOOL deniedWriteProbe = operation == kPXJBFilesystemOperationWrite &&
+                            PXJBPathMatchesDenyWriteRules(target, flags);
+    BOOL hiddenArtifact = PXJBPathMatchesHiddenRules(target);
+    return PXP1CJBResolvedPathDisposition(operation,
+                                          hiddenArtifact,
+                                          deniedWriteProbe);
 }
 
+static PXJBFilesystemDisposition PXJBClassifyFileDescriptorPath(int fd) {
+    if (fd < 0) return kPXJBFilesystemUnresolved;
+
+    char fdPath[PATH_MAX];
+    if (PXJBOriginalFcntlGetPath(fd, fdPath, sizeof(fdPath)) == -1) {
+        return kPXJBFilesystemUnresolved;
+    }
+    return PXJBClassifyFilesystemPathAt(AT_FDCWD,
+                                        fdPath,
+                                        kPXJBFilesystemOperationRead,
+                                        O_RDONLY,
+                                        NULL,
+                                        0);
+}
 
 // --- Priority 3: fstat (fd-based, resolve via original fcntl F_GETPATH) ---
 static int (*orig_fstat)(int, struct stat *);
 static int hook_fstat(int fd, struct stat *buf) {
     PXJB_FILESYSTEM_HOOK_SCOPE();
-    if (pxjbFilterFilesystem && fd >= 0) {
-        char fdPath[PATH_MAX];
-        if (PXJBOriginalFcntlGetPath(fd, fdPath, sizeof(fdPath)) != -1) {
-            PXJBFilesystemDisposition disposition =
-                PXJBClassifyFilesystemPathAt(AT_FDCWD,
-                                             fdPath,
-                                             kPXJBFilesystemOperationRead,
-                                             O_RDONLY,
-                                             NULL,
-                                             0);
-            if (PXJBFilesystemDispositionIsHidden(disposition)) {
-                errno = EBADF;
-                return -1;
-            }
-        }
+    if (pxjbFilterFilesystem &&
+        PXJBFilesystemDispositionIsHidden(PXJBClassifyFileDescriptorPath(fd))) {
+        errno = EBADF;
+        return -1;
     }
     return orig_fstat ? orig_fstat(fd, buf) : -1;
+}
+
+static int (*orig_fstat64)(int, struct stat *);
+static int hook_fstat64(int fd, struct stat *buf) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem &&
+        PXJBFilesystemDispositionIsHidden(PXJBClassifyFileDescriptorPath(fd))) {
+        errno = EBADF;
+        return -1;
+    }
+    return orig_fstat64 ? orig_fstat64(fd, buf) : -1;
 }
 
 // --- Priority 3: fstatat ---
@@ -2969,6 +3249,25 @@ static int hook_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
         }
     }
     return orig_fstatat ? orig_fstatat(dirfd, pathname, buf, flags) : -1;
+}
+
+static int (*orig_fstatat64)(int, const char *, struct stat *, int);
+static int hook_fstatat64(int dirfd, const char *pathname, struct stat *buf, int flags) {
+    PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (pxjbFilterFilesystem) {
+        PXJBFilesystemDisposition disposition =
+            PXJBClassifyFilesystemPathAt(dirfd,
+                                         pathname,
+                                         kPXJBFilesystemOperationRead,
+                                         O_RDONLY,
+                                         NULL,
+                                         0);
+        if (PXJBFilesystemDispositionIsHidden(disposition)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_fstatat64 ? orig_fstatat64(dirfd, pathname, buf, flags) : -1;
 }
 
 // --- Priority 3: faccessat ---
@@ -3759,7 +4058,65 @@ static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
 
 %end
 
+static BOOL PXJBCallStackAddressBelongsToHiddenImage(uintptr_t address) {
+    if (address == 0) return NO;
+    Dl_info info = {0};
+    if (!dladdr((const void *)address, &info) || !info.dli_fname) return NO;
+    return PXJBShouldHideImageName(info.dli_fname);
+}
+
+static BOOL PXJBCopyAddressFromCallStackSymbol(NSString *symbol, uintptr_t *outAddress) {
+    if (![symbol isKindOfClass:[NSString class]] || !outAddress) return NO;
+    NSRange prefix = [symbol rangeOfString:@"0x"];
+    if (prefix.location == NSNotFound || NSMaxRange(prefix) >= symbol.length) return NO;
+    NSString *hex = [symbol substringFromIndex:NSMaxRange(prefix)];
+    NSScanner *scanner = [NSScanner scannerWithString:hex];
+    unsigned long long parsed = 0;
+    if (![scanner scanHexLongLong:&parsed] || parsed == 0) return NO;
+    *outAddress = (uintptr_t)parsed;
+    return YES;
+}
+
+%hook NSThread
+
++ (NSArray<NSNumber *> *)callStackReturnAddresses {
+    NSArray<NSNumber *> *original = %orig;
+    if (!PXJBShouldBypassCached()) return original;
+    return (NSArray<NSNumber *> *)PXP1CJBArrayByReplacingMatchingObjects(
+        original,
+        YES,
+        ^BOOL(id object) {
+            if (![object isKindOfClass:[NSNumber class]]) return NO;
+            uintptr_t address = (uintptr_t)[(NSNumber *)object unsignedLongLongValue];
+            return PXJBCallStackAddressBelongsToHiddenImage(address);
+        },
+        @0);
+}
+
++ (NSArray<NSString *> *)callStackSymbols {
+    NSArray<NSString *> *original = %orig;
+    if (!PXJBShouldBypassCached()) return original;
+    return (NSArray<NSString *> *)PXP1CJBArrayByReplacingMatchingObjects(
+        original,
+        YES,
+        ^BOOL(id object) {
+            if (![object isKindOfClass:[NSString class]]) return NO;
+            uintptr_t address = 0;
+            return PXJBCopyAddressFromCallStackSymbol((NSString *)object, &address) &&
+                   PXJBCallStackAddressBelongsToHiddenImage(address);
+        },
+        @"<redacted frame>");
+}
+
+%end
+
 %hook NSProcessInfo
+
+- (NSArray<NSString *> *)arguments {
+    NSArray<NSString *> *original = %orig;
+    return (NSArray<NSString *> *)PXP1CJBFilterProcessArguments(original,
+                                                                 PXJBShouldBypassCached());
+}
 
 - (NSDictionary<NSString *, NSString *> *)environment {
     NSDictionary *env = %orig;
@@ -3785,21 +4142,9 @@ static NSArray *PXJBFilterRelativeDirectoryChildren(NSArray *children,
 %hook UIApplication
 
 - (BOOL)canOpenURL:(NSURL *)url {
-    if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]]) {
-        NSString *scheme = [[url scheme] lowercaseString];
-        if (scheme.length) {
-            if ([scheme isEqualToString:@"cydia"] ||
-                [scheme isEqualToString:@"sileo"] ||
-                [scheme isEqualToString:@"zbra"] ||
-                [scheme isEqualToString:@"filza"] ||
-                [scheme isEqualToString:@"undecimus"] ||
-                [scheme isEqualToString:@"checkra1n"] ||
-                [scheme isEqualToString:@"odyssey"] ||
-                [scheme isEqualToString:@"taurine"] ||
-                [scheme isEqualToString:@"electra"]) {
-                return NO;
-            }
-        }
+    if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] &&
+        PXP1CJBURLSchemeShouldHide(url.scheme)) {
+        return NO;
     }
     return %orig;
 }
@@ -4680,7 +5025,91 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
 %end
 
+// B-05b: optional private LaunchServices URL-probe surface. Install only when
+// the runtime method exists and its ABI matches the observed iFake call shape:
+// BOOL (id url, BOOL publicSchemes, BOOL privateSchemes, id connection, id *error).
+typedef BOOL (*PXJBLSCanOpenURLFunction)(id, SEL, id, BOOL, BOOL, id, id *);
+static PXJBLSCanOpenURLFunction gPXJBOrigLSCanOpenURL = NULL;
+static _Atomic(bool) gPXJBLSCanOpenURLInstalled = false;
 
+static const char *PXJBSkipObjCTypeQualifiers(const char *type) {
+    if (!type) return NULL;
+    while (*type && strchr("rnNoORV", *type)) type++;
+    return type;
+}
+
+static BOOL PXJBObjCTypeIsObject(const char *type) {
+    type = PXJBSkipObjCTypeQualifiers(type);
+    return type && type[0] == '@';
+}
+
+static BOOL PXJBObjCTypeIsBool(const char *type) {
+    type = PXJBSkipObjCTypeQualifiers(type);
+    return type && (type[0] == 'B' || type[0] == 'c');
+}
+
+static BOOL PXJBObjCTypeIsObjectPointer(const char *type) {
+    type = PXJBSkipObjCTypeQualifiers(type);
+    return type && type[0] == '^' && PXJBObjCTypeIsObject(type + 1);
+}
+
+static BOOL PXJBLSCanOpenURLMethodEncodingMatches(Method method) {
+    if (!method || method_getNumberOfArguments(method) != 7) return NO;
+    char *returnType = method_copyReturnType(method);
+    char *urlType = method_copyArgumentType(method, 2);
+    char *publicType = method_copyArgumentType(method, 3);
+    char *privateType = method_copyArgumentType(method, 4);
+    char *connectionType = method_copyArgumentType(method, 5);
+    char *errorType = method_copyArgumentType(method, 6);
+
+    BOOL matches = PXJBObjCTypeIsBool(returnType) &&
+                   PXJBObjCTypeIsObject(urlType) &&
+                   PXJBObjCTypeIsBool(publicType) &&
+                   PXJBObjCTypeIsBool(privateType) &&
+                   PXJBObjCTypeIsObject(connectionType) &&
+                   PXJBObjCTypeIsObjectPointer(errorType);
+    free(returnType);
+    free(urlType);
+    free(publicType);
+    free(privateType);
+    free(connectionType);
+    free(errorType);
+    return matches;
+}
+
+static BOOL PXJBHookLSCanOpenURL(id receiver,
+                                SEL selector,
+                                id url,
+                                BOOL publicSchemes,
+                                BOOL privateSchemes,
+                                id XPCConnection,
+                                id *error) {
+    if (PXJBShouldBypassCached() && [url isKindOfClass:[NSURL class]] &&
+        PXP1CJBURLSchemeShouldHide([(NSURL *)url scheme])) {
+        // iFake sub_1EAF6C returns NO without clearing or writing the error out-param.
+        return NO;
+    }
+    PXJBLSCanOpenURLFunction original = gPXJBOrigLSCanOpenURL;
+    return original
+        ? original(receiver, selector, url, publicSchemes, privateSchemes, XPCConnection, error)
+        : NO;
+}
+
+static void PXJBInstallLSCanOpenURLManagerHook(void) {
+    Class cls = objc_getClass("_LSCanOpenURLManager");
+    if (!cls) return;
+    SEL selector = sel_registerName("canOpenURL:publicSchemes:privateSchemes:XPCConnection:error:");
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!PXJBLSCanOpenURLMethodEncodingMatches(method)) return;
+
+    MSHookMessageEx(cls,
+                    selector,
+                    (IMP)PXJBHookLSCanOpenURL,
+                    (IMP *)&gPXJBOrigLSCanOpenURL);
+    BOOL installed = gPXJBOrigLSCanOpenURL != NULL &&
+                     (IMP)gPXJBOrigLSCanOpenURL != (IMP)PXJBHookLSCanOpenURL;
+    atomic_store_explicit(&gPXJBLSCanOpenURLInstalled, installed, memory_order_release);
+}
 
 %ctor {
     @autoreleasepool {
@@ -4766,12 +5195,27 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol("fopen");
             if (sym) MSHookFunction(sym, (void *)hook_fopen, (void **)&orig_fopen);
 
-            // P2: install opendir/readdir/closedir as one lifecycle group.
-            // fdopendir is optional, but if present its trampoline must also be valid.
+            // P2/B-01: install opendir/readdir/closedir as one lifecycle group.
+            // __opendir2 and fdopendir are optional entry points; both reuse the same
+            // classifier/lifecycle state without becoming mandatory capabilities.
             void *opendirEntry = FindSymbol("opendir");
+            void *opendir2Entry = FindSymbol("__opendir2");
             void *readdirEntry = FindSymbol("readdir");
+            void *readdirREntry = FindSymbol("readdir_r");
             void *closedirEntry = FindSymbol("closedir");
             void *fdopendirEntry = FindSymbol("fdopendir");
+            if (opendir2Entry) {
+                gJBOpenDir2Entry = (PXJBOpenDir2Function)opendir2Entry;
+                MSHookFunction(opendir2Entry,
+                               (void *)hook___opendir2,
+                               (void **)&orig___opendir2);
+            }
+            if (readdirREntry) {
+                gJBReaddirREntry = (PXJBReaddirRFunction)readdirREntry;
+                MSHookFunction(readdirREntry,
+                               (void *)hook_readdir_r,
+                               (void **)&orig_readdir_r);
+            }
             if (opendirEntry && readdirEntry && closedirEntry) {
                 gJBOpendirEntry = (PXJBOpendirFunction)opendirEntry;
                 gJBReaddirEntry = (PXJBReaddirFunction)readdirEntry;
@@ -4821,6 +5265,38 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol("realpath");
             if (sym) MSHookFunction(sym, (void *)hook_realpath, (void **)&orig_realpath);
 
+            // B-02: safe read-only metadata/query surfaces. Each wrapper is
+            // capability-optional and preserves original buffer/size semantics.
+            sym = FindSymbol("pathconf");
+            if (sym) MSHookFunction(sym, (void *)hook_pathconf, (void **)&orig_pathconf);
+
+            sym = FindSymbol("fpathconf");
+            if (sym) MSHookFunction(sym, (void *)hook_fpathconf, (void **)&orig_fpathconf);
+
+            sym = FindSymbol("getattrlist");
+            if (sym) MSHookFunction(sym, (void *)hook_getattrlist, (void **)&orig_getattrlist);
+
+            sym = FindSymbol("fgetattrlist");
+            if (sym) MSHookFunction(sym, (void *)hook_fgetattrlist, (void **)&orig_fgetattrlist);
+
+            sym = FindSymbol("getxattr");
+            if (sym) MSHookFunction(sym, (void *)hook_getxattr, (void **)&orig_getxattr);
+
+            sym = FindSymbol("fgetxattr");
+            if (sym) MSHookFunction(sym, (void *)hook_fgetxattr, (void **)&orig_fgetxattr);
+
+            sym = FindSymbol("listxattr");
+            if (sym) MSHookFunction(sym, (void *)hook_listxattr, (void **)&orig_listxattr);
+
+            sym = FindSymbol("flistxattr");
+            if (sym) MSHookFunction(sym, (void *)hook_flistxattr, (void **)&orig_flistxattr);
+
+            sym = FindSymbol("getpeername");
+            if (sym) MSHookFunction(sym, (void *)hook_getpeername, (void **)&orig_getpeername);
+
+            sym = FindSymbol("getsockname");
+            if (sym) MSHookFunction(sym, (void *)hook_getsockname, (void **)&orig_getsockname);
+
             sym = FindSymbol("connect");
             if (sym) MSHookFunction(sym, (void *)hook_connect, (void **)&orig_connect);
 
@@ -4828,6 +5304,16 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             if (sym) MSHookFunction(sym, (void *)hook_getenv, (void **)&orig_getenv);
 
             // Phase 2
+            // C-01: SystemConfiguration's debugger scalar is runtime-optional.
+            // Do not dlopen the framework just to gain this capability; if the
+            // symbol is not already available, preserve the process unchanged.
+            sym = FindSymbol("SCIsRunningWithDebugger");
+            if (sym) {
+                MSHookFunction(sym,
+                               (void *)hook_SCIsRunningWithDebugger,
+                               (void **)&orig_SCIsRunningWithDebugger);
+            }
+
             sym = FindSymbol("ptrace");
             if (sym) MSHookFunction(sym, (void *)hook_ptrace, (void **)&orig_ptrace);
 
@@ -4838,6 +5324,9 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             if (sym) MSHookFunction(sym, (void *)hook_vfork, (void **)&orig_vfork);
 
             // Priority 1: UID/GID spoofing - hide root access.
+            sym = FindSymbol("issetugid");
+            if (sym) MSHookFunction(sym, (void *)hook_issetugid, (void **)&orig_issetugid);
+
             sym = FindSymbol("getuid");
             if (sym) MSHookFunction(sym, (void *)hook_getuid, (void **)&orig_getuid);
 
@@ -4849,6 +5338,9 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
 
             sym = FindSymbol("getegid");
             if (sym) MSHookFunction(sym, (void *)hook_getegid, (void **)&orig_getegid);
+
+            sym = FindSymbol("getgroups");
+            if (sym) MSHookFunction(sym, (void *)hook_getgroups, (void **)&orig_getgroups);
 
             sym = FindSymbol("setuid");
             if (sym) MSHookFunction(sym, (void *)hook_setuid, (void **)&orig_setuid);
@@ -4917,6 +5409,9 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol("fstatfs");
             if (sym) MSHookFunction(sym, (void *)hook_fstatfs, (void **)&orig_fstatfs);
 
+            sym = FindSymbol("fstatfs64");
+            if (sym) MSHookFunction(sym, (void *)hook_fstatfs64, (void **)&orig_fstatfs64);
+
             sym = FindSymbol("statvfs");
             if (sym) MSHookFunction(sym, (void *)hook_statvfs, (void **)&orig_statvfs);
 
@@ -4933,8 +5428,14 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
             sym = FindSymbol("fstat");
             if (sym) MSHookFunction(sym, (void *)hook_fstat, (void **)&orig_fstat);
 
+            sym = FindSymbol("fstat64");
+            if (sym) MSHookFunction(sym, (void *)hook_fstat64, (void **)&orig_fstat64);
+
             sym = FindSymbol("fstatat");
             if (sym) MSHookFunction(sym, (void *)hook_fstatat, (void **)&orig_fstatat);
+
+            sym = FindSymbol("fstatat64");
+            if (sym) MSHookFunction(sym, (void *)hook_fstatat64, (void **)&orig_fstatat64);
 
             sym = FindSymbol("faccessat");
             if (sym) MSHookFunction(sym, (void *)hook_faccessat, (void **)&orig_faccessat);
@@ -5139,6 +5640,7 @@ static BOOL PXJBIsJBPlistSuiteName(NSString *suiteName) {
         }
 
         %init;
+        PXJBInstallLSCanOpenURLManagerHook();
 
         // Finalize install evidence, publish the immutable installed mask, then
         // activate the requested subset with one atomic policy publication.
@@ -5240,7 +5742,9 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityCore, "openat", orig_openat, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "fopen", orig_fopen, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "opendir", orig_opendir, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "__opendir2", orig___opendir2, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "readdir", orig_readdir, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "readdir_r", orig_readdir_r, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "closedir", orig_closedir, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "fdopendir", orig_fdopendir, false);
     PXJBCapabilityAuditSymbol(kPXJBCapabilityCore,
@@ -5255,15 +5759,32 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
                               false);
     PXJB_AUDIT(kPXJBCapabilityCore, "readlink", orig_readlink, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "realpath", orig_realpath, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "pathconf", orig_pathconf, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fpathconf", orig_fpathconf, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getattrlist", orig_getattrlist, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fgetattrlist", orig_fgetattrlist, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getxattr", orig_getxattr, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fgetxattr", orig_fgetxattr, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "listxattr", orig_listxattr, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "flistxattr", orig_flistxattr, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getpeername", orig_getpeername, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getsockname", orig_getsockname, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "connect", orig_connect, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "getenv", orig_getenv, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "ptrace", orig_ptrace, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "fork", orig_fork, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "vfork", orig_vfork, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "issetugid", orig_issetugid, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "getuid", orig_getuid, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "geteuid", orig_geteuid, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "getgid", orig_getgid, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "getegid", orig_getegid, false);
+    PXJB_AUDIT(kPXJBCapabilityCore, "getgroups", orig_getgroups, false);
+    PXJBCapabilityAuditSymbol(
+        kPXJBCapabilityCore,
+        "_LSCanOpenURLManager.canOpenURL:publicSchemes:privateSchemes:XPCConnection:error:",
+        atomic_load_explicit(&gPXJBLSCanOpenURLInstalled, memory_order_acquire),
+        false);
     PXJB_AUDIT(kPXJBCapabilityCore, "setuid", orig_setuid, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "seteuid", orig_seteuid, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "setgid", orig_setgid, false);
@@ -5279,7 +5800,9 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityCore, "dlopen_preflight", orig_dlopen_preflight, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "creat", orig_creat, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "fstat", orig_fstat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fstat64", orig_fstat64, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "fstatat", orig_fstatat, true);
+    PXJB_AUDIT(kPXJBCapabilityCore, "fstatat64", orig_fstatat64, false);
     PXJB_AUDIT(kPXJBCapabilityCore, "faccessat", orig_faccessat, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "readlinkat", orig_readlinkat, true);
     PXJB_AUDIT(kPXJBCapabilityCore, "symlink", orig_symlink, false);
@@ -5307,6 +5830,7 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
                               true);
     PXJB_AUDIT(kPXJBCapabilityStatfs, "statfs-provider-original", orig_statfs, true);
     PXJB_AUDIT(kPXJBCapabilityStatfs, "fstatfs", orig_fstatfs, false);
+    PXJB_AUDIT(kPXJBCapabilityStatfs, "fstatfs64", orig_fstatfs64, false);
     PXJB_AUDIT(kPXJBCapabilityStatfs, "statvfs", orig_statvfs, false);
     PXJB_AUDIT(kPXJBCapabilityStatfs, "fstatvfs", orig_fstatvfs, false);
 
@@ -5344,6 +5868,10 @@ static PXJBPolicyMask PXJBFinalizeCapabilityRegistryAndAudit(void) {
     PXJB_AUDIT(kPXJBCapabilityObjcImages, "objc_copyImageNames", orig_objc_copyImageNames, true);
     PXJB_AUDIT(kPXJBCapabilityObjcImages, "class_getImageName", orig_class_getImageName, true);
     PXJBCapabilityAuditSymbol(kPXJBCapabilityDebugLogging, "atomic-counter", true, true);
+    PXJB_AUDIT(kPXJBCapabilitySCDebuggerScalar,
+               "SCIsRunningWithDebugger",
+               orig_SCIsRunningWithDebugger,
+               true);
 
 #undef PXJB_AUDIT
 

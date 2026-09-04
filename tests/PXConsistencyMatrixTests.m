@@ -17,10 +17,20 @@ static NSDictionary *PXCanonicalDeviceIDs(void) {
         @"Darwin": @"23.5.0",
         @"KernelVersion": @"Darwin Kernel Version 23.5.0: Wed May  1 20:35:37 PDT 2024; root:xnu-10063.121.3~2/RELEASE_ARM64_T8130",
         @"DeviceModel": @"iPhone15,3",
+        @"DeviceModelName": @"iPhone 14 Pro Max",
         @"HwModel": @"D74AP",
         @"BoardID": @"0x2C",
         @"ModelNumber": @"MU123",
         @"DeviceName": @"iPhone",
+        @"SerialNumber": @"F2LLD9ABCD12",
+        @"MLBSerialNumber": @"C02XY1234567890AB",
+        @"UDID": @"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+        @"SystemBootUUID": @"12345678-1234-4234-9234-123456789abc",
+        @"IDFA": @"A1B2C3D4-E5F6-4789-ABCD-0123456789EF",
+        @"IMEI": @"490154203237518",
+        @"IMEI2": @"356938035643809",
+        @"MEID": @"A00000BEEF1234",
+        @"IMSI": @"310260123456789",
     };
 }
 
@@ -61,6 +71,15 @@ void PXRunConsistencyMatrixTests(void) {
         @"BoardID": deviceIDs[@"BoardID"],
         @"ModelNumber": deviceIDs[@"ModelNumber"],
         @"DeviceName": deviceIDs[@"DeviceName"],
+        @"SerialNumber": deviceIDs[@"SerialNumber"],
+        @"MLBSerialNumber": deviceIDs[@"MLBSerialNumber"],
+        @"UDID": deviceIDs[@"UDID"],
+        @"SystemBootUUID": deviceIDs[@"SystemBootUUID"],
+        @"IDFA": deviceIDs[@"IDFA"],
+        @"IMEI": deviceIDs[@"IMEI"],
+        @"IMEI2": deviceIDs[@"IMEI2"],
+        @"MEID": deviceIDs[@"MEID"],
+        @"IMSI": deviceIDs[@"IMSI"],
     };
     for (PXConsistencyMatrixEntry *entry in entries) {
         NSString *resolved = PXConsistencyResolveEntryValue(entry, deviceIDs);

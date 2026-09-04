@@ -11,6 +11,7 @@
 #import "TLinkIOSLogging.h"
 #import "PXScope.h"
 #import "PXNativeHookCoordinator.h"
+#import "PXPACProxySanitizer.h"
 
 static NSString *const kPXVPNSecuritySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
 
@@ -84,6 +85,40 @@ static CFDictionaryRef PXHookSCDynamicStoreCopyProxies(SCDynamicStoreRef store) 
     return sanitized;
 }
 
+typedef CFArrayRef (*PXCFNetworkCopyPACProxiesFunction)(CFStringRef, CFURLRef, CFErrorRef *);
+static PXCFNetworkCopyPACProxiesFunction PXOrigCFNetworkCopyProxiesForAutoConfigurationScript = NULL;
+static __thread BOOL gPXInsidePACProxyHook = NO;
+
+static CFArrayRef PXHookCFNetworkCopyProxiesForAutoConfigurationScript(CFStringRef script,
+                                                                       CFURLRef targetURL,
+                                                                       CFErrorRef *error) {
+    PXCFNetworkCopyPACProxiesFunction originalFunction = PXOrigCFNetworkCopyProxiesForAutoConfigurationScript;
+    if (!originalFunction) return NULL;
+    if (gPXInsidePACProxyHook) return originalFunction(script, targetURL, error);
+
+    gPXInsidePACProxyHook = YES;
+    CFArrayRef original = originalFunction(script, targetURL, error);
+    gPXInsidePACProxyHook = NO;
+
+    if (!PXVPNBypassActive() || !original) return original;
+    if (error && *error) return original;
+    if (CFGetTypeID(original) != CFArrayGetTypeID()) return original;
+
+    id originalObject = (__bridge id)original;
+    id projected = nil;
+    @try {
+        projected = PXPACProjectedProxyValue(originalObject, YES);
+    } @catch (__unused NSException *exception) {
+        return original;
+    }
+    if (projected == originalObject || ![projected isKindOfClass:[NSArray class]]) return original;
+
+    CFArrayRef replacement = (CFArrayRef)CFBridgingRetain(projected);
+    if (!replacement) return original;
+    CFRelease(original);
+    return replacement;
+}
+
 %group PXVPNObjectiveCHooks
 
 %hook NSURLSessionConfiguration
@@ -149,6 +184,9 @@ static void PXVPNInstallFunctionHook(void *handle, const char *symbol, void *rep
         PXVPNInstallFunctionHook(cfNetwork, "CFNetworkCopySystemProxySettings",
                                  (void *)PXHookCFNetworkCopySystemProxySettings,
                                  (void **)&PXOrigCFNetworkCopySystemProxySettings);
+        PXVPNInstallFunctionHook(cfNetwork, "CFNetworkCopyProxiesForAutoConfigurationScript",
+                                 (void *)PXHookCFNetworkCopyProxiesForAutoConfigurationScript,
+                                 (void **)&PXOrigCFNetworkCopyProxiesForAutoConfigurationScript);
 
         void *systemConfiguration = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
         PXVPNInstallFunctionHook(systemConfiguration, "SCDynamicStoreCopyProxies",

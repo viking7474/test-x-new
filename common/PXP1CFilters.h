@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -67,5 +69,73 @@ BOOL PXP1CJBIsSensitiveMountPath(const char *_Nullable path);
 /// Mirrors PXJBNormalizeStatfs: force the read-only mount flag so rootfs looks
 /// like a stock, non-jailbroken device while preserving all other flag bits.
 uint32_t PXP1CJBNormalizeStatfsFlags(uint32_t flags);
+
+#pragma mark - Central native filesystem query contract (B-00)
+
+typedef enum {
+    kPXJBFilesystemAllow = 0,
+    kPXJBFilesystemHide,
+    kPXJBFilesystemDenyWrite,
+    kPXJBFilesystemUnresolved,
+} PXJBFilesystemDisposition;
+
+typedef enum {
+    kPXJBFilesystemOperationRead = 0,
+    kPXJBFilesystemOperationWrite,
+} PXJBFilesystemOperation;
+
+typedef enum {
+    kPXJBHiddenReadErrnoPathNotFound = 0,
+    kPXJBHiddenReadErrnoBadFileDescriptor,
+    kPXJBHiddenReadErrnoPermissionDenied,
+} PXJBHiddenReadErrnoPolicy;
+
+BOOL PXP1CJBNormalizeAbsolutePath(const char *_Nullable inPath,
+                                  char *_Nullable out,
+                                  size_t outCapacity);
+BOOL PXP1CJBJoinAbsoluteBaseAndNormalize(const char *_Nullable basePath,
+                                         const char *_Nullable relativePath,
+                                         char *_Nullable out,
+                                         size_t outCapacity);
+PXJBFilesystemDisposition PXP1CJBResolvedPathDisposition(PXJBFilesystemOperation operation,
+                                                         BOOL hiddenArtifact,
+                                                         BOOL deniedWriteProbe);
+BOOL PXP1CJBDispositionIsHidden(PXJBFilesystemDisposition disposition);
+BOOL PXP1CJBDispositionBlocksWrite(PXJBFilesystemDisposition disposition);
+int PXP1CJBErrnoForDisposition(PXJBFilesystemDisposition disposition);
+int PXP1CJBErrnoForHiddenRead(PXJBHiddenReadErrnoPolicy policy);
+
+#pragma mark - Safe process/socket query parity (B-03)
+
+int PXP1CJBCompactNonRootGroups(gid_t *_Nullable groups, int count);
+BOOL PXP1CJBEndpointPortShouldHide(uint16_t hostOrderPort);
+
+#pragma mark - Secondary Objective-C parity (B-05)
+
+/// Exact, dedicated iFake argument markers recovered from sub_E60D4. This is
+/// intentionally separate from the filesystem/image path corpus because argv
+/// uses substring semantics rather than path classification.
+BOOL PXP1CJBArgumentContainsInstrumentationMarker(NSString *_Nullable argument);
+NSArray * _Nullable PXP1CJBFilterProcessArguments(NSArray *_Nullable originalArguments,
+                                                   BOOL filteringEnabled);
+
+/// Shared URL/app-availability corpus recovered from iFake's 18-entry
+/// off_5E4498 table. Input is normalized to lowercase before substring checks.
+BOOL PXP1CJBURLSchemeShouldHide(NSString *_Nullable scheme);
+
+/// Preserve array count and element class by replacing only entries proven by
+/// the caller-owned predicate. If disabled, malformed, or no entry matches,
+/// return the exact original object.
+NSArray * _Nullable PXP1CJBArrayByReplacingMatchingObjects(NSArray *_Nullable originalArray,
+                                                            BOOL filteringEnabled,
+                                                            BOOL (^_Nullable shouldReplace)(id object),
+                                                            id _Nullable replacementObject);
+
+#pragma mark - Framework debugger scalar parity (C-01)
+
+/// Pure projection contract for SCIsRunningWithDebugger: preserve the original
+/// framework result whenever the scoped JB capability is inactive; otherwise
+/// project the debugger state to false. The live hook remains runtime-optional.
+BOOL PXP1CJBProjectedDebuggerState(BOOL originalValue, BOOL bypassEnabled);
 
 NS_ASSUME_NONNULL_END

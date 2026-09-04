@@ -211,8 +211,9 @@ def run_source_matrix(matrix: Matrix) -> None:
             SOURCE,
         )
     )
+    lifecycle_marker = "install opendir/readdir/closedir as one lifecycle group."
     install_group = SOURCE[
-        SOURCE.index("// P2: install opendir/readdir/closedir as one lifecycle group.") :
+        SOURCE.index(lifecycle_marker) :
         SOURCE.index('sym = FindSymbol("readlink")')
     ]
     closedir_body = source_function("hook_closedir")

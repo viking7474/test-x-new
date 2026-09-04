@@ -48,14 +48,21 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"CFSystem", @"ProductVersion", @"ProductVersion", @"IOSVersion", @"IOSVersion"),
             PXKeyEntry(@"SystemVersion.plist", @"ProductVersion", @"ProductVersion", @"IOSVersion", @"IOSVersion"),
             PXKeyEntry(@"sysctlbyname", @"kern.osproductversion", @"ProductVersion", @"IOSVersion", @"IOSVersion"),
+            PXKeyEntry(@"ManagedConfiguration", @"MCProductVersion", @"ProductVersion", @"IOSVersion", @"IOSVersion"),
+            PXKeyEntry(@"PrivateWrapper", @"productVersion", @"ProductVersion", @"IOSVersion", @"IOSVersion"),
+            PXKeyEntry(@"PrivateWrapper", @"osVersion", @"ProductVersion", @"IOSVersion", @"IOSVersion"),
 
             // --- ProductBuildVersion (build number) ---
             PXKeyEntry(@"CFSystem", @"ProductBuildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
             PXKeyEntry(@"SystemVersion.plist", @"ProductBuildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
             PXKeyEntry(@"sysctl", @"CTL_KERN/KERN_OSVERSION", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
             PXKeyEntry(@"sysctlbyname", @"kern.osversion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
+            PXKeyEntry(@"sysctlnametomib+sysctl", @"kern.osversion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
             PXKeyEntry(@"MG", @"ProductBuildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
             PXKeyEntry(@"MG", @"BuildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
+            PXKeyEntry(@"ManagedConfiguration", @"MCProductBuildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
+            PXKeyEntry(@"PrivateWrapper", @"buildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
+            PXKeyEntry(@"PrivateWrapper", @"_iOSComponentBuildVersion", @"ProductBuildVersion", @"IOSVersion", @"IOSBuild"),
 
             // --- ReleaseType (always "User" for a shipping device) ---
             PXConstEntry(@"CFSystem", @"ReleaseType", @"ReleaseType", @"IOSVersion", @"User"),
@@ -65,6 +72,7 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             // --- Darwin (kernel release string, e.g. 23.5.0) ---
             PXKeyEntry(@"sysctl", @"CTL_KERN/KERN_OSRELEASE", @"Darwin", @"IOSVersion", @"Darwin"),
             PXKeyEntry(@"sysctlbyname", @"kern.osrelease", @"Darwin", @"IOSVersion", @"Darwin"),
+            PXKeyEntry(@"sysctlnametomib+sysctl", @"kern.osrelease", @"Darwin", @"IOSVersion", @"Darwin"),
             PXKeyEntry(@"uname", @"release", @"Darwin", @"IOSVersion", @"Darwin"),
 
             // --- KernelVersion (full kernel version banner) ---
@@ -79,17 +87,25 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             // --- DeviceModel (product identifier, e.g. iPhone15,3) ---
             PXKeyEntry(@"sysctl", @"CTL_HW/HW_MACHINE", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
             PXKeyEntry(@"sysctlbyname", @"hw.machine", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
+            PXKeyEntry(@"sysctlnametomib+sysctl", @"hw.machine", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
             PXKeyEntry(@"sysctlbyname", @"hw.product", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
             PXKeyEntry(@"MG", @"ProductType", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
             PXKeyEntry(@"IOKit", @"device-model", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
             PXKeyEntry(@"uname", @"machine", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
+            PXKeyEntry(@"PrivateWrapper", @"sf_productType", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
+            PXKeyEntry(@"PrivateWrapper", @"productType", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
+            PXKeyEntry(@"PrivateWrapper", @"deviceModel", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
+            PXKeyEntry(@"PrivateWrapper", @"_iOSComponentDeviceModel", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
+            PXKeyEntry(@"ManagedConfiguration", @"MCGestaltGetProductName", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
 
             // --- HwModel (board/marketing hw string, e.g. D74AP) ---
             PXKeyEntry(@"sysctl", @"CTL_HW/HW_MODEL", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"sysctlbyname", @"hw.model", @"HwModel", @"DeviceModel", @"HwModel"),
+            PXKeyEntry(@"sysctlnametomib+sysctl", @"hw.model", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"MG", @"HWModel", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"MG", @"HWModelStr", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"IOKit", @"model", @"HwModel", @"DeviceModel", @"HwModel"),
+            PXKeyEntry(@"PrivateWrapper", @"_iOSComponentHardwarePlatform", @"HwModel", @"DeviceModel", @"HwModel"),
 
             // --- BoardID ---
             PXKeyEntry(@"MG", @"BoardId", @"BoardID", @"DeviceModel", @"BoardID"),
@@ -103,6 +119,63 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"sysctlbyname", @"kern.hostname", @"DeviceName", @"DeviceName", @"DeviceName"),
             PXKeyEntry(@"gethostname", @"gethostname", @"DeviceName", @"DeviceName", @"DeviceName"),
             PXKeyEntry(@"uname", @"nodename", @"DeviceName", @"DeviceName", @"DeviceName"),
+            PXKeyEntry(@"PrivateWrapper", @"deviceName", @"DeviceName", @"DeviceName", @"DeviceName"),
+            PXKeyEntry(@"PrivateWrapper", @"name", @"DeviceName", @"DeviceName", @"DeviceName"),
+            PXKeyEntry(@"PrivateWrapper", @"hostName", @"DeviceName", @"DeviceName", @"DeviceName"),
+            PXKeyEntry(@"PrivateWrapper", @"localHostName", @"DeviceName", @"DeviceName", @"DeviceName"),
+
+            // --- SerialNumber ---
+            PXKeyEntry(@"IOKit", @"IOPlatformSerialNumber", @"SerialNumber", @"SerialNumber", @"SerialNumber"),
+            PXKeyEntry(@"IOKit", @"serial-number", @"SerialNumber", @"SerialNumber", @"SerialNumber"),
+            PXKeyEntry(@"ManagedConfiguration", @"MCIOSerialString", @"SerialNumber", @"SerialNumber", @"SerialNumber"),
+            PXKeyEntry(@"PrivateWrapper", @"sf_serialNumber", @"SerialNumber", @"SerialNumber", @"SerialNumber"),
+            PXKeyEntry(@"PrivateWrapper", @"serialNumber", @"SerialNumber", @"SerialNumber", @"SerialNumber"),
+            PXKeyEntry(@"PrivateWrapper", @"deviceSerialNumber", @"SerialNumber", @"SerialNumber", @"SerialNumber"),
+
+            // --- MLBSerialNumber ---
+            PXKeyEntry(@"IOKit", @"mlb-serial-number", @"MLBSerialNumber", @"MLBSerialNumber", @"MLBSerialNumber"),
+            PXKeyEntry(@"PrivateWrapper", @"MLBSerialNumber", @"MLBSerialNumber", @"MLBSerialNumber", @"MLBSerialNumber"),
+
+            // --- UDID ---
+            PXKeyEntry(@"ManagedConfiguration", @"MCGestaltGetDeviceUUID", @"UDID", @"UDID", @"UDID"),
+            PXKeyEntry(@"PrivateWrapper", @"sf_udidString", @"UDID", @"UDID", @"UDID"),
+            PXKeyEntry(@"PrivateWrapper", @"udid", @"UDID", @"UDID", @"UDID"),
+            PXKeyEntry(@"PrivateWrapper", @"uniqueDeviceIdentifier", @"UDID", @"UDID", @"UDID"),
+            PXKeyEntry(@"PrivateWrapper", @"deviceUDID", @"UDID", @"UDID", @"UDID"),
+
+            // --- SystemBootUUID ---
+            PXKeyEntry(@"IOKit", @"IOPlatformUUID", @"SystemBootUUID", @"SystemBootUUID", @"SystemBootUUID"),
+            PXKeyEntry(@"IOKit", @"system-id", @"SystemBootUUID", @"SystemBootUUID", @"SystemBootUUID"),
+
+            // --- IDFA / advertising identity ---
+            // iFake's sf_uuidString and applicationDSID both resolve from
+            // ads_tracking; keep them tied to x-new's canonical IDFA field.
+            PXKeyEntry(@"AdSupport", @"advertisingIdentifier", @"IDFA", @"IDFA", @"IDFA"),
+            PXKeyEntry(@"PrivateWrapper", @"sf_uuidString", @"IDFA", @"IDFA", @"IDFA"),
+            PXKeyEntry(@"PrivateWrapper", @"applicationDSID", @"IDFA", @"IDFA", @"IDFA"),
+
+            // --- IMEI ---
+            PXKeyEntry(@"IOKit", @"kIMEIKey", @"IMEI", @"IMEI", @"IMEI"),
+            PXKeyEntry(@"IOKit", @"InternationalMobileEquipmentIdentity", @"IMEI", @"IMEI", @"IMEI"),
+            PXKeyEntry(@"ManagedConfiguration", @"MCCTIMEI", @"IMEI", @"IMEI", @"IMEI"),
+            PXKeyEntry(@"CoreTelephonyServer", @"kCTMobileEquipmentInfoIMEI", @"IMEI", @"IMEI", @"IMEI"),
+            PXKeyEntry(@"CoreTelephonyServer", @"kCTPostponementInfoIMEI", @"IMEI", @"IMEI", @"IMEI"),
+            PXKeyEntry(@"PrivateWrapper", @"internationalMobileEquipmentIdentity", @"IMEI", @"IMEI", @"IMEI"),
+            PXKeyEntry(@"PrivateWrapper", @"IMEI", @"IMEI", @"IMEI", @"IMEI"),
+
+            // --- IMEI2 ---
+            PXKeyEntry(@"PrivateWrapper", @"internationalMobileEquipmentIdentity2", @"IMEI2", @"IMEI2", @"IMEI2"),
+
+            // --- MEID ---
+            PXKeyEntry(@"IOKit", @"MobileEquipmentIdentifier", @"MEID", @"MEID", @"MEID"),
+            PXKeyEntry(@"CoreTelephonyServer", @"kCTMobileEquipmentInfoCurrentMobileId", @"MEID", @"MEID", @"MEID"),
+            PXKeyEntry(@"CoreTelephonyServer", @"kCTMobileEquipmentInfoMEID", @"MEID", @"MEID", @"MEID"),
+            PXKeyEntry(@"CoreTelephonyServer", @"kCTPostponementInfoMEID", @"MEID", @"MEID", @"MEID"),
+            PXKeyEntry(@"PrivateWrapper", @"mobileEquipmentIdentifier", @"MEID", @"MEID", @"MEID"),
+            PXKeyEntry(@"PrivateWrapper", @"MEID", @"MEID", @"MEID", @"MEID"),
+
+            // --- IMSI ---
+            PXKeyEntry(@"CoreTelephonyServer", @"kCTMobileEquipmentInfoIMSI", @"IMSI", @"IMSI", @"IMSI"),
         ];
     });
     return entries;

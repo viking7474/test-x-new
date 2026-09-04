@@ -42,11 +42,17 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_jailbreak_bypass_p2.py",
     "scripts/test_storage_mount_reentrancy_static.py",
     "scripts/test_missing_hook_completion_static.py",
+    "scripts/test_ifake_parity_static.py",
+    "scripts/test_phase_b_regression_static.py",
+    "scripts/test_c02_propertylist_evidence_static.py",
+    "scripts/test_ifake_final_crosswalk_static.py",
+    "scripts/test_c04_sbs_nx_evidence_static.py",
 ]
 NODE_TESTS = [
     "scripts/test_canvas_fingerprint_protection.js",
     "scripts/test_web_spoof_p1.js",
     "scripts/test_webgl_profile_p2.js",
+    "scripts/test_c03_native_webgl_evidence.js",
 ]
 FORBIDDEN_PACKAGE_TOKENS = [
     b"PXLockdownResearchSafety",

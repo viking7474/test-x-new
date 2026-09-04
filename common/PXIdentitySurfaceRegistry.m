@@ -36,6 +36,9 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
     dispatch_once(&once, ^{
         PXIdentitySurfaceMask mg = PXIdentitySurfaceMobileGestalt;
         PXIdentitySurfaceMask io = PXIdentitySurfaceIORegistry;
+        PXIdentitySurfaceMask mc = PXIdentitySurfaceManagedConfiguration;
+        PXIdentitySurfaceMask ct = PXIdentitySurfaceCoreTelephonyServer;
+        PXIdentitySurfaceMask wrapper = PXIdentitySurfacePrivateWrapper;
         entries = @[
             PXEntry(@"ProductType", @[], @"DeviceModel", @"DeviceModel", nil, mg, PXIdentityExpectedTypeString),
             PXEntry(@"HWModelStr", @[@"HardwareModel", @"HWModel", @"hw-model"], @"DeviceModel", @"HwModel", nil, mg, PXIdentityExpectedTypeString),
@@ -44,6 +47,15 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
             PXEntry(@"ProductVersion", @[], @"IOSVersion", @"IOSVersion", nil, mg, PXIdentityExpectedTypeString),
             PXEntry(@"ProductBuildVersion", @[@"BuildVersion"], @"IOSVersion", @"IOSBuild", nil, mg, PXIdentityExpectedTypeString),
             PXEntry(@"ReleaseType", @[], @"IOSVersion", nil, @"User", mg, PXIdentityExpectedTypeString),
+
+            // ManagedConfiguration compatibility getters.  Keep API names as
+            // surface keys while resolving every value from the canonical profile.
+            PXEntry(@"MCCTIMEI", @[], @"IMEI", @"IMEI", nil, mc, PXIdentityExpectedTypeString),
+            PXEntry(@"MCIOSerialString", @[], @"SerialNumber", @"SerialNumber", nil, mc, PXIdentityExpectedTypeString),
+            PXEntry(@"MCProductVersion", @[], @"IOSVersion", @"IOSVersion", nil, mc, PXIdentityExpectedTypeString),
+            PXEntry(@"MCProductBuildVersion", @[], @"IOSVersion", @"IOSBuild", nil, mc, PXIdentityExpectedTypeString),
+            PXEntry(@"MCGestaltGetProductName", @[], @"DeviceModel", @"DeviceModel", nil, mc, PXIdentityExpectedTypeString),
+            PXEntry(@"MCGestaltGetDeviceUUID", @[], @"UDID", @"UDID", nil, mc, PXIdentityExpectedTypeString),
 
             PXEntry(@"device-model", @[@"product-name"], @"DeviceModel", @"DeviceModel", nil, io, PXIdentityExpectedTypeData),
             PXEntry(@"hw.machine", @[], @"DeviceModel", @"DeviceModel", nil, io, PXIdentityExpectedTypeString),
@@ -62,6 +74,52 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
             PXEntry(@"system-id", @[], @"SystemBootUUID", @"SystemBootUUID", nil, io, PXIdentityExpectedTypeData),
             PXEntry(@"kIMEIKey", @[@"InternationalMobileEquipmentIdentity"], @"IMEI", @"IMEI", nil, io, PXIdentityExpectedTypeString),
             PXEntry(@"MobileEquipmentIdentifier", @[@"kMEIDKey", @"MEID"], @"MEID", @"MEID", nil, io, PXIdentityExpectedTypeString),
+
+            // CoreTelephony server dictionary keys observed in iFake's V1/V2
+            // wrappers.  These entries model only fields that already exist in
+            // the original dictionary; the hook task must not synthesize keys.
+            PXEntry(@"kCTMobileEquipmentInfoCurrentMobileId", @[], @"MEID", @"MEID", nil, ct, PXIdentityExpectedTypeString),
+            PXEntry(@"kCTMobileEquipmentInfoIMEI", @[], @"IMEI", @"IMEI", nil, ct, PXIdentityExpectedTypeString),
+            PXEntry(@"kCTMobileEquipmentInfoIMSI", @[], @"IMSI", @"IMSI", nil, ct, PXIdentityExpectedTypeString),
+            PXEntry(@"kCTMobileEquipmentInfoMEID", @[], @"MEID", @"MEID", nil, ct, PXIdentityExpectedTypeString),
+            PXEntry(@"kCTPostponementInfoIMEI", @[], @"IMEI", @"IMEI", nil, ct, PXIdentityExpectedTypeString),
+            PXEntry(@"kCTPostponementInfoMEID", @[], @"MEID", @"MEID", nil, ct, PXIdentityExpectedTypeString),
+
+            // Generic/private wrapper surface.  Only selectors whose semantics
+            // map cleanly to canonical profile identity are modeled here.
+            // Vendor anti-fraud classes and secure-element evidence stay out.
+            PXEntry(@"sf_productType", @[], @"DeviceModel", @"DeviceModel", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"sf_serialNumber", @[], @"SerialNumber", @"SerialNumber", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"sf_udidString", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
+            // iFake sub_B17D8 byte-replays its config key as exact `ads_tracking`;
+            // x-new's canonical equivalent is IDFA, not SystemBootUUID.
+            PXEntry(@"sf_uuidString", @[], @"IDFA", @"IDFA", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"applicationDSID", @[], @"IDFA", @"IDFA", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"productType", @[], @"DeviceModel", @"DeviceModel", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"productVersion", @[], @"IOSVersion", @"IOSVersion", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"buildVersion", @[], @"IOSVersion", @"IOSBuild", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"deviceName", @[], @"DeviceName", @"DeviceName", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"deviceModel", @[], @"DeviceModel", @"DeviceModel", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"name", @[], @"DeviceName", @"DeviceName", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"hostName", @[], @"DeviceName", @"DeviceName", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"localHostName", @[], @"DeviceName", @"DeviceName", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"serialNumber", @[], @"SerialNumber", @"SerialNumber", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"udid", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"osVersion", @[], @"IOSVersion", @"IOSVersion", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"IMEI", @[], @"IMEI", @"IMEI", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"MEID", @[], @"MEID", @"MEID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"ICCID", @[], @"ICCID", @"ICCID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"IMSI", @[], @"IMSI", @"IMSI", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"MLBSerialNumber", @[], @"MLBSerialNumber", @"MLBSerialNumber", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"internationalMobileEquipmentIdentity", @[], @"IMEI", @"IMEI", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"internationalMobileEquipmentIdentity2", @[], @"IMEI2", @"IMEI2", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"mobileEquipmentIdentifier", @[], @"MEID", @"MEID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"uniqueDeviceIdentifier", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"deviceUDID", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"deviceSerialNumber", @[], @"SerialNumber", @"SerialNumber", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"_iOSComponentHardwarePlatform", @[], @"HwModel", @"HwModel", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"_iOSComponentBuildVersion", @[], @"IOSVersion", @"IOSBuild", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"_iOSComponentDeviceModel", @[], @"DeviceModel", @"DeviceModel", nil, wrapper, PXIdentityExpectedTypeString),
         ];
     });
     return entries;
@@ -105,7 +163,7 @@ BOOL PXIdentitySurfaceRegistryIsWellFormed(NSArray<NSString *> **outFailures) {
                 [failures addObject:[NSString stringWithFormat:@"%@ has empty alias", entry.canonicalKey]];
                 continue;
             }
-            for (NSUInteger bit = 1; bit <= PXIdentitySurfaceIORegistry; bit <<= 1) {
+            for (NSUInteger bit = 1; bit <= PXIdentitySurfacePrivateWrapper; bit <<= 1) {
                 if ((entry.surfaces & bit) == 0) continue;
                 NSString *token = [NSString stringWithFormat:@"%lu:%@", (unsigned long)bit, key];
                 if ([seen containsObject:token]) [failures addObject:[NSString stringWithFormat:@"duplicate surface alias %@", token]];

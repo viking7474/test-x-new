@@ -31,6 +31,7 @@ fi
 SYMBOLS=(
   sysctl
   sysctlbyname
+  sysctlnametomib
   gethostname
   getifaddrs
   IORegistryEntryCreateCFProperty

@@ -13,6 +13,7 @@ extern void MSHookFunction(void *symbol, void *replace, void **result);
 
 NSString * const kPXNativeSymbolSysctl = @"sysctl";
 NSString * const kPXNativeSymbolSysctlByname = @"sysctlbyname";
+NSString * const kPXNativeSymbolSysctlNameToMIB = @"sysctlnametomib";
 NSString * const kPXNativeSymbolGethostname = @"gethostname";
 NSString * const kPXNativeSymbolGetifaddrs = @"getifaddrs";
 NSString * const kPXNativeSymbolIORegistryEntryCreateCFProperty = @"IORegistryEntryCreateCFProperty";
@@ -53,7 +54,9 @@ NSString * const kPXNativeSymbolGethostuuid = @"gethostuuid";
 
 static int (*g_orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t) = NULL;
 static int (*g_orig_sysctlbyname)(const char *, void *, size_t *, void *, size_t) = NULL;
+static int (*g_orig_sysctlnametomib)(const char *, int *, size_t *) = NULL;
 static int (*g_orig_gethostname)(char *, size_t) = NULL;
+static __thread BOOL g_inside_sysctlnametomib = NO;
 static int (*g_orig_getifaddrs)(struct ifaddrs **) = NULL;
 static CFTypeRef (*g_orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t, CFStringRef, CFAllocatorRef, IOOptionBits) = NULL;
 static IOReturn (*g_orig_IORegistryEntryCreateCFProperties)(io_registry_entry_t, CFMutableDictionaryRef *, CFAllocatorRef, IOOptionBits) = NULL;
@@ -144,6 +147,7 @@ static int (*g_orig_gethostuuid)(uuid_t, const struct timespec *) = NULL;
 
 PX_REG_TYPED(registerSysctlProvider, kPXNativeSymbolSysctl, PXSysctlPreBlock, PXSysctlPostBlock)
 PX_REG_TYPED(registerSysctlBynameProvider, kPXNativeSymbolSysctlByname, PXSysctlBynamePreBlock, PXSysctlBynamePostBlock)
+PX_REG_TYPED(registerSysctlNameToMIBProvider, kPXNativeSymbolSysctlNameToMIB, PXSysctlNameToMIBPreBlock, PXSysctlNameToMIBPostBlock)
 PX_REG_TYPED(registerGethostnameProvider, kPXNativeSymbolGethostname, PXGethostnamePreBlock, PXGethostnamePostBlock)
 PX_REG_TYPED(registerGetifaddrsProvider, kPXNativeSymbolGetifaddrs, PXGetifaddrsPreBlock, PXGetifaddrsPostBlock)
 PX_REG_TYPED(registerIORegistryCreateCFPropertyProvider, kPXNativeSymbolIORegistryEntryCreateCFProperty, PXIORegCreateCFPropertyPreBlock, PXIORegCreateCFPropertyPostBlock)
@@ -204,6 +208,47 @@ static int PXCoord_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, v
     for (PXNativeHookProvider *p in providers) {
         PXSysctlBynamePostBlock post = p.postBlock;
         if (post) post(name, oldp, oldlenp, newp, newlen, &result);
+    }
+    return result;
+}
+
+static int PXCoord_sysctlnametomib(const char *name, int *mib, size_t *namelen) {
+    if (g_inside_sysctlnametomib) {
+        return g_orig_sysctlnametomib ? g_orig_sysctlnametomib(name, mib, namelen) : -1;
+    }
+
+    g_inside_sysctlnametomib = YES;
+    int result = -1;
+    BOOL handled = NO;
+    BOOL originalCalled = NO;
+    @try {
+        PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+        NSArray<PXNativeHookProvider *> *providers =
+            [coord _providersCopyForSymbol:kPXNativeSymbolSysctlNameToMIB];
+        for (PXNativeHookProvider *p in providers) {
+            PXSysctlNameToMIBPreBlock pre = p.preBlock;
+            if (!pre) continue;
+            if (pre(name, mib, namelen, &result)) {
+                handled = YES;
+                break;
+            }
+        }
+        if (!handled) {
+            result = g_orig_sysctlnametomib ? g_orig_sysctlnametomib(name, mib, namelen) : -1;
+            originalCalled = YES;
+            for (PXNativeHookProvider *p in providers) {
+                PXSysctlNameToMIBPostBlock post = p.postBlock;
+                if (post) post(name, mib, namelen, &result);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        // Fail open without double-calling the kernel mapper after a post-provider
+        // exception. If no original call happened yet, delegate exactly once now.
+        if (!originalCalled && !handled) {
+            result = g_orig_sysctlnametomib ? g_orig_sysctlnametomib(name, mib, namelen) : -1;
+        }
+    } @finally {
+        g_inside_sysctlnametomib = NO;
     }
     return result;
 }
@@ -461,6 +506,7 @@ static int PXCoord_gethostuuid(uuid_t id, const struct timespec *wait) {
     dispatch_once(&onceToken, ^{
         [self _installSymbol:kPXNativeSymbolSysctl replace:(void *)PXCoord_sysctl originalOut:(void **)&g_orig_sysctl];
         [self _installSymbol:kPXNativeSymbolSysctlByname replace:(void *)PXCoord_sysctlbyname originalOut:(void **)&g_orig_sysctlbyname];
+        [self _installSymbol:kPXNativeSymbolSysctlNameToMIB replace:(void *)PXCoord_sysctlnametomib originalOut:(void **)&g_orig_sysctlnametomib];
         [self _installSymbol:kPXNativeSymbolGethostname replace:(void *)PXCoord_gethostname originalOut:(void **)&g_orig_gethostname];
         [self _installSymbol:kPXNativeSymbolGetifaddrs replace:(void *)PXCoord_getifaddrs originalOut:(void **)&g_orig_getifaddrs];
         [self _installSymbol:kPXNativeSymbolGethostuuid replace:(void *)PXCoord_gethostuuid originalOut:(void **)&g_orig_gethostuuid];

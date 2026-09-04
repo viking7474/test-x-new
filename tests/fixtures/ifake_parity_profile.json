@@ -1,0 +1,32 @@
+{
+  "profileID": "ifake-parity-fixture",
+  "generation": 7,
+  "deviceIDs": {
+    "IOSVersion": "17.5.1",
+    "IOSBuild": "21F90",
+    "Darwin": "23.5.0",
+    "KernelVersion": "Darwin Kernel Version 23.5.0: Wed May  1 20:35:37 PDT 2024; root:xnu-10063.121.3~2/RELEASE_ARM64_T8130",
+    "DeviceModel": "iPhone15,3",
+    "DeviceModelName": "iPhone 14 Pro Max",
+    "HwModel": "D74AP",
+    "BoardID": "0x2C",
+    "ModelNumber": "A2894",
+    "DeviceName": "Research iPhone",
+    "SerialNumber": "F2LLD9ABCD12",
+    "MLBSerialNumber": "C02XY1234567890AB",
+    "UDID": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "SystemBootUUID": "12345678-1234-4234-9234-123456789abc",
+    "IDFA": "A1B2C3D4-E5F6-4789-ABCD-0123456789EF",
+    "IMEI": "490154203237518",
+    "IMEI2": "356938035643809",
+    "MEID": "A00000BEEF1234",
+    "IMSI": "310260123456789",
+    "ICCID": "8901260123456789012",
+    "BasebandVersion": "2.10.04",
+    "WiFiAddress": "02:11:22:33:44:55",
+    "BluetoothAddress": "02:AA:BB:CC:DD:EE",
+    "LocaleIdentifier": "en_US",
+    "Language": "en",
+    "TimeZone": "America/Los_Angeles"
+  }
+}

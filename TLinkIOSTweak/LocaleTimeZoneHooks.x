@@ -6,13 +6,18 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <time.h>
+#import <locale.h>
 #import <stdlib.h>
+#import <os/lock.h>
 
 #import "TLinkIOSLogging.h"
 #import "PXScope.h"
+#import "PXLocaleRuntimeProjection.h"
 
 static NSString *const kSecuritySettingsPath_LTZ = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
 static char kPXLocaleTimeZoneControllerStateKey;
+static os_unfair_lock gLTZProcessTimeZoneLock = OS_UNFAIR_LOCK_INIT;
+static __thread BOOL gLTZInsideCLibTimeHook = NO;
 
 static BOOL LTZShouldApply(void) {
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
@@ -82,14 +87,20 @@ static void LTZApplyProcessTimeZone(void) {
     });
 
     NSString *name = LTZShouldApply() ? LTZEffectiveTimeZoneName() : nil;
-    if (name.length) {
-        setenv("TZ", name.UTF8String, 1);
+    const char *effectiveTZ = name.length ? name.UTF8String : NULL;
+
+    // TZ/tzset is process-global. Serialize only our own mutations; do not hold
+    // the lock while reading Foundation/profile state, which may re-enter hooks.
+    os_unfair_lock_lock(&gLTZProcessTimeZoneLock);
+    if (effectiveTZ) {
+        setenv("TZ", effectiveTZ, 1);
     } else if (hadOriginalTZ && originalTZ) {
         setenv("TZ", originalTZ, 1);
     } else {
         unsetenv("TZ");
     }
     tzset();
+    os_unfair_lock_unlock(&gLTZProcessTimeZoneLock);
 }
 
 %group PXLocaleTimeZoneRuntime
@@ -112,6 +123,17 @@ static void LTZApplyProcessTimeZone(void) {
     if (!LTZShouldApply() || !LTZTargetRegionEnabled()) return original;
     NSArray *languages = LTZPinnedPreferredLanguages();
     return languages.count ? languages : original;
+}
+%end
+
+%hook NSBundle
+- (NSArray<NSString *> *)preferredLocalizations {
+    NSArray<NSString *> *original = %orig;
+    BOOL projectionEnabled = LTZShouldApply() && LTZTargetRegionEnabled();
+    return PXPreferredLocalizationsProjection(original,
+                                               LTZPinnedPreferredLanguages(),
+                                               LTZPinnedLocaleIdentifier(),
+                                               projectionEnabled);
 }
 %end
 
@@ -159,6 +181,71 @@ static void LTZApplyProcessTimeZone(void) {
     NSString *name = (LTZShouldApply() && LTZTimeSpoofingMode() != 0) ? LTZEffectiveTimeZoneName() : nil;
     if (name.length) return CFTimeZoneCreateWithName(kCFAllocatorDefault, (__bridge CFStringRef)name, true);
     return %orig;
+}
+
+%hookf(struct tm *, localtime, const time_t *timer) {
+    if (gLTZInsideCLibTimeHook) return %orig;
+
+    gLTZInsideCLibTimeHook = YES;
+    @try {
+        if (LTZShouldApply() &&
+            LTZTimeSpoofingMode() != 0 &&
+            LTZEffectiveTimeZoneName().length > 0) {
+            // iFake reasserts TZ/tzset before every localtime-family call. x-new
+            // already owns the same process TZ state; reapply it here so a target
+            // that mutates TZ between notifications cannot bypass the C surface.
+            LTZApplyProcessTimeZone();
+        }
+    } @catch (__unused NSException *exception) {
+        // Fail open to the libc result below.
+    }
+    struct tm *result = %orig;
+    gLTZInsideCLibTimeHook = NO;
+    return result;
+}
+
+%hookf(struct tm *, localtime_r, const time_t *timer, struct tm *resultBuffer) {
+    if (gLTZInsideCLibTimeHook) return %orig;
+
+    gLTZInsideCLibTimeHook = YES;
+    @try {
+        if (LTZShouldApply() &&
+            LTZTimeSpoofingMode() != 0 &&
+            LTZEffectiveTimeZoneName().length > 0) {
+            LTZApplyProcessTimeZone();
+        }
+    } @catch (__unused NSException *exception) {
+        // Fail open to the caller-buffer-preserving libc result below.
+    }
+    struct tm *result = %orig;
+    gLTZInsideCLibTimeHook = NO;
+    return result;
+}
+
+%hookf(char *, setlocale, int category, const char *locale) {
+    if (gLTZInsideCLibTimeHook) return %orig;
+
+    // Preserve pure query semantics and explicit locale requests. Only the
+    // environment-derived setlocale(category, "") form may consume the canonical
+    // target-region locale, and only for standard locale categories.
+    if (!LTZShouldApply() ||
+        !LTZTargetRegionEnabled() ||
+        !PXSetlocaleShouldUseCanonicalInput(category, locale)) {
+        return %orig;
+    }
+
+    NSString *canonical = PXCanonicalCLocaleName(LTZPinnedLocaleIdentifier());
+    if (!canonical.length) return %orig;
+
+    gLTZInsideCLibTimeHook = YES;
+    char *projected = %orig(category, canonical.UTF8String);
+    if (!projected) {
+        // The requested locale may not be installed on this OS image. Preserve the
+        // native environment fallback rather than inventing a successful locale.
+        projected = %orig(category, locale);
+    }
+    gLTZInsideCLibTimeHook = NO;
+    return projected;
 }
 
 %end

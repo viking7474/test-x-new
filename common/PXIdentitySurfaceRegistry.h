@@ -6,6 +6,9 @@ NS_ASSUME_NONNULL_BEGIN
 typedef NS_OPTIONS(NSUInteger, PXIdentitySurfaceMask) {
     PXIdentitySurfaceMobileGestalt = 1u << 0,
     PXIdentitySurfaceIORegistry = 1u << 1,
+    PXIdentitySurfaceManagedConfiguration = 1u << 2,
+    PXIdentitySurfaceCoreTelephonyServer = 1u << 3,
+    PXIdentitySurfacePrivateWrapper = 1u << 4,
 };
 
 typedef NS_ENUM(NSUInteger, PXIdentityExpectedType) {

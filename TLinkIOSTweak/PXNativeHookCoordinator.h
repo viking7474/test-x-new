@@ -32,6 +32,11 @@ typedef void (^PXSysctlPostBlock)(int *name, u_int namelen, void * _Nullable old
 typedef BOOL (^PXSysctlBynamePreBlock)(const char *name, void * _Nullable oldp, size_t * _Nullable oldlenp, void * _Nullable newp, size_t newlen, int *outResult);
 typedef void (^PXSysctlBynamePostBlock)(const char *name, void * _Nullable oldp, size_t * _Nullable oldlenp, void * _Nullable newp, size_t newlen, int *inoutResult);
 
+// --- sysctlnametomib ---
+// `namelen` is an in/out count of int MIB components, exactly matching Darwin's API.
+typedef BOOL (^PXSysctlNameToMIBPreBlock)(const char *name, int * _Nullable mib, size_t * _Nullable namelen, int *outResult);
+typedef void (^PXSysctlNameToMIBPostBlock)(const char *name, int * _Nullable mib, size_t * _Nullable namelen, int *inoutResult);
+
 // --- gethostname ---
 typedef BOOL (^PXGethostnamePreBlock)(char * _Nullable name, size_t namelen, int *outResult);
 typedef void (^PXGethostnamePostBlock)(char * _Nullable name, size_t namelen, int *inoutResult);
@@ -102,6 +107,7 @@ typedef BOOL (^PXGethostuuidPreBlock)(uuid_t _Nonnull uuid, const struct timespe
 // Convenience typed registrars (providerID must be unique globally).
 - (BOOL)registerSysctlProvider:(NSString *)providerID priority:(NSInteger)priority pre:(PXSysctlPreBlock _Nullable)pre post:(PXSysctlPostBlock _Nullable)post;
 - (BOOL)registerSysctlBynameProvider:(NSString *)providerID priority:(NSInteger)priority pre:(PXSysctlBynamePreBlock _Nullable)pre post:(PXSysctlBynamePostBlock _Nullable)post;
+- (BOOL)registerSysctlNameToMIBProvider:(NSString *)providerID priority:(NSInteger)priority pre:(PXSysctlNameToMIBPreBlock _Nullable)pre post:(PXSysctlNameToMIBPostBlock _Nullable)post;
 - (BOOL)registerGethostnameProvider:(NSString *)providerID priority:(NSInteger)priority pre:(PXGethostnamePreBlock _Nullable)pre post:(PXGethostnamePostBlock _Nullable)post;
 - (BOOL)registerGetifaddrsProvider:(NSString *)providerID priority:(NSInteger)priority pre:(PXGetifaddrsPreBlock _Nullable)pre post:(PXGetifaddrsPostBlock _Nullable)post;
 - (BOOL)registerIORegistryCreateCFPropertyProvider:(NSString *)providerID priority:(NSInteger)priority pre:(PXIORegCreateCFPropertyPreBlock _Nullable)pre post:(PXIORegCreateCFPropertyPostBlock _Nullable)post;
@@ -120,6 +126,7 @@ typedef BOOL (^PXGethostuuidPreBlock)(uuid_t _Nonnull uuid, const struct timespe
 // Symbol name constants
 FOUNDATION_EXPORT NSString * const kPXNativeSymbolSysctl;
 FOUNDATION_EXPORT NSString * const kPXNativeSymbolSysctlByname;
+FOUNDATION_EXPORT NSString * const kPXNativeSymbolSysctlNameToMIB;
 FOUNDATION_EXPORT NSString * const kPXNativeSymbolGethostname;
 FOUNDATION_EXPORT NSString * const kPXNativeSymbolGetifaddrs;
 FOUNDATION_EXPORT NSString * const kPXNativeSymbolIORegistryEntryCreateCFProperty;
