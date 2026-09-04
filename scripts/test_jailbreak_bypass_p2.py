@@ -249,7 +249,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: registry replacement is one critical section", register_body.count("pthread_mutex_lock") == 1 and "PXJBDetachDirectoryStream(stream)" not in register_body)
     matrix.check("source: lifecycle capability is required", '"directory-stream-lifecycle"' in SOURCE)
     matrix.check("source: all installed trampolines audited", not (installed - audited))
-    matrix.check("source: expected installed trampoline count", len(installed) == 67)
+    # P2 baseline (67) plus the 18 audited Phase-B/C additions in this module:
+    # 17 query-safe native surfaces and SCIsRunningWithDebugger.
+    matrix.check("source: expected installed trampoline count", len(installed) == 85)
 
 
 def run_matcher_matrix(matrix: Matrix) -> None:
