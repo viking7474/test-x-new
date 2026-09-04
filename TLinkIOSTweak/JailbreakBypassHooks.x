@@ -130,6 +130,16 @@ static void *FindSymbol(const char *symbol) {
     return symbol ? dlsym(RTLD_DEFAULT, symbol) : NULL;
 }
 
+// On iOS 13, opendir is a thin wrapper around the private __opendir2 entry.
+// Hooking both entry points with older Substrate can produce an invalid nested
+// trampoline before the post-install audit gets a chance to disable lifecycle
+// filtering. Keep the stable public opendir/readdir/closedir hooks there and
+// only add the optional private/deprecated entry points on newer runtimes.
+static BOOL PXJBOptionalDirectoryEntryHooksSupported(void) {
+    if (@available(iOS 14.0, *)) return YES;
+    return NO;
+}
+
 static BOOL PXStrEqNoCase(const char *a, const char *b) {
     if (!a || !b) return NO;
     while (*a && *b) {
@@ -5198,10 +5208,16 @@ static void PXJBInstallLSCanOpenURLManagerHook(void) {
             // P2/B-01: install opendir/readdir/closedir as one lifecycle group.
             // __opendir2 and fdopendir are optional entry points; both reuse the same
             // classifier/lifecycle state without becoming mandatory capabilities.
+            BOOL optionalDirectoryEntryHooksSupported =
+                PXJBOptionalDirectoryEntryHooksSupported();
             void *opendirEntry = FindSymbol("opendir");
-            void *opendir2Entry = FindSymbol("__opendir2");
+            void *opendir2Entry = optionalDirectoryEntryHooksSupported
+                ? FindSymbol("__opendir2")
+                : NULL;
             void *readdirEntry = FindSymbol("readdir");
-            void *readdirREntry = FindSymbol("readdir_r");
+            void *readdirREntry = optionalDirectoryEntryHooksSupported
+                ? FindSymbol("readdir_r")
+                : NULL;
             void *closedirEntry = FindSymbol("closedir");
             void *fdopendirEntry = FindSymbol("fdopendir");
             if (opendir2Entry) {

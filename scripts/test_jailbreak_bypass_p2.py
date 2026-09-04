@@ -237,6 +237,12 @@ def run_source_matrix(matrix: Matrix) -> None:
     ))
     matrix.check("source: lifecycle installs closedir", "MSHookFunction(closedirEntry" in install_group)
     matrix.check("source: fdopendir is optional", "if (fdopendirEntry)" in install_group)
+    matrix.check("source: iOS 13 skips nested optional dirent hooks", all(token in SOURCE for token in [
+        "PXJBOptionalDirectoryEntryHooksSupported",
+        "@available(iOS 14.0, *)",
+        "opendir2Entry = optionalDirectoryEntryHooksSupported",
+        "readdirREntry = optionalDirectoryEntryHooksSupported",
+    ]))
     matrix.check("source: lifecycle readiness uses release publication", "memory_order_release" in install_group)
     matrix.check("source: closedir detaches before original", closedir_body.index("PXJBDetachDirectoryStream") < closedir_body.index("PXJBOriginalClosedir"))
     matrix.check("source: failed closedir restores context", "PXJBRestoreDirectoryStream(detached)" in closedir_body)
