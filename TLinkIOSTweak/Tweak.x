@@ -41,6 +41,7 @@
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentitySnapshot.h"
 #import "PXSystemVersionTransformer.h"
+#import "PXRuntimeOSCompatibility.h"
 #import "PXIdentitySurfaceRegistry.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
@@ -226,20 +227,13 @@ static void PXCompatShimWKWebView(void) {
 
 #pragma mark - WidgetKit soft stubs (iOS < 14)
 
-// Real OS major from disk (not spoofed). Used to decide if WidgetKit exists.
+// Real OS major from the low-level physical runtime source. Never consult a
+// spoofable Foundation/UIDevice reporting surface for capability decisions.
 static NSInteger PXRealOSMajorVersion(void) {
-    static NSInteger major = -1;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSDictionary *sv = [NSDictionary dictionaryWithContentsOfFile:
-                            @"/System/Library/CoreServices/SystemVersion.plist"];
-        NSString *ver = [sv[@"ProductVersion"] isKindOfClass:[NSString class]] ? sv[@"ProductVersion"] : nil;
-        if (ver.length) {
-            major = [[ver componentsSeparatedByString:@"."].firstObject integerValue];
-        }
-        if (major < 0) major = 0;
-    });
-    return major;
+    NSString *version = PXRealRuntimeIOSVersion();
+    if (!version.length) return 0;
+    NSString *major = [version componentsSeparatedByString:@"."].firstObject;
+    return major.integerValue;
 }
 
 // Fake storage large enough for Swift to read a few words without immediate OOB.
@@ -505,62 +499,10 @@ static void PXRebindWidgetKitSymbolsInMainImage(void) {
 }
 
 static void PXInstallCompatibilityShims(void) {
-    @autoreleasepool {
-        // Some apps call selectors that may not exist on all iOS builds.
-        // When we spoof a newer iOS version, apps often branch into newer UIKit APIs
-        // without @available checks — add no-op / storage shims when missing.
-
-        Class procInfoCls = objc_getClass("NSProcessInfo");
-        if (procInfoCls && !class_getInstanceMethod(procInfoCls, @selector(isiOSAppOnMac))) {
-            class_addMethod(procInfoCls, @selector(isiOSAppOnMac), (IMP)PXCompatReturnNo, "B@:");
-        }
-
-        Class ctProvCls = objc_getClass("CTCellularPlanProvisioning");
-        if (ctProvCls && !class_getInstanceMethod(ctProvCls, @selector(supportsEmbeddedSIM))) {
-            class_addMethod(ctProvCls, @selector(supportsEmbeddedSIM), (IMP)PXCompatReturnNo, "B@:");
-        }
-
-        // Crash signature (CPUDasher etc.): -[UITabBar setScrollEdgeAppearance:] on iOS < 15
-        // while spoofed systemVersion advertises 15+/16+.
-        PXCompatShimBarAppearanceClass(objc_getClass("UITabBar"));
-        PXCompatShimBarAppearanceClass(objc_getClass("UINavigationBar"));
-        PXCompatShimBarAppearanceClass(objc_getClass("UIToolbar"));
-
-        // UINavigationItem large title / appearance helpers (harmless if unused)
-        Class navItem = objc_getClass("UINavigationItem");
-        if (navItem) {
-            PXCompatAddMethodIfMissing(navItem, @selector(setStandardAppearance:),
-                                       (IMP)PXCompatSetStandardAppearance, "v@:@");
-            PXCompatAddMethodIfMissing(navItem, @selector(standardAppearance),
-                                       (IMP)PXCompatGetStandardAppearance, "@@:");
-            PXCompatAddMethodIfMissing(navItem, @selector(setScrollEdgeAppearance:),
-                                       (IMP)PXCompatSetScrollEdgeAppearance, "v@:@");
-            PXCompatAddMethodIfMissing(navItem, @selector(scrollEdgeAppearance),
-                                       (IMP)PXCompatGetScrollEdgeAppearance, "@@:");
-            PXCompatAddMethodIfMissing(navItem, @selector(setCompactAppearance:),
-                                       (IMP)PXCompatSetCompactAppearance, "v@:@");
-            PXCompatAddMethodIfMissing(navItem, @selector(compactAppearance),
-                                       (IMP)PXCompatGetCompactAppearance, "@@:");
-            PXCompatAddMethodIfMissing(navItem, @selector(setCompactScrollEdgeAppearance:),
-                                       (IMP)PXCompatSetCompactScrollEdgeAppearance, "v@:@");
-            PXCompatAddMethodIfMissing(navItem, @selector(compactScrollEdgeAppearance),
-                                       (IMP)PXCompatGetCompactScrollEdgeAppearance, "@@:");
-        }
-
-        // Crash: -[WKWebView callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:]
-        // on real iOS < 14 while spoofed version is 14+.
-        PXCompatShimWKWebView();
-
-        // Crash: dyld can't resolve WidgetKit.WidgetCenter on real iOS < 14 (ARMCPUZ etc.)
-        // when app takes iOS 14+ path after version spoof / weak-link WidgetKit.
-        PXRebindWidgetKitSymbolsInMainImage();
-
-        // Quiet unused-function warnings if optimizer is aggressive
-        (void)PXCompatReturnNil;
-        (void)PXCompatVoidNoop;
-        (void)PXStub_WidgetCenter_Ma;
-        (void)PXStub_WidgetCenter_shared;
-    }
+    // Intentionally inert. Do not synthesize selectors, framework classes, or Swift
+    // metadata that are absent from the physical OS. Such shims make capability
+    // probes lie and can push an app into a larger incompatible API surface.
+    // Native OS reporting is runtime-capped instead; missing APIs stay missing.
 }
 
 // uname is the only Tweak-owned exclusive native symbol (not managed by the
@@ -591,16 +533,6 @@ static id PXReadSecuritySettingObject(NSString *key) {
 static BOOL PXReadSecuritySettingBool(NSString *key) {
     id v = PXReadSecuritySettingObject(key);
     return v ? [v boolValue] : NO;
-}
-
-static BOOL PXFixVersionAppliesToBundle(NSString *bundleID) {
-    if (!bundleID.length) return NO;
-    if (!PXReadSecuritySettingBool(@"fixVersionEnabled")) return NO;
-    id list = PXReadSecuritySettingObject(@"fixVersionApps");
-    if ([list isKindOfClass:[NSArray class]]) {
-        return [(NSArray *)list containsObject:bundleID];
-    }
-    return NO;
 }
 
 static NSString *PXHookMissingLogPath(void) {
@@ -812,19 +744,30 @@ static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
                     }
 
                     if (name[0] == CTL_KERN && [manager isIdentifierEnabled:@"IOSVersion"]) {
+                        // ProductBuildVersion is a reporting surface: keep the profile by default,
+                        // but Fix Version-selected apps fall back to the physical runtime.
                         if (name[1] == KERN_OSVERSION) {
+                            if (PXFixVersionAppliesToBundle(bundleID)) {
+                                return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
+                            }
                             if (!PXRequireKeysAll(deviceIds, @[@"IOSBuild"], @"sysctl", @"CTL_KERN/KERN_OSVERSION", bundleID, profileId, gen)) {
                                 return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
                             }
                             NSString *spoofed = deviceIds[@"IOSBuild"];
                             return PXWriteSysctlCStringLocal([spoofed UTF8String], oldp, oldlenp);
-                        } else if (name[1] == KERN_OSRELEASE) {
-                            if (!PXRequireKeysAll(deviceIds, @[@"Darwin"], @"sysctl", @"CTL_KERN/KERN_OSRELEASE", bundleID, profileId, gen)) {
+                        } else if (name[1] == KERN_OSRELEASE || name[1] == KERN_VERSION) {
+                            // Darwin release/kernel banner describe the implementation runtime.
+                            // Keep them physical for upward profiles and all Fix Version apps.
+                            if (!PXKernelIOSProfileMayExposeTupleForBundle(deviceIds[@"IOSVersion"], deviceIds[@"IOSBuild"], bundleID)) {
                                 return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
                             }
-                            NSString *spoofed = deviceIds[@"Darwin"];
-                            return PXWriteSysctlCStringLocal([spoofed UTF8String], oldp, oldlenp);
-                        } else if (name[1] == KERN_VERSION) {
+                            if (name[1] == KERN_OSRELEASE) {
+                                if (!PXRequireKeysAll(deviceIds, @[@"Darwin"], @"sysctl", @"CTL_KERN/KERN_OSRELEASE", bundleID, profileId, gen)) {
+                                    return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
+                                }
+                                NSString *spoofed = deviceIds[@"Darwin"];
+                                return PXWriteSysctlCStringLocal([spoofed UTF8String], oldp, oldlenp);
+                            }
                             if (!PXRequireKeysAll(deviceIds, @[@"KernelVersion"], @"sysctl", @"CTL_KERN/KERN_VERSION", bundleID, profileId, gen)) {
                                 return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
                             }
@@ -906,7 +849,7 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
                 return original;
             }
 
-            PXSystemVersionProjection *projection = PXCurrentSystemVersionProjection();
+            PXSystemVersionProjection *projection = PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
             if (!projection) return original;
             NSDictionary *base = original ? (__bridge NSDictionary *)original : @{};
             NSDictionary *transformed = PXTransformSystemVersionDictionary(base, projection);
@@ -966,6 +909,8 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     NSString *profileId = nil;
     NSNumber *gen = nil;
     NSDictionary *deviceIds = PXGetDeviceIdsSnapshot(&profileId, &gen);
+    BOOL nativeOSProfileCanExposeKernel = ![manager isIdentifierEnabled:@"IOSVersion"] ||
+        PXKernelIOSProfileMayExposeTupleForBundle(deviceIds[@"IOSVersion"], deviceIds[@"IOSBuild"], bundleID);
 
     // Do not sample the original here. This function is a coordinator pre-provider;
     // unhandled requests must fall through without calling the real syscall twice.
@@ -985,7 +930,8 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
 
      // NEW: kern.osproductversion - Critical for Facebook
       if (strcmp(name, "kern.osproductversion") == 0 && [manager isIdentifierEnabled:@"IOSVersion"]) {
-          // Fix Version (runtime-capped): for selected apps, always return runtime value to avoid crashes.
+          // ProductVersion is a reporting surface. Preserve upward profile spoofing
+          // unless this app is explicitly selected by Fix Version.
           if (PXFixVersionAppliesToBundle(bundleID)) {
               px_sysctlbyname_in_hook = NO;
               return 0;
@@ -1019,27 +965,41 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
          }
          spoofedValue = deviceIds[@"DeviceModel"];
     }
-    // OS Version spoofing
+    // OS version/build reporting and kernel implementation surfaces.
     else if ((strcmp(name, "kern.osversion") == 0 || strcmp(name, "kern.osrelease") == 0 || strcmp(name, "kern.version") == 0) &&
              [manager isIdentifierEnabled:@"IOSVersion"]) {
          if (strcmp(name, "kern.osversion") == 0) {
+             // Build number is reporting identity: preserve profile upward spoofing,
+             // except for apps explicitly protected by Fix Version.
+             if (PXFixVersionAppliesToBundle(bundleID)) {
+                 px_sysctlbyname_in_hook = NO;
+                 return 0;
+             }
              if (!PXRequireKeysAll(deviceIds, @[@"IOSBuild"], @"sysctlbyname", @"kern.osversion", bundleID, profileId, gen)) {
                  px_sysctlbyname_in_hook = NO;
                  return 0;
              }
              spoofedValue = deviceIds[@"IOSBuild"];
-         } else if (strcmp(name, "kern.osrelease") == 0) {
-             if (!PXRequireKeysAll(deviceIds, @[@"Darwin"], @"sysctlbyname", @"kern.osrelease", bundleID, profileId, gen)) {
-                 px_sysctlbyname_in_hook = NO;
-                 return 0;
-             }
-             spoofedValue = deviceIds[@"Darwin"];
          } else {
-             if (!PXRequireKeysAll(deviceIds, @[@"KernelVersion"], @"sysctlbyname", @"kern.version", bundleID, profileId, gen)) {
+             // Darwin release/kernel banner remain tied to the physical implementation
+             // when the profile is upward or Fix Version applies.
+             if (!nativeOSProfileCanExposeKernel) {
                  px_sysctlbyname_in_hook = NO;
-                 return 0;
+                 return 0; // outHandled remains NO: coordinator returns the real runtime value.
              }
-             spoofedValue = deviceIds[@"KernelVersion"];
+             if (strcmp(name, "kern.osrelease") == 0) {
+                 if (!PXRequireKeysAll(deviceIds, @[@"Darwin"], @"sysctlbyname", @"kern.osrelease", bundleID, profileId, gen)) {
+                     px_sysctlbyname_in_hook = NO;
+                     return 0;
+                 }
+                 spoofedValue = deviceIds[@"Darwin"];
+             } else {
+                 if (!PXRequireKeysAll(deviceIds, @[@"KernelVersion"], @"sysctlbyname", @"kern.version", bundleID, profileId, gen)) {
+                     px_sysctlbyname_in_hook = NO;
+                     return 0;
+                 }
+                 spoofedValue = deviceIds[@"KernelVersion"];
+             }
          }
     }
     else if (strcmp(name, "kern.hostname") == 0 && [manager isIdentifierEnabled:@"DeviceName"]) {
@@ -1139,6 +1099,7 @@ static int uname_hook(struct utsname *buf) {
             BOOL changed = NO;
 
             if ([manager isIdentifierEnabled:@"IOSVersion"] &&
+                PXKernelIOSProfileMayExposeTupleForBundle(deviceIDs[@"IOSVersion"], deviceIDs[@"IOSBuild"], bundleID) &&
                 PXRequireKeysAll(deviceIDs, @[@"Darwin", @"KernelVersion"], @"uname",
                                  @"utsname.sysname/release/version", bundleID, profileID, generation)) {
                 struct utsname versionCandidate = candidate;
@@ -4345,10 +4306,11 @@ static char* hook_GSSystemGetSerialNo(void) {
     setupHookingEnvironment();
     PXFileDebugAIDA64Log("[Tweak.ctor] after setupHookingEnvironment");
 
-    // Install shims for weakly-linked selectors to prevent crashes (apps only, not SpringBoard).
-    PXFileDebugAIDA64Log("[Tweak.ctor] before PXInstallCompatibilityShims");
-    PXInstallCompatibilityShims();
-    PXFileDebugAIDA64Log("[Tweak.ctor] after PXInstallCompatibilityShims");
+    // Do not synthesize missing UIKit/WebKit/WidgetKit capabilities on legacy iOS.
+    // Advertising a selector/symbol that the physical framework does not implement can
+    // move apps deeper into an incompatible code path (Swift metadata is especially unsafe).
+    // Native OS surfaces are now runtime-capped instead, so missing APIs stay genuinely absent.
+    PXFileDebugAIDA64Log("[Tweak.ctor] compatibility shims disabled; native OS projection is runtime-capped");
     
     PXLog(@"TLinkIOS tweak initializing...");
     
@@ -4398,16 +4360,14 @@ static char* hook_GSSystemGetSerialNo(void) {
     //     PXLog(@"Registered ElleKit early initialization handler");
     // }
     
-    // Detect iOS version
-    NSOperatingSystemVersion osVersion = [[NSProcessInfo processInfo] operatingSystemVersion];
-    PXLog(@"Detected iOS version: %ld.%ld.%ld", 
-          (long)osVersion.majorVersion, 
-          (long)osVersion.minorVersion, 
-          (long)osVersion.patchVersion);
-          
-    // Special handling for iOS 16+
-    if (osVersion.majorVersion >= 16) {
-        PXLog(@"iOS 16+ detected, enabling compatibility mode");
+    // Detect the physical iOS runtime. Reporting getters may intentionally expose
+    // an upward profile and must never drive tweak-internal capability decisions.
+    NSString *physicalOSVersion = PXRealRuntimeIOSVersion();
+    PXLog(@"Detected physical iOS version: %@", physicalOSVersion ?: @"unknown");
+
+    // Special handling for iOS 16+ uses the physical runtime only.
+    if (PXRealRuntimeIOSVersionIsAtLeast(@"16.0")) {
+        PXLog(@"Physical iOS 16+ detected, enabling compatibility mode");
     }
     
     // Detect which hook system is being used (coordinator uses MSHookFunction on both Substrate and ElleKit)

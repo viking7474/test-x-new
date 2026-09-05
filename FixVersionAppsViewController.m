@@ -1,4 +1,5 @@
 #import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 #import "FixVersionAppsViewController.h"
 #import <objc/runtime.h>
 
@@ -14,7 +15,6 @@
 @end
 
 @interface FixVersionAppsViewController () <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
-@property (nonatomic, strong) NSUserDefaults *securitySettings;
 @property (nonatomic, strong) NSMutableSet<NSString *> *selectedBundleIDs;
 @property (nonatomic, strong) NSArray<NSDictionary *> *installedApps;
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredApps;
@@ -27,8 +27,7 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        NSArray *saved = [_securitySettings objectForKey:@"fixVersionApps"];
+        NSArray *saved = PXReadSecuritySetting(@"fixVersionApps");
         if ([saved isKindOfClass:[NSArray class]]) {
             _selectedBundleIDs = [NSMutableSet setWithArray:(NSArray *)saved];
         } else {
@@ -78,12 +77,22 @@
 
 - (void)doneTapped {
     NSArray *toSave = [[self.selectedBundleIDs allObjects] sortedArrayUsingSelector:@selector(compare:)];
-    [self.securitySettings setObject:toSave forKey:@"fixVersionApps"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecuritySetting(@"fixVersionApps", toSave, &error)) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Fix Version"
+                                                                       message:@"Could not save the selected app list."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
 
     [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.fixVersionAppsChanged"
                                                         object:nil
                                                       userInfo:@{ @"count": @(toSave.count) }];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
     [self.navigationController popViewControllerAnimated:YES];
 }
 

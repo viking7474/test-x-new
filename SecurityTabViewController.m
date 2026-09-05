@@ -4434,7 +4434,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)showFixVersionInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Fix Version"
-                                                                   message:@"Runtime-capped OS version for selected apps.\n\nIf an app crashes when kern.osproductversion is spoofed, enable Fix Version and add that app to the list."
+                                                                   message:@"Hybrid Upward keeps the profile iOS version on reporting/fingerprint surfaces while real UIKit, dyld and availability stay tied to the physical runtime.\n\nFor selected apps, Fix Version returns the physical iOS version/build across OS-reporting surfaces to prevent apps that manually branch on version strings from entering unavailable APIs. Other spoofed identities remain active."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -4452,6 +4452,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.fixVersionChanged"
                                                         object:nil
                                                       userInfo:@{ @"enabled": @(enabled) }];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
     [self updateSecurityHeroCount];
 
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];

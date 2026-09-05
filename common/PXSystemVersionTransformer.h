@@ -21,6 +21,17 @@ PXSystemVersionProjectionFromSnapshot(PXIdentitySnapshot * _Nullable snapshot);
 FOUNDATION_EXPORT PXSystemVersionProjection * _Nullable
 PXCurrentSystemVersionProjection(void);
 
+/// Per-app reporting projection. Normal apps receive the configured profile
+/// version/build even for upward spoofing. Apps selected by Fix Version receive
+/// the physical runtime version/build while the rest of their profile stays active.
+FOUNDATION_EXPORT PXSystemVersionProjection * _Nullable
+PXCurrentReportingSystemVersionProjectionForBundle(NSString * _Nullable bundleID);
+
+/// Physical/native compatibility projection retained for kernel/runtime safety.
+/// Upward profiles are clamped to the real runtime pair.
+FOUNDATION_EXPORT PXSystemVersionProjection * _Nullable
+PXCurrentNativeSafeSystemVersionProjection(void);
+
 /// Matches canonical and rootless/preboot SystemVersion.plist paths by components.
 FOUNDATION_EXPORT BOOL PXIsSystemVersionPlistPath(NSString * _Nullable path);
 

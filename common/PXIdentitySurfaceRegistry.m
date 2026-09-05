@@ -1,4 +1,5 @@
 #import "PXIdentitySurfaceRegistry.h"
+#import "PXRuntimeOSCompatibility.h"
 
 @interface PXIdentitySurfaceEntry ()
 @property (nonatomic, copy, readwrite) NSString *canonicalKey;
@@ -137,7 +138,19 @@ PXIdentitySurfaceEntry *PXIdentitySurfaceEntryForKey(NSString *key, PXIdentitySu
 NSString *PXIdentitySurfaceResolveValue(PXIdentitySurfaceEntry *entry, NSDictionary *deviceIDs) {
     if (![entry isKindOfClass:[PXIdentitySurfaceEntry class]]) return nil;
     if (entry.constantValue.length) return entry.constantValue;
-    id raw = [deviceIDs isKindOfClass:[NSDictionary class]] ? deviceIDs[entry.deviceIDKey] : nil;
+    if (![deviceIDs isKindOfClass:[NSDictionary class]]) return nil;
+
+    // ProductVersion/ProductBuildVersion are reporting identity surfaces. Preserve
+    // the configured profile (including upward spoofing) by default; Fix Version
+    // selected apps receive the physical runtime pair. This policy is centralized
+    // so MobileGestalt, ManagedConfiguration and private wrappers cannot drift.
+    if ([entry.toggle isEqualToString:@"IOSVersion"] &&
+        ([entry.deviceIDKey isEqualToString:@"IOSVersion"] || [entry.deviceIDKey isEqualToString:@"IOSBuild"])) {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        return PXReportingIOSValueForDeviceIDKey(entry.deviceIDKey, deviceIDs, bundleID);
+    }
+
+    id raw = deviceIDs[entry.deviceIDKey];
     if (![raw isKindOfClass:[NSString class]]) return nil;
     NSString *value = (NSString *)raw;
     return [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length ? value : nil;

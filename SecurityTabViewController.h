@@ -63,7 +63,7 @@
 @property (nonatomic, strong) UISwitch *appVersionSpoofingToggleSwitch;
 @property (nonatomic, strong) UIButton *appVersionSpoofingAccessButton;
 
-// Fix Version (runtime-capped) control
+// Fix Version (per-app OS-reporting runtime fallback) control
 @property (nonatomic, strong) UILabel *fixVersionLabel;
 @property (nonatomic, strong) UISwitch *fixVersionToggleSwitch;
 @property (nonatomic, strong) UIButton *fixVersionAppsButton;

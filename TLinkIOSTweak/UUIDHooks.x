@@ -7,6 +7,7 @@
 #import "DyldCacheUUIDManager.h"
 #import "PXScope.h"
 #import "PXNativeHookCoordinator.h"
+#import "PXRuntimeOSCompatibility.h"
 #import <dlfcn.h>
 #import <substrate.h>
 #import <mach-o/dyld.h>
@@ -18,8 +19,9 @@
 #import <string.h>
 #import <errno.h>
 
-// Macro for iOS version checking
-#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v) ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
+// Tweak-internal capability checks must use the physical runtime, never the
+// spoofable UIDevice reporting surface.
+#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v) (PXRealRuntimeIOSVersionIsAtLeast((v)))
 
 // Global variables to track state
 static NSMutableDictionary *cachedBundleDecisions = nil;

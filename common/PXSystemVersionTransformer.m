@@ -1,6 +1,7 @@
 #import "PXSystemVersionTransformer.h"
 #import "PXIdentitySnapshot.h"
 #import "PXDeviceProfileSchema.h"
+#import "PXRuntimeOSCompatibility.h"
 
 @interface PXSystemVersionProjection ()
 @property (nonatomic, copy, readwrite) NSString *productVersion;
@@ -38,6 +39,59 @@ PXSystemVersionProjection *PXSystemVersionProjectionFromSnapshot(PXIdentitySnaps
 PXSystemVersionProjection *PXCurrentSystemVersionProjection(void) {
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     return PXSystemVersionProjectionFromSnapshot(snapshot);
+}
+
+PXSystemVersionProjection *PXCurrentReportingSystemVersionProjectionForBundle(NSString *bundleID) {
+    PXSystemVersionProjection *configured = PXCurrentSystemVersionProjection();
+    if (!configured) return nil;
+
+    NSString *reportedVersion = nil;
+    NSString *reportedBuild = nil;
+    if (!PXReportingIOSVersionBuildForBundle(configured.productVersion,
+                                              configured.productBuildVersion,
+                                              bundleID,
+                                              &reportedVersion,
+                                              &reportedBuild)) {
+        return nil;
+    }
+    if ([reportedVersion isEqualToString:configured.productVersion] &&
+        [reportedBuild isEqualToString:configured.productBuildVersion]) {
+        return configured;
+    }
+
+    PXSystemVersionProjection *projection = [[PXSystemVersionProjection alloc] init];
+    projection.productVersion = reportedVersion;
+    projection.productBuildVersion = reportedBuild;
+    projection.releaseType = configured.releaseType;
+    projection.profileID = configured.profileID;
+    projection.generation = configured.generation;
+    return projection;
+}
+
+PXSystemVersionProjection *PXCurrentNativeSafeSystemVersionProjection(void) {
+    PXSystemVersionProjection *configured = PXCurrentSystemVersionProjection();
+    if (!configured) return nil;
+
+    NSString *safeVersion = nil;
+    NSString *safeBuild = nil;
+    if (!PXNativeSafeIOSVersionBuild(configured.productVersion,
+                                     configured.productBuildVersion,
+                                     &safeVersion,
+                                     &safeBuild)) {
+        return nil;
+    }
+    if ([safeVersion isEqualToString:configured.productVersion] &&
+        [safeBuild isEqualToString:configured.productBuildVersion]) {
+        return configured;
+    }
+
+    PXSystemVersionProjection *projection = [[PXSystemVersionProjection alloc] init];
+    projection.productVersion = safeVersion;
+    projection.productBuildVersion = safeBuild;
+    projection.releaseType = configured.releaseType;
+    projection.profileID = configured.profileID;
+    projection.generation = configured.generation;
+    return projection;
 }
 
 BOOL PXIsSystemVersionPlistPath(NSString *path) {

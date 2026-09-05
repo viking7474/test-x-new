@@ -16,6 +16,7 @@
 #import "PXPaths.h"
 #import "PXIdentitySnapshot.h"
 #import "PXSystemVersionTransformer.h"
+#import "PXRuntimeOSCompatibility.h"
 #import "PXUserAgentNormalizer.h"
 #import "IdentifierManager.h"
 #import "PXFileDebug.h"
@@ -819,20 +820,23 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
         
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
-            NSString *spoofedVersion = getSpoofedSystemVersion();
-            if (spoofedVersion) {
+            NSDictionary *versionInfo = getIOSVersionInfo();
+            NSString *configuredVersion = versionInfo[@"version"];
+            NSString *configuredBuild = versionInfo[@"build"];
+            NSString *reportedVersion = nil;
+            NSString *reportedBuild = nil;
+            if (PXReportingIOSVersionBuildForBundle(configuredVersion, configuredBuild, bundleID, &reportedVersion, &reportedBuild)) {
                 NSString *originalVersion = %orig;
-                
-                // Only log occasionally to reduce overhead
+
+                // Reporting surfaces preserve the configured profile by default.
+                // Fix Version-selected apps receive the physical runtime instead.
                 if (lastSystemVersionCallTime == 0 || (currentTime - lastSystemVersionCallTime) > THROTTLE_INTERVAL_NSEC * 10) {
-                    IOSVERSION_LOG(@"UIDevice.systemVersion: %@ → %@", originalVersion, spoofedVersion);
+                    IOSVERSION_LOG(@"UIDevice.systemVersion: %@ → %@ (configured=%@)", originalVersion, reportedVersion, configuredVersion);
                 }
-                
-                // Update cache and timestamp
+
                 lastSystemVersionCallTime = currentTime;
-                cachedSystemVersionResult = spoofedVersion;
-                
-                return spoofedVersion;
+                cachedSystemVersionResult = reportedVersion;
+                return reportedVersion;
             }
         }
         
@@ -859,20 +863,23 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
-            NSString *spoofedVersion = getSpoofedSystemVersion();
-            if (spoofedVersion) {
+            NSDictionary *versionInfo = getIOSVersionInfo();
+            NSString *reportedVersion = nil;
+            NSString *reportedBuild = nil;
+            if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, &reportedBuild)) {
                 NSOperatingSystemVersion originalVersion = %orig;
-                NSOperatingSystemVersion spoofedStructVersion = getOperatingSystemVersion(spoofedVersion);
-                
-                NSLog(@"[iosversion] NSProcessInfo.operatingSystemVersion: %ld.%ld.%ld → %ld.%ld.%ld", 
-                      (long)originalVersion.majorVersion, 
-                      (long)originalVersion.minorVersion, 
+                NSOperatingSystemVersion reportedStructVersion = getOperatingSystemVersion(reportedVersion);
+
+                NSLog(@"[iosversion] NSProcessInfo.operatingSystemVersion: %ld.%ld.%ld → %ld.%ld.%ld (configured=%@)",
+                      (long)originalVersion.majorVersion,
+                      (long)originalVersion.minorVersion,
                       (long)originalVersion.patchVersion,
-                      (long)spoofedStructVersion.majorVersion, 
-                      (long)spoofedStructVersion.minorVersion, 
-                      (long)spoofedStructVersion.patchVersion);
-                
-                return spoofedStructVersion;
+                      (long)reportedStructVersion.majorVersion,
+                      (long)reportedStructVersion.minorVersion,
+                      (long)reportedStructVersion.patchVersion,
+                      versionInfo[@"version"]);
+
+                return reportedStructVersion;
             }
         }
     } @catch (NSException *e) {
@@ -881,57 +888,9 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
     return %orig;
 }
 
-// Hook isOperatingSystemAtLeastVersion to handle our spoofed version
-- (BOOL)isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion)version {
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            NSString *spoofedVersion = getSpoofedSystemVersion();
-            if (spoofedVersion) {
-                NSOperatingSystemVersion spoofedStructVersion = getOperatingSystemVersion(spoofedVersion);
-
-                // Feature gate: never claim OS capabilities above the *real* device OS.
-                // systemVersion / operatingSystemVersion still return the full spoof for
-                // fingerprint display; this only blocks code paths that would load
-                // unavailable frameworks (e.g. WidgetKit on iOS 13 after spoofing 14+).
-                static NSOperatingSystemVersion realOS = {0, 0, 0};
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    NSDictionary *sv = [NSDictionary dictionaryWithContentsOfFile:
-                                        @"/System/Library/CoreServices/SystemVersion.plist"];
-                    NSString *ver = [sv[@"ProductVersion"] isKindOfClass:[NSString class]] ? sv[@"ProductVersion"] : nil;
-                    if (ver.length) {
-                        NSArray *parts = [ver componentsSeparatedByString:@"."];
-                        if (parts.count > 0) realOS.majorVersion = [parts[0] integerValue];
-                        if (parts.count > 1) realOS.minorVersion = [parts[1] integerValue];
-                        if (parts.count > 2) realOS.patchVersion = [parts[2] integerValue];
-                    }
-                });
-
-                NSOperatingSystemVersion effective = spoofedStructVersion;
-                BOOL spoofAboveReal =
-                    (effective.majorVersion > realOS.majorVersion) ||
-                    (effective.majorVersion == realOS.majorVersion && effective.minorVersion > realOS.minorVersion) ||
-                    (effective.majorVersion == realOS.majorVersion && effective.minorVersion == realOS.minorVersion &&
-                     effective.patchVersion > realOS.patchVersion);
-                if (spoofAboveReal && realOS.majorVersion > 0) {
-                    effective = realOS;
-                }
-
-                BOOL result = (effective.majorVersion > version.majorVersion) ||
-                             ((effective.majorVersion == version.majorVersion) &&
-                              (effective.minorVersion > version.minorVersion)) ||
-                             ((effective.majorVersion == version.majorVersion) &&
-                              (effective.minorVersion == version.minorVersion) &&
-                              (effective.patchVersion >= version.patchVersion));
-                return result;
-            }
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[iosversion] Error in isOperatingSystemAtLeastVersion hook: %@", e);
-    }
-    return %orig;
-}
+// Availability/capability checks are intentionally not hooked. Reporting getters
+// may expose an upward profile, but UIKit/dyld/compiler availability must continue
+// to reflect the physical runtime.
 
 // Additional method to hook for getting raw operating system version string
 - (NSString *)operatingSystemVersionString {
@@ -939,16 +898,16 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
             NSDictionary *versionInfo = getIOSVersionInfo();
-            if (versionInfo && versionInfo[@"version"]) {
+            NSString *reportedVersion = nil;
+            NSString *reportedBuild = nil;
+            if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reportedVersion, &reportedBuild)) {
                 NSString *originalVersion = %orig;
-                NSString *spoofedVersion = [NSString stringWithFormat:@"Version %@ (Build %@)", 
-                                           versionInfo[@"version"], 
-                                           versionInfo[@"build"]];
-                
-                IOSVERSION_LOG(@"NSProcessInfo.operatingSystemVersionString: %@ → %@", 
-                      originalVersion, spoofedVersion);
-                      
-                return spoofedVersion;
+                NSString *nativeVersionString = [NSString stringWithFormat:@"Version %@ (Build %@)", reportedVersion, reportedBuild];
+
+                IOSVERSION_LOG(@"NSProcessInfo.operatingSystemVersionString: %@ → %@ (configured=%@/%@)",
+                      originalVersion, nativeVersionString, versionInfo[@"version"], versionInfo[@"build"]);
+
+                return nativeVersionString;
             }
         }
     } @catch (NSException *e) {
@@ -1093,7 +1052,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 
         if (shouldSpoofForBundle(bundleID) && applicationNameForUserAgent) {
             NSString *spoofedVersion = getSpoofedSystemVersion();
-            NSString *originalVersion = [[UIDevice currentDevice] systemVersion];
+            NSString *originalVersion = PXRealRuntimeIOSVersion() ?: @"";
             
             if (spoofedVersion) {
                 NSMutableString *modifiedName = [applicationNameForUserAgent mutableCopy];
@@ -1160,7 +1119,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                     return;
                 }
                 NSString *spoofedVersion = getSpoofedSystemVersion();
-                NSString *originalVersion = [[UIDevice currentDevice] systemVersion];
+                NSString *originalVersion = PXRealRuntimeIOSVersion() ?: @"";
                 
                 if (spoofedVersion) {
                     NSMutableString *modifiedValue = [value mutableCopy];
@@ -1223,7 +1182,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                 return originalUA;
             }
             NSString *spoofedVersion = getSpoofedSystemVersion();
-            NSString *originalVersion = [[UIDevice currentDevice] systemVersion];
+            NSString *originalVersion = PXRealRuntimeIOSVersion() ?: @"";
             
             if (spoofedVersion && originalUA) {
                 NSMutableString *modifiedUA = [originalUA mutableCopy];
@@ -1265,7 +1224,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                 return originalUA;
             }
             NSString *spoofedVersion = getSpoofedSystemVersion();
-            NSString *originalVersion = [[UIDevice currentDevice] systemVersion];
+            NSString *originalVersion = PXRealRuntimeIOSVersion() ?: @"";
             
             if (spoofedVersion && originalUA) {
                 NSMutableString *modifiedUA = [originalUA mutableCopy];
@@ -1299,7 +1258,7 @@ CFDictionaryRef replaced_CFCopySystemVersionDictionary(void) {
             IdentifierManager *manager = [IdentifierManager sharedManager];
             if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return original;
 
-            PXSystemVersionProjection *projection = PXCurrentSystemVersionProjection();
+            PXSystemVersionProjection *projection = PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
             if (!projection) return original;
             NSDictionary *base = original ? (__bridge NSDictionary *)original : @{};
             NSDictionary *transformed = PXTransformSystemVersionDictionary(base, projection);
@@ -1544,23 +1503,13 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
                 }
             }
 
-            // Handle system version info in Info.plist queries
-            if ([key isEqualToString:@"MinimumOSVersion"] || 
+            // MinimumOSVersion / DTPlatformVersion / DTSDKName describe the app binary's
+            // build contract, not the device runtime. Never rewrite them from the spoofed
+            // OS profile: doing so can select code paths for frameworks absent on this iOS.
+            if ([key isEqualToString:@"MinimumOSVersion"] ||
                 [key isEqualToString:@"DTPlatformVersion"] ||
                 [key isEqualToString:@"DTSDKName"]) {
-                
-                NSString *spoofedVersion = getSpoofedSystemVersion();
-                if (spoofedVersion) {
-                    // For SDK and platform keys, add iOS prefix if needed
-                    if ([key isEqualToString:@"DTPlatformVersion"] || 
-                        [key isEqualToString:@"DTSDKName"]) {
-                        if (![spoofedVersion hasPrefix:@"iOS"]) {
-                            return [NSString stringWithFormat:@"iOS%@", spoofedVersion];
-                        }
-                        return spoofedVersion;
-                    }
-                    return spoofedVersion;
-                }
+                return %orig;
             }
         }
     } @catch (NSException *e) {
@@ -1625,29 +1574,15 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
                 }
             }
 
-            // Check for system version keys
-            if (CFEqual(key, CFSTR("MinimumOSVersion")) || 
+            // App build metadata is not a device identity surface. Preserve the
+            // binary's real deployment/SDK contract so legacy runtimes do not enter
+            // newer-framework paths based on spoofed profile data.
+            if (CFEqual(key, CFSTR("MinimumOSVersion")) ||
                 CFEqual(key, CFSTR("DTPlatformVersion")) ||
                 CFEqual(key, CFSTR("DTSDKName"))) {
-                
-                NSString *spoofedVersion = getSpoofedSystemVersion();
-                if (spoofedVersion) {
-                    // Log what we're spoofing
-                    NSLog(@"[iosversion] 💉 Spoofing %@ for bundle %@ to %@", 
-                          (__bridge NSString*)key, nsBundleID, spoofedVersion);
-                    
-                    // Create a CFString from our spoofed version
-                    if (CFEqual(key, CFSTR("DTPlatformVersion")) || 
-                        CFEqual(key, CFSTR("DTSDKName"))) {
-                        
-                        if (![spoofedVersion hasPrefix:@"iOS"]) {
-                            NSString *prefixedVersion = [NSString stringWithFormat:@"iOS%@", spoofedVersion];
-                            return PXIOSVersionBorrowedInfoString(prefixedVersion);
-                        }
-                    }
-                    
-                    return PXIOSVersionBorrowedInfoString(spoofedVersion);
-                }
+                return original_CFBundleGetValueForInfoDictionaryKey
+                    ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
+                    : NULL;
             }
         }
     } @catch (NSException *e) {
@@ -1660,9 +1595,10 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
     } else {
         // For some keys, provide default values
         if (key && (CFEqual(key, CFSTR("MinimumOSVersion")))) {
-            // Return the current device's actual iOS version for MinimumOSVersion
-            NSString *actualVersion = [[UIDevice currentDevice] systemVersion];
-            return PXIOSVersionBorrowedInfoString(actualVersion);
+            // Fallback only when the original symbol is unavailable. Use the
+            // low-level physical runtime reader, never the hooked UIDevice surface.
+            NSString *actualVersion = PXRealRuntimeIOSVersion();
+            return actualVersion.length ? PXIOSVersionBorrowedInfoString(actualVersion) : NULL;
         }
         
         NSLog(@"[iosversion] ℹ️ No original function for CFBundleGetValueForInfoDictionaryKey, returning NULL");
@@ -1942,7 +1878,7 @@ static PXSystemVersionProjection *PXScopedSystemVersionProjection(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     IdentifierManager *manager = [IdentifierManager sharedManager];
     if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return nil;
-    return PXCurrentSystemVersionProjection();
+    return PXCurrentReportingSystemVersionProjectionForBundle(bundleID);
 }
 
 static NSDictionary *spoofSystemVersionPlist(NSDictionary *originalPlist) {
