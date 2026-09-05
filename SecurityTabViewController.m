@@ -3,6 +3,7 @@
 #import "FixVersionAppsViewController.h"
 #import "TLinkIOSLogging.h"
 #import "IdentifierManager.h"
+#import "PXPaths.h"
 #import "AppVersionSpoofingViewController.h"
 #import "DeviceSpecificSpoofingViewController.h"
 #import "IPStatusViewController.h"
@@ -889,10 +890,15 @@
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refreshPinnedCoordinates];
-    
+
+    // Detail screens can mutate Canvas settings while this controller remains alive.
+    // Refresh from the authoritative plist/IdentifierManager before becoming visible.
+    [self refreshCanvasFingerprintingControlState];
+    [self updateSecurityHeroCount];
+
     // Refresh network identifiers from the current profile
     [self refreshNetworkIdentifiers];
-    
+
     // Resume matrix animation if enabled
     if (self.matrixRainEnabled) {
         [self.matrixRainView startAnimation];
@@ -1022,7 +1028,11 @@
                                              selector:@selector(fixVersionAppsChanged:)
                                                  name:@"com.hydra.tlinkios.fixVersionAppsChanged"
                                                object:nil];
-    
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(canvasFingerprintingSettingChanged:)
+                                                 name:@"com.hydra.tlinkios.toggleCanvasFingerprintProtection"
+                                               object:nil];
+
     // Create scroll view container
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1276,6 +1286,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)fixVersionAppsChanged:(NSNotification *)note {
     [self refreshFixVersionAppsButtonTitle];
+}
+
+- (void)canvasFingerprintingSettingChanged:(NSNotification *)note {
+    [self refreshCanvasFingerprintingControlState];
+    [self updateSecurityHeroCount];
 }
 
 - (void)setupMatrixControl:(UIView *)contentView {
@@ -5031,6 +5046,38 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     ]];
 }
 
+- (BOOL)currentCanvasFingerprintingEnabled {
+    Class managerClass = NSClassFromString(@"IdentifierManager");
+    if (managerClass) {
+        id manager = [managerClass sharedManager];
+        if ([manager respondsToSelector:@selector(isCanvasFingerprintProtectionEnabled)]) {
+            return [manager isCanvasFingerprintProtectionEnabled];
+        }
+    }
+
+    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXSecuritySettingsPath()];
+    id primary = settings[@"canvasFingerprintingEnabled"];
+    if (primary) return [primary boolValue];
+    id legacy = settings[@"CanvasFingerprint"];
+    if (legacy) return [legacy boolValue];
+
+    primary = [self.securitySettings objectForKey:@"canvasFingerprintingEnabled"];
+    if (primary) return [primary boolValue];
+    legacy = [self.securitySettings objectForKey:@"CanvasFingerprint"];
+    return legacy ? [legacy boolValue] : NO;
+}
+
+- (void)refreshCanvasFingerprintingControlState {
+    BOOL enabled = [self currentCanvasFingerprintingEnabled];
+    if (self.canvasFingerprintingToggleSwitch) {
+        [self.canvasFingerprintingToggleSwitch setOn:enabled animated:NO];
+    }
+    if (self.canvasFingerprintingResetButton) {
+        self.canvasFingerprintingResetButton.enabled = enabled;
+        self.canvasFingerprintingResetButton.alpha = enabled ? 1.0 : 0.5;
+    }
+}
+
 - (void)setupCanvasFingerprintingControl:(UIView *)contentView {
     // Create a glassmorphic control with EXACT same style as other cells (like VPN/PROXY Detection Bypass)
     UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
@@ -5081,45 +5128,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     bottomRowContainer.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:bottomRowContainer];
     
-    // Initialize toggle state FIRST - before setting up the reset button
-    // Get initial toggle state from multiple sources to ensure proper state restoration
-    
-    // 1. First check NSUserDefaults directly (most reliable for persistence)
-    BOOL toggleEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"canvasFingerprintingEnabled"];
-    // If not found, check alternate key name
-    if (![[NSUserDefaults standardUserDefaults] objectForKey:@"canvasFingerprintingEnabled"]) {
-        toggleEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"CanvasFingerprint"];
-    }
-    
-    // 2. Then check security settings
-    if (![self.securitySettings objectForKey:@"canvasFingerprintingEnabled"] && 
-        ![self.securitySettings objectForKey:@"CanvasFingerprint"]) {
-        // If not in standard defaults, check security settings
-        toggleEnabled = [self.securitySettings boolForKey:@"canvasFingerprintingEnabled"] || 
-                       [self.securitySettings boolForKey:@"CanvasFingerprint"];
-    }
-    
-    // 3. Then check plist file directly
-    if (!toggleEnabled) {
-        NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-        NSDictionary *settingsDict = [NSDictionary dictionaryWithContentsOfFile:securitySettingsPath];
-        if (settingsDict) {
-            toggleEnabled = [settingsDict[@"canvasFingerprintingEnabled"] boolValue] || 
-                           [settingsDict[@"CanvasFingerprint"] boolValue];
-        }
-    }
-    
-    // 4. Finally, check IdentifierManager (authoritative source)
-    Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
-    if (identifierManagerClass) {
-        id manager = [identifierManagerClass sharedManager];
-        if ([manager respondsToSelector:@selector(isCanvasFingerprintProtectionEnabled)]) {
-            toggleEnabled = [manager isCanvasFingerprintProtectionEnabled];
-            // Log the state we're getting from IdentifierManager
-            PXLog(@"[SecurityTab] 🎨 Canvas Fingerprinting: Loading state %@ from IdentifierManager", 
-                  toggleEnabled ? @"ENABLED" : @"DISABLED");
-        }
-    }
+    // Load the authoritative state once; explicit OFF values must not fall through
+    // to stale compatibility stores.
+    BOOL toggleEnabled = [self currentCanvasFingerprintingEnabled];
 
     // Reset button with icon (styled like other buttons in the app)
     self.canvasFingerprintingResetButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -5222,41 +5233,27 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)canvasFingerprintingToggleSwitchChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
     
-    // ONLY update the plist file - THE SINGLE SOURCE OF TRUTH
-    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    settingsDict[@"canvasFingerprintingEnabled"] = @(enabled);
-    settingsDict[@"CanvasFingerprint"] = @(enabled); // Also use old key for compatibility
-    
-    // Ensure the plist is written atomically and with proper permissions
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
-                                                                  format:NSPropertyListXMLFormat_v1_0
-                                                                 options:0
-                                                                   error:nil];
-    if (plistData) {
-        [plistData writeToFile:securitySettingsPath atomically:YES];
-        PXLog(@"[SecurityTab] 🎨 Canvas Fingerprinting: Updated plist at %@", securitySettingsPath);
-    }
-    
-    // 5. Call the IdentifierManager method to handle the toggle
+    BOOL persistenceSuccess = NO;
     Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
     if (identifierManagerClass) {
         id manager = [identifierManagerClass sharedManager];
         if ([manager respondsToSelector:@selector(setCanvasFingerprintProtection:)]) {
-            [manager setCanvasFingerprintProtection:enabled];
-            PXLog(@"[SecurityTab] 🎨 Canvas Fingerprinting: Updated via IdentifierManager");
+            persistenceSuccess = [manager setCanvasFingerprintProtection:enabled];
         }
     }
-    
-    // 6. Update UI
-    // Enable/disable reset button based on toggle state
-    self.canvasFingerprintingResetButton.enabled = enabled;
-    if (enabled) {
-        self.canvasFingerprintingResetButton.alpha = 1.0;
-    } else {
-        self.canvasFingerprintingResetButton.alpha = 0.5;
+
+    if (!persistenceSuccess) {
+        [sender setOn:!enabled animated:YES];
+        [self refreshCanvasFingerprintingControlState];
+        [self showToastWithMessage:@"Could not save Canvas protection setting"];
+        PXLog(@"[SecurityTab] ❌ Canvas Fingerprinting persistence failed");
+        return;
     }
-    
+
+    NSString *securitySettingsPath = PXSecuritySettingsPath();
+    self.canvasFingerprintingResetButton.enabled = enabled;
+    self.canvasFingerprintingResetButton.alpha = enabled ? 1.0 : 0.5;
+
     // 7. Send notifications with enhanced information
     NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
     [userInfo setObject:@(enabled) forKey:@"enabled"];
@@ -5307,7 +5304,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
-    
+    [self updateSecurityHeroCount];
+
     PXLog(@"[SecurityTab] 🎨 Canvas Fingerprinting %@: Persistent settings updated across all domains", 
            enabled ? @"ENABLED" : @"DISABLED");
 }
@@ -5347,22 +5345,27 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         }];
     }];
     
-    // Reset the noise patterns using IdentifierManager
+    BOOL success = NO;
     Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
     if (identifierManagerClass) {
         id manager = [identifierManagerClass sharedManager];
-        if ([manager respondsToSelector:@selector(resetCanvasNoise)]) {
+        if ([manager respondsToSelector:@selector(resetCanvasNoiseAndPersist)]) {
+            success = [manager resetCanvasNoiseAndPersist];
+        } else if ([manager respondsToSelector:@selector(resetCanvasNoise)]) {
             [manager resetCanvasNoise];
-            
-            // Show toast notification instead of alert for consistency
-            [self showToastWithMessage:@"Canvas Fingerprint Noise Patterns Reset"];
-            
-            // Add haptic feedback
-            UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-            [generator prepare];
-            [generator impactOccurred];
+            success = YES;
         }
     }
+
+    if (!success) {
+        [self showToastWithMessage:@"Could not reset Canvas noise"];
+        return;
+    }
+
+    [self showToastWithMessage:@"Canvas Noise Seed Reset"];
+    UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [generator prepare];
+    [generator impactOccurred];
 }
 
 #pragma mark - Domain Blocking Methods

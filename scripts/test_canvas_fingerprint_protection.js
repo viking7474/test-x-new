@@ -230,6 +230,8 @@ for (const token of [
     "__wxInstallMainFailClosed",
     "__wxImageSeed",
     "__wxNoisyCanvasCopy",
+    "__weaponx_fp_update__",
+    "__wxRuntimeEnabled",
     "WebGL2RenderingContext",
     "OffscreenCanvas",
     "__wxPatchWorkerConstructor(\"Worker\")",
@@ -239,6 +241,7 @@ for (const token of [
     assert.ok(source.includes(token), "missing fingerprint protection invariant: " + token);
 }
 source = source
+    .split("__WX_NOISE_RATE__").join("0.02")
     .replace("__WX_BASE_SEED__", "305419896")
     .replace("__WX_WEBGL_VENDOR_JSON__", JSON.stringify("Apple"))
     .replace("__WX_WEBGL_RENDERER_JSON__", JSON.stringify("Apple GPU"))
@@ -275,6 +278,21 @@ async function main() {
     const firstMetrics = context2D.measureText("WeaponX deterministic metrics");
     const secondMetrics = context2D.measureText("WeaponX deterministic metrics");
     assert.strictEqual(firstMetrics.width, secondMetrics.width, "measureText noise must be deterministic");
+
+    assert.strictEqual(typeof context.__weaponx_fp_update__, "function", "runtime Canvas config updater must be exposed");
+    const runtimeCanvas = new context.HTMLCanvasElement(2, 2);
+    for (let index = 0; index < runtimeCanvas._pixels.length; index++) {
+        runtimeCanvas._pixels[index] = (index * 31 + 17) & 0xff;
+    }
+    const runtimeRawURL = "data:mock," + Buffer.from(runtimeCanvas._pixels).toString("hex");
+    context.__weaponx_fp_update__(0x11111111, 1.0, true);
+    const runtimeSeedOneURL = runtimeCanvas.toDataURL();
+    context.__weaponx_fp_update__(0x22222222, 1.0, true);
+    const runtimeSeedTwoURL = runtimeCanvas.toDataURL();
+    assert.notStrictEqual(runtimeSeedOneURL, runtimeSeedTwoURL, "reset seed must change the protected Canvas output");
+    context.__weaponx_fp_update__(0x22222222, 1.0, false);
+    assert.strictEqual(runtimeCanvas.toDataURL(), runtimeRawURL, "disabled WebKit scope must pass Canvas output through unchanged");
+    context.__weaponx_fp_update__(305419896, 0.02, true);
 
     canvas._pixels[0] += 7;
     assert.notStrictEqual(canvas.toDataURL(), firstURL, "different source content should produce different output");

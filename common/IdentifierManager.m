@@ -3238,19 +3238,20 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 - (BOOL)toggleCanvasFingerprintProtection {
     BOOL currentValue = [self isCanvasFingerprintProtectionEnabled];
     BOOL newValue = !currentValue;
-    
-    // Update settings
-    [self setCanvasFingerprintProtection:newValue];
-    
-    // Notify change
+
+    if (![self setCanvasFingerprintProtection:newValue]) {
+        PXLog(@"[WeaponX] ❌ Canvas Fingerprint Protection toggle persistence failed; keeping %@",
+              currentValue ? @"ENABLED" : @"DISABLED");
+        return currentValue;
+    }
+
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
         CFSTR("com.hydra.tlinkios.toggleCanvasFingerprint"),
         NULL, NULL, TRUE
     );
-    
+
     PXLog(@"[WeaponX] 🎨 Canvas Fingerprint Protection %@", newValue ? @"ENABLED" : @"DISABLED");
-    
     return newValue;
 }
 
@@ -3272,44 +3273,69 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 }
 
 - (BOOL)setCanvasFingerprintProtection:(BOOL)enabled {
-    // Read and update the plist file directly - SINGLE SOURCE OF TRUTH
     NSString *securitySettingsPath = PXSecuritySettingsPath();
     NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    
-    // Update with both key names for compatibility
+
     settingsDict[@"canvasFingerprintingEnabled"] = @(enabled);
     settingsDict[@"CanvasFingerprint"] = @(enabled);
-    
-    // Write back to the file
+
     BOOL success = [settingsDict writeToFile:securitySettingsPath atomically:YES];
-    
-    // Also update our in-memory settings to keep them in sync
-    if (success) {
-        NSMutableDictionary *updatedSettings = [self.settings mutableCopy];
-        updatedSettings[@"canvasFingerprintingEnabled"] = @(enabled);
-        updatedSettings[@"CanvasFingerprint"] = @(enabled);
-        self.settings = updatedSettings;
+    if (!success) {
+        PXLog(@"[WeaponX] ❌ Failed to persist Canvas Fingerprint Protection at %@", securitySettingsPath);
+        return NO;
     }
-    
-    // Notify about the change
+
+    NSMutableDictionary *updatedSettings = [self.settings mutableCopy] ?: [NSMutableDictionary dictionary];
+    updatedSettings[@"canvasFingerprintingEnabled"] = @(enabled);
+    updatedSettings[@"CanvasFingerprint"] = @(enabled);
+    self.settings = updatedSettings;
+
+    NSUserDefaults *securityDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+    [securityDefaults setBool:enabled forKey:@"canvasFingerprintingEnabled"];
+    [securityDefaults setBool:enabled forKey:@"CanvasFingerprint"];
+    [securityDefaults synchronize];
+
     CFNotificationCenterPostNotification(
         CFNotificationCenterGetDarwinNotifyCenter(),
         CFSTR("com.hydra.tlinkios.settings.changed"),
         NULL, NULL, TRUE
     );
-    
+
+    return YES;
+}
+
+- (BOOL)resetCanvasNoiseAndPersist {
+    NSString *securitySettingsPath = PXSecuritySettingsPath();
+    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
+    uint32_t nonce = [settingsDict[@"canvasNoiseSeedNonce"] unsignedIntValue];
+    nonce = nonce == 0xFFFFFFFFu ? 1u : nonce + 1u;
+    if (nonce == 0) nonce = 1u;
+    settingsDict[@"canvasNoiseSeedNonce"] = @(nonce);
+
+    BOOL success = [settingsDict writeToFile:securitySettingsPath atomically:YES];
+    if (!success) {
+        PXLog(@"[WeaponX] ❌ Failed to persist Canvas noise reset nonce at %@", securitySettingsPath);
+        return NO;
+    }
+
+    NSMutableDictionary *updatedSettings = [self.settings mutableCopy] ?: [NSMutableDictionary dictionary];
+    updatedSettings[@"canvasNoiseSeedNonce"] = @(nonce);
+    self.settings = updatedSettings;
+
+    NSUserDefaults *securityDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+    [securityDefaults setInteger:(NSInteger)nonce forKey:@"canvasNoiseSeedNonce"];
+    [securityDefaults synchronize];
+
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterPostNotification(center, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, TRUE);
+    CFNotificationCenterPostNotification(center, CFSTR("com.hydra.tlinkios.resetCanvasNoise"), NULL, NULL, TRUE);
+
+    PXLog(@"[WeaponX] 🎨 Canvas Fingerprint Noise patterns reset (nonce=%u)", nonce);
     return YES;
 }
 
 - (void)resetCanvasNoise {
-    // Post notification to reset canvas noise seeds
-    CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        CFSTR("com.hydra.tlinkios.resetCanvasNoise"),
-        NULL, NULL, TRUE
-    );
-    
-    PXLog(@"[WeaponX] 🎨 Canvas Fingerprint Noise patterns reset");
+    [self resetCanvasNoiseAndPersist];
 }
 
 @end

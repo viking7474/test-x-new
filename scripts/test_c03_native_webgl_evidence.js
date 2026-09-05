@@ -117,6 +117,7 @@ function extractFingerprintScript() {
 
 function renderFingerprintScript() {
     return extractFingerprintScript()
+        .split("__WX_NOISE_RATE__").join("0.02")
         .replace("__WX_BASE_SEED__", "305419896")
         .replace("__WX_WEBGL_VENDOR_JSON__", JSON.stringify("Profile Vendor"))
         .replace("__WX_WEBGL_RENDERER_JSON__", JSON.stringify("Profile Renderer"))

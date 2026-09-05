@@ -30,25 +30,64 @@ static void PXEnsureCanvasCache(void) {
     });
 }
 
-// Configuration for fingerprint noise
-static CGFloat kNoiseIntensity = 0.02;  // Default noise intensity (2% variation)
-static BOOL kConsistentNoise = YES;     // Whether to use consistent noise per session
+#pragma mark - Canvas Settings
+
+static NSDictionary *PXCanvasSettingsDictionary(void) {
+    NSArray<NSString *> *possiblePaths = @[
+        PXSecuritySettingsPath(),
+        @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
+        @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
+    ];
+    for (NSString *path in possiblePaths) {
+        if (!path.length) continue;
+        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (settings) return settings;
+    }
+    return @{};
+}
+
+static BOOL PXCanvasSettingBool(NSDictionary *settings, NSString *key, BOOL defaultValue) {
+    id value = settings[key];
+    return value ? [value boolValue] : defaultValue;
+}
+
+static NSInteger PXCanvasNoiseLevel(NSDictionary *settings) {
+    id raw = settings[@"canvasNoiseLevel"];
+    NSInteger level = raw ? [raw integerValue] : 1;
+    return MAX(0, MIN(3, level));
+}
+
+static CGFloat PXCanvasNoiseIntensityForLevel(NSInteger level) {
+    switch (MAX(0, MIN(3, level))) {
+        case 0: return 0.0;
+        case 1: return 0.02;
+        case 2: return 0.04;
+        case 3: return 0.08;
+        default: return 0.02;
+    }
+}
+
+static BOOL PXCanvasWebKitScopeEnabled(NSDictionary *settings) {
+    return PXCanvasSettingBool(settings, @"canvasWebKitNoiseEnabled", YES);
+}
+
+static BOOL PXCanvasNativeScopeEnabled(NSDictionary *settings) {
+    return PXCanvasSettingBool(settings, @"canvasNativeNoiseEnabled", NO);
+}
+
+static BOOL PXCanvasStableSeedEnabled(NSDictionary *settings) {
+    return PXCanvasSettingBool(settings, @"canvasStableSeedEnabled", YES);
+}
+
+static uint32_t PXCanvasSeedNonce(NSDictionary *settings) {
+    return (uint32_t)[settings[@"canvasNoiseSeedNonce"] unsignedIntValue];
+}
 
 #pragma mark - Helper Functions
 
 // Helper: Always read enablement from profile/plist, not IdentifierManager
 static BOOL isCanvasFingerprintProtectionEnabledForCurrentApp(void) {
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID) return NO;
-    NSArray *possiblePaths = @[@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
-                               @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
-                               @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
-    NSDictionary *settingsDict = nil;
-    for (NSString *path in possiblePaths) {
-        settingsDict = [NSDictionary dictionaryWithContentsOfFile:path];
-        if (settingsDict) break;
-    }
-    if (!settingsDict) return NO;
+    NSDictionary *settingsDict = PXCanvasSettingsDictionary();
     NSNumber *enabled = settingsDict[@"canvasFingerprintingEnabled"];
     if (!enabled) enabled = settingsDict[@"CanvasFingerprint"];
     return enabled ? [enabled boolValue] : NO;
@@ -63,12 +102,15 @@ static NSDictionary *PXReadCurrentDeviceIdsForFingerprint(void) {
     }
 }
 
-static uint32_t PXStableSeedForBundle(NSString *bundleID, NSDictionary *deviceIds) {
-    // FNV-1a 32-bit
+static NSInteger getNoiseSeedForBundle(NSString *bundleID);
+
+static uint32_t PXStableSeedForBundle(NSString *bundleID, NSDictionary *deviceIds, uint32_t nonce) {
+    // FNV-1a 32-bit. The persisted nonce is intentionally part of the seed so
+    // Reset Noise produces a genuinely new observable fingerprint.
     uint32_t h = 2166136261u;
     NSString *model = PXProfileString(deviceIds[@"DeviceModel"]) ?: @"";
     NSString *build = PXProfileString(deviceIds[@"IOSBuild"]) ?: @"";
-    NSString *s = [NSString stringWithFormat:@"%@|%@|%@", bundleID ?: @"", model, build];
+    NSString *s = [NSString stringWithFormat:@"%@|%@|%@|%u", bundleID ?: @"", model, build, nonce];
     NSData *data = [s dataUsingEncoding:NSUTF8StringEncoding];
     const uint8_t *bytes = (const uint8_t *)data.bytes;
     for (NSUInteger i = 0; i < data.length; i++) {
@@ -77,6 +119,14 @@ static uint32_t PXStableSeedForBundle(NSString *bundleID, NSDictionary *deviceId
     }
     if (h == 0) h = 1;
     return h;
+}
+
+static uint32_t PXEffectiveCanvasSeed(NSString *bundleID, NSDictionary *deviceIds, NSDictionary *settings) {
+    if (PXCanvasStableSeedEnabled(settings)) {
+        return PXStableSeedForBundle(bundleID, deviceIds ?: @{}, PXCanvasSeedNonce(settings));
+    }
+    uint32_t seed = (uint32_t)getNoiseSeedForBundle(bundleID);
+    return seed == 0 ? 1u : seed;
 }
 
 static BOOL PXParseResolutionString(NSString *res, NSInteger *outW, NSInteger *outH) {
@@ -172,7 +222,10 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
     NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
     if (!deviceIds) return nil;
 
-    uint32_t seed = PXStableSeedForBundle(bundleID, deviceIds);
+    NSDictionary *canvasSettings = PXCanvasSettingsDictionary();
+    if (!PXCanvasWebKitScopeEnabled(canvasSettings)) return nil;
+    uint32_t seed = PXEffectiveCanvasSeed(bundleID, deviceIds, canvasSettings);
+    CGFloat noiseRate = PXCanvasNoiseIntensityForLevel(PXCanvasNoiseLevel(canvasSettings));
 
     NSDictionary *webGLInfo = PXWebGLInfoFromDeviceIDs(deviceIds);
     NSString *webGLVendor = PXProfileString(webGLInfo[PXWebGLVendorKey]);
@@ -292,7 +345,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "    }\n"
          "\n"
          "    try {\n"
-         "        function __wxInstallScope(g, baseSeed, webGLVendor, webGLRenderer, webGLVersion, unmaskedVendor, unmaskedRenderer, maxTextureSize, maxRenderbufferSize) {\n"
+         "        function __wxInstallScope(g, baseSeed, webGLVendor, webGLRenderer, webGLVersion, unmaskedVendor, unmaskedRenderer, maxTextureSize, maxRenderbufferSize, initialNoiseRate) {\n"
          "            if (!g || g.__weaponx_fp_spoof__) return;\n"
          "            try {\n"
          "                Object.defineProperty(g, \"__weaponx_fp_spoof__\", {\n"
@@ -306,8 +359,23 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "            }\n"
          "\n"
          "            baseSeed = (baseSeed >>> 0) || 1;\n"
-         "            const __wxNoiseRate = 0.02;\n"
+         "            let __wxNoiseRate = Number(initialNoiseRate);\n"
+         "            if (!Number.isFinite(__wxNoiseRate)) __wxNoiseRate = __WX_NOISE_RATE__;\n"
+         "            __wxNoiseRate = Math.max(0, Math.min(1, __wxNoiseRate));\n"
+         "            let __wxRuntimeEnabled = true;\n"
          "            const __wx2DOriginals = [];\n"
+         "            try {\n"
+         "                Object.defineProperty(g, \"__weaponx_fp_update__\", {\n"
+         "                    value: function (nextSeed, nextNoiseRate, nextEnabled) {\n"
+         "                        baseSeed = (Number(nextSeed) >>> 0) || 1;\n"
+         "                        const parsedRate = Number(nextNoiseRate);\n"
+         "                        __wxNoiseRate = Number.isFinite(parsedRate) ? Math.max(0, Math.min(1, parsedRate)) : __wxNoiseRate;\n"
+         "                        __wxRuntimeEnabled = nextEnabled !== false;\n"
+         "                    },\n"
+         "                    configurable: false, enumerable: false, writable: false\n"
+         "                });\n"
+         "            } catch (_) {}\n"
+         "            function __wxEnabled() { return __wxRuntimeEnabled; }\n"
          "            const __wxAudioChannelCache = typeof WeakMap === \"function\" ? new WeakMap() : null;\n"
          "\n"
          "            function __wxMix32(hash, value) {\n"
@@ -397,6 +465,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                __wx2DOriginals.push({ proto: proto, getImageData: originalGetImageData });\n"
          "                proto.getImageData = function () {\n"
          "                    const imageData = originalGetImageData.apply(this, arguments);\n"
+         "                    if (!__wxEnabled()) return imageData;\n"
          "                    const x = Number(arguments[0]) || 0;\n"
          "                    const y = Number(arguments[1]) || 0;\n"
          "                    const width = imageData && imageData.width ? imageData.width : (Number(arguments[2]) || 0);\n"
@@ -408,6 +477,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    const originalMeasureText = proto.measureText;\n"
          "                    proto.measureText = function (text) {\n"
          "                        const result = originalMeasureText.apply(this, arguments);\n"
+         "                        if (!__wxEnabled()) return result;\n"
          "                        try {\n"
          "                            const key = [\n"
          "                                text,\n"
@@ -482,6 +552,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                const originalToBlob = typeof proto.toBlob === \"function\" ? proto.toBlob : null;\n"
          "                if (originalToDataURL) {\n"
          "                    proto.toDataURL = function () {\n"
+         "                        if (!__wxEnabled()) return originalToDataURL.apply(this, arguments);\n"
          "                        if ((Number(this.width) || 0) === 0 || (Number(this.height) || 0) === 0) {\n"
          "                            return originalToDataURL.apply(this, arguments);\n"
          "                        }\n"
@@ -491,6 +562,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                }\n"
          "                if (originalToBlob) {\n"
          "                    proto.toBlob = function () {\n"
+         "                        if (!__wxEnabled()) return originalToBlob.apply(this, arguments);\n"
          "                        if ((Number(this.width) || 0) === 0 || (Number(this.height) || 0) === 0) {\n"
          "                            return originalToBlob.apply(this, arguments);\n"
          "                        }\n"
@@ -507,12 +579,14 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                const originalTransferToImageBitmap = typeof proto.transferToImageBitmap === \"function\" ? proto.transferToImageBitmap : null;\n"
          "                if (originalConvertToBlob) {\n"
          "                    proto.convertToBlob = function () {\n"
+         "                        if (!__wxEnabled()) return originalConvertToBlob.apply(this, arguments);\n"
          "                        const copy = __wxNoisyCanvasCopy(this);\n"
          "                        return originalConvertToBlob.apply(copy, arguments);\n"
          "                    };\n"
          "                }\n"
          "                if (originalTransferToImageBitmap) {\n"
          "                    proto.transferToImageBitmap = function () {\n"
+         "                        if (!__wxEnabled()) return originalTransferToImageBitmap.apply(this, arguments);\n"
          "                        const protectedCopy = __wxNoisyCanvasCopy(this);\n"
          "                        if (!(protectedCopy instanceof g.OffscreenCanvas)) {\n"
          "                            throw new TypeError(\"Fingerprint protection requires an OffscreenCanvas transfer copy\");\n"
@@ -538,6 +612,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                if (typeof proto.getParameter === \"function\") {\n"
          "                    const originalGetParameter = proto.getParameter;\n"
          "                    proto.getParameter = function (parameter) {\n"
+         "                        if (!__wxEnabled()) return originalGetParameter.call(this, parameter);\n"
          "                        if (parameter === 37445 && unmaskedVendor != null) return unmaskedVendor;\n"
          "                        if (parameter === 37446 && unmaskedRenderer != null) return unmaskedRenderer;\n"
          "                        if (parameter === 7936 && webGLVendor != null) return webGLVendor;\n"
@@ -552,6 +627,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    const originalReadPixels = proto.readPixels;\n"
          "                    proto.readPixels = function () {\n"
          "                        const result = originalReadPixels.apply(this, arguments);\n"
+         "                        if (!__wxEnabled()) return result;\n"
          "                        if (arguments.length !== 7) return result;\n"
          "                        const x = Number(arguments[0]) || 0;\n"
          "                        const y = Number(arguments[1]) || 0;\n"
@@ -576,6 +652,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    const originalGetSupportedExtensions = proto.getSupportedExtensions;\n"
          "                    proto.getSupportedExtensions = function () {\n"
          "                        const extensions = originalGetSupportedExtensions.call(this);\n"
+         "                        if (!__wxEnabled()) return extensions;\n"
          "                        return Array.isArray(extensions)\n"
          "                            ? __wxStableSort(extensions, (webGLVersion || contextVersion) === \"WebGL 2.0\" ? 0x77673265 : 0x77673165)\n"
          "                            : extensions;\n"
@@ -589,7 +666,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    const originalGetFloatFrequencyData = g.AnalyserNode.prototype.getFloatFrequencyData;\n"
          "                    g.AnalyserNode.prototype.getFloatFrequencyData = function (array) {\n"
          "                        originalGetFloatFrequencyData.call(this, array);\n"
-         "                        if (!array) return;\n"
+         "                        if (!__wxEnabled() || !array) return;\n"
          "                        for (let index = 0; index < array.length; index++) {\n"
          "                            const value = Number(array[index]);\n"
          "                            if (!Number.isFinite(value)) continue;\n"
@@ -604,7 +681,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    const originalGetChannelData = g.AudioBuffer.prototype.getChannelData;\n"
          "                    g.AudioBuffer.prototype.getChannelData = function (channel) {\n"
          "                        const source = originalGetChannelData.apply(this, arguments);\n"
-         "                        if (!source || typeof Float32Array !== \"function\") return source;\n"
+         "                        if (!__wxEnabled() || !source || typeof Float32Array !== \"function\") return source;\n"
          "                        let channels = __wxAudioChannelCache.get(this);\n"
          "                        if (!channels) {\n"
          "                            channels = [];\n"
@@ -632,7 +709,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                const originalQuery = fontSet.query;\n"
          "                fontSet.query = function () {\n"
          "                    const result = originalQuery.apply(this, arguments);\n"
-         "                    if (!result || typeof result.then !== \"function\") return result;\n"
+         "                    if (!__wxEnabled() || !result || typeof result.then !== \"function\") return result;\n"
          "                    return result.then(function (fonts) {\n"
          "                        return Array.isArray(fonts) ? __wxStableSort(fonts, 0x666f6e74) : fonts;\n"
          "                    });\n"
@@ -644,7 +721,8 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    (baseSeed >>> 0) + \",\" + JSON.stringify(webGLVendor) + \",\" +\n"
          "                    JSON.stringify(webGLRenderer) + \",\" + JSON.stringify(webGLVersion) + \",\" +\n"
          "                    JSON.stringify(unmaskedVendor) + \",\" + JSON.stringify(unmaskedRenderer) + \",\" +\n"
-         "                    JSON.stringify(maxTextureSize) + \",\" + JSON.stringify(maxRenderbufferSize) + \");\\n\";\n"
+         "                    JSON.stringify(maxTextureSize) + \",\" + JSON.stringify(maxRenderbufferSize) + \",\" +\n"
+         "                    JSON.stringify(__wxNoiseRate) + \");\\n\";\n"
          "            }\n"
          "\n"
          "            function __wxAbsoluteWorkerURL(url) {\n"
@@ -684,6 +762,9 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                const OriginalWorker = g[propertyName];\n"
          "                if (typeof OriginalWorker !== \"function\") return;\n"
          "                function ProtectedWorker(url, options) {\n"
+         "                    if (!__wxEnabled()) {\n"
+         "                        return Reflect.construct(OriginalWorker, Array.prototype.slice.call(arguments), new.target || ProtectedWorker);\n"
+         "                    }\n"
          "                    const wrapperURL = __wxCreateWorkerWrapperURL(url, options);\n"
          "                    try {\n"
          "                        const args = arguments.length > 1 ? [wrapperURL, options] : [wrapperURL];\n"
@@ -709,8 +790,10 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                const blockedMessage = \"ServiceWorker messaging is blocked while fingerprint protection is active\";\n"
          "                if (g.ServiceWorker && g.ServiceWorker.prototype &&\n"
          "                    typeof g.ServiceWorker.prototype.postMessage === \"function\") {\n"
+         "                    const originalPostMessage = g.ServiceWorker.prototype.postMessage;\n"
          "                    try {\n"
          "                        g.ServiceWorker.prototype.postMessage = function () {\n"
+         "                            if (!__wxEnabled()) return originalPostMessage.apply(this, arguments);\n"
          "                            throw new TypeError(blockedMessage);\n"
          "                        };\n"
          "                    } catch (_) {}\n"
@@ -719,8 +802,10 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                if (!container) return;\n"
          "                const proto = Object.getPrototypeOf(container);\n"
          "                if (proto && typeof proto.register === \"function\") {\n"
+         "                    const originalRegister = proto.register;\n"
          "                    try {\n"
          "                        proto.register = function () {\n"
+         "                            if (!__wxEnabled()) return originalRegister.apply(this, arguments);\n"
          "                            const error = new TypeError(\"ServiceWorker registration is blocked while fingerprint protection is active\");\n"
          "                            return typeof Promise === \"function\" ? Promise.reject(error) : undefined;\n"
          "                        };\n"
@@ -730,22 +815,31 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "                    const originalAddEventListener = proto.addEventListener;\n"
          "                    try {\n"
          "                        proto.addEventListener = function (type) {\n"
-         "                            if (String(type) === \"message\") throw new TypeError(blockedMessage);\n"
+         "                            if (__wxEnabled() && String(type) === \"message\") throw new TypeError(blockedMessage);\n"
          "                            return originalAddEventListener.apply(this, arguments);\n"
          "                        };\n"
          "                    } catch (_) {}\n"
          "                }\n"
          "                if (proto && typeof proto.startMessages === \"function\") {\n"
+         "                    const originalStartMessages = proto.startMessages;\n"
          "                    try {\n"
          "                        proto.startMessages = function () {\n"
+         "                            if (!__wxEnabled()) return originalStartMessages.apply(this, arguments);\n"
          "                            throw new TypeError(blockedMessage);\n"
          "                        };\n"
          "                    } catch (_) {}\n"
          "                }\n"
          "                try {\n"
+         "                    const originalOnMessage = proto ? Object.getOwnPropertyDescriptor(proto, \"onmessage\") : null;\n"
          "                    Object.defineProperty(container, \"onmessage\", {\n"
-         "                        get: function () { return null; },\n"
-         "                        set: function () { throw new TypeError(blockedMessage); },\n"
+         "                        get: function () {\n"
+         "                            if (!__wxEnabled() && originalOnMessage && originalOnMessage.get) return originalOnMessage.get.call(this);\n"
+         "                            return null;\n"
+         "                        },\n"
+         "                        set: function (value) {\n"
+         "                            if (!__wxEnabled() && originalOnMessage && originalOnMessage.set) return originalOnMessage.set.call(this, value);\n"
+         "                            throw new TypeError(blockedMessage);\n"
+         "                        },\n"
          "                        configurable: false\n"
          "                    });\n"
          "                } catch (_) {}\n"
@@ -773,13 +867,15 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
          "            __wxFailClosedServiceWorkers();\n"
          "        }\n"
          "\n"
-         "        __wxInstallScope(__wxRoot, __WX_BASE_SEED__, __WX_WEBGL_VENDOR_JSON__, __WX_WEBGL_RENDERER_JSON__, __WX_WEBGL_VERSION_JSON__, __WX_UNMASKED_VENDOR_JSON__, __WX_UNMASKED_RENDERER_JSON__, __WX_MAX_TEXTURE_SIZE__, __WX_MAX_RENDERBUFFER_SIZE__);\n"
+         "        __wxInstallScope(__wxRoot, __WX_BASE_SEED__, __WX_WEBGL_VENDOR_JSON__, __WX_WEBGL_RENDERER_JSON__, __WX_WEBGL_VERSION_JSON__, __WX_UNMASKED_VENDOR_JSON__, __WX_UNMASKED_RENDERER_JSON__, __WX_MAX_TEXTURE_SIZE__, __WX_MAX_RENDERBUFFER_SIZE__, __WX_NOISE_RATE__);\n"
          "    } catch (_) {\n"
          "        __wxInstallMainFailClosed(__wxRoot);\n"
          "    }\n"
          "})();\n";
     script = [script stringByReplacingOccurrencesOfString:@"__WX_BASE_SEED__"
                                                withString:[NSString stringWithFormat:@"%u", seed]];
+    script = [script stringByReplacingOccurrencesOfString:@"__WX_NOISE_RATE__"
+                                               withString:[NSString stringWithFormat:@"%.6f", noiseRate]];
     script = [script stringByReplacingOccurrencesOfString:@"__WX_WEBGL_VENDOR_JSON__"
                                                withString:webGLVendorLiteral];
     script = [script stringByReplacingOccurrencesOfString:@"__WX_WEBGL_RENDERER_JSON__"
@@ -795,6 +891,29 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
     script = [script stringByReplacingOccurrencesOfString:@"__WX_MAX_RENDERBUFFER_SIZE__"
                                                withString:maxRenderbufferSizeLiteral];
     return script;
+}
+
+static NSString *PXBuildFingerprintRuntimeUpdateScript(NSString *bundleID, NSString **markerOut) {
+    if (!bundleID.length) return nil;
+
+    NSDictionary *settings = PXCanvasSettingsDictionary();
+    NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint() ?: @{};
+    BOOL masterEnabled = isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled();
+    BOOL webKitEnabled = masterEnabled && PXCanvasWebKitScopeEnabled(settings);
+    NSInteger level = PXCanvasNoiseLevel(settings);
+    CGFloat noiseRate = PXCanvasNoiseIntensityForLevel(level);
+    uint32_t seed = PXEffectiveCanvasSeed(bundleID, deviceIds, settings);
+    uint32_t nonce = PXCanvasSeedNonce(settings);
+    BOOL stableSeed = PXCanvasStableSeedEnabled(settings);
+
+    NSString *marker = [NSString stringWithFormat:@"__weaponx_fp_runtime_update__:%d:%ld:%u:%u:%d",
+                        webKitEnabled ? 1 : 0, (long)level, nonce, seed, stableSeed ? 1 : 0];
+    if (markerOut) *markerOut = marker;
+
+    return [NSString stringWithFormat:
+            @"(function(){try{const g=(typeof globalThis!==\"undefined\"?globalThis:(typeof self!==\"undefined\"?self:this));"
+             "if(g&&typeof g.__weaponx_fp_update__===\"function\"){g.__weaponx_fp_update__(%u,%.6f,%@);}}catch(_){}})();/*%@*/",
+            seed, noiseRate, webKitEnabled ? @"true" : @"false", marker];
 }
 
 // Update shouldProtectBundle to use only the new function
@@ -841,28 +960,30 @@ static NSInteger getNoiseSeedForBundle(NSString *bundleID) {
     return [cachedSeed integerValue];
 }
 
-// Add subtle noise to image data based on seed
+// Add subtle noise to image data based on the same persisted settings used by the JS path.
 static void addNoiseToImageData(NSMutableData *imageData, NSString *bundleID) {
-    if (!imageData || imageData.length == 0) return;
-    
-    uint32_t state = (uint32_t)(kConsistentNoise ? getNoiseSeedForBundle(bundleID) : arc4random_uniform(UINT32_MAX));
+    if (!imageData || imageData.length == 0 || !bundleID.length) return;
+
+    NSDictionary *settings = PXCanvasSettingsDictionary();
+    CGFloat noiseIntensity = PXCanvasNoiseIntensityForLevel(PXCanvasNoiseLevel(settings));
+    if (noiseIntensity <= 0.0) return;
+
+    NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
+    uint32_t state = PXEffectiveCanvasSeed(bundleID, deviceIds ?: @{}, settings);
     if (state == 0) state = 1;
     UInt8 *bytes = (UInt8 *)imageData.mutableBytes;
     NSUInteger length = imageData.length;
-    
-    // Skip the first 8 bytes (header data) to preserve PNG/JPEG validity
-    NSUInteger startOffset = 8;
-    
-    // Add subtle noise to pixel values
+
+    // Skip the first 8 bytes (header data) to preserve encoded-image headers.
+    NSUInteger startOffset = MIN((NSUInteger)8, length);
+
     for (NSUInteger i = startOffset; i < length; i++) {
         state ^= state << 13;
         state ^= state >> 17;
         state ^= state << 5;
-        if ((CGFloat)(state & 0xFFFFu) / 65535.0f < kNoiseIntensity) {
+        if ((CGFloat)(state & 0xFFFFu) / 65535.0f < noiseIntensity) {
             state = state * 1664525u + 1013904223u;
             int variation = (int)(state % 3u) - 1;
-            
-            // Apply variation ensuring value stays within 0-255 range
             int newValue = bytes[i] + variation;
             bytes[i] = (UInt8)MAX(0, MIN(255, newValue));
         }
@@ -920,25 +1041,50 @@ static void PXInstallDocumentStartSpoofScripts(WKUserContentController *controll
         PXAddDocumentStartUserScriptIfNeeded(controller,
                                              fingerprintScript,
                                              @"__weaponx_fp_spoof__");
+        hasFingerprint = PXUserContentControllerContainsMarker(controller, @"__weaponx_fp_spoof__");
+    }
+
+    // Once the wrapper has been installed, keep a generation-tagged runtime update
+    // script so future navigations receive the latest seed/noise/scope state even
+    // though WKUserContentController does not support removing one individual script.
+    if (hasFingerprint) {
+        NSString *runtimeMarker = nil;
+        NSString *runtimeScript = PXBuildFingerprintRuntimeUpdateScript(bundleID, &runtimeMarker);
+        PXAddDocumentStartUserScriptIfNeeded(controller, runtimeScript, runtimeMarker);
     }
 }
 
 static void PXStageDocumentStartScriptsForExistingWebViews(void) {
     void (^stageBlock)(void) = ^{
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            for (UIWindow *window in windowScene.windows) {
-                NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
-                while (stack.count > 0) {
-                    UIView *view = stack.lastObject;
-                    [stack removeLastObject];
-                    if ([view isKindOfClass:[WKWebView class]]) {
-                        WKWebView *webView = (WKWebView *)view;
-                        PXInstallDocumentStartSpoofScripts(webView.configuration.userContentController);
-                    }
-                    [stack addObjectsFromArray:view.subviews];
+        UIApplication *application = [UIApplication sharedApplication];
+        if (!application) return;
+
+        NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in application.connectedScenes) {
+                if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+                [windows addObjectsFromArray:((UIWindowScene *)scene).windows ?: @[]];
+            }
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [windows addObjectsFromArray:application.windows ?: @[]];
+#pragma clang diagnostic pop
+        }
+
+        for (UIWindow *window in windows) {
+            NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
+            while (stack.count > 0) {
+                UIView *view = stack.lastObject;
+                [stack removeLastObject];
+                if ([view isKindOfClass:[WKWebView class]]) {
+                    WKWebView *webView = (WKWebView *)view;
+                    // Stage only document-start scripts. Never evaluate fingerprint
+                    // installers/config updates into a live document; this preserves
+                    // the existing pre-navigation injection contract.
+                    PXInstallDocumentStartSpoofScripts(webView.configuration.userContentController);
                 }
+                [stack addObjectsFromArray:view.subviews];
             }
         }
     };
@@ -998,10 +1144,12 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
     NSData *originalData = %orig;
     
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID || !shouldProtectBundle(bundleID) || !originalData) {
+    NSDictionary *settings = PXCanvasSettingsDictionary();
+    if (!bundleID || !shouldProtectBundle(bundleID) || !PXCanvasNativeScopeEnabled(settings) ||
+        PXCanvasNoiseIntensityForLevel(PXCanvasNoiseLevel(settings)) <= 0.0 || !originalData) {
         return originalData;
     }
-    
+
     // Create a mutable copy to modify
     NSMutableData *modifiedData = [originalData mutableCopy];
     
@@ -1021,9 +1169,13 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
     PXLog(@"[CanvasFingerprint] Received settings notification: %@", notificationName);
     PXInvalidateScopeDecisionCache();
     PXEnsureCanvasCache();
+    BOOL rotateSessionSeed = [notificationName isEqualToString:@"com.hydra.tlinkios.resetCanvasNoise"] ||
+                             [notificationName isEqualToString:@"com.hydra.tlinkios.profileChanged"];
     os_unfair_lock_lock(&gCanvasCacheLock);
     [cachedBundleDecisions removeAllObjects];
-    [noiseSeedCache removeAllObjects];
+    if (rotateSessionSeed) {
+        [noiseSeedCache removeAllObjects];
+    }
     os_unfair_lock_unlock(&gCanvasCacheLock);
     PXStageDocumentStartScriptsForExistingWebViews();
 }

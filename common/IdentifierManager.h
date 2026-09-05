@@ -44,6 +44,7 @@
 - (BOOL)toggleCanvasFingerprintProtection;
 - (BOOL)isCanvasFingerprintProtectionEnabled;
 - (BOOL)setCanvasFingerprintProtection:(BOOL)enabled;
+- (BOOL)resetCanvasNoiseAndPersist;
 - (void)resetCanvasNoise;
 // Device Model
 - (BOOL)setCustomDeviceModel:(NSString *)value;
