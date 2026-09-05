@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "UberOrderViewController.h"
 #import "URLMonitor.h"
 
@@ -104,7 +105,7 @@ static void monitoringStateChangedCallback(CFNotificationCenterRef center, void 
     [super viewDidLoad];
     
     self.title = @"Uber Order IDs";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     
     // Add Done button to navigation bar
     UIBarButtonItem *doneButton = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone 
@@ -119,7 +120,7 @@ static void monitoringStateChangedCallback(CFNotificationCenterRef center, void 
                                                                    action:@selector(clearAllOrderIDs)];
     
     // Add Info button to navigation bar
-    UIBarButtonItem *infoButton = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"info.circle"]
+    UIBarButtonItem *infoButton = [[UIBarButtonItem alloc] initWithImage:PXSystemImageNamed(@"info.circle")
                                                      style:UIBarButtonItemStylePlain
                                                     target:self
                                                     action:@selector(showInstructions)];
@@ -127,7 +128,7 @@ static void monitoringStateChangedCallback(CFNotificationCenterRef center, void 
     self.navigationItem.rightBarButtonItems = @[clearButton, infoButton];
     
     // Setup table view
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:PXInsetGroupedTableViewStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -147,7 +148,7 @@ static void monitoringStateChangedCallback(CFNotificationCenterRef center, void 
                            @"Monitoring automatically activates when offline and stays active for 3 minutes.";
     self.noDataLabel.numberOfLines = 0;
     self.noDataLabel.textAlignment = NSTextAlignmentCenter;
-    self.noDataLabel.textColor = [UIColor secondaryLabelColor];
+    self.noDataLabel.textColor = PXSecondaryLabelColor();
     self.noDataLabel.font = [UIFont systemFontOfSize:14];
     self.noDataLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.noDataLabel];

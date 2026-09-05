@@ -1,3 +1,4 @@
+#import "PXUIKitCompat.h"
 //
 //  WeaponXToast.m
 //  TLinkIOS
@@ -5,36 +6,12 @@
 
 #import "WeaponXToast.h"
 #import "WeaponXTheme.h"
+#import "PXUIKitCompat.h"
 
 @implementation WeaponXToast
 
 + (nullable UIWindow *)wx_keyWindow {
-    UIWindow *window = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive &&
-                [scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (w.isKeyWindow) { window = w; break; }
-                }
-                if (window) break;
-            }
-        }
-        if (!window) {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *ws = (UIWindowScene *)scene;
-                    if (ws.windows.count > 0) { window = ws.windows.firstObject; break; }
-                }
-            }
-        }
-    } else {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        window = [UIApplication sharedApplication].keyWindow;
-        #pragma clang diagnostic pop
-    }
-    return window;
+    return PXKeyWindow();
 }
 
 + (void)wx_presentMessage:(NSString *)message
@@ -59,7 +36,7 @@
     UIImageView *iconView = [[UIImageView alloc] init];
     if (@available(iOS 13.0, *)) {
         NSString *iconName = isSuccess ? @"checkmark.circle.fill" : @"exclamationmark.triangle.fill";
-        iconView.image = [[UIImage systemImageNamed:iconName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iconView.image = [PXSystemImageNamed(iconName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     iconView.tintColor = [UIColor whiteColor];
     iconView.contentMode = UIViewContentModeScaleAspectFit;

@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "AppDataBackupRestoreViewController.h"
 #import "common/UIButton+SafeConfiguration.h"
 #import "AppDataBackupManager.h"
@@ -859,54 +860,54 @@ static void PXAttemptBringTLinkIOSToFront(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(_deliverPendingAlertIfPossible)
                                                  name:UIApplicationDidBecomeActiveNotification
                                                object:nil];
-    
+
     // Set title based on whether we have a specific app
     if (self.appName) {
         self.title = [NSString stringWithFormat:@"%@ Backup & Restore", self.appName];
     } else {
         self.title = @"App Data Backup & Restore";
     }
-    
+
     // Add Done button for the navigation bar
     UIBarButtonItem *doneButton = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                                                target:self
                                                                                action:@selector(dismissVC)];
     self.navigationItem.rightBarButtonItem = doneButton;
-    
+
     // Create an app name/ID label to make it clear which app we're working with
     self.appLabel = [[UILabel alloc] init];
     if (self.bundleID) {
-        NSString *displayText = self.appName ? 
-            [NSString stringWithFormat:@"App: %@\nBundle ID: %@", self.appName, self.bundleID] : 
+        NSString *displayText = self.appName ?
+            [NSString stringWithFormat:@"App: %@\nBundle ID: %@", self.appName, self.bundleID] :
             [NSString stringWithFormat:@"Bundle ID: %@", self.bundleID];
-        
+
         NSMutableAttributedString *attributedText = [[NSMutableAttributedString alloc] initWithString:displayText];
-        
+
         // Add styling - make app name bold if we have it
         if (self.appName) {
             NSRange appNameRange = [displayText rangeOfString:self.appName];
-            [attributedText addAttribute:NSFontAttributeName 
-                                   value:[UIFont boldSystemFontOfSize:17] 
+            [attributedText addAttribute:NSFontAttributeName
+                                   value:[UIFont boldSystemFontOfSize:17]
                                    range:appNameRange];
         }
-        
+
         self.appLabel.attributedText = attributedText;
     } else {
         self.appLabel.text = @"No app selected";
     }
-    
+
     self.appLabel.textAlignment = NSTextAlignmentCenter;
     self.appLabel.numberOfLines = 0;
     self.appLabel.font = [UIFont systemFontOfSize:16];
     self.appLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.appLabel];
-    
+
     UILabel *descLabel = [[UILabel alloc] init];
     descLabel.text = @"Backup and Restore your app data easily.\n\nSelect an option below:";
     descLabel.textAlignment = NSTextAlignmentCenter;
@@ -960,7 +961,7 @@ static void PXAttemptBringTLinkIOSToFront(void) {
     UIView *prefsRow = makeOptionRow(@"Include Global Preferences (rare)", &_includePrefsSwitch);
     self.includePrefsSwitch.on = YES;
     [optionsStack addArrangedSubview:prefsRow];
-    
+
     UIView *keychainRow = makeOptionRow(@"Include Keychain Items", &_includeKeychainSwitch);
     self.includeKeychainSwitch.on = NO; // Off by default - keychain backup is sensitive
     [optionsStack addArrangedSubview:keychainRow];
@@ -970,7 +971,7 @@ static void PXAttemptBringTLinkIOSToFront(void) {
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
         cfg.title = @"Keychain Groups";
-        cfg.image = [UIImage systemImageNamed:@"key.fill"]; 
+        cfg.image = PXSystemImageNamed(@"key.fill");
         cfg.imagePlacement = NSDirectionalRectEdgeLeading;
         cfg.imagePadding = 6;
         cfg.baseForegroundColor = [UIColor systemBlueColor];
@@ -989,20 +990,20 @@ static void PXAttemptBringTLinkIOSToFront(void) {
                                              selector:@selector(keychainGroupsSaved:)
                                                  name:PXBackupKeychainGroupsSavedNotification
                                                object:nil];
-    
+
     UIStackView *buttonStack = [[UIStackView alloc] init];
     buttonStack.axis = UILayoutConstraintAxisVertical;
     buttonStack.spacing = 24;
     buttonStack.alignment = UIStackViewAlignmentCenter;
     buttonStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:buttonStack];
-    
+
     // Create stylish buttons with icons using UIButtonConfiguration (iOS 15+)
     UIButton *backupButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *backupConfig = [UIButtonConfiguration filledButtonConfiguration];
         backupConfig.title = @"Backup App Data";
-        backupConfig.image = [UIImage systemImageNamed:@"arrow.down.doc.fill"];
+        backupConfig.image = PXSystemImageNamed(@"arrow.down.doc.fill");
         backupConfig.imagePlacement = NSDirectionalRectEdgeLeading;
         backupConfig.imagePadding = 8;
         backupConfig.contentInsets = NSDirectionalEdgeInsetsMake(12, 20, 12, 20);
@@ -1012,28 +1013,28 @@ static void PXAttemptBringTLinkIOSToFront(void) {
         [backupButton safeSetConfiguration:backupConfig];
     } else {
         [backupButton setTitle:@"Backup App Data" forState:UIControlStateNormal];
-        [backupButton setImage:[UIImage systemImageNamed:@"arrow.down.doc.fill"] forState:UIControlStateNormal];
+        [backupButton setImage:PXSystemImageNamed(@"arrow.down.doc.fill") forState:UIControlStateNormal];
         backupButton.tintColor = [UIColor systemBlueColor];
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         backupButton.contentEdgeInsets = UIEdgeInsetsMake(12, 20, 12, 20);
         #pragma clang diagnostic pop
     }
-    
+
     // Add rounded corners and border
     backupButton.layer.cornerRadius = 10;
     backupButton.layer.borderWidth = 1;
     backupButton.layer.borderColor = [UIColor systemBlueColor].CGColor;
-    
+
     [backupButton addTarget:self action:@selector(backupButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     [buttonStack addArrangedSubview:backupButton];
-    
+
     // Create restore button with UIButtonConfiguration (iOS 15+)
     UIButton *restoreButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *restoreConfig = [UIButtonConfiguration filledButtonConfiguration];
         restoreConfig.title = @"Restore App Data";
-        restoreConfig.image = [UIImage systemImageNamed:@"arrow.up.doc.fill"];
+        restoreConfig.image = PXSystemImageNamed(@"arrow.up.doc.fill");
         restoreConfig.imagePlacement = NSDirectionalRectEdgeLeading;
         restoreConfig.imagePadding = 8;
         restoreConfig.contentInsets = NSDirectionalEdgeInsetsMake(12, 20, 12, 20);
@@ -1043,28 +1044,28 @@ static void PXAttemptBringTLinkIOSToFront(void) {
         [restoreButton safeSetConfiguration:restoreConfig];
     } else {
         [restoreButton setTitle:@"Restore App Data" forState:UIControlStateNormal];
-        [restoreButton setImage:[UIImage systemImageNamed:@"arrow.up.doc.fill"] forState:UIControlStateNormal];
+        [restoreButton setImage:PXSystemImageNamed(@"arrow.up.doc.fill") forState:UIControlStateNormal];
         restoreButton.tintColor = [UIColor systemGreenColor];
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         restoreButton.contentEdgeInsets = UIEdgeInsetsMake(12, 20, 12, 20);
         #pragma clang diagnostic pop
     }
-    
+
     // Add rounded corners and border
     restoreButton.layer.cornerRadius = 10;
     restoreButton.layer.borderWidth = 1;
     restoreButton.layer.borderColor = [UIColor systemGreenColor].CGColor;
-    
+
     [restoreButton addTarget:self action:@selector(restoreButtonTapped) forControlEvents:UIControlEventTouchUpInside];
     [buttonStack addArrangedSubview:restoreButton];
-    
+
     [NSLayoutConstraint activateConstraints:@[
         // App label constraints
         [self.appLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:20],
         [self.appLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:30],
         [self.appLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-30],
-        
+
         // Description label constraints
         [descLabel.topAnchor constraintEqualToAnchor:self.appLabel.bottomAnchor constant:20],
         [descLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:30],
@@ -1074,7 +1075,7 @@ static void PXAttemptBringTLinkIOSToFront(void) {
         [optionsStack.topAnchor constraintEqualToAnchor:descLabel.bottomAnchor constant:20],
         [optionsStack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:30],
         [optionsStack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-30],
-         
+
         // Button stack constraints
         [buttonStack.topAnchor constraintEqualToAnchor:optionsStack.bottomAnchor constant:30],
         [buttonStack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor]

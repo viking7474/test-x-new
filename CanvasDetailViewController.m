@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "CanvasDetailViewController.h"
 #import "TLinkIOSLogging.h"
 #import "IdentifierManager.h"
@@ -113,27 +114,27 @@
 #pragma mark - Compatibility colors
 
 - (UIColor *)groupedBackgroundColor {
-    if (@available(iOS 13.0, *)) return [UIColor systemGroupedBackgroundColor];
+    if (@available(iOS 13.0, *)) return PXSystemGroupedBackgroundColor();
     return [UIColor groupTableViewBackgroundColor];
 }
 
 - (UIColor *)cardBackgroundColor {
-    if (@available(iOS 13.0, *)) return [UIColor secondarySystemGroupedBackgroundColor];
+    if (@available(iOS 13.0, *)) return PXSecondarySystemGroupedBackgroundColor();
     return [UIColor whiteColor];
 }
 
 - (UIColor *)primaryTextColor {
-    if (@available(iOS 13.0, *)) return [UIColor labelColor];
+    if (@available(iOS 13.0, *)) return PXLabelColor();
     return [UIColor blackColor];
 }
 
 - (UIColor *)secondaryTextColor {
-    if (@available(iOS 13.0, *)) return [UIColor secondaryLabelColor];
+    if (@available(iOS 13.0, *)) return PXSecondaryLabelColor();
     return [UIColor darkGrayColor];
 }
 
 - (UIColor *)separatorLineColor {
-    if (@available(iOS 13.0, *)) return [UIColor separatorColor];
+    if (@available(iOS 13.0, *)) return PXSeparatorColor();
     return [UIColor colorWithWhite:0.82 alpha:1.0];
 }
 
@@ -155,7 +156,7 @@
     imageView.contentMode = UIViewContentModeScaleAspectFit;
     imageView.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        imageView.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        imageView.image = [PXSystemImageNamed(symbolName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:imageView];
 
@@ -409,7 +410,7 @@
     self.resetButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
     self.resetButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
     if (@available(iOS 13.0, *)) {
-        [self.resetButton setImage:[UIImage systemImageNamed:@"arrow.counterclockwise"] forState:UIControlStateNormal];
+        [self.resetButton setImage:PXSystemImageNamed(@"arrow.counterclockwise") forState:UIControlStateNormal];
         [self.resetButton setTitle:@"  Reset Noise" forState:UIControlStateNormal];
     } else {
         [self.resetButton setTitle:@"↻  Reset Noise" forState:UIControlStateNormal];

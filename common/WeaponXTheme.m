@@ -1,3 +1,4 @@
+#import "PXUIKitCompat.h"
 //
 //  WeaponXTheme.m
 //  TLinkIOS
@@ -12,15 +13,21 @@ const CGFloat WXCornerRadiusLarge = 20.0;
 @implementation UIColor (WeaponXTheme)
 
 + (UIColor *)wxBrandBlue {
-    if (@available(iOS 13.0, *)) {
-        return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull tc) {
-            if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+    UIColor *fallback = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
+    SEL selector = NSSelectorFromString(@"colorWithDynamicProvider:");
+    if ([UIColor respondsToSelector:selector]) {
+        UIColor *(^provider)(UITraitCollection *) = ^UIColor *(UITraitCollection *tc) {
+            if (PXIsDarkUserInterfaceStyle(tc)) {
                 return [UIColor colorWithRed:0.20 green:0.60 blue:1.0 alpha:1.0];
             }
-            return [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
-        }];
+            return fallback;
+        };
+        IMP imp = [UIColor methodForSelector:selector];
+        id (*fn)(id, SEL, id) = (void *)imp;
+        UIColor *dynamicColor = fn(UIColor.class, selector, provider);
+        if ([dynamicColor isKindOfClass:UIColor.class]) return dynamicColor;
     }
-    return [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
+    return fallback;
 }
 
 + (UIColor *)wxSuccess {

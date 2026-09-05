@@ -1,10 +1,11 @@
+#import "common/PXUIKitCompat.h"
 #import "PXRRSManagerViewController.h"
 #import "WeaponXTheme.h"
 
 #pragma mark - Helpers
 
 static UITableViewStyle PXRRSSCompatibleInsetGrouped(void) {
-    if (@available(iOS 13.0, *)) return UITableViewStyleInsetGrouped;
+    if (@available(iOS 13.0, *)) return PXInsetGroupedTableViewStyle();
     return UITableViewStyleGrouped;
 }
 
@@ -28,10 +29,15 @@ static NSString *PXRRSRelativeDate(NSString *raw) {
         if (ts > 1000000000) date = [NSDate dateWithTimeIntervalSince1970:ts];
     }
     if (!date) return raw;
-    if (@available(iOS 13.0, *)) {
-        NSRelativeDateTimeFormatter *rel = [[NSRelativeDateTimeFormatter alloc] init];
-        rel.unitsStyle = NSRelativeDateTimeFormatterUnitsStyleFull;
-        return [rel localizedStringForDate:date relativeToDate:[NSDate date]];
+    Class relativeFormatterClass = NSClassFromString(@"NSRelativeDateTimeFormatter");
+    if (relativeFormatterClass) {
+        id rel = [[relativeFormatterClass alloc] init];
+        if ([rel respondsToSelector:NSSelectorFromString(@"setUnitsStyle:")]) {
+            [rel setValue:@0 forKey:@"unitsStyle"]; // NSRelativeDateTimeFormatterUnitsStyleFull
+        }
+        if ([rel respondsToSelector:NSSelectorFromString(@"localizedStringForDate:relativeToDate:")]) {
+            return [rel localizedStringForDate:date relativeToDate:[NSDate date]];
+        }
     }
     NSDateFormatter *out = [[NSDateFormatter alloc] init];
     out.dateStyle = NSDateFormatterMediumStyle;
@@ -45,7 +51,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     UIGraphicsBeginImageContextWithOptions(size, NO, 0);
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     UIColor *bg = [UIColor systemBlueColor];
-    if (@available(iOS 13.0, *)) bg = [UIColor systemIndigoColor];
+    if (@available(iOS 13.0, *)) bg = PXSystemIndigoColor();
     [bg setFill];
     UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 44, 44) cornerRadius:11];
     [path fill];
@@ -78,7 +84,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXRRSSCompatibleInsetGrouped()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
-    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.backgroundColor = PXSystemGroupedBackgroundColor();
     [self buildFooter];
 }
 
@@ -100,7 +106,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     [primary addTarget:self action:@selector(saveRestoreTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UIButton *secondary = [UIButton buttonWithType:UIButtonTypeSystem];
-    secondary.backgroundColor = [UIColor tertiarySystemFillColor];
+    secondary.backgroundColor = PXTertiarySystemFillColor();
     [secondary setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
     secondary.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     secondary.layer.cornerRadius = 12;
@@ -143,7 +149,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     NSDictionary *e = self.entry ?: @{};
     NSString *appName = PXRRSString(e, @"appName");
     if (!appName.length) appName = @"RRS";
@@ -153,8 +159,8 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         cell.textLabel.text = appName;
         cell.textLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
         cell.detailTextLabel.text = PXRRSString(e, @"dir").lastPathComponent;
-        cell.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        cell.detailTextLabel.font = PXMonospacedSystemFont(12, UIFontWeightRegular);
+        cell.detailTextLabel.textColor = PXSecondaryLabelColor();
         cell.detailTextLabel.numberOfLines = 2;
         return cell;
     }
@@ -168,11 +174,11 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         ];
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
         cell.textLabel.text = titles[indexPath.row];
         cell.detailTextLabel.text = values[indexPath.row];
         if (indexPath.row == 3) {
-            cell.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+            cell.detailTextLabel.font = PXMonospacedSystemFont(13, UIFontWeightRegular);
         }
         return cell;
     }
@@ -180,18 +186,18 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         cell.textLabel.text = PXRRSString(e, @"note").length ? PXRRSString(e, @"note") : @"(không có ghi chú)";
         cell.textLabel.numberOfLines = 0;
         cell.textLabel.font = [UIFont systemFontOfSize:15];
-        cell.textLabel.textColor = PXRRSString(e, @"note").length ? [UIColor labelColor] : [UIColor secondaryLabelColor];
+        cell.textLabel.textColor = PXRRSString(e, @"note").length ? PXLabelColor() : PXSecondaryLabelColor();
         return cell;
     }
     cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     cell.textLabel.text = @"Checksum";
     cell.textLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     cell.detailTextLabel.text = PXRRSString(e, @"checksum").length ? PXRRSString(e, @"checksum") : @"—";
-    cell.detailTextLabel.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    cell.detailTextLabel.font = PXMonospacedSystemFont(12, UIFontWeightRegular);
     cell.detailTextLabel.numberOfLines = 3;
-    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.detailTextLabel.textColor = PXSecondaryLabelColor();
     UIButton *copy = [UIButton buttonWithType:UIButtonTypeSystem];
     [copy setTitle:@"Copy" forState:UIControlStateNormal];
     copy.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
@@ -268,7 +274,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     self.selectedDirs = [NSMutableSet set];
     self.filterText = @"";
 
@@ -284,7 +290,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.navigationItem.prompt = nil;
 
     UIImage *backImg = nil;
-    if (@available(iOS 13.0, *)) backImg = [UIImage systemImageNamed:@"chevron.left"];
+    if (@available(iOS 13.0, *)) backImg = PXSystemImageNamed(@"chevron.left");
     self.closeButton = backImg
         ? [[UIBarButtonItem alloc] initWithImage:backImg style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)]
         : [[UIBarButtonItem alloc] initWithTitle:@"Đóng" style:UIBarButtonItemStylePlain target:self action:@selector(closeTapped)];
@@ -373,20 +379,18 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.footerContainer.translatesAutoresizingMaskIntoConstraints = NO;
     self.footerContainer.backgroundColor = [UIColor clearColor];
 
-    UIBlurEffectStyle style = UIBlurEffectStyleExtraLight;
-    if (@available(iOS 13.0, *)) style = UIBlurEffectStyleSystemChromeMaterial;
-    self.footerBlur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:style]];
+    self.footerBlur = [[UIVisualEffectView alloc] initWithEffect:PXChromeMaterialBlurEffect()];
     self.footerBlur.translatesAutoresizingMaskIntoConstraints = NO;
     self.footerBlur.userInteractionEnabled = NO;
     [self.footerContainer addSubview:self.footerBlur];
 
     UIView *sep = [[UIView alloc] init];
     sep.translatesAutoresizingMaskIntoConstraints = NO;
-    sep.backgroundColor = [UIColor separatorColor];
+    sep.backgroundColor = PXSeparatorColor();
     [self.footerContainer addSubview:sep];
 
     UIColor *fill = [UIColor colorWithWhite:0.5 alpha:0.16];
-    if (@available(iOS 13.0, *)) fill = [UIColor secondarySystemFillColor];
+    if (@available(iOS 13.0, *)) fill = PXSecondarySystemFillColor();
 
     self.sequenceFooterButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.sequenceFooterButton.translatesAutoresizingMaskIntoConstraints = NO;
@@ -574,7 +578,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         UILabel *empty = [[UILabel alloc] init];
         empty.text = @"Không có kết quả";
         empty.textAlignment = NSTextAlignmentCenter;
-        empty.textColor = [UIColor secondaryLabelColor];
+        empty.textColor = PXSecondaryLabelColor();
         empty.font = [UIFont systemFontOfSize:15];
         self.tableView.backgroundView = empty;
     } else {
@@ -586,9 +590,9 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 - (UIView *)emptyStateView {
     UIView *v = [[UIView alloc] initWithFrame:self.tableView.bounds];
     UIImageView *icon = [[UIImageView alloc] init];
-    if (@available(iOS 13.0, *)) icon.image = [UIImage systemImageNamed:@"externaldrive"];
+    if (@available(iOS 13.0, *)) icon.image = PXSystemImageNamed(@"externaldrive");
     icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.tintColor = [UIColor tertiaryLabelColor];
+    icon.tintColor = PXTertiaryLabelColor();
     icon.contentMode = UIViewContentModeScaleAspectFit;
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
@@ -599,7 +603,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"Trên Home: chọn app → Lưu RRS để tạo bản đầu tiên.";
     sub.font = [UIFont systemFontOfSize:14];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     sub.textAlignment = NSTextAlignmentCenter;
     sub.numberOfLines = 0;
     [v addSubview:icon];
@@ -626,7 +630,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     cell.accessoryView = nil;
     cell.accessoryType = self.editingSelection ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
 
     NSDictionary *e = [self visibleEntries][(NSUInteger)indexPath.row];
     NSString *dir = PXRRSString(e, @"dir");
@@ -665,7 +669,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
     UILabel *sub = [[UILabel alloc] init];
     sub.font = [UIFont systemFontOfSize:13];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     NSString *size = PXRRSString(e, @"size");
     NSString *when = PXRRSRelativeDate(PXRRSString(e, @"backupDate"));
     sub.text = size.length ? [NSString stringWithFormat:@"%@ · %@", when, size] : when;
@@ -679,7 +683,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     if (noteText.length) {
         UILabel *note = [[UILabel alloc] init];
         note.font = [UIFont systemFontOfSize:12];
-        note.textColor = [UIColor tertiaryLabelColor];
+        note.textColor = PXTertiaryLabelColor();
         note.text = noteText;
         note.lineBreakMode = NSLineBreakByTruncatingTail;
         [rows addObject:note];
@@ -951,7 +955,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
-    if (@available(iOS 13.0, *)) card.backgroundColor = [UIColor systemBackgroundColor];
+    if (@available(iOS 13.0, *)) card.backgroundColor = PXSystemBackgroundColor();
     else card.backgroundColor = [UIColor whiteColor];
     card.layer.cornerRadius = 16;
     if (@available(iOS 11.0, *)) card.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
@@ -973,7 +977,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     UILabel *subtitle = [[UILabel alloc] init];
     subtitle.text = @"Chọn cách duyệt danh sách RRS";
     subtitle.font = [UIFont systemFontOfSize:13];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.numberOfLines = 0;
 
@@ -989,11 +993,11 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     UILabel *nextCaption = [[UILabel alloc] init];
     nextCaption.text = @"Bản tiếp theo (NEXT)";
     nextCaption.font = [UIFont systemFontOfSize:13];
-    nextCaption.textColor = [UIColor secondaryLabelColor];
+    nextCaption.textColor = PXSecondaryLabelColor();
 
     self.nextNameLabel = [[UILabel alloc] init];
     self.nextNameLabel.font = [UIFont systemFontOfSize:13];
-    self.nextNameLabel.textColor = [UIColor secondaryLabelColor];
+    self.nextNameLabel.textColor = PXSecondaryLabelColor();
     self.nextNameLabel.numberOfLines = 1;
     self.nextNameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
@@ -1028,7 +1032,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.rangeRow.spacing = 10;
 
     UIColor *fill = [UIColor colorWithWhite:0.5 alpha:0.16];
-    if (@available(iOS 13.0, *)) fill = [UIColor secondarySystemFillColor];
+    if (@available(iOS 13.0, *)) fill = PXSecondarySystemFillColor();
 
     self.primaryButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.primaryButton.backgroundColor = [UIColor systemBlueColor];
@@ -1087,7 +1091,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     UIView *box = [[UIView alloc] init];
     box.translatesAutoresizingMaskIntoConstraints = NO;
     UIColor *bg = [UIColor colorWithWhite:0.95 alpha:1.0];
-    if (@available(iOS 13.0, *)) bg = [UIColor secondarySystemBackgroundColor];
+    if (@available(iOS 13.0, *)) bg = PXSecondarySystemBackgroundColor();
     box.backgroundColor = bg;
     box.layer.cornerRadius = 12;
 
@@ -1095,7 +1099,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     cap.translatesAutoresizingMaskIntoConstraints = NO;
     cap.text = [caption uppercaseString];
     cap.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-    cap.textColor = [UIColor secondaryLabelColor];
+    cap.textColor = PXSecondaryLabelColor();
 
     UITextField *tf = [[UITextField alloc] init];
     tf.translatesAutoresizingMaskIntoConstraints = NO;

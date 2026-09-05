@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "ProfileButtonsView.h"
 #import "common/UIButton+SafeConfiguration.h"
 
@@ -58,11 +59,11 @@
             config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
             
             // Configure background
-            config.background.backgroundColor = [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.5];
+            config.background.backgroundColor = [PXSystemBackgroundColor() colorWithAlphaComponent:0.5];
             config.background.cornerRadius = 22;
             
             // Configure image and text
-            UIImage *icon = [UIImage systemImageNamed:iconName];
+            UIImage *icon = PXSystemImageNamed(iconName);
             config.image = icon;
             config.title = title;
             config.imagePlacement = NSDirectionalRectEdgeTop;
@@ -115,12 +116,12 @@
     
     // Set image for iOS 13+
     if (@available(iOS 13.0, *)) {
-        UIImage *icon = [UIImage systemImageNamed:iconName];
+        UIImage *icon = PXSystemImageNamed(iconName);
         [button setImage:icon forState:UIControlStateNormal];
     }
     
     // Style the button
-    button.backgroundColor = [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.5];
+    button.backgroundColor = [PXSystemBackgroundColor() colorWithAlphaComponent:0.5];
     button.layer.cornerRadius = 22;
     button.clipsToBounds = YES;
 }

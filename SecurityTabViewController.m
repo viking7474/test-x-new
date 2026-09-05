@@ -1,4 +1,6 @@
 #import "SecurityTabViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
 #import "TLinkIOSLogging.h"
@@ -73,6 +75,7 @@
 @property (nonatomic, strong) UIStackView *cardsStack;
 @property (nonatomic, strong) UILabel *heroCountLabel;
 @property (nonatomic, strong) UILabel *heroSubtitleLabel;
+@property (nonatomic, strong) UISegmentedControl *timeSpoofingModeSegment;
 
 @end
 
@@ -278,13 +281,14 @@
 
     NSString *msg = enabled ? @"IP Monitoring Enabled" : @"IP Monitoring Disabled";
     [self showToastWithMessage:msg];
+    [self updateSecurityHeroCount];
 }
 
 - (void)setupIPMonitorControl:(UIView *)contentView {
     // Create a glassmorphic control for IP Monitor
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -294,7 +298,7 @@
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = @"Check & Monitor IP Status";
     titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    titleLabel.textColor = [UIColor labelColor];
+    titleLabel.textColor = PXLabelColor();
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:titleLabel];
     // Icon chip (redesign)
@@ -304,7 +308,7 @@
     // Info button
     UIButton *ipInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     if (@available(iOS 13.0, *)) {
-        UIImage *infoImage = [UIImage systemImageNamed:@"info.circle"];
+        UIImage *infoImage = PXSystemImageNamed(@"info.circle");
         [ipInfoButton setImage:infoImage forState:UIControlStateNormal];
         ipInfoButton.tintColor = [UIColor systemGrayColor];
     } else {
@@ -324,7 +328,7 @@
     UIImageView *ipIconView = [[UIImageView alloc] init];
     UIImage *iconImg = nil;
     if (@available(iOS 13.0, *)) {
-        iconImg = [UIImage systemImageNamed:@"antenna.radiowaves.left.and.right"];
+        iconImg = PXSystemImageNamed(@"antenna.radiowaves.left.and.right");
     }
     // Fallback to a default image if SF Symbol fails
     if (!iconImg) {
@@ -360,7 +364,7 @@
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
-        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.image = PXSystemImageNamed(@"chevron.forward");
         config.imagePlacement = NSDirectionalRectEdgeTrailing;
         config.imagePadding = 6;
         [self.ipMonitorCheckButton safeSetConfiguration:config];
@@ -411,7 +415,7 @@
     UILabel *ipMonitorInfoLabel = [[UILabel alloc] init];
     ipMonitorInfoLabel.text = @"Turn on toggle for IP monitoring. It notifies when IP changes.";
     ipMonitorInfoLabel.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightRegular];
-    ipMonitorInfoLabel.textColor = [UIColor secondaryLabelColor];
+    ipMonitorInfoLabel.textColor = PXSecondaryLabelColor();
     ipMonitorInfoLabel.textAlignment = NSTextAlignmentCenter;
     ipMonitorInfoLabel.numberOfLines = 1;
     ipMonitorInfoLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -425,7 +429,7 @@
     UILabel *targetRegionLabel = [[UILabel alloc] init];
     targetRegionLabel.text = @"TargetRegion follows IP";
     targetRegionLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    targetRegionLabel.textColor = [UIColor secondaryLabelColor];
+    targetRegionLabel.textColor = PXSecondaryLabelColor();
     targetRegionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [targetRegionRow addSubview:targetRegionLabel];
 
@@ -528,7 +532,7 @@
     
     // Create coordinates label
     UILabel *coordsLabel = [[UILabel alloc] init];
-    coordsLabel.textColor = [UIColor secondaryLabelColor];
+    coordsLabel.textColor = PXSecondaryLabelColor();
     coordsLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     coordsLabel.translatesAutoresizingMaskIntoConstraints = NO;
     coordsLabel.adjustsFontSizeToFitWidth = YES;
@@ -538,7 +542,7 @@
     
     // Create time label
     self.timeLabel = [[UILabel alloc] init];
-    self.timeLabel.textColor = [UIColor secondaryLabelColor];
+    self.timeLabel.textColor = PXSecondaryLabelColor();
     self.timeLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightRegular];
     self.timeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.timeLabel.textAlignment = NSTextAlignmentRight;
@@ -563,7 +567,7 @@
     
     // Create IP label
     UILabel *ipLabel = [[UILabel alloc] init];
-    ipLabel.textColor = [UIColor secondaryLabelColor];
+    ipLabel.textColor = PXSecondaryLabelColor();
     ipLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     ipLabel.translatesAutoresizingMaskIntoConstraints = NO;
     ipLabel.adjustsFontSizeToFitWidth = YES;
@@ -635,7 +639,7 @@
                     [NSString stringWithFormat:@"%@ %.4f, %.4f", flag, lat, lon]
                     attributes:@{
                         NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightRegular],
-                        NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                        NSForegroundColorAttributeName: PXSecondaryLabelColor()
                     }];
                 coordsLabel.attributedText = attributedText;
                 PXLog(@"[WeaponX] Updated title with flag: %@ for country: %@", flag, countryCode);
@@ -794,7 +798,7 @@
     if (!ipTimeLabel && leftView) {
         // Create time label if it doesn't exist
         ipTimeLabel = [[UILabel alloc] init];
-        ipTimeLabel.textColor = [UIColor secondaryLabelColor];
+        ipTimeLabel.textColor = PXSecondaryLabelColor();
         ipTimeLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightRegular];
         ipTimeLabel.translatesAutoresizingMaskIntoConstraints = NO;
         ipTimeLabel.adjustsFontSizeToFitWidth = YES;
@@ -887,14 +891,117 @@
     return ipAddress;
 }
 
+- (void)refreshNetworkDependencyState {
+    BOOL enabled = PXReadSecurityBool(@"networkDataSpoofEnabled", NO);
+    NSInteger type = PXReadSecurityInteger(@"networkConnectionType", 0);
+    if (type < 0 || type > 3) type = 0;
+
+    [self.networkDataSpoofToggleSwitch setOn:enabled animated:NO];
+    self.networkConnectionTypeSegment.selectedSegmentIndex = type;
+    self.networkConnectionTypeSegment.enabled = enabled;
+
+    UIView *connectionTypeView = [self.view viewWithTag:1001];
+    if (connectionTypeView) connectionTypeView.alpha = enabled ? 0.8 : 0.4;
+
+    BOOL showISO = (type == 2);
+    BOOL allowISO = enabled && showISO;
+    UIView *isoContainer = self.networkISOCountrySegment.superview;
+    if (isoContainer && isoContainer != self.networkConnectionTypeSegment.superview) {
+        isoContainer.hidden = !showISO;
+    }
+    self.networkISOCountrySegment.hidden = !showISO;
+    self.networkISOCountrySegment.enabled = allowISO;
+    self.customISOButton.hidden = !showISO;
+    self.customISOButton.enabled = allowISO;
+    self.quickGenerateButton.hidden = !showISO;
+    self.quickGenerateButton.enabled = allowISO;
+    self.carrierDetailsContainer.hidden = !showISO;
+
+    NSString *savedISO = [self.securitySettings stringForKey:@"networkISOCountryCode"] ?: @"us";
+    BOOL customISO = ![savedISO isEqualToString:@"us"] && ![savedISO isEqualToString:@"in"] && ![savedISO isEqualToString:@"ca"];
+    NSInteger isoIndex = [savedISO isEqualToString:@"in"] ? 1 : ([savedISO isEqualToString:@"ca"] ? 2 : ([savedISO isEqualToString:@"us"] ? 0 : UISegmentedControlNoSegment));
+    self.networkISOCountrySegment.selectedSegmentIndex = isoIndex;
+    self.carrierNameField.enabled = allowISO && customISO;
+    self.mccField.enabled = allowISO && customISO;
+    self.mncField.enabled = allowISO && customISO;
+
+    BOOL showLocalIP = (type == 1);
+    self.localIPContainer.hidden = !showLocalIP;
+    self.localIPField.enabled = enabled && showLocalIP;
+    self.localIPv6Field.enabled = enabled && showLocalIP;
+    self.localIPGenerateButton.enabled = enabled && showLocalIP;
+    self.localIPv6GenerateButton.enabled = enabled && showLocalIP;
+}
+
+- (void)refreshDeviceSpoofingDependencyState {
+    BOOL deviceEnabled = PXReadSecurityBool(@"deviceSpoofingEnabled", NO);
+    BOOL fullTest = PXReadSecurityBool(@"fullSpoofTestModeEnabled", NO);
+    id safariPreference = PXReadSecuritySetting(@"safariStackSpoofEnabled");
+    BOOL configuredSafari = safariPreference ? [safariPreference boolValue] : deviceEnabled;
+    BOOL effectiveSafari = deviceEnabled && (fullTest || configuredSafari);
+
+    [self.deviceSpoofingToggleSwitch setOn:deviceEnabled animated:NO];
+    self.deviceSpoofingAccessButton.enabled = deviceEnabled;
+    self.deviceSpoofingAccessButton.alpha = deviceEnabled ? 1.0 : 0.6;
+
+    [self.fullSpoofTestModeToggleSwitch setOn:fullTest animated:NO];
+    self.fullSpoofTestModeToggleSwitch.enabled = deviceEnabled;
+    self.fullSpoofTestModeToggleSwitch.alpha = deviceEnabled ? 1.0 : 0.5;
+
+    [self.safariStackSpoofingToggleSwitch setOn:effectiveSafari animated:NO];
+    self.safariStackSpoofingToggleSwitch.enabled = deviceEnabled && !fullTest;
+    self.safariStackSpoofingToggleSwitch.alpha = (deviceEnabled && !fullTest) ? 1.0 : 0.5;
+    self.safariStackSpoofingLabel.text = fullTest ? @"Safari/Auth Stack Spoofing (Forced)" : @"Safari/Auth Stack Spoofing";
+
+    self.webCompatIOSRangeToggleSwitch.enabled = deviceEnabled;
+    self.webCompatIOSRangeToggleSwitch.alpha = deviceEnabled ? 1.0 : 0.5;
+    self.displayUIScaleSpoofToggleSwitch.enabled = deviceEnabled;
+    self.displayUIScaleSpoofToggleSwitch.alpha = deviceEnabled ? 1.0 : 0.5;
+}
+
+- (void)refreshSecurityControlsFromAuthoritativeState {
+    [self.jailbreakDetectionToggleSwitch setOn:PXReadSecurityBool(@"jailbreakDetectionEnabled", NO) animated:NO];
+    [self.vpnDetectionToggleSwitch setOn:PXReadSecurityBool(@"vpnDetectionBypassEnabled", NO) animated:NO];
+    [self refreshCanvasFingerprintingControlState];
+    [self refreshNetworkDependencyState];
+    [self refreshDeviceSpoofingDependencyState];
+
+    BOOL appVersionEnabled = PXReadSecurityBool(@"appVersionSpoofingEnabled", NO);
+    [self.appVersionSpoofingToggleSwitch setOn:appVersionEnabled animated:NO];
+    self.appVersionSpoofingAccessButton.enabled = appVersionEnabled;
+    self.appVersionSpoofingAccessButton.alpha = appVersionEnabled ? 1.0 : 0.6;
+
+    [self.fixVersionToggleSwitch setOn:PXReadSecurityBool(@"fixVersionEnabled", NO) animated:NO];
+
+    NSInteger timeMode = PXReadSecurityInteger(@"timeSpoofingMode", 0);
+    if (timeMode < 0 || timeMode > 2) timeMode = 0;
+    self.timeSpoofingModeSegment.selectedSegmentIndex = timeMode;
+    self.ipLabel.hidden = (timeMode != 1);
+    self.locationLabel.hidden = (timeMode != 2);
+
+    BOOL deepEnabled = PXReadSecurityBool(@"deepCleanEnabled", NO);
+    self.deepCleanModeControl.selectedSegmentIndex = deepEnabled ? 1 : 0;
+    self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:deepEnabled];
+
+    [self.systemKeychainWipeToggleSwitch setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:NO];
+    [self.profileIndicatorToggleSwitch setOn:PXReadSecurityBool(@"profileIndicatorEnabled", NO) animated:NO];
+
+    self.matrixRainEnabled = [self.securitySettings boolForKey:@"matrixRainEnabled"];
+    [self.matrixToggleSwitch setOn:self.matrixRainEnabled animated:NO];
+    [self.ipMonitorToggleSwitch setOn:[self.securitySettings boolForKey:@"ipMonitorEnabled"] animated:NO];
+
+    DomainBlockingSettings *domainSettings = [DomainBlockingSettings sharedSettings];
+    [domainSettings loadSettings];
+    [self.domainBlockingToggleSwitch setOn:domainSettings.isEnabled animated:NO];
+
+    [self refreshFixVersionAppsButtonTitle];
+    [self updateSecurityHeroCount];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refreshPinnedCoordinates];
-
-    // Detail screens can mutate Canvas settings while this controller remains alive.
-    // Refresh from the authoritative plist/IdentifierManager before becoming visible.
-    [self refreshCanvasFingerprintingControlState];
-    [self updateSecurityHeroCount];
+    [self refreshSecurityControlsFromAuthoritativeState];
 
     // Refresh network identifiers from the current profile
     [self refreshNetworkIdentifiers];
@@ -1003,7 +1110,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     [self refreshPinnedCoordinates];
-    if (@available(iOS 13.0, *)) { self.view.backgroundColor = [UIColor systemGroupedBackgroundColor]; } else { self.view.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0]; } // Grouped bg so white cards pop
+    if (@available(iOS 13.0, *)) { self.view.backgroundColor = PXSystemGroupedBackgroundColor(); } else { self.view.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0]; } // Grouped bg so white cards pop
     
     // Initialize security settings
     self.securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
@@ -1247,9 +1354,16 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
             [self.securitySettings setObject:ip forKey:@"targetRegionPinnedSourceIP"]; 
         }
 
-        // Keep legacy key used by NetworkConnectionTypeHooks.
+        // Keep legacy key used by NetworkConnectionTypeHooks, but persist it through
+        // the same authoritative store as the Security network controls.
         if (carrierISO.length) {
-            [self.securitySettings setObject:carrierISO forKey:@"networkISOCountryCode"]; 
+            NSError *networkISOError = nil;
+            if (!PXWriteSecuritySetting(@"networkISOCountryCode", carrierISO, &networkISOError)) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self showToastWithMessage:@"Could not save TargetRegion network ISO"];
+                });
+                return;
+            }
         }
 
         [self.securitySettings synchronize];
@@ -1295,9 +1409,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupMatrixControl:(UIView *)contentView {
     // Create a simple glassmorphic control for Matrix Rain toggle
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1307,7 +1421,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.matrixLabel = [[UILabel alloc] init];
     self.matrixLabel.text = @"Matrix Rain Effect";
     self.matrixLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.matrixLabel.textColor = [UIColor labelColor];
+    self.matrixLabel.textColor = PXLabelColor();
     self.matrixLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.matrixLabel];
     // Icon chip (redesign)
@@ -1359,9 +1473,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupProfileIndicatorControl:(UIView *)contentView {
     // Create a glassmorphic control for Profile Indicator toggle
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1371,7 +1485,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.profileIndicatorLabel = [[UILabel alloc] init];
     self.profileIndicatorLabel.text = @"Profile Indicator";
     self.profileIndicatorLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.profileIndicatorLabel.textColor = [UIColor labelColor];
+    self.profileIndicatorLabel.textColor = PXLabelColor();
     self.profileIndicatorLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.profileIndicatorLabel];
     // Icon chip (redesign)
@@ -1431,9 +1545,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupJailbreakDetectionControl:(UIView *)contentView {
     // Create a glassmorphic control for Jailbreak Detection Bypass toggle
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1443,7 +1557,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.jailbreakDetectionLabel = [[UILabel alloc] init];
     self.jailbreakDetectionLabel.text = @"Jailbreak Detection Bypass";
     self.jailbreakDetectionLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.jailbreakDetectionLabel.textColor = [UIColor labelColor];
+    self.jailbreakDetectionLabel.textColor = PXLabelColor();
     self.jailbreakDetectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.jailbreakDetectionLabel];
     self.jailbreakDetectionLabel.numberOfLines = 1;
@@ -1504,9 +1618,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupNetworkDataSpoofControl:(UIView *)contentView {
     // Create a glassmorphic control for Network Data Spoof toggle
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1516,7 +1630,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkDataSpoofLabel = [[UILabel alloc] init];
     self.networkDataSpoofLabel.text = @"Network Data Spoof";
     self.networkDataSpoofLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.networkDataSpoofLabel.textColor = [UIColor labelColor];
+    self.networkDataSpoofLabel.textColor = PXLabelColor();
     self.networkDataSpoofLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.networkDataSpoofLabel];
     self.networkDataSpoofLabel.numberOfLines = 1;
@@ -1531,7 +1645,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     optionalLabel.text = @"(OPTIONAL)";
     optionalLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightRegular];
-    optionalLabel.textColor = [UIColor secondaryLabelColor];
+    optionalLabel.textColor = PXSecondaryLabelColor();
     optionalLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:optionalLabel];
     [optionalLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -1593,9 +1707,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     BOOL networkDataSpoofEnabled = [self.securitySettings boolForKey:@"networkDataSpoofEnabled"];
     
     // Create a glassmorphic control for Network Connection Type selection
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = networkDataSpoofEnabled ? 0.8 : 0.4; // Dim if network spoofing is disabled
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1606,7 +1720,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.networkConnectionTypeLabel = [[UILabel alloc] init];
     self.networkConnectionTypeLabel.text = @"Network Connection Type";
     self.networkConnectionTypeLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.networkConnectionTypeLabel.textColor = [UIColor labelColor];
+    self.networkConnectionTypeLabel.textColor = PXLabelColor();
     self.networkConnectionTypeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.networkConnectionTypeLabel];
     // Icon chip (redesign)
@@ -1670,13 +1784,13 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self.customISOButton setTitle:@"Custom" forState:UIControlStateNormal];
     
     // Style to match segmented control appearance
-    self.customISOButton.backgroundColor = [UIColor systemBackgroundColor];
+    self.customISOButton.backgroundColor = PXSystemBackgroundColor();
     if (@available(iOS 13.0, *)) {
-        self.customISOButton.backgroundColor = [UIColor systemGray5Color];
+        self.customISOButton.backgroundColor = PXSystemGray5Color();
     }
     self.customISOButton.layer.cornerRadius = 4;
     self.customISOButton.titleLabel.font = [UIFont systemFontOfSize:13];
-    self.customISOButton.tintColor = [UIColor labelColor];
+    self.customISOButton.tintColor = PXLabelColor();
     
     // Highlight the button if a custom ISO is selected
     if (defaultISOIndex == -1) {
@@ -1697,14 +1811,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Add quick generate button with refresh icon
     self.quickGenerateButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if (@available(iOS 13.0, *)) {
-        [self.quickGenerateButton setImage:[UIImage systemImageNamed:@"arrow.clockwise"] forState:UIControlStateNormal];
-        self.quickGenerateButton.backgroundColor = [UIColor systemGray5Color];
+        [self.quickGenerateButton setImage:PXSystemImageNamed(@"arrow.clockwise") forState:UIControlStateNormal];
+        self.quickGenerateButton.backgroundColor = PXSystemGray5Color();
     } else {
         [self.quickGenerateButton setTitle:@"↻" forState:UIControlStateNormal]; // Fallback for older iOS
-        self.quickGenerateButton.backgroundColor = [UIColor systemBackgroundColor];
+        self.quickGenerateButton.backgroundColor = PXSystemBackgroundColor();
     }
     self.quickGenerateButton.layer.cornerRadius = 4;
-    self.quickGenerateButton.tintColor = [UIColor labelColor];
+    self.quickGenerateButton.tintColor = PXLabelColor();
     self.quickGenerateButton.translatesAutoresizingMaskIntoConstraints = NO;
     self.quickGenerateButton.enabled = (networkDataSpoofEnabled && savedConnectionType == 2);
     [self.quickGenerateButton addTarget:self action:@selector(quickGenerateButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1768,14 +1882,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create generate button for local IPv6
     self.localIPv6GenerateButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if (@available(iOS 13.0, *)) {
-        [self.localIPv6GenerateButton setImage:[UIImage systemImageNamed:@"arrow.clockwise"] forState:UIControlStateNormal];
-        self.localIPv6GenerateButton.backgroundColor = [UIColor systemGray5Color];
+        [self.localIPv6GenerateButton setImage:PXSystemImageNamed(@"arrow.clockwise") forState:UIControlStateNormal];
+        self.localIPv6GenerateButton.backgroundColor = PXSystemGray5Color();
     } else {
         [self.localIPv6GenerateButton setTitle:@"↻" forState:UIControlStateNormal];
-        self.localIPv6GenerateButton.backgroundColor = [UIColor systemBackgroundColor];
+        self.localIPv6GenerateButton.backgroundColor = PXSystemBackgroundColor();
     }
     self.localIPv6GenerateButton.layer.cornerRadius = 4;
-    self.localIPv6GenerateButton.tintColor = [UIColor labelColor];
+    self.localIPv6GenerateButton.tintColor = PXLabelColor();
     self.localIPv6GenerateButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.localIPv6GenerateButton addTarget:self action:@selector(localIPv6GenerateButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [ipv6Row addSubview:self.localIPv6GenerateButton];
@@ -1808,14 +1922,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create generate button for local IP
     self.localIPGenerateButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if (@available(iOS 13.0, *)) {
-        [self.localIPGenerateButton setImage:[UIImage systemImageNamed:@"arrow.clockwise"] forState:UIControlStateNormal];
-        self.localIPGenerateButton.backgroundColor = [UIColor systemGray5Color];
+        [self.localIPGenerateButton setImage:PXSystemImageNamed(@"arrow.clockwise") forState:UIControlStateNormal];
+        self.localIPGenerateButton.backgroundColor = PXSystemGray5Color();
     } else {
         [self.localIPGenerateButton setTitle:@"↻" forState:UIControlStateNormal]; // Fallback for older iOS
-        self.localIPGenerateButton.backgroundColor = [UIColor systemBackgroundColor];
+        self.localIPGenerateButton.backgroundColor = PXSystemBackgroundColor();
     }
     self.localIPGenerateButton.layer.cornerRadius = 4;
-    self.localIPGenerateButton.tintColor = [UIColor labelColor];
+    self.localIPGenerateButton.tintColor = PXLabelColor();
     self.localIPGenerateButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.localIPGenerateButton addTarget:self action:@selector(localIPGenerateButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [ipv4Row addSubview:self.localIPGenerateButton];
@@ -2095,11 +2209,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     // Methods for field change and generate button have been moved to top-level
     // No nested methods here
+    [self refreshNetworkDependencyState];
 }
 
 - (void)matrixToggleChanged:(UISwitch *)sender {
     self.matrixRainEnabled = sender.isOn;
     [self.securitySettings setBool:self.matrixRainEnabled forKey:@"matrixRainEnabled"];
+    [self.securitySettings synchronize];
+    [self updateSecurityHeroCount];
     
     if (self.matrixRainEnabled) {
         [self.matrixRainView startAnimation];
@@ -2116,35 +2233,19 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)profileIndicatorToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
     
-    // 1) Persist to on-disk plist (source of truth for SpringBoard / tweak)
-    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    settingsDict[@"profileIndicatorEnabled"] = @(enabled);
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
-                                                                   format:NSPropertyListXMLFormat_v1_0
-                                                                  options:0
-                                                                    error:nil];
-    if (plistData) {
-        [plistData writeToFile:securitySettingsPath atomically:YES];
+    // Persist the authoritative policy first. Do not broadcast or mutate runtime
+    // state if the disk write fails.
+    NSError *persistenceError = nil;
+    if (!PXWriteSecurityBool(@"profileIndicatorEnabled", enabled, &persistenceError)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToastWithMessage:@"Could not save Profile Indicator setting"];
+        PXLog(@"[SecurityTab] Profile Indicator persistence failed: %@", persistenceError);
+        return;
     }
     CFPreferencesSetAppValue(CFSTR("profileIndicatorEnabled"),
                              enabled ? kCFBooleanTrue : kCFBooleanFalse,
                              CFSTR("com.weaponx.securitySettings"));
     CFPreferencesAppSynchronize(CFSTR("com.weaponx.securitySettings"));
-
-    // 2) Suites + in-memory defaults
-    NSArray *suiteNames = @[
-        @"com.weaponx.securitySettings",
-        @"com.hydra.tlinkios.SecuritySettings",
-        @"com.hydra.tlinkios"
-    ];
-    for (NSString *suiteName in suiteNames) {
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
-        [defaults setBool:enabled forKey:@"profileIndicatorEnabled"];
-        [defaults synchronize];
-    }
-    [self.securitySettings setBool:enabled forKey:@"profileIndicatorEnabled"];
-    [self.securitySettings synchronize];
 
     // 3) Ensure SpringBoard is listed in TLinkIOSTweak filter (Profile Indicator hosts in SB).
     // Spoof hooks remain scope-gated; SB injection is required for the floating bubble.
@@ -2208,6 +2309,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     PXLog(@"Profile indicator %@, plist+CFPreferences saved, Darwin: %@",
            enabled ? @"enabled" : @"disabled",
            notificationName);
+    [self updateSecurityHeroCount];
     
     // Add haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -2217,34 +2319,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)jailbreakDetectionToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-
-    // 1) Persist to the security settings plist (source of truth)
-    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    settingsDict[@"jailbreakDetectionEnabled"] = @(enabled);
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
-                                                                   format:NSPropertyListXMLFormat_v1_0
-                                                                  options:0
-                                                                    error:nil];
-    if (plistData) {
-        [plistData writeToFile:securitySettingsPath atomically:YES];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"jailbreakDetectionEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToastWithMessage:@"Could not save Jailbreak Detection setting"];
+        PXLog(@"[SecurityTab] Jailbreak persistence failed: %@", error);
+        return;
     }
 
-    // 2) Update NSUserDefaults suites
-    NSArray *suiteNames = @[
-        @"com.weaponx.securitySettings",
-        @"com.hydra.tlinkios.SecuritySettings",
-        @"com.hydra.tlinkios"
-    ];
-    for (NSString *suiteName in suiteNames) {
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
-        [defaults setBool:enabled forKey:@"jailbreakDetectionEnabled"];
-        [defaults synchronize];
-    }
-    [self.securitySettings setBool:enabled forKey:@"jailbreakDetectionEnabled"];
-    [self.securitySettings synchronize];
-
-    // 3) Notify tweaks/processes
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter,
@@ -2259,80 +2341,47 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                                             YES);
     }
 
-    // 4) Haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
+    [self updateSecurityHeroCount];
 }
 
 - (void)networkDataSpoofToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    
-    // 1. Update plist file - THE SOURCE OF TRUTH
-    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    settingsDict[@"networkDataSpoofEnabled"] = @(enabled);
-    
-    // Ensure the plist is written atomically and with proper permissions
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
-                                                                  format:NSPropertyListXMLFormat_v1_0
-                                                                 options:0
-                                                                   error:nil];
-    if (plistData) {
-        [plistData writeToFile:securitySettingsPath atomically:YES];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"networkDataSpoofEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self refreshNetworkDependencyState];
+        [self showToastWithMessage:@"Could not save Network Data Spoof setting"];
+        PXLog(@"[SecurityTab] Network Data persistence failed: %@", error);
+        return;
     }
-    
-    // 2. Update NSUserDefaults in all suites to ensure consistency
-    NSArray *suiteNames = @[
-        @"com.weaponx.securitySettings",
-        @"com.hydra.tlinkios.SecuritySettings",
-        @"com.hydra.tlinkios"
-    ];
-    
-    for (NSString *suiteName in suiteNames) {
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
-        [defaults setBool:enabled forKey:@"networkDataSpoofEnabled"];
-        [defaults synchronize];
-    }
-    
-    // 3. Update UI
-    UIView *connectionTypeView = [self.view viewWithTag:1001];
-    if (connectionTypeView) {
-        connectionTypeView.alpha = enabled ? 0.8 : 0.4;
-        self.networkConnectionTypeSegment.enabled = enabled;
-    }
-    
-    // 4. Send notifications with enhanced information
+
+    [self refreshNetworkDependencyState];
+
     NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
     [userInfo setObject:@(enabled) forKey:@"enabled"];
     [userInfo setObject:@"SecurityTabView" forKey:@"sender"];
     [userInfo setObject:[NSDate date] forKey:@"timestamp"];
     [userInfo setObject:@YES forKey:@"forceReload"];
-    [userInfo setObject:securitySettingsPath forKey:@"settingsPath"];
-    
-    // Post notification immediately on main thread
+    [userInfo setObject:PXSecuritySettingsPath() forKey:@"settingsPath"];
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleNetworkDataSpoof"
-                                                            object:nil 
+                                                            object:nil
                                                           userInfo:userInfo];
     });
-    
-    // Send Darwin notification with enhanced information
+
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     NSString *notificationName = enabled ? @"com.hydra.tlinkios.enableNetworkDataSpoof" : @"com.hydra.tlinkios.disableNetworkDataSpoof";
     CFNotificationCenterPostNotification(darwinCenter, (__bridge CFStringRef)notificationName, NULL, NULL, YES);
-    
-    // Also send a generic change notification
     CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkDataSpoofChanged"), NULL, NULL, YES);
-    
-    // Add haptic feedback
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
+
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
-    
-    // Log the change
-    PXLog(@"[SecurityTab] 🔄 Network data spoof %@: Settings updated in plist and all NSUserDefaults suites", 
-          enabled ? @"ENABLED" : @"DISABLED");
+    [self updateSecurityHeroCount];
 }
 
 - (void)showMatrixInfo {
@@ -2348,44 +2397,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     [alert addAction:okAction];
     
-    // Find top view controller to present the alert
-    UIViewController *rootVC = nil;
-    
-    // For iOS 13 and above, use the window scene approach
-    if (@available(iOS 13.0, *)) {
-        // Cast to the right type to avoid incompatible pointer types warning
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && 
-                [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        rootVC = window.rootViewController;
-                        break;
-                    }
-                }
-                if (rootVC) break;
-            }
-        }
-        
-        // Fallback if we couldn't find the key window
-        if (!rootVC && connectedScenes.count > 0) {
-            for (UIScene *scene in connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *windowScene = (UIWindowScene *)scene;
-                    rootVC = windowScene.windows.firstObject.rootViewController;
-                    if (rootVC) break;
-                }
-            }
-        }
-    } else {
-        // Fallback for iOS 12 and below
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        rootVC = [UIApplication sharedApplication].delegate.window.rootViewController;
-#pragma clang diagnostic pop
-    }
+    // Find top view controller through the runtime-safe shared window helper.
+    UIViewController *rootVC = PXKeyWindow().rootViewController;
     
     // Navigate through presented view controllers to find the topmost one
     while (rootVC.presentedViewController) {
@@ -2408,44 +2421,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     [alert addAction:okAction];
     
-    // Find top view controller to present the alert
-    UIViewController *rootVC = nil;
-    
-    // For iOS 13 and above, use the window scene approach
-    if (@available(iOS 13.0, *)) {
-        // Cast to the right type to avoid incompatible pointer types warning
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && 
-                [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        rootVC = window.rootViewController;
-                        break;
-                    }
-                }
-                if (rootVC) break;
-            }
-        }
-        
-        // Fallback if we couldn't find the key window
-        if (!rootVC && connectedScenes.count > 0) {
-            for (UIScene *scene in connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *windowScene = (UIWindowScene *)scene;
-                    rootVC = windowScene.windows.firstObject.rootViewController;
-                    if (rootVC) break;
-                }
-            }
-        }
-    } else {
-        // Fallback for iOS 12 and below
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        rootVC = [UIApplication sharedApplication].delegate.window.rootViewController;
-#pragma clang diagnostic pop
-    }
+    // Find top view controller through the runtime-safe shared window helper.
+    UIViewController *rootVC = PXKeyWindow().rootViewController;
     
     // Navigate through presented view controllers to find the topmost one
     while (rootVC.presentedViewController) {
@@ -2479,44 +2456,8 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     [alert addAction:okAction];
     
-    // Find top view controller to present the alert
-    UIViewController *rootVC = nil;
-    
-    // For iOS 13 and above, use the window scene approach
-    if (@available(iOS 13.0, *)) {
-        // Cast to the right type to avoid incompatible pointer types warning
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && 
-                [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        rootVC = window.rootViewController;
-                        break;
-                    }
-                }
-                if (rootVC) break;
-            }
-        }
-        
-        // Fallback if we couldn't find the key window
-        if (!rootVC && connectedScenes.count > 0) {
-            for (UIScene *scene in connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *windowScene = (UIWindowScene *)scene;
-                    rootVC = windowScene.windows.firstObject.rootViewController;
-                    if (rootVC) break;
-                }
-            }
-        }
-    } else {
-        // Fallback for iOS 12 and below
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        rootVC = [UIApplication sharedApplication].delegate.window.rootViewController;
-#pragma clang diagnostic pop
-    }
+    // Find top view controller through the runtime-safe shared window helper.
+    UIViewController *rootVC = PXKeyWindow().rootViewController;
     
     // Navigate through presented view controllers to find the topmost one
     while (rootVC.presentedViewController) {
@@ -2590,18 +2531,23 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         }
     }
     
-    [self.securitySettings setObject:selectedISO forKey:@"networkISOCountryCode"];
-    [self.securitySettings synchronize];
+    NSError *persistenceError = nil;
+    if (!PXWriteSecuritySetting(@"networkISOCountryCode", selectedISO, &persistenceError)) {
+        [self refreshNetworkDependencyState];
+        [self showToastWithMessage:@"Could not save Network ISO Country"];
+        PXLog(@"[SecurityTab] Network ISO persistence failed: %@", persistenceError);
+        return;
+    }
     
     // Reset the custom button style if a standard option is selected
     if (sender.selectedSegmentIndex >= 0) {
         [self.customISOButton setTitle:@"Custom" forState:UIControlStateNormal];
-        [self.customISOButton setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        [self.customISOButton setTitleColor:PXLabelColor() forState:UIControlStateNormal];
         
         if (@available(iOS 13.0, *)) {
-            self.customISOButton.backgroundColor = [UIColor systemGray5Color];
+            self.customISOButton.backgroundColor = PXSystemGray5Color();
         } else {
-            self.customISOButton.backgroundColor = [UIColor systemBackgroundColor];
+            self.customISOButton.backgroundColor = PXSystemBackgroundColor();
         }
     }
     
@@ -2614,6 +2560,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Send notification for updates
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
     
     // Haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -2624,9 +2571,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)networkConnectionTypeChanged:(UISegmentedControl *)sender {
     NSInteger selectedType = sender.selectedSegmentIndex;
     
-    // Save setting immediately and synchronize
-    [self.securitySettings setInteger:selectedType forKey:@"networkConnectionType"];
-    [self.securitySettings synchronize];
+    NSError *persistenceError = nil;
+    if (!PXWriteSecurityInteger(@"networkConnectionType", selectedType, &persistenceError)) {
+        [self refreshNetworkDependencyState];
+        [self showToastWithMessage:@"Could not save Network Connection Type"];
+        return;
+    }
     
     // Get type name for logging
     NSArray *typeNames = @[@"Auto", @"WiFi", @"Cellular", @"None"];
@@ -2698,30 +2648,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
 
     // Show feedback toast
-    UIWindow *keyWindow = nil;
-    if (@available(iOS 13.0, *)) {
-        // Cast to the right type to avoid incompatible pointer types warning
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && 
-                [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        keyWindow = window;
-                        break;
-                    }
-                }
-                if (keyWindow) break;
-            }
-        }
-    } else {
-        // Suppress deprecation warning for iOS 12 and below
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        keyWindow = [UIApplication sharedApplication].keyWindow;
-#pragma clang diagnostic pop
-    }
+    UIWindow *keyWindow = PXKeyWindow();
     
     if (keyWindow) {
         UIAlertController *toast = [UIAlertController alertControllerWithTitle:nil
@@ -2743,9 +2670,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupVPNDetectionBypassControl:(UIView *)contentView {
     // Create a glassmorphic control for VPN/PROXY Detection Bypass
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2755,7 +2682,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.vpnDetectionLabel = [[UILabel alloc] init];
     self.vpnDetectionLabel.text = @"VPN/PROXY Detection Bypass";
     self.vpnDetectionLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.vpnDetectionLabel.textColor = [UIColor labelColor];
+    self.vpnDetectionLabel.textColor = PXLabelColor();
     self.vpnDetectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.vpnDetectionLabel];
     self.vpnDetectionLabel.numberOfLines = 1;
@@ -2812,9 +2739,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupAlertChecksSection:(UIView *)contentView {
     // Create a glassmorphic container for alert checks
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2843,7 +2770,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *bluetoothLabel = [[UILabel alloc] init];
     bluetoothLabel.text = @"✓ 1 TURN OFF BLUETOOTH";
     bluetoothLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    bluetoothLabel.textColor = [UIColor labelColor];
+    bluetoothLabel.textColor = PXLabelColor();
     bluetoothLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:bluetoothLabel];
     
@@ -2851,7 +2778,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *appleIDLabel = [[UILabel alloc] init];
     appleIDLabel.text = @"✓ 2 LOGOUT APPLE ID";
     appleIDLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    appleIDLabel.textColor = [UIColor labelColor];
+    appleIDLabel.textColor = PXLabelColor();
     appleIDLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:appleIDLabel];
     
@@ -2859,7 +2786,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *notificationLabel = [[UILabel alloc] init];
     notificationLabel.text = @"✓ 3 DONT ALLOW NOTIFICATION/TRACKING";
     notificationLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    notificationLabel.textColor = [UIColor labelColor];
+    notificationLabel.textColor = PXLabelColor();
     notificationLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:notificationLabel];
 
@@ -2867,7 +2794,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *brightnessLabel = [[UILabel alloc] init];
     brightnessLabel.text = @"✓ 4 SET BRIGHTNESS TO AUTO";
     brightnessLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    brightnessLabel.textColor = [UIColor labelColor];
+    brightnessLabel.textColor = PXLabelColor();
     brightnessLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:brightnessLabel];
     
@@ -2875,7 +2802,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *touchIDLabel = [[UILabel alloc] init];
     touchIDLabel.text = @"✓ 5 REMOVE TOUCH ID & PASSCODE";
     touchIDLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    touchIDLabel.textColor = [UIColor labelColor];
+    touchIDLabel.textColor = PXLabelColor();
     touchIDLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:touchIDLabel];
     
@@ -2883,7 +2810,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *cleanVarLabel = [[UILabel alloc] init];
     cleanVarLabel.text = @"✓ 6 CLEAN VAR FROM ROOTHIDE APP";
     cleanVarLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    cleanVarLabel.textColor = [UIColor labelColor];
+    cleanVarLabel.textColor = PXLabelColor();
     cleanVarLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:cleanVarLabel];
     
@@ -2931,9 +2858,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupTimeSpoofingControl:(UIView *)contentView {
     // Create glassmorphic control
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2944,7 +2871,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *label = [[UILabel alloc] init];
     label.text = @"Time spoofing using IP/location";
     label.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor labelColor];
+    label.textColor = PXLabelColor();
     label.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:label];
     // Icon chip (redesign)
@@ -2954,7 +2881,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // IP Label
     self.ipLabel = [[UILabel alloc] init];
     self.ipLabel.font = [UIFont systemFontOfSize:14];
-    self.ipLabel.textColor = [UIColor secondaryLabelColor];
+    self.ipLabel.textColor = PXSecondaryLabelColor();
     self.ipLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.ipLabel.textAlignment = NSTextAlignmentLeft;
     self.ipLabel.numberOfLines = 2;
@@ -2965,7 +2892,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.locationLabel = [[UILabel alloc] init];
     self.locationLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.locationLabel.font = [UIFont systemFontOfSize:14];
-    self.locationLabel.textColor = [UIColor secondaryLabelColor];
+    self.locationLabel.textColor = PXSecondaryLabelColor();
     self.locationLabel.textAlignment = NSTextAlignmentLeft;
     self.locationLabel.numberOfLines = 2;
     self.locationLabel.hidden = [self.securitySettings integerForKey:@"timeSpoofingMode"] != 2;
@@ -2987,6 +2914,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Segmented control
     NSArray *segments = @[@"OFF", @"USE IP", @"USE LOCATION"];
     UISegmentedControl *segment = [[UISegmentedControl alloc] initWithItems:segments];
+    self.timeSpoofingModeSegment = segment;
     segment.translatesAutoresizingMaskIntoConstraints = NO;
     NSInteger savedValue = [self.securitySettings integerForKey:@"timeSpoofingMode"];
     if (savedValue < 0 || savedValue > 2) savedValue = 0;
@@ -3075,8 +3003,16 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)timeSpoofingModeChanged:(UISegmentedControl *)sender {
     NSInteger selected = sender.selectedSegmentIndex;
-    [self.securitySettings setInteger:selected forKey:@"timeSpoofingMode"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityInteger(@"timeSpoofingMode", selected, &error)) {
+        NSInteger persisted = PXReadSecurityInteger(@"timeSpoofingMode", 0);
+        if (persisted < 0 || persisted > 2) persisted = 0;
+        sender.selectedSegmentIndex = persisted;
+        self.ipLabel.hidden = persisted != 1;
+        self.locationLabel.hidden = persisted != 2;
+        [self showToastWithMessage:@"Could not save Time Spoofing mode"];
+        return;
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.hydra.tlinkios.settings.changed"),
                                          NULL, NULL, YES);
@@ -3110,7 +3046,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
                             NSFontAttributeName: [UIFont systemFontOfSize:12],
-                            NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                            NSForegroundColorAttributeName: PXSecondaryLabelColor()
                         }]];
                 }
             }
@@ -3157,7 +3093,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
                             NSFontAttributeName: [UIFont systemFontOfSize:12],
-                            NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                            NSForegroundColorAttributeName: PXSecondaryLabelColor()
                         }]];
                 }
             }
@@ -3199,7 +3135,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Create copyright label
     self.copyrightLabel = [[UILabel alloc] init];
     self.copyrightLabel.text = @" HYDRA SECURE SYSTEMS • ALL RIGHTS RESERVED";
-    self.copyrightLabel.font = [UIFont fontWithName:@"Menlo" size:10.0] ?: [UIFont monospacedSystemFontOfSize:10.0 weight:UIFontWeightRegular];
+    self.copyrightLabel.font = [UIFont fontWithName:@"Menlo" size:10.0] ?: PXMonospacedSystemFont(10.0, UIFontWeightRegular);
     self.copyrightLabel.textColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.2 alpha:0.8]; // Matrix green
     self.copyrightLabel.textAlignment = NSTextAlignmentCenter;
     self.copyrightLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3248,11 +3184,16 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)vpnDetectionToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"vpnDetectionBypassEnabled"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"vpnDetectionBypassEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToastWithMessage:@"Could not save VPN Detection setting"];
+        return;
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.hydra.tlinkios.settings.changed"),
                                          NULL, NULL, YES);
+    [self updateSecurityHeroCount];
 }
 
 - (void)openVPNDetail {
@@ -3313,7 +3254,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
                             NSFontAttributeName: [UIFont systemFontOfSize:12],
-                            NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                            NSForegroundColorAttributeName: PXSecondaryLabelColor()
                         }]];
                 }
             }
@@ -3360,7 +3301,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
                             NSFontAttributeName: [UIFont systemFontOfSize:12],
-                            NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                            NSForegroundColorAttributeName: PXSecondaryLabelColor()
                         }]];
                 }
             }
@@ -3387,9 +3328,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupDeviceSpecificSpoofingControl:(UIView *)contentView {
     // Create a glassmorphic control for Device Specific Spoofing
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3399,7 +3340,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.deviceSpoofingLabel = [[UILabel alloc] init];
     self.deviceSpoofingLabel.text = @"Device Specific Spoofing";
     self.deviceSpoofingLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.deviceSpoofingLabel.textColor = [UIColor labelColor];
+    self.deviceSpoofingLabel.textColor = PXLabelColor();
     self.deviceSpoofingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.deviceSpoofingLabel];
     // Icon chip (redesign)
@@ -3432,7 +3373,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [bottomRowContainer addSubview:appleBgView];
     
     UIImageView *appleIconView = [[UIImageView alloc] init];
-    appleIconView.image = [UIImage systemImageNamed:@"apple.logo"];
+    appleIconView.image = PXSystemImageNamed(@"apple.logo");
     appleIconView.tintColor = [UIColor systemBlueColor];
     appleIconView.contentMode = UIViewContentModeScaleAspectFit;
     appleIconView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3452,7 +3393,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
-        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.image = PXSystemImageNamed(@"chevron.forward");
         config.imagePlacement = NSDirectionalRectEdgeTrailing;
         config.imagePadding = 6;
         [self.deviceSpoofingAccessButton safeSetConfiguration:config];
@@ -3496,7 +3437,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.safariStackSpoofingLabel = [[UILabel alloc] init];
     self.safariStackSpoofingLabel.text = @"Safari/Auth Stack Spoofing";
     self.safariStackSpoofingLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    self.safariStackSpoofingLabel.textColor = [UIColor secondaryLabelColor];
+    self.safariStackSpoofingLabel.textColor = PXSecondaryLabelColor();
     self.safariStackSpoofingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [safariRow addSubview:self.safariStackSpoofingLabel];
 
@@ -3518,7 +3459,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.webCompatIOSRangeLabel = [[UILabel alloc] init];
     self.webCompatIOSRangeLabel.text = @"WebCompat iOS Range (<= 16.3.1)";
     self.webCompatIOSRangeLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    self.webCompatIOSRangeLabel.textColor = [UIColor secondaryLabelColor];
+    self.webCompatIOSRangeLabel.textColor = PXSecondaryLabelColor();
     self.webCompatIOSRangeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [webCompatRow addSubview:self.webCompatIOSRangeLabel];
 
@@ -3546,7 +3487,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.fullSpoofTestModeLabel = [[UILabel alloc] init];
     self.fullSpoofTestModeLabel.text = @"Full Spoof Test Mode";
     self.fullSpoofTestModeLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    self.fullSpoofTestModeLabel.textColor = [UIColor secondaryLabelColor];
+    self.fullSpoofTestModeLabel.textColor = PXSecondaryLabelColor();
     self.fullSpoofTestModeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [fullSpoofRow addSubview:self.fullSpoofTestModeLabel];
 
@@ -3566,7 +3507,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.displayUIScaleSpoofLabel = [[UILabel alloc] init];
     self.displayUIScaleSpoofLabel.text = @"UI Scale Spoof (Zoom UI)";
     self.displayUIScaleSpoofLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    self.displayUIScaleSpoofLabel.textColor = [UIColor secondaryLabelColor];
+    self.displayUIScaleSpoofLabel.textColor = PXSecondaryLabelColor();
     self.displayUIScaleSpoofLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [uiScaleRow addSubview:self.displayUIScaleSpoofLabel];
 
@@ -3714,6 +3655,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     self.webCompatIOSRangeWarningHeightConstraint = [self.webCompatIOSRangeWarningLabel.heightAnchor constraintEqualToConstant:(showWarning ? 24.0 : 0.0)];
     self.webCompatIOSRangeWarningHeightConstraint.active = YES;
+    [self refreshDeviceSpoofingDependencyState];
 }
 
 - (void)webCompatIOSRangeToggleChanged:(UISwitch *)sender {
@@ -3739,18 +3681,18 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)fullSpoofTestModeToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-
-    [self.securitySettings setBool:enabled forKey:@"fullSpoofTestModeEnabled"];
-
-    // In test mode, we want Safari/Auth stack spoofing ON for consistency.
-    if (enabled) {
-        [self.securitySettings setBool:YES forKey:@"safariStackSpoofEnabled"];
-        if (self.safariStackSpoofingToggleSwitch) {
-            [self.safariStackSpoofingToggleSwitch setOn:YES animated:YES];
-        }
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"fullSpoofTestModeEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self refreshDeviceSpoofingDependencyState];
+        [self showToastWithMessage:@"Could not save Full Spoof Test Mode"];
+        return;
     }
 
-    [self.securitySettings synchronize];
+    // Do not overwrite safariStackSpoofEnabled. Full Test only changes the effective
+    // runtime state; the user's configured Safari/Auth preference is restored when
+    // test mode is turned off.
+    [self refreshDeviceSpoofingDependencyState];
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
@@ -3771,13 +3713,20 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)safariStackSpoofingToggleChanged:(UISwitch *)sender {
+    if (PXReadSecurityBool(@"fullSpoofTestModeEnabled", NO)) {
+        [sender setOn:YES animated:YES];
+        [self refreshDeviceSpoofingDependencyState];
+        return;
+    }
+
     BOOL enabled = sender.isOn;
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"safariStackSpoofEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToastWithMessage:@"Could not save Safari/Auth Stack setting"];
+        return;
+    }
 
-    // Persist user override; effective enablement still follows global deviceSpoofingEnabled.
-    [self.securitySettings setBool:enabled forKey:@"safariStackSpoofEnabled"];
-    [self.securitySettings synchronize];
-
-    // Broadcast changes so all tweaks clear caches.
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, NULL, YES);
@@ -3803,9 +3752,13 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)deviceSpoofingToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
     
-    // Save setting immediately and synchronize
-    [self.securitySettings setBool:enabled forKey:@"deviceSpoofingEnabled"];
-    [self.securitySettings synchronize];
+    NSError *persistenceError = nil;
+    if (!PXWriteSecurityBool(@"deviceSpoofingEnabled", enabled, &persistenceError)) {
+        [sender setOn:!enabled animated:YES];
+        [self refreshDeviceSpoofingDependencyState];
+        [self showToastWithMessage:@"Could not save Device Spoofing setting"];
+        return;
+    }
 
     // Safari/Auth stack spoof toggle: default ON when global spoof is ON.
     if (self.safariStackSpoofingToggleSwitch) {
@@ -3889,6 +3842,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.toggleDeviceSpoofing"), NULL, NULL, YES);
     }
     
+    [self refreshDeviceSpoofingDependencyState];
+    [self updateSecurityHeroCount];
+
     // Add haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
@@ -3914,9 +3870,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupAppVersionSpoofingControl:(UIView *)contentView {
     // Create a glassmorphic control for App Version Spoofing
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3926,7 +3882,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.appVersionSpoofingLabel = [[UILabel alloc] init];
     self.appVersionSpoofingLabel.text = @"APP Specific Version Spoofing";
     self.appVersionSpoofingLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.appVersionSpoofingLabel.textColor = [UIColor labelColor];
+    self.appVersionSpoofingLabel.textColor = PXLabelColor();
     self.appVersionSpoofingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.appVersionSpoofingLabel];
     // Icon chip (redesign)
@@ -3959,7 +3915,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [bottomRowContainer addSubview:appBgView];
     
     UIImageView *appIconView = [[UIImageView alloc] init];
-    appIconView.image = [UIImage systemImageNamed:@"app.badge"];
+    appIconView.image = PXSystemImageNamed(@"app.badge");
     appIconView.tintColor = [UIColor systemBlueColor];
     appIconView.contentMode = UIViewContentModeScaleAspectFit;
     appIconView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3979,7 +3935,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
-        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.image = PXSystemImageNamed(@"chevron.forward");
         config.imagePlacement = NSDirectionalRectEdgeTrailing;
         config.imagePadding = 6;
         [self.appVersionSpoofingAccessButton safeSetConfiguration:config];
@@ -4078,9 +4034,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)setupFixVersionControl:(UIView *)contentView {
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4089,7 +4045,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.fixVersionLabel = [[UILabel alloc] init];
     self.fixVersionLabel.text = @"Fix Version";
     self.fixVersionLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.fixVersionLabel.textColor = [UIColor labelColor];
+    self.fixVersionLabel.textColor = PXLabelColor();
     self.fixVersionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.fixVersionLabel];
     // Icon chip (redesign)
@@ -4119,7 +4075,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [bottomRowContainer addSubview:wrenchBgView];
 
     UIImageView *wrenchIconView = [[UIImageView alloc] init];
-    wrenchIconView.image = [UIImage systemImageNamed:@"wrench.and.screwdriver"];
+    wrenchIconView.image = PXSystemImageNamed(@"wrench.and.screwdriver");
     wrenchIconView.tintColor = [UIColor systemBlueColor];
     wrenchIconView.contentMode = UIViewContentModeScaleAspectFit;
     wrenchIconView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4138,7 +4094,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         config.background.backgroundColor = [UIColor systemBlueColor];
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.baseForegroundColor = [UIColor whiteColor];
-        config.image = [UIImage systemImageNamed:@"chevron.forward"];
+        config.image = PXSystemImageNamed(@"chevron.forward");
         config.imagePlacement = NSDirectionalRectEdgeTrailing;
         config.imagePadding = 6;
         [self.fixVersionAppsButton safeSetConfiguration:config];
@@ -4213,9 +4169,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)setupDeepCleanControl:(UIView *)contentView {
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4224,7 +4180,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.deepCleanLabel = [[UILabel alloc] init];
     self.deepCleanLabel.text = @"Clear Data Mode";
     self.deepCleanLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.deepCleanLabel.textColor = [UIColor labelColor];
+    self.deepCleanLabel.textColor = PXLabelColor();
     self.deepCleanLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.deepCleanLabel];
     // Icon chip (redesign)
@@ -4245,11 +4201,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     self.deepCleanModeControl = [[UISegmentedControl alloc] initWithItems:@[@"Full", @"Deep"]];
     self.deepCleanModeControl.translatesAutoresizingMaskIntoConstraints = NO;
-    if (@available(iOS 13.0, *)) {
-        self.deepCleanModeControl.selectedSegmentTintColor = [UIColor systemBlueColor];
-    }
+    PXSetSegmentedControlSelectedTint(self.deepCleanModeControl, [UIColor systemBlueColor]);
     [self.deepCleanModeControl setTitleTextAttributes:@{ NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold] } forState:UIControlStateSelected];
-    [self.deepCleanModeControl setTitleTextAttributes:@{ NSForegroundColorAttributeName: [UIColor labelColor], NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium] } forState:UIControlStateNormal];
+    [self.deepCleanModeControl setTitleTextAttributes:@{ NSForegroundColorAttributeName: PXLabelColor(), NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium] } forState:UIControlStateNormal];
     BOOL deepEnabled = [self.securitySettings boolForKey:@"deepCleanEnabled"];
     self.deepCleanModeControl.selectedSegmentIndex = deepEnabled ? 1 : 0;
     [self.deepCleanModeControl addTarget:self action:@selector(deepCleanModeChanged:) forControlEvents:UIControlEventValueChanged];
@@ -4258,7 +4212,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.deepCleanHintLabel = [[UILabel alloc] init];
     self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:deepEnabled];
     self.deepCleanHintLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    self.deepCleanHintLabel.textColor = [UIColor secondaryLabelColor];
+    self.deepCleanHintLabel.textColor = PXSecondaryLabelColor();
     self.deepCleanHintLabel.numberOfLines = 1;
     self.deepCleanHintLabel.adjustsFontSizeToFitWidth = YES;
     self.deepCleanHintLabel.minimumScaleFactor = 0.8;
@@ -4293,9 +4247,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)setupSystemKeychainWipeControl:(UIView *)contentView {
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4304,7 +4258,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.systemKeychainWipeLabel = [[UILabel alloc] init];
     self.systemKeychainWipeLabel.text = @"System Keychain Wipe";
     self.systemKeychainWipeLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.systemKeychainWipeLabel.textColor = [UIColor labelColor];
+    self.systemKeychainWipeLabel.textColor = PXLabelColor();
     self.systemKeychainWipeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.systemKeychainWipeLabel];
     // Icon chip (redesign)
@@ -4330,7 +4284,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *modeLabel = [[UILabel alloc] init];
     modeLabel.text = @"Allow com.apple.*";
     modeLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    modeLabel.textColor = [UIColor labelColor];
+    modeLabel.textColor = PXLabelColor();
     modeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [bottomRowContainer addSubview:modeLabel];
 
@@ -4394,15 +4348,23 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     BOOL enabled = sender.isOn;
     if (enabled) {
         UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Allow System Keychain Wipe?"
-                                                                        message:@"This lets Clear Data also wipe com.apple.* system keychain items for scoped apps. It can sign you out of system services and is hard to undo. Continue?"
+                                                                        message:@"This does not erase data by itself. It arms a policy that lets a later Clear Data action also wipe com.apple.* system keychain items for scoped system apps. Continue?"
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-            [sender setOn:NO animated:YES];
+            [sender setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:YES];
         }]];
         [confirm addAction:[UIAlertAction actionWithTitle:@"Allow" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-            [self.securitySettings setBool:YES forKey:@"allowSystemKeychainWipeEnabled"];
-            [self.securitySettings synchronize];
-            [self showToastWithMessage:@"System Keychain Wipe allowed"];
+            NSError *error = nil;
+            if (!PXWriteSecurityBool(@"allowSystemKeychainWipeEnabled", YES, &error)) {
+                [sender setOn:NO animated:YES];
+                [self showToastWithMessage:@"Could not arm System Keychain Wipe policy"];
+                return;
+            }
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 CFSTR("com.hydra.tlinkios.settings.changed"),
+                                                 NULL, NULL, YES);
+            [self showToastWithMessage:@"System Keychain Wipe policy armed"];
+            [self updateSecurityHeroCount];
             UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
             [gen prepare];
             [gen impactOccurred];
@@ -4410,8 +4372,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [self presentViewController:confirm animated:YES completion:nil];
         return;
     }
-    [self.securitySettings setBool:NO forKey:@"allowSystemKeychainWipeEnabled"];
-    [self.securitySettings synchronize];
+
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"allowSystemKeychainWipeEnabled", NO, &error)) {
+        [sender setOn:YES animated:YES];
+        [self showToastWithMessage:@"Could not disable System Keychain Wipe policy"];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+    [self updateSecurityHeroCount];
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
@@ -4438,10 +4409,19 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)deepCleanModeChanged:(UISegmentedControl *)sender {
     BOOL deepEnabled = (sender.selectedSegmentIndex == 1);
-    [self.securitySettings setBool:deepEnabled forKey:@"deepCleanEnabled"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"deepCleanEnabled", deepEnabled, &error)) {
+        BOOL persisted = PXReadSecurityBool(@"deepCleanEnabled", NO);
+        sender.selectedSegmentIndex = persisted ? 1 : 0;
+        self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:persisted];
+        [self showToastWithMessage:@"Could not save Clear Data mode"];
+        return;
+    }
 
     self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:deepEnabled];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
 
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
@@ -4462,12 +4442,17 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)fixVersionToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"fixVersionEnabled"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"fixVersionEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToastWithMessage:@"Could not save Fix Version setting"];
+        return;
+    }
 
     [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.fixVersionChanged"
                                                         object:nil
                                                       userInfo:@{ @"enabled": @(enabled) }];
+    [self updateSecurityHeroCount];
 
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
@@ -4516,9 +4501,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)appVersionSpoofingToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
     
-    // Save setting immediately and synchronize
-    [self.securitySettings setBool:enabled forKey:@"appVersionSpoofingEnabled"];
-    [self.securitySettings synchronize];
+    NSError *persistenceError = nil;
+    if (!PXWriteSecurityBool(@"appVersionSpoofingEnabled", enabled, &persistenceError)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToastWithMessage:@"Could not save App Version Spoofing setting"];
+        return;
+    }
     
     // Enable/disable access button based on toggle state
     self.appVersionSpoofingAccessButton.enabled = enabled;
@@ -4557,6 +4545,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
                                                             object:nil 
                                                           userInfo:userInfo];
     });
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+    [self updateSecurityHeroCount];
     
     // Add haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -4721,9 +4713,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
             // Deselect any selected segment
             [self.networkISOCountrySegment setSelectedSegmentIndex:UISegmentedControlNoSegment];
             
-            // Save to user defaults
-            [self.securitySettings setObject:isoCode forKey:@"networkISOCountryCode"];
-            [self.securitySettings synchronize];
+            // Persist before changing dependent UI/carrier data.
+            NSError *persistenceError = nil;
+            if (!PXWriteSecuritySetting(@"networkISOCountryCode", isoCode, &persistenceError)) {
+                [self refreshNetworkDependencyState];
+                [self showToastWithMessage:@"Could not save custom Network ISO Country"];
+                PXLog(@"[SecurityTab] Custom Network ISO persistence failed: %@", persistenceError);
+                return;
+            }
             
             // Update custom button title
             [self.customISOButton setTitle:[NSString stringWithFormat:@"Custom: %@", [isoCode uppercaseString]] forState:UIControlStateNormal];
@@ -4746,6 +4743,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
             // Send notification for updates
             CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
             CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
+            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
             
             // Add haptic feedback
             UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -4865,7 +4863,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
      } completion:^(BOOL finished) {
          [UIView animateWithDuration:0.2 animations:^{
              sender.backgroundColor = originalColor;
-             sender.tintColor = [UIColor labelColor];
+             sender.tintColor = PXLabelColor();
          }];
      }];
     
@@ -4909,7 +4907,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     } completion:^(BOOL finished) {
         [UIView animateWithDuration:0.2 animations:^{
             sender.backgroundColor = originalColor;
-            sender.tintColor = [UIColor labelColor];
+            sender.tintColor = PXLabelColor();
         }];
     }];
     
@@ -4960,9 +4958,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupDomainBlockingControl:(UIView *)contentView {
     // Create a glassmorphic control for Domain Blocking
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4982,14 +4980,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *descriptionLabel = [[UILabel alloc] init];
     descriptionLabel.text = @"Block tracking domains for scoped apps";
     descriptionLabel.font = [UIFont systemFontOfSize:12];
-    descriptionLabel.textColor = [UIColor secondaryLabelColor];
+    descriptionLabel.textColor = PXSecondaryLabelColor();
     descriptionLabel.numberOfLines = 2;
     descriptionLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:descriptionLabel];
     
     // Info button
     UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
-    infoButton.tintColor = [UIColor labelColor];
+    infoButton.tintColor = PXLabelColor();
     infoButton.translatesAutoresizingMaskIntoConstraints = NO;
     [infoButton addTarget:self action:@selector(showDomainBlockingInfo) forControlEvents:UIControlEventTouchUpInside];
     [controlView.contentView addSubview:infoButton];
@@ -5008,7 +5006,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     // Manage domains button
     self.domainManagementButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.domainManagementButton setTitle:@"Manage Domains" forState:UIControlStateNormal];
-    [self.domainManagementButton setImage:[UIImage systemImageNamed:@"chevron.forward"] forState:UIControlStateNormal];
+    [self.domainManagementButton setImage:PXSystemImageNamed(@"chevron.forward") forState:UIControlStateNormal];
     self.domainManagementButton.semanticContentAttribute = UISemanticContentAttributeForceRightToLeft;
     self.domainManagementButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.domainManagementButton addTarget:self action:@selector(showDomainManagement) forControlEvents:UIControlEventTouchUpInside];
@@ -5080,9 +5078,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)setupCanvasFingerprintingControl:(UIView *)contentView {
     // Create a glassmorphic control with EXACT same style as other cells (like VPN/PROXY Detection Bypass)
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight]];
+    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
     controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
+    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
     controlView.clipsToBounds = YES;
     controlView.alpha = 1.0;
     controlView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5090,7 +5088,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     // Set background color to match other controls
     if (@available(iOS 13.0, *)) {
-        controlView.backgroundColor = [UIColor systemBackgroundColor];
+        controlView.backgroundColor = PXSystemBackgroundColor();
     } else {
         controlView.backgroundColor = [UIColor whiteColor];
     }
@@ -5099,7 +5097,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     self.canvasFingerprintingLabel = [[UILabel alloc] init];
     self.canvasFingerprintingLabel.text = @"Canvas Fingerprint Protection";
     self.canvasFingerprintingLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.canvasFingerprintingLabel.textColor = [UIColor labelColor];
+    self.canvasFingerprintingLabel.textColor = PXLabelColor();
     self.canvasFingerprintingLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [controlView.contentView addSubview:self.canvasFingerprintingLabel];
     // Icon chip (redesign)
@@ -5115,7 +5113,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     
     self.canvasFingerprintingInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
     if (@available(iOS 13.0, *)) {
-        UIImage *infoImage = [UIImage systemImageNamed:@"info.circle"];
+        UIImage *infoImage = PXSystemImageNamed(@"info.circle");
         [self.canvasFingerprintingInfoButton setImage:infoImage forState:UIControlStateNormal];
     }
     self.canvasFingerprintingInfoButton.tintColor = [UIColor systemBlueColor];
@@ -5137,7 +5135,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
         config.title = @"Reset Noise";
-        config.image = [UIImage systemImageNamed:@"arrow.clockwise"];
+        config.image = PXSystemImageNamed(@"arrow.clockwise");
         config.imagePlacement = NSDirectionalRectEdgeLeading;
         config.imagePadding = 5;
         config.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
@@ -5149,7 +5147,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     } else {
         // For older iOS versions
         if (@available(iOS 13.0, *)) {
-            UIImage *resetImage = [UIImage systemImageNamed:@"arrow.clockwise"];
+            UIImage *resetImage = PXSystemImageNamed(@"arrow.clockwise");
             [self.canvasFingerprintingResetButton setImage:resetImage forState:UIControlStateNormal];
             [self.canvasFingerprintingResetButton setTitle:@" Reset Noise" forState:UIControlStateNormal];
         } else {
@@ -5182,7 +5180,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     descriptionLabel.text = @"Prevents browser fingerprinting through canvas operations";
     descriptionLabel.font = [UIFont systemFontOfSize:12];
     if (@available(iOS 13.0, *)) {
-        descriptionLabel.textColor = [UIColor secondaryLabelColor];
+        descriptionLabel.textColor = PXSecondaryLabelColor();
     } else {
         descriptionLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1.0];
     }
@@ -5372,14 +5370,24 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)domainBlockingToggleChanged:(UISwitch *)sender {
     DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
+    BOOL previous = settings.isEnabled;
     settings.isEnabled = sender.isOn;
-    [settings saveSettings];
-    
-    // Provide haptic feedback
+    if (![settings saveSettings]) {
+        settings.isEnabled = previous;
+        [sender setOn:previous animated:YES];
+        [self showToastWithMessage:@"Could not save Domain Blocking setting"];
+        return;
+    }
+
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.domainBlockingChanged"),
+                                         NULL, NULL, YES);
+
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
-    
+    [self updateSecurityHeroCount];
+
     PXLog(@"[WeaponX] Domain Blocking %@", sender.isOn ? @"ENABLED" : @"DISABLED");
 }
 
@@ -5421,7 +5429,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     } completion:^(BOOL finished) {
         [UIView animateWithDuration:0.2 animations:^{
             sender.backgroundColor = originalColor;
-            sender.tintColor = [UIColor labelColor];
+            sender.tintColor = PXLabelColor();
         }];
     }];
     // Show toast
@@ -5438,7 +5446,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UIView *hero = [[UIView alloc] init];
     hero.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        hero.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        hero.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         hero.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.85];
     }
@@ -5456,7 +5464,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *countLabel = [[UILabel alloc] init];
     countLabel.translatesAutoresizingMaskIntoConstraints = NO;
     countLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
-    countLabel.textColor = [UIColor labelColor];
+    countLabel.textColor = PXLabelColor();
     countLabel.textAlignment = NSTextAlignmentCenter;
     countLabel.text = @"0/0";
     self.heroCountLabel = countLabel;
@@ -5465,14 +5473,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.text = @"Security";
     [hero addSubview:title];
 
     UILabel *subtitle = [[UILabel alloc] init];
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.numberOfLines = 2;
     subtitle.text = @"lớp bảo mật đang bật";
     self.heroSubtitleLabel = subtitle;
@@ -5506,7 +5514,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = title;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     if (self.cardsStack && self.cardsStack.arrangedSubviews.count > 0) {
         [self.cardsStack setCustomSpacing:22 afterView:self.cardsStack.arrangedSubviews.lastObject];
     }
@@ -5554,13 +5562,13 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        UIImage *chipImg = [UIImage systemImageNamed:symbolName];
+        UIImage *chipImg = PXSystemImageNamed(symbolName);
         if (!chipImg) {
             NSDictionary *chipFallback = @{ @"network.badge.shield.half.filled": @"lock.shield", @"paintbrush.pointed": @"paintbrush", @"globe.badge.chevron.backward": @"globe" };
             NSString *altName = chipFallback[symbolName];
-            if (altName) chipImg = [UIImage systemImageNamed:altName];
+            if (altName) chipImg = PXSystemImageNamed(altName);
         }
-        if (!chipImg) chipImg = [UIImage systemImageNamed:@"shield"];
+        if (!chipImg) chipImg = PXSystemImageNamed(@"shield");
         iv.image = [chipImg imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];

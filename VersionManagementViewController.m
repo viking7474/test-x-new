@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "VersionManagementViewController.h"
 #import "TLinkIOSLogging.h"
 #import "common/PXPaths.h"
@@ -43,7 +44,7 @@
     [super viewDidLoad];
     
     // Set up the view
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     
     // Set up navigation bar
     self.doneButton = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone 
@@ -56,7 +57,7 @@
                                                                    action:@selector(addButtonTapped)];
     
     // Add fetch button
-    self.fetchButton = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.down.circle"]
+    self.fetchButton = [[UIBarButtonItem alloc] initWithImage:PXSystemImageNamed(@"arrow.down.circle")
                                                       style:UIBarButtonItemStylePlain
                                                      target:self
                                                      action:@selector(fetchVersionsButtonTapped)];
@@ -65,7 +66,7 @@
     self.navigationItem.leftBarButtonItems = @[self.addButton, self.fetchButton];
     
     // Setup loading indicator
-    self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
     self.loadingIndicator.center = self.view.center;
     self.loadingIndicator.hidesWhenStopped = YES;
     [self.view addSubview:self.loadingIndicator];
@@ -75,19 +76,19 @@
     explanationLabel.translatesAutoresizingMaskIntoConstraints = NO;
     explanationLabel.text = @"You can add multiple versions for this app. Use the + button to add manually or the download button to fetch from App Store.";
     explanationLabel.textAlignment = NSTextAlignmentCenter;
-    explanationLabel.textColor = [UIColor secondaryLabelColor];
+    explanationLabel.textColor = PXSecondaryLabelColor();
     explanationLabel.numberOfLines = 0;
     explanationLabel.font = [UIFont systemFontOfSize:14];
     [self.view addSubview:explanationLabel];
     
     // Set up table view with improved style
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXInsetGroupedTableViewStyle()];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight = 110;
-    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.backgroundColor = PXSystemGroupedBackgroundColor();
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
     self.tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 16);
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"VersionCell"];
@@ -103,7 +104,7 @@
     emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     emptyLabel.text = @"No versions added yet\nTap the + button to add a version";
     emptyLabel.textAlignment = NSTextAlignmentCenter;
-    emptyLabel.textColor = [UIColor secondaryLabelColor];
+    emptyLabel.textColor = PXSecondaryLabelColor();
     emptyLabel.numberOfLines = 0;
     [self.emptyStateView addSubview:emptyLabel];
     
@@ -213,7 +214,7 @@
     
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, tableView.bounds.size.width - 32, 24)];
     titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-    titleLabel.textColor = [UIColor labelColor];
+    titleLabel.textColor = PXLabelColor();
     
     if (section == 0) {
         titleLabel.text = @"Current App Information";
@@ -253,7 +254,7 @@
         
         // Create container with shadows and rounded corners
         UIView *cardView = [[UIView alloc] initWithFrame:CGRectMake(12, 5, cell.contentView.bounds.size.width - 24, 70)];
-        cardView.backgroundColor = [UIColor systemBackgroundColor];
+        cardView.backgroundColor = PXSystemBackgroundColor();
         cardView.layer.cornerRadius = 12;
         cardView.layer.shadowColor = [UIColor blackColor].CGColor;
         cardView.layer.shadowOffset = CGSizeMake(0, 2);
@@ -266,7 +267,7 @@
         UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, cardView.bounds.size.width - 32, 20)];
         titleLabel.text = @"Actual App Info";
         titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
-        titleLabel.textColor = [UIColor secondaryLabelColor];
+        titleLabel.textColor = PXSecondaryLabelColor();
         titleLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         [cardView addSubview:titleLabel];
         
@@ -279,7 +280,7 @@
         UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 60, 30)];
         versionLabel.text = @"Version:";
         versionLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        versionLabel.textColor = [UIColor labelColor];
+        versionLabel.textColor = PXLabelColor();
         [infoContainer addSubview:versionLabel];
         
         UILabel *versionValue = [[UILabel alloc] initWithFrame:CGRectMake(70, 0, infoContainer.bounds.size.width - 80, 30)];
@@ -293,13 +294,13 @@
         UILabel *buildLabel = [[UILabel alloc] initWithFrame:CGRectMake(infoContainer.bounds.size.width - 120, 0, 50, 30)];
         buildLabel.text = @"Build:";
         buildLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        buildLabel.textColor = [UIColor labelColor];
+        buildLabel.textColor = PXLabelColor();
         buildLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         [infoContainer addSubview:buildLabel];
         
         UILabel *buildValue = [[UILabel alloc] initWithFrame:CGRectMake(infoContainer.bounds.size.width - 65, 0, 65, 30)];
         buildValue.text = realBuild;
-        buildValue.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightSemibold];
+        buildValue.font = PXMonospacedSystemFont(15, UIFontWeightSemibold);
         buildValue.textColor = [UIColor systemGreenColor];
         buildValue.textAlignment = NSTextAlignmentRight;
         buildValue.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
@@ -326,25 +327,20 @@
             
             // Set card background color based on active status
             if (indexPath.row == self.activeVersionIndex) {
-                // Use dynamic color that works in both light and dark mode
-                if (@available(iOS 13.0, *)) {
-                    cardView.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traitCollection) {
-                        if (traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
-                            return [UIColor colorWithRed:0.2 green:0.3 blue:0.5 alpha:1.0]; // Darker blue for dark mode
-                        } else {
-                            return [UIColor colorWithRed:0.9 green:0.95 blue:1.0 alpha:1.0]; // Light blue for light mode
-                        }
-                    }];
-                } else {
-                    cardView.backgroundColor = [UIColor colorWithRed:0.9 green:0.95 blue:1.0 alpha:1.0]; // Light blue for iOS < 13
-                }
+                UIColor *activeCardFallback = [UIColor colorWithRed:0.9 green:0.95 blue:1.0 alpha:1.0];
+                cardView.backgroundColor = PXDynamicColor(^UIColor *(UITraitCollection *traitCollection) {
+                    if (PXIsDarkUserInterfaceStyle(traitCollection)) {
+                        return [UIColor colorWithRed:0.2 green:0.3 blue:0.5 alpha:1.0];
+                    }
+                    return activeCardFallback;
+                }, activeCardFallback);
                 
                 UIView *activeIndicator = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 4, cardView.bounds.size.height)];
                 activeIndicator.backgroundColor = [UIColor systemBlueColor];
                 activeIndicator.layer.cornerRadius = 2;
                 [cardView addSubview:activeIndicator];
             } else {
-                cardView.backgroundColor = [UIColor systemBackgroundColor];
+                cardView.backgroundColor = PXSystemBackgroundColor();
             }
             
             [cell.contentView addSubview:cardView];
@@ -372,14 +368,14 @@
                 activeText.textAlignment = NSTextAlignmentCenter;
                 [activeBadge addSubview:activeText];
             } else {
-                nameLabel.textColor = [UIColor labelColor];
+                nameLabel.textColor = PXLabelColor();
             }
             
             [cardView addSubview:nameLabel];
             
             // Divider line
             UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(16, 44, cardView.bounds.size.width - 32, 1)];
-            divider.backgroundColor = [UIColor separatorColor];
+            divider.backgroundColor = PXSeparatorColor();
             divider.alpha = 0.5;
             divider.autoresizingMask = UIViewAutoresizingFlexibleWidth;
             [cardView addSubview:divider];
@@ -393,7 +389,7 @@
             UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 55, 24)];
             versionLabel.text = @"Version:";
             versionLabel.font = [UIFont systemFontOfSize:14];
-            versionLabel.textColor = [UIColor secondaryLabelColor];
+            versionLabel.textColor = PXSecondaryLabelColor();
             [infoContainer addSubview:versionLabel];
             
             UILabel *versionValue = [[UILabel alloc] initWithFrame:CGRectMake(60, 0, infoContainer.bounds.size.width / 2 - 60, 24)];
@@ -401,19 +397,12 @@
             versionValue.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
             // Make sure version value is visible in dark mode for active cells
             if (indexPath.row == self.activeVersionIndex) {
-                if (@available(iOS 13.0, *)) {
-                    versionValue.textColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traitCollection) {
-                        if (traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
-                            return [UIColor colorWithWhite:0.9 alpha:1.0]; // Light color for dark mode active cells
-                        } else {
-                            return [UIColor labelColor]; // Default for light mode
-                        }
-                    }];
-                } else {
-                    versionValue.textColor = [UIColor labelColor];
-                }
+                UIColor *fallback = PXLabelColor();
+                versionValue.textColor = PXDynamicColor(^UIColor *(UITraitCollection *traitCollection) {
+                    return PXIsDarkUserInterfaceStyle(traitCollection) ? [UIColor colorWithWhite:0.9 alpha:1.0] : fallback;
+                }, fallback);
             } else {
-                versionValue.textColor = [UIColor labelColor];
+                versionValue.textColor = PXLabelColor();
             }
             [infoContainer addSubview:versionValue];
             
@@ -422,28 +411,21 @@
                 UILabel *buildLabel = [[UILabel alloc] initWithFrame:CGRectMake(infoContainer.bounds.size.width / 2, 0, 40, 24)];
                 buildLabel.text = @"Build:";
                 buildLabel.font = [UIFont systemFontOfSize:14];
-                buildLabel.textColor = [UIColor secondaryLabelColor];
+                buildLabel.textColor = PXSecondaryLabelColor();
                 buildLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
                 [infoContainer addSubview:buildLabel];
                 
                 UILabel *buildValue = [[UILabel alloc] initWithFrame:CGRectMake(infoContainer.bounds.size.width / 2 + 45, 0, infoContainer.bounds.size.width / 2 - 45, 24)];
                 buildValue.text = build;
-                buildValue.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
+                buildValue.font = PXMonospacedSystemFont(14, UIFontWeightMedium);
                 // Make sure build value is visible in dark mode for active cells
                 if (indexPath.row == self.activeVersionIndex) {
-                    if (@available(iOS 13.0, *)) {
-                        buildValue.textColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traitCollection) {
-                            if (traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
-                                return [UIColor colorWithWhite:0.9 alpha:1.0]; // Light color for dark mode active cells
-                            } else {
-                                return [UIColor labelColor]; // Default for light mode
-                            }
-                        }];
-                    } else {
-                        buildValue.textColor = [UIColor labelColor];
-                    }
+                    UIColor *fallback = PXLabelColor();
+                    buildValue.textColor = PXDynamicColor(^UIColor *(UITraitCollection *traitCollection) {
+                        return PXIsDarkUserInterfaceStyle(traitCollection) ? [UIColor colorWithWhite:0.9 alpha:1.0] : fallback;
+                    }, fallback);
                 } else {
-                    buildValue.textColor = [UIColor labelColor];
+                    buildValue.textColor = PXLabelColor();
                 }
                 buildValue.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleLeftMargin;
                 [infoContainer addSubview:buildValue];
@@ -462,7 +444,7 @@
             UIButton *editButton = [UIButton buttonWithType:UIButtonTypeSystem];
             editButton.frame = CGRectMake(0, 0, buttonWidth, 30);
             [editButton setTitle:@"Edit" forState:UIControlStateNormal];
-            editButton.backgroundColor = [UIColor systemBackgroundColor];
+            editButton.backgroundColor = PXSystemBackgroundColor();
             editButton.layer.cornerRadius = 8;
             editButton.layer.borderWidth = 1;
             editButton.layer.borderColor = [UIColor systemBlueColor].CGColor;
@@ -476,7 +458,7 @@
             UIButton *deleteButton = [UIButton buttonWithType:UIButtonTypeSystem];
             deleteButton.frame = CGRectMake(buttonWidth + spacing, 0, buttonWidth, 30);
             [deleteButton setTitle:@"Delete" forState:UIControlStateNormal];
-            deleteButton.backgroundColor = [UIColor systemBackgroundColor];
+            deleteButton.backgroundColor = PXSystemBackgroundColor();
             deleteButton.layer.cornerRadius = 8;
             deleteButton.layer.borderWidth = 1;
             deleteButton.layer.borderColor = [UIColor systemRedColor].CGColor;
@@ -1413,7 +1395,7 @@
         UILabel *infoLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, tableView.bounds.size.width - 32, 30)];
         infoLabel.text = @"Tap 'Use' to make a version active";
         infoLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-        infoLabel.textColor = [UIColor secondaryLabelColor];
+        infoLabel.textColor = PXSecondaryLabelColor();
         infoLabel.textAlignment = NSTextAlignmentCenter;
         [footerView addSubview:infoLabel];
         

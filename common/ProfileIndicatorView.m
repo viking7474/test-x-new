@@ -4,6 +4,8 @@
 #import "ProfileManager.h"
 #import "IPStatusViewController.h"
 #import "PXPaths.h"
+#import "PXUIKitCompat.h"
+#import "PXSecuritySettingsStore.h"
 #import <notify.h>
 #import <CoreFoundation/CoreFoundation.h>
 
@@ -48,21 +50,13 @@ static BOOL PXProfileIndicatorSettingEnabled(void) {
     return [ud boolForKey:kPXProfileIndicatorEnabledKey];
 }
 
-static void PXWriteProfileIndicatorSetting(BOOL enabled) {
-    CFPreferencesSetAppValue(
-        (__bridge CFStringRef)kPXProfileIndicatorEnabledKey,
-        enabled ? kCFBooleanTrue : kCFBooleanFalse,
-        (__bridge CFStringRef)kPXSecuritySettingsDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kPXSecuritySettingsDomain);
-
-    NSString *path = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary dictionary];
-    dict[kPXProfileIndicatorEnabledKey] = @(enabled);
-    [dict writeToFile:path atomically:YES];
-
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:kPXSecuritySettingsDomain];
-    [ud setBool:enabled forKey:kPXProfileIndicatorEnabledKey];
-    [ud synchronize];
+static BOOL PXWriteProfileIndicatorSetting(BOOL enabled) {
+    NSError *error = nil;
+    BOOL success = PXWriteSecurityBool(kPXProfileIndicatorEnabledKey, enabled, &error);
+    if (!success) {
+        PXLog(@"ProfileIndicator: failed to persist profileIndicatorEnabled=%d: %@", enabled, error);
+    }
+    return success;
 }
 
 /// Real lock state via notify (lockstate Darwin fires for both lock and unlock).
@@ -102,34 +96,11 @@ static BOOL PXSpringBoardIsLocked(void) {
         return;
     }
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        // Modern way to get the rootViewController for iOS 13+
-        UIWindow *presentingWindow = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *window in scene.windows) {
-                    if (window.isKeyWindow) {
-                        presentingWindow = window;
-                        break;
-                    }
-                }
-            }
-            if (presentingWindow) break;
-        }
-        // Do NOT use [UIApplication sharedApplication].windows (deprecated in iOS 15+)
-        // If no window found in any foreground scene, fallback to app delegate window only
-        if (!presentingWindow && [UIApplication sharedApplication].delegate && [[UIApplication sharedApplication].delegate respondsToSelector:@selector(window)]) {
-            UIWindow *delegateWindow = [[UIApplication sharedApplication].delegate window];
-            if ([delegateWindow isKindOfClass:[UIWindow class]]) {
-                presentingWindow = delegateWindow;
-            }
-        }
+        UIWindow *presentingWindow = PXKeyWindow();
         UIViewController *rootVC = presentingWindow.rootViewController;
-        // Fallback: try to get a rootViewController from the app delegate window
-        if (!rootVC && [UIApplication sharedApplication].delegate && [[UIApplication sharedApplication].delegate respondsToSelector:@selector(window)]) {
-            UIWindow *delegateWindow = [[UIApplication sharedApplication].delegate window];
-            if ([delegateWindow isKindOfClass:[UIWindow class]]) {
-                rootVC = delegateWindow.rootViewController;
-            }
+        if (!rootVC) {
+            PXLog(@"ProfileIndicator: no root view controller available for long-press menu");
+            return;
         }
         UIAlertController *actionSheet = [UIAlertController alertControllerWithTitle:@"Profile Indicator"
                                                                              message:nil
@@ -329,24 +300,13 @@ static BOOL PXSpringBoardIsLocked(void) {
     // Use a fixed window size that's slightly larger than the circle to accommodate shadow
     CGRect windowFrame = CGRectMake(initialX, initialY, 60, 60);
     
-    // Prefer UIWindowScene on iOS 13+ (including SpringBoard — bare initWithFrame often never paints).
-    if (@available(iOS 13.0, *)) {
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        UIWindowScene *chosenScene = nil;
-        for (UIScene *scene in connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                chosenScene = ws;
-                break;
-            }
-            if (!chosenScene) chosenScene = ws;
-        }
-        if (chosenScene) {
-            self.floatingWindow = [[PassThroughWindow alloc] initWithWindowScene:chosenScene];
-            self.floatingWindow.frame = windowFrame;
-            PXLog(@"Created floating window with scene (activation=%ld)", (long)chosenScene.activationState);
-        }
+    // Prefer a scene-backed window when the runtime actually supports scenes.
+    id chosenScene = PXForegroundWindowScene();
+    SEL sceneInitializer = NSSelectorFromString(@"initWithWindowScene:");
+    if (chosenScene && [PassThroughWindow instancesRespondToSelector:sceneInitializer]) {
+        self.floatingWindow = [[PassThroughWindow alloc] initWithWindowScene:(UIWindowScene *)chosenScene];
+        self.floatingWindow.frame = windowFrame;
+        PXLog(@"Created floating window with scene");
     }
     
     // If still no window, use basic initialization
@@ -969,13 +929,13 @@ static void toggleIndicatorCallback(CFNotificationCenterRef center,
         if ([notificationName isEqualToString:@"com.hydra.tlinkios.enableProfileIndicator"]) {
             // Use dispatch_async to ensure UI updates happen on the main thread
             dispatch_async(dispatch_get_main_queue(), ^{
-                PXWriteProfileIndicatorSetting(YES);
+                if (!PXWriteProfileIndicatorSetting(YES)) return;
                 indicatorView.isDeviceLocked = PXSpringBoardIsLocked();
                 [indicatorView show];
             });
         } else if ([notificationName isEqualToString:@"com.hydra.tlinkios.disableProfileIndicator"]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                PXWriteProfileIndicatorSetting(NO);
+                if (!PXWriteProfileIndicatorSetting(NO)) return;
                 [indicatorView hide];
             });
         } else if ([notificationName isEqualToString:@"com.hydra.tlinkios.profileChanged"]) {

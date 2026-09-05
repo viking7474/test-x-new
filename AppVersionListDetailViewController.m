@@ -1,4 +1,6 @@
 #import "AppVersionListDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 #import "AppVersionEditorViewController.h"
 
 @interface AppVersionListDetailViewController ()
@@ -25,7 +27,7 @@
     [super viewDidLoad];
     self.title = @"App Version";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -91,6 +93,8 @@
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    BOOL enabled = PXReadSecurityBool(@"appVersionSpoofingEnabled", NO);
+    [self.mainSwitch setOn:enabled animated:NO];
     [self reloadApps];
     [self updateEnabledState];
 }
@@ -148,7 +152,7 @@
         empty.translatesAutoresizingMaskIntoConstraints = NO;
         empty.text = @"Ch\u01b0a c\u00f3 app n\u00e0o \u0111\u01b0\u1ee3c c\u1ea5u h\u00ecnh";
         empty.font = [UIFont systemFontOfSize:15];
-        empty.textColor = [UIColor secondaryLabelColor];
+        empty.textColor = PXSecondaryLabelColor();
         empty.textAlignment = NSTextAlignmentCenter;
         UIView *row = [[UIView alloc] init];
         row.translatesAutoresizingMaskIntoConstraints = NO;
@@ -179,7 +183,7 @@
     if (showSeparator) {
         UIView *sep = [[UIView alloc] init];
         sep.translatesAutoresizingMaskIntoConstraints = NO;
-        sep.backgroundColor = [UIColor separatorColor];
+        sep.backgroundColor = PXSeparatorColor();
         [row addSubview:sep];
         [NSLayoutConstraint activateConstraints:@[
             [sep.topAnchor constraintEqualToAnchor:row.topAnchor],
@@ -196,14 +200,14 @@
     name.translatesAutoresizingMaskIntoConstraints = NO;
     name.text = app[@"name"];
     name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    name.textColor = [UIColor labelColor];
+    name.textColor = PXLabelColor();
     [row addSubview:name];
 
     UILabel *bundle = [[UILabel alloc] init];
     bundle.translatesAutoresizingMaskIntoConstraints = NO;
     bundle.text = app[@"bundleID"];
     bundle.font = [UIFont systemFontOfSize:12];
-    bundle.textColor = [UIColor secondaryLabelColor];
+    bundle.textColor = PXSecondaryLabelColor();
     [row addSubview:bundle];
 
     UILabel *value = [[UILabel alloc] init];
@@ -212,15 +216,15 @@
     value.text = (ver.length > 0) ? ver : @"\u2014";
     value.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
     BOOL enabled = [app[@"enabled"] boolValue];
-    value.textColor = enabled ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
+    value.textColor = enabled ? [UIColor systemGreenColor] : PXSecondaryLabelColor();
     [row addSubview:value];
 
     UIImageView *chevron = [[UIImageView alloc] init];
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
     chevron.contentMode = UIViewContentModeScaleAspectFit;
-    chevron.tintColor = [UIColor tertiaryLabelColor];
+    chevron.tintColor = PXTertiaryLabelColor();
     if (@available(iOS 13.0, *)) {
-        chevron.image = [[UIImage systemImageNamed:@"chevron.right"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        chevron.image = [PXSystemImageNamed(@"chevron.right") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [row addSubview:chevron];
 
@@ -249,19 +253,26 @@
 }
 
 - (void)updateEnabledState {
-    BOOL on = [self.securitySettings boolForKey:@"appVersionSpoofingEnabled"];
+    BOOL on = PXReadSecurityBool(@"appVersionSpoofingEnabled", NO);
     CGFloat alpha = on ? 1.0 : 0.5;
     self.appsSectionHeader.alpha = alpha;
     self.appsCard.alpha = alpha;
+    self.appsCard.userInteractionEnabled = on;
     self.addButton.alpha = alpha;
+    self.addButton.enabled = on;
 }
 
 #pragma mark - Actions
 
 - (void)mainToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"appVersionSpoofingEnabled"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"appVersionSpoofingEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self updateEnabledState];
+        [self showToast:@"Could not save App Version Spoof setting"];
+        return;
+    }
 
     NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
     [userInfo setObject:@(enabled) forKey:@"enabled"];
@@ -271,6 +282,12 @@
                                                             object:nil
                                                           userInfo:userInfo];
     });
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.appVersionSpoofChanged"),
+                                         NULL, NULL, YES);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
 
     [self updateEnabledState];
     [self showToast:(enabled ? @"App Version Spoof Enabled" : @"App Version Spoof Disabled")];
@@ -334,7 +351,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbolName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -357,7 +374,7 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"App Version Spoof";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [card addSubview:title];
 
@@ -365,7 +382,7 @@
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.text = @"Fake app version numbers per app";
     subtitle.font = [UIFont systemFontOfSize:13];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.numberOfLines = 0;
     [card addSubview:subtitle];
 
@@ -387,7 +404,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -416,7 +433,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     return label;
 }
 
@@ -425,7 +442,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:12];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     label.numberOfLines = 0;
     return label;
 }
@@ -438,14 +455,14 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"B\u1eadt App Version Spoof";
     title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     [row addSubview:title];
 
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"CFBundleShortVersionString";
     sub.font = [UIFont systemFontOfSize:12];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     [row addSubview:sub];
 
     self.mainSwitch = [[UISwitch alloc] init];

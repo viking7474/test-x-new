@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "DevicesViewController.h"
 
 // Define cell identifiers
@@ -43,7 +44,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.cardView.layer.shadowOpacity = 0.1;
     
     if (@available(iOS 13.0, *)) {
-        self.cardView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+        self.cardView.backgroundColor = PXSecondarySystemBackgroundColor();
         self.cardView.layer.shadowColor = [UIColor systemGrayColor].CGColor;
     } else {
         self.cardView.backgroundColor = [UIColor colorWithRed:0.12 green:0.15 blue:0.24 alpha:1.0];
@@ -56,17 +57,13 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.iconContainer.translatesAutoresizingMaskIntoConstraints = NO;
     self.iconContainer.layer.cornerRadius = 30;
     
-    if (@available(iOS 13.0, *)) {
-        self.iconContainer.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traitCollection) {
-            if (traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
-                return [UIColor colorWithRed:0.15 green:0.15 blue:0.2 alpha:1.0]; // Dark mode
-            } else {
-                return [UIColor colorWithRed:0.92 green:0.92 blue:0.96 alpha:1.0]; // Light mode
-            }
-        }];
-    } else {
-        self.iconContainer.backgroundColor = [UIColor colorWithRed:0.08 green:0.1 blue:0.16 alpha:0.7];
-    }
+    UIColor *iconFallback = [UIColor colorWithRed:0.08 green:0.1 blue:0.16 alpha:0.7];
+    self.iconContainer.backgroundColor = PXDynamicColor(^UIColor *(UITraitCollection *traitCollection) {
+        if (PXIsDarkUserInterfaceStyle(traitCollection)) {
+            return [UIColor colorWithRed:0.15 green:0.15 blue:0.2 alpha:1.0];
+        }
+        return [UIColor colorWithRed:0.92 green:0.92 blue:0.96 alpha:1.0];
+    }, iconFallback);
     [self.cardView addSubview:self.iconContainer];
     
     // Create icon image view with dynamic tint color
@@ -85,7 +82,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.deviceNameLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.deviceNameLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
     if (@available(iOS 13.0, *)) {
-        self.deviceNameLabel.textColor = [UIColor labelColor];
+        self.deviceNameLabel.textColor = PXLabelColor();
     } else {
         self.deviceNameLabel.textColor = [UIColor whiteColor];
     }
@@ -96,7 +93,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.deviceIdLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.deviceIdLabel.font = [UIFont systemFontOfSize:12];
     if (@available(iOS 13.0, *)) {
-        self.deviceIdLabel.textColor = [UIColor secondaryLabelColor];
+        self.deviceIdLabel.textColor = PXSecondaryLabelColor();
     } else {
         self.deviceIdLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1.0];
     }
@@ -107,7 +104,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.deviceModelLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.deviceModelLabel.font = [UIFont systemFontOfSize:14];
     if (@available(iOS 13.0, *)) {
-        self.deviceModelLabel.textColor = [UIColor secondaryLabelColor];
+        self.deviceModelLabel.textColor = PXSecondaryLabelColor();
     } else {
         self.deviceModelLabel.textColor = [UIColor colorWithWhite:0.8 alpha:1.0];
     }
@@ -118,7 +115,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.lastSeenLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.lastSeenLabel.font = [UIFont systemFontOfSize:12];
     if (@available(iOS 13.0, *)) {
-        self.lastSeenLabel.textColor = [UIColor tertiaryLabelColor];
+        self.lastSeenLabel.textColor = PXTertiaryLabelColor();
     } else {
         self.lastSeenLabel.textColor = [UIColor colorWithWhite:0.7 alpha:1.0];
     }
@@ -352,7 +349,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
         
         // Set device icon
         if (@available(iOS 13.0, *)) {
-            self.iconImageView.image = [UIImage systemImageNamed:@"applelogo"];
+            self.iconImageView.image = PXSystemImageNamed(@"applelogo");
         }
     } else if (isActive) {
         // Active device styling with solid color
@@ -368,7 +365,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
         
         // Set device icon
         if (@available(iOS 13.0, *)) {
-            self.iconImageView.image = [UIImage systemImageNamed:@"applelogo"];
+            self.iconImageView.image = PXSystemImageNamed(@"applelogo");
         }
     } else {
         // Inactive device styling with solid color
@@ -384,7 +381,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
         
         // Set device icon
         if (@available(iOS 13.0, *)) {
-            self.iconImageView.image = [UIImage systemImageNamed:@"applelogo"];
+            self.iconImageView.image = PXSystemImageNamed(@"applelogo");
             // For inactive devices, use a grayed out appearance
             self.iconImageView.tintColor = [UIColor systemGrayColor];
         }
@@ -458,7 +455,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     
     // Set background color that adapts to system theme
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemBackgroundColor];
+        self.view.backgroundColor = PXSystemBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.1 alpha:1.0];
     }
@@ -490,7 +487,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     // Create collection view with layout
     self.collectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
     self.collectionView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.collectionView.backgroundColor = [UIColor systemBackgroundColor];
+    self.collectionView.backgroundColor = PXSystemBackgroundColor();
     self.collectionView.delegate = self;
     self.collectionView.dataSource = self;
     [self.collectionView registerClass:[DeviceCardCell class] forCellWithReuseIdentifier:kDeviceCardCellIdentifier];
@@ -511,7 +508,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.collectionView.refreshControl = self.refreshControl;
     
     // Set up activity indicator with dynamic colors
-    self.activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    self.activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
     self.activityIndicator.translatesAutoresizingMaskIntoConstraints = NO;
     self.activityIndicator.hidesWhenStopped = YES;
     if (@available(iOS 13.0, *)) {
@@ -528,7 +525,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.emptyStateLabel.textAlignment = NSTextAlignmentCenter;
     self.emptyStateLabel.text = @"No devices found";
     if (@available(iOS 13.0, *)) {
-        self.emptyStateLabel.textColor = [UIColor secondaryLabelColor];
+        self.emptyStateLabel.textColor = PXSecondaryLabelColor();
     } else {
         self.emptyStateLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.7];
     }
@@ -579,7 +576,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.deviceSlashLabel.textAlignment = NSTextAlignmentCenter;
     self.deviceSlashLabel.text = @"";
     if (@available(iOS 13.0, *)) {
-        self.deviceSlashLabel.textColor = [UIColor secondaryLabelColor];
+        self.deviceSlashLabel.textColor = PXSecondaryLabelColor();
     } else {
         self.deviceSlashLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.5];
     }
@@ -592,7 +589,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.deviceLimitLabel.textAlignment = NSTextAlignmentLeft;
     self.deviceLimitLabel.text = @"";
     if (@available(iOS 13.0, *)) {
-        self.deviceLimitLabel.textColor = [UIColor secondaryLabelColor];
+        self.deviceLimitLabel.textColor = PXSecondaryLabelColor();
     } else {
         self.deviceLimitLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.7];
     }
@@ -605,7 +602,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     devicesUsedLabel.textAlignment = NSTextAlignmentCenter;
     devicesUsedLabel.text = @"DEVICES USED";
     if (@available(iOS 13.0, *)) {
-        devicesUsedLabel.textColor = [UIColor tertiaryLabelColor];
+        devicesUsedLabel.textColor = PXTertiaryLabelColor();
     } else {
         devicesUsedLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.5];
     }
@@ -616,7 +613,7 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.deviceLimitProgressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     self.deviceLimitProgressView.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        self.deviceLimitProgressView.trackTintColor = [UIColor tertiarySystemFillColor];
+        self.deviceLimitProgressView.trackTintColor = PXTertiarySystemFillColor();
     } else {
         self.deviceLimitProgressView.trackTintColor = [UIColor colorWithRed:0.24 green:0.24 blue:0.4 alpha:0.2];
     }

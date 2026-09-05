@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "BottomButtons.h"
 #import "TLinkIOS.h"
 #import "IdentifierManager.h"
@@ -202,7 +203,7 @@
 
 - (UIView *)createBottomButtonsView {
     UIView *containerView = [[UIView alloc] init];
-    containerView.backgroundColor = [UIColor systemBackgroundColor];
+    containerView.backgroundColor = PXSystemBackgroundColor();
     containerView.translatesAutoresizingMaskIntoConstraints = NO;
     
     // Add shadow and separator
@@ -212,7 +213,7 @@
     containerView.layer.shadowRadius = 4;
     
     UIView *separator = [[UIView alloc] init];
-    separator.backgroundColor = [UIColor separatorColor];
+    separator.backgroundColor = PXSeparatorColor();
     separator.translatesAutoresizingMaskIntoConstraints = NO;
     [containerView addSubview:separator];
     
@@ -485,39 +486,11 @@
 
 // Replace the deprecated keyWindow usage with proper scene-aware window handling
 - (UIViewController *)topViewController {
-    UIWindow *window = nil;
-    
-    if (@available(iOS 13.0, *)) {
-        NSSet<UIScene *> *connectedScenes = UIApplication.sharedApplication.connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *w in windowScene.windows) {
-                    if (w.isKeyWindow) {
-                        window = w;
-                        break;
-                    }
-                }
-                if (!window) {
-                    // Fallback to first window if no key window found
-                    window = windowScene.windows.firstObject;
-                }
-                break;
-            }
-        }
-    } else {
-        // Fallback for iOS 12 and below
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        window = [UIApplication sharedApplication].keyWindow;
-        #pragma clang diagnostic pop
-    }
-    
+    UIWindow *window = PXKeyWindow();
     UIViewController *topController = window.rootViewController;
     while (topController.presentedViewController) {
         topController = topController.presentedViewController;
     }
-    
     return topController;
 }
 

@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "AppVersionSpoofingViewController.h"
 #import "common/PXPaths.h"
 #import "WeaponXToast.h"
@@ -118,7 +119,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"App Version Spoofing";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
 
     // Initialize data
     self.appsData = [NSMutableDictionary dictionary];
@@ -139,7 +140,7 @@
     
     // Create collection view
     self.collectionView = [[UICollectionView alloc] initWithFrame:self.view.bounds collectionViewLayout:layout];
-    self.collectionView.backgroundColor = [UIColor systemBackgroundColor];
+    self.collectionView.backgroundColor = PXSystemBackgroundColor();
     self.collectionView.delegate = self;
     self.collectionView.dataSource = self;
     self.collectionView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -156,7 +157,7 @@
     self.emptyStateLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 100)];
     self.emptyStateLabel.text = @"No apps found in scope list.\nAdd apps through the Scope tab first.";
     self.emptyStateLabel.textAlignment = NSTextAlignmentCenter;
-    self.emptyStateLabel.textColor = [UIColor secondaryLabelColor];
+    self.emptyStateLabel.textColor = PXSecondaryLabelColor();
     self.emptyStateLabel.numberOfLines = 0;
     self.emptyStateLabel.center = self.view.center;
     self.emptyStateLabel.hidden = YES;
@@ -170,7 +171,7 @@
     
     // Add back button
     UIBarButtonItem *backButton = [[UIBarButtonItem alloc]
-                                  initWithImage:[UIImage systemImageNamed:@"chevron.left"]
+                                  initWithImage:PXSystemImageNamed(@"chevron.left")
                                   style:UIBarButtonItemStylePlain
                                   target:self
                                   action:@selector(backButtonTapped)];
@@ -417,7 +418,7 @@
     // Create blur effect with dynamic style based on appearance
     UIBlurEffect *blurEffect;
     if (@available(iOS 13.0, *)) {
-        if (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
+        if (PXIsDarkUserInterfaceStyle(self.traitCollection)) {
             blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
         } else {
             blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleLight];
@@ -445,7 +446,7 @@
     gradientLayer.frame = backgroundContainer.bounds;
     gradientLayer.cornerRadius = 20;
     if (@available(iOS 13.0, *)) {
-        if (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
+        if (PXIsDarkUserInterfaceStyle(self.traitCollection)) {
             gradientLayer.colors = @[
                 (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.15].CGColor,
                 (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.05].CGColor
@@ -471,7 +472,7 @@
     borderView.layer.cornerRadius = 20;
     borderView.layer.borderWidth = 0.5;
     if (@available(iOS 13.0, *)) {
-        if (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
+        if (PXIsDarkUserInterfaceStyle(self.traitCollection)) {
             borderView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.2].CGColor;
         } else {
             borderView.layer.borderColor = [UIColor colorWithWhite:0.0 alpha:0.1].CGColor;
@@ -512,7 +513,7 @@
     UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(padding + 56, y, cardWidth - (padding*2 + 56), 26)];
     nameLabel.text = appInfo[@"name"] ?: bundleID;
     nameLabel.font = [UIFont systemFontOfSize:19 weight:UIFontWeightBold];
-    nameLabel.textColor = [UIColor labelColor];
+    nameLabel.textColor = PXLabelColor();
     [contentContainer addSubview:nameLabel];
     y += 28;
 
@@ -527,8 +528,8 @@
     
     UILabel *bundleLabel = [[UILabel alloc] initWithFrame:CGRectMake(padding + 56, y, cardWidth - (padding*2 + 56), 18)];
     bundleLabel.text = bundleText;
-    bundleLabel.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightMedium];
-    bundleLabel.textColor = [UIColor secondaryLabelColor];
+    bundleLabel.font = PXMonospacedSystemFont(13, UIFontWeightMedium);
+    bundleLabel.textColor = PXSecondaryLabelColor();
     [contentContainer addSubview:bundleLabel];
     y += 20;
 
@@ -546,12 +547,12 @@
         realLabel.text = @"Real: Unknown";
     }
     realLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    realLabel.textColor = [UIColor tertiaryLabelColor];
+    realLabel.textColor = PXTertiaryLabelColor();
     [contentContainer addSubview:realLabel];
     // Add copy button next to realLabel
     UIButton *copyRealBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     copyRealBtn.frame = CGRectMake(CGRectGetMaxX(realLabel.frame) + 2, y, 24, 18);
-    [copyRealBtn setImage:[UIImage systemImageNamed:@"doc.on.doc"] forState:UIControlStateNormal];
+    [copyRealBtn setImage:PXSystemImageNamed(@"doc.on.doc") forState:UIControlStateNormal];
     copyRealBtn.tintColor = [UIColor systemGrayColor];
     copyRealBtn.tag = indexPath.row;
     [copyRealBtn addTarget:self action:@selector(showCopyPopupForApp:) forControlEvents:UIControlEventTouchUpInside];
@@ -602,7 +603,7 @@
             }
         }
         
-        spoofedLabel.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightMedium];
+        spoofedLabel.font = PXMonospacedSystemFont(13, UIFontWeightMedium);
         spoofedLabel.textColor = [UIColor systemGreenColor];
         [contentContainer addSubview:spoofedLabel];
         y += 20;
@@ -667,7 +668,7 @@
     
     // Display a loading indicator
     if (!self.loadingIndicator) {
-        self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+        self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
         self.loadingIndicator.center = self.view.center;
         [self.view addSubview:self.loadingIndicator];
     }
@@ -779,7 +780,7 @@
         // Version and Build label (left side)
         UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, containerView.bounds.size.width - 32, 20)];
         versionLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-        versionLabel.textColor = [UIColor labelColor];
+        versionLabel.textColor = PXLabelColor();
         versionLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         
         NSString *buildStr = ver[@"build"];
@@ -812,7 +813,7 @@
         // App name label (right side)
         UILabel *appNameLabel = [[UILabel alloc] initWithFrame:CGRectMake(containerView.bounds.size.width - 150, 12, 134, 20)];
         appNameLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-        appNameLabel.textColor = [UIColor secondaryLabelColor];
+        appNameLabel.textColor = PXSecondaryLabelColor();
         appNameLabel.textAlignment = NSTextAlignmentRight;
         appNameLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         
@@ -827,7 +828,7 @@
         // Release date label
         UILabel *dateLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 32, containerView.bounds.size.width - 32, 16)];
         dateLabel.font = [UIFont systemFontOfSize:13];
-        dateLabel.textColor = [UIColor secondaryLabelColor];
+        dateLabel.textColor = PXSecondaryLabelColor();
         dateLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         
         // Format the release date
@@ -850,7 +851,7 @@
         // Compatibility label
         UILabel *compatibilityLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 48, containerView.bounds.size.width - 32, 16)];
         compatibilityLabel.font = [UIFont systemFontOfSize:13];
-        compatibilityLabel.textColor = [UIColor tertiaryLabelColor];
+        compatibilityLabel.textColor = PXTertiaryLabelColor();
         compatibilityLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         
         // Get compatibility info
@@ -864,7 +865,7 @@
         
         // Add a separator line
         UIView *separator = [[UIView alloc] initWithFrame:CGRectMake(16, 75, containerView.bounds.size.width - 32, 1)];
-        separator.backgroundColor = [UIColor separatorColor];
+        separator.backgroundColor = PXSeparatorColor();
         separator.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
         [containerView addSubview:separator];
         

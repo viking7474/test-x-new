@@ -1,4 +1,5 @@
-﻿#import "ProfileManagerViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "ProfileManagerViewController.h"
 #import "ProfileManager.h"
 #import "common/UIButton+SafeConfiguration.h"
 #import "common/PXPaths.h"
@@ -442,7 +443,7 @@
 }
 
 - (void)setupUI {
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     
     // Setup custom title view with centered title and count
     UIView *titleView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width - 100, 44)];
@@ -463,13 +464,13 @@
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(50, 0, 100, 44)];
     titleLabel.text = @"Profiles";
     titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-    titleLabel.textColor = [UIColor labelColor];
+    titleLabel.textColor = PXLabelColor();
     titleLabel.textAlignment = NSTextAlignmentCenter;
     [titleView addSubview:titleLabel];
     
     // Current profile ID pill - positioned on the right side
     UIView *rightContainer = [[UIView alloc] initWithFrame:CGRectMake(titleView.bounds.size.width - 70, 6, 70, 32)];
-    rightContainer.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    rightContainer.backgroundColor = PXSecondarySystemBackgroundColor();
     rightContainer.layer.cornerRadius = 16;
     rightContainer.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     [titleView addSubview:rightContainer];
@@ -483,7 +484,7 @@
     UILabel *currentLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 2, 40, 14)];
     currentLabel.text = @"Current";
     currentLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    currentLabel.textColor = [UIColor secondaryLabelColor];
+    currentLabel.textColor = PXSecondaryLabelColor();
     currentLabel.textAlignment = NSTextAlignmentRight;
     currentLabel.adjustsFontSizeToFitWidth = YES;
     currentLabel.minimumScaleFactor = 0.8;
@@ -493,7 +494,7 @@
     UILabel *profileSubLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 16, 40, 14)];
     profileSubLabel.text = @"Profile";
     profileSubLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    profileSubLabel.textColor = [UIColor secondaryLabelColor];
+    profileSubLabel.textColor = PXSecondaryLabelColor();
     profileSubLabel.textAlignment = NSTextAlignmentRight;
     profileSubLabel.adjustsFontSizeToFitWidth = YES;
     profileSubLabel.minimumScaleFactor = 0.8;
@@ -515,7 +516,7 @@
     self.navigationItem.titleView = titleView;
     
     // Setup table view
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:PXInsetGroupedTableViewStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -735,7 +736,7 @@
         UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(15, 8, 150, 30)];
         titleLabel.text = @"SEARCH PROFILES";
         titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-        titleLabel.textColor = [UIColor secondaryLabelColor];
+        titleLabel.textColor = PXSecondaryLabelColor();
         [headerView addSubview:titleLabel];
         
         // Create the toggle switch with a smaller size
@@ -759,8 +760,8 @@
         
         // Create container icon with a smaller size
         UIImageView *containerIcon = [[UIImageView alloc] initWithFrame:CGRectMake(containerSwitch.frame.origin.x - 30, 10, 20, 20)];
-        UIImage *boxImage = [UIImage systemImageNamed:@"shippingbox"];
-        containerIcon.image = [boxImage imageWithTintColor:[UIColor systemGrayColor] renderingMode:UIImageRenderingModeAlwaysTemplate];
+        UIImage *boxImage = PXSystemImageNamed(@"shippingbox");
+        containerIcon.image = PXImageWithTintColor(boxImage, [UIColor systemGrayColor]);
         containerIcon.tintColor = isEnabled ? [UIColor systemGreenColor] : [UIColor systemGrayColor];
         containerIcon.contentMode = UIViewContentModeScaleAspectFit;
         [headerView addSubview:containerIcon];
@@ -769,7 +770,7 @@
         UILabel *containerLabel = [[UILabel alloc] initWithFrame:CGRectMake(containerIcon.frame.origin.x - 110, 10, 100, 20)];
         containerLabel.text = @"Container System";
         containerLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        containerLabel.textColor = [UIColor secondaryLabelColor];
+        containerLabel.textColor = PXSecondaryLabelColor();
         containerLabel.textAlignment = NSTextAlignmentRight;
         containerLabel.adjustsFontSizeToFitWidth = YES;
         containerLabel.minimumScaleFactor = 0.75;
@@ -873,7 +874,7 @@
             
             // Container card view with shadow
             UIView *cardView = [[UIView alloc] initWithFrame:CGRectMake(15, 5, cell.contentView.bounds.size.width - 30, 80)];
-            cardView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+            cardView.backgroundColor = PXSecondarySystemBackgroundColor();
             cardView.layer.cornerRadius = 15;
             cardView.layer.shadowColor = [UIColor blackColor].CGColor;
             cardView.layer.shadowOffset = CGSizeMake(0, 2);
@@ -895,21 +896,21 @@
             UILabel *availableLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 45, 100, 16)];
             availableLabel.text = @"AVAILABLE";
             availableLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-            availableLabel.textColor = [UIColor secondaryLabelColor];
+            availableLabel.textColor = PXSecondaryLabelColor();
             [cardView addSubview:availableLabel];
             
             // Total space label - now positioned at the right side
             UILabel *totalLabel = [[UILabel alloc] initWithFrame:CGRectMake(cardView.bounds.size.width - 120, 45, 100, 16)];
             totalLabel.text = [NSString stringWithFormat:@"of %@", totalSpaceStr];
             totalLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-            totalLabel.textColor = [UIColor tertiaryLabelColor];
+            totalLabel.textColor = PXTertiaryLabelColor();
             totalLabel.textAlignment = NSTextAlignmentRight;
             totalLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
             [cardView addSubview:totalLabel];
             
             // Create a custom progress track
             UIView *progressTrack = [[UIView alloc] initWithFrame:CGRectMake(20, 65, cardView.bounds.size.width - 40, 8)];
-            progressTrack.backgroundColor = [UIColor systemFillColor];
+            progressTrack.backgroundColor = PXSystemFillColor();
             progressTrack.layer.cornerRadius = 4;
             progressTrack.autoresizingMask = UIViewAutoresizingFlexibleWidth;
             [cardView addSubview:progressTrack];
@@ -934,15 +935,15 @@
             
             // Add storage icon
             UIImageView *storageIcon = [[UIImageView alloc] initWithFrame:CGRectMake(cardView.bounds.size.width - 35, 15, 24, 24)];
-            UIImage *diskImage = [UIImage systemImageNamed:@"internaldrive"];
-            storageIcon.image = [diskImage imageWithTintColor:primaryColor renderingMode:UIImageRenderingModeAlwaysTemplate];
+            UIImage *diskImage = PXSystemImageNamed(@"internaldrive");
+            storageIcon.image = PXImageWithTintColor(diskImage, primaryColor);
             storageIcon.tintColor = primaryColor;
             storageIcon.contentMode = UIViewContentModeScaleAspectFit;
             storageIcon.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
             [cardView addSubview:storageIcon];
         } else {
             // Loading state
-            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
             loadingIndicator.center = CGPointMake(cell.contentView.bounds.size.width / 2, cell.contentView.bounds.size.height / 2);
             loadingIndicator.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
             [loadingIndicator startAnimating];
@@ -952,7 +953,7 @@
             loadingLabel.text = @"Scanning storage...";
             loadingLabel.textAlignment = NSTextAlignmentCenter;
             loadingLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-            loadingLabel.textColor = [UIColor secondaryLabelColor];
+            loadingLabel.textColor = PXSecondaryLabelColor();
             loadingLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
             [cell.contentView addSubview:loadingLabel];
         }
@@ -985,7 +986,7 @@
         
         // Create a container for our search UI
         UIView *searchContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 5, cell.contentView.bounds.size.width - 30, 60)];
-        searchContainer.backgroundColor = [UIColor secondarySystemBackgroundColor];
+        searchContainer.backgroundColor = PXSecondarySystemBackgroundColor();
         searchContainer.layer.cornerRadius = 15;
         searchContainer.layer.shadowColor = [UIColor blackColor].CGColor;
         searchContainer.layer.shadowOffset = CGSizeMake(0, 2);
@@ -998,7 +999,7 @@
         UITextField *searchField = [[UITextField alloc] initWithFrame:CGRectMake(15, 10, searchContainer.bounds.size.width - 80, 40)];
         searchField.placeholder = @"Search by name or ID";
         searchField.font = [UIFont systemFontOfSize:16];
-        searchField.backgroundColor = [UIColor tertiarySystemBackgroundColor];
+        searchField.backgroundColor = PXTertiarySystemBackgroundColor();
         searchField.layer.cornerRadius = 10;
         searchField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 40)];
         searchField.leftViewMode = UITextFieldViewModeAlways;
@@ -1015,8 +1016,8 @@
         
         // Add search icon
         UIImageView *searchIcon = [[UIImageView alloc] initWithFrame:CGRectMake(searchContainer.bounds.size.width - 55, 15, 30, 30)];
-        UIImage *icon = [UIImage systemImageNamed:@"magnifyingglass.circle.fill"];
-        searchIcon.image = [icon imageWithTintColor:[UIColor systemBlueColor] renderingMode:UIImageRenderingModeAlwaysTemplate];
+        UIImage *icon = PXSystemImageNamed(@"magnifyingglass.circle.fill");
+        searchIcon.image = PXImageWithTintColor(icon, [UIColor systemBlueColor]);
         searchIcon.tintColor = [UIColor systemBlueColor];
         searchIcon.contentMode = UIViewContentModeScaleAspectFit;
         searchIcon.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
@@ -1064,7 +1065,7 @@
         
         // Create a container for the buttons - reduce height
         UIView *container = [[UIView alloc] initWithFrame:CGRectMake(15, 5, cell.contentView.bounds.size.width - 30, 50)]; // Reduced from 60
-        container.backgroundColor = [UIColor secondarySystemBackgroundColor];
+        container.backgroundColor = PXSecondarySystemBackgroundColor();
         container.layer.cornerRadius = 12; // Reduced from 15
         container.autoresizingMask = UIViewAutoresizingFlexibleWidth;
         [cell.contentView addSubview:container];
@@ -1074,7 +1075,7 @@
         importExportButton.frame = CGRectMake(15, 8, (container.bounds.size.width / 2) - 25, 34); // Reduced height from 40 to 34
         
         // Configure button with icon and text - smaller font
-        UIImage *importExportIcon = [UIImage systemImageNamed:@"square.and.arrow.up.on.square"];
+        UIImage *importExportIcon = PXSystemImageNamed(@"square.and.arrow.up.on.square");
         NSString *importExportTitle = @"IMPORT/EXPORT";
         
         // Create configuration for button with smaller text
@@ -1122,7 +1123,7 @@
         trashAllButton.frame = CGRectMake(container.bounds.size.width/2 + 10, 8, (container.bounds.size.width / 2) - 25, 34); // Reduced height from 40 to 34
         
         // Configure button with icon and text - smaller text
-        UIImage *trashIcon = [UIImage systemImageNamed:@"trash"];
+        UIImage *trashIcon = PXSystemImageNamed(@"trash");
         NSString *trashTitle = @"ALL PROFILES";
         
         // Create configuration for button with smaller text
@@ -1194,7 +1195,7 @@
             
             // Create a container for the "Show More" button
             UIView *container = [[UIView alloc] initWithFrame:CGRectMake(15, 5, cell.contentView.bounds.size.width - 30, 60)];
-            container.backgroundColor = [UIColor secondarySystemBackgroundColor];
+            container.backgroundColor = PXSecondarySystemBackgroundColor();
             container.layer.cornerRadius = 15;
             container.autoresizingMask = UIViewAutoresizingFlexibleWidth;
             [cell.contentView addSubview:container];
@@ -1204,7 +1205,7 @@
             showMoreButton.frame = CGRectMake(15, 10, (container.bounds.size.width / 2) - 25, 40);
             
             // Configure button with icon and text properly spaced
-            UIImage *addIcon = [UIImage systemImageNamed:@"plus.circle.fill"];
+            UIImage *addIcon = PXSystemImageNamed(@"plus.circle.fill");
             NSString *title = @"Show More";
             
             // Create configuration for button
@@ -1240,7 +1241,7 @@
             searchButton.frame = CGRectMake(container.bounds.size.width/2 + 10, 10, (container.bounds.size.width / 2) - 25, 40);
             
             // Configure button with icon and text properly spaced
-            UIImage *searchIcon = [UIImage systemImageNamed:@"magnifyingglass"];
+            UIImage *searchIcon = PXSystemImageNamed(@"magnifyingglass");
             NSString *searchTitle = @"Search";
             
             // Create configuration for button
@@ -1422,7 +1423,7 @@
     
     // Set switch action color and image
     switchAction.backgroundColor = [UIColor systemBlueColor];
-    switchAction.image = [UIImage systemImageNamed:@"arrow.triangle.2.circlepath"];
+    switchAction.image = PXSystemImageNamed(@"arrow.triangle.2.circlepath");
     
     // Create swipe action configuration
     UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[switchAction]];
@@ -1544,7 +1545,7 @@
     }];
     
     // Set delete action image
-    deleteAction.image = [UIImage systemImageNamed:@"trash"];
+    deleteAction.image = PXSystemImageNamed(@"trash");
     
     // Create swipe action configuration
     UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[deleteAction]];
@@ -1564,7 +1565,7 @@
 
 - (void)switchToProfile:(Profile *)profile {
     // Show loading indicator
-    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
     loadingIndicator.center = self.view.center;
     loadingIndicator.hidesWhenStopped = YES;
     [self.view addSubview:loadingIndicator];
@@ -1640,7 +1641,7 @@
         NSString *newName = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (newName.length > 0) {
             // Show loading indicator
-            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
             loadingIndicator.center = self.view.center;
             loadingIndicator.hidesWhenStopped = YES;
             [self.view addSubview:loadingIndicator];
@@ -1809,7 +1810,7 @@
                                             style:UIAlertActionStyleDestructive
                                           handler:^(UIAlertAction * _Nonnull action) {
         // Show loading indicator
-        UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
         loadingIndicator.center = self.view.center;
         loadingIndicator.hidesWhenStopped = YES;
         [self.view addSubview:loadingIndicator];
@@ -1902,7 +1903,7 @@
         NSString *newDescription = alert.textFields.firstObject.text;
         if (newDescription && ![newDescription isEqualToString:profile.shortDescription]) {
             // Show loading indicator
-            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
             loadingIndicator.center = self.view.center;
             loadingIndicator.hidesWhenStopped = YES;
             [self.view addSubview:loadingIndicator];
@@ -2336,7 +2337,7 @@
 - (void)setSwitchBackupBusy:(BOOL)busy {
     if (busy) {
         if (!self.switchBackupIndicator) {
-            self.switchBackupIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+            self.switchBackupIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
             self.switchBackupIndicator.center = self.view.center;
             self.switchBackupIndicator.hidesWhenStopped = YES;
             [self.view addSubview:self.switchBackupIndicator];
@@ -2515,7 +2516,7 @@
 
 - (void)deleteAllProfiles {
     // Show loading indicator
-    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
     loadingIndicator.center = self.view.center;
     loadingIndicator.hidesWhenStopped = YES;
     [self.view addSubview:loadingIndicator];
@@ -2657,7 +2658,7 @@
     }
     
     // Show loading indicator
-    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
     loadingIndicator.center = self.view.center;
     loadingIndicator.hidesWhenStopped = YES;
     [self.view addSubview:loadingIndicator];
@@ -2785,8 +2786,8 @@
     
     // Default gradient colors (will update in configure method)
     self.gradientLayer.colors = @[
-        (id)[UIColor secondarySystemBackgroundColor].CGColor,
-        (id)[UIColor tertiarySystemBackgroundColor].CGColor
+        (id)PXSecondarySystemBackgroundColor().CGColor,
+        (id)PXTertiarySystemBackgroundColor().CGColor
     ];
     
     [self.innerCard.layer insertSublayer:self.gradientLayer atIndex:0];
@@ -2809,7 +2810,7 @@
     // Profile Name Label
     self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(70, 22, self.innerCard.bounds.size.width - 130, 28)];
     self.nameLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold]; // Reduced from 20 to 18
-    self.nameLabel.textColor = [UIColor labelColor];
+    self.nameLabel.textColor = PXLabelColor();
     self.nameLabel.adjustsFontSizeToFitWidth = YES;
     self.nameLabel.minimumScaleFactor = 0.7;
     self.nameLabel.lineBreakMode = NSLineBreakByTruncatingTail; // Add truncation for long names
@@ -2823,13 +2824,13 @@
     // Use modern UIButtonConfiguration API for iOS 15+
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *renameConfig = [UIButtonConfiguration plainButtonConfiguration];
-        renameConfig.image = [UIImage systemImageNamed:@"pencil"];
-        renameConfig.baseForegroundColor = [UIColor secondaryLabelColor];
+        renameConfig.image = PXSystemImageNamed(@"pencil");
+        renameConfig.baseForegroundColor = PXSecondaryLabelColor();
         renameConfig.contentInsets = NSDirectionalEdgeInsetsMake(5, 5, 5, 5);
         [self.renameButton safeSetConfiguration:renameConfig];
     } else {
-        [self.renameButton setImage:[UIImage systemImageNamed:@"pencil"] forState:UIControlStateNormal];
-        self.renameButton.tintColor = [UIColor secondaryLabelColor];
+        [self.renameButton setImage:PXSystemImageNamed(@"pencil") forState:UIControlStateNormal];
+        self.renameButton.tintColor = PXSecondaryLabelColor();
     }
     
     self.renameButton.userInteractionEnabled = YES;
@@ -2842,12 +2843,12 @@
     // Use modern UIButtonConfiguration API for iOS 15+
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *infoConfig = [UIButtonConfiguration plainButtonConfiguration];
-        infoConfig.image = [UIImage systemImageNamed:@"info.circle"];
+        infoConfig.image = PXSystemImageNamed(@"info.circle");
         infoConfig.baseForegroundColor = [UIColor systemBlueColor];
         infoConfig.contentInsets = NSDirectionalEdgeInsetsMake(5, 5, 5, 5);
         [self.infoButton safeSetConfiguration:infoConfig];
     } else {
-        [self.infoButton setImage:[UIImage systemImageNamed:@"info.circle"] forState:UIControlStateNormal];
+        [self.infoButton setImage:PXSystemImageNamed(@"info.circle") forState:UIControlStateNormal];
         self.infoButton.tintColor = [UIColor systemBlueColor];
     }
     
@@ -2863,7 +2864,7 @@
     
     // Add separator
     UIView *separator = [[UIView alloc] initWithFrame:CGRectMake(15, 0, actionContainer.bounds.size.width - 30, 1)];
-    separator.backgroundColor = [[UIColor separatorColor] colorWithAlphaComponent:0.3];
+    separator.backgroundColor = [PXSeparatorColor() colorWithAlphaComponent:0.3];
     separator.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [actionContainer addSubview:separator];
     
@@ -2879,12 +2880,12 @@
     // Use modern UIButtonConfiguration API for iOS 15+
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *timeConfig = [UIButtonConfiguration plainButtonConfiguration];
-        timeConfig.image = [UIImage systemImageNamed:@"clock"];
+        timeConfig.image = PXSystemImageNamed(@"clock");
         timeConfig.baseForegroundColor = [UIColor systemGrayColor];
         timeConfig.contentInsets = NSDirectionalEdgeInsetsMake(5, 5, 5, 5);
         [self.timeButton safeSetConfiguration:timeConfig];
     } else {
-        [self.timeButton setImage:[UIImage systemImageNamed:@"clock"] forState:UIControlStateNormal];
+        [self.timeButton setImage:PXSystemImageNamed(@"clock") forState:UIControlStateNormal];
         self.timeButton.tintColor = [UIColor systemGrayColor];
     }
     
@@ -2899,12 +2900,12 @@
     // Use modern UIButtonConfiguration API for iOS 15+
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *exportConfig = [UIButtonConfiguration plainButtonConfiguration];
-        exportConfig.image = [UIImage systemImageNamed:@"square.and.arrow.up.on.square"];
+        exportConfig.image = PXSystemImageNamed(@"square.and.arrow.up.on.square");
         exportConfig.baseForegroundColor = [UIColor systemBlueColor];
         exportConfig.contentInsets = NSDirectionalEdgeInsetsMake(5, 5, 5, 5);
         [self.exportButton safeSetConfiguration:exportConfig];
     } else {
-        [self.exportButton setImage:[UIImage systemImageNamed:@"square.and.arrow.up.on.square"] forState:UIControlStateNormal];
+        [self.exportButton setImage:PXSystemImageNamed(@"square.and.arrow.up.on.square") forState:UIControlStateNormal];
         self.exportButton.tintColor = [UIColor systemBlueColor];
     }
     
@@ -2920,12 +2921,12 @@
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *switchConfig = [UIButtonConfiguration plainButtonConfiguration];
         // Use a simpler SF Symbol that's definitely available in iOS 15+
-        switchConfig.image = [UIImage systemImageNamed:@"arrow.triangle.2.circlepath"];
+        switchConfig.image = PXSystemImageNamed(@"arrow.triangle.2.circlepath");
         switchConfig.baseForegroundColor = [UIColor systemBlueColor];
         switchConfig.contentInsets = NSDirectionalEdgeInsetsMake(5, 5, 5, 5);
         [self.switchButton safeSetConfiguration:switchConfig];
     } else {
-        [self.switchButton setImage:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"] forState:UIControlStateNormal];
+        [self.switchButton setImage:PXSystemImageNamed(@"arrow.triangle.2.circlepath") forState:UIControlStateNormal];
         self.switchButton.tintColor = [UIColor systemBlueColor];
     }
     
@@ -2940,12 +2941,12 @@
     // Use modern UIButtonConfiguration API for iOS 15+
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *deleteConfig = [UIButtonConfiguration plainButtonConfiguration];
-        deleteConfig.image = [UIImage systemImageNamed:@"trash"];
+        deleteConfig.image = PXSystemImageNamed(@"trash");
         deleteConfig.baseForegroundColor = [UIColor systemRedColor];
         deleteConfig.contentInsets = NSDirectionalEdgeInsetsMake(5, 5, 5, 5);
         [self.deleteButton safeSetConfiguration:deleteConfig];
     } else {
-        [self.deleteButton setImage:[UIImage systemImageNamed:@"trash"] forState:UIControlStateNormal];
+        [self.deleteButton setImage:PXSystemImageNamed(@"trash") forState:UIControlStateNormal];
         self.deleteButton.tintColor = [UIColor systemRedColor];
     }
     
@@ -2984,7 +2985,7 @@
         button.configurationUpdateHandler = ^(__kindof UIButton *btn) {
             // Apply a simple background when pressed
             if (btn.isHighlighted) {
-                btn.backgroundColor = [UIColor systemGray5Color];
+                btn.backgroundColor = PXSystemGray5Color();
             } else {
                 btn.backgroundColor = nil;
             }
@@ -2997,7 +2998,7 @@
 }
 
 - (void)buttonHighlighted:(UIButton *)button {
-    button.backgroundColor = [UIColor systemGray5Color];
+    button.backgroundColor = PXSystemGray5Color();
 }
 
 - (void)buttonUnhighlighted:(UIButton *)button {
@@ -3083,15 +3084,15 @@
     } else {
         // Inactive profile - default theme
         self.gradientLayer.colors = @[
-            (id)[UIColor secondarySystemBackgroundColor].CGColor,
-            (id)[UIColor tertiarySystemBackgroundColor].CGColor
+            (id)PXSecondarySystemBackgroundColor().CGColor,
+            (id)PXTertiarySystemBackgroundColor().CGColor
         ];
         self.innerCard.layer.borderWidth = 0;
         
         // ID badge background and text
         UIView *idBadge = [self.innerCard.subviews objectAtIndex:0];
         idBadge.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.15];
-        self.idLabel.textColor = [UIColor labelColor];
+        self.idLabel.textColor = PXLabelColor();
         
         // Show switch button for inactive profiles
         self.switchButton.hidden = NO;

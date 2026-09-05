@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import <UIKit/UIKit.h>
 
 // DownloadResourcesViewController.m
@@ -7,7 +8,7 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     self.title = @"Download resources";
 
     UILabel *descLabel = [[UILabel alloc] initWithFrame:CGRectZero];

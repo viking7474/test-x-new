@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "PlistViewerViewController.h"
 
 @interface PlistViewerViewController () <UITableViewDelegate, UITableViewDataSource, UITextFieldDelegate>
@@ -26,7 +27,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     self.title = [self.plistPath lastPathComponent];
     
     // Add edit and share buttons
@@ -41,7 +42,7 @@
     self.navigationItem.rightBarButtonItems = @[editButton, shareButton];
     
     // Setup table view
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:PXInsetGroupedTableViewStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -51,7 +52,7 @@
     // Error label (will be displayed if the plist can't be read)
     self.errorLabel = [[UILabel alloc] initWithFrame:CGRectMake(20, 0, self.view.bounds.size.width - 40, 80)];
     self.errorLabel.textAlignment = NSTextAlignmentCenter;
-    self.errorLabel.textColor = [UIColor secondaryLabelColor];
+    self.errorLabel.textColor = PXSecondaryLabelColor();
     self.errorLabel.numberOfLines = 0;
     self.errorLabel.hidden = YES;
     [self.view addSubview:self.errorLabel];

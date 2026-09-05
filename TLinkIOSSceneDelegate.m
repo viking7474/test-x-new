@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "TLinkIOSSceneDelegate.h"
 #import "TLinkIOSViewController.h"
 #import "TabBarController.h"
@@ -26,7 +27,7 @@
     
     UIWindowScene *windowScene = (UIWindowScene *)scene;
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
-    self.window.backgroundColor = [UIColor systemBackgroundColor];
+    self.window.backgroundColor = PXSystemBackgroundColor();
     
     // Create the tab bar controller
     TabBarController *tabBarController = [[TabBarController alloc] init];

@@ -1,4 +1,6 @@
 #import "JailbreakDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 #import <notify.h>
 
 @interface JailbreakDetailViewController ()
@@ -20,7 +22,7 @@
     [super viewDidLoad];
     self.title = @"Jailbreak Detection Bypass";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -77,7 +79,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbolName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -100,7 +102,7 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Jailbreak Detection Bypass";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [card addSubview:title];
 
@@ -108,7 +110,7 @@
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.text = @"Bypass app checks that block jailbroken devices";
     subtitle.font = [UIFont systemFontOfSize:13];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.numberOfLines = 0;
     [card addSubview:subtitle];
 
@@ -130,7 +132,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -159,7 +161,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     return label;
 }
 
@@ -168,7 +170,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:12];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     label.numberOfLines = 0;
     return label;
 }
@@ -181,14 +183,14 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Jailbreak Detection Bypass";
     title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [row addSubview:title];
 
     self.mainSwitch = [[UISwitch alloc] init];
     self.mainSwitch.translatesAutoresizingMaskIntoConstraints = NO;
     self.mainSwitch.onTintColor = [UIColor systemBlueColor];
-    [self.mainSwitch setOn:[self.securitySettings boolForKey:@"jailbreakDetectionEnabled"] animated:NO];
+    [self.mainSwitch setOn:PXReadSecurityBool(@"jailbreakDetectionEnabled", NO) animated:NO];
     [self.mainSwitch addTarget:self action:@selector(mainToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [row addSubview:self.mainSwitch];
 
@@ -207,34 +209,13 @@
 
 - (void)mainToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-
-    // 1) Persist to the security settings plist (source of truth)
-    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    settingsDict[@"jailbreakDetectionEnabled"] = @(enabled);
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
-                                                                  format:NSPropertyListXMLFormat_v1_0
-                                                                 options:0
-                                                                   error:nil];
-    if (plistData) {
-        [plistData writeToFile:securitySettingsPath atomically:YES];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"jailbreakDetectionEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToast:@"Could not save Jailbreak Detection setting"];
+        return;
     }
 
-    // 2) Update NSUserDefaults suites
-    NSArray *suiteNames = @[
-        @"com.weaponx.securitySettings",
-        @"com.hydra.tlinkios.SecuritySettings",
-        @"com.hydra.tlinkios"
-    ];
-    for (NSString *suiteName in suiteNames) {
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
-        [defaults setBool:enabled forKey:@"jailbreakDetectionEnabled"];
-        [defaults synchronize];
-    }
-    [self.securitySettings setBool:enabled forKey:@"jailbreakDetectionEnabled"];
-    [self.securitySettings synchronize];
-
-    // 3) Notify tweaks/processes
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter,
@@ -249,11 +230,9 @@
                                             YES);
     }
 
-    // 4) User feedback
     NSString *message = enabled ? @"Jailbreak Detection Bypass Enabled" : @"Jailbreak Detection Bypass Disabled";
     [self showToast:message];
 
-    // 5) Haptic feedback
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];

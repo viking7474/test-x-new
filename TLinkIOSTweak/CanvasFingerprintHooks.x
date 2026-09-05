@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import "TLinkIOSLogging.h"
+#import "PXUIKitCompat.h"
 #import <objc/runtime.h>
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 
@@ -1059,18 +1060,7 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
         UIApplication *application = [UIApplication sharedApplication];
         if (!application) return;
 
-        NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in application.connectedScenes) {
-                if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-                [windows addObjectsFromArray:((UIWindowScene *)scene).windows ?: @[]];
-            }
-        } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            [windows addObjectsFromArray:application.windows ?: @[]];
-#pragma clang diagnostic pop
-        }
+        NSMutableArray<UIWindow *> *windows = [PXApplicationWindows() mutableCopy];
 
         for (UIWindow *window in windows) {
             NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];

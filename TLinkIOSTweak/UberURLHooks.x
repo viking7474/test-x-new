@@ -9,6 +9,7 @@
 #import <errno.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <objc/runtime.h>
+#import "PXUIKitCompat.h"
 
 // Add this at the very beginning of the file, after the imports
 #define DOORDASH_DEBUG 1
@@ -43,78 +44,10 @@ static void performDelayedSetup(void);
 
 // Helper function to get the top view controller - moved to the top for proper declaration
 UIViewController* getTopViewController(void) {
-    UIViewController *rootViewController = nil;
-    
-    // iOS version check to use the appropriate API
-    NSOperatingSystemVersion iOS13 = (NSOperatingSystemVersion){13, 0, 0};
-    BOOL isIOS13OrLater = [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:iOS13];
-    
-    if (isIOS13OrLater) {
-        // Modern approach for iOS 13+
-        UIScene *scene = nil;
-        NSSet *connectedScenes = [[UIApplication sharedApplication] connectedScenes];
-        
-        for (UIScene *aScene in connectedScenes) {
-            if (aScene.activationState == UISceneActivationStateForegroundActive) {
-                scene = aScene;
-                break;
-            }
-        }
-        
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            for (UIWindow *window in windowScene.windows) {
-                if (window.isKeyWindow) {
-                    rootViewController = window.rootViewController;
-                    break;
-                }
-            }
-        }
-    }
-    
-    // Fallback for older iOS versions or if no window found above
-    if (!rootViewController) {
-        // Use application delegate window as fallback
-        UIWindow *window = [[UIApplication sharedApplication] delegate].window;
-        if (window) {
-            rootViewController = window.rootViewController;
-        }
-        
-        // If all else fails, try application windows directly (pre-iOS 13 approach)
-        if (!rootViewController) {
-            // This method works with iOS 12 and below
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            UIWindow *keyWindow = nil;
-            
-            if ([UIApplication sharedApplication].windows.count > 0) {
-                // Find the key window without directly accessing keyWindow property
-                NSArray *windows = [UIApplication sharedApplication].windows;
-                for (UIWindow *window in windows) {
-                    if (window.isKeyWindow) {
-                        keyWindow = window;
-                        break;
-                    }
-                }
-                
-                // Fallback to the first window if no key window
-                if (!keyWindow && windows.count > 0) {
-                    keyWindow = windows[0];
-                }
-                
-                if (keyWindow) {
-                    rootViewController = keyWindow.rootViewController;
-                }
-            }
-            #pragma clang diagnostic pop
-        }
-    }
-    
-    // Navigate to the top-most presented controller
+    UIViewController *rootViewController = PXKeyWindow().rootViewController;
     while (rootViewController.presentedViewController) {
         rootViewController = rootViewController.presentedViewController;
     }
-    
     return rootViewController;
 }
 
@@ -330,36 +263,8 @@ EXPORT void setMonitoringEnabled(BOOL enabled) {
             style:UIAlertActionStyleDefault 
             handler:nil]];
         
-        // Present the alert from the key window using modern approach (iOS 13+)
-        UIViewController *topVC = nil;
-        
-        // Check iOS version for the appropriate method
-        if (@available(iOS 13.0, *)) {
-            NSSet *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-            for (UIScene *scene in connectedScenes) {
-                if (scene.activationState == UISceneActivationStateForegroundActive) {
-                    UIWindowScene *windowScene = (UIWindowScene *)scene;
-                    for (UIWindow *window in windowScene.windows) {
-                        if (window.isKeyWindow) {
-                            topVC = window.rootViewController;
-                            break;
-                        }
-                    }
-                    if (topVC) break;
-                }
-            }
-        } else {
-            // Fallback for iOS 12 and below
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
-            #pragma clang diagnostic pop
-        }
-        
-        // Navigate to the topmost view controller
-        while (topVC.presentedViewController) {
-            topVC = topVC.presentedViewController;
-        }
+        // Present the alert from the runtime-safe top controller.
+        UIViewController *topVC = getTopViewController();
         
         [topVC presentViewController:alert animated:YES completion:nil];
     }

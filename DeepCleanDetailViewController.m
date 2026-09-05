@@ -1,4 +1,6 @@
 #import "DeepCleanDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 
 @interface DeepCleanDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -20,7 +22,7 @@
     [super viewDidLoad];
     self.title = @"Clear Data Mode";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -57,7 +59,7 @@
     [stack addArrangedSubview:[self sectionHeader:@"MODE"]];
     UIView *modeCard = [self cardContainer];
     UIStackView *modeStack = [self innerStackIn:modeCard];
-    BOOL deep = [self.securitySettings boolForKey:@"deepCleanEnabled"];
+    BOOL deep = PXReadSecurityBool(@"deepCleanEnabled", NO);
     UIButton *fRow = [self modeRowTitle:@"Full" desc:@"Standard 4-scope + Keychain wipe (faster)" tag:0 selected:!deep];
     UIButton *dRow = [self modeRowTitle:@"Deep" desc:@"Scans containers for leftover tokens (slower)" tag:1 selected:deep];
     [modeStack addArrangedSubview:fRow];
@@ -83,7 +85,7 @@
     note.translatesAutoresizingMaskIntoConstraints = NO;
     note.text = @"Deep mode additionally scans inside containers for leftover tokens/encrypted data after wiping. More thorough but slower.";
     note.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    note.textColor = [UIColor secondaryLabelColor];
+    note.textColor = PXSecondaryLabelColor();
     note.numberOfLines = 0;
     [stack addArrangedSubview:note];
 }
@@ -98,7 +100,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbol] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbol) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -120,13 +122,13 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Clear Data Mode";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     [card addSubview:title];
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"Global mode applied to every Clear Data action.";
     sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     sub.numberOfLines = 0;
     [card addSubview:sub];
     [NSLayoutConstraint activateConstraints:@[
@@ -147,7 +149,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -160,7 +162,7 @@
     l.translatesAutoresizingMaskIntoConstraints = NO;
     l.text = text;
     l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    l.textColor = [UIColor secondaryLabelColor];
+    l.textColor = PXSecondaryLabelColor();
     return l;
 }
 
@@ -183,7 +185,7 @@
     UIView *line = [[UIView alloc] init];
     line.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        line.backgroundColor = [UIColor separatorColor];
+        line.backgroundColor = PXSeparatorColor();
     } else {
         line.backgroundColor = [UIColor lightGrayColor];
     }
@@ -201,7 +203,7 @@
     t.translatesAutoresizingMaskIntoConstraints = NO;
     t.text = title;
     t.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    t.textColor = [UIColor labelColor];
+    t.textColor = PXLabelColor();
     t.userInteractionEnabled = NO;
     [row addSubview:t];
 
@@ -209,7 +211,7 @@
     d.translatesAutoresizingMaskIntoConstraints = NO;
     d.text = desc;
     d.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    d.textColor = [UIColor secondaryLabelColor];
+    d.textColor = PXSecondaryLabelColor();
     d.numberOfLines = 0;
     d.userInteractionEnabled = NO;
     [row addSubview:d];
@@ -219,7 +221,7 @@
     check.contentMode = UIViewContentModeScaleAspectFit;
     check.tintColor = [UIColor systemBlueColor];
     if (@available(iOS 13.0, *)) {
-        check.image = [[UIImage systemImageNamed:@"checkmark"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        check.image = [PXSystemImageNamed(@"checkmark") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     check.hidden = !selected;
     [row addSubview:check];
@@ -254,13 +256,13 @@
     t.translatesAutoresizingMaskIntoConstraints = NO;
     t.text = title;
     t.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    t.textColor = [UIColor labelColor];
+    t.textColor = PXLabelColor();
     [rowv addSubview:t];
     UILabel *d = [[UILabel alloc] init];
     d.translatesAutoresizingMaskIntoConstraints = NO;
     d.text = desc;
     d.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    d.textColor = [UIColor secondaryLabelColor];
+    d.textColor = PXSecondaryLabelColor();
     d.numberOfLines = 0;
     [rowv addSubview:d];
     [NSLayoutConstraint activateConstraints:@[
@@ -278,8 +280,16 @@
 
 - (void)modeRowTapped:(UIButton *)sender {
     BOOL deep = (sender.tag == 1);
-    [self.securitySettings setBool:deep forKey:@"deepCleanEnabled"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"deepCleanEnabled", deep, &error)) {
+        BOOL persisted = PXReadSecurityBool(@"deepCleanEnabled", NO);
+        self.fullCheck.hidden = persisted;
+        self.deepCheck.hidden = !persisted;
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
     self.fullCheck.hidden = deep;
     self.deepCheck.hidden = !deep;
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];

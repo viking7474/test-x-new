@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "CopyHelper.h"
 #import <UIKit/UIKit.h>
 #import "common/UIButton+SafeConfiguration.h"
@@ -21,14 +22,14 @@ static const void *const kCopyTextKey = &kCopyTextKey;
     // Use modern button configuration
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
-        config.image = [UIImage systemImageNamed:@"doc.on.doc"];
+        config.image = PXSystemImageNamed(@"doc.on.doc");
         config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         config.background.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
         config.baseForegroundColor = [UIColor systemBlueColor];
         config.contentInsets = NSDirectionalEdgeInsetsMake(8, 8, 8, 8);
         [copyButton safeSetConfiguration:config];
     } else {
-        [copyButton setImage:[UIImage systemImageNamed:@"doc.on.doc"] forState:UIControlStateNormal];
+        [copyButton setImage:PXSystemImageNamed(@"doc.on.doc") forState:UIControlStateNormal];
         copyButton.tintColor = [UIColor systemBlueColor];
         copyButton.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
         copyButton.layer.cornerRadius = 8;
@@ -58,7 +59,7 @@ static const void *const kCopyTextKey = &kCopyTextKey;
             // Create a checkmark configuration for success feedback
             UIButtonConfiguration *originalConfig = sender.configuration;
             UIButtonConfiguration *successConfig = [originalConfig copy];
-            successConfig.image = [UIImage systemImageNamed:@"checkmark"];
+            successConfig.image = PXSystemImageNamed(@"checkmark");
             successConfig.baseForegroundColor = [UIColor systemGreenColor];
             
             // Animate the change
@@ -78,12 +79,12 @@ static const void *const kCopyTextKey = &kCopyTextKey;
         } else {
             // Fallback for iOS < 15 using tint color change
             [UIView animateWithDuration:0.2 animations:^{
-                [sender setImage:[UIImage systemImageNamed:@"checkmark"] forState:UIControlStateNormal];
+                [sender setImage:PXSystemImageNamed(@"checkmark") forState:UIControlStateNormal];
                 sender.tintColor = [UIColor systemGreenColor];
             } completion:^(BOOL finished) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [UIView animateWithDuration:0.2 animations:^{
-                        [sender setImage:[UIImage systemImageNamed:@"doc.on.doc"] forState:UIControlStateNormal];
+                        [sender setImage:PXSystemImageNamed(@"doc.on.doc") forState:UIControlStateNormal];
                         sender.tintColor = originalColor;
                     }];
                 });

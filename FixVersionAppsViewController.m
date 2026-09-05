@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "FixVersionAppsViewController.h"
 #import <objc/runtime.h>
 
@@ -41,7 +42,7 @@
     [super viewDidLoad];
 
     self.title = @"Fix Version Apps";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
 
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done"
                                                                               style:UIBarButtonItemStyleDone

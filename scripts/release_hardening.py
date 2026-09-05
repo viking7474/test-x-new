@@ -48,6 +48,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_ifake_final_crosswalk_static.py",
     "scripts/test_c04_sbs_nx_evidence_static.py",
     "scripts/test_canvas_noise_controls_static.py",
+    "scripts/test_security_ui_logic_static.py",
 ]
 NODE_TESTS = [
     "scripts/test_canvas_fingerprint_protection.js",

@@ -29,6 +29,7 @@
 
 // Settings Management
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type;
+- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
 
 // Current Values

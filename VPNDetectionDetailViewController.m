@@ -1,4 +1,6 @@
 #import "VPNDetectionDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 
 @interface VPNDetectionDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -19,7 +21,7 @@
     [super viewDidLoad];
     self.title = @"VPN/PROXY Detection Bypass";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -76,7 +78,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbolName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -99,7 +101,7 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"VPN/PROXY Detection Bypass";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [card addSubview:title];
 
@@ -107,7 +109,7 @@
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.text = @"Hide VPN or Proxy usage from apps that check for it";
     subtitle.font = [UIFont systemFontOfSize:13];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.numberOfLines = 0;
     [card addSubview:subtitle];
 
@@ -129,7 +131,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -158,7 +160,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     return label;
 }
 
@@ -167,7 +169,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:12];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     label.numberOfLines = 0;
     return label;
 }
@@ -180,14 +182,14 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"VPN/PROXY Detection Bypass";
     title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [row addSubview:title];
 
     self.mainSwitch = [[UISwitch alloc] init];
     self.mainSwitch.translatesAutoresizingMaskIntoConstraints = NO;
     self.mainSwitch.onTintColor = [UIColor systemBlueColor];
-    [self.mainSwitch setOn:[self.securitySettings boolForKey:@"vpnDetectionBypassEnabled"] animated:NO];
+    [self.mainSwitch setOn:PXReadSecurityBool(@"vpnDetectionBypassEnabled", NO) animated:NO];
     [self.mainSwitch addTarget:self action:@selector(mainToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [row addSubview:self.mainSwitch];
 
@@ -206,8 +208,12 @@
 
 - (void)mainToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"vpnDetectionBypassEnabled"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"vpnDetectionBypassEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToast:@"Could not save VPN/PROXY Detection setting"];
+        return;
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.hydra.tlinkios.settings.changed"),
                                          NULL, NULL, YES);

@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "TabBarController.h"
 #import "WeaponXToast.h"
 #import "TLinkIOSViewController.h"
@@ -77,8 +78,8 @@
     // self.accountNavController = [[UINavigationController alloc] initWithRootViewController:accountVC];
     
     // Configure tab bar items (excluding account)
-    identityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home" image:[UIImage systemImageNamed:@"house.fill"] tag:1];
-    securityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Security" image:[UIImage systemImageNamed:@"shield.checkerboard"] tag:2];
+    identityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home" image:PXSystemImageNamed(@"house.fill") tag:1];
+    securityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Security" image:PXSystemImageNamed(@"shield.checkerboard") tag:2];
     
     // Set view controllers (excluding account)
     self.viewControllers = @[identityNav, securityNav];
@@ -88,7 +89,7 @@
     
     // Configure tab bar appearance
     self.tabBar.tintColor = [UIColor systemBlueColor];
-    self.tabBar.backgroundColor = [UIColor systemBackgroundColor];
+    self.tabBar.backgroundColor = PXSystemBackgroundColor();
     
     // iPad-specific UI adjustments - don't use SplitViewController directly in tabs
     if (self.isIPad) {
@@ -204,7 +205,7 @@
     // Use SF Symbols if available (iOS 13+)
     if (@available(iOS 13.0, *)) {
         NSString *iconName = isSuccess ? @"checkmark.circle.fill" : @"wifi.slash";
-        UIImage *icon = [UIImage systemImageNamed:iconName];
+        UIImage *icon = PXSystemImageNamed(iconName);
         iconView.image = [icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     } else {
         // Fallback for older iOS versions - use a simple circle view
@@ -230,43 +231,8 @@
         toastLabel.font = [UIFont boldSystemFontOfSize:15];
     }
     
-    // Get the key window
-    UIWindow *window = nil;
-    
-    // Modern way (iOS 13+)
-    if (@available(iOS 13.0, *)) {
-        NSSet *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && 
-                [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *candidateWindow in windowScene.windows) {
-                    if (candidateWindow.isKeyWindow) {
-                        window = candidateWindow;
-                        break;
-                    }
-                }
-                if (window) break;
-            }
-        }
-        
-        // Fallback to first window if no key window found
-        if (!window && connectedScenes.count > 0) {
-            UIScene *scene = [connectedScenes anyObject];
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                if (windowScene.windows.count > 0) {
-                    window = windowScene.windows.firstObject;
-                }
-            }
-        }
-    } else {
-        // Older way (pre-iOS 13)
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        window = [UIApplication sharedApplication].keyWindow;
-        #pragma clang diagnostic pop
-    }
+    // Runtime-safe across iOS 12+; scene-backed on modern systems with legacy fallback.
+    UIWindow *window = PXKeyWindow();
     
     if (!window) {
         NSLog(@"[WeaponX] ⚠️ Cannot show toast - no window found");
@@ -501,86 +467,39 @@
             // Validate the host
             BOOL isValid = NO;
             
-            // Use modern API for trust evaluation that's compatible with iOS 15+
-            
-            // Primary security check - verify certificate chain
-            if (@available(iOS 13.0, *)) {
-                CFErrorRef cfError = NULL;
-                isValid = SecTrustEvaluateWithError(serverTrust, &cfError);
-                if (!isValid && cfError) {
-                    NSError *trustError = (__bridge_transfer NSError *)cfError;
-                    NSLog(@"[WeaponX] ❌ Certificate trust evaluation failed: %@", trustError);
-                }
-            } else {
-                // Fallback for older iOS versions if needed (but likely not used on iOS 15+)
-                SecTrustResultType result;
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                SecTrustEvaluate(serverTrust, &result);
-                #pragma clang diagnostic pop
-                isValid = (result == kSecTrustResultUnspecified || result == kSecTrustResultProceed);
-            }
+            // Use the API available across the full iOS 12-18 support range.
+            SecTrustResultType result;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            OSStatus trustStatus = SecTrustEvaluate(serverTrust, &result);
+#pragma clang diagnostic pop
+            isValid = (trustStatus == errSecSuccess &&
+                       (result == kSecTrustResultUnspecified || result == kSecTrustResultProceed));
             
             // Additional security check - public key pinning
             if (isValid) {
-                // Use modern API to get certificate data
-                if (@available(iOS 15.0, *)) {
-                    CFArrayRef certChain = SecTrustCopyCertificateChain(serverTrust);
-                    if (certChain && CFArrayGetCount(certChain) > 0) {
-                        SecCertificateRef certificate = (SecCertificateRef)CFArrayGetValueAtIndex(certChain, 0);
-                        NSData *remoteCertificateData = CFBridgingRelease(SecCertificateCopyData(certificate));
-                        
-                        // Check if we need to initialize the trusted cert data
-                        if (!self.trustedServerCertificateData) {
-                            // On first run, we trust and store the certificate
-                            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-                            NSData *storedCertData = [defaults objectForKey:@"WeaponXTrustedCertificateData"];
-                            
-                            if (storedCertData) {
-                                self.trustedServerCertificateData = storedCertData;
-                            } else {
-                                // First connection - trust this certificate and store it
-                                self.trustedServerCertificateData = remoteCertificateData;
-                                [defaults setObject:remoteCertificateData forKey:@"WeaponXTrustedCertificateData"];
-                                [defaults synchronize];
-                                
-                                NSLog(@"[WeaponX] 🔒 Stored initial trusted certificate for future validation");
-                            }
+                // Leaf certificate access via the API available on the full iOS 12-18 range.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                SecCertificateRef certificate = SecTrustGetCertificateAtIndex(serverTrust, 0);
+#pragma clang diagnostic pop
+                if (certificate) {
+                    NSData *remoteCertificateData = CFBridgingRelease(SecCertificateCopyData(certificate));
+                    if (!self.trustedServerCertificateData) {
+                        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                        NSData *storedCertData = [defaults objectForKey:@"WeaponXTrustedCertificateData"];
+                        if (storedCertData) {
+                            self.trustedServerCertificateData = storedCertData;
+                        } else {
+                            self.trustedServerCertificateData = remoteCertificateData;
+                            [defaults setObject:remoteCertificateData forKey:@"WeaponXTrustedCertificateData"];
+                            [defaults synchronize];
+                            NSLog(@"[WeaponX] 🔒 Stored initial trusted certificate for future validation");
                         }
-                        
-                        // Validate against our trusted certificate data
-                        isValid = [self.trustedServerCertificateData isEqualToData:remoteCertificateData];
-                        CFRelease(certChain);
-                    } else {
-                        isValid = NO;
                     }
+                    isValid = [self.trustedServerCertificateData isEqualToData:remoteCertificateData];
                 } else {
-                    // Fallback for older iOS versions
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                    SecCertificateRef certificate = SecTrustGetCertificateAtIndex(serverTrust, 0);
-                    #pragma clang diagnostic pop
-                    if (certificate) {
-                        NSData *remoteCertificateData = CFBridgingRelease(SecCertificateCopyData(certificate));
-                        
-                        // Check stored certs as above
-                        if (!self.trustedServerCertificateData) {
-                            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-                            NSData *storedCertData = [defaults objectForKey:@"WeaponXTrustedCertificateData"];
-                            
-                            if (storedCertData) {
-                                self.trustedServerCertificateData = storedCertData;
-                            } else {
-                                self.trustedServerCertificateData = remoteCertificateData;
-                                [defaults setObject:remoteCertificateData forKey:@"WeaponXTrustedCertificateData"];
-                                [defaults synchronize];
-                            }
-                        }
-                        
-                        isValid = [self.trustedServerCertificateData isEqualToData:remoteCertificateData];
-                    } else {
-                        isValid = NO;
-                    }
+                    isValid = NO;
                 }
             }
             

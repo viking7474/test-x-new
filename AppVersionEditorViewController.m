@@ -1,4 +1,5 @@
 #import "AppVersionEditorViewController.h"
+#import "common/PXUIKitCompat.h"
 #import "VersionManagementViewController.h"
 
 @interface AppVersionEditorViewController () <VersionManagementViewControllerDelegate, UITextFieldDelegate>
@@ -26,7 +27,7 @@
     [super viewDidLoad];
     self.title = (self.appName.length > 0) ? self.appName : @"App Version";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -136,7 +137,7 @@
 
 #pragma mark - Persistence
 
-- (void)saveVersion:(NSString *)version build:(NSString *)build {
+- (BOOL)saveVersion:(NSString *)version build:(NSString *)build {
     NSString *profileId = nil;
     Class idc = NSClassFromString(@"IdentifierManager");
     if (idc && [idc respondsToSelector:@selector(sharedManager)]) {
@@ -161,7 +162,9 @@
         if (version.length > 0) { avd[@"spoofedVersion"] = version; }
         if (build.length > 0) { avd[@"spoofedBuild"] = build; }
         avd[@"lastUpdated"] = [NSDate date];
-        [avd writeToFile:profileVersionFile atomically:YES];
+        if (![avd writeToFile:profileVersionFile atomically:YES]) {
+            NSLog(@"[AppVersionEditor] Profile version mirror write failed: %@", profileVersionFile);
+        }
     }
 
     NSString *file = [self versionSpoofFile];
@@ -178,12 +181,19 @@
     sv[self.bundleID] = info;
     dict[@"SpoofedVersions"] = sv;
     dict[@"LastUpdated"] = [NSDate date];
-    [dict writeToFile:file atomically:YES];
+    if (![dict writeToFile:file atomically:YES]) {
+        NSLog(@"[AppVersionEditor] Failed to persist version spoof data: %@", file);
+        return NO;
+    }
 
     [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.appVersionDataChanged" object:nil];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.appVersionSpoofChanged"),
+                                         NULL, NULL, YES);
+    return YES;
 }
 
-- (void)persistToggle:(BOOL)enabled {
+- (BOOL)persistToggle:(BOOL)enabled {
     NSString *file = [self versionSpoofFile];
     NSMutableDictionary *dict = [[NSMutableDictionary alloc] initWithContentsOfFile:file];
     if (![dict isKindOfClass:[NSMutableDictionary class]]) { dict = [NSMutableDictionary dictionary]; }
@@ -196,8 +206,15 @@
     sv[self.bundleID] = info;
     dict[@"SpoofedVersions"] = sv;
     dict[@"LastUpdated"] = [NSDate date];
-    [dict writeToFile:file atomically:YES];
+    if (![dict writeToFile:file atomically:YES]) {
+        NSLog(@"[AppVersionEditor] Failed to persist per-app toggle: %@", file);
+        return NO;
+    }
     [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.appVersionDataChanged" object:nil];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.appVersionSpoofChanged"),
+                                         NULL, NULL, YES);
+    return YES;
 }
 
 #pragma mark - Actions
@@ -211,7 +228,11 @@
         [self showToast:@"Nh\u1eadp phi\u00ean b\u1ea3n tr\u01b0\u1edbc"];
         return;
     }
-    [self saveVersion:version build:build];
+    if (![self saveVersion:version build:build]) {
+        [self reloadFromPlist];
+        [self showToast:@"Kh\u00f4ng th\u1ec3 l\u01b0u phi\u00ean b\u1ea3n"];
+        return;
+    }
     [self.perAppSwitch setOn:YES animated:YES];
     [self showToast:@"\u0110\u00e3 l\u01b0u"];
     UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -220,8 +241,14 @@
 }
 
 - (void)perAppToggleChanged:(UISwitch *)sender {
-    [self persistToggle:sender.isOn];
-    [self showToast:(sender.isOn ? @"\u0110\u00e3 b\u1eadt spoof" : @"\u0110\u00e3 t\u1eaft spoof")];
+    BOOL enabled = sender.isOn;
+    if (![self persistToggle:enabled]) {
+        [sender setOn:!enabled animated:YES];
+        [self reloadFromPlist];
+        [self showToast:@"Kh\u00f4ng th\u1ec3 l\u01b0u tr\u1ea1ng th\u00e1i spoof"];
+        return;
+    }
+    [self showToast:(enabled ? @"\u0110\u00e3 b\u1eadt spoof" : @"\u0110\u00e3 t\u1eaft spoof")];
 }
 
 - (void)fetchTapped {
@@ -230,10 +257,10 @@
 
     UIActivityIndicatorView *spinner;
     if (@available(iOS 13.0, *)) {
-        spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+        spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
     } else {
         spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
-        spinner.color = [UIColor labelColor];
+        spinner.color = PXLabelColor();
     }
     spinner.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:spinner];
@@ -323,7 +350,11 @@
         UIAlertAction *a = [UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             self.versionField.text = ver;
             self.buildField.text = bld;
-            [self saveVersion:ver build:bld];
+            if (![self saveVersion:ver build:bld]) {
+                [self reloadFromPlist];
+                [self showToast:@"Kh\u00f4ng th\u1ec3 l\u01b0u phi\u00ean b\u1ea3n"];
+                return;
+            }
             [self.perAppSwitch setOn:YES animated:YES];
             [self showToast:@"\u0110\u00e3 l\u01b0u"];
         }];
@@ -397,14 +428,14 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"B\u1eadt spoof cho app n\u00e0y";
     title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     [row addSubview:title];
 
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = self.bundleID;
     sub.font = [UIFont systemFontOfSize:12];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     sub.numberOfLines = 1;
     sub.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [row addSubview:sub];
@@ -442,7 +473,7 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = (self.appName.length > 0) ? self.appName : @"App Version";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [card addSubview:title];
 
@@ -450,7 +481,7 @@
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.text = self.bundleID;
     subtitle.font = [UIFont systemFontOfSize:13];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.numberOfLines = 0;
     [card addSubview:subtitle];
 
@@ -478,7 +509,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbolName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -496,7 +527,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -510,7 +541,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     return label;
 }
 
@@ -519,7 +550,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:12];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     label.numberOfLines = 0;
     return label;
 }

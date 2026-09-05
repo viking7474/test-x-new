@@ -239,7 +239,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: fdopendir is optional", "if (fdopendirEntry)" in install_group)
     matrix.check("source: iOS 13 skips nested optional dirent hooks", all(token in SOURCE for token in [
         "PXJBOptionalDirectoryEntryHooksSupported",
-        "@available(iOS 14.0, *)",
+        "isOperatingSystemAtLeastVersion",
         "opendir2Entry = optionalDirectoryEntryHooksSupported",
         "readdirREntry = optionalDirectoryEntryHooksSupported",
     ]))

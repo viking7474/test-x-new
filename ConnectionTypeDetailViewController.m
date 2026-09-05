@@ -1,4 +1,6 @@
 #import "ConnectionTypeDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 
 @interface ConnectionTypeDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -20,7 +22,7 @@
     [super viewDidLoad];
     self.title = @"Connection Type";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -54,7 +56,7 @@
 
     [stack addArrangedSubview:[self buildHero]];
 
-    NSInteger saved = [self.securitySettings integerForKey:@"networkConnectionType"];
+    NSInteger saved = PXReadSecurityInteger(@"networkConnectionType", 0);
     if (saved < 0 || saved > 3) { saved = 0; }
 
     [stack addArrangedSubview:[self sectionHeader:@"CONNECTION TYPE"]];
@@ -73,7 +75,7 @@
     note.translatesAutoresizingMaskIntoConstraints = NO;
     note.text = @"Select how apps should see your network connection. This setting only works when Network Data Spoof is enabled.";
     note.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    note.textColor = [UIColor secondaryLabelColor];
+    note.textColor = PXSecondaryLabelColor();
     note.numberOfLines = 0;
     [stack addArrangedSubview:note];
 
@@ -81,7 +83,7 @@
     related.translatesAutoresizingMaskIntoConstraints = NO;
     related.text = @"When Cellular is selected, Country (ISO) options appear on the Security tab.";
     related.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    related.textColor = [UIColor tertiaryLabelColor];
+    related.textColor = PXTertiaryLabelColor();
     related.numberOfLines = 0;
     [stack addArrangedSubview:related];
 }
@@ -96,7 +98,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbol] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbol) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -118,13 +120,13 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Network Connection Type";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     [card addSubview:title];
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"Choose how apps see your connection.";
     sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     sub.numberOfLines = 0;
     [card addSubview:sub];
     [NSLayoutConstraint activateConstraints:@[
@@ -145,7 +147,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -158,7 +160,7 @@
     l.translatesAutoresizingMaskIntoConstraints = NO;
     l.text = text;
     l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    l.textColor = [UIColor secondaryLabelColor];
+    l.textColor = PXSecondaryLabelColor();
     return l;
 }
 
@@ -181,7 +183,7 @@
     UIView *line = [[UIView alloc] init];
     line.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        line.backgroundColor = [UIColor separatorColor];
+        line.backgroundColor = PXSeparatorColor();
     } else {
         line.backgroundColor = [UIColor lightGrayColor];
     }
@@ -199,14 +201,14 @@
     t.translatesAutoresizingMaskIntoConstraints = NO;
     t.text = title;
     t.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    t.textColor = [UIColor labelColor];
+    t.textColor = PXLabelColor();
     [row addSubview:t];
 
     UILabel *d = [[UILabel alloc] init];
     d.translatesAutoresizingMaskIntoConstraints = NO;
     d.text = desc;
     d.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    d.textColor = [UIColor secondaryLabelColor];
+    d.textColor = PXSecondaryLabelColor();
     d.numberOfLines = 0;
     [row addSubview:d];
 
@@ -215,7 +217,7 @@
     check.contentMode = UIViewContentModeScaleAspectFit;
     check.tintColor = [UIColor systemBlueColor];
     if (@available(iOS 13.0, *)) {
-        check.image = [[UIImage systemImageNamed:@"checkmark"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        check.image = [PXSystemImageNamed(@"checkmark") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     check.hidden = !selected;
     [row addSubview:check];
@@ -244,8 +246,14 @@
 - (void)typeRowTapped:(UITapGestureRecognizer *)g {
     NSInteger selectedType = g.view.tag;
 
-    [self.securitySettings setInteger:selectedType forKey:@"networkConnectionType"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityInteger(@"networkConnectionType", selectedType, &error)) {
+        NSInteger persisted = PXReadSecurityInteger(@"networkConnectionType", 0);
+        for (NSInteger i = 0; i < (NSInteger)self.typeChecks.count; i++) {
+            self.typeChecks[i].hidden = (i != persisted);
+        }
+        return;
+    }
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkConnectionTypeChanged"), NULL, NULL, YES);

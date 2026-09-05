@@ -1,3 +1,4 @@
+#import "PXUIKitCompat.h"
 // ScoreMeterView.m
 #import "ScoreMeterView.h"
 
@@ -35,7 +36,7 @@
 
     // Draw background arc
     CGContextSetLineWidth(ctx, lineWidth);
-    CGContextSetStrokeColorWithColor(ctx, [UIColor systemGray5Color].CGColor);
+    CGContextSetStrokeColorWithColor(ctx, PXSystemGray5Color().CGColor);
     CGContextAddArc(ctx, center.x, center.y, radius, startAngle, endAngle, 0);
     CGContextStrokePath(ctx);
 
@@ -59,7 +60,7 @@
     UIFont *labelFont = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     CGSize labelSize = [self.scoreLabel sizeWithAttributes:@{NSFontAttributeName: labelFont}];
     [self.scoreLabel drawAtPoint:CGPointMake(center.x - labelSize.width/2, center.y + scoreSize.height/2 + 2)
-            withAttributes:@{NSFontAttributeName: labelFont, NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}];
+            withAttributes:@{NSFontAttributeName: labelFont, NSForegroundColorAttributeName: PXSecondaryLabelColor()}];
 }
 
 @end

@@ -1,4 +1,6 @@
 #import "SystemKeychainWipeDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 
 @interface SystemKeychainWipeDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -19,7 +21,7 @@
     [super viewDidLoad];
     self.title = @"System Keychain Wipe";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -79,7 +81,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbolName] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbolName) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -102,7 +104,7 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"System Keychain Wipe";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [card addSubview:title];
 
@@ -110,7 +112,7 @@
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
     subtitle.text = @"Allow Clear Data to wipe com.apple.* keychain items";
     subtitle.font = [UIFont systemFontOfSize:13];
-    subtitle.textColor = [UIColor secondaryLabelColor];
+    subtitle.textColor = PXSecondaryLabelColor();
     subtitle.numberOfLines = 0;
     [card addSubview:subtitle];
 
@@ -140,7 +142,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = [UIColor systemRedColor];
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:@"exclamationmark.triangle.fill"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(@"exclamationmark.triangle.fill") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [banner addSubview:iv];
 
@@ -169,7 +171,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -198,7 +200,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     return label;
 }
 
@@ -207,7 +209,7 @@
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.font = [UIFont systemFontOfSize:12];
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     label.numberOfLines = 0;
     return label;
 }
@@ -220,14 +222,14 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Allow System Keychain Wipe";
     title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     title.numberOfLines = 0;
     [row addSubview:title];
 
     self.mainSwitch = [[UISwitch alloc] init];
     self.mainSwitch.translatesAutoresizingMaskIntoConstraints = NO;
     self.mainSwitch.onTintColor = [UIColor systemRedColor];
-    [self.mainSwitch setOn:[self.securitySettings boolForKey:@"allowSystemKeychainWipeEnabled"] animated:NO];
+    [self.mainSwitch setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:NO];
     [self.mainSwitch addTarget:self action:@selector(mainToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [row addSubview:self.mainSwitch];
 
@@ -248,15 +250,22 @@
     BOOL enabled = sender.isOn;
     if (enabled) {
         UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Allow System Keychain Wipe?"
-                                                                        message:@"This lets Clear Data also wipe com.apple.* system keychain items for scoped apps. It can sign you out of system services and is hard to undo. Continue?"
+                                                                        message:@"This does not erase data by itself. It arms a policy that lets a later Clear Data action also wipe com.apple.* system keychain items for scoped system apps. Continue?"
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-            [sender setOn:NO animated:YES];
+            [sender setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:YES];
         }]];
         [confirm addAction:[UIAlertAction actionWithTitle:@"Allow" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-            [self.securitySettings setBool:YES forKey:@"allowSystemKeychainWipeEnabled"];
-            [self.securitySettings synchronize];
-            [self showToast:@"System Keychain Wipe allowed"];
+            NSError *error = nil;
+            if (!PXWriteSecurityBool(@"allowSystemKeychainWipeEnabled", YES, &error)) {
+                [sender setOn:NO animated:YES];
+                [self showToast:@"Could not arm System Keychain Wipe policy"];
+                return;
+            }
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 CFSTR("com.hydra.tlinkios.settings.changed"),
+                                                 NULL, NULL, YES);
+            [self showToast:@"System Keychain Wipe policy armed"];
             UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
             [gen prepare];
             [gen impactOccurred];
@@ -264,9 +273,17 @@
         [self presentViewController:confirm animated:YES completion:nil];
         return;
     }
-    [self.securitySettings setBool:NO forKey:@"allowSystemKeychainWipeEnabled"];
-    [self.securitySettings synchronize];
-    [self showToast:@"System Keychain Wipe disabled"];
+
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"allowSystemKeychainWipeEnabled", NO, &error)) {
+        [sender setOn:YES animated:YES];
+        [self showToast:@"Could not disable System Keychain Wipe policy"];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+    [self showToast:@"System Keychain Wipe policy disabled"];
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];

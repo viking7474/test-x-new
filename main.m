@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import <UIKit/UIKit.h>
 #import "TLinkIOS.h"
 #import "TabBarController.h"
@@ -15,7 +16,7 @@ extern void StartWeaponXGuardian(void);
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
-    self.window.backgroundColor = [UIColor systemBackgroundColor];
+    self.window.backgroundColor = PXSystemBackgroundColor();
     
     // Set notification delegate
     [UNUserNotificationCenter currentNotificationCenter].delegate = self;
@@ -194,49 +195,10 @@ extern void StartWeaponXGuardian(void);
 
 // Helper method to get the top most view controller
 - (UIViewController *)topViewController {
-    // Modern approach for iOS 13+ to get the key window
-    UIWindow *keyWindow = nil;
-    
-    // Get the connected scenes
-    NSArray<UIScene *> *scenes = UIApplication.sharedApplication.connectedScenes.allObjects;
-    for (UIScene *scene in scenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive && 
-            [scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            for (UIWindow *window in windowScene.windows) {
-                if (window.isKeyWindow) {
-                    keyWindow = window;
-                    break;
-                }
-            }
-            if (keyWindow) break;
-        }
-    }
-    
-    // Fallback for older iOS versions - without using deprecated APIs
-    if (!keyWindow) {
-        // Try to find any available window from connected scenes
-        for (UIScene *scene in scenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                if (windowScene.windows.count > 0) {
-                    keyWindow = windowScene.windows.firstObject;
-                    break;
-                }
-            }
-        }
-        
-        // Last resort for older iOS versions
-        if (!keyWindow) {
-            // Use a different approach that doesn't rely on deprecated APIs
-            keyWindow = [[UIApplication sharedApplication] delegate].window;
-        }
-    }
-    
+    UIWindow *keyWindow = PXKeyWindow();
     if (!keyWindow) {
         return nil;
     }
-    
     UIViewController *rootViewController = keyWindow.rootViewController;
     return [self findTopViewControllerFromController:rootViewController];
 }

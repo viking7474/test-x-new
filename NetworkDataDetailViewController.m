@@ -1,4 +1,7 @@
 #import "NetworkDataDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
+#import "common/PXPaths.h"
 
 @interface NetworkDataDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
@@ -19,7 +22,7 @@
     [super viewDidLoad];
     self.title = @"Network Data Spoof";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -53,7 +56,7 @@
 
     [stack addArrangedSubview:[self buildHero]];
 
-    BOOL on = [self.securitySettings boolForKey:@"networkDataSpoofEnabled"];
+    BOOL on = PXReadSecurityBool(@"networkDataSpoofEnabled", NO);
 
     [stack addArrangedSubview:[self sectionHeader:@"STATUS"]];
     UIView *toggleCard = [self cardContainer];
@@ -73,7 +76,7 @@
     note.translatesAutoresizingMaskIntoConstraints = NO;
     note.text = @"Spoofs network data statistics including total data received and sent for both WiFi and cellular connections. This helps maintain privacy by preventing apps from tracking your actual network usage.";
     note.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    note.textColor = [UIColor secondaryLabelColor];
+    note.textColor = PXSecondaryLabelColor();
     note.numberOfLines = 0;
     [stack addArrangedSubview:note];
 
@@ -81,7 +84,7 @@
     related.translatesAutoresizingMaskIntoConstraints = NO;
     related.text = @"Connection Type and Country settings appear on the Security tab and apply only when Network Data Spoof is on.";
     related.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    related.textColor = [UIColor tertiaryLabelColor];
+    related.textColor = PXTertiaryLabelColor();
     related.numberOfLines = 0;
     [stack addArrangedSubview:related];
 }
@@ -96,7 +99,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbol] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbol) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -118,13 +121,13 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Network Data Spoof";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     [card addSubview:title];
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"Optional - hides your real WiFi and cellular data usage.";
     sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     sub.numberOfLines = 0;
     [card addSubview:sub];
     [NSLayoutConstraint activateConstraints:@[
@@ -145,7 +148,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -158,7 +161,7 @@
     l.translatesAutoresizingMaskIntoConstraints = NO;
     l.text = text;
     l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    l.textColor = [UIColor secondaryLabelColor];
+    l.textColor = PXSecondaryLabelColor();
     return l;
 }
 
@@ -181,7 +184,7 @@
     UIView *line = [[UIView alloc] init];
     line.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        line.backgroundColor = [UIColor separatorColor];
+        line.backgroundColor = PXSeparatorColor();
     } else {
         line.backgroundColor = [UIColor lightGrayColor];
     }
@@ -196,13 +199,13 @@
     t.translatesAutoresizingMaskIntoConstraints = NO;
     t.text = @"Enable Network Data Spoof";
     t.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    t.textColor = [UIColor labelColor];
+    t.textColor = PXLabelColor();
     [row addSubview:t];
     UILabel *d = [[UILabel alloc] init];
     d.translatesAutoresizingMaskIntoConstraints = NO;
     d.text = @"Spoof WiFi & cellular data statistics";
     d.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    d.textColor = [UIColor secondaryLabelColor];
+    d.textColor = PXSecondaryLabelColor();
     d.numberOfLines = 0;
     [row addSubview:d];
     UISwitch *sw = [[UISwitch alloc] init];
@@ -234,13 +237,13 @@
     t.translatesAutoresizingMaskIntoConstraints = NO;
     t.text = title;
     t.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    t.textColor = [UIColor labelColor];
+    t.textColor = PXLabelColor();
     [rowv addSubview:t];
     UILabel *d = [[UILabel alloc] init];
     d.translatesAutoresizingMaskIntoConstraints = NO;
     d.text = desc;
     d.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    d.textColor = [UIColor secondaryLabelColor];
+    d.textColor = PXSecondaryLabelColor();
     d.numberOfLines = 0;
     [rowv addSubview:d];
     [NSLayoutConstraint activateConstraints:@[
@@ -258,27 +261,11 @@
 
 - (void)mainToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-
-    NSString *securitySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
-    NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-    settingsDict[@"networkDataSpoofEnabled"] = @(enabled);
-    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:settingsDict
-                                                                  format:NSPropertyListXMLFormat_v1_0
-                                                                 options:0
-                                                                   error:nil];
-    if (plistData) {
-        [plistData writeToFile:securitySettingsPath atomically:YES];
-    }
-
-    NSArray *suiteNames = @[
-        @"com.weaponx.securitySettings",
-        @"com.hydra.tlinkios.SecuritySettings",
-        @"com.hydra.tlinkios"
-    ];
-    for (NSString *suiteName in suiteNames) {
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
-        [defaults setBool:enabled forKey:@"networkDataSpoofEnabled"];
-        [defaults synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"networkDataSpoofEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        NSLog(@"[NetworkDataDetail] Failed to persist networkDataSpoofEnabled: %@", error);
+        return;
     }
 
     NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
@@ -286,7 +273,7 @@
     [userInfo setObject:@"NetworkDataDetailView" forKey:@"sender"];
     [userInfo setObject:[NSDate date] forKey:@"timestamp"];
     [userInfo setObject:@YES forKey:@"forceReload"];
-    [userInfo setObject:securitySettingsPath forKey:@"settingsPath"];
+    [userInfo setObject:PXSecuritySettingsPath() forKey:@"settingsPath"];
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.toggleNetworkDataSpoof"
                                                             object:nil
@@ -297,6 +284,7 @@
     NSString *notificationName = enabled ? @"com.hydra.tlinkios.enableNetworkDataSpoof" : @"com.hydra.tlinkios.disableNetworkDataSpoof";
     CFNotificationCenterPostNotification(darwinCenter, (__bridge CFStringRef)notificationName, NULL, NULL, YES);
     CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkDataSpoofChanged"), NULL, NULL, YES);
+    CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
 
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];

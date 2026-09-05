@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "KeychainGroupsViewController.h"
 
 #import "AppEntitlementsReader.h"
@@ -41,7 +42,7 @@ static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.tlinkios
     [super viewDidLoad];
 
     self.title = @"Keychain Groups";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
 
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Save"
                                                                               style:UIBarButtonItemStyleDone
@@ -77,7 +78,7 @@ static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.tlinkios
     self.footerLabel.numberOfLines = 2;
     self.footerLabel.textAlignment = NSTextAlignmentCenter;
     self.footerLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
-    self.footerLabel.textColor = [UIColor secondaryLabelColor];
+    self.footerLabel.textColor = PXSecondaryLabelColor();
     self.footerLabel.text = @"Selected groups will be wiped on Clear Data.\nThis may sign you out of shared services.";
     [self.view addSubview:self.footerLabel];
 
@@ -182,7 +183,7 @@ static NSString * const PXKeychainGroupsSavedNotification = @"com.hydra.tlinkios
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"KeychainGroupCell"];
         cell.textLabel.numberOfLines = 1;
         cell.detailTextLabel.numberOfLines = 1;
-        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        cell.detailTextLabel.textColor = PXSecondaryLabelColor();
         cell.detailTextLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
     }
     NSString *group = self.filteredGroups[indexPath.row];

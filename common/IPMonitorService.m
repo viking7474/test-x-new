@@ -1,6 +1,7 @@
 #import "IPMonitorService.h"
 #import "IPStatusViewController.h"
 #import "TLinkIOSLogging.h"
+#import "PXUIKitCompat.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <netinet/in.h>
 #import <UIKit/UIKit.h>
@@ -532,50 +533,13 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 
 - (UIViewController *)topViewController {
     PXLog(@"[IPMonitor] Finding top view controller for alert presentation");
-    // Modern approach for iOS 13+ that works with multiple scenes
-    UIWindow *window = nil;
-    
-    // Get the key window for iOS 15+
-    NSSet<UIScene *> *scenes = [[UIApplication sharedApplication] connectedScenes];
-    for (UIScene *scene in scenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            // Try to find the key window
-            for (UIWindow *w in windowScene.windows) {
-                if (w.isKeyWindow) {
-                    window = w;
-                    break;
-                }
-            }
-            // If no key window found, use the first window
-            if (!window && windowScene.windows.count > 0) {
-                window = windowScene.windows.firstObject;
-            }
-            break;
-        }
-    }
-    
-    // If no window found, try to get any window from any scene
-    if (!window) {
-        for (UIScene *scene in scenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                if (windowScene.windows.count > 0) {
-                    window = windowScene.windows.firstObject;
-                    break;
-                }
-            }
-        }
-    }
-    
-    // If still no window, return nil
+    UIWindow *window = PXKeyWindow();
     if (!window) {
         PXLog(@"[IPMonitor] ERROR: No window found for alert presentation");
         return nil;
     }
-    
+
     PXLog(@"[IPMonitor] Found window for alert presentation: %@", window);
-    
     return [self topViewControllerWithRootViewController:window.rootViewController];
 }
 

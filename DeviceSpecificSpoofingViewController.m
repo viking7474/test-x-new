@@ -1,4 +1,5 @@
-﻿#import "DeviceSpecificSpoofingViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "DeviceSpecificSpoofingViewController.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "IdentifierManager.h"
@@ -29,7 +30,7 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     self.title = @"Device Specific Spoofing";
 
     // Remove placeholder label if present
@@ -52,7 +53,7 @@
     self.profileButtonsView.clipsToBounds = NO;
     self.profileButtonsView.userInteractionEnabled = YES;
     // Optional: add a subtle background for visibility
-    // self.profileButtonsView.backgroundColor = [[UIColor systemBackgroundColor] colorWithAlphaComponent:0.2];
+    // self.profileButtonsView.backgroundColor = [PXSystemBackgroundColor() colorWithAlphaComponent:0.2];
     [self.view addSubview:self.profileButtonsView];
     __weak typeof(self) weakSelf = self;
     self.profileButtonsView.onNewProfileTapped = ^{
@@ -208,7 +209,7 @@
         config.baseBackgroundColor = [UIColor systemBlueColor];
         config.baseForegroundColor = [UIColor whiteColor];
         config.title = @"Show Advanced Identifiers";
-        config.image = [UIImage systemImageNamed:@"chevron.down"];
+        config.image = PXSystemImageNamed(@"chevron.down");
         config.imagePlacement = NSDirectionalRectEdgeTrailing;
         config.imagePadding = 8;
         config.contentInsets = NSDirectionalEdgeInsetsMake(8, 16, 8, 16);
@@ -228,7 +229,7 @@
 #pragma clang diagnostic pop
         
         // Add chevron icon manually for older iOS
-        UIImageView *chevronIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
+        UIImageView *chevronIcon = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
         chevronIcon.tintColor = [UIColor whiteColor];
         chevronIcon.translatesAutoresizingMaskIntoConstraints = NO;
         [self.showAdvancedButton addSubview:chevronIcon];
@@ -266,10 +267,10 @@
         UIButtonConfiguration *config = self.showAdvancedButton.configuration;
         if (self.showAdvancedIdentifiers) {
             config.title = @"Hide Advanced Identifiers";
-            config.image = [UIImage systemImageNamed:@"chevron.up"];
+            config.image = PXSystemImageNamed(@"chevron.up");
         } else {
             config.title = @"Show Advanced Identifiers";
-            config.image = [UIImage systemImageNamed:@"chevron.down"];
+            config.image = PXSystemImageNamed(@"chevron.down");
         }
         [self.showAdvancedButton safeSetConfiguration:config];
     } else {
@@ -281,7 +282,7 @@
             for (UIView *subview in self.showAdvancedButton.subviews) {
                 if ([subview isKindOfClass:[UIImageView class]]) {
                     UIImageView *imageView = (UIImageView *)subview;
-                    imageView.image = [UIImage systemImageNamed:@"chevron.up"];
+                    imageView.image = PXSystemImageNamed(@"chevron.up");
                     break;
                 }
             }
@@ -292,7 +293,7 @@
             for (UIView *subview in self.showAdvancedButton.subviews) {
                 if ([subview isKindOfClass:[UIImageView class]]) {
                     UIImageView *imageView = (UIImageView *)subview;
-                    imageView.image = [UIImage systemImageNamed:@"chevron.down"];
+                    imageView.image = PXSystemImageNamed(@"chevron.down");
                     break;
                 }
             }
@@ -409,7 +410,7 @@
     containerView.layer.shadowOpacity = 0.1;
 
     // Blur effect
-    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
+    UIBlurEffect *blurEffect = PXMaterialBlurEffect();
     UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
     blurView.translatesAutoresizingMaskIntoConstraints = NO;
     [containerView addSubview:blurView];
@@ -462,10 +463,10 @@
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    titleLabel.textColor = [UIColor labelColor];
+    titleLabel.textColor = PXLabelColor();
     // Inline pencil icon (like TLinkIOSViewController)
     if (@available(iOS 15.0, *)) {
-        UIImage *pencilImg = [[UIImage systemImageNamed:@"pencil"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        UIImage *pencilImg = [PXSystemImageNamed(@"pencil") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
         NSTextAttachment *iconAttachment = [[NSTextAttachment alloc] init];
         iconAttachment.image = pencilImg;
         CGFloat iconSize = 16;
@@ -473,7 +474,7 @@
         NSAttributedString *space = [[NSAttributedString alloc] initWithString:@"  "];
         NSAttributedString *titleString = [[NSAttributedString alloc] initWithString:title attributes:@{
             NSFontAttributeName: [UIFont boldSystemFontOfSize:16],
-            NSForegroundColorAttributeName: [UIColor labelColor]
+            NSForegroundColorAttributeName: PXLabelColor()
         }];
         NSMutableAttributedString *full = [[NSMutableAttributedString alloc] initWithAttributedString:titleString];
         [full appendAttributedString:space];
@@ -496,14 +497,14 @@
     UIButton *copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *copyConfig = [UIButtonConfiguration plainButtonConfiguration];
-        copyConfig.image = [UIImage systemImageNamed:@"doc.on.doc"];
+        copyConfig.image = PXSystemImageNamed(@"doc.on.doc");
         copyConfig.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         copyConfig.background.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
         copyConfig.baseForegroundColor = isEnabled ? [UIColor systemBlueColor] : [UIColor systemGrayColor];
         copyConfig.contentInsets = NSDirectionalEdgeInsetsMake(8, 8, 8, 8);
         [copyButton safeSetConfiguration:copyConfig];
     } else {
-        [copyButton setImage:[UIImage systemImageNamed:@"doc.on.doc"] forState:UIControlStateNormal];
+        [copyButton setImage:PXSystemImageNamed(@"doc.on.doc") forState:UIControlStateNormal];
         copyButton.tintColor = isEnabled ? [UIColor systemBlueColor] : [UIColor systemGrayColor];
     }
     copyButton.accessibilityLabel = [NSString stringWithFormat:@"Copy %@", title];
@@ -520,14 +521,14 @@
         infoButton = [UIButton buttonWithType:UIButtonTypeSystem];
         if ([UIButton buttonConfigurationClassExists]) {
             UIButtonConfiguration *infoConfig = [UIButtonConfiguration plainButtonConfiguration];
-            infoConfig.image = [UIImage systemImageNamed:@"info.circle"];
+            infoConfig.image = PXSystemImageNamed(@"info.circle");
             infoConfig.cornerStyle = UIButtonConfigurationCornerStyleMedium;
             infoConfig.background.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
             infoConfig.baseForegroundColor = isEnabled ? [UIColor systemBlueColor] : [UIColor systemGrayColor];
             infoConfig.contentInsets = NSDirectionalEdgeInsetsMake(8, 8, 8, 8);
             [infoButton safeSetConfiguration:infoConfig];
         } else {
-            [infoButton setImage:[UIImage systemImageNamed:@"info.circle"] forState:UIControlStateNormal];
+            [infoButton setImage:PXSystemImageNamed(@"info.circle") forState:UIControlStateNormal];
             infoButton.tintColor = isEnabled ? [UIColor systemBlueColor] : [UIColor systemGrayColor];
         }
         infoButton.accessibilityLabel = @"Device Specifications";
@@ -555,8 +556,8 @@
     // (identifierContainer already declared above, just use it here)
 
     UILabel *valueLabel = [[UILabel alloc] init];
-    valueLabel.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightRegular];
-    valueLabel.textColor = [UIColor labelColor];
+    valueLabel.font = PXMonospacedSystemFont(18, UIFontWeightRegular);
+    valueLabel.textColor = PXLabelColor();
     valueLabel.numberOfLines = 1;
     valueLabel.adjustsFontSizeToFitWidth = YES;
     valueLabel.minimumScaleFactor = 0.7;
@@ -597,7 +598,7 @@
 
     UILabel *stateLabel = [[UILabel alloc] init];
     stateLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    stateLabel.textColor = isEnabled ? [UIColor systemBlueColor] : [UIColor labelColor];
+    stateLabel.textColor = isEnabled ? [UIColor systemBlueColor] : PXLabelColor();
     stateLabel.text = isEnabled ? @"Enabled" : @"Disabled";
     stateLabel.tag = 100;
 
@@ -799,7 +800,7 @@
         BOOL isEnabled = [[IdentifierManager sharedManager] isIdentifierEnabled:identifierType];
             enabledSwitch.on = isEnabled;
             stateLabel.text = isEnabled ? @"Enabled" : @"Disabled";
-            stateLabel.textColor = isEnabled ? [UIColor systemBlueColor] : [UIColor labelColor];
+            stateLabel.textColor = isEnabled ? [UIColor systemBlueColor] : PXLabelColor();
         
         // Log that we updated the card state
         NSLog(@"[WeaponX] Updated card state for %@: %@", identifierType, isEnabled ? @"Enabled" : @"Disabled");
@@ -867,7 +868,7 @@
             UIColor *originalColor = sender.tintColor;
             UIButtonConfiguration *originalConfig = sender.configuration;
             UIButtonConfiguration *successConfig = [originalConfig copy];
-            successConfig.image = [UIImage systemImageNamed:@"checkmark"];
+            successConfig.image = PXSystemImageNamed(@"checkmark");
             successConfig.baseForegroundColor = [UIColor systemGreenColor];
             [UIView animateWithDuration:0.2 animations:^{
                 [sender safeSetConfiguration:successConfig];
@@ -894,7 +895,11 @@
     else if (sender.tag == 2) key = @"MEID";
     else if (sender.tag == 3) key = @"DeviceModel";
     else if (sender.tag == 4) key = @"DeviceTheme";
-    [[IdentifierManager sharedManager] setIdentifierEnabled:sender.isOn forType:key];
+    BOOL enabled = sender.isOn;
+    if (!key.length || ![[IdentifierManager sharedManager] setIdentifierEnabledAndPersist:enabled forType:key]) {
+        [sender setOn:!enabled animated:YES];
+        return;
+    }
     
     // Update UI colors for controls and state label
     UIView *card = nil;
@@ -937,7 +942,7 @@
     }
     
     BOOL isEnabled = sender.isOn;
-    if (stateLabel) stateLabel.textColor = isEnabled ? [UIColor systemBlueColor] : [UIColor labelColor];
+    if (stateLabel) stateLabel.textColor = isEnabled ? [UIColor systemBlueColor] : PXLabelColor();
     if (stateLabel) stateLabel.text = isEnabled ? @"Enabled" : @"Disabled";
 
     if ([UIButton buttonConfigurationClassExists]) {

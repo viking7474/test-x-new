@@ -24,6 +24,7 @@
 #import "AppInstallUUIDManager.h"
 #import "AppContainerUUIDManager.h"
 #import "PXPaths.h"
+#import "PXSecuritySettingsStore.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
 #import <Security/Security.h>
@@ -1351,59 +1352,102 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         }
     }
     
-    // For WiFi specifically, also update the SystemConfiguration plist
-    if ([type isEqualToString:@"WiFi"]) {
-        NSString *securitySettingsPath = PXSecuritySettingsPath();
-        NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-        settingsDict[@"wifiSpoofEnabled"] = @(enabled);
-        [settingsDict writeToFile:securitySettingsPath atomically:YES];
-        
-        // Also update in UserDefaults for compatibility
-        NSUserDefaults *settings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        [settings setBool:enabled forKey:@"wifiSpoofEnabled"];
-        [settings synchronize];
-        
-        // Post notification to inform system about WiFi spoofing change
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           CFSTR("com.hydra.tlinkios.toggleWifiSpoof"),
-                                           NULL, NULL, YES);
-    }
-    // For Battery specifically, update the SystemConfiguration plist
-    else if ([type isEqualToString:@"Battery"]) {
-        NSString *securitySettingsPath = PXSecuritySettingsPath();
-        NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-        settingsDict[@"batterySpoofEnabled"] = @(enabled);
-        [settingsDict writeToFile:securitySettingsPath atomically:YES];
-        
-        // Also update in UserDefaults for compatibility
-        NSUserDefaults *settings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        [settings setBool:enabled forKey:@"batterySpoofEnabled"];
-        [settings synchronize];
-        
-        // Post notification to inform system about Battery spoofing change
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           CFSTR("com.hydra.tlinkios.toggleBatterySpoof"),
-                                           NULL, NULL, YES);
-    }
-    // For DeviceTheme, update the SystemConfiguration plist
-    else if ([type isEqualToString:@"DeviceTheme"]) {
-        NSString *securitySettingsPath = PXSecuritySettingsPath();
-        NSMutableDictionary *settingsDict = [NSMutableDictionary dictionaryWithContentsOfFile:securitySettingsPath] ?: [NSMutableDictionary dictionary];
-        settingsDict[@"deviceThemeSpoofEnabled"] = @(enabled);
-        [settingsDict writeToFile:securitySettingsPath atomically:YES];
-        
-        // Also update in UserDefaults for compatibility
-        NSUserDefaults *settings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        [settings setBool:enabled forKey:@"deviceThemeSpoofEnabled"];
-        [settings synchronize];
-        
-        // Post notification to inform system about DeviceTheme spoofing change
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof"),
-                                           NULL, NULL, YES);
-    }
-    
+    // Persist the identifier state first. Secondary runtime settings are written only after
+    // EnabledIdentifiers has been persisted, so callers never observe a secondary success
+    // notification for an identifier state that failed to save.
     [self saveSettings];
+    NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSDictionary *persistedIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
+        ? persistedSettings[@"EnabledIdentifiers"]
+        : nil;
+    id persistedState = persistedIdentifiers[type];
+    if (persistedState == nil || [persistedState boolValue] != enabled) {
+        PXLog(@"[WeaponX] Skipping secondary identifier state for %@ because EnabledIdentifiers did not persist", type);
+        return;
+    }
+
+    NSString *secondaryKey = nil;
+    CFStringRef notificationName = NULL;
+    if ([type isEqualToString:@"WiFi"]) {
+        secondaryKey = @"wifiSpoofEnabled";
+        notificationName = CFSTR("com.hydra.tlinkios.toggleWifiSpoof");
+    } else if ([type isEqualToString:@"Battery"]) {
+        secondaryKey = @"batterySpoofEnabled";
+        notificationName = CFSTR("com.hydra.tlinkios.toggleBatterySpoof");
+    } else if ([type isEqualToString:@"DeviceTheme"]) {
+        secondaryKey = @"deviceThemeSpoofEnabled";
+        notificationName = CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof");
+    }
+
+    if (secondaryKey) {
+        NSError *secondaryError = nil;
+        if (PXWriteSecurityBool(secondaryKey, enabled, &secondaryError)) {
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                               notificationName,
+                                               NULL, NULL, YES);
+        } else {
+            self.error = secondaryError;
+            PXLog(@"[WeaponX] Failed to persist secondary identifier state %@=%@: %@",
+                  secondaryKey, enabled ? @"YES" : @"NO", secondaryError);
+        }
+    }
+}
+
+- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type {
+    if (![type isKindOfClass:[NSString class]] || type.length == 0) return NO;
+
+    BOOL previous = [self.settings[type] boolValue];
+    NSString *secondaryKey = nil;
+    CFStringRef notificationName = NULL;
+    if ([type isEqualToString:@"WiFi"]) {
+        secondaryKey = @"wifiSpoofEnabled";
+        notificationName = CFSTR("com.hydra.tlinkios.toggleWifiSpoof");
+    } else if ([type isEqualToString:@"Battery"]) {
+        secondaryKey = @"batterySpoofEnabled";
+        notificationName = CFSTR("com.hydra.tlinkios.toggleBatterySpoof");
+    } else if ([type isEqualToString:@"DeviceTheme"]) {
+        secondaryKey = @"deviceThemeSpoofEnabled";
+        notificationName = CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof");
+    }
+
+    [self setIdentifierEnabled:enabled forType:type];
+
+    NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSDictionary *enabledIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
+        ? persistedSettings[@"EnabledIdentifiers"]
+        : nil;
+    id persistedValue = enabledIdentifiers[type];
+    BOOL primarySuccess = (persistedValue != nil && [persistedValue boolValue] == enabled);
+
+    BOOL secondarySuccess = YES;
+    if (secondaryKey) {
+        id secondaryValue = PXReadSecuritySetting(secondaryKey);
+        secondarySuccess = (secondaryValue != nil && [secondaryValue boolValue] == enabled);
+    }
+
+    if (primarySuccess && secondarySuccess) return YES;
+
+    // Restore in-memory and persisted state. The rollback itself is verified best-effort;
+    // callers still receive NO so the UI returns to the previously known state.
+    self.settings[type] = @(previous);
+    [self saveSettings];
+    if (secondaryKey) {
+        NSError *rollbackError = nil;
+        if (PXWriteSecurityBool(secondaryKey, previous, &rollbackError)) {
+            if (notificationName) {
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                   notificationName,
+                                                   NULL, NULL, YES);
+            }
+        } else {
+            self.error = rollbackError;
+            PXLog(@"[WeaponX] Failed to rollback secondary identifier state %@: %@", secondaryKey, rollbackError);
+        }
+    }
+
+    PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d); rolled back to %@",
+          type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, previous ? @"YES" : @"NO");
+    return NO;
 }
 
 - (BOOL)isIdentifierEnabled:(NSString *)type {

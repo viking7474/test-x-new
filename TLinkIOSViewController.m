@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "TLinkIOS.h"
 #import "WeaponXTheme.h"
 #import "PXRRSManagerViewController.h"
@@ -55,7 +56,7 @@ static NSString * const PXDashboardRestoreIndexKeyPrefix = @"PXDashboardRestoreI
 static NSString * const PXDashboardRestoreEndKeyPrefix = @"PXDashboardRestoreEnd_";
 
 static UITableViewStyle PXCompatibleInsetGroupedStyle(void) {
-    if (@available(iOS 13.0, *)) return UITableViewStyleInsetGrouped;
+    if (@available(iOS 13.0, *)) return PXInsetGroupedTableViewStyle();
     return UITableViewStyleGrouped;
 }
 
@@ -91,7 +92,7 @@ static UIImage *PXDrawCircleIcon(BOOL drawX, BOOL drawMinus) {
 
 static UIImage *PXClearDataIcon(void) {
     if (@available(iOS 13.0, *)) {
-        UIImage *img = [UIImage systemImageNamed:@"externaldrive.fill.badge.minus"];
+        UIImage *img = PXSystemImageNamed(@"externaldrive.fill.badge.minus");
         if (img) return img;
     }
     return PXDrawCircleIcon(NO, YES);
@@ -99,7 +100,7 @@ static UIImage *PXClearDataIcon(void) {
 
 static UIImage *PXRemoveFromScopeIcon(void) {
     if (@available(iOS 13.0, *)) {
-        UIImage *img = [UIImage systemImageNamed:@"trash.slash.circle.fill"];
+        UIImage *img = PXSystemImageNamed(@"trash.slash.circle.fill");
         if (img) return img;
     }
     return PXDrawCircleIcon(YES, NO);
@@ -564,9 +565,9 @@ static void PXWriteSubstrateFilterPlists(void) {
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.backgroundColor = PXSystemGroupedBackgroundColor();
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleDone target:self action:@selector(doneTapped)];
-    UIImage *backImage = [UIImage systemImageNamed:@"chevron.left"];
+    UIImage *backImage = PXSystemImageNamed(@"chevron.left");
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithImage:backImage style:UIBarButtonItemStylePlain target:self action:@selector(cancelTapped)];
     self.options = [self mutableOptions];
     if (!self.preview) self.preview = @{};
@@ -586,9 +587,9 @@ static void PXWriteSubstrateFilterPlists(void) {
     NSInteger row = [self fakeRowForIndexPath:indexPath];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     cell.textLabel.font = [UIFont systemFontOfSize:(row == 4 || row == 5 || row == 9) ? 14 : 15 weight:UIFontWeightSemibold];
-    cell.textLabel.textColor = [UIColor labelColor];
+    cell.textLabel.textColor = PXLabelColor();
     cell.detailTextLabel.font = [UIFont systemFontOfSize:14];
     cell.detailTextLabel.textColor = [UIColor systemBlueColor];
     cell.indentationWidth = 24;
@@ -610,21 +611,21 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 - (void)configureCheckboxCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
     BOOL checked = [self boolOption:key defaultValue:defaultValue];
-    UIImage *image = [UIImage systemImageNamed:checked ? @"checkmark.square.fill" : @"square"];
+    UIImage *image = PXSystemImageNamed(checked ? @"checkmark.square.fill" : @"square");
     cell.imageView.image = image;
-    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : [UIColor systemGray3Color];
+    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : PXSystemGray3Color();
     cell.textLabel.text = title;
     cell.accessoryType = UITableViewCellAccessoryNone;
 }
 
 - (void)configureRadioCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
     BOOL checked = [self boolOption:key defaultValue:defaultValue];
-    UIImage *image = [UIImage systemImageNamed:checked ? @"largecircle.fill.circle" : @"circle"];
+    UIImage *image = PXSystemImageNamed(checked ? @"largecircle.fill.circle" : @"circle");
     cell.imageView.image = image;
-    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : [UIColor systemGray3Color];
+    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : PXSystemGray3Color();
     cell.textLabel.text = title;
     cell.textLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
-    cell.textLabel.textColor = [UIColor secondaryLabelColor];
+    cell.textLabel.textColor = PXSecondaryLabelColor();
     cell.indentationLevel = 1;
     cell.accessoryType = UITableViewCellAccessoryNone;
 }
@@ -636,13 +637,13 @@ static void PXWriteSubstrateFilterPlists(void) {
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor systemBlueColor];
     label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    label.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
-    label.layer.borderColor = [UIColor separatorColor].CGColor;
+    label.backgroundColor = PXTertiarySystemGroupedBackgroundColor();
+    label.layer.borderColor = PXSeparatorColor().CGColor;
     label.layer.borderWidth = 1.0;
     label.layer.cornerRadius = 7;
     label.clipsToBounds = YES;
     [cell.contentView addSubview:label];
-    UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
     chevron.tintColor = [UIColor systemBlueColor];
     [cell.contentView addSubview:chevron];
@@ -960,8 +961,8 @@ static void PXWriteSubstrateFilterPlists(void) {
         self.scrollToBottomButton.alpha = 0.0;
         return;
     }
-    UIImage *downArrow = [[UIImage systemImageNamed:@"arrow.down"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    UIImage *upArrow = [[UIImage systemImageNamed:@"arrow.up"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    UIImage *downArrow = [PXSystemImageNamed(@"arrow.down") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    UIImage *upArrow = [PXSystemImageNamed(@"arrow.up") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     if (y <= maxY * 0.20) {
         // Top 20%: show button to scroll to bottom
         [self.scrollToBottomButton setImage:downArrow forState:UIControlStateNormal];
@@ -991,39 +992,10 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 // Helper method to find top view controller without using keyWindow
 - (UIViewController *)findTopViewController {
-    UIViewController *rootVC = nil;
-    
-    // Get the key window using the modern approach for iOS 13+
-    if (@available(iOS 13.0, *)) {
-        NSSet<UIScene *> *connectedScenes = [UIApplication sharedApplication].connectedScenes;
-        for (UIScene *scene in connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        rootVC = window.rootViewController;
-                        break;
-                    }
-                }
-                if (rootVC) break;
-            }
-        }
-        
-        // Fallback if we couldn't find the key window
-        if (!rootVC) {
-            UIWindowScene *windowScene = (UIWindowScene *)[connectedScenes anyObject];
-            rootVC = windowScene.windows.firstObject.rootViewController;
-        }
-    } else {
-        // Fallback for iOS 12 and below (though this is less likely to be used in iOS 15)
-        rootVC = [UIApplication sharedApplication].delegate.window.rootViewController;
-    }
-    
-    // Navigate through presented view controllers to find the topmost one
+    UIViewController *rootVC = PXKeyWindow().rootViewController;
     while (rootVC.presentedViewController) {
         rootVC = rootVC.presentedViewController;
     }
-    
     return rootVC;
 }
 
@@ -1167,7 +1139,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UILabel *dateLabel = [[UILabel alloc] init];
         dateLabel.text = formattedDate;
         dateLabel.font = [UIFont systemFontOfSize:12];
-        dateLabel.textColor = [UIColor secondaryLabelColor];
+        dateLabel.textColor = PXSecondaryLabelColor();
         dateLabel.translatesAutoresizingMaskIntoConstraints = NO;
         [contentContainer addSubview:dateLabel];
         
@@ -1216,8 +1188,8 @@ static void PXWriteSubstrateFilterPlists(void) {
             contentContainer.backgroundColor = [UIColor clearColor];
             contentContainer.layer.cornerRadius = 0;
             contentContainer.layer.borderWidth = 0;
-            versionLabel.textColor = [UIColor labelColor];
-            dateLabel.textColor = [UIColor secondaryLabelColor];
+            versionLabel.textColor = PXLabelColor();
+            dateLabel.textColor = PXSecondaryLabelColor();
         }
         
         // Setup constraints
@@ -1256,7 +1228,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellIdentifier];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellIdentifier];
-        cell.backgroundColor = [UIColor systemBackgroundColor];
+        cell.backgroundColor = PXSystemBackgroundColor();
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     
@@ -1272,7 +1244,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Create app view container
     UIView *appView = [[UIView alloc] init];
-    appView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    appView.backgroundColor = PXSecondarySystemBackgroundColor();
     appView.layer.cornerRadius = 8;
     appView.clipsToBounds = YES;
     
@@ -1330,8 +1302,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Add extension button with smaller size
     UIButton *extensionButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIImage *plusImage = [[UIImage systemImageNamed:@"plus.circle.fill"] imageWithConfiguration:
-                         [UIImageSymbolConfiguration configurationWithPointSize:14.0]];  // Reduced size
+    UIImage *plusImage = PXSystemImageNamedWithPointSize(@"plus.circle.fill", 14.0);  // Reduced size
     [extensionButton setImage:plusImage forState:UIControlStateNormal];
     extensionButton.tintColor = [UIColor systemBlueColor];
     extensionButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
@@ -1348,7 +1319,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     UILabel *bundleLabel = [[UILabel alloc] init];
     bundleLabel.text = displayBundleID;
-    bundleLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
+    bundleLabel.font = PXMonospacedSystemFont(14, UIFontWeightRegular);
     bundleLabel.numberOfLines = 1;
     bundleLabel.adjustsFontSizeToFitWidth = YES;
     bundleLabel.minimumScaleFactor = 0.75;
@@ -1373,7 +1344,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         }
         
         infoLabel.attributedText = attributedInfoText;
-        infoLabel.textColor = [UIColor labelColor];
+        infoLabel.textColor = PXLabelColor();
     } else {
         infoLabel.text = @"Removed From Scope";
         infoLabel.textColor = [UIColor systemOrangeColor];
@@ -1397,7 +1368,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Replace freeze button with more options button (ellipsis)
     UIButton *moreOptionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [moreOptionsButton setImage:[UIImage systemImageNamed:@"ellipsis.circle.fill"] forState:UIControlStateNormal];
+    [moreOptionsButton setImage:PXSystemImageNamed(@"ellipsis.circle.fill") forState:UIControlStateNormal];
     [moreOptionsButton setTintColor:[UIColor systemBlueColor]];
     moreOptionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
     [moreOptionsButton addTarget:self action:@selector(moreOptionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1413,7 +1384,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Add versions button
     UIButton *versionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [versionsButton setImage:[UIImage systemImageNamed:@"arrow.up.and.down.circle.fill"] forState:UIControlStateNormal];
+    [versionsButton setImage:PXSystemImageNamed(@"arrow.up.and.down.circle.fill") forState:UIControlStateNormal];
     [versionsButton setTintColor:[UIColor systemBlueColor]];
     versionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
     [versionsButton addTarget:self action:@selector(versionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1568,7 +1539,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     // Add iPad-specific layout adaptations
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
         // Use regular width size class layout for iPad
-        self.view.backgroundColor = [UIColor systemBackgroundColor];
+        self.view.backgroundColor = PXSystemBackgroundColor();
         
         // Create container view for iPad layout
         UIView *containerView = [[UIView alloc] init];
@@ -1595,14 +1566,14 @@ static void PXWriteSubstrateFilterPlists(void) {
     }
     
     self.title = @"TLinkIOS";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     
     
     if ([UIButton buttonConfigurationClassExists]) {
         // Modern button style for iOS 15+
         UIButtonConfiguration *filesConfig = [UIButtonConfiguration plainButtonConfiguration];
         filesConfig.title = @"Files";
-        filesConfig.image = [UIImage systemImageNamed:@"arrow.down.circle"];
+        filesConfig.image = PXSystemImageNamed(@"arrow.down.circle");
         filesConfig.imagePlacement = NSDirectionalRectEdgeLeading;
         filesConfig.imagePadding = 4;
         filesConfig.cornerStyle = UIButtonConfigurationCornerStyleMedium;
@@ -1613,7 +1584,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UIView *buttonContentView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 80, 30)];
         
         // Add icon image view
-        UIImageView *iconImageView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.down.circle"]];
+        UIImageView *iconImageView = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"arrow.down.circle")];
         iconImageView.tintColor = [UIColor systemBlueColor];
         iconImageView.translatesAutoresizingMaskIntoConstraints = NO;
         iconImageView.contentMode = UIViewContentModeScaleAspectFit;
@@ -1836,7 +1807,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         generateAllConfig.contentInsets = NSDirectionalEdgeInsetsMake(2, 4, 2, 4);
         
         // Create a smaller icon that matches the text size
-        UIImage *smallIcon = [UIImage systemImageNamed:@"arrow.triangle.2.circlepath" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:10]];
+        UIImage *smallIcon = PXSystemImageNamedWithPointSize(@"arrow.triangle.2.circlepath", 10.0);
         generateAllConfig.image = smallIcon;
         
         generateAllConfig.imagePlacement = NSDirectionalRectEdgeLeading;
@@ -1849,7 +1820,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         generateAllButton.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.15];
         
         if (@available(iOS 13.0, *)) {
-            UIImage *smallIcon = [UIImage systemImageNamed:@"arrow.triangle.2.circlepath"];
+            UIImage *smallIcon = PXSystemImageNamed(@"arrow.triangle.2.circlepath");
             [generateAllButton setImage:smallIcon forState:UIControlStateNormal];
         }
         
@@ -1942,16 +1913,16 @@ static void PXWriteSubstrateFilterPlists(void) {
     scrollToBottomButton.translatesAutoresizingMaskIntoConstraints = NO;
     // Use system background color that adapts to light/dark mode
     if (@available(iOS 13.0, *)) {
-        scrollToBottomButton.backgroundColor = [UIColor systemBackgroundColor];
+        scrollToBottomButton.backgroundColor = PXSystemBackgroundColor();
     } else {
         scrollToBottomButton.backgroundColor = [UIColor whiteColor];
     }
     scrollToBottomButton.layer.cornerRadius = 18;
     scrollToBottomButton.clipsToBounds = YES;
-    [scrollToBottomButton setImage:[[UIImage systemImageNamed:@"arrow.down"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+    [scrollToBottomButton setImage:[PXSystemImageNamed(@"arrow.down") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
     // Use system label color for the icon (adapts to theme)
     if (@available(iOS 13.0, *)) {
-        scrollToBottomButton.tintColor = [UIColor labelColor];
+        scrollToBottomButton.tintColor = PXLabelColor();
     } else {
         scrollToBottomButton.tintColor = [UIColor blackColor];
     }
@@ -2031,7 +2002,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         // Create app view container
         UIView *appView = [[UIView alloc] init];
-        appView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+        appView.backgroundColor = PXSecondarySystemBackgroundColor();
         appView.layer.cornerRadius = 8;
         appView.clipsToBounds = YES;
         
@@ -2089,8 +2060,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         // Add extension button with smaller size
         UIButton *extensionButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        UIImage *plusImage = [[UIImage systemImageNamed:@"plus.circle.fill"] imageWithConfiguration:
-                             [UIImageSymbolConfiguration configurationWithPointSize:14.0]];  // Reduced size
+        UIImage *plusImage = PXSystemImageNamedWithPointSize(@"plus.circle.fill", 14.0);  // Reduced size
         [extensionButton setImage:plusImage forState:UIControlStateNormal];
         extensionButton.tintColor = [UIColor systemBlueColor];
         extensionButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
@@ -2107,7 +2077,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         UILabel *bundleLabel = [[UILabel alloc] init];
         bundleLabel.text = displayBundleID;
-        bundleLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
+        bundleLabel.font = PXMonospacedSystemFont(14, UIFontWeightRegular);
         bundleLabel.numberOfLines = 1;
         bundleLabel.adjustsFontSizeToFitWidth = YES;
         bundleLabel.minimumScaleFactor = 0.75;
@@ -2132,7 +2102,7 @@ static void PXWriteSubstrateFilterPlists(void) {
             }
             
             infoLabel.attributedText = attributedInfoText;
-            infoLabel.textColor = [UIColor labelColor];
+            infoLabel.textColor = PXLabelColor();
         } else {
             infoLabel.text = @"Removed From Scope";
             infoLabel.textColor = [UIColor systemOrangeColor];
@@ -2156,7 +2126,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         // Replace freeze button with more options button (ellipsis)
         UIButton *moreOptionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [moreOptionsButton setImage:[UIImage systemImageNamed:@"ellipsis.circle.fill"] forState:UIControlStateNormal];
+        [moreOptionsButton setImage:PXSystemImageNamed(@"ellipsis.circle.fill") forState:UIControlStateNormal];
         [moreOptionsButton setTintColor:[UIColor systemBlueColor]];
         moreOptionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
         [moreOptionsButton addTarget:self action:@selector(moreOptionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -2172,7 +2142,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         // Add versions button
         UIButton *versionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [versionsButton setImage:[UIImage systemImageNamed:@"arrow.up.and.down.circle.fill"] forState:UIControlStateNormal];
+        [versionsButton setImage:PXSystemImageNamed(@"arrow.up.and.down.circle.fill") forState:UIControlStateNormal];
         [versionsButton setTintColor:[UIColor systemBlueColor]];
         versionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
         [versionsButton addTarget:self action:@selector(versionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -2309,11 +2279,11 @@ static void PXWriteSubstrateFilterPlists(void) {
     if (@available(iOS 15.0, *)) {
         UILabel *titleLabel = [[UILabel alloc] init];
         titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-        titleLabel.textColor = [UIColor labelColor];
+        titleLabel.textColor = PXLabelColor();
         
         // Determine which icon to use based on type
         NSString *iconName = [shippingboxTypes containsObject:type] ? @"shippingbox" : @"pencil";
-        UIImage *iconImage = [UIImage systemImageNamed:iconName];
+        UIImage *iconImage = PXSystemImageNamed(iconName);
         
         if (iconImage) {
             // Tint the icon to match text
@@ -2326,14 +2296,14 @@ static void PXWriteSubstrateFilterPlists(void) {
             NSAttributedString *space = [[NSAttributedString alloc] initWithString:@"  "];
             NSAttributedString *titleString = [[NSAttributedString alloc] initWithString:title attributes:@{
                 NSFontAttributeName: [UIFont systemFontOfSize:18 weight:UIFontWeightBold],
-                NSForegroundColorAttributeName: [UIColor labelColor]
+                NSForegroundColorAttributeName: PXLabelColor()
             }];
             
             NSMutableAttributedString *full = [[NSMutableAttributedString alloc] initWithAttributedString:titleString];
             [full appendAttributedString:space];
             [full appendAttributedString:[NSAttributedString attributedStringWithAttachment:iconAttachment]];
             titleLabel.attributedText = full;
-            titleLabel.tintColor = [UIColor labelColor];
+            titleLabel.tintColor = PXLabelColor();
             
             // Add tap gesture for the label to show edit dialog
             UITapGestureRecognizer *titleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(titleIconTapped:)];
@@ -2349,7 +2319,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UILabel *titleLabel = [[UILabel alloc] init];
         titleLabel.text = title;
         titleLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-        titleLabel.textColor = [UIColor labelColor];
+        titleLabel.textColor = PXLabelColor();
         [self.mainStackView addArrangedSubview:titleLabel];
     }
     
@@ -2375,7 +2345,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     containerView.backgroundColor = [UIColor clearColor];
     
     // Create blur effect - adapts to light/dark mode automatically
-    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
+    UIBlurEffect *blurEffect = PXMaterialBlurEffect();
     UIVisualEffectView *blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
     blurView.translatesAutoresizingMaskIntoConstraints = NO;
     [containerView addSubview:blurView];
@@ -2433,8 +2403,8 @@ static void PXWriteSubstrateFilterPlists(void) {
     UILabel *identifierLabel = [[UILabel alloc] init];
     NSString *currentValue = [self.manager currentValueForIdentifier:type];
     identifierLabel.text = currentValue ?: @"Not Set";
-    identifierLabel.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightRegular];
-    identifierLabel.textColor = [UIColor labelColor];
+    identifierLabel.font = PXMonospacedSystemFont(18, UIFontWeightRegular);
+    identifierLabel.textColor = PXLabelColor();
     identifierLabel.numberOfLines = 1;
     identifierLabel.adjustsFontSizeToFitWidth = YES;
     identifierLabel.minimumScaleFactor = 0.5;
@@ -2462,14 +2432,14 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *copyConfig = [UIButtonConfiguration plainButtonConfiguration];
-        copyConfig.image = [UIImage systemImageNamed:@"doc.on.doc"];
+        copyConfig.image = PXSystemImageNamed(@"doc.on.doc");
         copyConfig.cornerStyle = UIButtonConfigurationCornerStyleMedium;
         copyConfig.background.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
         copyConfig.baseForegroundColor = [UIColor systemBlueColor];
         copyConfig.contentInsets = NSDirectionalEdgeInsetsMake(8, 8, 8, 8);
         [copyButton safeSetConfiguration:copyConfig];
     } else {
-        [copyButton setImage:[UIImage systemImageNamed:@"doc.on.doc"] forState:UIControlStateNormal];
+        [copyButton setImage:PXSystemImageNamed(@"doc.on.doc") forState:UIControlStateNormal];
         copyButton.tintColor = [UIColor systemBlueColor];
         copyButton.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
         copyButton.layer.cornerRadius = 8;
@@ -2489,7 +2459,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     // Create status label
     UILabel *stateLabel = [[UILabel alloc] init];
     stateLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    stateLabel.textColor = [UIColor labelColor];
+    stateLabel.textColor = PXLabelColor();
     stateLabel.text = [self.manager isIdentifierEnabled:type] ? @"Enabled" : @"Disabled";
     stateLabel.tag = 100; // Tag to find this label later
     
@@ -2507,7 +2477,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *generateButton = [UIButton buttonWithType:UIButtonTypeSystem];
     if ([UIButton buttonConfigurationClassExists]) {
         UIButtonConfiguration *generateConfig = [UIButtonConfiguration plainButtonConfiguration];
-        generateConfig.image = [UIImage systemImageNamed:@"arrow.clockwise"];
+        generateConfig.image = PXSystemImageNamed(@"arrow.clockwise");
         generateConfig.title = @"Generate";
         generateConfig.imagePlacement = NSDirectionalRectEdgeLeading;
         generateConfig.imagePadding = 4;
@@ -2518,7 +2488,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         [generateButton safeSetConfiguration:generateConfig];
     } else {
         [generateButton setTitle:@"Generate" forState:UIControlStateNormal];
-        [generateButton setImage:[UIImage systemImageNamed:@"arrow.clockwise"] forState:UIControlStateNormal];
+        [generateButton setImage:PXSystemImageNamed(@"arrow.clockwise") forState:UIControlStateNormal];
         generateButton.tintColor = [UIColor systemBlueColor];
         generateButton.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.15];
         generateButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
@@ -2597,7 +2567,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Add installed apps button (plus button)
     UIButton *installedAppsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [installedAppsButton setImage:[UIImage systemImageNamed:@"plus.diamond.fill"] forState:UIControlStateNormal];
+    [installedAppsButton setImage:PXSystemImageNamed(@"plus.diamond.fill") forState:UIControlStateNormal];
     [installedAppsButton addTarget:self action:@selector(addAppButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [installedAppsButton setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [buttonsStack addArrangedSubview:installedAppsButton];
@@ -2648,7 +2618,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     [headerView addSubview:titleLabel];
     
     UIView *separatorView = [[UIView alloc] init];
-    separatorView.backgroundColor = [UIColor separatorColor];
+    separatorView.backgroundColor = PXSeparatorColor();
     separatorView.translatesAutoresizingMaskIntoConstraints = NO;
     [headerView addSubview:separatorView];
     
@@ -2712,8 +2682,14 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     if (!identifierType) return;
     
-    // Update the identifier state in manager
-    [self.manager setIdentifierEnabled:sender.isOn forType:identifierType];
+    // Persist through the verified IdentifierManager contract. Roll back the switch on failure.
+    BOOL requestedState = sender.isOn;
+    if (![self.manager setIdentifierEnabledAndPersist:requestedState forType:identifierType]) {
+        [sender setOn:!requestedState animated:YES];
+        NSError *error = [self.manager lastError];
+        if (error) [self showError:error];
+        return;
+    }
     
     // Find and update state label
     UIStackView *switchStatusStack = (UIStackView *)sender.superview;
@@ -2735,9 +2711,6 @@ static void PXWriteSubstrateFilterPlists(void) {
             [self directUpdateIdentifierValue:identifierType withValue:existingValue];
         }
     }
-    
-    // Save settings to persist the enabled state
-    [self.manager saveSettings];
 }
 
 - (void)appSwitchChanged:(UISwitch *)sender {
@@ -3024,8 +2997,12 @@ static void PXWriteSubstrateFilterPlists(void) {
             UISwitch *identifierSwitch = self.identifierSwitches[identifierType];
             if (identifierSwitch && !identifierSwitch.isOn) {
                 identifierSwitch.on = YES;
-                [self.manager setIdentifierEnabled:YES forType:identifierType];
-                [self.manager saveSettings];
+                if (![self.manager setIdentifierEnabledAndPersist:YES forType:identifierType]) {
+                    identifierSwitch.on = NO;
+                    NSError *error = [self.manager lastError];
+                    if (error) [self showError:error];
+                    return;
+                }
                 
                 // Update the status label
                 UIStackView *switchStatusStack = (UIStackView *)identifierSwitch.superview;
@@ -3151,7 +3128,7 @@ static void PXWriteSubstrateFilterPlists(void) {
             // Let's assume safeguards elsewhere work.
             UIButtonConfiguration *originalConfig = sender.configuration;
             UIButtonConfiguration *successConfig = [originalConfig copy];
-            successConfig.image = [UIImage systemImageNamed:@"checkmark"];
+            successConfig.image = PXSystemImageNamed(@"checkmark");
             successConfig.baseForegroundColor = [UIColor systemGreenColor];
             
             // Animate the change
@@ -3171,12 +3148,12 @@ static void PXWriteSubstrateFilterPlists(void) {
         } else {
             // Fallback for iOS < 15 using tint color change
             [UIView animateWithDuration:0.2 animations:^{
-                [sender setImage:[UIImage systemImageNamed:@"checkmark"] forState:UIControlStateNormal];
+                [sender setImage:PXSystemImageNamed(@"checkmark") forState:UIControlStateNormal];
                 sender.tintColor = [UIColor systemGreenColor];
             } completion:^(BOOL finished) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [UIView animateWithDuration:0.2 animations:^{
-                        [sender setImage:[UIImage systemImageNamed:@"doc.on.doc"] forState:UIControlStateNormal];
+                        [sender setImage:PXSystemImageNamed(@"doc.on.doc") forState:UIControlStateNormal];
                         sender.tintColor = originalColor;
                     }];
                 });
@@ -3193,7 +3170,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     // Create popup view controller if not exists
     if (!self.installedAppsPopupVC) {
         self.installedAppsPopupVC = [[UIViewController alloc] init];
-        self.installedAppsPopupVC.view.backgroundColor = [UIColor systemBackgroundColor];
+        self.installedAppsPopupVC.view.backgroundColor = PXSystemBackgroundColor();
         self.installedAppsPopupVC.modalPresentationStyle = UIModalPresentationFormSheet;
         self.installedAppsPopupVC.preferredContentSize = CGSizeMake(350, 500);
         
@@ -3206,7 +3183,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         // Add close button
         UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+        [closeButton setImage:PXSystemImageNamed(@"xmark.circle.fill") forState:UIControlStateNormal];
         [closeButton addTarget:self action:@selector(closeInstalledAppsPopup:) forControlEvents:UIControlEventTouchUpInside];
         closeButton.translatesAutoresizingMaskIntoConstraints = NO;
         [self.installedAppsPopupVC.view addSubview:closeButton];
@@ -3347,7 +3324,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     // Create versions popup if not exists
     if (!self.versionsPopupVC) {
         self.versionsPopupVC = [[UIViewController alloc] init];
-        self.versionsPopupVC.view.backgroundColor = [UIColor systemBackgroundColor];
+        self.versionsPopupVC.view.backgroundColor = PXSystemBackgroundColor();
         self.versionsPopupVC.modalPresentationStyle = UIModalPresentationFormSheet;
         self.versionsPopupVC.preferredContentSize = CGSizeMake(350, 500);
         
@@ -3360,13 +3337,13 @@ static void PXWriteSubstrateFilterPlists(void) {
         UILabel *titleLabel = [[UILabel alloc] init];
         titleLabel.text = @"TAP ON APPNAME TO INSTALL";
         titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-        titleLabel.textColor = [UIColor secondaryLabelColor];
+        titleLabel.textColor = PXSecondaryLabelColor();
         titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
         [self.versionsPopupVC.view addSubview:titleLabel];
         
         // Add close button
         UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+        [closeButton setImage:PXSystemImageNamed(@"xmark.circle.fill") forState:UIControlStateNormal];
         [closeButton addTarget:self action:@selector(closeVersionsPopup:) forControlEvents:UIControlEventTouchUpInside];
         closeButton.translatesAutoresizingMaskIntoConstraints = NO;
         [self.versionsPopupVC.view addSubview:closeButton];
@@ -3379,7 +3356,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         [self.versionsPopupVC.view addSubview:self.versionSearchBar];
         
         // Add loading indicator
-        UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
         loadingIndicator.translatesAutoresizingMaskIntoConstraints = NO;
         [self.versionsPopupVC.view addSubview:loadingIndicator];
         
@@ -4354,7 +4331,7 @@ static void PXWriteSubstrateFilterPlists(void) {
 // Helper methods for the profile creation popup
 - (void)showLoadingIndicator {
     if (!self.loadingIndicator) {
-        self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
         self.loadingIndicator.center = self.view.center;
         self.loadingIndicator.hidesWhenStopped = YES;
         [self.view addSubview:self.loadingIndicator];
@@ -5455,7 +5432,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         config.baseBackgroundColor = [UIColor systemBlueColor];
         config.baseForegroundColor = [UIColor whiteColor];
         config.title = @"Show Advanced Identifiers";
-        config.image = [UIImage systemImageNamed:@"chevron.down"];
+        config.image = PXSystemImageNamed(@"chevron.down");
         config.imagePlacement = NSDirectionalRectEdgeTrailing;
         config.imagePadding = 8;
         config.contentInsets = NSDirectionalEdgeInsetsMake(8, 16, 8, 16);
@@ -5474,7 +5451,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         #pragma clang diagnostic pop
         
         // Add chevron icon manually for older iOS
-        UIImageView *chevronIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
+        UIImageView *chevronIcon = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
         chevronIcon.tintColor = [UIColor whiteColor];
         chevronIcon.translatesAutoresizingMaskIntoConstraints = NO;
         [self.showAdvancedButton addSubview:chevronIcon];
@@ -5542,10 +5519,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         UIButtonConfiguration *config = self.showAdvancedButton.configuration;
         if (self.showAdvancedIdentifiers) {
             config.title = @"Hide Advanced Identifiers";
-            config.image = [UIImage systemImageNamed:@"chevron.up"];
+            config.image = PXSystemImageNamed(@"chevron.up");
         } else {
             config.title = @"Show Advanced Identifiers";
-            config.image = [UIImage systemImageNamed:@"chevron.down"];
+            config.image = PXSystemImageNamed(@"chevron.down");
         }
         [self.showAdvancedButton safeSetConfiguration:config];
     } else {
@@ -5557,7 +5534,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             for (UIView *subview in self.showAdvancedButton.subviews) {
                 if ([subview isKindOfClass:[UIImageView class]]) {
                     UIImageView *imageView = (UIImageView *)subview;
-                    imageView.image = [UIImage systemImageNamed:@"chevron.up"];
+                    imageView.image = PXSystemImageNamed(@"chevron.up");
                     break;
                 }
             }
@@ -5568,7 +5545,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             for (UIView *subview in self.showAdvancedButton.subviews) {
                 if ([subview isKindOfClass:[UIImageView class]]) {
                     UIImageView *imageView = (UIImageView *)subview;
-                    imageView.image = [UIImage systemImageNamed:@"chevron.down"];
+                    imageView.image = PXSystemImageNamed(@"chevron.down");
                     break;
                 }
             }
@@ -5645,7 +5622,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.nextFakePreview = [defaults objectForKey:PXDashboardFakePreviewKey];
     self.rrsRestoreOrder = [defaults stringForKey:PXDashboardRestoreOrderKey] ?: @"oldestFirst";
 
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     self.title = @"TLinkIOS";
 
     self.scrollView = [[UIScrollView alloc] init];
@@ -5688,7 +5665,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UILabel *rrsSelectionLabel = nil;
     UILabel *fakeSelectionLabel = nil;
     UILabel *fakeInfoSelectionLabel = nil;
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:[UIColor systemIndigoColor] valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:PXSystemIndigoColor() valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"externaldrive.fill.badge.icloud" color:[UIColor systemPinkColor] valueLabel:&rrsSelectionLabel selector:@selector(selectRRSAppsTapped)]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"face.smiling.inverse" color:[UIColor systemGrayColor] valueLabel:&fakeSelectionLabel selector:@selector(selectFakeTapped)]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"INFO FAKE" icon:@"info.circle.fill" color:[UIColor systemBlueColor] valueLabel:&fakeInfoSelectionLabel selector:@selector(infoFakeTapped)]];
@@ -5708,7 +5685,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.rrsNoteTextField = [[UITextField alloc] init];
     self.rrsNoteTextField.placeholder = @"Ghi chú khi lưu RRS";
     self.rrsNoteTextField.borderStyle = UITextBorderStyleNone;
-    self.rrsNoteTextField.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    self.rrsNoteTextField.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     self.rrsNoteTextField.layer.cornerRadius = 10;
     self.rrsNoteTextField.font = [UIFont systemFontOfSize:15];
     self.rrsNoteTextField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
@@ -5729,7 +5706,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     row.spacing = 10;
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:row];
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"iphone"]];
+    UIImageView *icon = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"iphone")];
     icon.tintColor = [UIColor systemBlueColor];
     [icon.widthAnchor constraintEqualToConstant:28].active = YES;
     [icon.heightAnchor constraintEqualToConstant:28].active = YES;
@@ -5756,7 +5733,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (UIView *)dashboardRoundedCard {
     UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     card.layer.cornerRadius = 12;
     card.translatesAutoresizingMaskIntoConstraints = NO;
     return card;
@@ -5782,7 +5759,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (UILabel *)dashboardSectionLabel:(NSString *)text {
     UILabel *label = [[UILabel alloc] init];
     label.text = text;
-    label.textColor = [UIColor secondaryLabelColor];
+    label.textColor = PXSecondaryLabelColor();
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     return label;
 }
@@ -5801,14 +5778,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [button setAttributedTitle:attr forState:UIControlStateNormal];
     button.titleLabel.numberOfLines = 2;
     button.titleLabel.textAlignment = NSTextAlignmentCenter;
-    if (@available(iOS 13.0, *)) [button setImage:[UIImage systemImageNamed:icon] forState:UIControlStateNormal];
+    if (@available(iOS 13.0, *)) [button setImage:PXSystemImageNamed(icon) forState:UIControlStateNormal];
     return button;
 }
 
 - (UIView *)dashboardSelectionRowWithTitle:(NSString *)title icon:(NSString *)icon color:(UIColor *)color valueLabel:(UILabel * __strong *)outLabel selector:(SEL)selector {
     UIView *row = [self dashboardPlainRowWithTitle:title value:nil selector:selector];
     UIStackView *stack = (UIStackView *)row.subviews.firstObject;
-    UIImageView *iconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:icon]];
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:PXSystemImageNamed(icon)];
     iconView.tintColor = color;
     iconView.backgroundColor = [color colorWithAlphaComponent:0.14];
     iconView.layer.cornerRadius = 6;
@@ -5818,7 +5795,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [stack insertArrangedSubview:iconView atIndex:0];
     UILabel *value = [[UILabel alloc] init];
     value.font = [UIFont systemFontOfSize:13];
-    value.textColor = [UIColor secondaryLabelColor];
+    value.textColor = PXSecondaryLabelColor();
     [stack insertArrangedSubview:value atIndex:2];
     if (outLabel) *outLabel = value;
     return row;
@@ -5842,7 +5819,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UILabel *right = [[UILabel alloc] init];
     right.text = value ?: @"›";
     right.font = [UIFont systemFontOfSize:18];
-    right.textColor = [UIColor tertiaryLabelColor];
+    right.textColor = PXTertiaryLabelColor();
     [stack addArrangedSubview:right];
     [NSLayoutConstraint activateConstraints:@[
         [stack.topAnchor constraintEqualToAnchor:row.topAnchor constant:8],
@@ -6079,7 +6056,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     iconBackground.translatesAutoresizingMaskIntoConstraints = NO;
     iconBackground.layer.cornerRadius = 14.0;
     iconBackground.layer.masksToBounds = YES;
-    if (@available(iOS 13.0, *)) iconBackground.backgroundColor = [UIColor systemIndigoColor];
+    if (@available(iOS 13.0, *)) iconBackground.backgroundColor = PXSystemIndigoColor();
     else iconBackground.backgroundColor = [UIColor colorWithRed:0.28 green:0.35 blue:0.95 alpha:1.0];
     [card addSubview:iconBackground];
 
@@ -6088,7 +6065,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     gridIcon.contentMode = UIViewContentModeScaleAspectFit;
     gridIcon.tintColor = [UIColor whiteColor];
     if (@available(iOS 13.0, *)) {
-        gridIcon.image = [UIImage systemImageNamed:@"square.grid.2x2.fill"];
+        gridIcon.image = PXSystemImageNamed(@"square.grid.2x2.fill");
     }
     [iconBackground addSubview:gridIcon];
 
@@ -6194,18 +6171,20 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     nav.modalPresentationStyle = UIModalPresentationPageSheet;
     nav.navigationBar.prefersLargeTitles = NO;
 
-    if (@available(iOS 13.0, *)) {
+    if (NSClassFromString(@"UINavigationBarAppearance") != nil) {
         UINavigationBarAppearance *appearance = [[UINavigationBarAppearance alloc] init];
         [appearance configureWithOpaqueBackground];
-        appearance.backgroundColor = [UIColor systemBackgroundColor];
-        appearance.shadowColor = [[UIColor separatorColor] colorWithAlphaComponent:0.45];
+        appearance.backgroundColor = PXSystemBackgroundColor();
+        appearance.shadowColor = [PXSeparatorColor() colorWithAlphaComponent:0.45];
         appearance.titleTextAttributes = @{NSFontAttributeName: [UIFont systemFontOfSize:19.0 weight:UIFontWeightBold]};
         nav.navigationBar.standardAppearance = appearance;
         nav.navigationBar.scrollEdgeAppearance = appearance;
         nav.navigationBar.compactAppearance = appearance;
     }
 
-    if (@available(iOS 15.0, *)) {
+    if (NSClassFromString(@"UISheetPresentationController") != nil &&
+        NSClassFromString(@"UISheetPresentationControllerDetent") != nil &&
+        [nav respondsToSelector:NSSelectorFromString(@"sheetPresentationController")]) {
         UISheetPresentationController *sheet = nav.sheetPresentationController;
         sheet.detents = @[[UISheetPresentationControllerDetent largeDetent]];
         sheet.prefersGrabberVisible = YES;
@@ -6225,12 +6204,15 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.appSearchBar.searchBarStyle = UISearchBarStyleMinimal;
     self.appSearchBar.backgroundImage = [[UIImage alloc] init];
     self.appSearchBar.translatesAutoresizingMaskIntoConstraints = NO;
-    if (@available(iOS 13.0, *)) {
-        UITextField *searchField = self.appSearchBar.searchTextField;
-        searchField.backgroundColor = [UIColor secondarySystemFillColor];
-        searchField.layer.cornerRadius = 14.0;
-        searchField.layer.masksToBounds = YES;
-        searchField.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    SEL searchTextFieldSelector = NSSelectorFromString(@"searchTextField");
+    if ([self.appSearchBar respondsToSelector:searchTextFieldSelector]) {
+        UITextField *searchField = [self.appSearchBar valueForKey:@"searchTextField"];
+        if ([searchField isKindOfClass:[UITextField class]]) {
+            searchField.backgroundColor = PXSecondarySystemFillColor();
+            searchField.layer.cornerRadius = 14.0;
+            searchField.layer.masksToBounds = YES;
+            searchField.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+        }
     }
     [picker.view addSubview:self.appSearchBar];
 
@@ -6854,7 +6836,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     
     // Add freeze/unfreeze option with appropriate styling based on current state
     NSString *freezeTitle = isFrozen ? @"Unfreeze App" : @"Freeze App";
-    UIImage *freezeImage = [UIImage systemImageNamed:@"snowflake.circle.fill"];
+    UIImage *freezeImage = PXSystemImageNamed(@"snowflake.circle.fill");
     
     UIAlertAction *freezeAction = [UIAlertAction actionWithTitle:freezeTitle
                                                           style:UIAlertActionStyleDefault
@@ -7177,8 +7159,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (void)toolsButtonTapped {
     ToolViewController *toolsVC = [[ToolViewController alloc] init];
     UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:toolsVC];
-    if (@available(iOS 15.0, *)) {
-        // Modern styling for iOS 15+
+    if (NSClassFromString(@"UINavigationBarAppearance") != nil) {
+        // Modern styling when UINavigationBarAppearance exists.
         UINavigationBarAppearance *appearance = [[UINavigationBarAppearance alloc] init];
         [appearance configureWithDefaultBackground];
         navController.navigationBar.standardAppearance = appearance;

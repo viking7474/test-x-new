@@ -167,27 +167,38 @@
     return @([settings isCustomDomainEnabled:domain]);
 }
 
+- (void)postDomainBlockingChanged {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.domainBlockingChanged"),
+                                         NULL, NULL, YES);
+}
+
+- (void)showDomainPersistenceError {
+    [self showAlertWithTitle:@"Could Not Save" message:@"The Domain Blocking change was not written to disk. The previous state has been restored."];
+}
+
 // ENHANCED: Setter for custom domain switch state with dynamic label update
 - (void)setCustomDomainEnabled:(id)value forSpecifier:(PSSpecifier *)specifier {
     NSString *domain = [specifier propertyForKey:@"id"];
     BOOL enabled = [value boolValue];
     DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
-    [settings setCustomDomainEnabled:domain enabled:enabled];
-    
-    // Update the specifier name to show current status
+    if (![settings setCustomDomainEnabled:domain enabled:enabled]) {
+        [self reloadSpecifiers];
+        [self showDomainPersistenceError];
+        return;
+    }
+
     NSString *actionText = enabled ? @"Enabled" : @"Enable";
     NSString *newName = [NSString stringWithFormat:@"    %@ %@", actionText, domain];
     [specifier setName:newName];
-    
-    // Find and update the cell to reflect the new name immediately
+
     NSInteger specifierIndex = [self indexOfSpecifier:specifier];
     if (specifierIndex != NSNotFound) {
         NSIndexPath *indexPath = [NSIndexPath indexPathForRow:specifierIndex inSection:0];
         UITableViewCell *cell = [self.table cellForRowAtIndexPath:indexPath];
-        if (cell) {
-            cell.textLabel.text = newName;
-        }
+        if (cell) cell.textLabel.text = newName;
     }
+    [self postDomainBlockingChanged];
 }
 
 - (void)addCustomDomainTapped {
@@ -229,8 +240,12 @@
                     return;
                 }
                 
-                // Add as custom domain
-                [settings addDomain:domain];
+                // Add as custom domain only if persistence succeeds.
+                if (![settings addDomain:domain]) {
+                    [self showDomainPersistenceError];
+                    return;
+                }
+                [self postDomainBlockingChanged];
                 
                 // Show success feedback
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Domain Added" 
@@ -308,15 +323,11 @@
                     return;
                 }
                 
-                // Get the current enabled state before removing
-                BOOL wasEnabled = [settings isCustomDomainEnabled:currentDomain];
-                
-                // Remove the old domain
-                [settings removeCustomDomain:currentDomain];
-                
-                // Add the new domain with the same enabled state
-                [settings addDomain:newDomain]; // This adds to custom domains
-                [settings setCustomDomainEnabled:newDomain enabled:wasEnabled];
+                if (![settings replaceCustomDomain:currentDomain withDomain:newDomain]) {
+                    [self showDomainPersistenceError];
+                    return;
+                }
+                [self postDomainBlockingChanged];
                 
                 // Show success feedback
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Domain Updated" 
@@ -385,9 +396,13 @@
         [actionSheet addAction:[UIAlertAction actionWithTitle:toggleTitle
                                                         style:UIAlertActionStyleDefault
                                                       handler:^(UIAlertAction *action) {
-            [settings setCustomDomainEnabled:domain enabled:!isEnabled];
+            if (![settings setCustomDomainEnabled:domain enabled:!isEnabled]) {
+                [self showDomainPersistenceError];
+                return;
+            }
+            [self postDomainBlockingChanged];
             [self reloadSpecifiers];
-            
+
             NSString *statusMessage = !isEnabled ? @"Domain enabled successfully" : @"Domain disabled successfully";
             [self showAlertWithTitle:@"Domain Updated" message:statusMessage];
         }]];
@@ -395,7 +410,11 @@
         [actionSheet addAction:[UIAlertAction actionWithTitle:@"🗑️ Remove Domain"
                                                         style:UIAlertActionStyleDestructive
                                                       handler:^(UIAlertAction *action) {
-            [settings removeCustomDomain:domain];
+            if (![settings removeCustomDomain:domain]) {
+                [self showDomainPersistenceError];
+                return;
+            }
+            [self postDomainBlockingChanged];
             [self reloadSpecifiers];
             [self showAlertWithTitle:@"Domain Removed" message:[NSString stringWithFormat:@"'%@' has been removed from your domains.", domain]];
         }]];
@@ -404,7 +423,11 @@
         [actionSheet addAction:[UIAlertAction actionWithTitle:@"➕ Add Domain"
                                                         style:UIAlertActionStyleDefault
                                                       handler:^(UIAlertAction *action) {
-            [settings addDomain:domain];
+            if (![settings addDomain:domain]) {
+                [self showDomainPersistenceError];
+                return;
+            }
+            [self postDomainBlockingChanged];
             [self reloadSpecifiers];
             [self showAlertWithTitle:@"Domain Added" message:[NSString stringWithFormat:@"'%@' has been added to your domains and is now enabled.", domain]];
         }]];
@@ -503,7 +526,11 @@
                                            style:UIAlertActionStyleDestructive 
                                          handler:^(UIAlertAction *action) {
         DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
-        [settings removeCustomDomain:domain];
+        if (![settings removeCustomDomain:domain]) {
+            [self showDomainPersistenceError];
+            return;
+        }
+        [self postDomainBlockingChanged];
         
         // Show success feedback
         UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Domain Deleted" 

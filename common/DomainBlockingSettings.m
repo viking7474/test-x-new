@@ -86,93 +86,67 @@ static void ensureDirectoryExists(NSString *filePath) {
     return self;
 }
 
-- (void)saveSettings {
-    @try {
-        NSString *settingsPath = getSettingsFilePath();
-        NSLog(@"[DomainBlockingSettings] Saving to path: %@", settingsPath);
-        
-        // Ensure directory exists before saving
-        ensureDirectoryExists(settingsPath);
-        
-        NSDictionary *settings = @{
-            kIsEnabledKey: @(self.isEnabled),
-            kBlockedDomainsKey: self.blockedDomains,
-            kCustomDomainsKey: self.customDomainsStatus
-        };
-        
-        NSLog(@"[DomainBlockingSettings] Saving settings: %@", settings);
-        
-        BOOL success = [settings writeToFile:settingsPath atomically:YES];
-        if (!success) {
-            NSLog(@"[DomainBlockingSettings] ERROR: Failed to save settings!");
-        } else {
-            NSLog(@"[DomainBlockingSettings] Settings saved successfully");
+- (BOOL)saveSettings {
+    @synchronized (self) {
+        @try {
+            NSString *settingsPath = getSettingsFilePath();
+            ensureDirectoryExists(settingsPath);
+
+            NSDictionary *settings = @{
+                kIsEnabledKey: @(self.isEnabled),
+                kBlockedDomainsKey: [self.blockedDomains copy],
+                kCustomDomainsKey: [self.customDomainsStatus copy]
+            };
+
+            BOOL success = [settings writeToFile:settingsPath atomically:YES];
+            if (!success) {
+                NSLog(@"[DomainBlockingSettings] ERROR: Failed to save settings to %@", settingsPath);
+            }
+            return success;
+        } @catch (NSException *exception) {
+            NSLog(@"[DomainBlockingSettings] Exception saving: %@", exception);
+            return NO;
         }
-    } @catch (NSException *exception) {
-        NSLog(@"[DomainBlockingSettings] Exception saving: %@", exception);
     }
 }
 
-- (void)loadSettings {
-    @try {
-        NSString *settingsPath = getSettingsFilePath();
-        NSLog(@"[DomainBlockingSettings] Loading from path: %@", settingsPath);
-        
-        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:settingsPath];
-        
-        if (settings) {
-            NSLog(@"[DomainBlockingSettings] Found settings file");
-            
-            // Load enabled state (default to YES if not found)
-            if (settings[kIsEnabledKey] != nil) {
-                self.isEnabled = [settings[kIsEnabledKey] boolValue];
-            } else {
-                self.isEnabled = YES; // Default to enabled
-            }
-            
-            // Load custom domains status - CRITICAL FIX: Clear and reload ALL domains
-            NSDictionary *savedCustomStatus = settings[kCustomDomainsKey];
-            if ([savedCustomStatus isKindOfClass:[NSDictionary class]]) {
-                // IMPORTANT: We need to replace the dictionary, not merge
-                // because the saved file contains ALL domains (defaults + custom)
-                [self.customDomainsStatus removeAllObjects];
-                [self.customDomainsStatus addEntriesFromDictionary:savedCustomStatus];
-                NSLog(@"[DomainBlockingSettings] Loaded custom domains: %@", savedCustomStatus);
-            }
-            
-            // Legacy support for old format - migrate old blocked domains to custom domains
-            NSArray *savedDomains = settings[kBlockedDomainsKey];
-            if ([savedDomains isKindOfClass:[NSArray class]] && !savedCustomStatus) {
-                // STEALTH: No logging - avoid detection
-                // Migrate old format - add all old blocked domains as custom domains
-                for (NSString *domain in savedDomains) {
-                    // Add to custom domains with enabled status
-                    self.customDomainsStatus[domain] = @YES;
+- (BOOL)loadSettings {
+    @synchronized (self) {
+        @try {
+            NSString *settingsPath = getSettingsFilePath();
+            NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:settingsPath];
+
+            if (settings) {
+                self.isEnabled = settings[kIsEnabledKey] != nil ? [settings[kIsEnabledKey] boolValue] : YES;
+
+                NSDictionary *savedCustomStatus = settings[kCustomDomainsKey];
+                if ([savedCustomStatus isKindOfClass:[NSDictionary class]]) {
+                    [self.customDomainsStatus removeAllObjects];
+                    [self.customDomainsStatus addEntriesFromDictionary:savedCustomStatus];
                 }
-                // Save migrated format
-                [self saveSettings];
+
+                NSArray *savedDomains = settings[kBlockedDomainsKey];
+                if ([savedDomains isKindOfClass:[NSArray class]] && !savedCustomStatus) {
+                    for (NSString *domain in savedDomains) {
+                        if ([domain isKindOfClass:[NSString class]] && domain.length > 0) {
+                            self.customDomainsStatus[domain] = @YES;
+                        }
+                    }
+                    [self rebuildBlockedDomainsList];
+                    return [self saveSettings];
+                }
+
+                [self rebuildBlockedDomainsList];
+                return YES;
             }
-            
-            // Rebuild blocked domains list from custom domains
+
+            // First run: keep the in-memory defaults and create the file.
+            return [self saveSettings];
+        } @catch (NSException *exception) {
+            NSLog(@"[DomainBlockingSettings] Exception loading: %@", exception);
             [self rebuildBlockedDomainsList];
-            
-            // STEALTH: No logging - avoid detection
-            
-        } else {
-            NSLog(@"[DomainBlockingSettings] No settings file found, keeping defaults");
-            // No settings file found, keep defaults from init
-            // Important: Don't clear customDomainsStatus here!
-            
-            // Save the defaults to create the file
-            [self saveSettings];
+            return NO;
         }
-    } @catch (NSException *exception) {
-        NSLog(@"[DomainBlockingSettings] Exception loading: %@", exception);
-        // Use defaults on error - but don't clear them!
-        // self.isEnabled is already YES from init
-        // customDomainsStatus already has default domains
-        // Just rebuild the list
-        [self rebuildBlockedDomainsList];
     }
 }
 
@@ -194,117 +168,149 @@ static void ensureDirectoryExists(NSString *filePath) {
     NSLog(@"[DomainBlockingSettings] Final blocked domains: %@", self.blockedDomains);
 }
 
-- (void)addDomain:(NSString *)domain {
-    NSLog(@"[DomainBlockingSettings] addDomain called with: %@", domain);
-    
-    if (![self.blockedDomains containsObject:domain]) {
-        // Add as custom domain with enabled status
+- (BOOL)addDomain:(NSString *)domain {
+    if (![domain isKindOfClass:[NSString class]] || domain.length == 0) return NO;
+    @synchronized (self) {
+        NSNumber *oldValue = self.customDomainsStatus[domain];
+        if (oldValue && [oldValue boolValue]) return YES;
+
         self.customDomainsStatus[domain] = @YES;
-        NSLog(@"[DomainBlockingSettings] Added domain to customDomainsStatus: %@", self.customDomainsStatus);
-        
         [self rebuildBlockedDomainsList];
-        [self saveSettings];
-    } else {
-        NSLog(@"[DomainBlockingSettings] Domain already in blocked list: %@", domain);
+        if ([self saveSettings]) return YES;
+
+        if (oldValue) self.customDomainsStatus[domain] = oldValue;
+        else [self.customDomainsStatus removeObjectForKey:domain];
+        [self rebuildBlockedDomainsList];
+        return NO;
     }
 }
 
-- (void)removeDomain:(NSString *)domain {
-    // Remove from custom domains
-    if (self.customDomainsStatus[domain] != nil) {
+- (BOOL)removeDomain:(NSString *)domain {
+    if (![domain isKindOfClass:[NSString class]] || domain.length == 0) return NO;
+    @synchronized (self) {
+        NSNumber *oldValue = self.customDomainsStatus[domain];
+        if (!oldValue || ![oldValue boolValue]) return YES;
+
         self.customDomainsStatus[domain] = @NO;
         [self rebuildBlockedDomainsList];
-        [self saveSettings];
+        if ([self saveSettings]) return YES;
+
+        self.customDomainsStatus[domain] = oldValue;
+        [self rebuildBlockedDomainsList];
+        return NO;
     }
 }
 
 // Removed optional domain methods - everything is now custom domains
 
 - (BOOL)isDomainBlocked:(NSString *)domain {
-    if (!self.isEnabled) {
+    if (!domain || domain.length == 0) return NO;
+
+    @synchronized (self) {
+        if (!self.isEnabled) return NO;
+
+        NSString *lowerDomain = [domain lowercaseString];
+        if ([lowerDomain hasSuffix:@"."]) {
+            lowerDomain = [lowerDomain substringToIndex:lowerDomain.length - 1];
+        }
+
+        for (NSString *blockedDomain in self.blockedDomains) {
+            NSString *lowerBlocked = [blockedDomain lowercaseString];
+            if ([lowerBlocked hasSuffix:@"."]) {
+                lowerBlocked = [lowerBlocked substringToIndex:lowerBlocked.length - 1];
+            }
+
+            if ([lowerDomain isEqualToString:lowerBlocked]) return YES;
+            if ([lowerDomain hasSuffix:[@"." stringByAppendingString:lowerBlocked]]) return YES;
+        }
         return NO;
     }
-    
-    if (!domain || domain.length == 0) {
-        return NO;
-    }
-    
-    // Convert to lowercase for case-insensitive comparison
-    NSString *lowerDomain = [domain lowercaseString];
-    
-    // Remove any trailing dots (DNS format)
-    if ([lowerDomain hasSuffix:@"."]) {
-        lowerDomain = [lowerDomain substringToIndex:lowerDomain.length - 1];
-    }
-    
-    for (NSString *blockedDomain in self.blockedDomains) {
-        NSString *lowerBlocked = [blockedDomain lowercaseString];
-        
-        // Remove any trailing dots from blocked domain too
-        if ([lowerBlocked hasSuffix:@"."]) {
-            lowerBlocked = [lowerBlocked substringToIndex:lowerBlocked.length - 1];
-        }
-        
-        // Exact match
-        if ([lowerDomain isEqualToString:lowerBlocked]) {
-            // STEALTH: No logging - avoid detection
-            return YES;
-        }
-        
-        // Subdomain match: if requested domain ends with "." + blocked domain
-        // Example: api.example.com should be blocked if example.com is in blocklist
-        NSString *dotPrefixedBlocked = [@"." stringByAppendingString:lowerBlocked];
-        if ([lowerDomain hasSuffix:dotPrefixedBlocked]) {
-            // STEALTH: No logging - avoid detection
-            return YES;
-        }
-    }
-    
-    return NO;
 }
 
 // Removed getEnabledByDefaultDomains - no longer needed
 
 #pragma mark - Custom Domain Management
 
-- (void)setCustomDomainEnabled:(NSString *)domain enabled:(BOOL)enabled {
-    if (self.customDomainsStatus[domain] != nil) {
+- (BOOL)setCustomDomainEnabled:(NSString *)domain enabled:(BOOL)enabled {
+    if (![domain isKindOfClass:[NSString class]] || domain.length == 0) return NO;
+    @synchronized (self) {
+        NSNumber *oldValue = self.customDomainsStatus[domain];
+        if (!oldValue) return NO;
+        if ([oldValue boolValue] == enabled) return YES;
+
         self.customDomainsStatus[domain] = @(enabled);
         [self rebuildBlockedDomainsList];
-        [self saveSettings];
+        if ([self saveSettings]) return YES;
+
+        self.customDomainsStatus[domain] = oldValue;
+        [self rebuildBlockedDomainsList];
+        return NO;
     }
 }
 
 - (BOOL)isCustomDomainEnabled:(NSString *)domain {
-    return [self.customDomainsStatus[domain] boolValue];
+    @synchronized (self) {
+        return [self.customDomainsStatus[domain] boolValue];
+    }
 }
 
-- (void)removeCustomDomain:(NSString *)domain {
-    if (self.customDomainsStatus[domain] != nil) {
+- (BOOL)removeCustomDomain:(NSString *)domain {
+    if (![domain isKindOfClass:[NSString class]] || domain.length == 0) return NO;
+    @synchronized (self) {
+        NSNumber *oldValue = self.customDomainsStatus[domain];
+        if (!oldValue) return YES;
+
         [self.customDomainsStatus removeObjectForKey:domain];
         [self rebuildBlockedDomainsList];
-        [self saveSettings];
+        if ([self saveSettings]) return YES;
+
+        self.customDomainsStatus[domain] = oldValue;
+        [self rebuildBlockedDomainsList];
+        return NO;
+    }
+}
+
+- (BOOL)replaceCustomDomain:(NSString *)oldDomain withDomain:(NSString *)newDomain {
+    if (oldDomain.length == 0 || newDomain.length == 0) return NO;
+    @synchronized (self) {
+        NSNumber *oldEnabled = self.customDomainsStatus[oldDomain];
+        if (!oldEnabled || self.customDomainsStatus[newDomain] != nil) return NO;
+
+        NSDictionary *snapshot = [self.customDomainsStatus copy];
+        [self.customDomainsStatus removeObjectForKey:oldDomain];
+        self.customDomainsStatus[newDomain] = oldEnabled;
+        [self rebuildBlockedDomainsList];
+        if ([self saveSettings]) return YES;
+
+        [self.customDomainsStatus removeAllObjects];
+        [self.customDomainsStatus addEntriesFromDictionary:snapshot];
+        [self rebuildBlockedDomainsList];
+        return NO;
     }
 }
 
 - (NSArray<NSDictionary *> *)getCustomDomains {
-    NSMutableArray *customDomains = [NSMutableArray array];
-    for (NSString *domain in self.customDomainsStatus.allKeys) {
-        BOOL enabled = [self.customDomainsStatus[domain] boolValue];
-        [customDomains addObject:@{
-            @"domain": domain,
-            @"enabled": @(enabled),
-            @"category": @"Custom",
-            @"description": @"User added domain"
+    @synchronized (self) {
+        NSMutableArray *customDomains = [NSMutableArray array];
+        for (NSString *domain in self.customDomainsStatus.allKeys) {
+            BOOL enabled = [self.customDomainsStatus[domain] boolValue];
+            [customDomains addObject:@{
+                @"domain": domain,
+                @"enabled": @(enabled),
+                @"category": @"Custom",
+                @"description": @"User added domain"
+            }];
+        }
+        return [customDomains sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *obj1, NSDictionary *obj2) {
+            return [obj1[@"domain"] localizedCaseInsensitiveCompare:obj2[@"domain"]];
         }];
     }
-    return [customDomains sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *obj1, NSDictionary *obj2) {
-        return [obj1[@"domain"] localizedCaseInsensitiveCompare:obj2[@"domain"]];
-    }];
-    }
+}
 
 - (BOOL)isCustomDomain:(NSString *)domain {
-    return self.customDomainsStatus[domain] != nil;
+    @synchronized (self) {
+        return self.customDomainsStatus[domain] != nil;
+    }
 }
 
 - (NSArray<NSDictionary *> *)getAllDomains {

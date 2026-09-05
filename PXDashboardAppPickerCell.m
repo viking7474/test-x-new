@@ -1,23 +1,24 @@
+#import "common/PXUIKitCompat.h"
 #import "PXDashboardAppPickerCell.h"
 #import "WeaponXTheme.h"
 
 UIColor *PXAppPickerBackgroundColor(void) {
-    if (@available(iOS 13.0, *)) return [UIColor systemGroupedBackgroundColor];
+    if (@available(iOS 13.0, *)) return PXSystemGroupedBackgroundColor();
     return [UIColor colorWithWhite:0.96 alpha:1.0];
 }
 
 UIColor *PXAppPickerCardColor(void) {
-    if (@available(iOS 13.0, *)) return [UIColor secondarySystemGroupedBackgroundColor];
+    if (@available(iOS 13.0, *)) return PXSecondarySystemGroupedBackgroundColor();
     return [UIColor whiteColor];
 }
 
 UIColor *PXAppPickerSecondaryTextColor(void) {
-    if (@available(iOS 13.0, *)) return [UIColor secondaryLabelColor];
+    if (@available(iOS 13.0, *)) return PXSecondaryLabelColor();
     return [UIColor colorWithWhite:0.42 alpha:1.0];
 }
 
 UIColor *PXAppPickerBorderColor(void) {
-    if (@available(iOS 13.0, *)) return [UIColor separatorColor];
+    if (@available(iOS 13.0, *)) return PXSeparatorColor();
     return [UIColor colorWithWhite:0.84 alpha:1.0];
 }
 
@@ -47,7 +48,7 @@ UIColor *PXAppPickerBorderColor(void) {
     self.appIconView.layer.cornerRadius = 12.0;
     self.appIconView.layer.masksToBounds = YES;
     if (@available(iOS 13.0, *)) {
-        self.appIconView.backgroundColor = [UIColor tertiarySystemFillColor];
+        self.appIconView.backgroundColor = PXTertiarySystemFillColor();
         self.appIconView.tintColor = [UIColor systemBlueColor];
     } else {
         self.appIconView.backgroundColor = [UIColor colorWithWhite:0.92 alpha:1.0];
@@ -145,7 +146,7 @@ UIColor *PXAppPickerBorderColor(void) {
     UIColor *unselectedBorder = nil;
     if (@available(iOS 13.0, *)) {
         blue = [UIColor systemBlueColor];
-        unselectedBorder = [UIColor systemGray3Color];
+        unselectedBorder = PXSystemGray3Color();
     } else {
         blue = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
         unselectedBorder = [UIColor colorWithWhite:0.80 alpha:1.0];

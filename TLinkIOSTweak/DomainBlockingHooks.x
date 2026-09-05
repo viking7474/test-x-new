@@ -25,6 +25,16 @@ static NSDictionary *loadScopedApps(void);
 static BOOL isInScopedAppsList(void);
 static BOOL shouldBlockDomain(NSString *host);
 
+static void domainBlockingSettingsChanged(CFNotificationCenterRef center,
+                                          void *observer,
+                                          CFStringRef name,
+                                          const void *object,
+                                          CFDictionaryRef userInfo) {
+    @autoreleasepool {
+        [[DomainBlockingSettings sharedSettings] loadSettings];
+    }
+}
+
 #pragma mark - Scoped Apps Helper Functions (Unified)
 
 // Get the current bundle ID
@@ -83,22 +93,10 @@ static BOOL shouldBlockDomain(NSString *host) {
     }
     
     @autoreleasepool {
-        // OPTIMIZATION: Check global enable state first to avoid expensive operations
         DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
-        
-        // TEMPORARY DEBUG: Log the state
-        NSLog(@"[DomainBlocking DEBUG] Checking domain: %@", host);
-        NSLog(@"[DomainBlocking DEBUG] Settings enabled: %@", settings.isEnabled ? @"YES" : @"NO");
-        NSLog(@"[DomainBlocking DEBUG] Blocked domains: %@", settings.blockedDomains);
-        
-        if (!settings.isEnabled) {
-            // STEALTH: No logging - avoid detection
-            return NO; // Early exit if globally disabled
-        }
-        
+
         // Get current bundle ID for scoped app check
         NSString *bundleID = getCurrentBundleID();
-        NSLog(@"[DomainBlocking DEBUG] Bundle ID: %@", bundleID);
         
         if (!bundleID) {
             // STEALTH: No logging - avoid detection
@@ -107,7 +105,6 @@ static BOOL shouldBlockDomain(NSString *host) {
         
         // Only check scoped apps if globally enabled
         BOOL isScoped = isInScopedAppsList();
-        NSLog(@"[DomainBlocking DEBUG] Is scoped app: %@", isScoped ? @"YES" : @"NO");
         
         if (!isScoped) {
             // STEALTH: No logging - avoid detection
@@ -116,7 +113,6 @@ static BOOL shouldBlockDomain(NSString *host) {
         
         // Check if domain is blocked (domain names only, no IP blocking)
         BOOL shouldBlock = [settings isDomainBlocked:host];
-        NSLog(@"[DomainBlocking DEBUG] Should block %@: %@", host, shouldBlock ? @"YES" : @"NO");
         
         // STEALTH: No logging - avoid detection
         return shouldBlock;
@@ -609,12 +605,20 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
         NSString *bundleID = getCurrentBundleID();
         NSString *proc = [NSProcessInfo processInfo].processName;
         if (PXIsCriticalSystemProcess(bundleID, proc)) return;
-        DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
-        if (!settings.isEnabled) return;
-
         BOOL isScoped = bundleID.length && PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         if (!isScoped) return;
 
+        DomainBlockingSettings *settings = [DomainBlockingSettings sharedSettings];
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (__bridge const void *)(settings),
+                                        domainBlockingSettingsChanged,
+                                        CFSTR("com.hydra.tlinkios.domainBlockingChanged"),
+                                        NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+
+        // Install hooks even when Domain Blocking is currently OFF. shouldBlockDomain()
+        // consults the live settings snapshot, so an already-running scoped process can
+        // be enabled or disabled without a restart.
         // DNS-level C function hooks
         void *gethostbyname_ptr = dlsym(RTLD_DEFAULT, "gethostbyname");
         if (gethostbyname_ptr) {

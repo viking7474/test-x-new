@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "ProgressHUDView.h"
 #import "WeaponXTheme.h"
 
@@ -19,7 +20,7 @@
     // Modern material card that adapts to light/dark automatically.
     UIVisualEffectView *card;
     if (@available(iOS 13.0, *)) {
-        card = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterial]];
+        card = [[UIVisualEffectView alloc] initWithEffect:PXThickMaterialBlurEffect()];
     } else {
         card = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
     }
@@ -32,8 +33,8 @@
     // Activity spinner.
     UIActivityIndicatorView *spinner;
     if (@available(iOS 13.0, *)) {
-        spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-        spinner.color = [UIColor labelColor];
+        spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
+        spinner.color = PXLabelColor();
     } else {
         spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
     }
@@ -51,7 +52,7 @@
     hud.titleLabel.font = WXScaledFont(16.0, UIFontWeightSemibold);
     hud.titleLabel.adjustsFontForContentSizeCategory = YES;
     if (@available(iOS 13.0, *)) {
-        hud.titleLabel.textColor = [UIColor labelColor];
+        hud.titleLabel.textColor = PXLabelColor();
     } else {
         hud.titleLabel.textColor = [UIColor whiteColor];
     }
@@ -72,7 +73,7 @@
     hud.detailLabel.font = WXScaledFont(13.0, UIFontWeightRegular);
     hud.detailLabel.adjustsFontForContentSizeCategory = YES;
     if (@available(iOS 13.0, *)) {
-        hud.detailLabel.textColor = [UIColor secondaryLabelColor];
+        hud.detailLabel.textColor = PXSecondaryLabelColor();
     } else {
         hud.detailLabel.textColor = [UIColor lightGrayColor];
     }

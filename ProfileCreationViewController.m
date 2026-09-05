@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "ProfileCreationViewController.h"
 #import "ProfileManager.h"
 
@@ -19,7 +20,7 @@
 }
 
 - (void)setupUI {
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     self.title = @"Create Profile";
     
     // Name Text Field
@@ -49,7 +50,7 @@
     [self.view addSubview:self.cancelButton];
     
     // Activity Indicator
-    self.activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    self.activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
     self.activityIndicator.translatesAutoresizingMaskIntoConstraints = NO;
     self.activityIndicator.hidesWhenStopped = YES;
     [self.view addSubview:self.activityIndicator];

@@ -1,4 +1,6 @@
 #import "TimeSpoofDetailViewController.h"
+#import "common/PXUIKitCompat.h"
+#import "common/PXSecuritySettingsStore.h"
 #import "IPStatusCacheManager.h"
 #import "LocationSpoofingManager.h"
 #import "IPMonitorService.h"
@@ -52,7 +54,7 @@
     [super viewDidLoad];
     self.title = @"Time Spoof";
     if (@available(iOS 13.0, *)) {
-        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.view.backgroundColor = PXSystemGroupedBackgroundColor();
     } else {
         self.view.backgroundColor = [UIColor groupTableViewBackgroundColor];
     }
@@ -86,7 +88,7 @@
 
     [stack addArrangedSubview:[self buildHero]];
 
-    NSInteger saved = [self.securitySettings integerForKey:@"timeSpoofingMode"];
+    NSInteger saved = PXReadSecurityInteger(@"timeSpoofingMode", 0);
     if (saved < 0 || saved > 2) { saved = 0; }
 
     [stack addArrangedSubview:[self sectionHeader:@"MODE"]];
@@ -109,13 +111,13 @@
     self.dataTitleLabel = [[UILabel alloc] init];
     self.dataTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.dataTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    self.dataTitleLabel.textColor = [UIColor secondaryLabelColor];
+    self.dataTitleLabel.textColor = PXSecondaryLabelColor();
     [dataStack addArrangedSubview:self.dataTitleLabel];
 
     self.dataLabel = [[UILabel alloc] init];
     self.dataLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.dataLabel.font = [UIFont systemFontOfSize:14];
-    self.dataLabel.textColor = [UIColor labelColor];
+    self.dataLabel.textColor = PXLabelColor();
     self.dataLabel.numberOfLines = 0;
     [dataStack addArrangedSubview:self.dataLabel];
     [stack addArrangedSubview:self.dataCard];
@@ -124,7 +126,7 @@
     note.translatesAutoresizingMaskIntoConstraints = NO;
     note.text = @"Choose how the system spoofs time. Time data is stored in the iplocationtime.plist file and includes timestamp information.";
     note.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    note.textColor = [UIColor secondaryLabelColor];
+    note.textColor = PXSecondaryLabelColor();
     note.numberOfLines = 0;
     [stack addArrangedSubview:note];
 
@@ -132,7 +134,7 @@
     related.translatesAutoresizingMaskIntoConstraints = NO;
     related.text = @"Use Location mode relies on your pinned location. Set it from the Location screen.";
     related.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    related.textColor = [UIColor tertiaryLabelColor];
+    related.textColor = PXTertiaryLabelColor();
     related.numberOfLines = 0;
     [stack addArrangedSubview:related];
 
@@ -149,7 +151,7 @@
     iv.contentMode = UIViewContentModeScaleAspectFit;
     iv.tintColor = color;
     if (@available(iOS 13.0, *)) {
-        iv.image = [[UIImage systemImageNamed:symbol] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        iv.image = [PXSystemImageNamed(symbol) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     [chip addSubview:iv];
     [NSLayoutConstraint activateConstraints:@[
@@ -171,13 +173,13 @@
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Time Spoofing";
     title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    title.textColor = [UIColor labelColor];
+    title.textColor = PXLabelColor();
     [card addSubview:title];
     UILabel *sub = [[UILabel alloc] init];
     sub.translatesAutoresizingMaskIntoConstraints = NO;
     sub.text = @"Spoof time zone using IP or pinned location.";
     sub.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    sub.textColor = [UIColor secondaryLabelColor];
+    sub.textColor = PXSecondaryLabelColor();
     sub.numberOfLines = 0;
     [card addSubview:sub];
     [NSLayoutConstraint activateConstraints:@[
@@ -198,7 +200,7 @@
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
     } else {
         card.backgroundColor = [UIColor whiteColor];
     }
@@ -211,7 +213,7 @@
     l.translatesAutoresizingMaskIntoConstraints = NO;
     l.text = text;
     l.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    l.textColor = [UIColor secondaryLabelColor];
+    l.textColor = PXSecondaryLabelColor();
     return l;
 }
 
@@ -234,7 +236,7 @@
     UIView *line = [[UIView alloc] init];
     line.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 13.0, *)) {
-        line.backgroundColor = [UIColor separatorColor];
+        line.backgroundColor = PXSeparatorColor();
     } else {
         line.backgroundColor = [UIColor lightGrayColor];
     }
@@ -252,14 +254,14 @@
     t.translatesAutoresizingMaskIntoConstraints = NO;
     t.text = title;
     t.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    t.textColor = [UIColor labelColor];
+    t.textColor = PXLabelColor();
     [row addSubview:t];
 
     UILabel *d = [[UILabel alloc] init];
     d.translatesAutoresizingMaskIntoConstraints = NO;
     d.text = desc;
     d.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    d.textColor = [UIColor secondaryLabelColor];
+    d.textColor = PXSecondaryLabelColor();
     d.numberOfLines = 0;
     [row addSubview:d];
 
@@ -268,7 +270,7 @@
     check.contentMode = UIViewContentModeScaleAspectFit;
     check.tintColor = [UIColor systemBlueColor];
     if (@available(iOS 13.0, *)) {
-        check.image = [[UIImage systemImageNamed:@"checkmark"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        check.image = [PXSystemImageNamed(@"checkmark") imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
     check.hidden = !selected;
     [row addSubview:check];
@@ -297,8 +299,15 @@
 - (void)modeRowTapped:(UITapGestureRecognizer *)g {
     NSInteger selected = g.view.tag;
 
-    [self.securitySettings setInteger:selected forKey:@"timeSpoofingMode"];
-    [self.securitySettings synchronize];
+    NSError *error = nil;
+    if (!PXWriteSecurityInteger(@"timeSpoofingMode", selected, &error)) {
+        NSInteger persisted = PXReadSecurityInteger(@"timeSpoofingMode", 0);
+        for (NSInteger i = 0; i < (NSInteger)self.modeChecks.count; i++) {
+            self.modeChecks[i].hidden = (i != persisted);
+        }
+        [self refreshDataDisplayForMode:persisted];
+        return;
+    }
     [self publishTimeSpoofSettingsChanged];
     if (selected == 2) [self resolvePinnedLocationTimeZone];
 
@@ -335,7 +344,7 @@
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
                             NSFontAttributeName: [UIFont systemFontOfSize:12],
-                            NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                            NSForegroundColorAttributeName: PXSecondaryLabelColor()
                         }]];
                 }
             }
@@ -374,7 +383,7 @@
                         initWithString:[NSString stringWithFormat:@"\nRecorded: %@", timeAgo]
                         attributes:@{
                             NSFontAttributeName: [UIFont systemFontOfSize:12],
-                            NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+                            NSForegroundColorAttributeName: PXSecondaryLabelColor()
                         }]];
                 }
             }

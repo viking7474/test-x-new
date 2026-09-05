@@ -136,8 +136,8 @@ static void *FindSymbol(const char *symbol) {
 // filtering. Keep the stable public opendir/readdir/closedir hooks there and
 // only add the optional private/deprecated entry points on newer runtimes.
 static BOOL PXJBOptionalDirectoryEntryHooksSupported(void) {
-    if (@available(iOS 14.0, *)) return YES;
-    return NO;
+    NSOperatingSystemVersion iOS14 = (NSOperatingSystemVersion){14, 0, 0};
+    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:iOS14];
 }
 
 static BOOL PXStrEqNoCase(const char *a, const char *b) {

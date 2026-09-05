@@ -1,3 +1,4 @@
+#import "PXUIKitCompat.h"
 // IPStatusViewController.m
 #import "IPStatusViewController.h"
 #import "IPStatusCacheManager.h"
@@ -22,7 +23,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"IP Status";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     self.collapsibleCards = [NSMutableDictionary dictionary];
     
     [self setupUI];
@@ -73,7 +74,7 @@
     [self.mainStackView addArrangedSubview:self.viewCachedButton];
     
     // Setup activity indicator
-    self.activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    self.activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
     self.activityIndicator.hidesWhenStopped = YES;
     [self.mainStackView addArrangedSubview:self.activityIndicator];
     
@@ -112,7 +113,7 @@
 - (void)setupCacheSelector {
     // Create a container view for the cache selector
     UIView *cacheSelectorContainer = [[UIView alloc] init];
-    cacheSelectorContainer.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    cacheSelectorContainer.backgroundColor = PXSecondarySystemBackgroundColor();
     cacheSelectorContainer.layer.cornerRadius = 12;
     cacheSelectorContainer.translatesAutoresizingMaskIntoConstraints = NO;
     [self.mainStackView addArrangedSubview:cacheSelectorContainer];
@@ -134,7 +135,7 @@
     self.cacheInfoLabel = [[UILabel alloc] init];
     self.cacheInfoLabel.text = @"Showing most recent IP check";
     self.cacheInfoLabel.font = [UIFont systemFontOfSize:12];
-    self.cacheInfoLabel.textColor = [UIColor secondaryLabelColor];
+    self.cacheInfoLabel.textColor = PXSecondaryLabelColor();
     self.cacheInfoLabel.textAlignment = NSTextAlignmentCenter;
     [cacheStack addArrangedSubview:self.cacheInfoLabel];
     
@@ -246,7 +247,7 @@
         noDataLabel.text = @"No cached IP data available. Tap 'Fetch IP Details' to get started.";
         noDataLabel.textAlignment = NSTextAlignmentCenter;
         noDataLabel.numberOfLines = 0;
-        noDataLabel.textColor = [UIColor secondaryLabelColor];
+        noDataLabel.textColor = PXSecondaryLabelColor();
         [self.mainStackView addArrangedSubview:noDataLabel];
     }
 }
@@ -649,7 +650,7 @@
                     for (NSDictionary *row in proxySecurityArr) {
                         UILabel *rowLabel = [[UILabel alloc] init];
                         rowLabel.font = [UIFont systemFontOfSize:15];
-                        rowLabel.textColor = [UIColor secondaryLabelColor];
+                        rowLabel.textColor = PXSecondaryLabelColor();
                         rowLabel.numberOfLines = 0;
                         rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                         [stack addArrangedSubview:rowLabel];
@@ -703,7 +704,7 @@
                     for (NSDictionary *row in blacklistArr) {
             UILabel *rowLabel = [[UILabel alloc] init];
                         rowLabel.font = [UIFont systemFontOfSize:15];
-            rowLabel.textColor = [UIColor secondaryLabelColor];
+            rowLabel.textColor = PXSecondaryLabelColor();
             rowLabel.numberOfLines = 0;
                         rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                                 [contentStack addArrangedSubview:rowLabel];
@@ -725,7 +726,7 @@
                                     UIView *contentView = cardInfo[@"contentView"];
                                     UIImageView *chevron = cardInfo[@"chevron"];
                                     contentView.hidden = YES;
-                                    chevron.image = [UIImage systemImageNamed:@"chevron.right"];
+                                    chevron.image = PXSystemImageNamed(@"chevron.right");
                                 }
                             } else {
                                 // If there's at least one "Yes", expand the card
@@ -734,7 +735,7 @@
                                     UIView *contentView = cardInfo[@"contentView"];
                                     UIImageView *chevron = cardInfo[@"chevron"];
                                     contentView.hidden = NO;
-                                    chevron.image = [UIImage systemImageNamed:@"chevron.down"];
+                                    chevron.image = PXSystemImageNamed(@"chevron.down");
                                 }
                             }
                         }
@@ -767,7 +768,7 @@
                     for (NSDictionary *row in asnArr) {
                         UILabel *rowLabel = [[UILabel alloc] init];
                         rowLabel.font = [UIFont systemFontOfSize:15];
-                        rowLabel.textColor = [UIColor secondaryLabelColor];
+                        rowLabel.textColor = PXSecondaryLabelColor();
                         rowLabel.numberOfLines = 0;
                         rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                         [stack addArrangedSubview:rowLabel];
@@ -803,7 +804,7 @@
                             for (NSDictionary *row in googleArr) {
                                 UILabel *rowLabel = [[UILabel alloc] init];
                                 rowLabel.font = [UIFont systemFontOfSize:15];
-                                rowLabel.textColor = [UIColor secondaryLabelColor];
+                                rowLabel.textColor = PXSecondaryLabelColor();
                                 rowLabel.numberOfLines = 0;
                                 rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                                 [contentStack addArrangedSubview:rowLabel];
@@ -825,7 +826,7 @@
                                     UIView *contentView = cardInfo[@"contentView"];
                                     UIImageView *chevron = cardInfo[@"chevron"];
                                     contentView.hidden = YES;
-                                    chevron.image = [UIImage systemImageNamed:@"chevron.right"];
+                                    chevron.image = PXSystemImageNamed(@"chevron.right");
                                 }
                             } else {
                                 // If there's at least one "Yes", expand the card
@@ -834,7 +835,7 @@
                                     UIView *contentView = cardInfo[@"contentView"];
                                     UIImageView *chevron = cardInfo[@"chevron"];
                                     contentView.hidden = NO;
-                                    chevron.image = [UIImage systemImageNamed:@"chevron.down"];
+                                    chevron.image = PXSystemImageNamed(@"chevron.down");
                                 }
                             }
                         }
@@ -886,7 +887,7 @@
                                     for (NSDictionary *row in historyArr) {
                                         UILabel *rowLabel = [[UILabel alloc] init];
                                         rowLabel.font = [UIFont systemFontOfSize:15];
-                                        rowLabel.textColor = [UIColor secondaryLabelColor];
+                                        rowLabel.textColor = PXSecondaryLabelColor();
                                         rowLabel.numberOfLines = 0;
                                         rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                                         [contentStack addArrangedSubview:rowLabel];
@@ -932,7 +933,7 @@
                         for (NSDictionary *row in dsArr) {
                             UILabel *rowLabel = [[UILabel alloc] init];
                             rowLabel.font = [UIFont systemFontOfSize:15];
-                            rowLabel.textColor = [UIColor secondaryLabelColor];
+                            rowLabel.textColor = PXSecondaryLabelColor();
                             rowLabel.numberOfLines = 0;
                             rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                                     [contentStack addArrangedSubview:rowLabel];
@@ -983,7 +984,7 @@
                     for (NSDictionary *row in locationArr) {
                         UILabel *rowLabel = [[UILabel alloc] init];
                         rowLabel.font = [UIFont systemFontOfSize:15];
-                        rowLabel.textColor = [UIColor secondaryLabelColor];
+                        rowLabel.textColor = PXSecondaryLabelColor();
                         rowLabel.numberOfLines = 0;
                         rowLabel.text = [NSString stringWithFormat:@"%@: %@", row[@"key"], row[@"value"]];
                         [stack addArrangedSubview:rowLabel];
@@ -996,7 +997,7 @@
 
 - (void)addInfoCardWithTitle:(NSString *)title dictionary:(NSDictionary *)dict keys:(NSArray *)keys {
     UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    card.backgroundColor = PXSecondarySystemBackgroundColor();
     card.layer.cornerRadius = 12;
     
     UIStackView *stack = [[UIStackView alloc] init];
@@ -1103,7 +1104,7 @@
         
         // Initially collapse the content
         contentView.hidden = YES;
-        chevronImageView.image = [UIImage systemImageNamed:@"chevron.right"];
+        chevronImageView.image = PXSystemImageNamed(@"chevron.right");
         
         // Add tap gesture recognizer to the header
         UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleCardExpansion:)];
@@ -1111,11 +1112,11 @@
         headerView.userInteractionEnabled = YES;
         
         // Add a visual indicator that the card is tappable
-        headerView.backgroundColor = [UIColor tertiarySystemBackgroundColor];
+        headerView.backgroundColor = PXTertiarySystemBackgroundColor();
         headerView.layer.cornerRadius = 8;
     } else {
         // For non-collapsible cards, just show the chevron as down
-        chevronImageView.image = [UIImage systemImageNamed:@"chevron.down"];
+        chevronImageView.image = PXSystemImageNamed(@"chevron.down");
     }
 }
 
@@ -1137,10 +1138,10 @@
     [UIView animateWithDuration:0.3 animations:^{
         if (contentView.hidden) {
             contentView.hidden = NO;
-            chevron.image = [UIImage systemImageNamed:@"chevron.down"];
+            chevron.image = PXSystemImageNamed(@"chevron.down");
         } else {
             contentView.hidden = YES;
-            chevron.image = [UIImage systemImageNamed:@"chevron.right"];
+            chevron.image = PXSystemImageNamed(@"chevron.right");
         }
     }];
 }

@@ -1,3 +1,4 @@
+#import "common/PXUIKitCompat.h"
 #import "ToolViewController.h"
 #import "IPStatusViewController.h"
 #import "UberOrderViewController.h"
@@ -437,7 +438,7 @@
     [super viewDidLoad];
     
     self.title = @"Network Tools";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.view.backgroundColor = PXSystemBackgroundColor();
     
     // Register for monitoring status changes 
     [[NSNotificationCenter defaultCenter] addObserver:self 
@@ -459,7 +460,7 @@
     self.navigationItem.leftBarButtonItem = doneButton;
     
     // Initialize table view
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:PXInsetGroupedTableViewStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
     self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -612,7 +613,7 @@
     // Add icon image view
     UIImageView *iconImageView = [[UIImageView alloc] initWithFrame:CGRectMake(20, 20, 40, 40)];
     iconImageView.contentMode = UIViewContentModeScaleAspectFit;
-    iconImageView.image = [UIImage systemImageNamed:@"shield.checkerboard"];
+    iconImageView.image = PXSystemImageNamed(@"shield.checkerboard");
     iconImageView.tintColor = [UIColor whiteColor];
     [cardContainer addSubview:iconImageView];
     
@@ -634,7 +635,7 @@
     // Add arrow indicator
     UIImageView *arrowImageView = [[UIImageView alloc] initWithFrame:CGRectMake(cardContainer.bounds.size.width - 35, cardContainer.bounds.size.height/2 - 15, 24, 24)];
     arrowImageView.contentMode = UIViewContentModeScaleAspectFit;
-    arrowImageView.image = [UIImage systemImageNamed:@"chevron.right.circle.fill"];
+    arrowImageView.image = PXSystemImageNamed(@"chevron.right.circle.fill");
     arrowImageView.tintColor = [UIColor whiteColor];
     [cardContainer addSubview:arrowImageView];
     
@@ -676,7 +677,7 @@
     // Add icon image view
     UIImageView *iconImageView = [[UIImageView alloc] initWithFrame:CGRectMake(20, 20, 40, 40)];
     iconImageView.contentMode = UIViewContentModeScaleAspectFit;
-    iconImageView.image = [UIImage systemImageNamed:@"qrcode"];
+    iconImageView.image = PXSystemImageNamed(@"qrcode");
     iconImageView.tintColor = [UIColor whiteColor];
     [cardContainer addSubview:iconImageView];
     
@@ -762,7 +763,7 @@
     // Add arrow indicator
     UIImageView *arrowImageView = [[UIImageView alloc] initWithFrame:CGRectMake(cardContainer.bounds.size.width - 35, cardContainer.bounds.size.height/2 - 15, 24, 24)];
     arrowImageView.contentMode = UIViewContentModeScaleAspectFit;
-    arrowImageView.image = [UIImage systemImageNamed:@"chevron.right.circle.fill"];
+    arrowImageView.image = PXSystemImageNamed(@"chevron.right.circle.fill");
     arrowImageView.tintColor = [UIColor whiteColor];
     [cardContainer addSubview:arrowImageView];
     
@@ -804,7 +805,7 @@
     // Add icon image view
     UIImageView *iconImageView = [[UIImageView alloc] initWithFrame:CGRectMake(20, 20, 40, 40)];
     iconImageView.contentMode = UIViewContentModeScaleAspectFit;
-    iconImageView.image = [UIImage systemImageNamed:@"bag"];
+    iconImageView.image = PXSystemImageNamed(@"bag");
     iconImageView.tintColor = [UIColor whiteColor];
     [cardContainer addSubview:iconImageView];
     
@@ -865,7 +866,7 @@
         
         // Host input container with inline label + field
         UIView *hostContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 12, cell.contentView.bounds.size.width - 30, 36)];
-        hostContainer.backgroundColor = [UIColor systemGray6Color];
+        hostContainer.backgroundColor = PXSystemGray6Color();
         hostContainer.layer.cornerRadius = 10;
         [self.pingView addSubview:hostContainer];
         
@@ -899,14 +900,14 @@
         [self.pingView addSubview:self.pingStartButton];
         
         // Activity indicator
-        self.pingActivityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        self.pingActivityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
         self.pingActivityIndicator.center = CGPointMake(self.pingStartButton.frame.origin.x + 25, self.pingStartButton.center.y);
         self.pingActivityIndicator.hidesWhenStopped = YES;
         [self.pingView addSubview:self.pingActivityIndicator];
         
         // Results container
         UIView *resultsContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 102, cell.contentView.bounds.size.width - 30, 70)];
-        resultsContainer.backgroundColor = [UIColor systemGray6Color];
+        resultsContainer.backgroundColor = PXSystemGray6Color();
         resultsContainer.layer.cornerRadius = 10;
         [self.pingView addSubview:resultsContainer];
         
@@ -920,7 +921,7 @@
         
         // Divider
         UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(10, 38, resultsContainer.bounds.size.width - 20, 1)];
-        divider.backgroundColor = [UIColor separatorColor];
+        divider.backgroundColor = PXSeparatorColor();
         [resultsContainer addSubview:divider];
         
         // Result label
@@ -953,21 +954,21 @@
         [self.speedTestView addSubview:self.speedTestStartButton];
         
         // Activity indicator
-        self.speedTestActivityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        self.speedTestActivityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
         self.speedTestActivityIndicator.center = CGPointMake(self.speedTestStartButton.frame.origin.x + 25, self.speedTestStartButton.center.y);
         self.speedTestActivityIndicator.hidesWhenStopped = YES;
         [self.speedTestView addSubview:self.speedTestActivityIndicator];
         
         // Results container
         UIView *resultsContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 57, cell.contentView.bounds.size.width - 30, 115)];
-        resultsContainer.backgroundColor = [UIColor systemGray6Color];
+        resultsContainer.backgroundColor = PXSystemGray6Color();
         resultsContainer.layer.cornerRadius = 10;
         [self.speedTestView addSubview:resultsContainer];
         
         // Progress view
         self.speedTestProgressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
         self.speedTestProgressView.frame = CGRectMake(15, 15, resultsContainer.bounds.size.width - 30, 10);
-        self.speedTestProgressView.trackTintColor = [UIColor systemGray5Color];
+        self.speedTestProgressView.trackTintColor = PXSystemGray5Color();
         self.speedTestProgressView.progressTintColor = [UIColor systemGreenColor];
         self.speedTestProgressView.layer.cornerRadius = 2;
         self.speedTestProgressView.clipsToBounds = YES; 
@@ -985,7 +986,7 @@
         
         // Divider
         UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(15, 65, resultsContainer.bounds.size.width - 30, 1)];
-        divider.backgroundColor = [UIColor separatorColor];
+        divider.backgroundColor = PXSeparatorColor();
         [resultsContainer addSubview:divider];
         
         // Live speed results label
@@ -1018,9 +1019,9 @@
     [self.pingStartButton addTarget:self action:@selector(cancelPingTest) forControlEvents:UIControlEventTouchUpInside];
     [self.pingActivityIndicator startAnimating];
     self.pingResultLabel.text = @"Testing...";
-    self.pingResultLabel.textColor = [UIColor labelColor];
+    self.pingResultLabel.textColor = PXLabelColor();
     self.pingLiveLabel.text = @"";
-    self.pingLiveLabel.textColor = [UIColor labelColor];
+    self.pingLiveLabel.textColor = PXLabelColor();
     
     // Create and start ping test
     self.pingTest = [[SimplePingHelper alloc] initWithHost:host];
@@ -1101,7 +1102,7 @@
     // Reset UI
     [self.pingActivityIndicator stopAnimating];
     self.pingResultLabel.text = @"Cancelled";
-    self.pingResultLabel.textColor = [UIColor labelColor];
+    self.pingResultLabel.textColor = PXLabelColor();
     self.pingLiveLabel.text = @"";
     
     [self.pingStartButton setTitle:@"Start Ping Test" forState:UIControlStateNormal];
@@ -1120,9 +1121,9 @@
     self.speedTestProgressView.hidden = NO;
     self.speedTestProgressView.progress = 0.0;
     self.speedTestResultLabel.text = @"Initializing...";
-    self.speedTestResultLabel.textColor = [UIColor labelColor];
+    self.speedTestResultLabel.textColor = PXLabelColor();
     self.speedLiveLabel.text = @"";
-    self.speedLiveLabel.textColor = [UIColor labelColor];
+    self.speedLiveLabel.textColor = PXLabelColor();
     
     // Create and start speed test
     self.speedTest = [[NetworkSpeedTest alloc] init];
@@ -1206,7 +1207,7 @@
     [self.speedTestActivityIndicator stopAnimating];
     self.speedTestProgressView.hidden = YES;
     self.speedTestResultLabel.text = @"Cancelled";
-    self.speedTestResultLabel.textColor = [UIColor labelColor];
+    self.speedTestResultLabel.textColor = PXLabelColor();
     self.speedLiveLabel.text = @"";
     
     [self.speedTestStartButton setTitle:@"Start Speed Test" forState:UIControlStateNormal];
