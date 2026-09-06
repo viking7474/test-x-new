@@ -3,7 +3,6 @@
 #import "StorageManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXNativeHookCoordinator.h"
-#import "PXNativeFilesystemReentry.h"
 #import <Foundation/Foundation.h>
 #import <sys/mount.h>
 #import <dlfcn.h>
@@ -697,7 +696,6 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 %hook NSFileManager
 
 - (NSDictionary *)attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
-    if (PXNativeFilesystemCriticalIsActive()) return nil;
     NSDictionary *originalAttributes = %orig;
     
     if (!originalAttributes || !shouldApplyStorageSpoofing()) {
@@ -811,13 +809,6 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Hook NSURL's getResourceValue:forKey:error: method for iOS 15+ compatibility
 - (BOOL)getResourceValue:(id *)value forKey:(NSURLResourceKey)key error:(NSError **)error {
-    // Do not call back into CoreServices resource metadata while a tweak-owned
-    // statfs/getfsstat/getmntinfo callback is active. CoreServices may already
-    // hold MountInfo's non-recursive unfair lock on this same thread.
-    if (PXNativeFilesystemCriticalIsActive()) {
-        if (value) *value = nil;
-        return NO;
-    }
     BOOL result = %orig;
     
     if (!result || !value || !*value || !key || !shouldApplyStorageSpoofing()) {
@@ -873,11 +864,6 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Hook NSURL's resourceValuesForKeys:error: method for iOS 15+ compatibility
 - (NSDictionary<NSURLResourceKey, id> *)resourceValuesForKeys:(NSArray<NSURLResourceKey> *)keys error:(NSError **)error {
-    // Emergency reentry brake for CoreServices' MountInfo critical path. Returning
-    // nil here is safer than calling the original resource resolver recursively;
-    // normal calls are unaffected because the TLS scope is thread-local and only
-    // active inside tweak-owned native filesystem callbacks.
-    if (PXNativeFilesystemCriticalIsActive()) return nil;
     NSDictionary<NSURLResourceKey, id> *originalValues = %orig;
     
     if (!originalValues || !keys || !shouldApplyStorageSpoofing()) {
