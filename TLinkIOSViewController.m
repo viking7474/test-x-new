@@ -6265,14 +6265,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (UIView *)dashboardAppPickerHeaderView {
     CGFloat width = CGRectGetWidth(self.view.bounds);
     if (width < 1.0) width = CGRectGetWidth([UIScreen mainScreen].bounds);
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, width, 122.0)];
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, width, 96.0)];
     header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     header.backgroundColor = [UIColor clearColor];
 
     UIView *card = [[UIView alloc] init];
     card.translatesAutoresizingMaskIntoConstraints = NO;
     card.backgroundColor = PXAppPickerCardColor();
-    card.layer.cornerRadius = 16.0;
+    card.layer.cornerRadius = 14.0;
     card.layer.borderWidth = 1.0;
     UIColor *border = nil;
     if (@available(iOS 13.0, *)) border = [[UIColor systemBlueColor] colorWithAlphaComponent:0.18];
@@ -6283,7 +6283,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
     UIView *iconBackground = [[UIView alloc] init];
     iconBackground.translatesAutoresizingMaskIntoConstraints = NO;
-    iconBackground.layer.cornerRadius = 14.0;
+    iconBackground.layer.cornerRadius = 11.0;
     iconBackground.layer.masksToBounds = YES;
     if (@available(iOS 13.0, *)) iconBackground.backgroundColor = PXSystemIndigoColor();
     else iconBackground.backgroundColor = [UIColor colorWithRed:0.28 green:0.35 blue:0.95 alpha:1.0];
@@ -6310,18 +6310,18 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     titleLabel.text = @"Tổng ứng dụng";
-    titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightSemibold];
+    titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
     [card addSubview:titleLabel];
 
     self.appPickerSelectionSummaryLabel = [[UILabel alloc] init];
     self.appPickerSelectionSummaryLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appPickerSelectionSummaryLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightRegular];
+    self.appPickerSelectionSummaryLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
     self.appPickerSelectionSummaryLabel.textColor = PXAppPickerSecondaryTextColor();
     [card addSubview:self.appPickerSelectionSummaryLabel];
 
     UIView *countPill = [[UIView alloc] init];
     countPill.translatesAutoresizingMaskIntoConstraints = NO;
-    countPill.layer.cornerRadius = 18.0;
+    countPill.layer.cornerRadius = 15.0;
     if (@available(iOS 13.0, *)) countPill.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.11];
     else countPill.backgroundColor = [[UIColor blueColor] colorWithAlphaComponent:0.10];
     [card addSubview:countPill];
@@ -6329,44 +6329,44 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.appPickerSelectionCountLabel = [[UILabel alloc] init];
     self.appPickerSelectionCountLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.appPickerSelectionCountLabel.textAlignment = NSTextAlignmentCenter;
-    self.appPickerSelectionCountLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+    self.appPickerSelectionCountLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
     if (@available(iOS 13.0, *)) self.appPickerSelectionCountLabel.textColor = [UIColor systemBlueColor];
     else self.appPickerSelectionCountLabel.textColor = [UIColor blueColor];
     [countPill addSubview:self.appPickerSelectionCountLabel];
 
     [NSLayoutConstraint activateConstraints:@[
-        [card.topAnchor constraintEqualToAnchor:header.topAnchor constant:8.0],
+        [card.topAnchor constraintEqualToAnchor:header.topAnchor constant:6.0],
         [card.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:16.0],
         [card.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-16.0],
-        [card.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-10.0],
+        [card.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-8.0],
 
-        [iconBackground.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16.0],
+        [iconBackground.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14.0],
         [iconBackground.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
-        [iconBackground.widthAnchor constraintEqualToConstant:60.0],
-        [iconBackground.heightAnchor constraintEqualToConstant:60.0],
+        [iconBackground.widthAnchor constraintEqualToConstant:46.0],
+        [iconBackground.heightAnchor constraintEqualToConstant:46.0],
 
         [gridIcon.centerXAnchor constraintEqualToAnchor:iconBackground.centerXAnchor],
         [gridIcon.centerYAnchor constraintEqualToAnchor:iconBackground.centerYAnchor],
-        [gridIcon.widthAnchor constraintEqualToConstant:34.0],
-        [gridIcon.heightAnchor constraintEqualToConstant:34.0],
+        [gridIcon.widthAnchor constraintEqualToConstant:26.0],
+        [gridIcon.heightAnchor constraintEqualToConstant:26.0],
 
         [fallbackGrid.topAnchor constraintEqualToAnchor:iconBackground.topAnchor],
         [fallbackGrid.leadingAnchor constraintEqualToAnchor:iconBackground.leadingAnchor],
         [fallbackGrid.trailingAnchor constraintEqualToAnchor:iconBackground.trailingAnchor],
         [fallbackGrid.bottomAnchor constraintEqualToAnchor:iconBackground.bottomAnchor],
 
-        [titleLabel.leadingAnchor constraintEqualToAnchor:iconBackground.trailingAnchor constant:16.0],
-        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:countPill.leadingAnchor constant:-12.0],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:iconBackground.trailingAnchor constant:12.0],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:countPill.leadingAnchor constant:-10.0],
         [titleLabel.bottomAnchor constraintEqualToAnchor:card.centerYAnchor constant:-2.0],
 
         [self.appPickerSelectionSummaryLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
-        [self.appPickerSelectionSummaryLabel.trailingAnchor constraintLessThanOrEqualToAnchor:countPill.leadingAnchor constant:-12.0],
+        [self.appPickerSelectionSummaryLabel.trailingAnchor constraintLessThanOrEqualToAnchor:countPill.leadingAnchor constant:-10.0],
         [self.appPickerSelectionSummaryLabel.topAnchor constraintEqualToAnchor:card.centerYAnchor constant:4.0],
 
-        [countPill.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16.0],
+        [countPill.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14.0],
         [countPill.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
-        [countPill.heightAnchor constraintEqualToConstant:36.0],
-        [countPill.widthAnchor constraintGreaterThanOrEqualToConstant:76.0],
+        [countPill.heightAnchor constraintEqualToConstant:30.0],
+        [countPill.widthAnchor constraintGreaterThanOrEqualToConstant:64.0],
 
         [self.appPickerSelectionCountLabel.topAnchor constraintEqualToAnchor:countPill.topAnchor],
         [self.appPickerSelectionCountLabel.leadingAnchor constraintEqualToAnchor:countPill.leadingAnchor constant:12.0],
@@ -6451,8 +6451,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.installedAppsTableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.installedAppsTableView.backgroundColor = PXAppPickerBackgroundColor();
     self.installedAppsTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    self.installedAppsTableView.rowHeight = 98.0;
-    self.installedAppsTableView.estimatedRowHeight = 98.0;
+    self.installedAppsTableView.rowHeight = 68.0;
+    self.installedAppsTableView.estimatedRowHeight = 68.0;
     self.installedAppsTableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
     self.installedAppsTableView.showsVerticalScrollIndicator = NO;
     self.installedAppsTableView.tableFooterView = [[UIView alloc] initWithFrame:CGRectZero];

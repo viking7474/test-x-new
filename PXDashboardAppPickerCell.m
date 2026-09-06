@@ -36,7 +36,7 @@ UIColor *PXAppPickerBorderColor(void) {
     self.cardView = [[UIView alloc] init];
     self.cardView.translatesAutoresizingMaskIntoConstraints = NO;
     self.cardView.backgroundColor = PXAppPickerCardColor();
-    self.cardView.layer.cornerRadius = 15.0;
+    self.cardView.layer.cornerRadius = 13.0;
     self.cardView.layer.borderWidth = 0.5;
     self.cardView.layer.borderColor = PXAppPickerBorderColor().CGColor;
     self.cardView.layer.masksToBounds = YES;
@@ -45,7 +45,7 @@ UIColor *PXAppPickerBorderColor(void) {
     self.appIconView = [[UIImageView alloc] init];
     self.appIconView.translatesAutoresizingMaskIntoConstraints = NO;
     self.appIconView.contentMode = UIViewContentModeScaleAspectFill;
-    self.appIconView.layer.cornerRadius = 12.0;
+    self.appIconView.layer.cornerRadius = 9.0;
     self.appIconView.layer.masksToBounds = YES;
     if (@available(iOS 13.0, *)) {
         self.appIconView.backgroundColor = PXTertiarySystemFillColor();
@@ -58,7 +58,7 @@ UIColor *PXAppPickerBorderColor(void) {
 
     self.appNameLabel = [[UILabel alloc] init];
     self.appNameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appNameLabel.font = WXScaledFont(17.0, UIFontWeightSemibold);
+    self.appNameLabel.font = WXScaledFont(16.0, UIFontWeightSemibold);
     self.appNameLabel.adjustsFontForContentSizeCategory = YES;
     self.appNameLabel.numberOfLines = 1;
     self.appNameLabel.adjustsFontSizeToFitWidth = YES;
@@ -67,7 +67,7 @@ UIColor *PXAppPickerBorderColor(void) {
 
     self.appDetailLabel = [[UILabel alloc] init];
     self.appDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appDetailLabel.font = WXScaledFont(13.5, UIFontWeightRegular);
+    self.appDetailLabel.font = WXScaledFont(12.5, UIFontWeightRegular);
     self.appDetailLabel.adjustsFontForContentSizeCategory = YES;
     self.appDetailLabel.textColor = PXAppPickerSecondaryTextColor();
     self.appDetailLabel.numberOfLines = 1;
@@ -77,7 +77,7 @@ UIColor *PXAppPickerBorderColor(void) {
 
     self.selectionCircleView = [[UIView alloc] init];
     self.selectionCircleView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.selectionCircleView.layer.cornerRadius = 15.0;
+    self.selectionCircleView.layer.cornerRadius = 12.0;
     self.selectionCircleView.layer.borderWidth = 2.0;
     self.selectionCircleView.userInteractionEnabled = NO;
     [self.cardView addSubview:self.selectionCircleView];
@@ -86,38 +86,38 @@ UIColor *PXAppPickerBorderColor(void) {
     self.selectionCheckLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.selectionCheckLabel.text = @"✓";
     self.selectionCheckLabel.textAlignment = NSTextAlignmentCenter;
-    self.selectionCheckLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
+    self.selectionCheckLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
     self.selectionCheckLabel.textColor = [UIColor whiteColor];
     self.selectionCheckLabel.userInteractionEnabled = NO;
     [self.selectionCircleView addSubview:self.selectionCheckLabel];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.cardView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:5.0],
+        [self.cardView.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4.0],
         [self.cardView.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16.0],
         [self.cardView.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16.0],
-        [self.cardView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-5.0],
+        [self.cardView.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0],
 
         [self.appIconView.leadingAnchor constraintEqualToAnchor:self.cardView.leadingAnchor constant:16.0],
         [self.appIconView.centerYAnchor constraintEqualToAnchor:self.cardView.centerYAnchor],
-        [self.appIconView.widthAnchor constraintEqualToConstant:54.0],
-        [self.appIconView.heightAnchor constraintEqualToConstant:54.0],
+        [self.appIconView.widthAnchor constraintEqualToConstant:40.0],
+        [self.appIconView.heightAnchor constraintEqualToConstant:40.0],
 
         [self.selectionCircleView.trailingAnchor constraintEqualToAnchor:self.cardView.trailingAnchor constant:-16.0],
         [self.selectionCircleView.centerYAnchor constraintEqualToAnchor:self.cardView.centerYAnchor],
-        [self.selectionCircleView.widthAnchor constraintEqualToConstant:30.0],
-        [self.selectionCircleView.heightAnchor constraintEqualToConstant:30.0],
+        [self.selectionCircleView.widthAnchor constraintEqualToConstant:24.0],
+        [self.selectionCircleView.heightAnchor constraintEqualToConstant:24.0],
 
         [self.selectionCheckLabel.topAnchor constraintEqualToAnchor:self.selectionCircleView.topAnchor],
         [self.selectionCheckLabel.leadingAnchor constraintEqualToAnchor:self.selectionCircleView.leadingAnchor],
         [self.selectionCheckLabel.trailingAnchor constraintEqualToAnchor:self.selectionCircleView.trailingAnchor],
         [self.selectionCheckLabel.bottomAnchor constraintEqualToAnchor:self.selectionCircleView.bottomAnchor constant:-1.0],
 
-        [self.appNameLabel.leadingAnchor constraintEqualToAnchor:self.appIconView.trailingAnchor constant:16.0],
-        [self.appNameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.selectionCircleView.leadingAnchor constant:-14.0],
+        [self.appNameLabel.leadingAnchor constraintEqualToAnchor:self.appIconView.trailingAnchor constant:12.0],
+        [self.appNameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.selectionCircleView.leadingAnchor constant:-12.0],
         [self.appNameLabel.bottomAnchor constraintEqualToAnchor:self.cardView.centerYAnchor constant:-2.0],
 
         [self.appDetailLabel.leadingAnchor constraintEqualToAnchor:self.appNameLabel.leadingAnchor],
-        [self.appDetailLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.selectionCircleView.leadingAnchor constant:-14.0],
+        [self.appDetailLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.selectionCircleView.leadingAnchor constant:-12.0],
         [self.appDetailLabel.topAnchor constraintEqualToAnchor:self.cardView.centerYAnchor constant:4.0]
     ]];
 
