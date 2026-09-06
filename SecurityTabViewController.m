@@ -64,6 +64,10 @@
 
 @property (nonatomic, strong) NSLayoutConstraint *webCompatIOSRangeWarningHeightConstraint;
 - (void)setupIPMonitorControl:(UIView *)contentView;
+- (void)setupCompactSecurityRoot;
+- (UIView *)securityCompactCardWithRows:(NSArray<UIView *> *)rows;
+- (UIView *)securityCompactRowWithTitle:(NSString *)title subtitle:(NSString *)subtitle icon:(NSString *)icon color:(UIColor *)color trailingSwitch:(UISwitch *)toggle value:(NSString *)value selector:(SEL)selector;
+- (UISwitch *)securityCompactSwitchOn:(BOOL)on selector:(SEL)selector destructive:(BOOL)destructive;
 // Any private properties go here
 @property (nonatomic, strong) UILabel *copyrightLabel;
 @property (nonatomic, strong) NSCache *countryCache;
@@ -75,6 +79,10 @@
 @property (nonatomic, strong) UIStackView *cardsStack;
 @property (nonatomic, strong) UILabel *heroCountLabel;
 @property (nonatomic, strong) UILabel *heroSubtitleLabel;
+@property (nonatomic, strong) UILabel *compactConnectionTypeValueLabel;
+@property (nonatomic, strong) UILabel *compactIPStatusValueLabel;
+@property (nonatomic, strong) UILabel *compactTimeModeValueLabel;
+@property (nonatomic, strong) UILabel *compactDeepCleanValueLabel;
 @property (nonatomic, strong) UISegmentedControl *timeSpoofingModeSegment;
 
 @end
@@ -994,6 +1002,11 @@
     [domainSettings loadSettings];
     [self.domainBlockingToggleSwitch setOn:domainSettings.isEnabled animated:NO];
 
+    self.compactConnectionTypeValueLabel.text = [self securityConnectionTypeSummary];
+    self.compactIPStatusValueLabel.text = [self securityIPSummary];
+    self.compactTimeModeValueLabel.text = [self securityTimeModeSummary];
+    self.compactDeepCleanValueLabel.text = deepEnabled ? @"Deep" : @"Full";
+
     [self refreshFixVersionAppsButtonTitle];
     [self updateSecurityHeroCount];
 }
@@ -1177,44 +1190,14 @@
     self.cardsStack = cardsStack;
     [NSLayoutConstraint activateConstraints:@[
         [cardsStack.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:16],
-        [cardsStack.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:20],
-        [cardsStack.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-20],
+        [cardsStack.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:16],
+        [cardsStack.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-16],
         [cardsStack.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-16]
     ]];
 
-    // Hero summary header
-    [self.cardsStack addArrangedSubview:[self buildSecurityHeroView]];
-
-    // Section 1 — Bypass phát hiện
-    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"BYPASS PHÁT HIỆN"]];
-    [self setupJailbreakDetectionControl:contentView];
-    [self setupVPNDetectionBypassControl:contentView];
-    [self setupCanvasFingerprintingControl:contentView];
-    [self setupAlertChecksSection:contentView];
-
-    // Section 2 — Mạng & vị trí
-    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"MẠNG & VỊ TRÍ"]];
-    [self setupNetworkDataSpoofControl:contentView];
-    [self setupNetworkConnectionTypeControl:contentView];
-    [self setupIPMonitorControl:contentView];
-
-    // Section 3 — Spoof thiết bị & app
-    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"SPOOF THIẾT BỊ & APP"]];
-    [self setupDeviceSpecificSpoofingControl:contentView];
-    [self setupAppVersionSpoofingControl:contentView];
-    [self setupTimeSpoofingControl:contentView];
-    [self setupFixVersionControl:contentView];
-
-    // Section 4 — Dữ liệu & Keychain
-    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"DỮ LIỆU & KEYCHAIN"]];
-    [self setupDeepCleanControl:contentView];
-    [self setupSystemKeychainWipeControl:contentView];
-    [self setupDomainBlockingControl:contentView];
-
-    // Section 5 — Giao diện
-    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"GIAO DIỆN"]];
-    [self setupMatrixControl:contentView];
-    [self setupProfileIndicatorControl:contentView];
+    // Compact iOS-native root. Complex controls live in their existing detail screens;
+    // root stays focused on status, quick toggles, and navigation.
+    [self setupCompactSecurityRoot];
 
     // Footer
     [self setupCopyrightLabel:contentView];
@@ -5443,6 +5426,257 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [generator impactOccurred];
 }
 
+#pragma mark - Compact Security Root
+
+- (UISwitch *)securityCompactSwitchOn:(BOOL)on selector:(SEL)selector destructive:(BOOL)destructive {
+    UISwitch *toggle = [[UISwitch alloc] init];
+    toggle.translatesAutoresizingMaskIntoConstraints = NO;
+    toggle.onTintColor = destructive ? [UIColor systemRedColor] : [UIColor systemGreenColor];
+    [toggle setOn:on animated:NO];
+    if (selector) {
+        [toggle addTarget:self action:selector forControlEvents:UIControlEventValueChanged];
+    }
+    return toggle;
+}
+
+- (UIView *)securityCompactRowWithTitle:(NSString *)title
+                               subtitle:(NSString *)subtitle
+                                   icon:(NSString *)icon
+                                  color:(UIColor *)color
+                         trailingSwitch:(UISwitch *)toggle
+                                  value:(NSString *)value
+                               selector:(SEL)selector {
+    UIControl *row = [[UIControl alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    row.backgroundColor = [UIColor clearColor];
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:(subtitle.length ? 62.0 : 54.0)].active = YES;
+    if (selector) {
+        [row addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
+    }
+
+    UIView *chip = [self securityIconChip:icon color:color ?: [UIColor systemBlueColor]];
+    [row addSubview:chip];
+
+    UIStackView *labels = [[UIStackView alloc] init];
+    labels.axis = UILayoutConstraintAxisVertical;
+    labels.alignment = UIStackViewAlignmentFill;
+    labels.spacing = 2.0;
+    labels.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:labels];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    titleLabel.textColor = PXLabelColor();
+    titleLabel.numberOfLines = 1;
+    titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [labels addArrangedSubview:titleLabel];
+
+    if (subtitle.length) {
+        UILabel *subtitleLabel = [[UILabel alloc] init];
+        subtitleLabel.text = subtitle;
+        subtitleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        subtitleLabel.textColor = PXSecondaryLabelColor();
+        subtitleLabel.numberOfLines = 1;
+        subtitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        if ([title isEqualToString:@"IP Status"]) self.compactIPStatusValueLabel = subtitleLabel;
+        [labels addArrangedSubview:subtitleLabel];
+    }
+
+    UIView *trailing = nil;
+    if (toggle) {
+        trailing = toggle;
+        [row addSubview:toggle];
+    } else {
+        UIStackView *trailingStack = [[UIStackView alloc] init];
+        trailingStack.axis = UILayoutConstraintAxisHorizontal;
+        trailingStack.alignment = UIStackViewAlignmentCenter;
+        trailingStack.spacing = 6.0;
+        trailingStack.translatesAutoresizingMaskIntoConstraints = NO;
+
+        if (value.length) {
+            UILabel *valueLabel = [[UILabel alloc] init];
+            valueLabel.text = value;
+            valueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
+            valueLabel.textColor = PXSecondaryLabelColor();
+            valueLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+            valueLabel.numberOfLines = 1;
+            [valueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+            if ([title isEqualToString:@"Connection Type"]) self.compactConnectionTypeValueLabel = valueLabel;
+            else if ([title isEqualToString:@"Time Spoofing"]) self.compactTimeModeValueLabel = valueLabel;
+            else if ([title isEqualToString:@"Clear Data Mode"]) self.compactDeepCleanValueLabel = valueLabel;
+            [trailingStack addArrangedSubview:valueLabel];
+        }
+
+        if (selector) {
+            UILabel *chevron = [[UILabel alloc] init];
+            chevron.text = @"›";
+            chevron.font = [UIFont systemFontOfSize:22 weight:UIFontWeightRegular];
+            chevron.textColor = PXTertiaryLabelColor();
+            [trailingStack addArrangedSubview:chevron];
+        }
+        trailing = trailingStack;
+        [row addSubview:trailingStack];
+    }
+
+    [labels setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [labels setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:@[
+        [chip.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:14],
+        [chip.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [labels.leadingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:12],
+        [labels.centerYAnchor constraintEqualToAnchor:row.centerYAnchor]
+    ]];
+
+    if (trailing) {
+        [constraints addObject:[trailing.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-14]];
+        [constraints addObject:[trailing.centerYAnchor constraintEqualToAnchor:row.centerYAnchor]];
+        [constraints addObject:[labels.trailingAnchor constraintLessThanOrEqualToAnchor:trailing.leadingAnchor constant:-10]];
+    } else {
+        [constraints addObject:[labels.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-14]];
+    }
+    [NSLayoutConstraint activateConstraints:constraints];
+    return row;
+}
+
+- (UIView *)securityCompactCardWithRows:(NSArray<UIView *> *)rows {
+    UIView *card = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.backgroundColor = PXSystemBackgroundColor();
+    card.layer.cornerRadius = 16.0;
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.035;
+    card.layer.shadowRadius = 4.0;
+    card.layer.shadowOffset = CGSizeMake(0, 1);
+    card.layer.masksToBounds = NO;
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentFill;
+    stack.spacing = 0;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+
+    [rows enumerateObjectsUsingBlock:^(UIView *row, NSUInteger idx, BOOL *stop) {
+        [stack addArrangedSubview:row];
+        if (idx + 1 < rows.count) {
+            UIView *separator = [[UIView alloc] init];
+            separator.translatesAutoresizingMaskIntoConstraints = NO;
+            separator.backgroundColor = [PXSeparatorColor() colorWithAlphaComponent:0.55];
+            [separator.heightAnchor constraintEqualToConstant:0.5].active = YES;
+            [stack addArrangedSubview:separator];
+        }
+    }];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor]
+    ]];
+    return card;
+}
+
+- (NSString *)securityConnectionTypeSummary {
+    NSInteger idx = [self.securitySettings integerForKey:@"networkConnectionType"];
+    NSArray<NSString *> *names = @[@"Auto", @"Wi-Fi", @"Cellular", @"None"];
+    if (idx < 0 || idx >= (NSInteger)names.count) idx = 0;
+    return names[(NSUInteger)idx];
+}
+
+- (NSString *)securityIPSummary {
+    NSDictionary *ipData = [IPStatusCacheManager getPublicIPData];
+    NSString *ip = [ipData[@"publicIP"] isKindOfClass:[NSString class]] ? ipData[@"publicIP"] : nil;
+    NSString *flag = [ipData[@"ipFlagEmoji"] isKindOfClass:[NSString class]] ? ipData[@"ipFlagEmoji"] : nil;
+    if (!ip.length) return @"Check now";
+    return flag.length ? [NSString stringWithFormat:@"%@ %@", flag, ip] : ip;
+}
+
+- (NSString *)securityTimeModeSummary {
+    NSInteger mode = [self.securitySettings integerForKey:@"timeSpoofingMode"];
+    if (mode == 1) return @"IP";
+    if (mode == 2) return @"Location";
+    return @"Off";
+}
+
+- (void)showCompactSetupChecklist {
+    NSString *message = @"1. Tắt Bluetooth\n2. Đăng xuất Apple ID\n3. Không cho Notification / Tracking\n4. Đặt Brightness về Auto\n5. Gỡ Touch ID & Passcode\n6. Clean var từ RootHide app";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Setup checklist"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)setupCompactSecurityRoot {
+    [self.cardsStack addArrangedSubview:[self buildSecurityHeroView]];
+
+    self.jailbreakDetectionToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"jailbreakDetectionEnabled", NO) selector:@selector(jailbreakDetectionToggleChanged:) destructive:NO];
+    self.vpnDetectionToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"vpnDetectionBypassEnabled", NO) selector:@selector(vpnDetectionToggleChanged:) destructive:NO];
+    self.canvasFingerprintingToggleSwitch = [self securityCompactSwitchOn:[self currentCanvasFingerprintingEnabled] selector:@selector(canvasFingerprintingToggleSwitchChanged:) destructive:NO];
+
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"BYPASS PHÁT HIỆN"]];
+    UIView *bypassCard = [self securityCompactCardWithRows:@[
+        [self securityCompactRowWithTitle:@"Jailbreak Detection" subtitle:@"Ẩn dấu hiệu jailbreak" icon:@"lock.shield" color:[UIColor systemBlueColor] trailingSwitch:self.jailbreakDetectionToggleSwitch value:nil selector:@selector(openJailbreakDetail)],
+        [self securityCompactRowWithTitle:@"VPN / Proxy Detection" subtitle:@"Bypass kiểm tra VPN và proxy" icon:@"shield.lefthalf.filled" color:[UIColor systemBlueColor] trailingSwitch:self.vpnDetectionToggleSwitch value:nil selector:@selector(openVPNDetail)],
+        [self securityCompactRowWithTitle:@"Canvas Fingerprint" subtitle:@"Nhiễu Canvas API · chạm để cấu hình" icon:@"paintbrush.pointed" color:[UIColor systemPurpleColor] trailingSwitch:self.canvasFingerprintingToggleSwitch value:nil selector:@selector(openCanvasDetail)],
+        [self securityCompactRowWithTitle:@"Setup checklist" subtitle:@"Bluetooth · Apple ID · Notification / Tracking" icon:@"exclamationmark.triangle" color:[UIColor systemOrangeColor] trailingSwitch:nil value:nil selector:@selector(showCompactSetupChecklist)]
+    ]];
+    [self.cardsStack addArrangedSubview:bypassCard];
+
+    self.networkDataSpoofToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"networkDataSpoofEnabled", NO) selector:@selector(networkDataSpoofToggleChanged:) destructive:NO];
+    self.ipMonitorToggleSwitch = [self securityCompactSwitchOn:[self.securitySettings boolForKey:@"ipMonitorEnabled"] selector:@selector(ipMonitorToggleChanged:) destructive:NO];
+    self.targetRegionFollowsIPToggleSwitch = [self securityCompactSwitchOn:[self.securitySettings boolForKey:@"targetRegionFollowsIPEnabled"] selector:@selector(targetRegionFollowsIPToggleChanged:) destructive:NO];
+
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"MẠNG & VỊ TRÍ"]];
+    UIView *networkCard = [self securityCompactCardWithRows:@[
+        [self securityCompactRowWithTitle:@"Network Data Spoof" subtitle:@"Carrier · MCC/MNC · network metadata" icon:@"antenna.radiowaves.left.and.right" color:[UIColor systemTealColor] trailingSwitch:self.networkDataSpoofToggleSwitch value:nil selector:@selector(openNetworkDataDetail)],
+        [self securityCompactRowWithTitle:@"Connection Type" subtitle:nil icon:@"wifi" color:[UIColor systemTealColor] trailingSwitch:nil value:[self securityConnectionTypeSummary] selector:@selector(openConnectionTypeDetail)],
+        [self securityCompactRowWithTitle:@"IP Status" subtitle:[self securityIPSummary] icon:@"globe" color:[UIColor systemBlueColor] trailingSwitch:nil value:nil selector:@selector(presentIPStatusPage)],
+        [self securityCompactRowWithTitle:@"IP Monitor" subtitle:@"Cảnh báo khi public IP thay đổi" icon:@"wave.3.right" color:[UIColor systemTealColor] trailingSwitch:self.ipMonitorToggleSwitch value:nil selector:@selector(presentIPStatusPage)],
+        [self securityCompactRowWithTitle:@"TargetRegion follows IP" subtitle:@"Chạm hàng để sync từ IP hiện tại" icon:@"location" color:[UIColor systemGreenColor] trailingSwitch:self.targetRegionFollowsIPToggleSwitch value:nil selector:@selector(syncTargetRegionFromIPTapped:)]
+    ]];
+    [self.cardsStack addArrangedSubview:networkCard];
+
+    self.deviceSpoofingToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"deviceSpoofingEnabled", NO) selector:@selector(deviceSpoofingToggleChanged:) destructive:NO];
+    self.appVersionSpoofingToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"appVersionSpoofingEnabled", NO) selector:@selector(appVersionSpoofingToggleChanged:) destructive:NO];
+    self.fixVersionToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"fixVersionEnabled", NO) selector:@selector(fixVersionToggleChanged:) destructive:NO];
+
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"SPOOF THIẾT BỊ & APP"]];
+    UIView *deviceCard = [self securityCompactCardWithRows:@[
+        [self securityCompactRowWithTitle:@"Device Spoofing" subtitle:@"Model · name · serial · system info" icon:@"iphone" color:[UIColor systemGrayColor] trailingSwitch:self.deviceSpoofingToggleSwitch value:nil selector:@selector(deviceSpoofingAccessTapped:)],
+        [self securityCompactRowWithTitle:@"App Version Spoof" subtitle:@"CFBundle version theo từng app" icon:@"app.badge" color:[UIColor systemPurpleColor] trailingSwitch:self.appVersionSpoofingToggleSwitch value:nil selector:@selector(appVersionSpoofingAccessTapped:)],
+        [self securityCompactRowWithTitle:@"Time Spoofing" subtitle:@"IP / location based time" icon:@"clock" color:[UIColor systemOrangeColor] trailingSwitch:nil value:[self securityTimeModeSummary] selector:@selector(openTimeSpoofDetail)],
+        [self securityCompactRowWithTitle:@"Fix Version" subtitle:@"Chỉ kern.osproductversion dùng giá trị máy thật" icon:@"wrench.and.screwdriver" color:[UIColor systemBlueColor] trailingSwitch:self.fixVersionToggleSwitch value:nil selector:@selector(fixVersionAppsTapped:)]
+    ]];
+    [self.cardsStack addArrangedSubview:deviceCard];
+
+    self.systemKeychainWipeToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) selector:@selector(systemKeychainWipeToggleChanged:) destructive:YES];
+    DomainBlockingSettings *domainSettings = [DomainBlockingSettings sharedSettings];
+    [domainSettings loadSettings];
+    self.domainBlockingToggleSwitch = [self securityCompactSwitchOn:domainSettings.isEnabled selector:@selector(domainBlockingToggleChanged:) destructive:NO];
+    NSString *cleanMode = PXReadSecurityBool(@"deepCleanEnabled", NO) ? @"Deep" : @"Full";
+
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"DỮ LIỆU & KEYCHAIN"]];
+    UIView *dataCard = [self securityCompactCardWithRows:@[
+        [self securityCompactRowWithTitle:@"Clear Data Mode" subtitle:@"Chọn mức dọn dữ liệu mặc định" icon:@"trash" color:[UIColor systemRedColor] trailingSwitch:nil value:cleanMode selector:@selector(openDeepCleanDetail)],
+        [self securityCompactRowWithTitle:@"System Keychain Wipe" subtitle:@"Destructive · cần xác nhận" icon:@"key" color:[UIColor systemOrangeColor] trailingSwitch:self.systemKeychainWipeToggleSwitch value:nil selector:@selector(openSystemKeychainWipeDetail)],
+        [self securityCompactRowWithTitle:@"Domain Blocking" subtitle:@"Blocklist cho scoped apps" icon:@"nosign" color:[UIColor systemGrayColor] trailingSwitch:self.domainBlockingToggleSwitch value:nil selector:@selector(showDomainManagement)]
+    ]];
+    [self.cardsStack addArrangedSubview:dataCard];
+
+    self.matrixToggleSwitch = [self securityCompactSwitchOn:self.matrixRainEnabled selector:@selector(matrixToggleChanged:) destructive:NO];
+    self.profileIndicatorToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"profileIndicatorEnabled", NO) selector:@selector(profileIndicatorToggleChanged:) destructive:NO];
+
+    [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"GIAO DIỆN"]];
+    UIView *uiCard = [self securityCompactCardWithRows:@[
+        [self securityCompactRowWithTitle:@"Matrix Rain" subtitle:@"Hiệu ứng nền · tôn trọng Reduce Motion" icon:@"square.grid.3x3" color:[UIColor systemGreenColor] trailingSwitch:self.matrixToggleSwitch value:nil selector:@selector(showMatrixInfo)],
+        [self securityCompactRowWithTitle:@"Profile Indicator" subtitle:@"Hiện profile đang active trên SpringBoard" icon:@"person.crop.circle" color:[UIColor systemBlueColor] trailingSwitch:self.profileIndicatorToggleSwitch value:nil selector:@selector(showProfileIndicatorInfo)]
+    ]];
+    [self.cardsStack addArrangedSubview:uiCard];
+}
+
 #pragma mark - Redesign Phase 1 Helpers
 
 - (UIView *)buildSecurityHeroView {
@@ -5458,16 +5692,16 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     UIView *ring = [[UIView alloc] init];
     ring.translatesAutoresizingMaskIntoConstraints = NO;
-    ring.layer.cornerRadius = 30;
+    ring.layer.cornerRadius = 26;
     ring.layer.borderWidth = 3.0;
-    ring.layer.borderColor = [UIColor systemBlueColor].CGColor;
-    ring.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.10];
+    ring.layer.borderColor = [UIColor systemGreenColor].CGColor;
+    ring.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.10];
     [hero addSubview:ring];
 
     UILabel *countLabel = [[UILabel alloc] init];
     countLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    countLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
-    countLabel.textColor = PXLabelColor();
+    countLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    countLabel.textColor = [UIColor systemGreenColor];
     countLabel.textAlignment = NSTextAlignmentCenter;
     countLabel.text = @"0/0";
     self.heroCountLabel = countLabel;
@@ -5475,7 +5709,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.font = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+    title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
     title.textColor = PXLabelColor();
     title.text = @"Security";
     [hero addSubview:title];
@@ -5490,12 +5724,12 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [hero addSubview:subtitle];
 
     [NSLayoutConstraint activateConstraints:@[
-        [hero.heightAnchor constraintEqualToConstant:104],
+        [hero.heightAnchor constraintEqualToConstant:92],
 
         [ring.leadingAnchor constraintEqualToAnchor:hero.leadingAnchor constant:16],
         [ring.centerYAnchor constraintEqualToAnchor:hero.centerYAnchor],
-        [ring.widthAnchor constraintEqualToConstant:60],
-        [ring.heightAnchor constraintEqualToConstant:60],
+        [ring.widthAnchor constraintEqualToConstant:52],
+        [ring.heightAnchor constraintEqualToConstant:52],
 
         [countLabel.centerXAnchor constraintEqualToAnchor:ring.centerXAnchor],
         [countLabel.centerYAnchor constraintEqualToAnchor:ring.centerYAnchor],
@@ -5516,10 +5750,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     UILabel *label = [[UILabel alloc] init];
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = title;
-    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
     label.textColor = PXSecondaryLabelColor();
     if (self.cardsStack && self.cardsStack.arrangedSubviews.count > 0) {
-        [self.cardsStack setCustomSpacing:22 afterView:self.cardsStack.arrangedSubviews.lastObject];
+        [self.cardsStack setCustomSpacing:18 afterView:self.cardsStack.arrangedSubviews.lastObject];
     }
     return label;
 }

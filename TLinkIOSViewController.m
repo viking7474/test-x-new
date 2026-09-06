@@ -5632,7 +5632,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
     self.mainStackView = [[UIStackView alloc] init];
     self.mainStackView.axis = UILayoutConstraintAxisVertical;
-    self.mainStackView.spacing = 16;
+    self.mainStackView.spacing = 12;
     self.mainStackView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.scrollView addSubview:self.mainStackView];
 
@@ -5641,11 +5641,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [self.scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [self.mainStackView.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant:18],
-        [self.mainStackView.leadingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.leadingAnchor constant:18],
-        [self.mainStackView.trailingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.trailingAnchor constant:-18],
-        [self.mainStackView.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-24],
-        [self.mainStackView.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-36]
+        [self.mainStackView.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant:16],
+        [self.mainStackView.leadingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.leadingAnchor constant:16],
+        [self.mainStackView.trailingAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.trailingAnchor constant:-16],
+        [self.mainStackView.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-28],
+        [self.mainStackView.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-32]
     ]];
 
     [self.mainStackView addArrangedSubview:[self dashboardStatusCard]];
@@ -5700,32 +5700,66 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (UIView *)dashboardStatusCard {
     UIView *card = [self dashboardRoundedCard];
+
     UIStackView *row = [[UIStackView alloc] init];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.alignment = UIStackViewAlignmentCenter;
-    row.spacing = 10;
+    row.spacing = 12;
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:row];
-    UIImageView *icon = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"iphone")];
-    icon.tintColor = [UIColor systemBlueColor];
-    [icon.widthAnchor constraintEqualToConstant:28].active = YES;
-    [icon.heightAnchor constraintEqualToConstant:28].active = YES;
-    [row addArrangedSubview:icon];
-    UILabel *label = [[UILabel alloc] init];
+
+    UIStackView *textStack = [[UIStackView alloc] init];
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.spacing = 2;
+    [row addArrangedSubview:textStack];
+
+    UILabel *kicker = [[UILabel alloc] init];
+    kicker.text = @"DEVICE STATUS";
+    kicker.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    kicker.textColor = PXSecondaryLabelColor();
+    [textStack addArrangedSubview:kicker];
+
     NSString *model = [self.manager currentValueForIdentifier:@"DeviceModel"] ?: @"Unknown";
     NSString *ios = [self.manager currentValueForIdentifier:@"IOSVersion"] ?: @"Unknown";
-    label.text = [NSString stringWithFormat:@"DEVICE STATUS\n%@, %@", ios, model];
-    label.numberOfLines = 2;
-    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    [row addArrangedSubview:label];
+    UILabel *device = [[UILabel alloc] init];
+    device.text = [NSString stringWithFormat:@"%@, %@", ios, model];
+    device.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    device.textColor = PXLabelColor();
+    [textStack addArrangedSubview:device];
+    [textStack setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIView *statusPill = [[UIView alloc] init];
+    statusPill.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.12];
+    statusPill.layer.cornerRadius = 14;
+    statusPill.translatesAutoresizingMaskIntoConstraints = NO;
+    [statusPill.heightAnchor constraintEqualToConstant:28].active = YES;
+
+    UIView *dot = [[UIView alloc] init];
+    dot.backgroundColor = [UIColor systemGreenColor];
+    dot.layer.cornerRadius = 4;
+    dot.translatesAutoresizingMaskIntoConstraints = NO;
+    [statusPill addSubview:dot];
+
     UILabel *state = [[UILabel alloc] init];
     state.text = @"Connected";
-    state.font = [UIFont systemFontOfSize:12];
-    [row addArrangedSubview:state];
+    state.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    state.textColor = [UIColor systemGreenColor];
+    state.translatesAutoresizingMaskIntoConstraints = NO;
+    [statusPill addSubview:state];
+    [row addArrangedSubview:statusPill];
+
     [NSLayoutConstraint activateConstraints:@[
+        [dot.leadingAnchor constraintEqualToAnchor:statusPill.leadingAnchor constant:10],
+        [dot.centerYAnchor constraintEqualToAnchor:statusPill.centerYAnchor],
+        [dot.widthAnchor constraintEqualToConstant:8],
+        [dot.heightAnchor constraintEqualToConstant:8],
+        [state.leadingAnchor constraintEqualToAnchor:dot.trailingAnchor constant:6],
+        [state.trailingAnchor constraintEqualToAnchor:statusPill.trailingAnchor constant:-10],
+        [state.centerYAnchor constraintEqualToAnchor:statusPill.centerYAnchor],
+
         [row.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
-        [row.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [row.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [row.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+        [row.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16],
         [row.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14]
     ]];
     return card;
@@ -5733,8 +5767,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (UIView *)dashboardRoundedCard {
     UIView *card = [[UIView alloc] init];
-    card.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
-    card.layer.cornerRadius = 12;
+    card.backgroundColor = PXSystemBackgroundColor();
+    card.layer.cornerRadius = 16;
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.04;
+    card.layer.shadowRadius = 4.0;
+    card.layer.shadowOffset = CGSizeMake(0, 1);
     card.translatesAutoresizingMaskIntoConstraints = NO;
     return card;
 }
@@ -5767,14 +5805,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (UIButton *)dashboardActionCardWithTitle:(NSString *)title subtitle:(NSString *)subtitle color:(UIColor *)color icon:(NSString *)icon selector:(SEL)selector {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     BOOL filled = [title containsString:@"Lưu"];
-    button.backgroundColor = [color colorWithAlphaComponent:filled ? 1.0 : 0.08];
-    button.layer.cornerRadius = 12;
+    button.backgroundColor = [color colorWithAlphaComponent:filled ? 1.0 : 0.10];
+    button.layer.cornerRadius = 16;
     button.tintColor = filled ? [UIColor whiteColor] : color;
-    [button.heightAnchor constraintEqualToConstant:108].active = YES;
+    [button.heightAnchor constraintEqualToConstant:104].active = YES;
     [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
     NSString *full = [NSString stringWithFormat:@"%@\n%@", title, subtitle];
-    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:full attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightBold], NSForegroundColorAttributeName: button.tintColor}];
-    [attr addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:11 weight:UIFontWeightRegular] range:[full rangeOfString:subtitle]];
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:full attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightBold], NSForegroundColorAttributeName: button.tintColor}];
+    [attr addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:12 weight:UIFontWeightRegular] range:[full rangeOfString:subtitle]];
     [button setAttributedTitle:attr forState:UIControlStateNormal];
     button.titleLabel.numberOfLines = 2;
     button.titleLabel.textAlignment = NSTextAlignmentCenter;
@@ -5788,10 +5826,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UIImageView *iconView = [[UIImageView alloc] initWithImage:PXSystemImageNamed(icon)];
     iconView.tintColor = color;
     iconView.backgroundColor = [color colorWithAlphaComponent:0.14];
-    iconView.layer.cornerRadius = 6;
+    iconView.layer.cornerRadius = 8;
     iconView.contentMode = UIViewContentModeCenter;
-    [iconView.widthAnchor constraintEqualToConstant:28].active = YES;
-    [iconView.heightAnchor constraintEqualToConstant:28].active = YES;
+    [iconView.widthAnchor constraintEqualToConstant:30].active = YES;
+    [iconView.heightAnchor constraintEqualToConstant:30].active = YES;
     [stack insertArrangedSubview:iconView atIndex:0];
     UILabel *value = [[UILabel alloc] init];
     value.font = [UIFont systemFontOfSize:13];
@@ -5804,16 +5842,17 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (UIView *)dashboardPlainRowWithTitle:(NSString *)title value:(NSString *)value selector:(SEL)selector {
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
-    [row.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:52].active = YES;
     UIStackView *stack = [[UIStackView alloc] init];
     stack.axis = UILayoutConstraintAxisHorizontal;
     stack.alignment = UIStackViewAlignmentCenter;
-    stack.spacing = 10;
+    stack.spacing = 12;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [row addSubview:stack];
     UILabel *label = [[UILabel alloc] init];
     label.text = title;
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    label.textColor = PXLabelColor();
     [stack addArrangedSubview:label];
     [label setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     UILabel *right = [[UILabel alloc] init];
