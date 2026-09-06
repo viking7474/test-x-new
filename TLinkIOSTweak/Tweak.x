@@ -744,20 +744,17 @@ static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
                     }
 
                     if (name[0] == CTL_KERN && [manager isIdentifierEnabled:@"IOSVersion"]) {
-                        // ProductBuildVersion is a reporting surface: keep the profile by default,
-                        // but Fix Version-selected apps fall back to the physical runtime.
+                        // Legacy Fix Version does not affect numeric CTL_KERN surfaces.
+                        // Product build/Darwin/kernel values remain profile-backed.
                         if (name[1] == KERN_OSVERSION) {
-                            if (PXFixVersionAppliesToBundle(bundleID)) {
-                                return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
-                            }
                             if (!PXRequireKeysAll(deviceIds, @[@"IOSBuild"], @"sysctl", @"CTL_KERN/KERN_OSVERSION", bundleID, profileId, gen)) {
                                 return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
                             }
                             NSString *spoofed = deviceIds[@"IOSBuild"];
                             return PXWriteSysctlCStringLocal([spoofed UTF8String], oldp, oldlenp);
                         } else if (name[1] == KERN_OSRELEASE || name[1] == KERN_VERSION) {
-                            // Darwin release/kernel banner describe the implementation runtime.
-                            // Keep them physical for upward profiles and all Fix Version apps.
+                            // Legacy behavior keeps Darwin/kernel reporting profile-backed too.
+                            // Fix Version only bypasses kern.osproductversion below.
                             if (!PXKernelIOSProfileMayExposeTupleForBundle(deviceIds[@"IOSVersion"], deviceIds[@"IOSBuild"], bundleID)) {
                                 return sysctl_orig(name, namelen, oldp, oldlenp, newp, newlen);
                             }
@@ -930,8 +927,9 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
 
      // NEW: kern.osproductversion - Critical for Facebook
       if (strcmp(name, "kern.osproductversion") == 0 && [manager isIdentifierEnabled:@"IOSVersion"]) {
-          // ProductVersion is a reporting surface. Preserve upward profile spoofing
-          // unless this app is explicitly selected by Fix Version.
+          // Legacy Fix Version exception: selected apps expose the physical value
+          // only for kern.osproductversion. Every other intended OS/profile surface
+          // remains spoofed from the selected profile.
           if (PXFixVersionAppliesToBundle(bundleID)) {
               px_sysctlbyname_in_hook = NO;
               return 0;
@@ -969,20 +967,16 @@ static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void
     else if ((strcmp(name, "kern.osversion") == 0 || strcmp(name, "kern.osrelease") == 0 || strcmp(name, "kern.version") == 0) &&
              [manager isIdentifierEnabled:@"IOSVersion"]) {
          if (strcmp(name, "kern.osversion") == 0) {
-             // Build number is reporting identity: preserve profile upward spoofing,
-             // except for apps explicitly protected by Fix Version.
-             if (PXFixVersionAppliesToBundle(bundleID)) {
-                 px_sysctlbyname_in_hook = NO;
-                 return 0;
-             }
+             // Build number remains profile-backed even when Fix Version applies.
+             // The legacy exception is kern.osproductversion only.
              if (!PXRequireKeysAll(deviceIds, @[@"IOSBuild"], @"sysctlbyname", @"kern.osversion", bundleID, profileId, gen)) {
                  px_sysctlbyname_in_hook = NO;
                  return 0;
              }
              spoofedValue = deviceIds[@"IOSBuild"];
          } else {
-             // Darwin release/kernel banner remain tied to the physical implementation
-             // when the profile is upward or Fix Version applies.
+             // Darwin release/kernel banner stay profile-backed under legacy Fix Version.
+             // Well-formed profile tuples are allowed even when the profile is upward.
              if (!nativeOSProfileCanExposeKernel) {
                  px_sysctlbyname_in_hook = NO;
                  return 0; // outHandled remains NO: coordinator returns the real runtime value.

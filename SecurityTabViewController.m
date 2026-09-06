@@ -4434,7 +4434,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
 - (void)showFixVersionInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Fix Version"
-                                                                   message:@"Hybrid Upward keeps the profile iOS version on reporting/fingerprint surfaces while real UIKit, dyld and availability stay tied to the physical runtime.\n\nFor selected apps, Fix Version returns the physical iOS version/build across OS-reporting surfaces to prevent apps that manually branch on version strings from entering unavailable APIs. Other spoofed identities remain active."
+                                                                   message:@"Legacy Fix Version is intentionally narrow. For selected apps, only kern.osproductversion falls through to the physical device value. Other configured iOS/profile surfaces such as UIDevice, NSProcessInfo, SystemVersion, build, Darwin/kernel and related identity reporting remain spoofed from the selected profile.\n\nUse this for apps that specifically reject a spoofed kern.osproductversion while you still want the rest of the profile to remain fake."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];

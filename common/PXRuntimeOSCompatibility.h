@@ -13,14 +13,14 @@ FOUNDATION_EXPORT BOOL PXRealRuntimeIOSVersionIsAtLeast(NSString *minimumVersion
 /// than the physical runtime. Unknown/malformed versions fail closed as NO here.
 FOUNDATION_EXPORT BOOL PXConfiguredIOSVersionExceedsRealRuntime(NSString * _Nullable configuredVersion);
 
-/// Per-app compatibility override. When enabled and bundleID is selected in
-/// fixVersionApps, OS version/build reporting falls back to the physical runtime
-/// while unrelated profile identities remain active.
+/// Legacy per-app compatibility override. When enabled and bundleID is selected in
+/// fixVersionApps, only kern.osproductversion is allowed to fall through to the
+/// physical runtime. Other configured OS/profile reporting surfaces stay spoofed.
 FOUNDATION_EXPORT BOOL PXFixVersionAppliesToBundle(NSString * _Nullable bundleID);
 
 /// Reporting projection used by UIDevice/NSProcessInfo/SystemVersion/MG/MC/private
-/// ProductVersion surfaces. Normal mode preserves the configured profile even for
-/// upward spoofing; Fix Version selected apps receive the physical version/build.
+/// ProductVersion surfaces. Always preserves the configured profile. Legacy Fix
+/// Version is intentionally handled only at kern.osproductversion in Tweak.x.
 FOUNDATION_EXPORT BOOL PXReportingIOSVersionBuildForBundle(NSString * _Nullable configuredVersion,
                                                             NSString * _Nullable configuredBuild,
                                                             NSString * _Nullable bundleID,
@@ -46,8 +46,9 @@ FOUNDATION_EXPORT BOOL PXNativeSafeIOSVersionBuild(NSString * _Nullable configur
 FOUNDATION_EXPORT BOOL PXNativeIOSProfileMayExposeKernelTuple(NSString * _Nullable configuredVersion,
                                                                NSString * _Nullable configuredBuild);
 
-/// Same kernel policy with Fix Version taken into account. Selected apps always
-/// keep the physical Darwin/kernel implementation tuple.
+/// Default legacy kernel-reporting policy. Fix Version does not alter Darwin/kernel
+/// profile values; selected apps only bypass kern.osproductversion. This helper
+/// therefore accepts any well-formed configured version/build pair.
 FOUNDATION_EXPORT BOOL PXKernelIOSProfileMayExposeTupleForBundle(NSString * _Nullable configuredVersion,
                                                                  NSString * _Nullable configuredBuild,
                                                                  NSString * _Nullable bundleID);

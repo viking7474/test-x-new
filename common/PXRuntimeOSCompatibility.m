@@ -135,22 +135,16 @@ BOOL PXReportingIOSVersionBuildForBundle(NSString *configuredVersion,
                                          NSString *bundleID,
                                          NSString **outVersion,
                                          NSString **outBuild) {
+    (void)bundleID;
     NSString *configuredV = PXRuntimeOSString(configuredVersion);
     NSString *configuredB = PXRuntimeOSString(configuredBuild);
     if (!configuredV.length || !configuredB.length || !PXRuntimeOSVersionComponents(configuredV)) return NO;
 
-    NSString *reportedV = configuredV;
-    NSString *reportedB = configuredB;
-    if (PXFixVersionAppliesToBundle(bundleID)) {
-        NSString *realV = PXRealRuntimeIOSVersion();
-        NSString *realB = PXRealRuntimeIOSBuild();
-        if (!realV.length || !realB.length || !PXRuntimeOSVersionComponents(realV)) return NO;
-        reportedV = realV;
-        reportedB = realB;
-    }
-
-    if (outVersion) *outVersion = reportedV;
-    if (outBuild) *outBuild = reportedB;
+    // Legacy Fix Version semantics are intentionally narrow: this reporting helper
+    // always exposes the configured profile. The only per-app runtime fallback is
+    // kern.osproductversion in Tweak.x, where selected apps leave that query unhandled.
+    if (outVersion) *outVersion = configuredV;
+    if (outBuild) *outBuild = configuredB;
     return YES;
 }
 
@@ -207,6 +201,8 @@ BOOL PXNativeSafeIOSVersionBuild(NSString *configuredVersion,
 BOOL PXKernelIOSProfileMayExposeTupleForBundle(NSString *configuredVersion,
                                                 NSString *configuredBuild,
                                                 NSString *bundleID) {
-    if (PXFixVersionAppliesToBundle(bundleID)) return NO;
-    return PXNativeIOSProfileMayExposeKernelTuple(configuredVersion, configuredBuild);
+    (void)bundleID;
+    NSString *configuredV = PXRuntimeOSString(configuredVersion);
+    NSString *configuredB = PXRuntimeOSString(configuredBuild);
+    return configuredV.length && configuredB.length && PXRuntimeOSVersionComponents(configuredV) != nil;
 }

@@ -828,8 +828,8 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
             if (PXReportingIOSVersionBuildForBundle(configuredVersion, configuredBuild, bundleID, &reportedVersion, &reportedBuild)) {
                 NSString *originalVersion = %orig;
 
-                // Reporting surfaces preserve the configured profile by default.
-                // Fix Version-selected apps receive the physical runtime instead.
+                // Reporting surfaces always preserve the configured profile.
+                // Legacy Fix Version only bypasses kern.osproductversion in Tweak.x.
                 if (lastSystemVersionCallTime == 0 || (currentTime - lastSystemVersionCallTime) > THROTTLE_INTERVAL_NSEC * 10) {
                     IOSVERSION_LOG(@"UIDevice.systemVersion: %@ → %@ (configured=%@)", originalVersion, reportedVersion, configuredVersion);
                 }

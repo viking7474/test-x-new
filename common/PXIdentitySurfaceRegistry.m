@@ -140,10 +140,10 @@ NSString *PXIdentitySurfaceResolveValue(PXIdentitySurfaceEntry *entry, NSDiction
     if (entry.constantValue.length) return entry.constantValue;
     if (![deviceIDs isKindOfClass:[NSDictionary class]]) return nil;
 
-    // ProductVersion/ProductBuildVersion are reporting identity surfaces. Preserve
-    // the configured profile (including upward spoofing) by default; Fix Version
-    // selected apps receive the physical runtime pair. This policy is centralized
-    // so MobileGestalt, ManagedConfiguration and private wrappers cannot drift.
+    // ProductVersion/ProductBuildVersion are reporting identity surfaces and always
+    // preserve the configured profile, including upward spoofing. Legacy Fix Version
+    // is intentionally limited to kern.osproductversion in Tweak.x, so MG/MC/private
+    // wrappers remain fake and cannot drift from the selected profile.
     if ([entry.toggle isEqualToString:@"IOSVersion"] &&
         ([entry.deviceIDKey isEqualToString:@"IOSVersion"] || [entry.deviceIDKey isEqualToString:@"IOSBuild"])) {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];

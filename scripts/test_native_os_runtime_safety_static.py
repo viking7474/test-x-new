@@ -54,7 +54,8 @@ require("dictionaryWithContentsOfFile" not in compat_m,
 require('plist[@"ProductVersion"]' in compat_m and 'plist[@"ProductBuildVersion"]' in compat_m,
         "real runtime version/build are captured as one source pair")
 
-# Hybrid Upward policy: profile reporting by default, physical pair only for Fix Version apps.
+# Legacy Fix Version policy: profile reporting stays active everywhere except the
+# selected app's kern.osproductversion query, which falls through to the real syscall.
 for token in (
     "PXFixVersionAppliesToBundle",
     "PXReportingIOSVersionBuildForBundle",
@@ -65,13 +66,13 @@ for token in (
 require('PXReadSecurityBool(@"fixVersionEnabled", NO)' in compat_m and
         'PXReadSecuritySetting(@"fixVersionApps")' in compat_m,
         "Fix Version policy is driven by authoritative security settings")
-report_policy = body(compat_m, "BOOL PXReportingIOSVersionBuildForBundle", 2600)
-require("NSString *reportedV = configuredV;" in report_policy and
-        "NSString *reportedB = configuredB;" in report_policy,
-        "normal reporting preserves the configured profile version/build")
-require("if (PXFixVersionAppliesToBundle(bundleID))" in report_policy and
-        "reportedV = realV;" in report_policy and "reportedB = realB;" in report_policy,
-        "Fix Version changes only reporting version/build to the physical pair")
+report_policy = body(compat_m, "BOOL PXReportingIOSVersionBuildForBundle", 2200)
+require("if (outVersion) *outVersion = configuredV;" in report_policy and
+        "if (outBuild) *outBuild = configuredB;" in report_policy,
+        "all normal OS reporting preserves the configured profile version/build")
+require("PXFixVersionAppliesToBundle" not in report_policy and
+        "PXRealRuntimeIOSVersion" not in report_policy and "PXRealRuntimeIOSBuild" not in report_policy,
+        "Fix Version does not broaden into UIDevice/NSProcessInfo/SystemVersion reporting")
 
 # SystemVersion dictionary/raw-file surfaces use the per-app reporting projection.
 require("PXCurrentReportingSystemVersionProjectionForBundle" in transform_h and
@@ -82,7 +83,8 @@ require("PXCurrentReportingSystemVersionProjectionForBundle(bundleID)" in ios,
 require("PXCurrentReportingSystemVersionProjectionForBundle(bundleID)" in tweak,
         "coordinator CFCopySystemVersionDictionary consumes per-app reporting projection")
 
-# UIDevice / NSProcessInfo reporting getters preserve upward profile unless Fix Version applies.
+# UIDevice / NSProcessInfo reporting getters always preserve the configured profile;
+# legacy Fix Version must not alter these surfaces.
 uid_body = body(ios, "- (NSString *)systemVersion", 2600)
 require("PXReportingIOSVersionBuildForBundle" in uid_body and "return reportedVersion;" in uid_body,
         "UIDevice.systemVersion uses Hybrid/Fix-Version reporting policy")
@@ -106,26 +108,41 @@ require("- (BOOL)isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion)versi
 require("Availability/capability checks are intentionally not hooked" in ios,
         "source documents physical availability contract")
 
-# MobileGestalt / ManagedConfiguration / private wrappers share Hybrid/Fix-Version reporting.
+# MobileGestalt / ManagedConfiguration / private wrappers remain profile-backed.
 require('entry.toggle isEqualToString:@"IOSVersion"' in registry and
         "PXReportingIOSValueForDeviceIDKey" in registry and
         "[[NSBundle mainBundle] bundleIdentifier]" in registry,
-        "native identity registry resolves ProductVersion/Build per current app policy")
+        "native identity registry resolves ProductVersion/Build from the configured profile")
 
-# Product version/build remain profile-backed by default, while Darwin/kernel implementation stays physical upward.
-require("PXFixVersionAppliesToBundle(bundleID)" in tweak,
-        "sysctl ProductVersion/ProductBuildVersion honors Fix Version per app")
-require('strcmp(name, "kern.osproductversion") == 0' in tweak and
-        'spoofedValue = deviceIds[@"IOSVersion"]' in tweak,
-        "kern.osproductversion preserves profile reporting when Fix Version is off")
-require("name[1] == KERN_OSVERSION" in tweak and 'deviceIds[@"IOSBuild"]' in tweak,
-        "numeric/string kernel build reporting can preserve profile build")
-require("PXKernelIOSProfileMayExposeTupleForBundle" in tweak,
-        "Darwin/kernel implementation surfaces use per-app physical safety gate")
-require("return 0; // outHandled remains NO: coordinator returns the real runtime value." in tweak,
-        "unsafe Darwin/kernel sysctlbyname requests fall through to physical runtime")
+# Legacy Fix Version is kern.osproductversion-only. Every other intended OS/kernel
+# reporting surface remains profile-backed, including upward profiles such as iOS 13.x.
+kern_product = body(tweak, 'strcmp(name, "kern.osproductversion") == 0', 1200)
+require("PXFixVersionAppliesToBundle(bundleID)" in kern_product and
+        "if (outHandled) *outHandled = YES;" not in kern_product.split("PXFixVersionAppliesToBundle(bundleID)", 1)[1].split("}", 1)[0],
+        "Fix Version selected apps leave kern.osproductversion unhandled for the real syscall")
+require('spoofedValue = deviceIds[@"IOSVersion"]' in kern_product,
+        "kern.osproductversion still reports the profile when Fix Version does not apply")
+
+kern_numeric = body(tweak, "if (name[0] == CTL_KERN", 3200)
+require("name[1] == KERN_OSVERSION" in kern_numeric and 'deviceIds[@"IOSBuild"]' in kern_numeric,
+        "numeric KERN_OSVERSION remains profile-backed")
+require("PXFixVersionAppliesToBundle(bundleID)" not in kern_numeric,
+        "Fix Version does not affect numeric CTL_KERN reporting")
+
+kern_named = body(tweak, 'strcmp(name, "kern.osversion") == 0', 2600)
+require('spoofedValue = deviceIds[@"IOSBuild"]' in kern_named and
+        "PXFixVersionAppliesToBundle(bundleID)" not in kern_named,
+        "kern.osversion remains profile-backed under Fix Version")
+require('spoofedValue = deviceIds[@"Darwin"]' in kern_named and
+        'spoofedValue = deviceIds[@"KernelVersion"]' in kern_named,
+        "kern.osrelease and kern.version remain profile-backed")
+
+kernel_policy = body(compat_m, "BOOL PXKernelIOSProfileMayExposeTupleForBundle", 900)
+require("PXFixVersionAppliesToBundle" not in kernel_policy and
+        "PXNativeIOSProfileMayExposeKernelTuple" not in kernel_policy,
+        "default kernel reporting policy is not runtime-clamped by Fix Version")
 require("PXKernelIOSProfileMayExposeTupleForBundle(deviceIDs[@\"IOSVersion\"], deviceIDs[@\"IOSBuild\"], bundleID)" in tweak,
-        "uname Darwin/kernel projection stays physical for upward/Fix-Version apps")
+        "uname keeps using the profile kernel tuple policy")
 
 # App binary metadata is not runtime identity and must remain original.
 nsbundle_body = body(ios, "%hook NSBundle", 5200)
@@ -166,8 +183,9 @@ fix_toggle_body = body(security_ui, "- (void)fixVersionToggleChanged:", 1800)
 require("PXWriteSecurityBool" in fix_toggle_body and
         'CFSTR("com.hydra.tlinkios.settings.changed")' in fix_toggle_body,
         "Fix Version master toggle persists and hot-reloads injected processes")
-require("Other spoofed identities remain active" in security_ui,
-        "Fix Version UI explains that non-OS identity spoofing remains active")
+require("only kern.osproductversion falls through" in security_ui and
+        "remain spoofed from the selected profile" in security_ui,
+        "Fix Version UI documents the narrow kern.osproductversion-only behavior")
 
 # Web/User-Agent projection intentionally remains profile-backed.
 require("static NSString *getSpoofedSystemVersion()" in ios and

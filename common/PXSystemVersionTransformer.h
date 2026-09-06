@@ -21,9 +21,9 @@ PXSystemVersionProjectionFromSnapshot(PXIdentitySnapshot * _Nullable snapshot);
 FOUNDATION_EXPORT PXSystemVersionProjection * _Nullable
 PXCurrentSystemVersionProjection(void);
 
-/// Per-app reporting projection. Normal apps receive the configured profile
-/// version/build even for upward spoofing. Apps selected by Fix Version receive
-/// the physical runtime version/build while the rest of their profile stays active.
+/// Per-app reporting projection. Always returns the configured profile version/build,
+/// including upward spoofing. Legacy Fix Version is handled only by the dedicated
+/// kern.osproductversion path and does not alter SystemVersion projection.
 FOUNDATION_EXPORT PXSystemVersionProjection * _Nullable
 PXCurrentReportingSystemVersionProjectionForBundle(NSString * _Nullable bundleID);
 
