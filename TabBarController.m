@@ -77,9 +77,17 @@
     // Create account nav controller but don't add it to tab bar
     // self.accountNavController = [[UINavigationController alloc] initWithRootViewController:accountVC];
     
-    // Configure tab bar items (excluding account)
-    identityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home" image:PXSystemImageNamed(@"house.fill") tag:1];
-    securityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Security" image:PXSystemImageNamed(@"shield.checkerboard") tag:2];
+    // Configure tab bar items with symbols available on iOS 13/14.
+    // Using separate outline/filled states keeps the inactive Security icon visible
+    // and gives the selected tab the stronger visual weight shown in the UI mockup.
+    UIImage *homeImage = PXSystemImageNamed(@"house");
+    UIImage *homeSelectedImage = PXSystemImageNamed(@"house.fill") ?: homeImage;
+    UIImage *securityImage = PXSystemImageNamed(@"shield");
+    UIImage *securitySelectedImage = PXSystemImageNamed(@"shield.fill") ?: securityImage;
+    identityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"TLinkIOS" image:homeImage selectedImage:homeSelectedImage];
+    identityNav.tabBarItem.tag = 1;
+    securityNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Security" image:securityImage selectedImage:securitySelectedImage];
+    securityNav.tabBarItem.tag = 2;
     
     // Set view controllers (excluding account)
     self.viewControllers = @[identityNav, securityNav];

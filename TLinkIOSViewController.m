@@ -1616,7 +1616,10 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Add Tools button to navigation bar (right side)
     UIButton *toolsButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImage *toolsIcon = PXSystemImageNamed(@"wrench.fill") ?: PXSystemImageNamed(@"wrench");
     [toolsButton setTitle:@"Tools" forState:UIControlStateNormal];
+    [toolsButton setImage:toolsIcon forState:UIControlStateNormal];
+    toolsButton.tintColor = [UIColor systemBlueColor];
     toolsButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
     [toolsButton setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
     
@@ -1624,6 +1627,8 @@ static void PXWriteSubstrateFilterPlists(void) {
         // Use modern button configuration for iOS 15+
         UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
         config.title = @"Tools";
+        config.image = toolsIcon;
+        config.imagePadding = 6;
         config.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
             NSMutableDictionary *newAttributes = [attributes mutableCopy];
             newAttributes[NSFontAttributeName] = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
@@ -1637,6 +1642,8 @@ static void PXWriteSubstrateFilterPlists(void) {
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         toolsButton.contentEdgeInsets = UIEdgeInsetsMake(4, 10, 4, 10);
+        toolsButton.imageEdgeInsets = UIEdgeInsetsMake(0, -2, 0, 5);
+        toolsButton.titleEdgeInsets = UIEdgeInsetsMake(0, 3, 0, -2);
         #pragma clang diagnostic pop
     }
     
@@ -5654,11 +5661,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     actions.axis = UILayoutConstraintAxisHorizontal;
     actions.spacing = 12;
     actions.distribution = UIStackViewDistributionFillEqually;
-    [actions addArrangedSubview:[self dashboardActionCardWithTitle:@"Lưu RRS" subtitle:@"+ Reset Data" color:[UIColor systemBlueColor] icon:@"checkmark.rectangle" selector:@selector(saveRRSThenResetTapped)]];
+    [actions addArrangedSubview:[self dashboardActionCardWithTitle:@"Lưu RRS" subtitle:@"+ Reset Data" color:[UIColor systemBlueColor] icon:@"checkmark.square.fill" selector:@selector(saveRRSThenResetTapped)]];
     [actions addArrangedSubview:[self dashboardActionCardWithTitle:@"Reset Data" subtitle:@"System Clean" color:[UIColor systemRedColor] icon:@"arrow.clockwise" selector:@selector(resetDataTapped)]];
     [self.mainStackView addArrangedSubview:actions];
 
-    [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"SELECTION CENTER"]];
+    [self.mainStackView addArrangedSubview:[self dashboardSectionHeaderWithTitle:@"SELECTION CENTER" icon:@"square.grid.2x2" color:PXSystemIndigoColor()]];
     UIView *selectionCard = [self dashboardGroupCard];
     UIStackView *selectionStack = (UIStackView *)[selectionCard viewWithTag:7001];
     UILabel *resetSelectionLabel = nil;
@@ -5666,8 +5673,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UILabel *fakeSelectionLabel = nil;
     UILabel *fakeInfoSelectionLabel = nil;
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:PXSystemIndigoColor() valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"externaldrive.fill.badge.icloud" color:[UIColor systemPinkColor] valueLabel:&rrsSelectionLabel selector:@selector(selectRRSAppsTapped)]];
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"face.smiling.inverse" color:[UIColor systemGrayColor] valueLabel:&fakeSelectionLabel selector:@selector(selectFakeTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardGroupSeparator]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"bookmark.fill" color:[UIColor systemPinkColor] valueLabel:&rrsSelectionLabel selector:@selector(selectRRSAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardGroupSeparator]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"eye.fill" color:[UIColor systemGrayColor] valueLabel:&fakeSelectionLabel selector:@selector(selectFakeTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardGroupSeparator]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"INFO FAKE" icon:@"info.circle.fill" color:[UIColor systemBlueColor] valueLabel:&fakeInfoSelectionLabel selector:@selector(infoFakeTapped)]];
     self.resetSelectionValueLabel = resetSelectionLabel;
     self.rrsSelectionValueLabel = rrsSelectionLabel;
@@ -5675,11 +5685,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.fakeInfoSelectionValueLabel = fakeInfoSelectionLabel;
     [self.mainStackView addArrangedSubview:selectionCard];
 
-    [self.mainStackView addArrangedSubview:[self dashboardSectionLabel:@"MANAGEMENT"]];
+    [self.mainStackView addArrangedSubview:[self dashboardSectionHeaderWithTitle:@"MANAGEMENT" icon:@"gear" color:[UIColor systemBlueColor]]];
     UIView *managementCard = [self dashboardGroupCard];
     UIStackView *managementStack = (UIStackView *)[managementCard viewWithTag:7001];
-    [managementStack addArrangedSubview:[self dashboardPlainRowWithTitle:@"Quản lý RRS" value:nil selector:@selector(manageRRSTapped)]];
-    [managementStack addArrangedSubview:[self dashboardPlainRowWithTitle:@"Restore nhanh" value:@"⚡" selector:@selector(quickRestoreTapped)]];
+    [managementStack addArrangedSubview:[self dashboardIconRowWithTitle:@"Quản lý RRS" icon:@"folder.fill" color:[UIColor systemBlueColor] value:nil selector:@selector(manageRRSTapped)]];
+    [managementStack addArrangedSubview:[self dashboardGroupSeparator]];
+    [managementStack addArrangedSubview:[self dashboardIconRowWithTitle:@"Restore nhanh" icon:@"bolt.fill" color:[UIColor systemOrangeColor] value:nil selector:@selector(quickRestoreTapped)]];
     [self.mainStackView addArrangedSubview:managementCard];
 
     self.rrsNoteTextField = [[UITextField alloc] init];
@@ -5704,13 +5715,33 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UIStackView *row = [[UIStackView alloc] init];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.alignment = UIStackViewAlignmentCenter;
-    row.spacing = 12;
+    row.spacing = 14;
     row.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:row];
 
+    UIView *deviceIcon = [[UIView alloc] init];
+    deviceIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    deviceIcon.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.12];
+    deviceIcon.layer.cornerRadius = 25;
+    [deviceIcon.widthAnchor constraintEqualToConstant:50].active = YES;
+    [deviceIcon.heightAnchor constraintEqualToConstant:50].active = YES;
+
+    UIImageView *phone = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"iphone")];
+    phone.translatesAutoresizingMaskIntoConstraints = NO;
+    phone.tintColor = [UIColor systemBlueColor];
+    phone.contentMode = UIViewContentModeScaleAspectFit;
+    [deviceIcon addSubview:phone];
+    [NSLayoutConstraint activateConstraints:@[
+        [phone.centerXAnchor constraintEqualToAnchor:deviceIcon.centerXAnchor],
+        [phone.centerYAnchor constraintEqualToAnchor:deviceIcon.centerYAnchor],
+        [phone.widthAnchor constraintEqualToConstant:21],
+        [phone.heightAnchor constraintEqualToConstant:30]
+    ]];
+    [row addArrangedSubview:deviceIcon];
+
     UIStackView *textStack = [[UIStackView alloc] init];
     textStack.axis = UILayoutConstraintAxisVertical;
-    textStack.spacing = 2;
+    textStack.spacing = 3;
     [row addArrangedSubview:textStack];
 
     UILabel *kicker = [[UILabel alloc] init];
@@ -5723,16 +5754,16 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSString *ios = [self.manager currentValueForIdentifier:@"IOSVersion"] ?: @"Unknown";
     UILabel *device = [[UILabel alloc] init];
     device.text = [NSString stringWithFormat:@"%@, %@", ios, model];
-    device.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    device.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     device.textColor = PXLabelColor();
     [textStack addArrangedSubview:device];
     [textStack setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
 
     UIView *statusPill = [[UIView alloc] init];
     statusPill.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.12];
-    statusPill.layer.cornerRadius = 14;
+    statusPill.layer.cornerRadius = 15;
     statusPill.translatesAutoresizingMaskIntoConstraints = NO;
-    [statusPill.heightAnchor constraintEqualToConstant:28].active = YES;
+    [statusPill.heightAnchor constraintEqualToConstant:30].active = YES;
 
     UIView *dot = [[UIView alloc] init];
     dot.backgroundColor = [UIColor systemGreenColor];
@@ -5794,48 +5825,171 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return card;
 }
 
-- (UILabel *)dashboardSectionLabel:(NSString *)text {
+- (UIView *)dashboardGroupSeparator {
+    UIView *holder = [[UIView alloc] init];
+    holder.translatesAutoresizingMaskIntoConstraints = NO;
+    [holder.heightAnchor constraintEqualToConstant:0.5].active = YES;
+
+    UIView *line = [[UIView alloc] init];
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    line.backgroundColor = [PXSeparatorColor() colorWithAlphaComponent:0.55];
+    [holder addSubview:line];
+    [NSLayoutConstraint activateConstraints:@[
+        [line.leadingAnchor constraintEqualToAnchor:holder.leadingAnchor constant:64],
+        [line.trailingAnchor constraintEqualToAnchor:holder.trailingAnchor constant:-14],
+        [line.topAnchor constraintEqualToAnchor:holder.topAnchor],
+        [line.bottomAnchor constraintEqualToAnchor:holder.bottomAnchor]
+    ]];
+    return holder;
+}
+
+- (UIView *)dashboardSectionHeaderWithTitle:(NSString *)text icon:(NSString *)icon color:(UIColor *)color {
+    UIView *header = [[UIView alloc] init];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    [header.heightAnchor constraintEqualToConstant:28].active = YES;
+
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:PXSystemImageNamed(icon)];
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    iconView.tintColor = color ?: [UIColor systemBlueColor];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    [header addSubview:iconView];
+
     UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.textColor = PXSecondaryLabelColor();
     label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    return label;
+    [header addSubview:label];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [iconView.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:2],
+        [iconView.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [iconView.widthAnchor constraintEqualToConstant:20],
+        [iconView.heightAnchor constraintEqualToConstant:20],
+        [label.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:8],
+        [label.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [label.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor]
+    ]];
+    return header;
 }
 
 - (UIButton *)dashboardActionCardWithTitle:(NSString *)title subtitle:(NSString *)subtitle color:(UIColor *)color icon:(NSString *)icon selector:(SEL)selector {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    BOOL filled = [title containsString:@"Lưu"];
-    button.backgroundColor = [color colorWithAlphaComponent:filled ? 1.0 : 0.10];
-    button.layer.cornerRadius = 16;
-    button.tintColor = filled ? [UIColor whiteColor] : color;
-    [button.heightAnchor constraintEqualToConstant:104].active = YES;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.backgroundColor = color;
+    button.layer.cornerRadius = 18;
+    button.layer.shadowColor = color.CGColor;
+    button.layer.shadowOpacity = 0.18;
+    button.layer.shadowRadius = 6.0;
+    button.layer.shadowOffset = CGSizeMake(0, 3);
+    [button.heightAnchor constraintEqualToConstant:110].active = YES;
     [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
-    NSString *full = [NSString stringWithFormat:@"%@\n%@", title, subtitle];
-    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:full attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightBold], NSForegroundColorAttributeName: button.tintColor}];
-    [attr addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:12 weight:UIFontWeightRegular] range:[full rangeOfString:subtitle]];
-    [button setAttributedTitle:attr forState:UIControlStateNormal];
-    button.titleLabel.numberOfLines = 2;
-    button.titleLabel.textAlignment = NSTextAlignmentCenter;
-    if (@available(iOS 13.0, *)) [button setImage:PXSystemImageNamed(icon) forState:UIControlStateNormal];
+
+    UIView *iconChip = [[UIView alloc] init];
+    iconChip.translatesAutoresizingMaskIntoConstraints = NO;
+    iconChip.userInteractionEnabled = NO;
+    iconChip.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.94];
+    iconChip.layer.cornerRadius = 13;
+    [button addSubview:iconChip];
+
+    UIImageView *watermark = [[UIImageView alloc] initWithImage:PXSystemImageNamed(icon)];
+    watermark.translatesAutoresizingMaskIntoConstraints = NO;
+    watermark.userInteractionEnabled = NO;
+    watermark.tintColor = [[UIColor whiteColor] colorWithAlphaComponent:0.10];
+    watermark.contentMode = UIViewContentModeScaleAspectFit;
+    [button addSubview:watermark];
+
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:PXSystemImageNamed(icon)];
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    iconView.tintColor = color;
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    [iconChip addSubview:iconView];
+
+    UIStackView *textStack = [[UIStackView alloc] init];
+    textStack.translatesAutoresizingMaskIntoConstraints = NO;
+    textStack.userInteractionEnabled = NO;
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.alignment = UIStackViewAlignmentLeading;
+    textStack.spacing = 1;
+    [button addSubview:textStack];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    titleLabel.textColor = [UIColor whiteColor];
+    titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    titleLabel.adjustsFontSizeToFitWidth = YES;
+    titleLabel.minimumScaleFactor = 0.82;
+    [textStack addArrangedSubview:titleLabel];
+
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.text = subtitle;
+    subtitleLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.90];
+    subtitleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    [textStack addArrangedSubview:subtitleLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [iconChip.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:14],
+        [iconChip.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
+        [iconChip.widthAnchor constraintEqualToConstant:46],
+        [iconChip.heightAnchor constraintEqualToConstant:46],
+        [iconView.centerXAnchor constraintEqualToAnchor:iconChip.centerXAnchor],
+        [iconView.centerYAnchor constraintEqualToAnchor:iconChip.centerYAnchor],
+        [iconView.widthAnchor constraintEqualToConstant:25],
+        [iconView.heightAnchor constraintEqualToConstant:25],
+
+        [watermark.trailingAnchor constraintEqualToAnchor:button.trailingAnchor constant:10],
+        [watermark.bottomAnchor constraintEqualToAnchor:button.bottomAnchor constant:8],
+        [watermark.widthAnchor constraintEqualToConstant:70],
+        [watermark.heightAnchor constraintEqualToConstant:70],
+
+        [textStack.leadingAnchor constraintEqualToAnchor:iconChip.trailingAnchor constant:10],
+        [textStack.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
+        [textStack.trailingAnchor constraintLessThanOrEqualToAnchor:button.trailingAnchor constant:-8]
+    ]];
     return button;
 }
 
 - (UIView *)dashboardSelectionRowWithTitle:(NSString *)title icon:(NSString *)icon color:(UIColor *)color valueLabel:(UILabel * __strong *)outLabel selector:(SEL)selector {
     UIView *row = [self dashboardPlainRowWithTitle:title value:nil selector:selector];
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:58].active = YES;
     UIStackView *stack = (UIStackView *)row.subviews.firstObject;
-    UIImageView *iconView = [[UIImageView alloc] initWithImage:PXSystemImageNamed(icon)];
+
+    UIImage *image = PXSystemImageNamed(icon);
+    if (!image) image = PXSystemImageNamed(@"circle.fill");
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:image];
     iconView.tintColor = color;
     iconView.backgroundColor = [color colorWithAlphaComponent:0.14];
-    iconView.layer.cornerRadius = 8;
+    iconView.layer.cornerRadius = 10;
     iconView.contentMode = UIViewContentModeCenter;
-    [iconView.widthAnchor constraintEqualToConstant:30].active = YES;
-    [iconView.heightAnchor constraintEqualToConstant:30].active = YES;
+    [iconView.widthAnchor constraintEqualToConstant:36].active = YES;
+    [iconView.heightAnchor constraintEqualToConstant:36].active = YES;
     [stack insertArrangedSubview:iconView atIndex:0];
+
     UILabel *value = [[UILabel alloc] init];
     value.font = [UIFont systemFontOfSize:13];
     value.textColor = PXSecondaryLabelColor();
+    value.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [value setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
     [stack insertArrangedSubview:value atIndex:2];
     if (outLabel) *outLabel = value;
+    return row;
+}
+
+- (UIView *)dashboardIconRowWithTitle:(NSString *)title icon:(NSString *)icon color:(UIColor *)color value:(NSString *)value selector:(SEL)selector {
+    UIView *row = [self dashboardPlainRowWithTitle:title value:value selector:selector];
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:58].active = YES;
+    UIStackView *stack = (UIStackView *)row.subviews.firstObject;
+
+    UIImage *image = PXSystemImageNamed(icon);
+    if (!image) image = PXSystemImageNamed(@"circle.fill");
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:image];
+    iconView.tintColor = color;
+    iconView.backgroundColor = [color colorWithAlphaComponent:0.12];
+    iconView.layer.cornerRadius = 9;
+    iconView.contentMode = UIViewContentModeCenter;
+    [iconView.widthAnchor constraintEqualToConstant:36].active = YES;
+    [iconView.heightAnchor constraintEqualToConstant:36].active = YES;
+    [stack insertArrangedSubview:iconView atIndex:0];
     return row;
 }
 
@@ -5851,7 +6005,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [row addSubview:stack];
     UILabel *label = [[UILabel alloc] init];
     label.text = title;
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
     label.textColor = PXLabelColor();
     [stack addArrangedSubview:label];
     [label setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
