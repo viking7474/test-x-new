@@ -26,6 +26,7 @@
 #import "PXScope.h"
 #import "PXFileDebug.h"
 #import "PXNativeHookCoordinator.h"
+#import "PXNativeFilesystemReentry.h"
 #import "PXP1CFilters.h"
 #import <sys/sysctl.h>
 #if __has_include(<sys/user.h>)
@@ -3600,7 +3601,15 @@ static BOOL PXJBMountEntryShouldHide(const struct statfs *entry) {
 }
 
 static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
+    // CoreServices calls getmntinfo while holding a non-recursive MountInfo lock.
+    // Mark the whole callback before entering libc so any nested statfs/getfsstat
+    // coordinator path can bypass Objective-C providers and AppVersion/file hooks
+    // can fail open without touching Foundation metadata.
+    const bool nestedFilesystemCritical = PXNativeFilesystemCriticalIsActive();
+    PX_NATIVE_FILESYSTEM_CRITICAL_SCOPE(pxNativeFilesystemCriticalScope);
     PXJB_FILESYSTEM_HOOK_SCOPE();
+    if (nestedFilesystemCritical) pxjbFilterFilesystem = NO;
+
     int count = PXJBOriginalGetmntinfo(mntbufp, flags);
     if (!pxjbFilterFilesystem || count <= 0 || !mntbufp || !*mntbufp) return count;
 

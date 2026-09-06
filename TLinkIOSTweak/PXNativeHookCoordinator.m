@@ -3,6 +3,7 @@
 
 #import "PXNativeHookCoordinator.h"
 #import "TLinkIOSLogging.h"
+#import "PXNativeFilesystemReentry.h"
 #import <dlfcn.h>
 #import <os/lock.h>
 #import <string.h>
@@ -374,45 +375,87 @@ static CFDictionaryRef PXCoord_CFCopySystemVersionDictionary(void) {
 }
 
 static int PXCoord_statfs(const char *path, struct statfs *buf) {
-    int result = g_orig_statfs ? g_orig_statfs(path, buf) : -1;
-    PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
-    NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs];
-    for (PXNativeHookProvider *p in providers) {
-        PXStatfsPostBlock post = p.postBlock;
-        if (post) post(path, buf, &result);
+    const bool nestedFilesystemCritical = PXNativeFilesystemCriticalIsActive();
+    PXNativeFilesystemCriticalEnter();
+    int result = -1;
+    @try {
+        result = g_orig_statfs ? g_orig_statfs(path, buf) : -1;
+        if (!nestedFilesystemCritical) {
+            PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+            NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs];
+            for (PXNativeHookProvider *p in providers) {
+                PXStatfsPostBlock post = p.postBlock;
+                if (post) post(path, buf, &result);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        // The kernel result is already available. Fail open rather than letting
+        // provider/Objective-C work escape a native filesystem callback.
+    } @finally {
+        PXNativeFilesystemCriticalLeave();
     }
     return result;
 }
 
 static int PXCoord_statfs64(const char *path, PXStatfs64Buf *buf) {
-    int result = g_orig_statfs64 ? g_orig_statfs64(path, buf) : -1;
-    PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
-    NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs64];
-    for (PXNativeHookProvider *p in providers) {
-        PXStatfs64PostBlock post = p.postBlock;
-        if (post) post(path, buf, &result);
+    const bool nestedFilesystemCritical = PXNativeFilesystemCriticalIsActive();
+    PXNativeFilesystemCriticalEnter();
+    int result = -1;
+    @try {
+        result = g_orig_statfs64 ? g_orig_statfs64(path, buf) : -1;
+        if (!nestedFilesystemCritical) {
+            PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+            NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs64];
+            for (PXNativeHookProvider *p in providers) {
+                PXStatfs64PostBlock post = p.postBlock;
+                if (post) post(path, buf, &result);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+    } @finally {
+        PXNativeFilesystemCriticalLeave();
     }
     return result;
 }
 
 static int PXCoord_getfsstat(struct statfs *buf, int bufsize, int flags) {
-    int result = g_orig_getfsstat ? g_orig_getfsstat(buf, bufsize, flags) : -1;
-    PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
-    NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat];
-    for (PXNativeHookProvider *p in providers) {
-        PXGetfsstatPostBlock post = p.postBlock;
-        if (post) post(buf, bufsize, flags, &result);
+    const bool nestedFilesystemCritical = PXNativeFilesystemCriticalIsActive();
+    PXNativeFilesystemCriticalEnter();
+    int result = -1;
+    @try {
+        result = g_orig_getfsstat ? g_orig_getfsstat(buf, bufsize, flags) : -1;
+        if (!nestedFilesystemCritical) {
+            PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+            NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat];
+            for (PXNativeHookProvider *p in providers) {
+                PXGetfsstatPostBlock post = p.postBlock;
+                if (post) post(buf, bufsize, flags, &result);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+    } @finally {
+        PXNativeFilesystemCriticalLeave();
     }
     return result;
 }
 
 static int PXCoord_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
-    int result = g_orig_getfsstat64 ? g_orig_getfsstat64(buf, bufsize, flags) : -1;
-    PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
-    NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat64];
-    for (PXNativeHookProvider *p in providers) {
-        PXGetfsstat64PostBlock post = p.postBlock;
-        if (post) post(buf, bufsize, flags, &result);
+    const bool nestedFilesystemCritical = PXNativeFilesystemCriticalIsActive();
+    PXNativeFilesystemCriticalEnter();
+    int result = -1;
+    @try {
+        result = g_orig_getfsstat64 ? g_orig_getfsstat64(buf, bufsize, flags) : -1;
+        if (!nestedFilesystemCritical) {
+            PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
+            NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat64];
+            for (PXNativeHookProvider *p in providers) {
+                PXGetfsstat64PostBlock post = p.postBlock;
+                if (post) post(buf, bufsize, flags, &result);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+    } @finally {
+        PXNativeFilesystemCriticalLeave();
     }
     return result;
 }

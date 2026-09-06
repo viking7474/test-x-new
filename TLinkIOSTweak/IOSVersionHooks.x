@@ -17,6 +17,7 @@
 #import "PXIdentitySnapshot.h"
 #import "PXSystemVersionTransformer.h"
 #import "PXRuntimeOSCompatibility.h"
+#import "PXNativeFilesystemReentry.h"
 #import "PXUserAgentNormalizer.h"
 #import "IdentifierManager.h"
 #import "PXFileDebug.h"
@@ -1483,6 +1484,7 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 %hook NSBundle
 
 - (id)objectForInfoDictionaryKey:(NSString *)key {
+    if (PXNativeFilesystemCriticalIsActive()) return %orig;
     @try {
         NSString *bundleID = [self bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
@@ -1549,6 +1551,11 @@ static CFStringRef PXIOSVersionBorrowedInfoString(NSString *value) {
 
 // Replacement function for CFBundleGetValueForInfoDictionaryKey
 CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFStringRef key) {
+    if (PXNativeFilesystemCriticalIsActive()) {
+        return original_CFBundleGetValueForInfoDictionaryKey
+            ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
+            : NULL;
+    }
     @try {
         if (!bundle || !key) return NULL;
         

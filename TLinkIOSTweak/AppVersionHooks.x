@@ -10,6 +10,7 @@
 #import "AppVersionHooks.h"
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXNativeFilesystemReentry.h"
 #import "PXFileDebug.h"
 #import "PXP1BFilters.h"
 #import <os/lock.h>
@@ -108,18 +109,19 @@ static NSString *PXCFBundleIDSafe(CFBundleRef bundle) {
 }
 
 static NSDate *PXFileMTime(NSString *path) {
-    if (!path.length) return nil;
+    if (PXNativeFilesystemCriticalIsActive() || !path.length) return nil;
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
     return [attrs isKindOfClass:[NSDictionary class]] ? attrs[NSFileModificationDate] : nil;
 }
 
 static NSDictionary *PXReadPlist(NSString *path) {
-    if (!path.length) return nil;
+    if (PXNativeFilesystemCriticalIsActive() || !path.length) return nil;
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
     return [d isKindOfClass:[NSDictionary class]] ? d : nil;
 }
 
 static NSString *PXResolveExistingPath(NSArray<NSString *> *candidates) {
+    if (PXNativeFilesystemCriticalIsActive()) return nil;
     NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *p in candidates) {
         if (p.length && [fm fileExistsAtPath:p]) {
@@ -130,6 +132,7 @@ static NSString *PXResolveExistingPath(NSArray<NSString *> *candidates) {
 }
 
 BOOL PXAppVersionSpoofMasterEnabled(void) {
+    if (PXNativeFilesystemCriticalIsActive()) return NO;
     NSDictionary *settings = PXReadPlist(PXSecuritySettingsPath());
     return [settings[@"appVersionSpoofingEnabled"] boolValue];
 }
@@ -201,7 +204,7 @@ static NSDictionary *PXLoadProfileAppVersionPlist(NSString *bundleID) {
 BOOL PXGetSpoofedAppVersionForBundle(NSString *bundleID, NSString **outVersion, NSString **outBuild) {
     if (outVersion) *outVersion = nil;
     if (outBuild) *outBuild = nil;
-    if (!bundleID.length) return NO;
+    if (PXNativeFilesystemCriticalIsActive() || !bundleID.length) return NO;
 
     if (!PXAppVersionSpoofMasterEnabled()) {
         return NO;
@@ -275,6 +278,9 @@ void PXAppVersionHooksInvalidateCache(void) {
 #pragma mark - Full dictionary helpers
 
 static BOOL PXAppVersionScopeAllows(void) {
+    // A native mount/stat callback may run while CoreServices holds MountInfo's
+    // non-recursive lock. Never resolve scope through bundle/profile metadata there.
+    if (PXNativeFilesystemCriticalIsActive()) return NO;
     // NEVER call -[NSBundle bundleIdentifier] here — it re-enters infoDictionary.
     NSString *bundleID = PXMainBundleIDCached();
     if (!bundleID.length) return NO;
@@ -320,6 +326,10 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
 %hook NSBundle
 
 - (NSDictionary *)infoDictionary {
+    // CoreServices mount/property resolution can call bundle APIs while holding
+    // MountInfo's non-recursive lock. In that context only the original bundle
+    // dictionary is safe; AppVersion profile I/O must not run.
+    if (PXNativeFilesystemCriticalIsActive()) return %orig;
     // Recursion: bundleIdentifier / CFBundleGetInfoDictionary re-enter here.
     if (gPXAppVersionInfoRecursion > 0) {
         return %orig;
@@ -362,6 +372,7 @@ static BOOL PXShouldSpoofMainBundleInfo(NSBundle *bundle, NSString **outMainBund
 }
 
 - (NSDictionary *)localizedInfoDictionary {
+    if (PXNativeFilesystemCriticalIsActive()) return %orig;
     if (gPXAppVersionInfoRecursion > 0) {
         return %orig;
     }
@@ -484,6 +495,9 @@ static CFDictionaryRef PXCachedOrBuildCFInfoDict(CFBundleRef bundle,
 }
 
 static CFDictionaryRef replaced_CFBundleGetInfoDictionary(CFBundleRef bundle) {
+    if (PXNativeFilesystemCriticalIsActive()) {
+        return original_CFBundleGetInfoDictionary ? original_CFBundleGetInfoDictionary(bundle) : NULL;
+    }
     if (gPXAppVersionInfoRecursion > 0) {
         return original_CFBundleGetInfoDictionary ? original_CFBundleGetInfoDictionary(bundle) : NULL;
     }
@@ -503,6 +517,9 @@ static CFDictionaryRef replaced_CFBundleGetInfoDictionary(CFBundleRef bundle) {
 }
 
 static CFDictionaryRef replaced_CFBundleGetLocalInfoDictionary(CFBundleRef bundle) {
+    if (PXNativeFilesystemCriticalIsActive()) {
+        return original_CFBundleGetLocalInfoDictionary ? original_CFBundleGetLocalInfoDictionary(bundle) : NULL;
+    }
     if (gPXAppVersionInfoRecursion > 0) {
         return original_CFBundleGetLocalInfoDictionary ? original_CFBundleGetLocalInfoDictionary(bundle) : NULL;
     }
