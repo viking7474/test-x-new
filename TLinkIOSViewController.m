@@ -1616,12 +1616,21 @@ static void PXWriteSubstrateFilterPlists(void) {
     
     // Add Tools button to navigation bar (right side)
     UIButton *toolsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIImage *toolsIcon = PXSystemImageNamed(@"wrench.fill") ?: PXSystemImageNamed(@"wrench");
+    toolsButton.translatesAutoresizingMaskIntoConstraints = NO;
+    UIImage *toolsIcon = PXSystemImageNamedWithPointSize(@"wrench.fill", 17.0);
+    if (!toolsIcon) toolsIcon = PXSystemImageNamedWithPointSize(@"wrench", 17.0);
     [toolsButton setTitle:@"Tools" forState:UIControlStateNormal];
     [toolsButton setImage:toolsIcon forState:UIControlStateNormal];
     toolsButton.tintColor = [UIColor systemBlueColor];
     toolsButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    toolsButton.titleLabel.lineBreakMode = NSLineBreakByClipping;
+    toolsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    toolsButton.semanticContentAttribute = UISemanticContentAttributeForceLeftToRight;
     [toolsButton setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    [NSLayoutConstraint activateConstraints:@[
+        [toolsButton.widthAnchor constraintEqualToConstant:92.0],
+        [toolsButton.heightAnchor constraintEqualToConstant:38.0]
+    ]];
     
     if ([UIButton buttonConfigurationClassExists]) {
         // Use modern button configuration for iOS 15+
@@ -5726,16 +5735,43 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [deviceIcon.widthAnchor constraintEqualToConstant:50].active = YES;
     [deviceIcon.heightAnchor constraintEqualToConstant:50].active = YES;
 
-    UIImageView *phone = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"iphone")];
+    // Draw a simple phone glyph instead of relying on one SF Symbol name.
+    // This keeps the Device Status icon visible on older iOS/SF Symbols sets.
+    UIView *phone = [[UIView alloc] init];
     phone.translatesAutoresizingMaskIntoConstraints = NO;
-    phone.tintColor = [UIColor systemBlueColor];
-    phone.contentMode = UIViewContentModeScaleAspectFit;
+    phone.backgroundColor = [UIColor clearColor];
+    phone.layer.borderColor = [UIColor systemBlueColor].CGColor;
+    phone.layer.borderWidth = 2.0;
+    phone.layer.cornerRadius = 4.5;
     [deviceIcon addSubview:phone];
+
+    UIView *speaker = [[UIView alloc] init];
+    speaker.translatesAutoresizingMaskIntoConstraints = NO;
+    speaker.backgroundColor = [UIColor systemBlueColor];
+    speaker.layer.cornerRadius = 1.0;
+    [phone addSubview:speaker];
+
+    UIView *homeBar = [[UIView alloc] init];
+    homeBar.translatesAutoresizingMaskIntoConstraints = NO;
+    homeBar.backgroundColor = [UIColor systemBlueColor];
+    homeBar.layer.cornerRadius = 1.0;
+    [phone addSubview:homeBar];
+
     [NSLayoutConstraint activateConstraints:@[
         [phone.centerXAnchor constraintEqualToAnchor:deviceIcon.centerXAnchor],
         [phone.centerYAnchor constraintEqualToAnchor:deviceIcon.centerYAnchor],
-        [phone.widthAnchor constraintEqualToConstant:21],
-        [phone.heightAnchor constraintEqualToConstant:30]
+        [phone.widthAnchor constraintEqualToConstant:19],
+        [phone.heightAnchor constraintEqualToConstant:30],
+
+        [speaker.topAnchor constraintEqualToAnchor:phone.topAnchor constant:3.5],
+        [speaker.centerXAnchor constraintEqualToAnchor:phone.centerXAnchor],
+        [speaker.widthAnchor constraintEqualToConstant:6],
+        [speaker.heightAnchor constraintEqualToConstant:1.5],
+
+        [homeBar.bottomAnchor constraintEqualToAnchor:phone.bottomAnchor constant:-3.0],
+        [homeBar.centerXAnchor constraintEqualToAnchor:phone.centerXAnchor],
+        [homeBar.widthAnchor constraintEqualToConstant:7],
+        [homeBar.heightAnchor constraintEqualToConstant:1.5]
     ]];
     [row addArrangedSubview:deviceIcon];
 

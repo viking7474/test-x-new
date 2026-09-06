@@ -5455,6 +5455,9 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
 
     UIView *chip = [self securityIconChip:icon color:color ?: [UIColor systemBlueColor]];
+    // Decorative subviews must not steal touches from the row UIControl.
+    // The trailing UISwitch remains interactive on its own.
+    chip.userInteractionEnabled = NO;
     [row addSubview:chip];
 
     UIStackView *labels = [[UIStackView alloc] init];
@@ -5462,6 +5465,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     labels.alignment = UIStackViewAlignmentFill;
     labels.spacing = 2.0;
     labels.translatesAutoresizingMaskIntoConstraints = NO;
+    labels.userInteractionEnabled = NO;
     [row addSubview:labels];
 
     UILabel *titleLabel = [[UILabel alloc] init];
@@ -5493,6 +5497,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         trailingStack.alignment = UIStackViewAlignmentCenter;
         trailingStack.spacing = 6.0;
         trailingStack.translatesAutoresizingMaskIntoConstraints = NO;
+        trailingStack.userInteractionEnabled = NO;
 
         if (value.length) {
             UILabel *valueLabel = [[UILabel alloc] init];
