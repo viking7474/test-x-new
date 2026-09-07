@@ -490,53 +490,67 @@ static void PXWriteSubstrateFilterPlists(void) {
 @end
 
 @interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, copy) NSArray<NSDictionary *> *models;
+@property (nonatomic, copy) NSArray<NSDictionary *> *items;
+@property (nonatomic, copy) NSString *sheetTitle;
 @property (nonatomic) NSInteger minIndex;
 @property (nonatomic) NSInteger maxIndex;
 @property (nonatomic) BOOL fullRandom;
 @property (nonatomic, copy) void (^onApply)(BOOL fullRandom, NSInteger minIndex, NSInteger maxIndex);
 @property (nonatomic, strong) UITableView *leftTable;
 @property (nonatomic, strong) UITableView *rightTable;
+@property (nonatomic, strong) UIView *sheetView;
 @end
 
 @implementation PXFakeModelRangeViewController
 
-- (NSString *)chipForModel:(NSDictionary *)model index:(NSInteger)index selected:(BOOL)selected {
-    if (selected) {
-        NSArray *boards = @[ @"D22AP", @"N841AP", @"D321AP", @"N104AP", @"D421AP", @"D53GAP", @"D53PAP", @"D17AP", @"D63AP", @"D27AP", @"D73AP", @"D37AP", @"D83AP", @"D84AP" ];
-        if (index >= 0 && index < (NSInteger)boards.count) return boards[(NSUInteger)index];
-    }
-    NSArray *chips = @[ @"A11", @"A12", @"A12", @"A13", @"A13", @"A14", @"A14", @"A15", @"A15", @"A15", @"A16", @"A16", @"A17", @"A17" ];
-    if (index >= 0 && index < (NSInteger)chips.count) return chips[(NSUInteger)index];
-    return @"iPhone";
+- (NSString *)chipForItem:(NSDictionary *)item selected:(BOOL)selected {
+    NSString *selectedChip = [item[@"selectedChip"] isKindOfClass:[NSString class]] ? item[@"selectedChip"] : nil;
+    NSString *chip = [item[@"chip"] isKindOfClass:[NSString class]] ? item[@"chip"] : nil;
+    if (selected && selectedChip.length) return selectedChip;
+    if (chip.length) return chip;
+    return @"";
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = PXSystemGroupedBackgroundColor();
+    self.view.backgroundColor = [UIColor clearColor];
+
+    UIControl *dim = [[UIControl alloc] init];
+    dim.translatesAutoresizingMaskIntoConstraints = NO;
+    dim.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.24];
+    [dim addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:dim];
+
+    UIView *sheet = [[UIView alloc] init];
+    sheet.translatesAutoresizingMaskIntoConstraints = NO;
+    sheet.backgroundColor = PXSystemGroupedBackgroundColor();
+    sheet.layer.cornerRadius = 28.0;
+    sheet.layer.masksToBounds = YES;
+    [self.view addSubview:sheet];
+    self.sheetView = sheet;
 
     UIView *grabber = [[UIView alloc] init];
     grabber.translatesAutoresizingMaskIntoConstraints = NO;
     grabber.backgroundColor = PXSystemGray3Color();
     grabber.layer.cornerRadius = 2.5;
-    [self.view addSubview:grabber];
+    [sheet addSubview:grabber];
 
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.text = @"Fake Model";
+    title.text = self.sheetTitle.length ? self.sheetTitle : @"Fake Model";
     title.textAlignment = NSTextAlignmentCenter;
     title.textColor = PXLabelColor();
-    title.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-    [self.view addSubview:title];
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    [sheet addSubview:title];
 
     UIView *pickerCard = [[UIView alloc] init];
     pickerCard.translatesAutoresizingMaskIntoConstraints = NO;
     pickerCard.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
-    pickerCard.layer.cornerRadius = 18;
+    pickerCard.layer.cornerRadius = 16;
     pickerCard.layer.borderWidth = 0.5;
     pickerCard.layer.borderColor = PXSeparatorColor().CGColor;
     pickerCard.clipsToBounds = YES;
-    [self.view addSubview:pickerCard];
+    [sheet addSubview:pickerCard];
 
     self.leftTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.rightTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
@@ -544,9 +558,9 @@ static void PXWriteSubstrateFilterPlists(void) {
         table.translatesAutoresizingMaskIntoConstraints = NO;
         table.dataSource = self;
         table.delegate = self;
-        table.rowHeight = 42;
+        table.rowHeight = 39;
         table.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
-        table.separatorColor = [PXSeparatorColor() colorWithAlphaComponent:0.45];
+        table.separatorColor = [PXSeparatorColor() colorWithAlphaComponent:0.42];
         table.backgroundColor = [UIColor clearColor];
         table.showsVerticalScrollIndicator = YES;
         table.tableFooterView = [[UIView alloc] initWithFrame:CGRectZero];
@@ -558,7 +572,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIView *transfer = [[UIView alloc] init];
     transfer.translatesAutoresizingMaskIntoConstraints = NO;
     transfer.backgroundColor = PXSystemBackgroundColor();
-    transfer.layer.cornerRadius = 15;
+    transfer.layer.cornerRadius = 14;
     transfer.layer.borderWidth = 0.5;
     transfer.layer.borderColor = PXSystemGray3Color().CGColor;
     [pickerCard addSubview:transfer];
@@ -567,112 +581,132 @@ static void PXWriteSubstrateFilterPlists(void) {
     transferLabel.text = @"›";
     transferLabel.textAlignment = NSTextAlignmentCenter;
     transferLabel.textColor = PXSecondaryLabelColor();
-    transferLabel.font = [UIFont systemFontOfSize:23 weight:UIFontWeightMedium];
+    transferLabel.font = [UIFont systemFontOfSize:21 weight:UIFontWeightMedium];
     [transfer addSubview:transferLabel];
 
     UIButton *randomButton = [UIButton buttonWithType:UIButtonTypeSystem];
     randomButton.translatesAutoresizingMaskIntoConstraints = NO;
     randomButton.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.08];
-    randomButton.layer.cornerRadius = 12;
+    randomButton.layer.cornerRadius = 11;
     randomButton.layer.borderWidth = 1;
     randomButton.layer.borderColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.35].CGColor;
-    randomButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    randomButton.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+    randomButton.titleLabel.adjustsFontSizeToFitWidth = YES;
+    randomButton.titleLabel.minimumScaleFactor = 0.82;
     [randomButton setTitle:@"⚄  Ngẫu nhiên không giới hạn (Full Random)" forState:UIControlStateNormal];
     [randomButton setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
     [randomButton addTarget:self action:@selector(fullRandomTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:randomButton];
+    [sheet addSubview:randomButton];
 
     UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
     cancel.translatesAutoresizingMaskIntoConstraints = NO;
     cancel.backgroundColor = PXSecondarySystemFillColor();
-    cancel.layer.cornerRadius = 12;
-    cancel.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    cancel.layer.cornerRadius = 11;
+    cancel.titleLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightSemibold];
     [cancel setTitle:@"Huỷ (Cancel)" forState:UIControlStateNormal];
     [cancel setTitleColor:PXLabelColor() forState:UIControlStateNormal];
     [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:cancel];
+    [sheet addSubview:cancel];
 
     UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
     done.translatesAutoresizingMaskIntoConstraints = NO;
     done.backgroundColor = [UIColor systemBlueColor];
-    done.layer.cornerRadius = 12;
+    done.layer.cornerRadius = 11;
     done.layer.shadowColor = [UIColor systemBlueColor].CGColor;
-    done.layer.shadowOpacity = 0.18;
+    done.layer.shadowOpacity = 0.16;
     done.layer.shadowRadius = 4;
     done.layer.shadowOffset = CGSizeMake(0, 2);
-    done.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    done.titleLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightBold];
     [done setTitle:@"Áp dụng (Done)" forState:UIControlStateNormal];
     [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:done];
+    [sheet addSubview:done];
 
     [NSLayoutConstraint activateConstraints:@[
-        [grabber.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:10],
-        [grabber.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [dim.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [dim.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [dim.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [dim.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [sheet.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [sheet.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [sheet.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:20],
+        [sheet.heightAnchor constraintEqualToConstant:422],
+
+        [grabber.topAnchor constraintEqualToAnchor:sheet.topAnchor constant:9],
+        [grabber.centerXAnchor constraintEqualToAnchor:sheet.centerXAnchor],
         [grabber.widthAnchor constraintEqualToConstant:40],
         [grabber.heightAnchor constraintEqualToConstant:5],
 
-        [title.topAnchor constraintEqualToAnchor:grabber.bottomAnchor constant:12],
-        [title.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [title.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+        [title.topAnchor constraintEqualToAnchor:grabber.bottomAnchor constant:10],
+        [title.leadingAnchor constraintEqualToAnchor:sheet.leadingAnchor constant:20],
+        [title.trailingAnchor constraintEqualToAnchor:sheet.trailingAnchor constant:-20],
 
-        [pickerCard.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:16],
-        [pickerCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [pickerCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [pickerCard.heightAnchor constraintEqualToConstant:222],
+        [pickerCard.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:12],
+        [pickerCard.leadingAnchor constraintEqualToAnchor:sheet.leadingAnchor constant:16],
+        [pickerCard.trailingAnchor constraintEqualToAnchor:sheet.trailingAnchor constant:-16],
+        [pickerCard.heightAnchor constraintEqualToConstant:208],
 
-        [self.leftTable.topAnchor constraintEqualToAnchor:pickerCard.topAnchor constant:8],
-        [self.leftTable.leadingAnchor constraintEqualToAnchor:pickerCard.leadingAnchor constant:8],
-        [self.leftTable.bottomAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:-8],
-        [self.leftTable.widthAnchor constraintEqualToAnchor:pickerCard.widthAnchor multiplier:0.46 constant:-8],
+        [self.leftTable.topAnchor constraintEqualToAnchor:pickerCard.topAnchor constant:7],
+        [self.leftTable.leadingAnchor constraintEqualToAnchor:pickerCard.leadingAnchor constant:7],
+        [self.leftTable.bottomAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:-7],
+        [self.leftTable.widthAnchor constraintEqualToAnchor:pickerCard.widthAnchor multiplier:0.46 constant:-7],
 
-        [self.rightTable.topAnchor constraintEqualToAnchor:pickerCard.topAnchor constant:8],
-        [self.rightTable.trailingAnchor constraintEqualToAnchor:pickerCard.trailingAnchor constant:-8],
-        [self.rightTable.bottomAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:-8],
-        [self.rightTable.widthAnchor constraintEqualToAnchor:pickerCard.widthAnchor multiplier:0.46 constant:-8],
+        [self.rightTable.topAnchor constraintEqualToAnchor:pickerCard.topAnchor constant:7],
+        [self.rightTable.trailingAnchor constraintEqualToAnchor:pickerCard.trailingAnchor constant:-7],
+        [self.rightTable.bottomAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:-7],
+        [self.rightTable.widthAnchor constraintEqualToAnchor:pickerCard.widthAnchor multiplier:0.46 constant:-7],
 
         [transfer.centerXAnchor constraintEqualToAnchor:pickerCard.centerXAnchor],
         [transfer.centerYAnchor constraintEqualToAnchor:pickerCard.centerYAnchor],
-        [transfer.widthAnchor constraintEqualToConstant:30],
-        [transfer.heightAnchor constraintEqualToConstant:30],
+        [transfer.widthAnchor constraintEqualToConstant:28],
+        [transfer.heightAnchor constraintEqualToConstant:28],
         [transferLabel.topAnchor constraintEqualToAnchor:transfer.topAnchor],
         [transferLabel.leadingAnchor constraintEqualToAnchor:transfer.leadingAnchor],
         [transferLabel.trailingAnchor constraintEqualToAnchor:transfer.trailingAnchor],
         [transferLabel.bottomAnchor constraintEqualToAnchor:transfer.bottomAnchor constant:-1],
 
-        [randomButton.topAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:12],
-        [randomButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [randomButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [randomButton.heightAnchor constraintEqualToConstant:46],
+        [randomButton.topAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:11],
+        [randomButton.leadingAnchor constraintEqualToAnchor:sheet.leadingAnchor constant:16],
+        [randomButton.trailingAnchor constraintEqualToAnchor:sheet.trailingAnchor constant:-16],
+        [randomButton.heightAnchor constraintEqualToConstant:43],
 
-        [cancel.topAnchor constraintEqualToAnchor:randomButton.bottomAnchor constant:12],
-        [cancel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [cancel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-12],
-        [cancel.heightAnchor constraintEqualToConstant:48],
+        [cancel.topAnchor constraintEqualToAnchor:randomButton.bottomAnchor constant:10],
+        [cancel.leadingAnchor constraintEqualToAnchor:sheet.leadingAnchor constant:16],
+        [cancel.heightAnchor constraintEqualToConstant:45],
 
         [done.topAnchor constraintEqualToAnchor:cancel.topAnchor],
-        [done.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [done.bottomAnchor constraintEqualToAnchor:cancel.bottomAnchor],
+        [done.trailingAnchor constraintEqualToAnchor:sheet.trailingAnchor constant:-16],
         [done.heightAnchor constraintEqualToAnchor:cancel.heightAnchor],
         [done.leadingAnchor constraintEqualToAnchor:cancel.trailingAnchor constant:10],
         [done.widthAnchor constraintEqualToAnchor:cancel.widthAnchor]
     ]];
-
-    self.preferredContentSize = CGSizeMake(390, 430);
 }
 
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.models.count; }
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (!self.items.count) return;
+    NSInteger safeMin = MAX(0, MIN(self.minIndex, (NSInteger)self.items.count - 1));
+    NSInteger safeMax = MAX(0, MIN(self.maxIndex, (NSInteger)self.items.count - 1));
+    [self.leftTable scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:safeMin inSection:0] atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+    [self.rightTable scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:safeMax inSection:0] atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.items.count; }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"FakeModelRangeCell"];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"FakeModelRangeCell"];
-    NSDictionary *model = self.models[(NSUInteger)indexPath.row];
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"FakeRangeCell"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"FakeRangeCell"];
+    NSDictionary *item = self.items[(NSUInteger)indexPath.row];
     BOOL left = (tableView.tag == 9101);
     BOOL selected = !self.fullRandom && indexPath.row == (left ? self.minIndex : self.maxIndex);
-    cell.textLabel.text = model[@"name"] ?: @"iPhone";
-    cell.textLabel.font = [UIFont systemFontOfSize:13 weight:selected ? UIFontWeightSemibold : UIFontWeightMedium];
-    cell.detailTextLabel.text = [self chipForModel:model index:indexPath.row selected:selected];
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : @"";
+    cell.textLabel.text = name;
+    cell.textLabel.font = [UIFont systemFontOfSize:12.5 weight:selected ? UIFontWeightSemibold : UIFontWeightMedium];
+    cell.textLabel.adjustsFontSizeToFitWidth = YES;
+    cell.textLabel.minimumScaleFactor = 0.78;
+    cell.detailTextLabel.text = [self chipForItem:item selected:selected];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:9.5 weight:UIFontWeightSemibold];
     cell.detailTextLabel.textColor = selected ? (left ? [UIColor systemBlueColor] : [UIColor systemGreenColor]) : PXSecondaryLabelColor();
     cell.backgroundColor = selected ? [(left ? [UIColor systemBlueColor] : [UIColor systemGreenColor]) colorWithAlphaComponent:0.10] : PXSecondarySystemGroupedBackgroundColor();
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -829,8 +863,63 @@ static void PXWriteSubstrateFilterPlists(void) {
 - (UIView *)fakeIconChipWithSymbol:(NSString *)symbol color:(UIColor *)color fallback:(NSString *)fallback {
     UIView *chip = [[UIView alloc] init];
     chip.translatesAutoresizingMaskIntoConstraints = NO;
-    chip.backgroundColor = [color colorWithAlphaComponent:0.14];
+    BOOL appleGlyph = [symbol isEqualToString:@"applelogo"];
+    BOOL phoneGlyph = [symbol isEqualToString:@"rectangle.portrait"];
+    chip.backgroundColor = (appleGlyph || phoneGlyph) ? color : [color colorWithAlphaComponent:0.14];
     chip.layer.cornerRadius = 13;
+
+    if (appleGlyph) {
+        UILabel *apple = [[UILabel alloc] init];
+        apple.translatesAutoresizingMaskIntoConstraints = NO;
+        apple.text = @"";
+        apple.textAlignment = NSTextAlignmentCenter;
+        apple.textColor = [UIColor whiteColor];
+        apple.font = [UIFont systemFontOfSize:27 weight:UIFontWeightRegular];
+        [chip addSubview:apple];
+        [NSLayoutConstraint activateConstraints:@[
+            [apple.topAnchor constraintEqualToAnchor:chip.topAnchor],
+            [apple.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor],
+            [apple.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor],
+            [apple.bottomAnchor constraintEqualToAnchor:chip.bottomAnchor]
+        ]];
+        return chip;
+    }
+
+    if (phoneGlyph) {
+        UIView *phone = [[UIView alloc] init];
+        phone.translatesAutoresizingMaskIntoConstraints = NO;
+        phone.backgroundColor = [UIColor clearColor];
+        phone.layer.borderColor = [UIColor whiteColor].CGColor;
+        phone.layer.borderWidth = 2.0;
+        phone.layer.cornerRadius = 3.5;
+        [chip addSubview:phone];
+        UIView *speaker = [[UIView alloc] init];
+        speaker.translatesAutoresizingMaskIntoConstraints = NO;
+        speaker.backgroundColor = [UIColor whiteColor];
+        speaker.layer.cornerRadius = 0.75;
+        [phone addSubview:speaker];
+        UIView *homeBar = [[UIView alloc] init];
+        homeBar.translatesAutoresizingMaskIntoConstraints = NO;
+        homeBar.backgroundColor = [UIColor whiteColor];
+        homeBar.layer.cornerRadius = 0.75;
+        [phone addSubview:homeBar];
+        [NSLayoutConstraint activateConstraints:@[
+            [phone.centerXAnchor constraintEqualToAnchor:chip.centerXAnchor],
+            [phone.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [phone.widthAnchor constraintEqualToConstant:17],
+            [phone.heightAnchor constraintEqualToConstant:27],
+            [speaker.topAnchor constraintEqualToAnchor:phone.topAnchor constant:3],
+            [speaker.centerXAnchor constraintEqualToAnchor:phone.centerXAnchor],
+            [speaker.widthAnchor constraintEqualToConstant:5],
+            [speaker.heightAnchor constraintEqualToConstant:1.5],
+            [homeBar.bottomAnchor constraintEqualToAnchor:phone.bottomAnchor constant:-2.5],
+            [homeBar.centerXAnchor constraintEqualToAnchor:phone.centerXAnchor],
+            [homeBar.widthAnchor constraintEqualToConstant:6],
+            [homeBar.heightAnchor constraintEqualToConstant:1.5]
+        ]];
+        return chip;
+    }
+
     UIImage *image = PXSystemImageNamed(symbol);
     if (!image && fallback.length) image = PXSystemImageNamed(fallback);
     if (image) {
@@ -877,30 +966,39 @@ static void PXWriteSubstrateFilterPlists(void) {
     [cell.contentView addSubview:labels];
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = title;
-    titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    titleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightBold];
     titleLabel.textColor = PXLabelColor();
+    titleLabel.numberOfLines = 1;
+    titleLabel.adjustsFontSizeToFitWidth = YES;
+    titleLabel.minimumScaleFactor = 0.84;
     [labels addArrangedSubview:titleLabel];
     UILabel *subtitleLabel = [[UILabel alloc] init];
     subtitleLabel.text = subtitle;
-    subtitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    subtitleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
     subtitleLabel.textColor = PXSecondaryLabelColor();
+    subtitleLabel.numberOfLines = 1;
+    subtitleLabel.adjustsFontSizeToFitWidth = YES;
+    subtitleLabel.minimumScaleFactor = 0.78;
     [labels addArrangedSubview:subtitleLabel];
 
     UISwitch *toggle = [[UISwitch alloc] init];
+    toggle.translatesAutoresizingMaskIntoConstraints = NO;
     toggle.onTintColor = [UIColor systemBlueColor];
     [toggle setOn:[self boolOption:key defaultValue:defaultValue] animated:NO];
     objc_setAssociatedObject(toggle, @selector(fakeSwitchChanged:), key, OBJC_ASSOCIATION_COPY_NONATOMIC);
     [toggle addTarget:self action:@selector(fakeSwitchChanged:) forControlEvents:UIControlEventValueChanged];
-    cell.accessoryView = toggle;
+    [cell.contentView addSubview:toggle];
 
     [NSLayoutConstraint activateConstraints:@[
         [chip.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
         [chip.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
         [chip.widthAnchor constraintEqualToConstant:46],
         [chip.heightAnchor constraintEqualToConstant:46],
+        [toggle.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
+        [toggle.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
         [labels.leadingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:14],
         [labels.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
-        [labels.trailingAnchor constraintLessThanOrEqualToAnchor:cell.contentView.trailingAnchor constant:-76]
+        [labels.trailingAnchor constraintLessThanOrEqualToAnchor:toggle.leadingAnchor constant:-12]
     ]];
     return cell;
 }
@@ -1109,12 +1207,12 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
     done.translatesAutoresizingMaskIntoConstraints = NO;
     done.backgroundColor = [UIColor systemBlueColor];
-    done.layer.cornerRadius = 20;
-    done.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    done.layer.cornerRadius = 18;
+    done.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     [done setTitle:@"Done" forState:UIControlStateNormal];
     [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [NSLayoutConstraint activateConstraints:@[[done.widthAnchor constraintEqualToConstant:72], [done.heightAnchor constraintEqualToConstant:40]]];
+    [NSLayoutConstraint activateConstraints:@[[done.widthAnchor constraintEqualToConstant:60], [done.heightAnchor constraintEqualToConstant:36]]];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:done];
 }
 
@@ -1178,11 +1276,55 @@ static void PXWriteSubstrateFilterPlists(void) {
         @9: @"fakeGPSEnabled",
         @10: @"gpsRandomByIPEnabled"
     };
-    if (row == 1) { [self showRangePickerWithTitle:@"Fake iOS Version" values:[self iosVersions] minKey:@"iosMin" maxKey:@"iosMax" labels:nil]; return; }
+    if (row == 1) { [self showFakeIOSRangePicker]; return; }
     if (row == 3) { [self showFakeModelRangePicker]; return; }
     if (row == 8) { [self showIPServerPicker]; return; }
     NSString *key = toggleKeys[@(row)];
     if (key.length) [self setBoolOption:key value:![self boolOption:key defaultValue:(row == 0 || row == 2)]];
+}
+
+- (void)showFakeIOSRangePicker {
+    NSArray<NSString *> *versions = [self iosVersions];
+    if (!versions.count) return;
+
+    NSString *currentMin = [self.options[@"iosMin"] isKindOfClass:[NSString class]] ? self.options[@"iosMin"] : nil;
+    NSString *currentMax = [self.options[@"iosMax"] isKindOfClass:[NSString class]] ? self.options[@"iosMax"] : nil;
+    BOOL fullRandom = (!currentMin.length && !currentMax.length);
+    NSUInteger minFound = currentMin.length ? [versions indexOfObject:currentMin] : 0;
+    NSUInteger maxFound = currentMax.length ? [versions indexOfObject:currentMax] : (versions.count - 1);
+    NSInteger minIndex = (minFound == NSNotFound) ? 0 : (NSInteger)minFound;
+    NSInteger maxIndex = (maxFound == NSNotFound) ? ((NSInteger)versions.count - 1) : (NSInteger)maxFound;
+    if (minIndex > maxIndex) { NSInteger swap = minIndex; minIndex = maxIndex; maxIndex = swap; }
+
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:versions.count];
+    for (NSString *version in versions) {
+        [items addObject:@{ @"name": version, @"chip": @"iOS", @"selectedChip": @"iOS" }];
+    }
+
+    PXFakeModelRangeViewController *picker = [[PXFakeModelRangeViewController alloc] init];
+    picker.sheetTitle = @"Fake iOS Version";
+    picker.items = items;
+    picker.minIndex = minIndex;
+    picker.maxIndex = maxIndex;
+    picker.fullRandom = fullRandom;
+    __weak typeof(self) weakSelf = self;
+    picker.onApply = ^(BOOL random, NSInteger minimum, NSInteger maximum) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        NSMutableDictionary *dict = [self mutableOptions];
+        if (random) {
+            [dict removeObjectForKey:@"iosMin"];
+            [dict removeObjectForKey:@"iosMax"];
+        } else if (minimum >= 0 && maximum >= 0 && minimum < (NSInteger)versions.count && maximum < (NSInteger)versions.count) {
+            dict[@"iosMin"] = versions[(NSUInteger)minimum];
+            dict[@"iosMax"] = versions[(NSUInteger)maximum];
+        }
+        self.options = dict;
+        [self.tableView reloadData];
+    };
+    picker.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    picker.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [self presentViewController:picker animated:YES completion:nil];
 }
 
 - (void)showFakeModelRangePicker {
@@ -1195,8 +1337,20 @@ static void PXWriteSubstrateFilterPlists(void) {
     if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
 
+    NSArray *boards = @[ @"D22AP", @"N841AP", @"D321AP", @"N104AP", @"D421AP", @"D53GAP", @"D53PAP", @"D17AP", @"D63AP", @"D27AP", @"D73AP", @"D37AP", @"D83AP", @"D84AP" ];
+    NSArray *chips = @[ @"A11", @"A12", @"A12", @"A13", @"A13", @"A14", @"A14", @"A15", @"A15", @"A15", @"A16", @"A16", @"A17", @"A17" ];
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:models.count];
+    for (NSUInteger index = 0; index < models.count; index++) {
+        NSDictionary *model = models[index];
+        NSString *name = [model[@"name"] isKindOfClass:[NSString class]] ? model[@"name"] : @"iPhone";
+        NSString *chip = index < chips.count ? chips[index] : @"iPhone";
+        NSString *selectedChip = index < boards.count ? boards[index] : chip;
+        [items addObject:@{ @"name": name, @"chip": chip, @"selectedChip": selectedChip }];
+    }
+
     PXFakeModelRangeViewController *picker = [[PXFakeModelRangeViewController alloc] init];
-    picker.models = models;
+    picker.sheetTitle = @"Fake Model";
+    picker.items = items;
     picker.minIndex = MAX(0, minIdx - 1);
     picker.maxIndex = MAX(0, maxIdx - 1);
     picker.fullRandom = fullRandom;
@@ -1215,17 +1369,8 @@ static void PXWriteSubstrateFilterPlists(void) {
         self.options = dict;
         [self.tableView reloadData];
     };
-    picker.modalPresentationStyle = UIModalPresentationPageSheet;
-    if (NSClassFromString(@"UISheetPresentationController") != nil &&
-        NSClassFromString(@"UISheetPresentationControllerDetent") != nil &&
-        [picker respondsToSelector:NSSelectorFromString(@"sheetPresentationController")]) {
-        UISheetPresentationController *sheet = picker.sheetPresentationController;
-        if ([UISheetPresentationControllerDetent respondsToSelector:@selector(mediumDetent)]) {
-            sheet.detents = @[[UISheetPresentationControllerDetent mediumDetent]];
-        }
-        sheet.prefersGrabberVisible = NO;
-        sheet.preferredCornerRadius = 28.0;
-    }
+    picker.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    picker.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     [self presentViewController:picker animated:YES completion:nil];
 }
 
