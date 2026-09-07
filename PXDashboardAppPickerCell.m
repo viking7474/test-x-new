@@ -58,7 +58,7 @@ UIColor *PXAppPickerBorderColor(void) {
 
     self.appNameLabel = [[UILabel alloc] init];
     self.appNameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appNameLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    self.appNameLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
     self.appNameLabel.adjustsFontForContentSizeCategory = YES;
     self.appNameLabel.numberOfLines = 1;
     self.appNameLabel.adjustsFontSizeToFitWidth = YES;
