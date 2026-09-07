@@ -489,6 +489,223 @@ static void PXWriteSubstrateFilterPlists(void) {
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
 @end
 
+@interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, copy) NSArray<NSDictionary *> *models;
+@property (nonatomic) NSInteger minIndex;
+@property (nonatomic) NSInteger maxIndex;
+@property (nonatomic) BOOL fullRandom;
+@property (nonatomic, copy) void (^onApply)(BOOL fullRandom, NSInteger minIndex, NSInteger maxIndex);
+@property (nonatomic, strong) UITableView *leftTable;
+@property (nonatomic, strong) UITableView *rightTable;
+@end
+
+@implementation PXFakeModelRangeViewController
+
+- (NSString *)chipForModel:(NSDictionary *)model index:(NSInteger)index selected:(BOOL)selected {
+    if (selected) {
+        NSArray *boards = @[ @"D22AP", @"N841AP", @"D321AP", @"N104AP", @"D421AP", @"D53GAP", @"D53PAP", @"D17AP", @"D63AP", @"D27AP", @"D73AP", @"D37AP", @"D83AP", @"D84AP" ];
+        if (index >= 0 && index < (NSInteger)boards.count) return boards[(NSUInteger)index];
+    }
+    NSArray *chips = @[ @"A11", @"A12", @"A12", @"A13", @"A13", @"A14", @"A14", @"A15", @"A15", @"A15", @"A16", @"A16", @"A17", @"A17" ];
+    if (index >= 0 && index < (NSInteger)chips.count) return chips[(NSUInteger)index];
+    return @"iPhone";
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = PXSystemGroupedBackgroundColor();
+
+    UIView *grabber = [[UIView alloc] init];
+    grabber.translatesAutoresizingMaskIntoConstraints = NO;
+    grabber.backgroundColor = PXSystemGray3Color();
+    grabber.layer.cornerRadius = 2.5;
+    [self.view addSubview:grabber];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.text = @"Fake Model";
+    title.textAlignment = NSTextAlignmentCenter;
+    title.textColor = PXLabelColor();
+    title.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+    [self.view addSubview:title];
+
+    UIView *pickerCard = [[UIView alloc] init];
+    pickerCard.translatesAutoresizingMaskIntoConstraints = NO;
+    pickerCard.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
+    pickerCard.layer.cornerRadius = 18;
+    pickerCard.layer.borderWidth = 0.5;
+    pickerCard.layer.borderColor = PXSeparatorColor().CGColor;
+    pickerCard.clipsToBounds = YES;
+    [self.view addSubview:pickerCard];
+
+    self.leftTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.rightTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    for (UITableView *table in @[ self.leftTable, self.rightTable ]) {
+        table.translatesAutoresizingMaskIntoConstraints = NO;
+        table.dataSource = self;
+        table.delegate = self;
+        table.rowHeight = 42;
+        table.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
+        table.separatorColor = [PXSeparatorColor() colorWithAlphaComponent:0.45];
+        table.backgroundColor = [UIColor clearColor];
+        table.showsVerticalScrollIndicator = YES;
+        table.tableFooterView = [[UIView alloc] initWithFrame:CGRectZero];
+        [pickerCard addSubview:table];
+    }
+    self.leftTable.tag = 9101;
+    self.rightTable.tag = 9102;
+
+    UIView *transfer = [[UIView alloc] init];
+    transfer.translatesAutoresizingMaskIntoConstraints = NO;
+    transfer.backgroundColor = PXSystemBackgroundColor();
+    transfer.layer.cornerRadius = 15;
+    transfer.layer.borderWidth = 0.5;
+    transfer.layer.borderColor = PXSystemGray3Color().CGColor;
+    [pickerCard addSubview:transfer];
+    UILabel *transferLabel = [[UILabel alloc] init];
+    transferLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    transferLabel.text = @"›";
+    transferLabel.textAlignment = NSTextAlignmentCenter;
+    transferLabel.textColor = PXSecondaryLabelColor();
+    transferLabel.font = [UIFont systemFontOfSize:23 weight:UIFontWeightMedium];
+    [transfer addSubview:transferLabel];
+
+    UIButton *randomButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    randomButton.translatesAutoresizingMaskIntoConstraints = NO;
+    randomButton.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.08];
+    randomButton.layer.cornerRadius = 12;
+    randomButton.layer.borderWidth = 1;
+    randomButton.layer.borderColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.35].CGColor;
+    randomButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    [randomButton setTitle:@"⚄  Ngẫu nhiên không giới hạn (Full Random)" forState:UIControlStateNormal];
+    [randomButton setTitleColor:[UIColor systemOrangeColor] forState:UIControlStateNormal];
+    [randomButton addTarget:self action:@selector(fullRandomTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:randomButton];
+
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    cancel.translatesAutoresizingMaskIntoConstraints = NO;
+    cancel.backgroundColor = PXSecondarySystemFillColor();
+    cancel.layer.cornerRadius = 12;
+    cancel.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [cancel setTitle:@"Huỷ (Cancel)" forState:UIControlStateNormal];
+    [cancel setTitleColor:PXLabelColor() forState:UIControlStateNormal];
+    [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:cancel];
+
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+    done.translatesAutoresizingMaskIntoConstraints = NO;
+    done.backgroundColor = [UIColor systemBlueColor];
+    done.layer.cornerRadius = 12;
+    done.layer.shadowColor = [UIColor systemBlueColor].CGColor;
+    done.layer.shadowOpacity = 0.18;
+    done.layer.shadowRadius = 4;
+    done.layer.shadowOffset = CGSizeMake(0, 2);
+    done.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    [done setTitle:@"Áp dụng (Done)" forState:UIControlStateNormal];
+    [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:done];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [grabber.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:10],
+        [grabber.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [grabber.widthAnchor constraintEqualToConstant:40],
+        [grabber.heightAnchor constraintEqualToConstant:5],
+
+        [title.topAnchor constraintEqualToAnchor:grabber.bottomAnchor constant:12],
+        [title.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
+        [title.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+
+        [pickerCard.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:16],
+        [pickerCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [pickerCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [pickerCard.heightAnchor constraintEqualToConstant:222],
+
+        [self.leftTable.topAnchor constraintEqualToAnchor:pickerCard.topAnchor constant:8],
+        [self.leftTable.leadingAnchor constraintEqualToAnchor:pickerCard.leadingAnchor constant:8],
+        [self.leftTable.bottomAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:-8],
+        [self.leftTable.widthAnchor constraintEqualToAnchor:pickerCard.widthAnchor multiplier:0.46 constant:-8],
+
+        [self.rightTable.topAnchor constraintEqualToAnchor:pickerCard.topAnchor constant:8],
+        [self.rightTable.trailingAnchor constraintEqualToAnchor:pickerCard.trailingAnchor constant:-8],
+        [self.rightTable.bottomAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:-8],
+        [self.rightTable.widthAnchor constraintEqualToAnchor:pickerCard.widthAnchor multiplier:0.46 constant:-8],
+
+        [transfer.centerXAnchor constraintEqualToAnchor:pickerCard.centerXAnchor],
+        [transfer.centerYAnchor constraintEqualToAnchor:pickerCard.centerYAnchor],
+        [transfer.widthAnchor constraintEqualToConstant:30],
+        [transfer.heightAnchor constraintEqualToConstant:30],
+        [transferLabel.topAnchor constraintEqualToAnchor:transfer.topAnchor],
+        [transferLabel.leadingAnchor constraintEqualToAnchor:transfer.leadingAnchor],
+        [transferLabel.trailingAnchor constraintEqualToAnchor:transfer.trailingAnchor],
+        [transferLabel.bottomAnchor constraintEqualToAnchor:transfer.bottomAnchor constant:-1],
+
+        [randomButton.topAnchor constraintEqualToAnchor:pickerCard.bottomAnchor constant:12],
+        [randomButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [randomButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [randomButton.heightAnchor constraintEqualToConstant:46],
+
+        [cancel.topAnchor constraintEqualToAnchor:randomButton.bottomAnchor constant:12],
+        [cancel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [cancel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-12],
+        [cancel.heightAnchor constraintEqualToConstant:48],
+
+        [done.topAnchor constraintEqualToAnchor:cancel.topAnchor],
+        [done.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [done.bottomAnchor constraintEqualToAnchor:cancel.bottomAnchor],
+        [done.heightAnchor constraintEqualToAnchor:cancel.heightAnchor],
+        [done.leadingAnchor constraintEqualToAnchor:cancel.trailingAnchor constant:10],
+        [done.widthAnchor constraintEqualToAnchor:cancel.widthAnchor]
+    ]];
+
+    self.preferredContentSize = CGSizeMake(390, 430);
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.models.count; }
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"FakeModelRangeCell"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"FakeModelRangeCell"];
+    NSDictionary *model = self.models[(NSUInteger)indexPath.row];
+    BOOL left = (tableView.tag == 9101);
+    BOOL selected = !self.fullRandom && indexPath.row == (left ? self.minIndex : self.maxIndex);
+    cell.textLabel.text = model[@"name"] ?: @"iPhone";
+    cell.textLabel.font = [UIFont systemFontOfSize:13 weight:selected ? UIFontWeightSemibold : UIFontWeightMedium];
+    cell.detailTextLabel.text = [self chipForModel:model index:indexPath.row selected:selected];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    cell.detailTextLabel.textColor = selected ? (left ? [UIColor systemBlueColor] : [UIColor systemGreenColor]) : PXSecondaryLabelColor();
+    cell.backgroundColor = selected ? [(left ? [UIColor systemBlueColor] : [UIColor systemGreenColor]) colorWithAlphaComponent:0.10] : PXSecondarySystemGroupedBackgroundColor();
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    self.fullRandom = NO;
+    if (tableView.tag == 9101) {
+        self.minIndex = indexPath.row;
+        if (self.minIndex > self.maxIndex) self.maxIndex = self.minIndex;
+    } else {
+        self.maxIndex = indexPath.row;
+        if (self.maxIndex < self.minIndex) self.minIndex = self.maxIndex;
+    }
+    [self.leftTable reloadData];
+    [self.rightTable reloadData];
+}
+
+- (void)fullRandomTapped {
+    self.fullRandom = YES;
+    [self.leftTable reloadData];
+    [self.rightTable reloadData];
+}
+
+- (void)cancelTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)doneTapped {
+    if (self.onApply) self.onApply(self.fullRandom, self.minIndex, self.maxIndex);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
 @interface PXFakeSelectionViewController : UITableViewController
 @property (nonatomic, copy) NSDictionary *options;
 @property (nonatomic, copy) NSDictionary *preview;
@@ -558,19 +775,347 @@ static void PXWriteSubstrateFilterPlists(void) {
     return [NetworkManager getCarriersForCountry:code ?: @"us"];
 }
 
+- (UIView *)fakeNavigationTitleView {
+    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 190, 40)];
+    UIView *chip = [[UIView alloc] init];
+    chip.translatesAutoresizingMaskIntoConstraints = NO;
+    chip.backgroundColor = [[UIColor systemIndigoColor] colorWithAlphaComponent:0.16];
+    chip.layer.cornerRadius = 9;
+    [container addSubview:chip];
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"theatermasks.fill") ?: PXSystemImageNamed(@"eye.fill")];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.tintColor = [UIColor systemIndigoColor];
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    [chip addSubview:icon];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.text = @"Chọn Fake";
+    title.font = [UIFont systemFontOfSize:21 weight:UIFontWeightBold];
+    title.textColor = PXLabelColor();
+    [container addSubview:title];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [chip.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [chip.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        [chip.widthAnchor constraintEqualToConstant:36],
+        [chip.heightAnchor constraintEqualToConstant:36],
+        [icon.centerXAnchor constraintEqualToAnchor:chip.centerXAnchor],
+        [icon.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+        [icon.widthAnchor constraintEqualToConstant:22],
+        [icon.heightAnchor constraintEqualToConstant:22],
+        [title.leadingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:10],
+        [title.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        [title.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor]
+    ]];
+    return container;
+}
+
+- (UIView *)fakeTableHeaderView {
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    if (width < 1) width = CGRectGetWidth(UIScreen.mainScreen.bounds);
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 42)];
+    UILabel *subtitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 4, width - 32, 28)];
+    subtitle.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    subtitle.text = @"Tùy chỉnh thông tin giả mạo thiết bị";
+    subtitle.textAlignment = NSTextAlignmentCenter;
+    subtitle.textColor = PXSecondaryLabelColor();
+    subtitle.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
+    [header addSubview:subtitle];
+    return header;
+}
+
+- (UIView *)fakeIconChipWithSymbol:(NSString *)symbol color:(UIColor *)color fallback:(NSString *)fallback {
+    UIView *chip = [[UIView alloc] init];
+    chip.translatesAutoresizingMaskIntoConstraints = NO;
+    chip.backgroundColor = [color colorWithAlphaComponent:0.14];
+    chip.layer.cornerRadius = 13;
+    UIImage *image = PXSystemImageNamed(symbol);
+    if (!image && fallback.length) image = PXSystemImageNamed(fallback);
+    if (image) {
+        UIImageView *iv = [[UIImageView alloc] initWithImage:image];
+        iv.translatesAutoresizingMaskIntoConstraints = NO;
+        iv.tintColor = color;
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        [chip addSubview:iv];
+        [NSLayoutConstraint activateConstraints:@[
+            [iv.centerXAnchor constraintEqualToAnchor:chip.centerXAnchor],
+            [iv.centerYAnchor constraintEqualToAnchor:chip.centerYAnchor],
+            [iv.widthAnchor constraintEqualToConstant:24],
+            [iv.heightAnchor constraintEqualToConstant:24]
+        ]];
+    } else {
+        UILabel *fallbackLabel = [[UILabel alloc] init];
+        fallbackLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        fallbackLabel.text = @"•";
+        fallbackLabel.textAlignment = NSTextAlignmentCenter;
+        fallbackLabel.textColor = color;
+        fallbackLabel.font = [UIFont systemFontOfSize:25 weight:UIFontWeightBold];
+        [chip addSubview:fallbackLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [fallbackLabel.topAnchor constraintEqualToAnchor:chip.topAnchor],
+            [fallbackLabel.leadingAnchor constraintEqualToAnchor:chip.leadingAnchor],
+            [fallbackLabel.trailingAnchor constraintEqualToAnchor:chip.trailingAnchor],
+            [fallbackLabel.bottomAnchor constraintEqualToAnchor:chip.bottomAnchor]
+        ]];
+    }
+    return chip;
+}
+
+- (UITableViewCell *)fakeMainToggleCellWithTitle:(NSString *)title subtitle:(NSString *)subtitle key:(NSString *)key defaultValue:(BOOL)defaultValue symbol:(NSString *)symbol fallback:(NSString *)fallback color:(UIColor *)color {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
+
+    UIView *chip = [self fakeIconChipWithSymbol:symbol color:color fallback:fallback];
+    [cell.contentView addSubview:chip];
+    UIStackView *labels = [[UIStackView alloc] init];
+    labels.translatesAutoresizingMaskIntoConstraints = NO;
+    labels.axis = UILayoutConstraintAxisVertical;
+    labels.spacing = 3;
+    [cell.contentView addSubview:labels];
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    titleLabel.textColor = PXLabelColor();
+    [labels addArrangedSubview:titleLabel];
+    UILabel *subtitleLabel = [[UILabel alloc] init];
+    subtitleLabel.text = subtitle;
+    subtitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    subtitleLabel.textColor = PXSecondaryLabelColor();
+    [labels addArrangedSubview:subtitleLabel];
+
+    UISwitch *toggle = [[UISwitch alloc] init];
+    toggle.onTintColor = [UIColor systemBlueColor];
+    [toggle setOn:[self boolOption:key defaultValue:defaultValue] animated:NO];
+    objc_setAssociatedObject(toggle, @selector(fakeSwitchChanged:), key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [toggle addTarget:self action:@selector(fakeSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [chip.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [chip.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [chip.widthAnchor constraintEqualToConstant:46],
+        [chip.heightAnchor constraintEqualToConstant:46],
+        [labels.leadingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:14],
+        [labels.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [labels.trailingAnchor constraintLessThanOrEqualToAnchor:cell.contentView.trailingAnchor constant:-76]
+    ]];
+    return cell;
+}
+
+- (UITableViewCell *)fakeRangeCellWithText:(NSString *)text color:(UIColor *)color {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
+    UIView *control = [[UIView alloc] init];
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    control.backgroundColor = [color colorWithAlphaComponent:0.09];
+    control.layer.cornerRadius = 15;
+    control.layer.borderWidth = 0.5;
+    control.layer.borderColor = [color colorWithAlphaComponent:0.18].CGColor;
+    control.userInteractionEnabled = NO;
+    [cell.contentView addSubview:control];
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = text;
+    label.textColor = color;
+    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [control addSubview:label];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.tintColor = color;
+    [control addSubview:chevron];
+    [NSLayoutConstraint activateConstraints:@[
+        [control.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:6],
+        [control.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [control.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [control.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+        [label.leadingAnchor constraintEqualToAnchor:control.leadingAnchor constant:16],
+        [label.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+        [label.trailingAnchor constraintLessThanOrEqualToAnchor:chevron.leadingAnchor constant:-10],
+        [chevron.trailingAnchor constraintEqualToAnchor:control.trailingAnchor constant:-16],
+        [chevron.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+        [chevron.widthAnchor constraintEqualToConstant:13],
+        [chevron.heightAnchor constraintEqualToConstant:13]
+    ]];
+    return cell;
+}
+
+- (UITableViewCell *)fakeCheckboxCellWithTitle:(NSString *)title subtitle:(NSString *)subtitle key:(NSString *)key defaultValue:(BOOL)defaultValue {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    BOOL checked = [self boolOption:key defaultValue:defaultValue];
+    UIImageView *check = [[UIImageView alloc] initWithImage:PXSystemImageNamed(checked ? @"checkmark.square.fill" : @"square")];
+    check.translatesAutoresizingMaskIntoConstraints = NO;
+    check.tintColor = checked ? [UIColor systemBlueColor] : PXSystemGray3Color();
+    [cell.contentView addSubview:check];
+    UIStackView *labels = [[UIStackView alloc] init];
+    labels.translatesAutoresizingMaskIntoConstraints = NO;
+    labels.axis = UILayoutConstraintAxisVertical;
+    labels.spacing = 2;
+    [cell.contentView addSubview:labels];
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = title;
+    titleLabel.textColor = PXLabelColor();
+    titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [labels addArrangedSubview:titleLabel];
+    if (subtitle.length) {
+        UILabel *detail = [[UILabel alloc] init];
+        detail.text = subtitle;
+        detail.textColor = PXSecondaryLabelColor();
+        detail.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        detail.numberOfLines = 1;
+        [labels addArrangedSubview:detail];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [check.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:20],
+        [check.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [check.widthAnchor constraintEqualToConstant:23],
+        [check.heightAnchor constraintEqualToConstant:23],
+        [labels.leadingAnchor constraintEqualToAnchor:check.trailingAnchor constant:14],
+        [labels.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [labels.trailingAnchor constraintLessThanOrEqualToAnchor:cell.contentView.trailingAnchor constant:-16]
+    ]];
+    return cell;
+}
+
+- (UITableViewCell *)fakeServerCell {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    UIView *control = [[UIView alloc] init];
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    control.backgroundColor = [[UIColor systemTealColor] colorWithAlphaComponent:0.10];
+    control.layer.cornerRadius = 15;
+    control.userInteractionEnabled = NO;
+    [cell.contentView addSubview:control];
+    UIImageView *server = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"server.rack") ?: PXSystemImageNamed(@"globe")];
+    server.translatesAutoresizingMaskIntoConstraints = NO;
+    server.tintColor = [UIColor systemBlueColor];
+    [control addSubview:server];
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = [NSString stringWithFormat:@"Chọn server: %@", self.options[@"ipServer"] ?: @"ip-api.com"];
+    label.textColor = [UIColor systemBlueColor];
+    label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [control addSubview:label];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.right")];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.tintColor = [UIColor systemBlueColor];
+    [control addSubview:chevron];
+    [NSLayoutConstraint activateConstraints:@[
+        [control.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:6],
+        [control.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [control.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [control.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+        [server.leadingAnchor constraintEqualToAnchor:control.leadingAnchor constant:16],
+        [server.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+        [server.widthAnchor constraintEqualToConstant:24],
+        [server.heightAnchor constraintEqualToConstant:24],
+        [label.leadingAnchor constraintEqualToAnchor:server.trailingAnchor constant:14],
+        [label.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+        [label.trailingAnchor constraintLessThanOrEqualToAnchor:chevron.leadingAnchor constant:-10],
+        [chevron.trailingAnchor constraintEqualToAnchor:control.trailingAnchor constant:-16],
+        [chevron.centerYAnchor constraintEqualToAnchor:control.centerYAnchor],
+        [chevron.widthAnchor constraintEqualToConstant:12],
+        [chevron.heightAnchor constraintEqualToConstant:16]
+    ]];
+    return cell;
+}
+
+- (UITableViewCell *)fakeGPSCell {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    UIView *chip = [self fakeIconChipWithSymbol:@"location.fill" color:[UIColor systemBlueColor] fallback:@"location"];
+    [cell.contentView addSubview:chip];
+    UIStackView *labels = [[UIStackView alloc] init];
+    labels.translatesAutoresizingMaskIntoConstraints = NO;
+    labels.axis = UILayoutConstraintAxisVertical;
+    labels.spacing = 3;
+    [cell.contentView addSubview:labels];
+    UILabel *title = [[UILabel alloc] init];
+    title.text = @"5. Fake GPS Location";
+    title.textColor = PXLabelColor();
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    [labels addArrangedSubview:title];
+    UILabel *subtitle = [[UILabel alloc] init];
+    subtitle.text = @"Ngẫu nhiên theo IP address";
+    subtitle.textColor = PXSecondaryLabelColor();
+    subtitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    [labels addArrangedSubview:subtitle];
+    BOOL gpsEnabled = [self boolOption:@"fakeGPSEnabled" defaultValue:NO];
+    UIColor *gpsColor = gpsEnabled ? [UIColor systemBlueColor] : PXSystemGray3Color();
+    UIView *state = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
+    state.backgroundColor = [gpsColor colorWithAlphaComponent:gpsEnabled ? 0.10 : 0.08];
+    state.layer.cornerRadius = 22;
+    UIImageView *pin = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"mappin.circle.fill") ?: PXSystemImageNamed(@"location.fill")];
+    pin.frame = CGRectMake(10, 10, 24, 24);
+    pin.tintColor = gpsColor;
+    pin.contentMode = UIViewContentModeScaleAspectFit;
+    [state addSubview:pin];
+    cell.accessoryView = state;
+    [NSLayoutConstraint activateConstraints:@[
+        [chip.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [chip.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [chip.widthAnchor constraintEqualToConstant:44],
+        [chip.heightAnchor constraintEqualToConstant:44],
+        [labels.leadingAnchor constraintEqualToAnchor:chip.trailingAnchor constant:14],
+        [labels.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        [labels.trailingAnchor constraintLessThanOrEqualToAnchor:cell.contentView.trailingAnchor constant:-70]
+    ]];
+    return cell;
+}
+
+- (void)fakeSwitchChanged:(UISwitch *)sender {
+    NSString *key = objc_getAssociatedObject(sender, @selector(fakeSwitchChanged:));
+    if (!key.length) return;
+    NSMutableDictionary *dict = [self mutableOptions];
+    dict[key] = @(sender.isOn);
+    self.options = dict;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Chọn Fake";
+    self.options = [self mutableOptions];
+    if (!self.preview) self.preview = @{};
+    self.title = @"";
+    self.navigationItem.titleView = [self fakeNavigationTitleView];
+    self.navigationController.navigationBar.prefersLargeTitles = NO;
+
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
-    self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     self.tableView.backgroundColor = PXSystemGroupedBackgroundColor();
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done" style:UIBarButtonItemStyleDone target:self action:@selector(doneTapped)];
-    UIImage *backImage = PXSystemImageNamed(@"chevron.left");
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithImage:backImage style:UIBarButtonItemStylePlain target:self action:@selector(cancelTapped)];
-    self.options = [self mutableOptions];
-    if (!self.preview) self.preview = @{};
+    self.tableView.separatorStyle = UITableViewCellSeparatorStyleSingleLine;
+    self.tableView.separatorColor = [PXSeparatorColor() colorWithAlphaComponent:0.42];
+    self.tableView.sectionHeaderHeight = 14;
+    self.tableView.sectionFooterHeight = 4;
+    self.tableView.tableHeaderView = [self fakeTableHeaderView];
+    self.tableView.contentInset = UIEdgeInsetsMake(0, 0, 20, 0);
+
+    UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
+    back.translatesAutoresizingMaskIntoConstraints = NO;
+    back.backgroundColor = PXSecondarySystemFillColor();
+    back.layer.cornerRadius = 20;
+    [back setImage:PXSystemImageNamedWithPointSize(@"chevron.left", 18) forState:UIControlStateNormal];
+    [back addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [NSLayoutConstraint activateConstraints:@[[back.widthAnchor constraintEqualToConstant:40], [back.heightAnchor constraintEqualToConstant:40]]];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:back];
+
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+    done.translatesAutoresizingMaskIntoConstraints = NO;
+    done.backgroundColor = [UIColor systemBlueColor];
+    done.layer.cornerRadius = 20;
+    done.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [done setTitle:@"Done" forState:UIControlStateNormal];
+    [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [done addTarget:self action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
+    [NSLayoutConstraint activateConstraints:@[[done.widthAnchor constraintEqualToConstant:72], [done.heightAnchor constraintEqualToConstant:40]]];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:done];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
@@ -578,85 +1123,27 @@ static void PXWriteSubstrateFilterPlists(void) {
 - (NSInteger)fakeRowForIndexPath:(NSIndexPath *)indexPath { return indexPath.section == 0 ? indexPath.row : indexPath.row + 7; }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger row = [self fakeRowForIndexPath:indexPath];
-    if (row == 1 || row == 3) return 52;
-    if (row == 8) return 44;
-    return 44;
+    if (row == 0 || row == 2 || row == 7) return 88;
+    if (row == 1 || row == 3) return 66;
+    if (row == 4 || row == 5 || row == 6) return 70;
+    if (row == 8) return 62;
+    if (row == 9) return 82;
+    return 54;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger row = [self fakeRowForIndexPath:indexPath];
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.backgroundColor = PXSecondarySystemGroupedBackgroundColor();
-    cell.textLabel.font = [UIFont systemFontOfSize:(row == 4 || row == 5 || row == 9) ? 14 : 15 weight:UIFontWeightSemibold];
-    cell.textLabel.textColor = PXLabelColor();
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:14];
-    cell.detailTextLabel.textColor = [UIColor systemBlueColor];
-    cell.indentationWidth = 24;
-    if (row == 4 || row == 5 || row == 9) cell.indentationLevel = 1;
-
-    if (row == 0) [self configureCheckboxCell:cell title:@"1. Fake iOS Version" key:@"fakeIOSVersionEnabled" defaultValue:YES];
-    else if (row == 1) [self configureRangeCell:cell text:[self iosRangeText]];
-    else if (row == 2) [self configureCheckboxCell:cell title:@"2. Fake Model" key:@"fakeModelEnabled" defaultValue:YES];
-    else if (row == 3) [self configureRangeCell:cell text:[self modelRangeText]];
-    else if (row == 4) [self configureCheckboxCell:cell title:@"2.1 Fake Screen Size" key:@"fakeScreenSizeEnabled" defaultValue:NO];
-    else if (row == 5) [self configureCheckboxCell:cell title:@"2.2 Fake Full Screen" key:@"fakeFullScreenEnabled" defaultValue:NO];
-    else if (row == 6) [self configureCheckboxCell:cell title:@"3. Fake Name" key:@"fakeNameEnabled" defaultValue:NO];
-    else if (row == 7) [self configureCheckboxCell:cell title:@"4. Check IP Address" key:@"checkIPEnabled" defaultValue:NO];
-    else if (row == 8) { cell.textLabel.text = [NSString stringWithFormat:@"🌐 Chọn server: %@", self.options[@"ipServer"] ?: @"ip-api.com"]; cell.textLabel.textColor = [UIColor systemBlueColor]; cell.textLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium]; }
-    else if (row == 9) [self configureCheckboxCell:cell title:@"5. Fake GPS Location" key:@"fakeGPSEnabled" defaultValue:NO];
-    else [self configureRadioCell:cell title:@"Ngẫu nhiên theo ip address" key:@"gpsRandomByIPEnabled" defaultValue:NO];
-    return cell;
-}
-
-- (void)configureCheckboxCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
-    BOOL checked = [self boolOption:key defaultValue:defaultValue];
-    UIImage *image = PXSystemImageNamed(checked ? @"checkmark.square.fill" : @"square");
-    cell.imageView.image = image;
-    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : PXSystemGray3Color();
-    cell.textLabel.text = title;
-    cell.accessoryType = UITableViewCellAccessoryNone;
-}
-
-- (void)configureRadioCell:(UITableViewCell *)cell title:(NSString *)title key:(NSString *)key defaultValue:(BOOL)defaultValue {
-    BOOL checked = [self boolOption:key defaultValue:defaultValue];
-    UIImage *image = PXSystemImageNamed(checked ? @"largecircle.fill.circle" : @"circle");
-    cell.imageView.image = image;
-    cell.imageView.tintColor = checked ? [UIColor systemBlueColor] : PXSystemGray3Color();
-    cell.textLabel.text = title;
-    cell.textLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
-    cell.textLabel.textColor = PXSecondaryLabelColor();
-    cell.indentationLevel = 1;
-    cell.accessoryType = UITableViewCellAccessoryNone;
-}
-
-- (void)configureRangeCell:(UITableViewCell *)cell text:(NSString *)text {
-    UILabel *label = [[UILabel alloc] init];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.text = text;
-    label.textAlignment = NSTextAlignmentCenter;
-    label.textColor = [UIColor systemBlueColor];
-    label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    label.backgroundColor = PXTertiarySystemGroupedBackgroundColor();
-    label.layer.borderColor = PXSeparatorColor().CGColor;
-    label.layer.borderWidth = 1.0;
-    label.layer.cornerRadius = 7;
-    label.clipsToBounds = YES;
-    [cell.contentView addSubview:label];
-    UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
-    chevron.translatesAutoresizingMaskIntoConstraints = NO;
-    chevron.tintColor = [UIColor systemBlueColor];
-    [cell.contentView addSubview:chevron];
-    [NSLayoutConstraint activateConstraints:@[
-        [label.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8],
-        [label.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:46],
-        [label.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
-        [label.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
-        [chevron.centerYAnchor constraintEqualToAnchor:label.centerYAnchor],
-        [chevron.trailingAnchor constraintEqualToAnchor:label.trailingAnchor constant:-14],
-        [chevron.widthAnchor constraintEqualToConstant:12],
-        [chevron.heightAnchor constraintEqualToConstant:12]
-    ]];
+    if (row == 0) return [self fakeMainToggleCellWithTitle:@"1. Fake iOS Version" subtitle:@"Chọn phiên bản iOS giả mạo cho thiết bị" key:@"fakeIOSVersionEnabled" defaultValue:YES symbol:@"applelogo" fallback:@"gearshape.fill" color:[UIColor systemBlueColor]];
+    if (row == 1) return [self fakeRangeCellWithText:[self iosRangeText] color:[UIColor systemBlueColor]];
+    if (row == 2) return [self fakeMainToggleCellWithTitle:@"2. Fake Model" subtitle:@"Chọn model iPhone giả mạo" key:@"fakeModelEnabled" defaultValue:YES symbol:@"rectangle.portrait" fallback:@"rectangle" color:[UIColor systemPurpleColor]];
+    if (row == 3) return [self fakeRangeCellWithText:[self modelRangeText] color:[UIColor systemPurpleColor]];
+    if (row == 4) return [self fakeCheckboxCellWithTitle:@"2.1 Fake Screen Size" subtitle:@"Giả lập kích thước màn hình" key:@"fakeScreenSizeEnabled" defaultValue:NO];
+    if (row == 5) return [self fakeCheckboxCellWithTitle:@"2.2 Fake Full Screen" subtitle:@"Như toàn màn hình (không còn thanh trạng thái)" key:@"fakeFullScreenEnabled" defaultValue:NO];
+    if (row == 6) return [self fakeCheckboxCellWithTitle:@"3. Fake Name" subtitle:@"Giả lập tên thiết bị" key:@"fakeNameEnabled" defaultValue:NO];
+    if (row == 7) return [self fakeMainToggleCellWithTitle:@"4. Check IP Address" subtitle:@"Kiểm tra địa chỉ IP thiết bị" key:@"checkIPEnabled" defaultValue:NO symbol:@"globe" fallback:@"network" color:[UIColor systemTealColor]];
+    if (row == 8) return [self fakeServerCell];
+    if (row == 9) return [self fakeGPSCell];
+    return [self fakeCheckboxCellWithTitle:@"Ngẫu nhiên theo IP address" subtitle:@"Dùng vị trí suy ra từ public IP" key:@"gpsRandomByIPEnabled" defaultValue:NO];
 }
 
 - (NSString *)iosRangeText {
@@ -692,15 +1179,69 @@ static void PXWriteSubstrateFilterPlists(void) {
         @10: @"gpsRandomByIPEnabled"
     };
     if (row == 1) { [self showRangePickerWithTitle:@"Fake iOS Version" values:[self iosVersions] minKey:@"iosMin" maxKey:@"iosMax" labels:nil]; return; }
-    if (row == 3) {
-        NSMutableArray *labels = [NSMutableArray array];
-        for (NSUInteger i = 0; i < [self models].count; i++) [labels addObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)i + 1, [self models][i][@"name"]]];
-        [self showRangePickerWithTitle:@"Fake Model" values:labels minKey:@"modelMinIndex" maxKey:@"modelMaxIndex" labels:labels];
-        return;
-    }
-    if (row == 8) return;
+    if (row == 3) { [self showFakeModelRangePicker]; return; }
+    if (row == 8) { [self showIPServerPicker]; return; }
     NSString *key = toggleKeys[@(row)];
     if (key.length) [self setBoolOption:key value:![self boolOption:key defaultValue:(row == 0 || row == 2)]];
+}
+
+- (void)showFakeModelRangePicker {
+    NSArray<NSDictionary *> *models = [self models];
+    if (!models.count) return;
+    NSInteger minIdx = [self.options[@"modelMinIndex"] integerValue];
+    NSInteger maxIdx = [self.options[@"modelMaxIndex"] integerValue];
+    BOOL fullRandom = (minIdx <= 0 && maxIdx <= 0);
+    if (minIdx <= 0) minIdx = 1;
+    if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
+    if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
+
+    PXFakeModelRangeViewController *picker = [[PXFakeModelRangeViewController alloc] init];
+    picker.models = models;
+    picker.minIndex = MAX(0, minIdx - 1);
+    picker.maxIndex = MAX(0, maxIdx - 1);
+    picker.fullRandom = fullRandom;
+    __weak typeof(self) weakSelf = self;
+    picker.onApply = ^(BOOL random, NSInteger minimum, NSInteger maximum) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        NSMutableDictionary *dict = [self mutableOptions];
+        if (random) {
+            [dict removeObjectForKey:@"modelMinIndex"];
+            [dict removeObjectForKey:@"modelMaxIndex"];
+        } else {
+            dict[@"modelMinIndex"] = [NSString stringWithFormat:@"%ld", (long)minimum + 1];
+            dict[@"modelMaxIndex"] = [NSString stringWithFormat:@"%ld", (long)maximum + 1];
+        }
+        self.options = dict;
+        [self.tableView reloadData];
+    };
+    picker.modalPresentationStyle = UIModalPresentationPageSheet;
+    if (NSClassFromString(@"UISheetPresentationController") != nil &&
+        NSClassFromString(@"UISheetPresentationControllerDetent") != nil &&
+        [picker respondsToSelector:NSSelectorFromString(@"sheetPresentationController")]) {
+        UISheetPresentationController *sheet = picker.sheetPresentationController;
+        if ([UISheetPresentationControllerDetent respondsToSelector:@selector(mediumDetent)]) {
+            sheet.detents = @[[UISheetPresentationControllerDetent mediumDetent]];
+        }
+        sheet.prefersGrabberVisible = NO;
+        sheet.preferredCornerRadius = 28.0;
+    }
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)showIPServerPicker {
+    NSArray<NSString *> *servers = @[ @"ip-api.com", @"ipwho.is", @"ipinfo.io" ];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Chọn server IP" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSString *server in servers) {
+        [sheet addAction:[UIAlertAction actionWithTitle:server style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            NSMutableDictionary *dict = [self mutableOptions];
+            dict[@"ipServer"] = server;
+            self.options = dict;
+            [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet];
 }
 
 - (void)showRangePickerWithTitle:(NSString *)title values:(NSArray<NSString *> *)values minKey:(NSString *)minKey maxKey:(NSString *)maxKey labels:(NSArray<NSString *> *)labels {
