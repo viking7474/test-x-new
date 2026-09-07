@@ -826,7 +826,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
     title.text = @"Chọn Fake";
-    title.font = [UIFont systemFontOfSize:21 weight:UIFontWeightBold];
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
     title.textColor = PXLabelColor();
     [container addSubview:title];
 
@@ -966,7 +966,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     [cell.contentView addSubview:labels];
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = title;
-    titleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightBold];
+    titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     titleLabel.textColor = PXLabelColor();
     titleLabel.numberOfLines = 1;
     titleLabel.adjustsFontSizeToFitWidth = YES;
@@ -974,7 +974,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     [labels addArrangedSubview:titleLabel];
     UILabel *subtitleLabel = [[UILabel alloc] init];
     subtitleLabel.text = subtitle;
-    subtitleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+    subtitleLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
     subtitleLabel.textColor = PXSecondaryLabelColor();
     subtitleLabel.numberOfLines = 1;
     subtitleLabel.adjustsFontSizeToFitWidth = YES;
@@ -1019,7 +1019,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.textColor = color;
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     [control addSubview:label];
     UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1058,13 +1058,13 @@ static void PXWriteSubstrateFilterPlists(void) {
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = title;
     titleLabel.textColor = PXLabelColor();
-    titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     [labels addArrangedSubview:titleLabel];
     if (subtitle.length) {
         UILabel *detail = [[UILabel alloc] init];
         detail.text = subtitle;
         detail.textColor = PXSecondaryLabelColor();
-        detail.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        detail.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
         detail.numberOfLines = 1;
         [labels addArrangedSubview:detail];
     }
@@ -1098,7 +1098,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = [NSString stringWithFormat:@"Chọn server: %@", self.options[@"ipServer"] ?: @"ip-api.com"];
     label.textColor = [UIColor systemBlueColor];
-    label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     [control addSubview:label];
     UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.right")];
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1138,12 +1138,12 @@ static void PXWriteSubstrateFilterPlists(void) {
     UILabel *title = [[UILabel alloc] init];
     title.text = @"5. Fake GPS Location";
     title.textColor = PXLabelColor();
-    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    title.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     [labels addArrangedSubview:title];
     UILabel *subtitle = [[UILabel alloc] init];
     subtitle.text = @"Ngẫu nhiên theo IP address";
     subtitle.textColor = PXSecondaryLabelColor();
-    subtitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    subtitle.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
     [labels addArrangedSubview:subtitle];
     BOOL gpsEnabled = [self boolOption:@"fakeGPSEnabled" defaultValue:NO];
     UIColor *gpsColor = gpsEnabled ? [UIColor systemBlueColor] : PXSystemGray3Color();
@@ -6727,7 +6727,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [row addSubview:stack];
     UILabel *label = [[UILabel alloc] init];
     label.text = title;
-    label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     label.textColor = PXLabelColor();
     [stack addArrangedSubview:label];
     [label setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -7091,7 +7091,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [appearance configureWithOpaqueBackground];
         appearance.backgroundColor = PXSystemBackgroundColor();
         appearance.shadowColor = [PXSeparatorColor() colorWithAlphaComponent:0.45];
-        appearance.titleTextAttributes = @{NSFontAttributeName: [UIFont systemFontOfSize:19.0 weight:UIFontWeightBold]};
+        appearance.titleTextAttributes = @{NSFontAttributeName: [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold]};
         nav.navigationBar.standardAppearance = appearance;
         nav.navigationBar.scrollEdgeAppearance = appearance;
         nav.navigationBar.compactAppearance = appearance;

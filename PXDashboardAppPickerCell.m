@@ -58,7 +58,7 @@ UIColor *PXAppPickerBorderColor(void) {
 
     self.appNameLabel = [[UILabel alloc] init];
     self.appNameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appNameLabel.font = WXScaledFont(16.0, UIFontWeightSemibold);
+    self.appNameLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
     self.appNameLabel.adjustsFontForContentSizeCategory = YES;
     self.appNameLabel.numberOfLines = 1;
     self.appNameLabel.adjustsFontSizeToFitWidth = YES;
@@ -67,7 +67,7 @@ UIColor *PXAppPickerBorderColor(void) {
 
     self.appDetailLabel = [[UILabel alloc] init];
     self.appDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.appDetailLabel.font = WXScaledFont(12.5, UIFontWeightRegular);
+    self.appDetailLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular];
     self.appDetailLabel.adjustsFontForContentSizeCategory = YES;
     self.appDetailLabel.textColor = PXAppPickerSecondaryTextColor();
     self.appDetailLabel.numberOfLines = 1;
