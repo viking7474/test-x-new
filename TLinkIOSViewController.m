@@ -1019,7 +1019,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.text = text;
     label.textColor = color;
-    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
     [control addSubview:label];
     UIImageView *chevron = [[UIImageView alloc] initWithImage:PXSystemImageNamed(@"chevron.down")];
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
