@@ -1542,7 +1542,7 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"INFO FAKE";
+    self.title = @"Info Fake";
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:PXCompatibleInsetGroupedStyle()];
     self.tableView.delegate = self;
     self.tableView.dataSource = self;
@@ -6367,13 +6367,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     UILabel *rrsSelectionLabel = nil;
     UILabel *fakeSelectionLabel = nil;
     UILabel *fakeInfoSelectionLabel = nil;
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App RESET!" icon:@"square.grid.2x2.fill" color:PXSystemIndigoColor() valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App Reset" icon:@"square.grid.2x2.fill" color:PXSystemIndigoColor() valueLabel:&resetSelectionLabel selector:@selector(selectResetAppsTapped)]];
     [selectionStack addArrangedSubview:[self dashboardGroupSeparator]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn App lưu RRS" icon:@"bookmark.fill" color:[UIColor systemPinkColor] valueLabel:&rrsSelectionLabel selector:@selector(selectRRSAppsTapped)]];
     [selectionStack addArrangedSubview:[self dashboardGroupSeparator]];
     [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Chọn Fake" icon:@"eye.fill" color:[UIColor systemGrayColor] valueLabel:&fakeSelectionLabel selector:@selector(selectFakeTapped)]];
     [selectionStack addArrangedSubview:[self dashboardGroupSeparator]];
-    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"INFO FAKE" icon:@"info.circle.fill" color:[UIColor systemBlueColor] valueLabel:&fakeInfoSelectionLabel selector:@selector(infoFakeTapped)]];
+    [selectionStack addArrangedSubview:[self dashboardSelectionRowWithTitle:@"Info Fake" icon:@"info.circle.fill" color:[UIColor systemBlueColor] valueLabel:&fakeInfoSelectionLabel selector:@selector(infoFakeTapped)]];
     self.resetSelectionValueLabel = resetSelectionLabel;
     self.rrsSelectionValueLabel = rrsSelectionLabel;
     self.fakeSelectionValueLabel = fakeSelectionLabel;
@@ -6727,7 +6727,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [row addSubview:stack];
     UILabel *label = [[UILabel alloc] init];
     label.text = title;
-    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    label.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightMedium];
     label.textColor = PXLabelColor();
     [stack addArrangedSubview:label];
     [label setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -7078,7 +7078,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.selectionDraftAppIDs = [NSMutableSet setWithArray:source ?: @[]];
 
     UIViewController *picker = [[UIViewController alloc] init];
-    picker.title = [mode isEqualToString:@"reset"] ? @"Chọn App RESET!" : @"Chọn App lưu RRS";
+    picker.title = [mode isEqualToString:@"reset"] ? @"Chọn App Reset" : @"Chọn App lưu RRS";
     picker.view.backgroundColor = PXAppPickerBackgroundColor();
     picker.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
 
