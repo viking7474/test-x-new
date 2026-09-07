@@ -18,9 +18,6 @@ NS_ASSUME_NONNULL_BEGIN
 + (UIColor *)wxSuccess;
 /// Destructive / error state color.
 + (UIColor *)wxDanger;
-/// Matrix rain accent green.
-+ (UIColor *)wxMatrixGreen;
-
 @end
 
 /// Corner-radius design tokens (keep radii consistent across the app).

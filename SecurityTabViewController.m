@@ -42,8 +42,6 @@
 @property (nonatomic, strong) UISwitch *domainBlockingToggleSwitch;
 @property (nonatomic, strong) UIButton *domainManagementButton;
 
-// Matrix Rain View (properties declared in header)
-
 @property (nonatomic, strong) UIButton *ipMonitorCheckButton;
 @property (nonatomic, strong) UISwitch *ipMonitorToggleSwitch;
 @property (nonatomic, strong) UISwitch *targetRegionFollowsIPToggleSwitch;
@@ -993,9 +991,6 @@
 
     [self.systemKeychainWipeToggleSwitch setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:NO];
     [self.profileIndicatorToggleSwitch setOn:PXReadSecurityBool(@"profileIndicatorEnabled", NO) animated:NO];
-
-    self.matrixRainEnabled = [self.securitySettings boolForKey:@"matrixRainEnabled"];
-    [self.matrixToggleSwitch setOn:self.matrixRainEnabled animated:NO];
     [self.ipMonitorToggleSwitch setOn:[self.securitySettings boolForKey:@"ipMonitorEnabled"] animated:NO];
 
     DomainBlockingSettings *domainSettings = [DomainBlockingSettings sharedSettings];
@@ -1018,11 +1013,6 @@
 
     // Refresh network identifiers from the current profile
     [self refreshNetworkIdentifiers];
-
-    // Resume matrix animation if enabled
-    if (self.matrixRainEnabled) {
-        [self.matrixRainView startAnimation];
-    }
 }
 
 // Add a method to refresh network identifiers from the current profile
@@ -1127,17 +1117,6 @@
     
     // Initialize security settings
     self.securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-    
-    // Add Matrix Rain view (behind everything)
-    self.matrixRainView = [[MatrixRainView alloc] initWithFrame:self.view.bounds];
-    self.matrixRainView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:self.matrixRainView];
-    
-    // Check if Matrix Rain is enabled
-    self.matrixRainEnabled = [self.securitySettings boolForKey:@"matrixRainEnabled"];
-    if (self.matrixRainEnabled) {
-        [self.matrixRainView startAnimation];
-    }
     
     // Add tap gesture recognizer to dismiss keyboard when tapping elsewhere
     UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissKeyboard)];
@@ -1388,70 +1367,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 - (void)canvasFingerprintingSettingChanged:(NSNotification *)note {
     [self refreshCanvasFingerprintingControlState];
     [self updateSecurityHeroCount];
-}
-
-- (void)setupMatrixControl:(UIView *)contentView {
-    // Create a simple glassmorphic control for Matrix Rain toggle
-    UIVisualEffectView *controlView = [[UIVisualEffectView alloc] initWithEffect:PXThinMaterialLightBlurEffect()];
-    controlView.layer.cornerRadius = 16;
-    if (@available(iOS 13.0, *)) { controlView.contentView.backgroundColor = PXSecondarySystemGroupedBackgroundColor(); } else { controlView.contentView.backgroundColor = [UIColor whiteColor]; }
-    controlView.clipsToBounds = YES;
-    controlView.alpha = 1.0;
-    controlView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.cardsStack addArrangedSubview:controlView];
-    
-    // Matrix label
-    self.matrixLabel = [[UILabel alloc] init];
-    self.matrixLabel.text = @"Matrix Rain Effect";
-    self.matrixLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    self.matrixLabel.textColor = PXLabelColor();
-    self.matrixLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [controlView.contentView addSubview:self.matrixLabel];
-    // Icon chip (redesign)
-    UIView *mxChip = [self securityIconChip:@"square.grid.3x3" color:[UIColor systemGreenColor]];
-    [controlView.contentView addSubview:mxChip];
-    
-    // Info button with circular background
-    UIView *infoBgView = [[UIView alloc] init];
-    infoBgView.backgroundColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.1];
-    infoBgView.layer.cornerRadius = 12;
-    infoBgView.translatesAutoresizingMaskIntoConstraints = NO;
-    [controlView.contentView addSubview:infoBgView];
-    
-    self.matrixInfoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
-    self.matrixInfoButton.tintColor = [UIColor systemBlueColor];
-    self.matrixInfoButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.matrixInfoButton addTarget:self action:@selector(showMatrixInfo) forControlEvents:UIControlEventTouchUpInside];
-    [infoBgView addSubview:self.matrixInfoButton];
-    
-    // Matrix toggle switch
-    self.matrixToggleSwitch = [[UISwitch alloc] init];
-    self.matrixToggleSwitch.onTintColor = [UIColor systemBlueColor];
-    self.matrixToggleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.matrixToggleSwitch setOn:self.matrixRainEnabled animated:NO];
-    [self.matrixToggleSwitch addTarget:self action:@selector(matrixToggleChanged:) forControlEvents:UIControlEventValueChanged];
-    [controlView.contentView addSubview:self.matrixToggleSwitch];
-    
-    // Position toggle control
-    [NSLayoutConstraint activateConstraints:@[
-        [controlView.heightAnchor constraintEqualToConstant:60],
-        
-        [self.matrixLabel.leadingAnchor constraintEqualToAnchor:mxChip.trailingAnchor constant:12],
-        [self.matrixLabel.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
-        [mxChip.leadingAnchor constraintEqualToAnchor:controlView.contentView.leadingAnchor constant:16],
-        [mxChip.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
-        
-        [infoBgView.leadingAnchor constraintEqualToAnchor:self.matrixLabel.trailingAnchor constant:10],
-        [infoBgView.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor],
-        [infoBgView.widthAnchor constraintEqualToConstant:24],
-        [infoBgView.heightAnchor constraintEqualToConstant:24],
-        
-        [self.matrixInfoButton.centerXAnchor constraintEqualToAnchor:infoBgView.centerXAnchor],
-        [self.matrixInfoButton.centerYAnchor constraintEqualToAnchor:infoBgView.centerYAnchor],
-        
-        [self.matrixToggleSwitch.trailingAnchor constraintEqualToAnchor:controlView.contentView.trailingAnchor constant:-20],
-        [self.matrixToggleSwitch.centerYAnchor constraintEqualToAnchor:controlView.contentView.centerYAnchor]
-    ]];
 }
 
 - (void)setupProfileIndicatorControl:(UIView *)contentView {
@@ -2195,24 +2110,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self refreshNetworkDependencyState];
 }
 
-- (void)matrixToggleChanged:(UISwitch *)sender {
-    self.matrixRainEnabled = sender.isOn;
-    [self.securitySettings setBool:self.matrixRainEnabled forKey:@"matrixRainEnabled"];
-    [self.securitySettings synchronize];
-    [self updateSecurityHeroCount];
-    
-    if (self.matrixRainEnabled) {
-        [self.matrixRainView startAnimation];
-    } else {
-        [self.matrixRainView stopAnimation];
-    }
-    
-    // Add haptic feedback
-    UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [generator prepare];
-    [generator impactOccurred];
-}
-
 - (void)profileIndicatorToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
     
@@ -2365,30 +2262,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [generator prepare];
     [generator impactOccurred];
     [self updateSecurityHeroCount];
-}
-
-- (void)showMatrixInfo {
-    UIAlertController *alert = [UIAlertController 
-                               alertControllerWithTitle:@"Matrix Rain Effect"
-                               message:@"Enables the Matrix-style rain animation in the background of the Security tab. This effect is optimized to use minimal system resources."
-                               preferredStyle:UIAlertControllerStyleAlert];
-    
-    UIAlertAction *okAction = [UIAlertAction 
-                              actionWithTitle:@"OK" 
-                              style:UIAlertActionStyleDefault 
-                              handler:nil];
-    
-    [alert addAction:okAction];
-    
-    // Find top view controller through the runtime-safe shared window helper.
-    UIViewController *rootVC = PXKeyWindow().rootViewController;
-    
-    // Navigate through presented view controllers to find the topmost one
-    while (rootVC.presentedViewController) {
-        rootVC = rootVC.presentedViewController;
-    }
-    
-    [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)showProfileIndicatorInfo {
@@ -3145,13 +3018,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     } completion:^(BOOL finished) {
         self.copyrightLabel.alpha = 0.7;
     }];
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    [super viewDidDisappear:animated];
-    
-    // Pause matrix animation when view is not visible
-    [self.matrixRainView stopAnimation];
 }
 
 // Method to dismiss keyboard when tapping outside text fields
@@ -5671,12 +5537,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     ]];
     [self.cardsStack addArrangedSubview:dataCard];
 
-    self.matrixToggleSwitch = [self securityCompactSwitchOn:self.matrixRainEnabled selector:@selector(matrixToggleChanged:) destructive:NO];
     self.profileIndicatorToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"profileIndicatorEnabled", NO) selector:@selector(profileIndicatorToggleChanged:) destructive:NO];
 
     [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"GIAO DIỆN"]];
     UIView *uiCard = [self securityCompactCardWithRows:@[
-        [self securityCompactRowWithTitle:@"Matrix Rain" subtitle:@"Hiệu ứng nền · tôn trọng Reduce Motion" icon:@"square.grid.3x3" color:[UIColor systemGreenColor] trailingSwitch:self.matrixToggleSwitch value:nil selector:@selector(showMatrixInfo)],
         [self securityCompactRowWithTitle:@"Profile Indicator" subtitle:@"Hiện profile đang active trên SpringBoard" icon:@"person.crop.circle" color:[UIColor systemBlueColor] trailingSwitch:self.profileIndicatorToggleSwitch value:nil selector:@selector(showProfileIndicatorInfo)]
     ]];
     [self.cardsStack addArrangedSubview:uiCard];
@@ -5775,7 +5639,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     add(self.fixVersionToggleSwitch);
     add(self.systemKeychainWipeToggleSwitch);
     add(self.domainBlockingToggleSwitch);
-    add(self.matrixToggleSwitch);
     add(self.profileIndicatorToggleSwitch);
     add(self.ipMonitorToggleSwitch);
     NSUInteger on = 0;
