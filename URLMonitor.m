@@ -10,7 +10,15 @@ static NSTimer *autoDisableTimer = nil;
 static NSTimer *periodicNetworkCheckTimer = nil;
 static NSDate *monitoringStartTime = nil;
 static NSTimeInterval monitoringDuration = 180; // 3 minutes in seconds
-static BOOL monitoringExplicitlyDisabled = NO; // Track when timer has explicitly disabled monitoring
+static BOOL networkStateInitialized = NO;
+static BOOL lastNetworkConnected = YES;
+static BOOL offlineEpisodeHandled = NO;
+
+static BOOL URLMonitoringDeadlineExpired(void) {
+    if (!isMonitoringEnabled || !monitoringStartTime) return NO;
+    NSTimeInterval elapsed = -[monitoringStartTime timeIntervalSinceNow];
+    return elapsed >= monitoringDuration;
+}
 
 @interface URLMonitor()
 @property (nonatomic, assign) SCNetworkReachabilityRef reachabilityRef;
@@ -62,6 +70,12 @@ static BOOL monitoringExplicitlyDisabled = NO; // Track when timer has explicitl
         SCNetworkReachabilityScheduleWithRunLoop(monitor.reachabilityRef, CFRunLoopGetMain(), kCFRunLoopCommonModes);
     }
     
+    // A monitoring session is process-local and always has a live deadline. Do not
+    // resurrect a stale persisted YES after the app has restarted without that session.
+    if (!isMonitoringEnabled) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kMonitoringEnabledKey];
+    }
+
     // Check initial state immediately
     [self checkNetworkStatus];
     
@@ -80,16 +94,38 @@ static BOOL monitoringExplicitlyDisabled = NO; // Track when timer has explicitl
 // Check current network status manually
 + (void)checkNetworkStatus {
     BOOL isConnected = [self isNetworkConnected];
-    
-    // Always notify the Uber app of current status
-    // This ensures Uber app hooks are always synced with our state
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                       (CFStringRef)@"com.weaponx.uberMonitoringChanged",
-                                       NULL, NULL, YES);
-    
-    if (!isConnected) {
-        // Network is offline - activate monitoring for 3 minutes
-        [self activateMonitoringWithTimeout:180]; // 3 minutes
+    if (URLMonitoringDeadlineExpired()) {
+        [self deactivateMonitoring];
+    }
+
+    BOOL hadKnownState = networkStateInitialized;
+    BOOL networkChanged = hadKnownState && (isConnected != lastNetworkConnected);
+
+    networkStateInitialized = YES;
+    lastNetworkConnected = isConnected;
+
+    if (isConnected) {
+        // A reconnect ends the current offline episode. The next real transition
+        // back to offline may start a fresh fixed-duration monitoring session.
+        offlineEpisodeHandled = NO;
+    } else if (!offlineEpisodeHandled) {
+        // Handle each continuous offline episode once. Repeated 10-second polls must
+        // never restart the 180-second deadline.
+        offlineEpisodeHandled = YES;
+        if (!isMonitoringEnabled) {
+            [self activateMonitoringWithTimeout:180];
+            return; // Activation already publishes the monitoring state change.
+        }
+    }
+
+    // Network status observers only need a refresh for a real transition. This keeps
+    // the UI synchronized without broadcasting the same Darwin notification every 10s.
+    if (networkChanged) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                           (CFStringRef)@"com.weaponx.uberMonitoringChanged",
+                                           NULL, NULL, YES);
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"UberMonitoringStatusChanged"
+                                                            object:@(isMonitoringEnabled)];
     }
 }
 
@@ -109,6 +145,10 @@ static void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetwo
 + (BOOL)isNetworkConnected {
     // Check current network status
     URLMonitor *monitor = [URLMonitor sharedInstance];
+    if (!monitor.reachabilityRef) {
+        return YES; // Fail open if reachability could not be created.
+    }
+
     SCNetworkReachabilityFlags flags;
     BOOL success = SCNetworkReachabilityGetFlags(monitor.reachabilityRef, &flags);
     
@@ -120,71 +160,72 @@ static void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetwo
 }
 
 + (void)activateMonitoringWithTimeout:(NSTimeInterval)timeout {
-    // Cancel any existing timer
+    if (timeout <= 0) {
+        [self deactivateMonitoring];
+        return;
+    }
+
+    // Activation is idempotent while a session is already running. In particular,
+    // repeated offline polls must never move the current deadline forward.
+    if (isMonitoringEnabled) {
+        return;
+    }
+
     if (autoDisableTimer) {
         [autoDisableTimer invalidate];
         autoDisableTimer = nil;
     }
-    
-    // Save the monitoring duration
+
     monitoringDuration = timeout;
-    
-    // Record start time for countdown
     monitoringStartTime = [NSDate date];
-    
-    // Activate monitoring
     isMonitoringEnabled = YES;
-    monitoringExplicitlyDisabled = NO; // Reset explicit disable flag
-    
-    // Save state to NSUserDefaults
+    if (networkStateInitialized && !lastNetworkConnected) {
+        offlineEpisodeHandled = YES;
+    }
+
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:YES forKey:kMonitoringEnabledKey];
-    
-    // Always notify hooks about state change
+
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                         (CFStringRef)@"com.weaponx.uberMonitoringChanged",
                                         NULL, NULL, YES);
-    
-    // Schedule auto-disable timer - always deactivate after the timeout
+
     autoDisableTimer = [NSTimer scheduledTimerWithTimeInterval:timeout
                                                        target:self
                                                      selector:@selector(deactivateMonitoring)
                                                      userInfo:nil
                                                       repeats:NO];
-    
-    // Also post notification to update the UI
+
     [[NSNotificationCenter defaultCenter] postNotificationName:@"UberMonitoringStatusChanged" object:@(YES)];
 }
 
 + (void)deactivateMonitoring {
-    // Always deactivate after timer expires, regardless of network status
-    // Deactivate monitoring
+    BOOL wasEnabled = isMonitoringEnabled;
+
+    if (autoDisableTimer) {
+        [autoDisableTimer invalidate];
+        autoDisableTimer = nil;
+    }
+
     isMonitoringEnabled = NO;
-    monitoringExplicitlyDisabled = YES; // Set the flag that monitoring was explicitly disabled
-    
-    // Reset start time
     monitoringStartTime = nil;
-    
-    // Save state to NSUserDefaults
+    if (networkStateInitialized && !lastNetworkConnected) {
+        // Do not restart monitoring again during the same continuous offline episode.
+        offlineEpisodeHandled = YES;
+    }
+
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL wasPersistedEnabled = [defaults boolForKey:kMonitoringEnabledKey];
     [defaults setBool:NO forKey:kMonitoringEnabledKey];
-    
-    // Notify hooks about state change
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                        (CFStringRef)@"com.weaponx.uberMonitoringChanged",
-                                        NULL, NULL, YES);
-    
-    // Also post notification to update the UI in WeaponX app
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"UberMonitoringStatusChanged" object:@(NO)];
-    
-    // Clear timer
-    autoDisableTimer = nil;
-    
-    // Schedule reset of the explicit disable flag after 10 seconds
-    // This allows monitoring to resume if network remains offline after this time
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        monitoringExplicitlyDisabled = NO;
-    });
+
+    // Publish only an actual monitoring-state transition. Repeated deactivation calls
+    // (including a stale timer firing after a manual stop) are intentionally silent.
+    if (wasEnabled || wasPersistedEnabled) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                            (CFStringRef)@"com.weaponx.uberMonitoringChanged",
+                                            NULL, NULL, YES);
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"UberMonitoringStatusChanged" object:@(NO)];
+    }
 }
 
 + (NSTimeInterval)getRemainingMonitoringTime {
@@ -208,23 +249,14 @@ static void NetworkReachabilityCallback(SCNetworkReachabilityRef target, SCNetwo
 }
 
 + (BOOL)isMonitoringActive {
-    // If monitoring was explicitly disabled by the timer, respect that
-    // even if the network is offline
-    if (monitoringExplicitlyDisabled) {
+    if (URLMonitoringDeadlineExpired()) {
+        [self deactivateMonitoring];
         return NO;
     }
-    
-    // Check if network is offline - force monitoring if offline
-    if (![self isNetworkConnected]) {
-        // Update NSUserDefaults to reflect network state
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        [defaults setBool:YES forKey:kMonitoringEnabledKey];
-        return YES;
-    }
-    
-    // Read from NSUserDefaults
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    return [defaults boolForKey:kMonitoringEnabledKey];
+
+    // Monitoring state is session-based. Network offline by itself must not force this
+    // back to YES after the fixed deadline has expired.
+    return isMonitoringEnabled;
 }
 
 @end 

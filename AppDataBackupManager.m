@@ -50,6 +50,9 @@ static NSString * const PXExactRestoreDestinationErrorDescription =
     @"Exact application data container could not be resolved safely";
 static const NSTimeInterval PXKeychainHelperInvocationTimeoutSeconds = 300.0;
 static const NSUInteger PXKeychainHelperInvocationOutputLimitBytes = 1024 * 1024;
+static const NSTimeInterval PXTarCreateTimeoutSeconds = 60.0 * 60.0;
+static const NSTimeInterval PXTarExtractTimeoutSeconds = 60.0 * 60.0;
+static const NSUInteger PXTarCommandOutputLimitBytes = 1024 * 1024;
 static const NSUInteger PXKeychainBackupPlistMaximumBytes = 64 * 1024 * 1024;
 
 static BOOL PXProtectOwnedKeychainTemporaryFileAtPath(NSString *filePath) {
@@ -965,21 +968,38 @@ static NSString *PXFindDataContainerUUIDByMetadata(NSFileManager *fm, NSString *
     CommandRunner *runner = [CommandRunner shared];
 
     // Prefer preserving extended attributes (file protection class), ACLs and numeric owners.
-    NSString *cmd = [NSString stringWithFormat:@"%@ --xattrs --acls --numeric-owner -czf %@ --exclude '.com.apple.mobile_container_manager.metadata.plist' --exclude '.com.apple.containermanagerd.metadata.plist' -C %@ .",
-                     PXShellQuote(tarPath),
-                     PXShellQuote(archivePath),
-                     PXShellQuote(sourceDir)];
-    CommandResult *res = [runner runAndCapture:cmd];
-    if (res.exitCode == 0) {
+    NSArray<NSString *> *preferredArguments = @[
+        @"--xattrs", @"--acls", @"--numeric-owner",
+        @"-czf", archivePath,
+        @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
+        @"--exclude", @".com.apple.containermanagerd.metadata.plist",
+        @"-C", sourceDir,
+        @"."
+    ];
+    CommandResult *res = [runner runExecutableAndCapture:tarPath
+                                                arguments:preferredArguments
+                                               timeoutSec:PXTarCreateTimeoutSeconds
+                                           maxOutputBytes:PXTarCommandOutputLimitBytes];
+    if (res.succeeded) {
+        return res;
+    }
+    if (res.timedOut || res.spawnError != 0 || res.runnerError != 0 ||
+        !res.exitedNormally || res.terminationSignal != 0) {
         return res;
     }
 
-    // Fallback for tar variants without these flags.
-    NSString *fallback = [NSString stringWithFormat:@"%@ -czf %@ --exclude '.com.apple.mobile_container_manager.metadata.plist' --exclude '.com.apple.containermanagerd.metadata.plist' -C %@ .",
-                          PXShellQuote(tarPath),
-                          PXShellQuote(archivePath),
-                          PXShellQuote(sourceDir)];
-    return [runner runAndCapture:fallback];
+    // Fallback only for a normal non-zero exit, which covers tar variants without the preservation flags.
+    NSArray<NSString *> *fallbackArguments = @[
+        @"-czf", archivePath,
+        @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
+        @"--exclude", @".com.apple.containermanagerd.metadata.plist",
+        @"-C", sourceDir,
+        @"."
+    ];
+    return [runner runExecutableAndCapture:tarPath
+                                  arguments:fallbackArguments
+                                 timeoutSec:PXTarCreateTimeoutSeconds
+                             maxOutputBytes:PXTarCommandOutputLimitBytes];
 }
 
 static NSString *PXTimestampSuffix(void) {
@@ -1093,20 +1113,31 @@ static NSString *PXCleanSubdirName(NSString *s) {
 - (CommandResult *)_tarExtract:(NSString *)tarPath archive:(NSString *)archivePath toDir:(NSString *)destDir {
     CommandRunner *runner = [CommandRunner shared];
 
-    NSString *cmd = [NSString stringWithFormat:@"%@ --xattrs --acls -xzf %@ -C %@",
-                     PXShellQuote(tarPath),
-                     PXShellQuote(archivePath),
-                     PXShellQuote(destDir)];
-    CommandResult *res = [runner runAndCapture:cmd];
-    if (res.exitCode == 0) {
+    NSArray<NSString *> *preferredArguments = @[
+        @"--xattrs", @"--acls",
+        @"-xzf", archivePath,
+        @"-C", destDir
+    ];
+    CommandResult *res = [runner runExecutableAndCapture:tarPath
+                                                arguments:preferredArguments
+                                               timeoutSec:PXTarExtractTimeoutSeconds
+                                           maxOutputBytes:PXTarCommandOutputLimitBytes];
+    if (res.succeeded) {
+        return res;
+    }
+    if (res.timedOut || res.spawnError != 0 || res.runnerError != 0 ||
+        !res.exitedNormally || res.terminationSignal != 0) {
         return res;
     }
 
-    NSString *fallback = [NSString stringWithFormat:@"%@ -xzf %@ -C %@",
-                          PXShellQuote(tarPath),
-                          PXShellQuote(archivePath),
-                          PXShellQuote(destDir)];
-    return [runner runAndCapture:fallback];
+    NSArray<NSString *> *fallbackArguments = @[
+        @"-xzf", archivePath,
+        @"-C", destDir
+    ];
+    return [runner runExecutableAndCapture:tarPath
+                                  arguments:fallbackArguments
+                                 timeoutSec:PXTarExtractTimeoutSeconds
+                             maxOutputBytes:PXTarCommandOutputLimitBytes];
 }
 
 - (CommandResult *)_tarExtractDataArchive:(NSString *)tarPath
