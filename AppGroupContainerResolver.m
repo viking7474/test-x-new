@@ -153,6 +153,7 @@ static PXAppGroupMCMResolutionState PXAppGroupResolverRegisteredContainer(NSStri
         return PXAppGroupMCMResolutionStateMissing;
     }
 
+    SEL identifierSelector = NSSelectorFromString(@"identifier");
     SEL urlSelector = NSSelectorFromString(@"url");
     SEL uuidSelector = NSSelectorFromString(@"uuid");
     if (![container respondsToSelector:urlSelector] || ![container respondsToSelector:uuidSelector]) {
@@ -160,6 +161,14 @@ static PXAppGroupMCMResolutionState PXAppGroupResolverRegisteredContainer(NSStri
     }
 
     id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    if ([container respondsToSelector:identifierSelector]) {
+        id identifierObject = sendObject(container, identifierSelector);
+        if (![identifierObject isKindOfClass:[NSString class]] ||
+            ![(NSString *)identifierObject isEqualToString:groupIdentifier]) {
+            return PXAppGroupMCMResolutionStateFailed;
+        }
+    }
+
     id urlObject = sendObject(container, urlSelector);
     id uuidObject = sendObject(container, uuidSelector);
     NSString *path = [urlObject isKindOfClass:[NSURL class]] ? [(NSURL *)urlObject path] : nil;
@@ -283,17 +292,25 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
 
         NSUUID *pathUUID = [[NSUUID alloc] initWithUUIDString:registeredPath.lastPathComponent];
         NSUUID *mcmUUID = [[NSUUID alloc] initWithUUIDString:registeredUUID];
+        BOOL realDirectory = PXAppGroupResolverRealDirectoryAtPath(registeredPath);
         BOOL metadataMalformed = NO;
         BOOL metadataMatches = PXAppGroupResolverMetadataMatchesIdentifier(registeredPath,
                                                                            groupIdentifier,
                                                                            &metadataMalformed);
-        if (!PXAppGroupResolverRealDirectoryAtPath(registeredPath) ||
-            !pathUUID || !mcmUUID || ![pathUUID isEqual:mcmUUID] || !metadataMatches) {
+        // The exact MCM identifier + registered URL identify the live container. The opaque MCM UUID is
+        // sanity-checked, but it is not required to equal the filesystem basename; the destructive path
+        // validator independently revalidates the fixed root, basename UUID, metadata identity and inode.
+        if (!realDirectory || !pathUUID || !mcmUUID || !metadataMatches) {
             PXAppGroupResolverAssignError(error,
                                           metadataMalformed
                                               ? PXAppGroupContainerResolverErrorMetadataInvalid
                                               : PXAppGroupContainerResolverErrorInvalidCandidate,
-                                          @"Registered App Group container failed exact filesystem validation");
+                                          [NSString stringWithFormat:
+                                              @"Registered App Group container failed exact filesystem validation (directory=%d pathUUID=%d mcmUUID=%d metadata=%d)",
+                                              realDirectory ? 1 : 0,
+                                              pathUUID ? 1 : 0,
+                                              mcmUUID ? 1 : 0,
+                                              metadataMatches ? 1 : 0]);
             return nil;
         }
 

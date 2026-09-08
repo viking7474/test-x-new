@@ -1925,10 +1925,18 @@ static BOOL PXOptionalCleanupDirectoryContents(int descriptor,
                                     @"The optional Restore file-item limit was exceeded.");
     }
 
-    NSString *mobileLibraryPath = nil;
+    BOOL needsMobileLibraryDestination =
+        restorePlan.includesProfileAppData ||
+        restorePlan.includesGlobalSafari ||
+        restorePlan.includesPreferences ||
+        restorePlan.systemGlobalItems.count > 0 ||
+        restorePlan.sharedDatabaseItems.count > 0;
+
+    NSString *mobileLibraryPath = @"";
     PXOptionalIdentity mobileLibraryIdentity;
     memset(&mobileLibraryIdentity, 0, sizeof(mobileLibraryIdentity));
-    if (!PXOptionalResolveMobileLibrary(&mobileLibraryPath,
+    if (needsMobileLibraryDestination &&
+        !PXOptionalResolveMobileLibrary(&mobileLibraryPath,
                                         &mobileLibraryIdentity,
                                         error)) {
         return nil;
