@@ -5336,7 +5336,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = title;
-    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
     titleLabel.textColor = PXLabelColor();
     titleLabel.numberOfLines = 1;
     titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;

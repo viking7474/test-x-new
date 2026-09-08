@@ -18,7 +18,7 @@
                         <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <subviews>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="PROJECT X" textAlignment="center" lineBreakMode="tailTruncation" numberOfLines="1" translatesAutoresizingMaskIntoConstraints="NO" id="projectXLabel">
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="TLinkiOS" textAlignment="center" lineBreakMode="tailTruncation" numberOfLines="1" translatesAutoresizingMaskIntoConstraints="NO" id="projectXLabel">
                                 <rect key="frame" x="96" y="326" width="200" height="50"/>
                                 <fontDescription key="fontDescription" type="system" weight="bold" pointSize="36"/>
                             </label>
