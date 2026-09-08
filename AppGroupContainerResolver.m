@@ -3,6 +3,7 @@
 #import <sys/stat.h>
 #import <objc/message.h>
 #import <errno.h>
+#import <string.h>
 
 NSString * const PXAppGroupContainerResolverErrorDomain = @"PXAppGroupContainerResolver";
 
@@ -72,6 +73,27 @@ static BOOL PXAppGroupResolverRealDirectoryAtPath(NSString *path) {
         return NO;
     }
     return S_ISDIR(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
+}
+
+static BOOL PXAppGroupResolverSameDirectoryIdentity(NSString *leftPath, NSString *rightPath) {
+    const char *leftFileSystemPath = leftPath.fileSystemRepresentation;
+    const char *rightFileSystemPath = rightPath.fileSystemRepresentation;
+    if (!leftFileSystemPath || !rightFileSystemPath) {
+        return NO;
+    }
+
+    struct stat leftStat;
+    struct stat rightStat;
+    memset(&leftStat, 0, sizeof(leftStat));
+    memset(&rightStat, 0, sizeof(rightStat));
+    if (lstat(leftFileSystemPath, &leftStat) != 0 ||
+        lstat(rightFileSystemPath, &rightStat) != 0) {
+        return NO;
+    }
+    return S_ISDIR(leftStat.st_mode) && !S_ISLNK(leftStat.st_mode) &&
+           S_ISDIR(rightStat.st_mode) && !S_ISLNK(rightStat.st_mode) &&
+           leftStat.st_dev == rightStat.st_dev &&
+           leftStat.st_ino == rightStat.st_ino;
 }
 
 static BOOL PXAppGroupResolverRegularFileAtPath(NSString *path) {
@@ -317,39 +339,56 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
             return @[];
         }
 
-        NSUUID *pathUUID = [[NSUUID alloc] initWithUUIDString:registeredPath.lastPathComponent];
+        NSString *registeredBasename = registeredPath.lastPathComponent;
+        NSUUID *pathUUID = [[NSUUID alloc] initWithUUIDString:registeredBasename];
         NSUUID *mcmUUID = [[NSUUID alloc] initWithUUIDString:registeredUUID];
         BOOL realDirectory = PXAppGroupResolverRealDirectoryAtPath(registeredPath);
         BOOL metadataMalformed = NO;
         BOOL metadataMatches = PXAppGroupResolverMetadataMatchesIdentifier(registeredPath,
                                                                            groupIdentifier,
                                                                            &metadataMalformed);
-        // The exact MCM identifier + registered URL identify the live container. The opaque MCM UUID is
-        // sanity-checked, but it is not required to equal the filesystem basename; the destructive path
-        // validator independently revalidates the fixed root, basename UUID, metadata identity and inode.
-        if (!realDirectory || !pathUUID || !mcmUUID || !metadataMatches) {
-            registeredValidationErrorCode = metadataMalformed
+        // MCM may report the ordinary rootful /var spelling while destructive validation intentionally
+        // requires the fixed /private/var spelling. Rebind only through the fixed root + UUID and only
+        // when both lexical paths still identify the exact same real directory.
+        NSString *fixedRegisteredPath = registeredBasename.length
+            ? [basePath stringByAppendingPathComponent:registeredBasename]
+            : nil;
+        BOOL fixedIdentityMatches = fixedRegisteredPath.length > 0 &&
+            PXAppGroupResolverSameDirectoryIdentity(registeredPath, fixedRegisteredPath);
+        BOOL fixedMetadataMalformed = NO;
+        BOOL fixedMetadataMatches = fixedIdentityMatches &&
+            PXAppGroupResolverMetadataMatchesIdentifier(fixedRegisteredPath,
+                                                         groupIdentifier,
+                                                         &fixedMetadataMalformed);
+        // The opaque MCM UUID is sanity-checked, but it is not required to equal the filesystem basename.
+        // PXDestructivePathValidator remains authoritative and still requires fixed base + basename UUID,
+        // canonical containment, metadata identity, ownership/mode and stable device/inode identity.
+        if (!realDirectory || !pathUUID || !mcmUUID || !metadataMatches ||
+            !fixedIdentityMatches || !fixedMetadataMatches) {
+            registeredValidationErrorCode = (metadataMalformed || fixedMetadataMalformed)
                 ? PXAppGroupContainerResolverErrorMetadataInvalid
                 : PXAppGroupContainerResolverErrorInvalidCandidate;
             registeredValidationFailure = [NSString stringWithFormat:
-                @"Registered App Group container failed exact filesystem validation (directory=%d pathUUID=%d mcmUUID=%d metadata=%d); exact fixed-root fallback found no valid match",
+                @"Registered App Group container failed exact filesystem validation (directory=%d pathUUID=%d mcmUUID=%d metadata=%d fixedIdentity=%d fixedMetadata=%d); exact fixed-root fallback found no valid match",
                 realDirectory ? 1 : 0,
                 pathUUID ? 1 : 0,
                 mcmUUID ? 1 : 0,
-                metadataMatches ? 1 : 0];
+                metadataMatches ? 1 : 0,
+                fixedIdentityMatches ? 1 : 0,
+                fixedMetadataMatches ? 1 : 0];
         } else {
             PXResolvedContainer *registeredCandidate =
                 [[PXResolvedContainer alloc] initWithKind:PXResolvedContainerKindAppGroup
                                                      root:root
                                       requestedIdentifier:groupIdentifier
                                        metadataIdentifier:groupIdentifier
-                                            containerUUID:registeredPath.lastPathComponent
-                                            containerPath:registeredPath];
+                                            containerUUID:registeredBasename
+                                            containerPath:fixedRegisteredPath];
             if (registeredCandidate) {
                 return @[registeredCandidate];
             }
             registeredValidationErrorCode = PXAppGroupContainerResolverErrorInvalidCandidate;
-            registeredValidationFailure = @"Registered App Group container could not be represented safely; exact fixed-root fallback found no valid match";
+            registeredValidationFailure = @"Registered App Group container could not be rebound to the fixed root safely; exact fixed-root fallback found no valid match";
         }
     }
 

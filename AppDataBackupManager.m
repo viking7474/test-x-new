@@ -981,6 +981,12 @@ typedef NS_ENUM(NSInteger, PXTarHardLinkScanState) {
     PXTarHardLinkScanStateUnknown = 2,
 };
 
+typedef NS_ENUM(NSInteger, PXTarSymlinkScanState) {
+    PXTarSymlinkScanStateNoSymlinks = 0,
+    PXTarSymlinkScanStateHasSymlinks = 1,
+    PXTarSymlinkScanStateUnknown = 2,
+};
+
 static PXTarHardLinkScanState PXTarScanHardLinkedRegularFiles(NSString *sourceDir) {
     if (![sourceDir isKindOfClass:[NSString class]] || sourceDir.length == 0) {
         return PXTarHardLinkScanStateUnknown;
@@ -1015,6 +1021,97 @@ static PXTarHardLinkScanState PXTarScanHardLinkedRegularFiles(NSString *sourceDi
                              : PXTarHardLinkScanStateNoHardLinks;
 }
 
+static PXTarSymlinkScanState PXTarScanSymbolicLinks(NSString *sourceDir) {
+    if (![sourceDir isKindOfClass:[NSString class]] || sourceDir.length == 0) {
+        return PXTarSymlinkScanStateUnknown;
+    }
+
+    NSURL *rootURL = [NSURL fileURLWithPath:sourceDir isDirectory:YES];
+    __block BOOL enumerationFailed = NO;
+    NSDirectoryEnumerator *enumerator =
+        [[NSFileManager defaultManager] enumeratorAtURL:rootURL
+                             includingPropertiesForKeys:nil
+                                                options:0
+                                           errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+        enumerationFailed = YES;
+        return NO;
+    }];
+    if (!enumerator) {
+        return PXTarSymlinkScanStateUnknown;
+    }
+
+    for (NSURL *entryURL in enumerator) {
+        const char *entryPath = entryURL.fileSystemRepresentation;
+        struct stat entryStat;
+        memset(&entryStat, 0, sizeof(entryStat));
+        if (!entryPath || lstat(entryPath, &entryStat) != 0) {
+            return PXTarSymlinkScanStateUnknown;
+        }
+        if (S_ISLNK(entryStat.st_mode)) {
+            [enumerator skipDescendants];
+            return PXTarSymlinkScanStateHasSymlinks;
+        }
+    }
+    return enumerationFailed ? PXTarSymlinkScanStateUnknown
+                             : PXTarSymlinkScanStateNoSymlinks;
+}
+
+static BOOL PXTarRemoveSymbolicLinksFromPrivateTree(NSString *sourceDir, int *errorOut) {
+    if (errorOut) *errorOut = 0;
+    if (![sourceDir isKindOfClass:[NSString class]] || sourceDir.length == 0) {
+        if (errorOut) *errorOut = EINVAL;
+        return NO;
+    }
+
+    NSURL *rootURL = [NSURL fileURLWithPath:sourceDir isDirectory:YES];
+    NSMutableArray<NSString *> *symlinkPaths = [NSMutableArray array];
+    __block BOOL enumerationFailed = NO;
+    NSDirectoryEnumerator *enumerator =
+        [[NSFileManager defaultManager] enumeratorAtURL:rootURL
+                             includingPropertiesForKeys:nil
+                                                options:0
+                                           errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+        enumerationFailed = YES;
+        return NO;
+    }];
+    if (!enumerator) {
+        if (errorOut) *errorOut = EIO;
+        return NO;
+    }
+
+    for (NSURL *entryURL in enumerator) {
+        const char *entryPath = entryURL.fileSystemRepresentation;
+        struct stat entryStat;
+        memset(&entryStat, 0, sizeof(entryStat));
+        if (!entryPath || lstat(entryPath, &entryStat) != 0) {
+            if (errorOut) *errorOut = errno != 0 ? errno : EIO;
+            return NO;
+        }
+        if (S_ISLNK(entryStat.st_mode)) {
+            [enumerator skipDescendants];
+            [symlinkPaths addObject:entryURL.path];
+        }
+    }
+    if (enumerationFailed) {
+        if (errorOut) *errorOut = EIO;
+        return NO;
+    }
+
+    for (NSString *symlinkPath in symlinkPaths) {
+        const char *fileSystemPath = symlinkPath.fileSystemRepresentation;
+        if (!fileSystemPath || unlink(fileSystemPath) != 0) {
+            if (errorOut) *errorOut = errno != 0 ? errno : EIO;
+            return NO;
+        }
+    }
+
+    if (PXTarScanSymbolicLinks(sourceDir) != PXTarSymlinkScanStateNoSymlinks) {
+        if (errorOut) *errorOut = EIO;
+        return NO;
+    }
+    return YES;
+}
+
 static CommandResult *PXTarSyntheticFailure(int runnerError, NSString *message) {
     CommandResult *result = [[CommandResult alloc] init];
     result.exitCode = -1;
@@ -1045,29 +1142,32 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
     CommandRunner *runner = [CommandRunner shared];
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // GNU tar can directly materialize hard-linked regular files into independent archive members.
-    // bsdtar/Apple tar preserve hard links as type '1', which Restore intentionally rejects, so only
-    // when such files are detected we stage a private BSD cp -R -P -p copy first. BSD/Darwin cp -R
-    // copies hard-linked files as separate files while -P keeps symbolic links physical (not followed).
+    // Restore intentionally accepts only regular files and directories. GNU tar can materialize hard
+    // links directly, while bsdtar/Apple tar preserve them as type '1'. Symlinks are type '2' on every
+    // tar variant, so any source tree containing (or not safely proving absence of) symlinks is copied
+    // into a private tree first; links are then unlinked from that private copy without following them.
     BOOL isGnuTar = [[tarPath lastPathComponent] isEqualToString:@"gtar"];
     PXTarHardLinkScanState hardLinkState = PXTarScanHardLinkedRegularFiles(sourceDir);
+    PXTarSymlinkScanState symlinkState = PXTarScanSymbolicLinks(sourceDir);
     BOOL shouldMaterializeHardLinks = !isGnuTar && hardLinkState != PXTarHardLinkScanStateNoHardLinks;
+    BOOL shouldSanitizeSymlinks = symlinkState != PXTarSymlinkScanStateNoSymlinks;
+    BOOL shouldMaterializeSource = shouldMaterializeHardLinks || shouldSanitizeSymlinks;
     NSString *materializationRoot = nil;
     NSString *effectiveSourceDir = sourceDir;
 
-    if (shouldMaterializeHardLinks) {
+    if (shouldMaterializeSource) {
         int materializationError = 0;
         materializationRoot = PXTarCreatePrivateMaterializationDirectory(&materializationError);
         if (materializationRoot.length == 0) {
             return PXTarSyntheticFailure(materializationError,
-                                         @"Could not create private hard-link materialization directory");
+                                         @"Could not create private archive-source materialization directory");
         }
 
         NSString *cpPath = [runner firstExistingPath:@[@"/bin/cp", @"/usr/bin/cp"]];
         if (cpPath.length == 0) {
             [fm removeItemAtPath:materializationRoot error:nil];
             return PXTarSyntheticFailure(ENOENT,
-                                         @"BSD cp is unavailable for hard-link materialization");
+                                         @"BSD cp is unavailable for archive-source materialization");
         }
 
         NSString *copyCommand = [NSString stringWithFormat:@"%@ -R -P -p %@ %@",
@@ -1091,15 +1191,28 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
         memset(&materializedStat, 0, sizeof(materializedStat));
         const char *materializedPath = effectiveSourceDir.fileSystemRepresentation;
         if (effectiveSourceDir.length == 0 || !materializedPath ||
-            lstat(materializedPath, &materializedStat) != 0 || !S_ISDIR(materializedStat.st_mode)) {
+            lstat(materializedPath, &materializedStat) != 0 ||
+            !S_ISDIR(materializedStat.st_mode) || S_ISLNK(materializedStat.st_mode)) {
             [fm removeItemAtPath:materializationRoot error:nil];
             return PXTarSyntheticFailure(EIO,
-                                         @"Hard-link materialization did not produce a safe source directory");
+                                         @"Archive-source materialization did not produce a safe source directory");
+        }
+
+        int symlinkCleanupError = 0;
+        if (!PXTarRemoveSymbolicLinksFromPrivateTree(effectiveSourceDir, &symlinkCleanupError)) {
+            [fm removeItemAtPath:materializationRoot error:nil];
+            return PXTarSyntheticFailure(symlinkCleanupError,
+                                         @"Archive-source materialization could not remove symbolic links safely");
         }
         if (PXTarScanHardLinkedRegularFiles(effectiveSourceDir) != PXTarHardLinkScanStateNoHardLinks) {
             [fm removeItemAtPath:materializationRoot error:nil];
             return PXTarSyntheticFailure(EIO,
-                                         @"Hard-link materialization still contains multiply-linked regular files");
+                                         @"Archive-source materialization still contains multiply-linked regular files");
+        }
+        if (PXTarScanSymbolicLinks(effectiveSourceDir) != PXTarSymlinkScanStateNoSymlinks) {
+            [fm removeItemAtPath:materializationRoot error:nil];
+            return PXTarSyntheticFailure(EIO,
+                                         @"Archive-source materialization still contains symbolic links");
         }
     }
 
