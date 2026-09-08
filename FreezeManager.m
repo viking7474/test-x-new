@@ -1,7 +1,8 @@
 #import "FreezeManager.h"
 #import "IdentifierManager.h"
-#import <spawn.h>
-#import <sys/wait.h>
+#import "common/PXProcessKiller.h"
+#import <string.h>
+#import <sys/stat.h>
 
 @interface FreezeManager ()
 @property (nonatomic, strong) BottomButtons *bottomButtons;
@@ -140,92 +141,114 @@
 }
 
 - (void)killApplication:(NSString *)bundleID {
-    if (!bundleID) return;
-    
-    // Get the executable name from LSApplicationProxy
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return;
+
     LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
     if (!appProxy) {
         NSLog(@"[FreezeManager] Could not find application proxy for bundle ID: %@", bundleID);
         return;
     }
-    
-    NSString *executableName = appProxy.bundleExecutable;
-    if (!executableName || ![executableName length]) {
-        NSLog(@"[FreezeManager] Could not find executable name for app: %@", bundleID);
-        return;
+
+    NSArray<NSString *> *protectedProcesses = @[@"SpringBoard", @"backboardd", @"TLinkIOS", @"installd", @"assertiond"];
+    NSMutableOrderedSet<NSString *> *executableNames = [NSMutableOrderedSet orderedSet];
+    NSString *mainExecutable = appProxy.bundleExecutable;
+    if ([mainExecutable isKindOfClass:[NSString class]] && mainExecutable.length > 0 &&
+        ![protectedProcesses containsObject:mainExecutable]) {
+        [executableNames addObject:mainExecutable];
     }
-    
-    // Skip system critical processes
-    NSArray *protectedProcesses = @[@"SpringBoard", @"backboardd", @"TLinkIOS", @"installd", @"assertiond"];
-    if ([protectedProcesses containsObject:executableName]) {
-        // NSLog(@"[FreezeManager] Skipping protected process: %@", executableName);
-        return;
-    }
-    
-    // Verify executable name is valid UTF-8
-    const char *executableStr = [executableName UTF8String];
-    if (!executableStr) {
-        NSLog(@"[FreezeManager] Invalid executable name encoding for app: %@", bundleID);
-        return;
-    }
-    
-    // Check for different killall paths based on jailbreak type
-    NSArray *killallPaths = @[
-        @"/usr/bin/killall",              // Dopamine path
-        @"/usr/bin/killall",                     // Traditional/Palera1n path
-        @"/bin/killall",                  // Alternative Dopamine path
-        @"/private/preboot/jb/usr/bin/killall"   // Additional Palera1n path
-    ];
-    
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *killallPath = nil;
-    
-    // Find the first available killall binary
-    for (NSString *path in killallPaths) {
-        if ([fileManager fileExistsAtPath:path]) {
-            killallPath = path;
-            break;
-        }
-    }
-    
-    if (!killallPath) {
-        NSLog(@"[FreezeManager] Error: Could not find a valid killall binary path");
-        return;
-    }
-    
-    // Kill the app using killall -9 command
-    pid_t pid;
-    int status;
-    const char *killallPathStr = [killallPath UTF8String];
-    
-    char *const argv[] = {(char *)"killall", (char *)"-9", (char *)executableStr, NULL};
-    
-    NSLog(@"[FreezeManager] Using killall from: %@ to kill process: %@", killallPath, executableName);
-    
+
+    // App extensions can keep an App Group live after the host executable exits. Resolve only
+    // .appex bundles physically owned by this installed app and kill their exact executables too.
     @try {
-        if (posix_spawn(&pid, killallPathStr, NULL, NULL, argv, NULL) == 0) {
-            if (waitpid(pid, &status, WEXITED) != -1) {
-                if (WIFEXITED(status)) {
-                    if (WEXITSTATUS(status) == 0) {
-                        NSLog(@"[FreezeManager] Successfully killed app %@ via executable name: %@", bundleID, executableName);
-                    } else {
-                        NSLog(@"[FreezeManager] Process exited with status %d for app %@", WEXITSTATUS(status), bundleID);
-                    }
-                } else if (WIFSIGNALED(status)) {
-                    NSLog(@"[FreezeManager] Process killed by signal %d for app %@", WTERMSIG(status), bundleID);
-                }
-            } else {
-                NSLog(@"[FreezeManager] Failed to wait for process termination: %s", strerror(errno));
-            }
-        } else {
-            NSLog(@"[FreezeManager] Failed to spawn killall process: %s", strerror(errno));
+        id bundleURLObject = nil;
+        @try { bundleURLObject = [appProxy valueForKey:@"bundleURL"]; } @catch (__unused NSException *exception) {}
+        NSString *applicationBundlePath = nil;
+        if ([bundleURLObject isKindOfClass:[NSURL class]]) {
+            applicationBundlePath = [(NSURL *)bundleURLObject path];
+        } else if ([bundleURLObject isKindOfClass:[NSString class]]) {
+            applicationBundlePath = (NSString *)bundleURLObject;
         }
-    } @catch (NSException *exception) {
-        NSLog(@"[FreezeManager] Exception while killing app %@: %@", bundleID, exception);
+
+        struct stat applicationBundleStat;
+        memset(&applicationBundleStat, 0, sizeof(applicationBundleStat));
+        const char *applicationBundleFS = applicationBundlePath.fileSystemRepresentation;
+        if (applicationBundlePath.length > 0 &&
+            [[applicationBundlePath pathExtension].lowercaseString isEqualToString:@"app"] &&
+            applicationBundleFS &&
+            lstat(applicationBundleFS, &applicationBundleStat) == 0 &&
+            S_ISDIR(applicationBundleStat.st_mode) &&
+            !S_ISLNK(applicationBundleStat.st_mode)) {
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            NSArray<NSString *> *extensionLocations = @[
+                applicationBundlePath,
+                [applicationBundlePath stringByAppendingPathComponent:@"PlugIns"],
+                [applicationBundlePath stringByAppendingPathComponent:@"Plugins"]
+            ];
+
+            for (NSUInteger locationIndex = 0; locationIndex < extensionLocations.count; locationIndex++) {
+                NSString *location = extensionLocations[locationIndex];
+                struct stat locationStat;
+                memset(&locationStat, 0, sizeof(locationStat));
+                const char *locationFS = location.fileSystemRepresentation;
+                if (!locationFS || lstat(locationFS, &locationStat) != 0 ||
+                    !S_ISDIR(locationStat.st_mode) || S_ISLNK(locationStat.st_mode)) {
+                    continue;
+                }
+
+                NSArray<NSString *> *entries = [fileManager contentsOfDirectoryAtPath:location error:nil];
+                for (NSString *entry in entries) {
+                    if (![entry isKindOfClass:[NSString class]] ||
+                        ![[entry pathExtension].lowercaseString isEqualToString:@"appex"]) {
+                        continue;
+                    }
+                    NSString *extensionPath = [location stringByAppendingPathComponent:entry];
+                    struct stat extensionStat;
+                    memset(&extensionStat, 0, sizeof(extensionStat));
+                    const char *extensionFS = extensionPath.fileSystemRepresentation;
+                    if (!extensionFS || lstat(extensionFS, &extensionStat) != 0 ||
+                        !S_ISDIR(extensionStat.st_mode) || S_ISLNK(extensionStat.st_mode)) {
+                        continue;
+                    }
+
+                    NSString *infoPath = [extensionPath stringByAppendingPathComponent:@"Info.plist"];
+                    struct stat infoStat;
+                    memset(&infoStat, 0, sizeof(infoStat));
+                    const char *infoFS = infoPath.fileSystemRepresentation;
+                    if (!infoFS || lstat(infoFS, &infoStat) != 0 ||
+                        !S_ISREG(infoStat.st_mode) || S_ISLNK(infoStat.st_mode)) {
+                        continue;
+                    }
+                    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+                    NSString *extensionExecutable = [info[@"CFBundleExecutable"] isKindOfClass:[NSString class]]
+                        ? info[@"CFBundleExecutable"]
+                        : nil;
+                    BOOL safeExecutableName = extensionExecutable.length > 0 &&
+                        ![extensionExecutable isEqualToString:@"."] &&
+                        ![extensionExecutable isEqualToString:@".."] &&
+                        [extensionExecutable rangeOfString:@"/"].location == NSNotFound;
+                    if (safeExecutableName && ![protectedProcesses containsObject:extensionExecutable]) {
+                        [executableNames addObject:extensionExecutable];
+                    }
+                }
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        // Best-effort process quiescence must not make Clear/Restore fail before their strict validators run.
     }
-    
-    // Add a small delay to ensure processes are terminated
-    usleep(100000); // 100ms delay
+
+    if (executableNames.count == 0) {
+        NSLog(@"[FreezeManager] Could not resolve any killable executable for app: %@", bundleID);
+        return;
+    }
+
+    for (NSString *executableName in executableNames) {
+        BOOL executed = PXKillallByName(executableName, SIGKILL);
+        NSLog(@"[FreezeManager] Kill request app=%@ executable=%@ executed=%d",
+              bundleID, executableName, executed ? 1 : 0);
+    }
+
+    // Give host and extension processes a short window to leave shared-container descriptors.
+    usleep(100000);
 }
 
 @end

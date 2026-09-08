@@ -4222,6 +4222,11 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 return;
             }
 
+            // App Group staging can take long enough for a host/extension process to be relaunched.
+            // Re-quiesce immediately before transactional namespace mutation; FreezeManager also kills
+            // executable names of .appex bundles physically owned by the installed application.
+            [self _killRelatedProcessesForBundleID:bundleID];
+
             NSError *appGroupTransactionPrepareError = nil;
             __attribute__((objc_precise_lifetime))
             PXAppGroupRestoreTransaction *appGroupTransaction =
@@ -4235,13 +4240,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         isEqualToString:PXAppGroupRestoreTransactionErrorDomain] &&
                     appGroupTransactionPrepareError.code ==
                         PXAppGroupRestoreTransactionErrorTargetValidationFailed;
+                NSString *prepareField = [appGroupTransactionPrepareError.userInfo[PXAppGroupRestoreTransactionErrorFieldPathKey]
+                    isKindOfClass:[NSString class]]
+                    ? appGroupTransactionPrepareError.userInfo[PXAppGroupRestoreTransactionErrorFieldPathKey]
+                    : nil;
+                NSString *prepareBaseMessage = targetAuthorityFailure
+                    ? @"Exact App Group restore target could not be revalidated safely"
+                    : @"Failed to prepare validated App Group stages transactionally";
+                NSString *prepareMessage = appGroupTransactionPrepareError
+                    ? [NSString stringWithFormat:@"%@ (%@:%ld%@%@)",
+                       prepareBaseMessage,
+                       appGroupTransactionPrepareError.domain ?: @"unknown",
+                       (long)appGroupTransactionPrepareError.code,
+                       prepareField.length ? @" field=" : @"",
+                       prepareField ?: @""]
+                    : prepareBaseMessage;
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:targetAuthorityFailure ? 319 : 310
                                                userInfo:@{
-                                                   NSLocalizedDescriptionKey:
-                                                       targetAuthorityFailure
-                                                           ? @"Exact App Group restore target could not be revalidated safely"
-                                                           : @"Failed to commit validated App Group stages transactionally"
+                                                   NSLocalizedDescriptionKey: prepareMessage
                                                }];
                 completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                 return;
@@ -4258,7 +4275,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             BOOL appGroupCommitted =
                 [appGroupTransaction commitWithCleanupWarning:&appGroupTransactionCleanupWarning
                                                          error:&appGroupTransactionError];
-            (void)appGroupTransactionError;
             BOOL appGroupStagingCleanupComplete =
                 cleanupAppGroupStagingWorkspaces(appGroupStagingWorkspaces);
             PXDebugAppendLine(debugPre,
@@ -4267,10 +4283,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                                appGroupTransaction.rollbackPerformed ? 1 : 0,
                                appGroupTransaction.rollbackComplete ? 1 : 0]);
             if (!appGroupCommitted) {
+                NSString *commitField = [appGroupTransactionError.userInfo[PXAppGroupRestoreTransactionErrorFieldPathKey]
+                    isKindOfClass:[NSString class]]
+                    ? appGroupTransactionError.userInfo[PXAppGroupRestoreTransactionErrorFieldPathKey]
+                    : nil;
+                NSString *commitMessage = appGroupTransactionError
+                    ? [NSString stringWithFormat:@"Failed to commit validated App Group stages transactionally (%@:%ld%@%@)",
+                       appGroupTransactionError.domain ?: @"unknown",
+                       (long)appGroupTransactionError.code,
+                       commitField.length ? @" field=" : @"",
+                       commitField ?: @""]
+                    : @"Failed to commit validated App Group stages transactionally";
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:310
                                                userInfo:@{
-                                                   NSLocalizedDescriptionKey: @"Failed to commit validated App Group stages transactionally"
+                                                   NSLocalizedDescriptionKey: commitMessage
                                                }];
                 completeStructuredFailure(
                     PXRestoreComponentAppGroups,
@@ -4282,7 +4309,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             }
 
             if (appGroupTransactionCleanupWarning) {
-                [warnings addObject:@"App Group transaction cleanup failed; ownership correction was skipped"];
+                NSString *cleanupField = [appGroupTransactionCleanupWarning.userInfo[PXAppGroupRestoreTransactionErrorFieldPathKey]
+                    isKindOfClass:[NSString class]]
+                    ? appGroupTransactionCleanupWarning.userInfo[PXAppGroupRestoreTransactionErrorFieldPathKey]
+                    : nil;
+                [warnings addObject:[NSString stringWithFormat:
+                    @"App Group transaction cleanup failed (%@:%ld%@%@); ownership correction was skipped",
+                    appGroupTransactionCleanupWarning.domain ?: @"unknown",
+                    (long)appGroupTransactionCleanupWarning.code,
+                    cleanupField.length ? @" field=" : @"",
+                    cleanupField ?: @""]];
             } else {
                 for (PXAppGroupRestoreTarget *target in appGroupTargetPlan.targets) {
                     [runner runAndCapture:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
