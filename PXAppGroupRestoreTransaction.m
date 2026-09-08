@@ -1785,7 +1785,7 @@ static BOOL PXAppGroupRestoreOpenWorkspace(PXAppGroupRestoreParticipant *partici
     return YES;
 }
 
-static BOOL PXAppGroupRestoreWorkspaceHasNoRecoveryData(
+static BOOL PXAppGroupRestoreWorkspaceIsSafeWithoutJournal(
     PXAppGroupRestoreParticipant *participant,
     BOOL leader,
     NSError **error) {
@@ -1800,13 +1800,13 @@ static BOOL PXAppGroupRestoreWorkspaceHasNoRecoveryData(
     for (NSData *nameData in names) {
         if (PXAppGroupRestoreRawNameEquals(nameData, PXAppGroupRestoreOriginalDirectoryName) ||
             PXAppGroupRestoreRawNameEquals(nameData, PXAppGroupRestoreNewDirectoryName)) {
+            BOOL isOriginal = PXAppGroupRestoreRawNameEquals(nameData,
+                                                             PXAppGroupRestoreOriginalDirectoryName);
             BOOL exists = NO;
             int descriptor = PXAppGroupRestoreOpenDirectoryAt(
                 participant.workspaceDescriptor,
-                PXAppGroupRestoreRawNameEquals(nameData,
-                                                PXAppGroupRestoreOriginalDirectoryName)
-                    ? PXAppGroupRestoreOriginalDirectoryName
-                    : PXAppGroupRestoreNewDirectoryName,
+                isOriginal ? PXAppGroupRestoreOriginalDirectoryName
+                           : PXAppGroupRestoreNewDirectoryName,
                 &exists);
             if (descriptor < 0 || !exists) {
                 if (descriptor >= 0) close(descriptor);
@@ -1818,11 +1818,19 @@ static BOOL PXAppGroupRestoreWorkspaceHasNoRecoveryData(
             NSArray<NSData *> *contents =
                 PXAppGroupRestoreReadDirectoryNames(descriptor, 1, error, @"$.recovery");
             close(descriptor);
-            if (!contents || contents.count != 0) {
+            if (!contents) {
+                return NO;
+            }
+            // Before the durable leader journal is published, prepare may already have copied the
+            // validated restore payload into new/, but quarantine has not started yet. Therefore
+            // staged data in new/ is transaction-owned and safe to discard. Data in original/ is
+            // different: it proves live App Group entries may already have been quarantined, so a
+            // missing journal must remain fail-closed to avoid destroying the only original copy.
+            if (isOriginal && contents.count != 0) {
                 return PXAppGroupRestoreFail(error,
                                              PXAppGroupRestoreTransactionErrorRecoveryFailed,
                                              @"$.recovery",
-                                             @"An App Group workspace contains recovery data without a journal.");
+                                             @"An App Group workspace contains quarantined original data without a journal.");
             }
             continue;
         }
@@ -2242,9 +2250,9 @@ static BOOL PXAppGroupRestoreRecoverStaleBatch(
             if (participant.workspaceDescriptor < 0) {
                 continue;
             }
-            if (!PXAppGroupRestoreWorkspaceHasNoRecoveryData(participant,
-                                                              participant == leader,
-                                                              error)) {
+            if (!PXAppGroupRestoreWorkspaceIsSafeWithoutJournal(participant,
+                                                                 participant == leader,
+                                                                 error)) {
                 return NO;
             }
         }
