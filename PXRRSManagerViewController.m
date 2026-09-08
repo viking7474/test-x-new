@@ -278,13 +278,10 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     self.selectedDirs = [NSMutableSet set];
     self.filterText = @"";
 
-    // iPhone 6s: large title + search + sticky footer eats vertical space.
-    BOOL compact = (CGRectGetHeight(UIScreen.mainScreen.bounds) < 700.0);
+    // Use a compact custom title so the RRS count badge stays visible consistently.
     if (@available(iOS 11.0, *)) {
-        self.navigationController.navigationBar.prefersLargeTitles = !compact;
-        self.navigationItem.largeTitleDisplayMode = compact
-            ? UINavigationItemLargeTitleDisplayModeNever
-            : UINavigationItemLargeTitleDisplayModeAlways;
+        self.navigationController.navigationBar.prefersLargeTitles = NO;
+        self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     }
     self.title = @"RRS";
     self.navigationItem.prompt = nil;
@@ -481,12 +478,53 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     [self.tableView reloadData];
 }
 
+- (UIView *)rrsNavigationTitleViewForCount:(NSUInteger)count {
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 7.0;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = @"RRS";
+    titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+    titleLabel.textColor = PXLabelColor();
+    [stack addArrangedSubview:titleLabel];
+
+    UIView *badge = [[UIView alloc] init];
+    badge.translatesAutoresizingMaskIntoConstraints = NO;
+    badge.backgroundColor = PXSystemGray5Color();
+    badge.layer.cornerRadius = 13.0;
+    [badge.widthAnchor constraintEqualToConstant:26.0].active = YES;
+    [badge.heightAnchor constraintEqualToConstant:26.0].active = YES;
+
+    UILabel *countLabel = [[UILabel alloc] init];
+    countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    countLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)count];
+    countLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    countLabel.textColor = [UIColor blackColor];
+    countLabel.textAlignment = NSTextAlignmentCenter;
+    countLabel.adjustsFontSizeToFitWidth = YES;
+    countLabel.minimumScaleFactor = 0.65;
+    [badge addSubview:countLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [countLabel.topAnchor constraintEqualToAnchor:badge.topAnchor],
+        [countLabel.leadingAnchor constraintEqualToAnchor:badge.leadingAnchor constant:3.0],
+        [countLabel.trailingAnchor constraintEqualToAnchor:badge.trailingAnchor constant:-3.0],
+        [countLabel.bottomAnchor constraintEqualToAnchor:badge.bottomAnchor]
+    ]];
+
+    [stack addArrangedSubview:badge];
+    return stack;
+}
+
 - (void)refreshChrome {
     NSUInteger count = self.entries.count;
     self.navigationItem.prompt = nil;
 
     if (self.editingSelection) {
         NSUInteger n = self.selectedDirs.count;
+        self.navigationItem.titleView = nil;
         self.title = n ? [NSString stringWithFormat:@"Đã chọn %lu", (unsigned long)n] : @"Chọn RRS";
         self.navigationItem.leftBarButtonItem = self.doneSelectButton;
         self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Tất cả"
@@ -500,7 +538,8 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         self.deleteFooterButton.enabled = n > 0;
         self.deleteFooterButton.alpha = n > 0 ? 1.0 : 0.45;
     } else {
-        self.title = count ? [NSString stringWithFormat:@"RRS (%lu)", (unsigned long)count] : @"RRS";
+        self.title = @"RRS";
+        self.navigationItem.titleView = [self rrsNavigationTitleViewForCount:count];
         self.navigationItem.leftBarButtonItem = self.closeButton;
         self.navigationItem.rightBarButtonItem = self.selectButton;
         self.sequenceFooterButton.hidden = NO;
