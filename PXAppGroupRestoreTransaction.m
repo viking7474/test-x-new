@@ -1785,6 +1785,117 @@ static BOOL PXAppGroupRestoreOpenWorkspace(PXAppGroupRestoreParticipant *partici
     return YES;
 }
 
+static BOOL PXAppGroupRestoreRestoreOriginalEntriesWithoutJournal(
+    PXAppGroupRestoreParticipant *participant,
+    NSError **error) {
+    if (participant.originalDescriptor < 0) {
+        return YES;
+    }
+
+    NSArray<PXAppGroupRestoreEntry *> *originalEntries =
+        PXAppGroupRestoreCollectEntries(participant.originalDescriptor,
+                                        YES,
+                                        YES,
+                                        NO,
+                                        NO,
+                                        error,
+                                        @"$.recovery.original");
+    if (!originalEntries) {
+        return NO;
+    }
+
+    for (PXAppGroupRestoreEntry *entry in originalEntries) {
+        BOOL destinationExists = NO;
+        struct stat destinationStat;
+        memset(&destinationStat, 0, sizeof(destinationStat));
+        if (!PXAppGroupRestoreNameState(participant.targetDescriptor,
+                                        entry.nameData,
+                                        &destinationExists,
+                                        &destinationStat)) {
+            return PXAppGroupRestoreFail(error,
+                                         PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                         @"$.recovery.original",
+                                         @"A live App Group entry could not be inspected while recovering an orphaned original.");
+        }
+
+        if (destinationExists) {
+            // Clear recreates empty Documents/Library/tmp directories after wiping a container.
+            // If it interrupted while deleting a transaction workspace, one of those empty
+            // placeholders can conflict with the quarantined original directory. Only remove a
+            // destination that is itself a real empty directory on the same filesystem; any other
+            // conflict remains fail-closed because the journal that would disambiguate identities
+            // is gone.
+            if (entry.modeType != S_IFDIR ||
+                !S_ISDIR(destinationStat.st_mode) ||
+                destinationStat.st_dev != participant.targetStat.st_dev) {
+                return PXAppGroupRestoreFail(error,
+                                             PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                             @"$.recovery.original",
+                                             @"An orphaned App Group original conflicts with live data and cannot be recovered safely.");
+            }
+            char *rawName = PXAppGroupRestoreCopyTerminatedName(entry.nameData);
+            if (!rawName) {
+                return PXAppGroupRestoreFail(error,
+                                             PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                             @"$.recovery.original",
+                                             @"An orphaned App Group original name is invalid.");
+            }
+            int destinationDescriptor = openat(participant.targetDescriptor,
+                                               rawName,
+                                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (destinationDescriptor < 0) {
+                free(rawName);
+                return PXAppGroupRestoreFail(error,
+                                             PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                             @"$.recovery.original",
+                                             @"A conflicting live App Group directory could not be opened safely.");
+            }
+            struct stat openedStat;
+            memset(&openedStat, 0, sizeof(openedStat));
+            NSArray<NSData *> *destinationContents = nil;
+            if (fstat(destinationDescriptor, &openedStat) == 0 &&
+                S_ISDIR(openedStat.st_mode) &&
+                openedStat.st_dev == destinationStat.st_dev &&
+                openedStat.st_ino == destinationStat.st_ino) {
+                destinationContents =
+                    PXAppGroupRestoreReadDirectoryNames(destinationDescriptor,
+                                                        1,
+                                                        error,
+                                                        @"$.recovery.original");
+            }
+            close(destinationDescriptor);
+            if (!destinationContents || destinationContents.count != 0 ||
+                unlinkat(participant.targetDescriptor, rawName, AT_REMOVEDIR) != 0) {
+                free(rawName);
+                return PXAppGroupRestoreFail(error,
+                                             PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                             @"$.recovery.original",
+                                             @"An orphaned App Group original conflicts with a non-empty live directory.");
+            }
+            free(rawName);
+        }
+
+        if (!PXAppGroupRestoreMoveEntry(entry,
+                                        participant.originalDescriptor,
+                                        participant.targetDescriptor,
+                                        error,
+                                        PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                        @"$.recovery.original",
+                                        @"An orphaned quarantined App Group original could not be restored safely.")) {
+            return NO;
+        }
+    }
+
+    if (!PXAppGroupRestoreSyncDirectory(participant.originalDescriptor) ||
+        !PXAppGroupRestoreSyncDirectory(participant.targetDescriptor)) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorRecoveryFailed,
+                                     @"$.recovery.original",
+                                     @"Recovered orphaned App Group originals could not be synchronized.");
+    }
+    return YES;
+}
+
 static BOOL PXAppGroupRestoreWorkspaceIsSafeWithoutJournal(
     PXAppGroupRestoreParticipant *participant,
     BOOL leader,
@@ -1822,16 +1933,12 @@ static BOOL PXAppGroupRestoreWorkspaceIsSafeWithoutJournal(
                 return NO;
             }
             // Before the durable leader journal is published, prepare may already have copied the
-            // validated restore payload into new/, but quarantine has not started yet. Therefore
-            // staged data in new/ is transaction-owned and safe to discard. Data in original/ is
-            // different: it proves live App Group entries may already have been quarantined, so a
-            // missing journal must remain fail-closed to avoid destroying the only original copy.
-            if (isOriginal && contents.count != 0) {
-                return PXAppGroupRestoreFail(error,
-                                             PXAppGroupRestoreTransactionErrorRecoveryFailed,
-                                             @"$.recovery",
-                                             @"An App Group workspace contains quarantined original data without a journal.");
-            }
+            // validated restore payload into new/. If original/ is populated without a journal,
+            // external Clear may have interrupted while deleting the reserved workspace. Validate
+            // the complete workspace first; orphaned originals are restored conservatively below
+            // instead of being discarded.
+            (void)isOriginal;
+            (void)contents;
             continue;
         }
         if (leader && PXAppGroupRestoreRawNameEquals(nameData,
@@ -1860,7 +1967,7 @@ static BOOL PXAppGroupRestoreWorkspaceIsSafeWithoutJournal(
                                      @"$.recovery",
                                      @"An App Group pre-mutation workspace contains an unexpected entry.");
     }
-    return YES;
+    return PXAppGroupRestoreRestoreOriginalEntriesWithoutJournal(participant, error);
 }
 
 static BOOL PXAppGroupRestoreRemoveWorkspace(PXAppGroupRestoreParticipant *participant,

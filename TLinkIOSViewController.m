@@ -7583,21 +7583,20 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSDictionary *manifest = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:nil];
     NSString *manifestBundleID = manifest[@"bundleID"] ?: bundleID;
     NSString *manifestAppName = manifest[@"appName"] ?: appName;
-    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Clear %@", manifestAppName]];
-    [[AppDataCleaner sharedManager] clearDataForBundleID:manifestBundleID completion:^(BOOL clearSuccess, NSError *clearError) {
-        if (!clearSuccess) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", manifestAppName, clearError.localizedDescription ?: @"failed"]];
-        [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Restore %@", manifestAppName]];
-        [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:manifestBundleID appName:manifestAppName completion:^(PXRestoreResult *result, NSError *error) {
-            if (error || !result) {
-                [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@",
-                                     manifestAppName,
-                                     error.localizedDescription ?: @"failed"]];
-            } else {
-                if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-                [self markRRSRestoredAtBackupDirectory:dir];
-            }
-            [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
-        }];
+    // Restore owns its mutation/rollback boundaries. Do not run the destructive five-scope
+    // Clear pipeline first: App Group stale-transaction recovery must see the live namespace and
+    // its journal/workspace exactly as the previous Restore left them.
+    [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Restore %@", manifestAppName]];
+    [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:manifestBundleID appName:manifestAppName completion:^(PXRestoreResult *result, NSError *error) {
+        if (error || !result) {
+            [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@",
+                                 manifestAppName,
+                                 error.localizedDescription ?: @"failed"]];
+        } else {
+            if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+            [self markRRSRestoredAtBackupDirectory:dir];
+        }
+        [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
     }];
 }
 
@@ -7628,7 +7627,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     vc.onRestoreOnly = ^(NSString *backupDir) {
         if (!backupDir.length) { [weakSelf showDashboardMessage:@"Thiếu RRS" message:@"Không tìm thấy file RRS để restore."]; return; }
         [weakSelf showProgressHUDWithTitle:@"Restore RRS..."];
-        [weakSelf restoreBackupDirectoryAfterClearingManifestApp:backupDir warnings:[NSMutableArray array]];
+        [weakSelf restoreBackupDirectoryForManifestApp:backupDir warnings:[NSMutableArray array]];
     };
     vc.onNextChanged = ^(NSInteger nextIndex) {
         [[NSUserDefaults standardUserDefaults] setInteger:nextIndex forKey:[weakSelf currentProfileRestoreIndexKey]];
@@ -7663,11 +7662,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                                         detail]];
             return;
         }
-        [self restoreBackupDirectoryAfterClearingManifestApp:backupDir warnings:[warnings mutableCopy]];
+        [self restoreBackupDirectoryForManifestApp:backupDir warnings:[warnings mutableCopy]];
     }];
 }
 
-- (void)restoreBackupDirectoryAfterClearingManifestApp:(NSString *)backupDir warnings:(NSMutableArray<NSString *> *)warnings {
+- (void)restoreBackupDirectoryForManifestApp:(NSString *)backupDir warnings:(NSMutableArray<NSString *> *)warnings {
     NSError *manifestError = nil;
     NSDictionary *manifest = [[AppDataBackupManager shared] readManifestAtBackupDirectory:backupDir error:&manifestError];
     NSString *bundleID = manifest[@"bundleID"];
@@ -7677,24 +7676,23 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [self showDashboardMessage:@"RRS lỗi" message:@"Không đọc được app trong manifest backup."];
         return;
     }
-    [self updateProgress:0.4 detail:[NSString stringWithFormat:@"Clear %@", appName]];
-    [[AppDataCleaner sharedManager] clearDataForBundleID:bundleID completion:^(BOOL success, NSError *error) {
-        if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", appName, error.localizedDescription ?: @"failed"]];
-        [self updateProgress:0.7 detail:[NSString stringWithFormat:@"Restore %@", appName]];
-        [[AppDataBackupManager shared] restoreBackupAtDirectory:backupDir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *restoreError) {
-            if (restoreError || !result) {
-                [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@",
-                                     appName,
-                                     restoreError.localizedDescription ?: @"failed"]];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self hideProgressHUD];
-                    NSString *msg = [NSString stringWithFormat:@"Restore %@ chưa hoàn tất.%@",
-                                     appName,
-                                     warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
-                    [self showDashboardMessage:@"Restore thất bại" message:msg];
-                });
-                return;
-            }
+    // Restore is already transactional; a full Clear here can destroy an App Group recovery
+    // journal/workspace before PXAppGroupRestoreTransaction gets a chance to recover it.
+    [self updateProgress:0.7 detail:[NSString stringWithFormat:@"Restore %@", appName]];
+    [[AppDataBackupManager shared] restoreBackupAtDirectory:backupDir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *restoreError) {
+        if (restoreError || !result) {
+            [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@",
+                                 appName,
+                                 restoreError.localizedDescription ?: @"failed"]];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self hideProgressHUD];
+                NSString *msg = [NSString stringWithFormat:@"Restore %@ chưa hoàn tất.%@",
+                                 appName,
+                                 warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+                [self showDashboardMessage:@"Restore thất bại" message:msg];
+            });
+            return;
+        }
             if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
             [self markRRSRestoredAtBackupDirectory:backupDir];
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -7706,7 +7704,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 });
             });
         }];
-    }];
 }
 
 - (void)presentRRSSequenceModal {
