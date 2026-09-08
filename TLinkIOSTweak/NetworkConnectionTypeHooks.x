@@ -12,7 +12,6 @@
 #import <SystemConfiguration/CaptiveNetwork.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
-#import "NetworkManager.h"
 #import "CarrierDB.h"
 
 #import "PXScope.h"
@@ -223,61 +222,44 @@ static NSString *getProfileIdentityPath() {
     return PXActiveProfileIdentityPath();
 }
 
-// Get the local IP address from the current profile
-static NSString *getProfileLocalIPAddress() {
+// Read persisted profile IP values without generating or writing from inside native hooks.
+static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *deviceIDsKey) {
     NSString *identityDir = getProfileIdentityPath();
-    if (!identityDir) {
-        return @"192.168.1.1"; // Default fallback
-    }
-    
-    // Try to read from network_settings.plist
+    if (!identityDir.length) return nil;
+
     NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
     NSDictionary *networkDict = [NSDictionary dictionaryWithContentsOfFile:networkPath];
-    
-    NSString *localIP = networkDict[@"localIPAddress"];
-    
-    // If not found in dedicated file, try the combined device_ids.plist
-    if (!localIP) {
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-        localIP = deviceIds[@"LocalIPAddress"];
+    id networkValue = networkDict[networkKey];
+    if ([networkValue isKindOfClass:[NSString class]] && [(NSString *)networkValue length] > 0) {
+        return networkValue;
     }
-    
-    // If still not found, return default IP
-    if (!localIP) {
-        localIP = @"192.168.1.1";
+
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+    id deviceValue = deviceIds[deviceIDsKey];
+    if ([deviceValue isKindOfClass:[NSString class]] && [(NSString *)deviceValue length] > 0) {
+        return deviceValue;
     }
-    
-    return localIP;
+
+    return nil;
 }
 
-// Get the current local IP address from the system
-static NSString * __attribute__((unused)) getCurrentLocalIPAddress() {
-    NSString *address = @"192.168.1.1"; // Default fallback
-    struct ifaddrs *interfaces = NULL;
-    struct ifaddrs *temp_addr = NULL;
-    
-    // Retrieve the current interfaces - returns 0 on success
-    if (getifaddrs(&interfaces) == 0) {
-        // Loop through linked list of interfaces
-        temp_addr = interfaces;
-        while (temp_addr != NULL) {
-            if (temp_addr->ifa_addr->sa_family == AF_INET) {
-                // Check if interface is en0 which is the wifi connection on iOS
-                if ([[NSString stringWithUTF8String:temp_addr->ifa_name] isEqualToString:@"en0"]) {
-                    // Get NSString from C String
-                    address = [NSString stringWithUTF8String:inet_ntoa(((struct sockaddr_in *)temp_addr->ifa_addr)->sin_addr)];
-                    break;
-                }
-            }
-            temp_addr = temp_addr->ifa_next;
-        }
-    }
-    
-    // Free memory
-    freeifaddrs(interfaces);
-    
-    return address;
+static NSString *getProfileLocalIPAddress() {
+    return getProfileStoredIPAddress(@"localIPAddress", @"LocalIPAddress");
+}
+
+static NSString *getProfileLocalIPv6Address() {
+    return getProfileStoredIPAddress(@"localIPv6Address", @"LocalIPv6Address");
+}
+
+static BOOL PXNetworkParseIPv4(NSString *value, struct in_addr *outAddress) {
+    if (!value.length || !outAddress) return NO;
+    return inet_pton(AF_INET, value.UTF8String, outAddress) == 1;
+}
+
+static BOOL PXNetworkParseIPv6(NSString *value, struct in6_addr *outAddress) {
+    if (!value.length || !outAddress) return NO;
+    return inet_pton(AF_INET6, value.UTF8String, outAddress) == 1;
 }
 
 // Load scoped apps from the plist file
@@ -330,11 +312,13 @@ static NetworkConnectionType getNetworkConnectionType() {
 
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
     BOOL enabled = [settings[@"networkDataSpoofEnabled"] boolValue];
-    NetworkConnectionType type = enabled
-        ? (NetworkConnectionType)([settings[@"networkConnectionType"] respondsToSelector:@selector(integerValue)]
-            ? [settings[@"networkConnectionType"] integerValue]
-            : NetworkConnectionTypeAuto)
-        : (NetworkConnectionType)-1;
+    NSInteger rawType = [settings[@"networkConnectionType"] respondsToSelector:@selector(integerValue)]
+        ? [settings[@"networkConnectionType"] integerValue]
+        : NetworkConnectionTypeAuto;
+    if (rawType < NetworkConnectionTypeAuto || rawType > NetworkConnectionTypeNone) {
+        rawType = NetworkConnectionTypeAuto;
+    }
+    NetworkConnectionType type = enabled ? (NetworkConnectionType)rawType : (NetworkConnectionType)-1;
 
     os_unfair_lock_lock(&gNetworkCacheLock);
     cachedConnectionType = type;
@@ -358,30 +342,25 @@ static BOOL shouldUseWiFiForAutoMode() {
     return isWiFi;
 }
 
-// Helper to check if we should spoof connection type for the current app
-static BOOL shouldSpoofConnectionType() {
+// Master runtime gate shared by all Network Data Spoof hooks.
+// Hooks remain installed for scoped apps so Security UI changes can take effect live,
+// but they must become transparent whenever the authoritative setting is disabled.
+static BOOL shouldApplyNetworkSpoofing() {
     NetworkConnectionType type = getNetworkConnectionType();
-    
-    // If spoofing is disabled or set to "None", don't spoof
-    if (type == -1 || !PXNetworkDataSpoofEnabledCached() || type == NetworkConnectionTypeNone) {
+    if (type == (NetworkConnectionType)-1 || !PXNetworkDataSpoofEnabledCached()) {
         return NO;
     }
-    
-    // Check if the current app is a scoped app
-    BOOL isScoped = isInScopedAppsList();
-    
-    // If it's a scoped app, we should apply the network spoofing
-    if (isScoped) {
-        NSString *bundleID = getCurrentBundleID();
-        PXLog(@"[NetworkHook] App %@ is a scoped app, applying network spoofing", bundleID);
-        return YES;
-    }
-    
-    return NO;
+    return isInScopedAppsList();
+}
+
+// Connection type "None" is an active spoofing mode: report no connection.
+static BOOL shouldSpoofConnectionType() {
+    return shouldApplyNetworkSpoofing();
 }
 
 // Helper to check if we should show as WiFi
 static BOOL shouldShowAsWiFi() {
+    if (!shouldApplyNetworkSpoofing()) return NO;
     NetworkConnectionType type = getNetworkConnectionType();
     
     if (type == NetworkConnectionTypeWiFi) {
@@ -395,6 +374,7 @@ static BOOL shouldShowAsWiFi() {
 
 // Helper to check if we should show as Cellular
 static BOOL shouldShowAsCellular() {
+    if (!shouldApplyNetworkSpoofing()) return NO;
     NetworkConnectionType type = getNetworkConnectionType();
     if (type == NetworkConnectionTypeCellular) {
         return YES;
@@ -402,6 +382,10 @@ static BOOL shouldShowAsCellular() {
         return YES;
     }
     return NO;
+}
+
+static BOOL shouldShowAsNoConnection() {
+    return shouldApplyNetworkSpoofing() && getNetworkConnectionType() == NetworkConnectionTypeNone;
 }
 
 // Get carrier details from the current profile
@@ -567,28 +551,23 @@ static NSString *getCurrentCellularNetworkType() {
 static Boolean (*original_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags);
 
 Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
-    if (shouldShowAsWiFi()) {
-        return original_SCNetworkReachabilityGetFlags(target, flags);
-    }
     Boolean result = original_SCNetworkReachabilityGetFlags(target, flags);
-    if (!result || !flags) {
+    if (!result || !flags || !shouldSpoofConnectionType()) {
         return result;
     }
+
     @try {
-        if (!shouldSpoofConnectionType()) {
-            return result;
-        }
         if (shouldShowAsWiFi()) {
             *flags |= kSCNetworkReachabilityFlagsReachable;
             *flags &= ~kSCNetworkReachabilityFlagsIsWWAN;
         } else if (shouldShowAsCellular()) {
             *flags |= kSCNetworkReachabilityFlagsReachable;
             *flags |= kSCNetworkReachabilityFlagsIsWWAN;
-        } else {
+        } else if (shouldShowAsNoConnection()) {
             *flags &= ~kSCNetworkReachabilityFlagsReachable;
             *flags &= ~kSCNetworkReachabilityFlagsIsWWAN;
         }
-    } @catch (NSException *exception) {}
+    } @catch (__unused NSException *exception) {}
     return result;
 }
 
@@ -686,11 +665,11 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (BOOL)allowsVOIP {
-    if (shouldShowAsWiFi()) {
+    if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return %orig;
     }
-    
-    // Allow VOIP in all network modes
+
+    // Preserve the existing spoof behavior only while Network Data Spoof is active.
     return YES;
 }
 
@@ -710,12 +689,12 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (BOOL)isDiscretionary {
-    if (shouldShowAsWiFi()) {
+    if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return %orig;
     }
-    
-    // Discretionary transfers are typically used for background transfers 
-    // that prefer WiFi. Return NO to indicate high priority connection.
+
+    // Discretionary transfers are typically used for background transfers
+    // that prefer WiFi. Preserve the legacy cellular-mode behavior only while active.
     return NO;
 }
 
@@ -725,76 +704,64 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 
 // Enable getifaddrs hook for local IP spoofing
 static void PXNetworkPostGetifaddrs(struct ifaddrs **ifap, int *inoutResult) {
-    if (!inoutResult || *inoutResult != 0 || !ifap || !*ifap) {
+    if (!inoutResult || *inoutResult != 0 || !ifap || !*ifap || !shouldApplyNetworkSpoofing()) {
         return;
     }
-    
-    // Get spoofed IP values from profile
-    NSString *spoofedIPv4 = getProfileLocalIPAddress();
-    NSString *spoofedIPv6 = [NetworkManager getSavedLocalIPv6Address];
-    
-    // Check if we have any custom IP to spoof (not default values)
-    BOOL hasSpoofedIPv4 = spoofedIPv4 && ![spoofedIPv4 isEqualToString:@"192.168.1.1"];
-    BOOL hasSpoofedIPv6 = spoofedIPv6 && spoofedIPv6.length > 0;
-    
-    // If no custom IPs are set, don't modify anything
-    if (!hasSpoofedIPv4 && !hasSpoofedIPv6) {
-        return;
-    }
-    
-    PXLog(@"[NetworkHook] Spoofing local IPs - IPv4: %@, IPv6: %@", 
-          spoofedIPv4 ?: @"(none)", spoofedIPv6 ?: @"(none)");
-    
-    struct ifaddrs *ifa = *ifap;
-    
-    // Determine interface to modify based on connection type setting
+
     NetworkConnectionType type = getNetworkConnectionType();
-    BOOL useWiFiInterface = YES; // Default to en0 (WiFi)
-    
-    if (shouldSpoofConnectionType()) {
-        // If connection type spoofing is enabled, respect the setting
-        if (type == NetworkConnectionTypeCellular || 
-            (type == NetworkConnectionTypeAuto && !shouldUseWiFiForAutoMode())) {
-            useWiFiInterface = NO; // Use pdp_ip0 (cellular)
-        }
-    }
-    
-    // Interface names
+    BOOL noConnection = (type == NetworkConnectionTypeNone);
+    BOOL useWiFiInterface = (type == NetworkConnectionTypeWiFi ||
+                             (type == NetworkConnectionTypeAuto && shouldUseWiFiForAutoMode()));
     const char *targetInterface = useWiFiInterface ? "en0" : "pdp_ip0";
     const char *clearInterface = useWiFiInterface ? "pdp_ip0" : "en0";
-    
-    while (ifa) {
-        if (ifa->ifa_addr) {
-            // Handle IPv4
-            if (ifa->ifa_addr->sa_family == AF_INET) {
-                if (strcmp(ifa->ifa_name, targetInterface) == 0 && hasSpoofedIPv4) {
-                    struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
-                    sin->sin_addr.s_addr = inet_addr([spoofedIPv4 UTF8String]);
-                    PXLog(@"[NetworkHook] Spoofed %s IPv4 to %@", targetInterface, spoofedIPv4);
-                }
-                // Clear the other interface if connection type spoofing is active
-                if (shouldSpoofConnectionType() && strcmp(ifa->ifa_name, clearInterface) == 0) {
-                    struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
-                    sin->sin_addr.s_addr = 0;
-                }
+
+    NSString *spoofedIPv4 = getProfileLocalIPAddress();
+    NSString *spoofedIPv6 = getProfileLocalIPv6Address();
+    struct in_addr parsedIPv4;
+    struct in6_addr parsedIPv6;
+    BOOL hasSpoofedIPv4 = PXNetworkParseIPv4(spoofedIPv4, &parsedIPv4);
+    BOOL hasSpoofedIPv6 = PXNetworkParseIPv6(spoofedIPv6, &parsedIPv6);
+
+    if ((spoofedIPv4.length && !hasSpoofedIPv4) || (spoofedIPv6.length && !hasSpoofedIPv6)) {
+        PXLog(@"[NetworkHook] Ignoring invalid stored local IP value(s)");
+    }
+
+    for (struct ifaddrs *ifa = *ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || !ifa->ifa_name) continue;
+
+        BOOL isWiFi = strcmp(ifa->ifa_name, "en0") == 0;
+        BOOL isCellular = strcmp(ifa->ifa_name, "pdp_ip0") == 0;
+        if (!isWiFi && !isCellular) continue;
+
+        sa_family_t family = ifa->ifa_addr->sa_family;
+        if (noConnection) {
+            if (family == AF_INET) {
+                ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr = 0;
+            } else if (family == AF_INET6) {
+                memset(&((struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr, 0, sizeof(struct in6_addr));
             }
-            // Handle IPv6
-            else if (ifa->ifa_addr->sa_family == AF_INET6) {
-                if (strcmp(ifa->ifa_name, targetInterface) == 0 && hasSpoofedIPv6) {
-                    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
-                    inet_pton(AF_INET6, [spoofedIPv6 UTF8String], &sin6->sin6_addr);
-                    PXLog(@"[NetworkHook] Spoofed %s IPv6 to %@", targetInterface, spoofedIPv6);
-                }
-                // Clear the other interface if connection type spoofing is active
-                if (shouldSpoofConnectionType() && strcmp(ifa->ifa_name, clearInterface) == 0) {
-                    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
-                    memset(&sin6->sin6_addr, 0, sizeof(sin6->sin6_addr));
-                }
+            continue;
+        }
+
+        BOOL isTarget = strcmp(ifa->ifa_name, targetInterface) == 0;
+        BOOL isClear = strcmp(ifa->ifa_name, clearInterface) == 0;
+
+        if (family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+            if (isTarget && hasSpoofedIPv4) {
+                sin->sin_addr = parsedIPv4;
+            } else if (isClear) {
+                sin->sin_addr.s_addr = 0;
+            }
+        } else if (family == AF_INET6) {
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
+            if (isTarget && hasSpoofedIPv6) {
+                sin6->sin6_addr = parsedIPv6;
+            } else if (isClear) {
+                memset(&sin6->sin6_addr, 0, sizeof(sin6->sin6_addr));
             }
         }
-        ifa = ifa->ifa_next;
     }
-    
 }
 
 #pragma mark - Network.framework Hooks (iOS 12+)
@@ -805,37 +772,32 @@ static void PXNetworkPostGetifaddrs(struct ifaddrs **ifap, int *inoutResult) {
 %hook NWPath
 
 - (BOOL)isExpensive {
-    if (shouldShowAsWiFi()) {
+    if (!shouldApplyNetworkSpoofing() || shouldShowAsNoConnection()) {
         return %orig;
     }
-    
-    // WiFi is not expensive, cellular is
+
+    // WiFi is not expensive, cellular is.
     return shouldShowAsCellular();
 }
 
 - (BOOL)usesInterfaceType:(NSInteger)type {
+    if (!shouldApplyNetworkSpoofing()) {
+        return %orig;
+    }
+
+    if (shouldShowAsNoConnection()) {
+        if (type == 1 || type == 2) return NO;
+        return %orig;
+    }
+
     if (shouldShowAsWiFi()) {
-        // Interface type 1 is typically WiFi
-        if (type == 1) {
-            return YES;
-        }
-        // Interface type 2 is typically cellular
-        else if (type == 2) {
-            return NO;
-        }
+        if (type == 1) return YES;
+        if (type == 2) return NO;
+    } else if (shouldShowAsCellular()) {
+        if (type == 1) return NO;
+        if (type == 2) return YES;
     }
-    // For cellular mode
-    else {
-        // Interface type 1 is typically WiFi
-        if (type == 1) {
-            return NO;
-        }
-        // Interface type 2 is typically cellular
-        else if (type == 2) {
-            return YES;
-        }
-    }
-    
+
     return %orig;
 }
 
@@ -878,7 +840,7 @@ static void signalStrengthSettingsChanged(CFNotificationCenterRef center, void *
 static CFDictionaryRef (*original_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
 
 static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    if (shouldShowAsWiFi()) {
+    if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return original_CNCopyCurrentNetworkInfo(interfaceName);
     }
     // Always call the original so WiFiHook.x can spoof as needed
@@ -898,16 +860,13 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 %hook CTServiceDescriptor
 
 - (NSString *)signalStrengthBars {
-    if (shouldShowAsWiFi()) {
+    if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return %orig;
     }
-    
-    // Return spoofed signal bars
+
     int bars = getCellularSignalBars();
     NSString *barsString = [NSString stringWithFormat:@"%d", bars];
-    
     PXLog(@"[NetworkHook] Spoofed cellular signal bars to %@", barsString);
-    
     return barsString;
 }
 
@@ -916,16 +875,13 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 %hook UIStatusBarSignalStrengthItemView
 
 - (void)setCellularSignalStrengthBars:(int)bars {
-    if (shouldShowAsWiFi()) {
+    if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         %orig;
         return;
     }
-    
-    // Get spoofed signal bars
+
     int spoofedBars = getCellularSignalBars();
-    
     PXLog(@"[NetworkHook] Spoofed UI cellular signal bars from %d to %d", bars, spoofedBars);
-    
     %orig(spoofedBars);
 }
 
@@ -989,6 +945,9 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
                                            CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(darwinCenter, NULL, networkSettingsChanged,
                                            CFSTR("com.hydra.tlinkios.profileChanged"), NULL,
+                                           CFNotificationSuspensionBehaviorDeliverImmediately);
+            CFNotificationCenterAddObserver(darwinCenter, NULL, networkSettingsChanged,
+                                           CFSTR("com.hydra.tlinkios.networkDataSpoofChanged"), NULL,
                                            CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(darwinCenter,
                                            NULL,

@@ -5,6 +5,10 @@
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 
+@interface NetworkManager ()
++ (BOOL)saveLocalIPAddress:(NSString *)ipAddress ipv6Address:(NSString *)ipv6Address;
+@end
+
 @implementation NetworkManager
 
 + (instancetype)sharedManager {
@@ -46,7 +50,7 @@
 #pragma mark - IP Address Methods
 
 + (NSString *)getCurrentLocalIPAddress {
-    NSString *address = @"192.168.1.1"; // Default fallback
+    NSString *address = nil;
     struct ifaddrs *interfaces = NULL;
     struct ifaddrs *temp_addr = NULL;
     
@@ -67,14 +71,19 @@
         }
     }
     
-    // Free memory
-    freeifaddrs(interfaces);
+    if (interfaces) {
+        freeifaddrs(interfaces);
+    }
     
     return address;
 }
 
 + (NSString *)generateSpoofedLocalIPAddressFromCurrent {
     NSString *currentIP = [self getCurrentLocalIPAddress];
+    if (!currentIP.length) {
+        return nil;
+    }
+
     NSArray<NSString *> *parts = [currentIP componentsSeparatedByString:@"."];
     if (parts.count == 4) {
         // Change the last octet to a random value (2-253), not the original
@@ -88,8 +97,9 @@
         NSString *spoofedIP = [NSString stringWithFormat:@"%@.%@.%@.%d", parts[0], parts[1], parts[2], newLastOctet];
         return spoofedIP;
     }
-    // Fallback to random if parsing fails
-    return [self getCurrentLocalIPAddress];
+
+    // Preserve the detected address if parsing unexpectedly fails; never invent a local IPv4.
+    return currentIP;
 }
 
 + (NSString *)generateSpoofedLocalIPv6AddressFromCurrent {
@@ -100,7 +110,7 @@
         temp_addr = interfaces;
         while (temp_addr != NULL) {
             if (temp_addr->ifa_addr && temp_addr->ifa_addr->sa_family == AF_INET6) {
-                if ([[NSString stringWithUTF8String:temp_addr->ifa_name] isEqualToString:@"en0"]) {
+                if (temp_addr->ifa_name && [[NSString stringWithUTF8String:temp_addr->ifa_name] isEqualToString:@"en0"]) {
                     char ip6[INET6_ADDRSTRLEN];
                     struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)temp_addr->ifa_addr;
                     inet_ntop(AF_INET6, &sin6->sin6_addr, ip6, sizeof(ip6));
@@ -111,7 +121,9 @@
             temp_addr = temp_addr->ifa_next;
         }
     }
-    freeifaddrs(interfaces);
+    if (interfaces) {
+        freeifaddrs(interfaces);
+    }
     if (!address) {
         address = @"fe80::1234:abcd:5678:9abc";
     }
@@ -142,30 +154,46 @@
     return identityPath;
 }
 
-+ (BOOL)saveLocalIPAddress:(NSString *)ipAddress {
++ (BOOL)saveLocalIPAddress:(NSString *)ipAddress ipv6Address:(NSString *)ipv6Address {
     NSString *identityDir = [self profileIdentityPath];
     if (!identityDir) {
         PXLog(@"[WeaponX] Error: Could not get profile identity path for NetworkManager");
         return NO;
     }
-    // Generate spoofed IPv6
-    NSString *ipv6 = [self generateSpoofedLocalIPv6AddressFromCurrent];
-    NSDictionary *networkDict = @{
-        @"localIPAddress": ipAddress ?: @"",
-        @"localIPv6Address": ipv6 ?: @"",
-        @"lastUpdated": [NSDate date]
-    };
+
     NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
+    NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: [NSMutableDictionary dictionary];
+    if (ipAddress != nil) {
+        networkDict[@"localIPAddress"] = ipAddress;
+    }
+    if (ipv6Address != nil) {
+        networkDict[@"localIPv6Address"] = ipv6Address;
+    }
+    networkDict[@"lastUpdated"] = [NSDate date];
+
     BOOL success = [networkDict writeToFile:networkPath atomically:YES];
     if (success) {
         NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
         NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-        deviceIds[@"LocalIPAddress"] = ipAddress;
-        deviceIds[@"LocalIPv6Address"] = ipv6;
+        if (ipAddress != nil) {
+            deviceIds[@"LocalIPAddress"] = ipAddress;
+        }
+        if (ipv6Address != nil) {
+            deviceIds[@"LocalIPv6Address"] = ipv6Address;
+        }
         success = [deviceIds writeToFile:deviceIdsPath atomically:YES];
     }
-    PXLog(@"[WeaponX] %@ Local IP Address (IPv4/IPv6) saved to profile: %@ / %@", success ? @"✅" : @"❌", ipAddress, ipv6);
+
+    PXLog(@"[WeaponX] %@ Local IP Address (IPv4/IPv6) saved to profile: %@ / %@",
+          success ? @"✅" : @"❌",
+          ipAddress ?: @"<unchanged>",
+          ipv6Address ?: @"<unchanged>");
     return success;
+}
+
++ (BOOL)saveLocalIPAddress:(NSString *)ipAddress {
+    NSString *ipv6Address = [self generateSpoofedLocalIPv6AddressFromCurrent];
+    return [self saveLocalIPAddress:ipAddress ipv6Address:ipv6Address];
 }
 
 + (NSString *)getSavedLocalIPAddress {
@@ -180,14 +208,15 @@
         return nil;
     }
     
-    // If forced refresh is requested, always generate a new local IP
+    // If forced refresh is requested, generate from the real current IPv4 only.
     if (forceRefresh) {
         NSString *localIP = [self generateSpoofedLocalIPAddressFromCurrent];
-        
-        // Save it for future use
-        [self saveLocalIPAddress:localIP];
-        
-        PXLog(@"[WeaponX] Forced refresh of local IP address: %@", localIP);
+        if (localIP.length) {
+            [self saveLocalIPAddress:localIP];
+            PXLog(@"[WeaponX] Forced refresh of local IP address: %@", localIP);
+        } else {
+            PXLog(@"[WeaponX] Forced refresh skipped: no current local IPv4 address is available");
+        }
         return localIP;
     }
     
@@ -204,12 +233,15 @@
         localIP = deviceIds[@"LocalIPAddress"];
     }
     
-    // If still not found, get current IP or generate a random one
+    // If still not found, use the real current IPv4 when available.
     if (!localIP) {
         localIP = [self getCurrentLocalIPAddress];
-        // Save it for future use
-        [self saveLocalIPAddress:localIP];
-        PXLog(@"[WeaponX] No saved Local IP found, using current: %@", localIP);
+        if (localIP.length) {
+            [self saveLocalIPAddress:localIP];
+            PXLog(@"[WeaponX] No saved Local IP found, using current: %@", localIP);
+        } else {
+            PXLog(@"[WeaponX] No saved Local IP found and no current local IPv4 address is available");
+        }
     }
     
     return localIP;
@@ -228,7 +260,10 @@
     }
     if (!ipv6) {
         ipv6 = [self generateSpoofedLocalIPv6AddressFromCurrent];
-        [self saveLocalIPAddress:[self getCurrentLocalIPAddress]];
+        if (ipv6.length) {
+            NSString *currentIPv4 = [self getCurrentLocalIPAddress];
+            [self saveLocalIPAddress:currentIPv4 ipv6Address:ipv6];
+        }
     }
     return ipv6;
 }

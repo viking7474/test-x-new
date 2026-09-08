@@ -35,7 +35,7 @@
 @end
 
 @interface NetworkManager : NSObject
-+ (void)saveLocalIPAddress:(NSString *)localIP;
++ (BOOL)saveLocalIPAddress:(NSString *)localIP;
 @end
 
 @interface ProfileManager ()
@@ -427,6 +427,7 @@
         
         // 2. Generate local IP and carrier info based on connection type
         NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+        BOOL networkDataSpoofEnabled = [securitySettings boolForKey:@"networkDataSpoofEnabled"];
         NSInteger connectionType = [securitySettings integerForKey:@"networkConnectionType"];
         
         // Path to profile identity directory
@@ -498,8 +499,8 @@
             }
         }
         
-        // Generate local IP if in WiFi (1), auto (0), or cellular (2) mode
-        if (connectionType == 0 || connectionType == 1 || connectionType == 2) {
+        // Generate local IP only while Network Data Spoof is enabled.
+        if (networkDataSpoofEnabled && (connectionType == 0 || connectionType == 1 || connectionType == 2)) {
             // Generate local IP using NSInvocation
             Class networkManagerClass = NSClassFromString(@"NetworkManager");
             SEL spoofedIPSel = NSSelectorFromString(@"generateSpoofedLocalIPAddressFromCurrent");
@@ -510,20 +511,25 @@
                     [invocation setTarget:networkManagerClass];
                     [invocation setSelector:spoofedIPSel];
                     [invocation invoke];
-                    NSString * __unsafe_unretained localIP;
+                    NSString * __unsafe_unretained localIP = nil;
                     [invocation getReturnValue:&localIP];
-                // Save to network_settings.plist
-                NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-                    NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: [NSMutableDictionary dictionary];
-                networkDict[@"localIPAddress"] = localIP;
-                // Also update the device_ids.plist
-                NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-                deviceIds[@"LocalIPAddress"] = localIP;
-                [deviceIds writeToFile:deviceIdsPath atomically:YES];
-                    NSLog(@"[WeaponX] 🌐 Generated spoofed local IP for profile %@: %@", profile.name, localIP);
-                    // --- FIX: Also save IPv6 using NetworkManager logic ---
-                    [NetworkManager saveLocalIPAddress:localIP];
+                    if (localIP.length) {
+                        NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
+                        NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: [NSMutableDictionary dictionary];
+                        networkDict[@"localIPAddress"] = localIP;
+                        [networkDict writeToFile:networkPath atomically:YES];
+
+                        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+                        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
+                        deviceIds[@"LocalIPAddress"] = localIP;
+                        [deviceIds writeToFile:deviceIdsPath atomically:YES];
+
+                        NSLog(@"[WeaponX] 🌐 Generated spoofed local IP for profile %@: %@", profile.name, localIP);
+                        // Keep the existing NetworkManager path responsible for the paired IPv6 value.
+                        [NetworkManager saveLocalIPAddress:localIP];
+                    } else {
+                        NSLog(@"[WeaponX] 🌐 No current local IPv4 available for profile %@; skipping local IP generation", profile.name);
+                    }
                 }
                 }
         }
