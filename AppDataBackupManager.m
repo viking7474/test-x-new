@@ -50,6 +50,10 @@ static NSString * const PXExactRestoreDestinationErrorDescription =
     @"Exact application data container could not be resolved safely";
 static const NSTimeInterval PXKeychainHelperInvocationTimeoutSeconds = 300.0;
 static const NSUInteger PXKeychainHelperInvocationOutputLimitBytes = 1024 * 1024;
+static const NSTimeInterval PXDebugCommandTimeoutSeconds = 30.0;
+static const NSUInteger PXDebugCommandOutputLimitBytes = 256 * 1024;
+static const NSTimeInterval PXPermissionCommandTimeoutSeconds = 120.0;
+static const NSUInteger PXPermissionCommandOutputLimitBytes = 64 * 1024;
 static const NSTimeInterval PXTarCreateTimeoutSeconds = 60.0 * 60.0;
 static const NSTimeInterval PXTarExtractTimeoutSeconds = 60.0 * 60.0;
 static const NSUInteger PXTarCommandOutputLimitBytes = 1024 * 1024;
@@ -566,8 +570,15 @@ static void PXDebugRun(CommandRunner *runner, NSString *path, NSString *label, N
     if (!runner || !path.length || !cmd.length) return;
     PXDebugAppendLine(path, [NSString stringWithFormat:@"> %@", label ?: @"cmd"]);
     PXDebugAppendLine(path, [NSString stringWithFormat:@"$ %@", cmd]);
-    CommandResult *res = [runner runAndCapture:cmd];
-    PXDebugAppendLine(path, [NSString stringWithFormat:@"exit=%d", (int)res.exitCode]);
+    CommandResult *res = [runner runAndCapture:cmd
+                                   timeoutSec:PXDebugCommandTimeoutSeconds
+                               maxOutputBytes:PXDebugCommandOutputLimitBytes];
+    PXDebugAppendLine(path,
+                      [NSString stringWithFormat:@"exit=%d timedOut=%d stdoutTruncated=%d stderrTruncated=%d",
+                       (int)res.exitCode,
+                       res.timedOut ? 1 : 0,
+                       res.stdoutTruncated ? 1 : 0,
+                       res.stderrTruncated ? 1 : 0]);
     if (res.stdoutString.length) {
         PXDebugAppendLine(path, @"[stdout]");
         PXDebugAppendLine(path, res.stdoutString);
@@ -1172,32 +1183,6 @@ static NSString *PXCleanSubdirName(NSString *s) {
         [NSString stringWithFormat:@"/private/var/mobile/Library/WeaponX/Profiles/%@/appdata/%@", profileId, bundleID]
     ]];
     return path;
-}
-
-- (void)_wipeDirectoryContents:(NSString *)dirPath {
-    if (!dirPath.length) {
-        return;
-    }
-    // Wipe everything inside the directory, but preserve container metadata files.
-    // Deleting these can break MCM/LaunchServices container mapping (especially for App Groups).
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSError *listErr = nil;
-    NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:dirPath error:&listErr];
-    if (!items.count) {
-        return;
-    }
-    NSSet<NSString *> *preserve = [NSSet setWithArray:@[
-        @".com.apple.mobile_container_manager.metadata.plist",
-        @".com.apple.containermanagerd.metadata.plist"
-    ]];
-    for (NSString *name in items) {
-        if (![name isKindOfClass:[NSString class]] || !name.length) continue;
-        if ([preserve containsObject:name]) {
-            continue;
-        }
-        NSString *p = [dirPath stringByAppendingPathComponent:name];
-        [fm removeItemAtPath:p error:nil];
-    }
 }
 
 - (NSString *)_preferencesPlistPathForBundleID:(NSString *)bundleID {
@@ -2179,9 +2164,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         [fm createDirectoryAtPath:prefsDir withIntermediateDirectories:YES attributes:nil error:nil];
 
         // Restrict permissions best-effort
-        [runner run:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(backupDir)]];
-        [runner run:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(groupsDir)]];
-        [runner run:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(prefsDir)]];
+        [runner runAndCapture:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(backupDir)]
+                     timeoutSec:PXPermissionCommandTimeoutSeconds
+                 maxOutputBytes:PXPermissionCommandOutputLimitBytes];
+        [runner runAndCapture:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(groupsDir)]
+                     timeoutSec:PXPermissionCommandTimeoutSeconds
+                 maxOutputBytes:PXPermissionCommandOutputLimitBytes];
+        [runner runAndCapture:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(prefsDir)]
+                     timeoutSec:PXPermissionCommandTimeoutSeconds
+                 maxOutputBytes:PXPermissionCommandOutputLimitBytes];
 
         // Debug snapshot: before backup
         {
@@ -2690,7 +2681,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             NSString *libBase = [self _mobileLibraryBasePath];
             NSString *sharedDir = [backupDir stringByAppendingPathComponent:@"shared_db"];
             [fm createDirectoryAtPath:sharedDir withIntermediateDirectories:YES attributes:nil error:nil];
-            [runner run:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(sharedDir)]];
+            [runner runAndCapture:[NSString stringWithFormat:@"chmod 700 %@ 2>/dev/null || true", PXShellQuote(sharedDir)]
+                         timeoutSec:PXPermissionCommandTimeoutSeconds
+                     maxOutputBytes:PXPermissionCommandOutputLimitBytes];
 
             PXDebugHeader(debugBefore, @"Shared System DBs");
             PXDebugAppendLine(debugBefore, [NSString stringWithFormat:@"libraryBase=%@", libBase ?: @""]);
@@ -3091,62 +3084,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         *stageOut = stage;
     }
     return YES;
-}
-
-- (BOOL)_cloneOptionalDirectoryStageAtPath:(NSString *)stagePath
-                              destination:(NSString *)destination
-                                   tarPath:(NSString *)tarPath
-                                    runner:(CommandRunner *)runner
-                                 debugPath:(NSString *)debugPath
-                                debugLabel:(NSString *)debugLabel {
-    BOOL shouldUseCopy =
-        [tarPath isEqualToString:@"/usr/bin/tar"] ||
-        [tarPath isEqualToString:@"/bin/tar"];
-    CommandResult *tarCloneResult = nil;
-    if (!shouldUseCopy) {
-        NSString *cloneCommand =
-            [NSString stringWithFormat:@"%@ --xattrs --acls -cf - -C %@ . | %@ --xattrs --acls -xf - -C %@",
-             PXShellQuote(tarPath),
-             PXShellQuote(stagePath),
-             PXShellQuote(tarPath),
-             PXShellQuote(destination)];
-        tarCloneResult = [runner runAndCapture:cloneCommand];
-        PXDebugAppendLine(debugPath,
-                          [NSString stringWithFormat:@"%@TarPipeExit=%d",
-                           debugLabel,
-                           (int)tarCloneResult.exitCode]);
-        if (tarCloneResult.stderrString.length) {
-            PXDebugAppendLine(debugPath,
-                              [NSString stringWithFormat:@"%@TarPipeStderrPresent=1",
-                               debugLabel]);
-        }
-        if (tarCloneResult.exitCode != 0 ||
-            (tarCloneResult.stderrString.length &&
-             [tarCloneResult.stderrString containsString:@"XATTR support is not available"])) {
-            shouldUseCopy = YES;
-        }
-    } else {
-        PXDebugAppendLine(debugPath,
-                          [NSString stringWithFormat:@"%@TarPipeSkipped=1", debugLabel]);
-    }
-
-    if (!shouldUseCopy) {
-        return YES;
-    }
-    NSString *copyCommand =
-        [NSString stringWithFormat:@"cp -a %@/. %@/ 2>/dev/null",
-         PXShellQuote(stagePath),
-         PXShellQuote(destination)];
-    CommandResult *copyResult = [runner runAndCapture:copyCommand];
-    PXDebugAppendLine(debugPath,
-                      [NSString stringWithFormat:@"%@CpExit=%d",
-                       debugLabel,
-                       (int)copyResult.exitCode]);
-    if (copyResult.stderrString.length) {
-        PXDebugAppendLine(debugPath,
-                          [NSString stringWithFormat:@"%@CpStderrPresent=1", debugLabel]);
-    }
-    return copyResult.exitCode == 0;
 }
 
 - (void)restoreBackupAtDirectory:(NSString *)backupDir
@@ -3629,7 +3566,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
         // Never recurse through a retained private journal/quarantine workspace.
         if (!mainTransactionCleanupWarning) {
-            [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]];
+            [runner runAndCapture:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true", PXShellQuote(dataContainerPath)]
+                         timeoutSec:PXPermissionCommandTimeoutSeconds
+                     maxOutputBytes:PXPermissionCommandOutputLimitBytes];
         }
 
         NSError *mainDataCleanupError = nil;
@@ -3715,8 +3654,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (profileCleanupWarning) {
                 [warnings addObject:@"Optional transaction cleanup failed"];
             } else {
-                [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
-                             PXShellQuote(profileDestination)]];
+                [runner runAndCapture:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                                      PXShellQuote(profileDestination)]
+                             timeoutSec:PXPermissionCommandTimeoutSeconds
+                         maxOutputBytes:PXPermissionCommandOutputLimitBytes];
             }
             if (!profileStagingCleaned) {
                 [warnings addObject:@"Optional-directory staging cleanup failed"];
@@ -3795,8 +3736,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (safariCleanupWarning) {
                 [warnings addObject:@"Optional transaction cleanup failed"];
             } else {
-                [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
-                             PXShellQuote(safariDestination)]];
+                [runner runAndCapture:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                                      PXShellQuote(safariDestination)]
+                             timeoutSec:PXPermissionCommandTimeoutSeconds
+                         maxOutputBytes:PXPermissionCommandOutputLimitBytes];
             }
             if (!safariStagingCleaned) {
                 [warnings addObject:@"Optional-directory staging cleanup failed"];
@@ -4074,8 +4017,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 [warnings addObject:@"App Group transaction cleanup failed; ownership correction was skipped"];
             } else {
                 for (PXAppGroupRestoreTarget *target in appGroupTargetPlan.targets) {
-                    [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
-                                 PXShellQuote(target.canonicalPath)]];
+                    [runner runAndCapture:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                                          PXShellQuote(target.canonicalPath)]
+                                 timeoutSec:PXPermissionCommandTimeoutSeconds
+                             maxOutputBytes:PXPermissionCommandOutputLimitBytes];
                 }
             }
             if (!appGroupStagingCleanupComplete) {
@@ -4179,8 +4124,10 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     [warnings addObject:@"Optional transaction cleanup failed"];
                 } else {
                     for (NSString *destination in systemDestinations) {
-                        [runner run:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
-                                     PXShellQuote(destination)]];
+                        [runner runAndCapture:[NSString stringWithFormat:@"chown -R mobile:mobile %@ 2>/dev/null || true",
+                                              PXShellQuote(destination)]
+                                     timeoutSec:PXPermissionCommandTimeoutSeconds
+                                 maxOutputBytes:PXPermissionCommandOutputLimitBytes];
                     }
                 }
                 if (!stagingCleaned) [warnings addObject:@"Optional-directory staging cleanup failed"];
@@ -4285,10 +4232,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 [warnings addObject:@"Optional transaction cleanup failed"];
             } else {
                 for (NSString *destination in sharedDestinations) {
-                    [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true",
-                                 PXShellQuote(destination)]];
-                    [runner run:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
-                                 PXShellQuote(destination)]];
+                    [runner runAndCapture:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true",
+                                          PXShellQuote(destination)]
+                                 timeoutSec:PXPermissionCommandTimeoutSeconds
+                             maxOutputBytes:PXPermissionCommandOutputLimitBytes];
+                    [runner runAndCapture:[NSString stringWithFormat:@"chmod 600 %@ 2>/dev/null || true",
+                                          PXShellQuote(destination)]
+                                 timeoutSec:PXPermissionCommandTimeoutSeconds
+                             maxOutputBytes:PXPermissionCommandOutputLimitBytes];
                 }
             }
             if (!sharedStagingCleaned) [warnings addObject:@"Optional-file staging cleanup failed"];
@@ -4359,10 +4310,14 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             if (preferencesCleanupWarning) {
                 [warnings addObject:@"Optional transaction cleanup failed"];
             } else {
-                [runner run:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true",
-                             PXShellQuote(preferencesDestination)]];
-                [runner run:[NSString stringWithFormat:@"chmod 644 %@ 2>/dev/null || true",
-                             PXShellQuote(preferencesDestination)]];
+                [runner runAndCapture:[NSString stringWithFormat:@"chown mobile:mobile %@ 2>/dev/null || true",
+                                      PXShellQuote(preferencesDestination)]
+                             timeoutSec:PXPermissionCommandTimeoutSeconds
+                         maxOutputBytes:PXPermissionCommandOutputLimitBytes];
+                [runner runAndCapture:[NSString stringWithFormat:@"chmod 644 %@ 2>/dev/null || true",
+                                      PXShellQuote(preferencesDestination)]
+                             timeoutSec:PXPermissionCommandTimeoutSeconds
+                         maxOutputBytes:PXPermissionCommandOutputLimitBytes];
                 PXKillallByName(@"cfprefsd", SIGTERM);
             }
             if (!preferencesStagingCleaned) [warnings addObject:@"Optional-file staging cleanup failed"];
