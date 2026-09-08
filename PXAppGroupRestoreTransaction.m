@@ -2298,16 +2298,19 @@ static BOOL PXAppGroupRestoreRecoverStaleBatch(
             return NO;
         }
     } else {
-        if (!PXAppGroupRestoreRequireNamespaces(
-                participants,
-                committedPhase,
-                PXAppGroupRestoreTransactionErrorRecoveryFailed,
-                @"$.recovery",
-                committedPhase
-                    ? @"A committed stale App Group batch namespace is inconsistent."
-                    : @"A rolled-back stale App Group batch namespace is inconsistent.",
-                error)) {
-            return NO;
+        // Once a durable final decision exists, the live App Group namespace is allowed to evolve.
+        // A prior cleanup failure can leave only transaction-owned recovery workspaces behind; the
+        // app may legitimately mutate its committed/rolled-back namespace before the next Restore.
+        // Requiring an exact snapshot match here turns that normal post-decision activity into a
+        // false recovery failure. Revalidate only the bound target/lock authority, then remove the
+        // transaction-owned workspace contents without touching live namespace entries.
+        for (PXAppGroupRestoreParticipant *participant in participants) {
+            if (!PXAppGroupRestoreParticipantIdentityIsValid(participant,
+                                                             YES,
+                                                             NO,
+                                                             error)) {
+                return NO;
+            }
         }
     }
     if (!PXAppGroupRestoreCleanupBatch(participants, error)) {

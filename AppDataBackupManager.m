@@ -4247,13 +4247,18 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 NSString *prepareBaseMessage = targetAuthorityFailure
                     ? @"Exact App Group restore target could not be revalidated safely"
                     : @"Failed to prepare validated App Group stages transactionally";
+                NSString *prepareReason = [appGroupTransactionPrepareError.localizedDescription isKindOfClass:[NSString class]]
+                    ? appGroupTransactionPrepareError.localizedDescription
+                    : nil;
                 NSString *prepareMessage = appGroupTransactionPrepareError
-                    ? [NSString stringWithFormat:@"%@ (%@:%ld%@%@)",
+                    ? [NSString stringWithFormat:@"%@ (%@:%ld%@%@%@%@)",
                        prepareBaseMessage,
                        appGroupTransactionPrepareError.domain ?: @"unknown",
                        (long)appGroupTransactionPrepareError.code,
                        prepareField.length ? @" field=" : @"",
-                       prepareField ?: @""]
+                       prepareField ?: @"",
+                       prepareReason.length ? @" reason=" : @"",
+                       prepareReason ?: @""]
                     : prepareBaseMessage;
                 NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                    code:targetAuthorityFailure ? 319 : 310
