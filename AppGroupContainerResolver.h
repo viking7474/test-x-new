@@ -22,8 +22,10 @@ typedef NS_ENUM(NSInteger, PXAppGroupContainerResolverErrorCode) {
 
 @interface AppGroupContainerResolver : NSObject
 
-// Returns every exact physical match for Clear. A missing root or no exact match returns an empty array.
-// Resolver faults return nil plus error. Callers must validate every returned model before mutation.
+// Resolves the currently registered exact physical App Group container when MobileContainerManager is
+// available. If that authority is unavailable, falls back to exact metadata scanning. A missing root or
+// no exact match returns an empty array; resolver faults return nil plus error. Callers must still validate
+// every returned model before mutation.
 - (nullable NSArray<PXResolvedContainer *> *)resolveAllAppGroupContainersForGroupIdentifier:(NSString *)groupIdentifier
                                                                                        root:(PXResolvedContainerRoot)root
                                                                                       error:(NSError * _Nullable * _Nullable)error;
@@ -33,7 +35,8 @@ typedef NS_ENUM(NSInteger, PXAppGroupContainerResolverErrorCode) {
                                                                         root:(PXResolvedContainerRoot)root
                                                                        error:(NSError * _Nullable * _Nullable)error;
 
-// Maps application group identifiers to AppGroup container UUID/path using exact metadata matches.
+// Maps each application-group identifier to at most one authoritative UUID/path. Ambiguous fallback
+// filesystem matches are omitted rather than guessed.
 - (NSArray<AppGroupContainerInfo *> *)resolveGroupContainersForGroupIDs:(NSArray<NSString *> *)groupIDs;
 
 @end

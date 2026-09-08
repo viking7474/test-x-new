@@ -1070,11 +1070,14 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
                                          @"BSD cp is unavailable for hard-link materialization");
         }
 
+        NSString *copyCommand = [NSString stringWithFormat:@"%@ -R -P -p %@ %@",
+                                 PXShellQuote(cpPath),
+                                 PXShellQuote(sourceDir),
+                                 PXShellQuote(materializationRoot)];
         CommandResult *copyResult =
-            [runner runExecutableAndCapture:cpPath
-                                  arguments:@[@"-R", @"-P", @"-p", sourceDir, materializationRoot]
-                                 timeoutSec:PXTarCreateTimeoutSeconds
-                             maxOutputBytes:PXTarCommandOutputLimitBytes];
+            [runner runAndCapture:copyCommand
+                       timeoutSec:PXTarCreateTimeoutSeconds
+                   maxOutputBytes:PXTarCommandOutputLimitBytes];
         if (!copyResult.succeeded) {
             [fm removeItemAtPath:materializationRoot error:nil];
             return copyResult;
