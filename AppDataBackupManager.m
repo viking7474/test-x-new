@@ -975,13 +975,132 @@ static NSString *PXFindDataContainerUUIDByMetadata(NSFileManager *fm, NSString *
     ]];
 }
 
+typedef NS_ENUM(NSInteger, PXTarHardLinkScanState) {
+    PXTarHardLinkScanStateNoHardLinks = 0,
+    PXTarHardLinkScanStateHasHardLinks = 1,
+    PXTarHardLinkScanStateUnknown = 2,
+};
+
+static PXTarHardLinkScanState PXTarScanHardLinkedRegularFiles(NSString *sourceDir) {
+    if (![sourceDir isKindOfClass:[NSString class]] || sourceDir.length == 0) {
+        return PXTarHardLinkScanStateUnknown;
+    }
+
+    NSURL *rootURL = [NSURL fileURLWithPath:sourceDir isDirectory:YES];
+    __block BOOL enumerationFailed = NO;
+    NSDirectoryEnumerator *enumerator =
+        [[NSFileManager defaultManager] enumeratorAtURL:rootURL
+                             includingPropertiesForKeys:nil
+                                                options:0
+                                           errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+        enumerationFailed = YES;
+        return NO;
+    }];
+    if (!enumerator) {
+        return PXTarHardLinkScanStateUnknown;
+    }
+
+    for (NSURL *entryURL in enumerator) {
+        const char *entryPath = entryURL.fileSystemRepresentation;
+        struct stat entryStat;
+        memset(&entryStat, 0, sizeof(entryStat));
+        if (!entryPath || lstat(entryPath, &entryStat) != 0) {
+            return PXTarHardLinkScanStateUnknown;
+        }
+        if (S_ISREG(entryStat.st_mode) && entryStat.st_nlink > 1) {
+            return PXTarHardLinkScanStateHasHardLinks;
+        }
+    }
+    return enumerationFailed ? PXTarHardLinkScanStateUnknown
+                             : PXTarHardLinkScanStateNoHardLinks;
+}
+
+static CommandResult *PXTarSyntheticFailure(int runnerError, NSString *message) {
+    CommandResult *result = [[CommandResult alloc] init];
+    result.exitCode = -1;
+    result.runnerError = runnerError != 0 ? runnerError : EIO;
+    result.exitedNormally = NO;
+    result.stderrString = [message isKindOfClass:[NSString class]] ? message : @"Tar preparation failed";
+    return result;
+}
+
+static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
+    if (errorOut) *errorOut = 0;
+    char templatePath[] = "/tmp/tlinkios-tar-materialized.XXXXXX";
+    char *createdPath = mkdtemp(templatePath);
+    if (!createdPath) {
+        if (errorOut) *errorOut = errno != 0 ? errno : EIO;
+        return nil;
+    }
+    NSString *path = [NSString stringWithUTF8String:createdPath];
+    if (path.length == 0) {
+        (void)rmdir(createdPath);
+        if (errorOut) *errorOut = EINVAL;
+        return nil;
+    }
+    return path;
+}
+
 - (CommandResult *)_tarCreate:(NSString *)tarPath fromDir:(NSString *)sourceDir toArchive:(NSString *)archivePath {
     CommandRunner *runner = [CommandRunner shared];
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // GNU tar can directly materialize hard-linked regular files into independent archive members.
+    // bsdtar/Apple tar preserve hard links as type '1', which Restore intentionally rejects, so only
+    // when such files are detected we stage a private BSD cp -R -P -p copy first. BSD/Darwin cp -R
+    // copies hard-linked files as separate files while -P keeps symbolic links physical (not followed).
+    BOOL isGnuTar = [[tarPath lastPathComponent] isEqualToString:@"gtar"];
+    PXTarHardLinkScanState hardLinkState = PXTarScanHardLinkedRegularFiles(sourceDir);
+    BOOL shouldMaterializeHardLinks = !isGnuTar && hardLinkState != PXTarHardLinkScanStateNoHardLinks;
+    NSString *materializationRoot = nil;
+    NSString *effectiveSourceDir = sourceDir;
+
+    if (shouldMaterializeHardLinks) {
+        int materializationError = 0;
+        materializationRoot = PXTarCreatePrivateMaterializationDirectory(&materializationError);
+        if (materializationRoot.length == 0) {
+            return PXTarSyntheticFailure(materializationError,
+                                         @"Could not create private hard-link materialization directory");
+        }
+
+        NSString *cpPath = [runner firstExistingPath:@[@"/bin/cp", @"/usr/bin/cp"]];
+        if (cpPath.length == 0) {
+            [fm removeItemAtPath:materializationRoot error:nil];
+            return PXTarSyntheticFailure(ENOENT,
+                                         @"BSD cp is unavailable for hard-link materialization");
+        }
+
+        CommandResult *copyResult =
+            [runner runExecutableAndCapture:cpPath
+                                  arguments:@[@"-R", @"-P", @"-p", sourceDir, materializationRoot]
+                                 timeoutSec:PXTarCreateTimeoutSeconds
+                             maxOutputBytes:PXTarCommandOutputLimitBytes];
+        if (!copyResult.succeeded) {
+            [fm removeItemAtPath:materializationRoot error:nil];
+            return copyResult;
+        }
+
+        NSString *sourceBasename = [sourceDir lastPathComponent];
+        effectiveSourceDir = sourceBasename.length
+            ? [materializationRoot stringByAppendingPathComponent:sourceBasename]
+            : nil;
+        struct stat materializedStat;
+        memset(&materializedStat, 0, sizeof(materializedStat));
+        const char *materializedPath = effectiveSourceDir.fileSystemRepresentation;
+        if (effectiveSourceDir.length == 0 || !materializedPath ||
+            lstat(materializedPath, &materializedStat) != 0 || !S_ISDIR(materializedStat.st_mode)) {
+            [fm removeItemAtPath:materializationRoot error:nil];
+            return PXTarSyntheticFailure(EIO,
+                                         @"Hard-link materialization did not produce a safe source directory");
+        }
+        if (PXTarScanHardLinkedRegularFiles(effectiveSourceDir) != PXTarHardLinkScanStateNoHardLinks) {
+            [fm removeItemAtPath:materializationRoot error:nil];
+            return PXTarSyntheticFailure(EIO,
+                                         @"Hard-link materialization still contains multiply-linked regular files");
+        }
+    }
 
     // Prefer preserving extended attributes (file protection class), ACLs and numeric owners.
-    // GNU tar normally emits hard-link members for multiply-linked regular files; Restore intentionally
-    // accepts only regular files/directories, so normalize GNU hard links into independent file members.
-    BOOL isGnuTar = [[tarPath lastPathComponent] isEqualToString:@"gtar"];
     NSMutableArray<NSString *> *preferredArguments = [NSMutableArray array];
     if (isGnuTar) {
         [preferredArguments addObject:@"--hard-dereference"];
@@ -991,37 +1110,44 @@ static NSString *PXFindDataContainerUUIDByMetadata(NSFileManager *fm, NSString *
         @"-czf", archivePath,
         @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
         @"--exclude", @".com.apple.containermanagerd.metadata.plist",
-        @"-C", sourceDir,
+        @"-C", effectiveSourceDir,
         @"."
     ]];
     CommandResult *res = [runner runExecutableAndCapture:tarPath
                                                 arguments:preferredArguments
                                                timeoutSec:PXTarCreateTimeoutSeconds
                                            maxOutputBytes:PXTarCommandOutputLimitBytes];
-    if (res.succeeded) {
-        return res;
-    }
-    if (res.timedOut || res.spawnError != 0 || res.runnerError != 0 ||
-        !res.exitedNormally || res.terminationSignal != 0) {
-        return res;
+    CommandResult *finalResult = res;
+    if (!res.succeeded &&
+        !res.timedOut && res.spawnError == 0 && res.runnerError == 0 &&
+        res.exitedNormally && res.terminationSignal == 0) {
+        // Fallback only for a normal non-zero exit, which covers tar variants without preservation flags.
+        NSMutableArray<NSString *> *fallbackArguments = [NSMutableArray array];
+        if (isGnuTar) {
+            [fallbackArguments addObject:@"--hard-dereference"];
+        }
+        [fallbackArguments addObjectsFromArray:@[
+            @"-czf", archivePath,
+            @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
+            @"--exclude", @".com.apple.containermanagerd.metadata.plist",
+            @"-C", effectiveSourceDir,
+            @"."
+        ]];
+        finalResult = [runner runExecutableAndCapture:tarPath
+                                             arguments:fallbackArguments
+                                            timeoutSec:PXTarCreateTimeoutSeconds
+                                        maxOutputBytes:PXTarCommandOutputLimitBytes];
     }
 
-    // Fallback only for a normal non-zero exit, which covers tar variants without the preservation flags.
-    NSMutableArray<NSString *> *fallbackArguments = [NSMutableArray array];
-    if (isGnuTar) {
-        [fallbackArguments addObject:@"--hard-dereference"];
+    if (materializationRoot.length) {
+        NSError *cleanupError = nil;
+        BOOL cleaned = [fm removeItemAtPath:materializationRoot error:&cleanupError];
+        if (!cleaned && finalResult.succeeded) {
+            return PXTarSyntheticFailure(cleanupError.code ?: EIO,
+                                         @"Hard-link materialization cleanup failed");
+        }
     }
-    [fallbackArguments addObjectsFromArray:@[
-        @"-czf", archivePath,
-        @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
-        @"--exclude", @".com.apple.containermanagerd.metadata.plist",
-        @"-C", sourceDir,
-        @"."
-    ]];
-    return [runner runExecutableAndCapture:tarPath
-                                  arguments:fallbackArguments
-                                 timeoutSec:PXTarCreateTimeoutSeconds
-                             maxOutputBytes:PXTarCommandOutputLimitBytes];
+    return finalResult;
 }
 
 static NSString *PXTimestampSuffix(void) {
