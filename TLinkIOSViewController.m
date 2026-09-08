@@ -7083,7 +7083,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     picker.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
 
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:picker];
-    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
     nav.navigationBar.prefersLargeTitles = NO;
 
     if (NSClassFromString(@"UINavigationBarAppearance") != nil) {
@@ -7095,15 +7095,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         nav.navigationBar.standardAppearance = appearance;
         nav.navigationBar.scrollEdgeAppearance = appearance;
         nav.navigationBar.compactAppearance = appearance;
-    }
-
-    if (NSClassFromString(@"UISheetPresentationController") != nil &&
-        NSClassFromString(@"UISheetPresentationControllerDetent") != nil &&
-        [nav respondsToSelector:NSSelectorFromString(@"sheetPresentationController")]) {
-        UISheetPresentationController *sheet = nav.sheetPresentationController;
-        sheet.detents = @[[UISheetPresentationControllerDetent largeDetent]];
-        sheet.prefersGrabberVisible = YES;
-        sheet.preferredCornerRadius = 28.0;
     }
 
     picker.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
