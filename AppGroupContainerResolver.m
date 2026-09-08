@@ -173,7 +173,13 @@ static PXAppGroupMCMResolutionState PXAppGroupResolverRegisteredContainer(NSStri
         return PXAppGroupMCMResolutionStateFailed;
     }
 
-    if (containerPathOut) *containerPathOut = [path copy];
+    NSString *canonicalPath = [path stringByResolvingSymlinksInPath];
+    if (![canonicalPath isKindOfClass:[NSString class]] || canonicalPath.length == 0 ||
+        ![canonicalPath hasPrefix:@"/"]) {
+        return PXAppGroupMCMResolutionStateFailed;
+    }
+
+    if (containerPathOut) *containerPathOut = [canonicalPath copy];
     if (containerUUIDOut) *containerUUIDOut = [uuidString copy];
     return PXAppGroupMCMResolutionStateResolved;
 }
