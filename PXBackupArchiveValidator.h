@@ -41,6 +41,12 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, copy, readonly)
     NSDictionary<NSString *, NSNumber *> *regularFileBytesByArchiveName;
 
+@property (nonatomic, copy, readonly)
+    NSDictionary<NSString *, NSNumber *> *reservedAppGroupTransactionMemberCountsByArchiveName;
+
+@property (nonatomic, copy, readonly)
+    NSDictionary<NSString *, NSNumber *> *reservedAppGroupTransactionRegularFileBytesByArchiveName;
+
 - (BOOL)containsArchiveName:(NSString *)archiveName;
 
 - (instancetype)init NS_UNAVAILABLE;

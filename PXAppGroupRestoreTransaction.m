@@ -235,6 +235,20 @@ static BOOL PXAppGroupRestoreNameIsContainerMetadata(NSData *nameData) {
                                           @".com.apple.containermanagerd.metadata.plist");
 }
 
+static NSString *PXAppGroupRestoreDiagnosticName(NSData *nameData) {
+    if (![nameData isKindOfClass:[NSData class]] || nameData.length == 0) {
+        return @"<invalid>";
+    }
+    NSString *name = [[NSString alloc] initWithData:nameData encoding:NSUTF8StringEncoding];
+    NSData *roundTrip = name ? PXAppGroupRestoreNameData(name) : nil;
+    if (name.length > 0 && roundTrip && [roundTrip isEqualToData:nameData] &&
+        [name rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location == NSNotFound) {
+        return name;
+    }
+    NSString *encoded = [nameData base64EncodedStringWithOptions:0];
+    return [NSString stringWithFormat:@"<base64:%@>", encoded ?: @""];
+}
+
 static NSArray<NSData *> *PXAppGroupRestoreReadDirectoryNames(int descriptor,
                                                               NSUInteger maximumNameCount,
                                                               NSError **error,
@@ -464,7 +478,8 @@ static NSArray<PXAppGroupRestoreEntry *> *PXAppGroupRestoreCollectEntries(
     BOOL skipContainerMetadata,
     BOOL skipTransactionPrefix,
     NSError **error,
-    NSString *fieldPath) {
+    NSString *fieldPath,
+    NSString *diagnosticContext) {
     NSArray<NSData *> *names =
         PXAppGroupRestoreReadDirectoryNames(descriptor,
                                             PXAppGroupRestoreMaximumTopLevelEntries,
@@ -481,10 +496,28 @@ static NSArray<PXAppGroupRestoreEntry *> *PXAppGroupRestoreCollectEntries(
             PXAppGroupRestoreRawNameHasPrefix(nameData, PXAppGroupRestoreTransactionPrefix);
         if ((rejectContainerMetadata && metadata) ||
             (rejectTransactionPrefix && transactionName)) {
+            NSString *entryName = PXAppGroupRestoreDiagnosticName(nameData);
+            NSString *entryKind = metadata ? @"container metadata" : @"transaction workspace";
+            NSString *description = diagnosticContext.length
+                ? [NSString stringWithFormat:
+                    @"A reserved transaction entry name is present: '%@' (kind=%@, %@).",
+                    entryName,
+                    entryKind,
+                    diagnosticContext]
+                : [NSString stringWithFormat:
+                    @"A reserved transaction entry name is present: '%@' (kind=%@).",
+                    entryName,
+                    entryKind];
+            NSLog(@"[PXAppGroupRestoreTransaction] Reserved entry rejected: field=%@ entry=%@ kind=%@%@%@",
+                  fieldPath ?: @"<unknown>",
+                  entryName,
+                  entryKind,
+                  diagnosticContext.length ? @" " : @"",
+                  diagnosticContext ?: @"");
             return PXAppGroupRestoreFailObject(error,
                                                PXAppGroupRestoreTransactionErrorFilesystemInspectionFailed,
                                                fieldPath,
-                                               @"A reserved transaction entry name is present.");
+                                               description);
         }
         if ((skipContainerMetadata && metadata) ||
             (skipTransactionPrefix && transactionName)) {
@@ -540,7 +573,8 @@ static BOOL PXAppGroupRestoreRequireExactEntries(
                                         skipContainerMetadata,
                                         skipTransactionPrefix,
                                         &inspectionError,
-                                        fieldPath);
+                                        fieldPath,
+                                        nil);
     if (!actualEntries ||
         !PXAppGroupRestoreEntryArraysMatch(expectedEntries, actualEntries)) {
         return PXAppGroupRestoreFail(error,
@@ -1799,7 +1833,9 @@ static BOOL PXAppGroupRestoreRestoreOriginalEntriesWithoutJournal(
                                         NO,
                                         NO,
                                         error,
-                                        @"$.recovery.original");
+                                        @"$.recovery.original",
+                                        [NSString stringWithFormat:@"appGroups=%@",
+                                         [participant.target.groupIdentifiers componentsJoinedByString:@","]]);
     if (!originalEntries) {
         return NO;
     }
@@ -2674,6 +2710,9 @@ static BOOL PXAppGroupRestoreRecoverStaleBatch(
     }
     NSUInteger aggregateEntries = 0;
     for (PXAppGroupRestoreParticipant *participant in participants) {
+        NSString *appGroupDiagnosticContext =
+            [NSString stringWithFormat:@"appGroups=%@",
+             [participant.target.groupIdentifiers componentsJoinedByString:@","]];
         NSArray<PXAppGroupRestoreEntry *> *originalEntries =
             PXAppGroupRestoreCollectEntries(participant.targetDescriptor,
                                              NO,
@@ -2681,7 +2720,8 @@ static BOOL PXAppGroupRestoreRecoverStaleBatch(
                                              YES,
                                              YES,
                                              error,
-                                             @"$.target.entries");
+                                             @"$.target.entries",
+                                             nil);
         NSArray<PXAppGroupRestoreEntry *> *stagedEntries =
             PXAppGroupRestoreCollectEntries(participant.stageDescriptor,
                                              YES,
@@ -2689,7 +2729,8 @@ static BOOL PXAppGroupRestoreRecoverStaleBatch(
                                              NO,
                                              NO,
                                              error,
-                                             @"$.stage.entries");
+                                             @"$.stage.entries",
+                                             appGroupDiagnosticContext);
         if (!originalEntries || !stagedEntries ||
             originalEntries.count > PXAppGroupRestoreMaximumAggregateEntries - aggregateEntries) {
             PXAppGroupRestoreCloseAllDescriptors(participants);

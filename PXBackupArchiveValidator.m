@@ -45,18 +45,28 @@ typedef NS_ENUM(NSUInteger, PXArchiveTarHeaderFormat) {
     NSDictionary<NSString *, NSNumber *> *memberCountsByArchiveName;
 @property (nonatomic, copy, readwrite)
     NSDictionary<NSString *, NSNumber *> *regularFileBytesByArchiveName;
+@property (nonatomic, copy, readwrite)
+    NSDictionary<NSString *, NSNumber *> *reservedAppGroupTransactionMemberCountsByArchiveName;
+@property (nonatomic, copy, readwrite)
+    NSDictionary<NSString *, NSNumber *> *reservedAppGroupTransactionRegularFileBytesByArchiveName;
 - (instancetype)initWithMemberCounts:(NSDictionary<NSString *, NSNumber *> *)memberCounts
-                    regularFileBytes:(NSDictionary<NSString *, NSNumber *> *)regularFileBytes;
+                    regularFileBytes:(NSDictionary<NSString *, NSNumber *> *)regularFileBytes
+ reservedAppGroupTransactionMembers:(NSDictionary<NSString *, NSNumber *> *)reservedMembers
+    reservedAppGroupTransactionBytes:(NSDictionary<NSString *, NSNumber *> *)reservedBytes;
 @end
 
 @implementation PXValidatedBackupArchiveSet
 
 - (instancetype)initWithMemberCounts:(NSDictionary<NSString *, NSNumber *> *)memberCounts
-                    regularFileBytes:(NSDictionary<NSString *, NSNumber *> *)regularFileBytes {
+                    regularFileBytes:(NSDictionary<NSString *, NSNumber *> *)regularFileBytes
+ reservedAppGroupTransactionMembers:(NSDictionary<NSString *, NSNumber *> *)reservedMembers
+    reservedAppGroupTransactionBytes:(NSDictionary<NSString *, NSNumber *> *)reservedBytes {
     self = [super init];
     if (self) {
         _memberCountsByArchiveName = [memberCounts copy];
         _regularFileBytesByArchiveName = [regularFileBytes copy];
+        _reservedAppGroupTransactionMemberCountsByArchiveName = [reservedMembers copy];
+        _reservedAppGroupTransactionRegularFileBytesByArchiveName = [reservedBytes copy];
         _archiveNames = [[_memberCountsByArchiveName allKeys]
             sortedArrayUsingSelector:@selector(compare:)];
     }
@@ -806,6 +816,18 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
     return path;
 }
 
+static BOOL PXArchivePathUsesReservedAppGroupTransactionNamespace(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0 || [path isEqualToString:@"."]) {
+        return NO;
+    }
+    for (NSString *component in [path componentsSeparatedByString:@"/"]) {
+        if ([component hasPrefix:@".weaponx-app-group-restore-"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 @interface PXArchiveTarParser : NSObject {
     NSUInteger _artifactIndex;
     uint64_t _archiveBudget;
@@ -815,6 +837,8 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
     uint64_t _physicalHeaders;
     uint64_t _logicalMembers;
     uint64_t _regularFileBytes;
+    uint64_t _reservedAppGroupTransactionLogicalMembers;
+    uint64_t _reservedAppGroupTransactionRegularFileBytes;
     uint64_t _metadataTotal;
     uint64_t _payloadRemaining;
     uint64_t _paddingRemaining;
@@ -836,6 +860,8 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
 }
 @property (nonatomic, assign, readonly) uint64_t logicalMembers;
 @property (nonatomic, assign, readonly) uint64_t regularFileBytes;
+@property (nonatomic, assign, readonly) uint64_t reservedAppGroupTransactionLogicalMembers;
+@property (nonatomic, assign, readonly) uint64_t reservedAppGroupTransactionRegularFileBytes;
 - (instancetype)initWithArtifactIndex:(NSUInteger)artifactIndex
                         archiveBudget:(uint64_t)archiveBudget
                restoreLogicalMembers:(uint64_t *)restoreLogicalMembers;
@@ -868,6 +894,14 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
 
 - (uint64_t)regularFileBytes {
     return _regularFileBytes;
+}
+
+- (uint64_t)reservedAppGroupTransactionLogicalMembers {
+    return _reservedAppGroupTransactionLogicalMembers;
+}
+
+- (uint64_t)reservedAppGroupTransactionRegularFileBytes {
+    return _reservedAppGroupTransactionRegularFileBytes;
 }
 
 - (NSString *)memberPathForIndex:(uint64_t)index field:(NSString *)field {
@@ -1382,7 +1416,12 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
         return NO;
     }
 
+    BOOL reservedAppGroupTransactionMember =
+        PXArchivePathUsesReservedAppGroupTransactionNamespace(normalizedPath);
     _logicalMembers++;
+    if (reservedAppGroupTransactionMember) {
+        _reservedAppGroupTransactionLogicalMembers++;
+    }
     if (_restoreLogicalMembers) {
         (*_restoreLogicalMembers)++;
     }
@@ -1396,6 +1435,18 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
                                  @"The archive regular-file byte total exceeds the fixed budget.");
         }
         _regularFileBytes = regularTotal;
+        if (reservedAppGroupTransactionMember) {
+            uint64_t reservedRegularTotal = 0;
+            if (!PXArchiveAddUInt64(_reservedAppGroupTransactionRegularFileBytes,
+                                    effectiveSize,
+                                    &reservedRegularTotal)) {
+                return PXArchiveFail(error,
+                                     PXBackupArchiveValidatorErrorLimitExceeded,
+                                     headerPath,
+                                     @"The reserved App Group transaction byte total overflowed.");
+            }
+            _reservedAppGroupTransactionRegularFileBytes = reservedRegularTotal;
+        }
     }
 
     [self clearPendingMetadata];
@@ -1602,6 +1653,8 @@ static BOOL PXArchiveValidateOne(PXArchiveReference *reference,
                                  uint64_t *restoreLogicalMembers,
                                  NSNumber **memberCountOut,
                                  NSNumber **regularFileBytesOut,
+                                 NSNumber **reservedAppGroupTransactionMemberCountOut,
+                                 NSNumber **reservedAppGroupTransactionRegularFileBytesOut,
                                  NSError **error) {
     PXArchiveDeclaration *declaration = reference.declaration;
     NSString *fieldPath = reference.fieldPath;
@@ -1833,6 +1886,14 @@ static BOOL PXArchiveValidateOne(PXArchiveReference *reference,
         }
         if (regularFileBytesOut) {
             *regularFileBytesOut = @(parser.regularFileBytes);
+        }
+        if (reservedAppGroupTransactionMemberCountOut) {
+            *reservedAppGroupTransactionMemberCountOut =
+                @(parser.reservedAppGroupTransactionLogicalMembers);
+        }
+        if (reservedAppGroupTransactionRegularFileBytesOut) {
+            *reservedAppGroupTransactionRegularFileBytesOut =
+                @(parser.reservedAppGroupTransactionRegularFileBytes);
         }
         success = YES;
     } while (NO);
@@ -2150,12 +2211,18 @@ static BOOL PXArchiveCollectReferences(NSDictionary *manifest,
         [NSMutableDictionary dictionaryWithCapacity:references.count];
     NSMutableDictionary<NSString *, NSNumber *> *regularFileBytes =
         [NSMutableDictionary dictionaryWithCapacity:references.count];
+    NSMutableDictionary<NSString *, NSNumber *> *reservedAppGroupTransactionMemberCounts =
+        [NSMutableDictionary dictionaryWithCapacity:references.count];
+    NSMutableDictionary<NSString *, NSNumber *> *reservedAppGroupTransactionRegularFileBytes =
+        [NSMutableDictionary dictionaryWithCapacity:references.count];
     uint64_t restoreInflated = 0;
     uint64_t restoreLogicalMembers = 0;
     BOOL valid = YES;
     for (PXArchiveReference *reference in references) {
         NSNumber *memberCount = nil;
         NSNumber *regularBytes = nil;
+        NSNumber *reservedMemberCount = nil;
+        NSNumber *reservedRegularBytes = nil;
         if (!PXArchiveValidateOne(reference,
                                   canonicalRoot,
                                   rootDescriptor,
@@ -2163,12 +2230,16 @@ static BOOL PXArchiveCollectReferences(NSDictionary *manifest,
                                   &restoreLogicalMembers,
                                   &memberCount,
                                   &regularBytes,
+                                  &reservedMemberCount,
+                                  &reservedRegularBytes,
                                   error)) {
             valid = NO;
             break;
         }
         memberCounts[reference.declaration.name] = memberCount;
         regularFileBytes[reference.declaration.name] = regularBytes;
+        reservedAppGroupTransactionMemberCounts[reference.declaration.name] = reservedMemberCount;
+        reservedAppGroupTransactionRegularFileBytes[reference.declaration.name] = reservedRegularBytes;
     }
     close(rootDescriptor);
     if (!valid) {
@@ -2177,7 +2248,9 @@ static BOOL PXArchiveCollectReferences(NSDictionary *manifest,
 
     return [[PXValidatedBackupArchiveSet alloc]
         initWithMemberCounts:memberCounts
-            regularFileBytes:regularFileBytes];
+            regularFileBytes:regularFileBytes
+ reservedAppGroupTransactionMembers:reservedAppGroupTransactionMemberCounts
+    reservedAppGroupTransactionBytes:reservedAppGroupTransactionRegularFileBytes];
 }
 
 @end

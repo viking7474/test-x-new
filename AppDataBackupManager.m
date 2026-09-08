@@ -1226,6 +1226,7 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
         @"-czf", archivePath,
         @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
         @"--exclude", @".com.apple.containermanagerd.metadata.plist",
+        @"--exclude", @".weaponx-app-group-restore-*",
         @"-C", effectiveSourceDir,
         @"."
     ]];
@@ -1246,6 +1247,7 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
             @"-czf", archivePath,
             @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
             @"--exclude", @".com.apple.containermanagerd.metadata.plist",
+            @"--exclude", @".weaponx-app-group-restore-*",
             @"-C", effectiveSourceDir,
             @"."
         ]];
@@ -1398,6 +1400,46 @@ static NSString *PXCleanSubdirName(NSString *s) {
         @"-xzf", archivePath,
         @"-C", destDir
     ];
+    return [runner runExecutableAndCapture:tarPath
+                                  arguments:fallbackArguments
+                                 timeoutSec:PXTarExtractTimeoutSeconds
+                             maxOutputBytes:PXTarCommandOutputLimitBytes];
+}
+
+- (CommandResult *)_tarExtractAppGroupArchive:(NSString *)tarPath
+                                      archive:(NSString *)archivePath
+                                        toDir:(NSString *)destDir {
+    CommandRunner *runner = [CommandRunner shared];
+    NSArray<NSString *> *reservedExcludes = @[
+        @"--exclude", @".weaponx-app-group-restore-*",
+        @"--exclude", @"./.weaponx-app-group-restore-*"
+    ];
+
+    NSMutableArray<NSString *> *preferredArguments = [NSMutableArray arrayWithArray:@[
+        @"--xattrs", @"--acls"
+    ]];
+    [preferredArguments addObjectsFromArray:reservedExcludes];
+    [preferredArguments addObjectsFromArray:@[
+        @"-xzf", archivePath,
+        @"-C", destDir
+    ]];
+    CommandResult *res = [runner runExecutableAndCapture:tarPath
+                                                arguments:preferredArguments
+                                               timeoutSec:PXTarExtractTimeoutSeconds
+                                           maxOutputBytes:PXTarCommandOutputLimitBytes];
+    if (res.succeeded) {
+        return res;
+    }
+    if (res.timedOut || res.spawnError != 0 || res.runnerError != 0 ||
+        !res.exitedNormally || res.terminationSignal != 0) {
+        return res;
+    }
+
+    NSMutableArray<NSString *> *fallbackArguments = [NSMutableArray arrayWithArray:reservedExcludes];
+    [fallbackArguments addObjectsFromArray:@[
+        @"-xzf", archivePath,
+        @"-C", destDir
+    ]];
     return [runner runExecutableAndCapture:tarPath
                                   arguments:fallbackArguments
                                  timeoutSec:PXTarExtractTimeoutSeconds
@@ -4057,11 +4099,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         restorePlan.validatedArchives.memberCountsByArchiveName[archiveName];
                     NSNumber *regularByteSummary =
                         restorePlan.validatedArchives.regularFileBytesByArchiveName[archiveName];
+                    NSNumber *reservedMemberCountSummary =
+                        restorePlan.validatedArchives.reservedAppGroupTransactionMemberCountsByArchiveName[archiveName];
+                    NSNumber *reservedRegularByteSummary =
+                        restorePlan.validatedArchives.reservedAppGroupTransactionRegularFileBytesByArchiveName[archiveName];
                     unsigned long long memberCountValue = 0;
                     unsigned long long regularByteValue = 0;
+                    unsigned long long reservedMemberCountValue = 0;
+                    unsigned long long reservedRegularByteValue = 0;
                     if (!PXReadUnsignedIntegralSummaryNumber(memberCountSummary, &memberCountValue) ||
                         !PXReadUnsignedIntegralSummaryNumber(regularByteSummary, &regularByteValue) ||
-                        memberCountValue > NSUIntegerMax) {
+                        !PXReadUnsignedIntegralSummaryNumber(reservedMemberCountSummary, &reservedMemberCountValue) ||
+                        !PXReadUnsignedIntegralSummaryNumber(reservedRegularByteSummary, &reservedRegularByteValue) ||
+                        memberCountValue > NSUIntegerMax ||
+                        reservedMemberCountValue > memberCountValue ||
+                        reservedRegularByteValue > regularByteValue) {
                         [retainedGroupWorkspace cleanupWithError:nil];
                         cleanupAppGroupStagingWorkspaces(appGroupStagingWorkspaces);
                         NSError *err = [NSError errorWithDomain:PXAppGroupRestoreTargetPlanErrorDomain
@@ -4073,8 +4125,24 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         completeStructuredFailure(PXRestoreComponentAppGroups, err, PXRestoreRollbackStatusNotPerformed, appGroupWarningStart);
                         return;
                     }
+                    memberCountValue -= reservedMemberCountValue;
+                    regularByteValue -= reservedRegularByteValue;
                     [targetMemberCounts addObject:@(memberCountValue)];
                     [targetRegularFileBytes addObject:@(regularByteValue)];
+                    if (reservedMemberCountValue > 0) {
+                        NSString *groupList = [target.groupIdentifiers componentsJoinedByString:@","];
+                        [warnings addObject:[NSString stringWithFormat:
+                            @"App Group backup %@ contained %llu internal transaction member(s); omitted from private staging",
+                            archiveName,
+                            reservedMemberCountValue]];
+                        PXDebugAppendLine(debugPre,
+                            [NSString stringWithFormat:
+                                @"appGroupReservedTransactionOmitted archive=%@ groups=%@ members=%llu bytes=%llu",
+                                archiveName,
+                                groupList,
+                                reservedMemberCountValue,
+                                reservedRegularByteValue]);
+                    }
                 }
 
                 for (NSUInteger sourceIndex = 0; sourceIndex < target.planItems.count; sourceIndex++) {
@@ -4120,9 +4188,9 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     }
 
                     CommandResult *extractResult =
-                        [self _tarExtract:tarPath
-                                  archive:archivePath
-                                    toDir:currentGroupWorkspace.dataPath];
+                        [self _tarExtractAppGroupArchive:tarPath
+                                                archive:archivePath
+                                                  toDir:currentGroupWorkspace.dataPath];
                     if (extractResult.exitCode != 0) {
                         [currentGroupWorkspace cleanupWithError:nil];
                         [retainedGroupWorkspace cleanupWithError:nil];
