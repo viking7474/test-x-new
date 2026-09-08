@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, copy, nullable) void (^onDelete)(NSArray<NSString *> *dirs);
 @property (nonatomic, copy, nullable) void (^onSaveAndRestore)(NSString *backupDir);
+@property (nonatomic, copy, nullable) void (^onRestoreOnly)(NSString *backupDir);
 @property (nonatomic, copy, nullable) void (^onSequenceChanged)(NSInteger mode, NSInteger begin, NSInteger end);
 @property (nonatomic, copy, nullable) void (^onNextChanged)(NSInteger nextIndex);
 @property (nonatomic, copy, nullable) NSArray<NSDictionary *> *(^onReload)(void);

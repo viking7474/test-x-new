@@ -220,7 +220,6 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 - (void)restoreOnlyTapped {
     NSString *dir = PXRRSString(self.entry, @"dir");
     if (self.onRestoreOnly && dir.length) self.onRestoreOnly(dir);
-    else if (self.onSaveAndRestore && dir.length) self.onSaveAndRestore(dir);
 }
 
 - (void)deleteTapped {
@@ -819,7 +818,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     UIContextualAction *restore = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                           title:@"Restore"
                                                                         handler:^(__unused UIContextualAction *action, __unused UIView *sourceView, void (^completion)(BOOL)) {
-        if (weakSelf.onSaveAndRestore && dir.length) weakSelf.onSaveAndRestore(dir);
+        if (weakSelf.onRestoreOnly && dir.length) weakSelf.onRestoreOnly(dir);
         completion(YES);
     }];
     restore.backgroundColor = [UIColor systemBlueColor];
@@ -836,7 +835,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         if (weakSelf.onSaveAndRestore) weakSelf.onSaveAndRestore(backupDir);
     };
     detail.onRestoreOnly = ^(NSString *backupDir) {
-        if (weakSelf.onSaveAndRestore) weakSelf.onSaveAndRestore(backupDir);
+        if (weakSelf.onRestoreOnly) weakSelf.onRestoreOnly(backupDir);
     };
     detail.onDelete = ^(NSString *backupDir) {
         if (weakSelf.onDelete) weakSelf.onDelete(@[backupDir ?: @""]);

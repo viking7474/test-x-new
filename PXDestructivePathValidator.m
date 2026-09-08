@@ -18,6 +18,7 @@ static NSString * const PXRootlessAppGroupBase = @"/containers/Shared/AppGroup";
 static NSString * const PXRootfulPluginKitDataBase = @"/private/var/mobile/Containers/Data/PluginKitPlugin";
 static NSString * const PXRootlessPluginKitDataBase = @"/containers/Data/PluginKitPlugin";
 static NSString * const PXContainerMetadataFilename = @".com.apple.mobile_container_manager.metadata.plist";
+static NSString * const PXAlternateContainerMetadataFilename = @".com.apple.containermanagerd.metadata.plist";
 static NSString * const PXContainerMetadataIdentifierKey = @"MCMMetadataIdentifier";
 
 static void PXSetDestructivePathValidatorError(NSError * _Nullable * _Nullable error,
@@ -190,6 +191,21 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
         *lookupError = 0;
     }
     return YES;
+}
+
+static NSString *PXContainerMetadataPathForCandidate(NSString *canonicalCandidate) {
+    NSString *primaryPath = [canonicalCandidate stringByAppendingPathComponent:PXContainerMetadataFilename];
+    const char *primaryFileSystemPath = primaryPath.fileSystemRepresentation;
+    if (!primaryFileSystemPath) {
+        return primaryPath;
+    }
+
+    struct stat primaryStatus;
+    errno = 0;
+    if (lstat(primaryFileSystemPath, &primaryStatus) == 0 || errno != ENOENT) {
+        return primaryPath;
+    }
+    return [canonicalCandidate stringByAppendingPathComponent:PXAlternateContainerMetadataFilename];
 }
 
 @implementation PXDestructivePathValidator
@@ -468,7 +484,7 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
         return nil;
     }
 
-    NSString *metadataPath = [canonicalCandidate stringByAppendingPathComponent:PXContainerMetadataFilename];
+    NSString *metadataPath = PXContainerMetadataPathForCandidate(canonicalCandidate);
     struct stat initialMetadataStatus;
     const char *metadataFileSystemPath = [metadataPath fileSystemRepresentation];
     if (metadataFileSystemPath == NULL) {
@@ -554,7 +570,7 @@ static BOOL PXResolveMobileUserID(uid_t *mobileUserID, int *lookupError) {
     }
 
     NSString *canonicalMetadataParent = [canonicalMetadataPath stringByDeletingLastPathComponent];
-    if (![[canonicalMetadataPath lastPathComponent] isEqualToString:PXContainerMetadataFilename] ||
+    if (![[canonicalMetadataPath lastPathComponent] isEqualToString:metadataPath.lastPathComponent] ||
         ![canonicalMetadataParent isEqualToString:canonicalCandidate]) {
         PXSetDestructivePathValidatorError(error,
                                            PXDestructivePathValidatorErrorCanonicalBaseViolation,

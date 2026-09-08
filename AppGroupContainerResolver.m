@@ -2,8 +2,12 @@
 
 #import <sys/stat.h>
 #import <objc/message.h>
+#import <errno.h>
 
 NSString * const PXAppGroupContainerResolverErrorDomain = @"PXAppGroupContainerResolver";
+
+static NSString * const PXAppGroupResolverPrimaryMetadataFilename = @".com.apple.mobile_container_manager.metadata.plist";
+static NSString * const PXAppGroupResolverAlternateMetadataFilename = @".com.apple.containermanagerd.metadata.plist";
 
 static BOOL PXAppGroupResolverStringContainsNUL(NSString *value) {
     unichar nulCharacter = 0;
@@ -81,6 +85,28 @@ static BOOL PXAppGroupResolverRegularFileAtPath(NSString *path) {
         return NO;
     }
     return S_ISREG(entryStat.st_mode) && !S_ISLNK(entryStat.st_mode);
+}
+
+static NSString *PXAppGroupResolverMetadataPath(NSString *containerPath) {
+    NSString *primaryPath = [containerPath stringByAppendingPathComponent:PXAppGroupResolverPrimaryMetadataFilename];
+    const char *primaryFileSystemPath = primaryPath.fileSystemRepresentation;
+    if (!primaryFileSystemPath) {
+        return nil;
+    }
+
+    struct stat primaryStat;
+    errno = 0;
+    if (lstat(primaryFileSystemPath, &primaryStat) == 0) {
+        return S_ISREG(primaryStat.st_mode) && !S_ISLNK(primaryStat.st_mode)
+            ? primaryPath
+            : nil;
+    }
+    if (errno != ENOENT) {
+        return nil;
+    }
+
+    NSString *alternatePath = [containerPath stringByAppendingPathComponent:PXAppGroupResolverAlternateMetadataFilename];
+    return PXAppGroupResolverRegularFileAtPath(alternatePath) ? alternatePath : nil;
 }
 
 typedef NS_ENUM(NSInteger, PXAppGroupMCMResolutionState) {
@@ -197,9 +223,8 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
                                                          NSString *groupIdentifier,
                                                          BOOL *metadataMalformed) {
     if (metadataMalformed) *metadataMalformed = NO;
-    NSString *metadataPath = [containerPath stringByAppendingPathComponent:
-                              @".com.apple.mobile_container_manager.metadata.plist"];
-    if (!PXAppGroupResolverRegularFileAtPath(metadataPath)) {
+    NSString *metadataPath = PXAppGroupResolverMetadataPath(containerPath);
+    if (!metadataPath.length) {
         return NO;
     }
     NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
@@ -260,6 +285,8 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
                                               &registeredPath,
                                               &registeredUUID,
                                               &mcmQueryError);
+    PXAppGroupContainerResolverErrorCode registeredValidationErrorCode = PXAppGroupContainerResolverErrorInvalidCandidate;
+    NSString *registeredValidationFailure = nil;
     if (mcmState == PXAppGroupMCMResolutionStateFailed) {
         NSString *detail = mcmQueryError.localizedDescription.length
             ? mcmQueryError.localizedDescription
@@ -301,33 +328,29 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
         // sanity-checked, but it is not required to equal the filesystem basename; the destructive path
         // validator independently revalidates the fixed root, basename UUID, metadata identity and inode.
         if (!realDirectory || !pathUUID || !mcmUUID || !metadataMatches) {
-            PXAppGroupResolverAssignError(error,
-                                          metadataMalformed
-                                              ? PXAppGroupContainerResolverErrorMetadataInvalid
-                                              : PXAppGroupContainerResolverErrorInvalidCandidate,
-                                          [NSString stringWithFormat:
-                                              @"Registered App Group container failed exact filesystem validation (directory=%d pathUUID=%d mcmUUID=%d metadata=%d)",
-                                              realDirectory ? 1 : 0,
-                                              pathUUID ? 1 : 0,
-                                              mcmUUID ? 1 : 0,
-                                              metadataMatches ? 1 : 0]);
-            return nil;
+            registeredValidationErrorCode = metadataMalformed
+                ? PXAppGroupContainerResolverErrorMetadataInvalid
+                : PXAppGroupContainerResolverErrorInvalidCandidate;
+            registeredValidationFailure = [NSString stringWithFormat:
+                @"Registered App Group container failed exact filesystem validation (directory=%d pathUUID=%d mcmUUID=%d metadata=%d); exact fixed-root fallback found no valid match",
+                realDirectory ? 1 : 0,
+                pathUUID ? 1 : 0,
+                mcmUUID ? 1 : 0,
+                metadataMatches ? 1 : 0];
+        } else {
+            PXResolvedContainer *registeredCandidate =
+                [[PXResolvedContainer alloc] initWithKind:PXResolvedContainerKindAppGroup
+                                                     root:root
+                                      requestedIdentifier:groupIdentifier
+                                       metadataIdentifier:groupIdentifier
+                                            containerUUID:registeredPath.lastPathComponent
+                                            containerPath:registeredPath];
+            if (registeredCandidate) {
+                return @[registeredCandidate];
+            }
+            registeredValidationErrorCode = PXAppGroupContainerResolverErrorInvalidCandidate;
+            registeredValidationFailure = @"Registered App Group container could not be represented safely; exact fixed-root fallback found no valid match";
         }
-
-        PXResolvedContainer *registeredCandidate =
-            [[PXResolvedContainer alloc] initWithKind:PXResolvedContainerKindAppGroup
-                                                 root:root
-                                  requestedIdentifier:groupIdentifier
-                                   metadataIdentifier:groupIdentifier
-                                        containerUUID:registeredPath.lastPathComponent
-                                        containerPath:registeredPath];
-        if (!registeredCandidate) {
-            PXAppGroupResolverAssignError(error,
-                                          PXAppGroupContainerResolverErrorInvalidCandidate,
-                                          @"Registered App Group container could not be represented safely");
-            return nil;
-        }
-        return @[registeredCandidate];
     }
 
     NSFileManager *fileManager = [NSFileManager defaultManager];
@@ -367,40 +390,16 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
             continue;
         }
 
-        NSString *metadataPath = [containerPath stringByAppendingPathComponent:
-                                  @".com.apple.mobile_container_manager.metadata.plist"];
-        if (!PXAppGroupResolverRegularFileAtPath(metadataPath)) {
-            continue;
+        BOOL metadataMalformed = NO;
+        BOOL exactMatch = PXAppGroupResolverMetadataMatchesIdentifier(containerPath,
+                                                                      groupIdentifier,
+                                                                      &metadataMalformed);
+        if (metadataMalformed) {
+            PXAppGroupResolverAssignError(error,
+                                          PXAppGroupContainerResolverErrorMetadataInvalid,
+                                          @"App Group metadata contains duplicate exact identities");
+            return nil;
         }
-
-        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-        if (![metadata isKindOfClass:[NSDictionary class]]) {
-            continue;
-        }
-
-        id metadataIdentifier = metadata[@"MCMMetadataIdentifier"];
-        BOOL exactMatch = NO;
-        if ([metadataIdentifier isKindOfClass:[NSString class]]) {
-            NSString *metadataString = (NSString *)metadataIdentifier;
-            exactMatch = PXAppGroupResolverIdentifierIsValid(metadataString) &&
-                         [metadataString isEqualToString:groupIdentifier];
-        } else if ([metadataIdentifier isKindOfClass:[NSArray class]]) {
-            NSUInteger exactOccurrenceCount = 0;
-            for (id element in (NSArray *)metadataIdentifier) {
-                if ([element isKindOfClass:[NSString class]] &&
-                    [(NSString *)element isEqualToString:groupIdentifier]) {
-                    exactOccurrenceCount++;
-                }
-            }
-            if (exactOccurrenceCount > 1) {
-                PXAppGroupResolverAssignError(error,
-                                              PXAppGroupContainerResolverErrorMetadataInvalid,
-                                              @"App Group metadata contains duplicate exact identities");
-                return nil;
-            }
-            exactMatch = exactOccurrenceCount == 1;
-        }
-
         if (!exactMatch) {
             continue;
         }
@@ -421,6 +420,12 @@ static BOOL PXAppGroupResolverMetadataMatchesIdentifier(NSString *containerPath,
         [matches addObject:candidate];
     }
 
+    if (matches.count == 0 && registeredValidationFailure.length) {
+        PXAppGroupResolverAssignError(error,
+                                      registeredValidationErrorCode,
+                                      registeredValidationFailure);
+        return nil;
+    }
     return [matches copy];
 }
 

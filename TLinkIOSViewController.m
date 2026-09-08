@@ -7625,6 +7625,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         if (!backupDir.length) { [weakSelf showDashboardMessage:@"Thiếu RRS" message:@"Không tìm thấy file RRS để restore."]; return; }
         [weakSelf saveCurrentRRSThenRestoreBackupDirectory:backupDir];
     };
+    vc.onRestoreOnly = ^(NSString *backupDir) {
+        if (!backupDir.length) { [weakSelf showDashboardMessage:@"Thiếu RRS" message:@"Không tìm thấy file RRS để restore."]; return; }
+        [weakSelf showProgressHUDWithTitle:@"Restore RRS..."];
+        [weakSelf restoreBackupDirectoryAfterClearingManifestApp:backupDir warnings:[NSMutableArray array]];
+    };
     vc.onNextChanged = ^(NSInteger nextIndex) {
         [[NSUserDefaults standardUserDefaults] setInteger:nextIndex forKey:[weakSelf currentProfileRestoreIndexKey]];
         [[NSUserDefaults standardUserDefaults] synchronize];
