@@ -7547,10 +7547,24 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self restoreQuickApps:apps backupMap:backupMap index:0 restoreIndex:idx warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self hideProgressHUD];
-            [[NSUserDefaults standardUserDefaults] setInteger:idx + 1 forKey:[self currentProfileRestoreIndexKey]];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            NSString *msg = [NSString stringWithFormat:@"Đã restore lượt %ld cho %lu app.%@", (long)idx + 1, (unsigned long)apps.count, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
-            [self showDashboardMessage:@"Restore xong" message:msg];
+            BOOL restoreFailed = [warnings indexOfObjectPassingTest:^BOOL(NSString *warning, NSUInteger warningIndex, BOOL *stop) {
+                (void)warningIndex;
+                if ([warning hasPrefix:@"Restore "]) {
+                    *stop = YES;
+                    return YES;
+                }
+                return NO;
+            }] != NSNotFound;
+            if (!restoreFailed) {
+                [[NSUserDefaults standardUserDefaults] setInteger:idx + 1 forKey:[self currentProfileRestoreIndexKey]];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+            }
+            NSString *msg = [NSString stringWithFormat:@"%@ lượt %ld cho %lu app.%@",
+                             restoreFailed ? @"Restore chưa hoàn tất" : @"Đã restore",
+                             (long)idx + 1,
+                             (unsigned long)apps.count,
+                             warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+            [self showDashboardMessage:restoreFailed ? @"Restore có lỗi" : @"Restore xong" message:msg];
         });
     }];
 }
@@ -7574,9 +7588,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         if (!clearSuccess) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", manifestAppName, clearError.localizedDescription ?: @"failed"]];
         [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Restore %@", manifestAppName]];
         [[AppDataBackupManager shared] restoreBackupAtDirectory:dir bundleID:manifestBundleID appName:manifestAppName completion:^(PXRestoreResult *result, NSError *error) {
-            if (error) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", manifestAppName, error.localizedDescription ?: @"failed"]];
-            if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-            [self markRRSRestoredAtBackupDirectory:dir];
+            if (error || !result) {
+                [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@",
+                                     manifestAppName,
+                                     error.localizedDescription ?: @"failed"]];
+            } else {
+                if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+                [self markRRSRestoredAtBackupDirectory:dir];
+            }
             [self restoreQuickApps:apps backupMap:backupMap index:index + 1 restoreIndex:restoreIndex warnings:warnings completion:completion];
         }];
     }];
@@ -7658,7 +7677,19 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", appName, error.localizedDescription ?: @"failed"]];
         [self updateProgress:0.7 detail:[NSString stringWithFormat:@"Restore %@", appName]];
         [[AppDataBackupManager shared] restoreBackupAtDirectory:backupDir bundleID:bundleID appName:appName completion:^(PXRestoreResult *result, NSError *restoreError) {
-            if (restoreError) [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@", appName, restoreError.localizedDescription ?: @"failed"]];
+            if (restoreError || !result) {
+                [warnings addObject:[NSString stringWithFormat:@"Restore %@: %@",
+                                     appName,
+                                     restoreError.localizedDescription ?: @"failed"]];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self hideProgressHUD];
+                    NSString *msg = [NSString stringWithFormat:@"Restore %@ chưa hoàn tất.%@",
+                                     appName,
+                                     warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+                    [self showDashboardMessage:@"Restore thất bại" message:msg];
+                });
+                return;
+            }
             if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
             [self markRRSRestoredAtBackupDirectory:backupDir];
             dispatch_async(dispatch_get_main_queue(), ^{

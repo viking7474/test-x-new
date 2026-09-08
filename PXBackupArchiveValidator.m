@@ -1306,10 +1306,22 @@ static NSString *PXArchiveNormalizeMemberPath(NSString *input,
     BOOL directory = type == '5';
     BOOL regular = type == 0 || type == '0';
     if (!regular && !directory) {
+        NSString *typeName = @"special";
+        switch (type) {
+            case '1': typeName = @"hard link"; break;
+            case '2': typeName = @"symbolic link"; break;
+            case '3': typeName = @"character device"; break;
+            case '4': typeName = @"block device"; break;
+            case '6': typeName = @"FIFO"; break;
+            default: break;
+        }
         return PXArchiveFail(error,
                              PXBackupArchiveValidatorErrorUnsupportedEntryType,
                              [self memberPathForIndex:_currentHeaderIndex field:@"type"],
-                             @"An archive member type is unsupported.");
+                             [NSString stringWithFormat:
+                              @"An archive member type is unsupported (%@, type=0x%02X).",
+                              typeName,
+                              (unsigned int)(unsigned char)type]);
     }
     if (_pendingPAXLinkPath || _pendingGNULinkPath) {
         return PXArchiveFail(error,

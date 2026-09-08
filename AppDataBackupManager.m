@@ -979,14 +979,21 @@ static NSString *PXFindDataContainerUUIDByMetadata(NSFileManager *fm, NSString *
     CommandRunner *runner = [CommandRunner shared];
 
     // Prefer preserving extended attributes (file protection class), ACLs and numeric owners.
-    NSArray<NSString *> *preferredArguments = @[
+    // GNU tar normally emits hard-link members for multiply-linked regular files; Restore intentionally
+    // accepts only regular files/directories, so normalize GNU hard links into independent file members.
+    BOOL isGnuTar = [[tarPath lastPathComponent] isEqualToString:@"gtar"];
+    NSMutableArray<NSString *> *preferredArguments = [NSMutableArray array];
+    if (isGnuTar) {
+        [preferredArguments addObject:@"--hard-dereference"];
+    }
+    [preferredArguments addObjectsFromArray:@[
         @"--xattrs", @"--acls", @"--numeric-owner",
         @"-czf", archivePath,
         @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
         @"--exclude", @".com.apple.containermanagerd.metadata.plist",
         @"-C", sourceDir,
         @"."
-    ];
+    ]];
     CommandResult *res = [runner runExecutableAndCapture:tarPath
                                                 arguments:preferredArguments
                                                timeoutSec:PXTarCreateTimeoutSeconds
@@ -1000,13 +1007,17 @@ static NSString *PXFindDataContainerUUIDByMetadata(NSFileManager *fm, NSString *
     }
 
     // Fallback only for a normal non-zero exit, which covers tar variants without the preservation flags.
-    NSArray<NSString *> *fallbackArguments = @[
+    NSMutableArray<NSString *> *fallbackArguments = [NSMutableArray array];
+    if (isGnuTar) {
+        [fallbackArguments addObject:@"--hard-dereference"];
+    }
+    [fallbackArguments addObjectsFromArray:@[
         @"-czf", archivePath,
         @"--exclude", @".com.apple.mobile_container_manager.metadata.plist",
         @"--exclude", @".com.apple.containermanagerd.metadata.plist",
         @"-C", sourceDir,
         @"."
-    ];
+    ]];
     return [runner runExecutableAndCapture:tarPath
                                   arguments:fallbackArguments
                                  timeoutSec:PXTarCreateTimeoutSeconds
@@ -2308,6 +2319,21 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                 }
                                                       error:&groupArtifactError];
             if (!groupArtifact) {
+                PXDebugAppendLine(debugBefore,
+                                  [NSString stringWithFormat:
+                                   @"groupArchiveFailed group=%@ exit=%d timedOut=%d spawn=%d runner=%d normal=%d signal=%d stdoutTruncated=%d stderrTruncated=%d stderrPresent=%d writerErrorDomain=%@ writerErrorCode=%ld",
+                                   info.groupID ?: @"",
+                                   groupTarResult ? groupTarResult.exitCode : -1,
+                                   groupTarResult ? (groupTarResult.timedOut ? 1 : 0) : 0,
+                                   groupTarResult ? groupTarResult.spawnError : EINVAL,
+                                   groupTarResult ? groupTarResult.runnerError : EINVAL,
+                                   groupTarResult ? (groupTarResult.exitedNormally ? 1 : 0) : 0,
+                                   groupTarResult ? groupTarResult.terminationSignal : 0,
+                                   groupTarResult ? (groupTarResult.stdoutTruncated ? 1 : 0) : 0,
+                                   groupTarResult ? (groupTarResult.stderrTruncated ? 1 : 0) : 0,
+                                   groupTarResult ? (groupTarResult.stderrString.length > 0 ? 1 : 0) : 0,
+                                   groupArtifactError.domain ?: @"",
+                                   (long)groupArtifactError.code]);
                 NSError *fatalPolicyError = nil;
                 BOOL shouldContinue = PXBackupApplyArtifactFailurePolicy(
                     appGroupArtifactPolicy,
