@@ -56,6 +56,7 @@ static const NSTimeInterval PXPermissionCommandTimeoutSeconds = 120.0;
 static const NSUInteger PXPermissionCommandOutputLimitBytes = 64 * 1024;
 static const NSTimeInterval PXTarCreateTimeoutSeconds = 60.0 * 60.0;
 static const NSTimeInterval PXTarExtractTimeoutSeconds = 60.0 * 60.0;
+static const NSTimeInterval PXBackupFileCopyTimeoutSeconds = 60.0 * 60.0;
 static const NSUInteger PXTarCommandOutputLimitBytes = 1024 * 1024;
 static const NSUInteger PXKeychainBackupPlistMaximumBytes = 64 * 1024 * 1024;
 
@@ -2719,6 +2720,8 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         NSString *preferencesRelativePath =
             [NSString stringWithFormat:@"preferences/%@.plist", bundleID];
         NSString *prefSourcePath = [self _preferencesPlistPathForBundleID:bundleID];
+        NSString *backupCopyExecutablePath =
+            [runner firstExistingPath:@[@"/bin/cp", @"/usr/bin/cp"]];
         if (preferencesRequested) {
             if ([fm fileExistsAtPath:prefSourcePath]) {
                 NSError *preferencesArtifactError = nil;
@@ -2726,11 +2729,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                     [artifactWriter writeArtifactAtRelativePath:preferencesRelativePath
                                                          policy:preferencesArtifactPolicy
                                                        producer:^BOOL(NSString *temporaryOutputPath) {
-                        NSString *cpCmd = [NSString stringWithFormat:@"cp -f %@ %@ 2>/dev/null",
-                            PXShellQuote(prefSourcePath),
-                            PXShellQuote(temporaryOutputPath)];
-                        CommandResult *copyResult = [runner run:cpCmd];
-                        return copyResult && copyResult.exitCode == 0;
+                        if (!backupCopyExecutablePath.length) {
+                            return NO;
+                        }
+                        CommandResult *copyResult =
+                            [runner runExecutableAndCapture:backupCopyExecutablePath
+                                                  arguments:@[@"-f", prefSourcePath, temporaryOutputPath]
+                                                 timeoutSec:PXBackupFileCopyTimeoutSeconds
+                                             maxOutputBytes:PXPermissionCommandOutputLimitBytes];
+                        return copyResult.succeeded;
                     }
                                                           error:&preferencesArtifactError];
                 if (!preferencesArtifactRecord) {
@@ -3024,12 +3031,16 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         [artifactWriter writeArtifactAtRelativePath:dstRel
                                                              policy:sharedSystemDatabaseArtifactPolicy
                                                            producer:^BOOL(NSString *temporaryOutputPath) {
-                            NSString *copyCommand = [NSString stringWithFormat:@"cp -a %@ %@ 2>/dev/null",
-                                PXShellQuote(src),
-                                PXShellQuote(temporaryOutputPath)];
-                            CommandResult *copyResult = [runner run:copyCommand];
-                            return copyResult && copyResult.exitCode == 0;
+                        if (!backupCopyExecutablePath.length) {
+                            return NO;
                         }
+                        CommandResult *copyResult =
+                            [runner runExecutableAndCapture:backupCopyExecutablePath
+                                                  arguments:@[@"-a", src, temporaryOutputPath]
+                                                 timeoutSec:PXBackupFileCopyTimeoutSeconds
+                                             maxOutputBytes:PXPermissionCommandOutputLimitBytes];
+                        return copyResult.succeeded;
+                    }
                                                               error:&sharedArtifactError];
                     if (sharedArtifact) {
                         [sharedDatabaseArtifactRecords addObject:sharedArtifact];

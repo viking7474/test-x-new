@@ -401,7 +401,7 @@
     NSArray *services = @[
         @{@"url": @"https://ifconfig.me/ip", @"isJSON": @NO},
         @{@"url": @"https://api.myip.com", @"isJSON": @YES, @"key": @"ip"},
-        @{@"url": @"http://ip-api.com/json", @"isJSON": @YES, @"key": @"query"}
+        @{@"url": @"https://api.ipify.org", @"isJSON": @NO}
     ];
     
     // Create a dictionary to count occurrences of each IP

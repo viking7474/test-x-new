@@ -466,9 +466,13 @@
 
 // Handle authentication challenges (for certificate pinning)
 - (void)URLSession:(NSURLSession *)session didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler {
-    // Certificate pinning for weaponx.us domain
+    // Certificate pinning for weaponx.us and its subdomains. Do not use substring matching:
+    // e.g. weaponx.us.attacker.example must never enter the pinned validation path.
     if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
-        if ([challenge.protectionSpace.host containsString:@"weaponx.us"]) {
+        NSString *host = challenge.protectionSpace.host.lowercaseString;
+        BOOL hostMatchesWeaponX = [host isEqualToString:@"weaponx.us"] ||
+                                  [host hasSuffix:@".weaponx.us"];
+        if (hostMatchesWeaponX) {
             // Get the server trust
             SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
             

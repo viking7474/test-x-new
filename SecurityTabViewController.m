@@ -5258,9 +5258,10 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)localIPv6FieldChanged:(UITextField *)textField {
-    // Save changes to profile-based storage
+    // Persist the exact IPv4/IPv6 pair shown in the UI.
     NSString *ipv4 = self.localIPField.text;
-    [NetworkManager saveLocalIPAddress:ipv4]; // This will also update IPv6
+    NSString *ipv6 = textField.text;
+    [NetworkManager saveLocalIPAddress:ipv4 ipv6Address:ipv6];
     // Send notification that local IP has changed
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.localIPChanged"), NULL, NULL, YES);

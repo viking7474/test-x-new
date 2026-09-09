@@ -23,11 +23,6 @@ static id PXReadSecuritySettingObject(NSString *key) {
 
     CFStringRef cfKey = (__bridge CFStringRef)key;
     CFStringRef appID = CFSTR("com.weaponx.securitySettings");
-    // P1 FIX (toggle/profile gate): injected processes cache the com.weaponx.securitySettings
-    // domain in cfprefsd, so CFPreferencesCopyAppValue keeps returning the OLD toggle value
-    // after the user turns spoofing off or switches profile — the gate never actually flips.
-    // Force a synchronize so the copy re-reads the latest values written by the WeaponX app.
-    CFPreferencesAppSynchronize(appID);
     CFPropertyListRef pref = CFPreferencesCopyAppValue(cfKey, appID);
     if (pref) {
         result = CFBridgingRelease(pref);
@@ -50,41 +45,19 @@ static id PXReadSecuritySettingObject(NSString *key) {
     return result;
 }
 
-static BOOL PXReadSecuritySettingHasKey(NSString *key) {
-    if (!key.length) return NO;
-    gPXReadingSecuritySettings = YES;
-
-    CFStringRef cfKey = (__bridge CFStringRef)key;
-    CFStringRef appID = CFSTR("com.weaponx.securitySettings");
-    // P1 FIX (toggle/profile gate): mirror PXReadSecuritySettingObject — synchronize before
-    // reading so a freshly toggled or profile-switched value is not masked by a stale cfprefsd
-    // cache in the injected process.
-    CFPreferencesAppSynchronize(appID);
-    CFPropertyListRef pref = CFPreferencesCopyAppValue(cfKey, appID);
-    if (pref) {
-        CFRelease(pref);
-        gPXReadingSecuritySettings = NO;
-        return YES;
-    }
-
-    NSArray<NSString *> *paths = @[
-        @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
-        @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"
-    ];
-    for (NSString *path in paths) {
-        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
-        if ([dict isKindOfClass:[NSDictionary class]] && dict[key] != nil) {
-            gPXReadingSecuritySettings = NO;
-            return YES;
-        }
-    }
-    gPXReadingSecuritySettings = NO;
-    return NO;
-}
-
 static BOOL PXReadSecuritySettingBool(NSString *key) {
     id v = PXReadSecuritySettingObject(key);
     return v ? [v boolValue] : NO;
+}
+
+static void PXSynchronizeSecuritySettings(void) {
+    gPXReadingSecuritySettings = YES;
+    CFPreferencesAppSynchronize(CFSTR("com.weaponx.securitySettings"));
+    gPXReadingSecuritySettings = NO;
+}
+
+static NSTimeInterval PXMonotonicNow(void) {
+    return [NSProcessInfo processInfo].systemUptime;
 }
 
 // Immutable snapshot for hot-path scope decisions.
@@ -144,12 +117,33 @@ static PXScopeSnapshot *gSnapshot = nil; // immutable once published
 static uint64_t gScopeGeneration = 1;
 static NSMutableDictionary *gDecisionLogTimes = nil; // protected by gDecisionLogLock
 
+static os_unfair_lock gDebugFlagLock = OS_UNFAIR_LOCK_INIT;
+static NSTimeInterval gDebugFlagCheckTime = 0;
+static BOOL gDebugFlagsInitialized = NO;
+static BOOL gDebugFlagEnabled = NO;
+static BOOL gDebugFlagVerbose = NO;
+
+static BOOL PXScopeDebugFlagState(BOOL verbose) {
+    NSTimeInterval now = PXMonotonicNow();
+    os_unfair_lock_lock(&gDebugFlagLock);
+    if (!gDebugFlagsInitialized || now - gDebugFlagCheckTime >= 1.0) {
+        gDebugFlagEnabled = access("/tmp/px_debug_scope", F_OK) == 0 ||
+                            access("/tmp/px_debug_all", F_OK) == 0;
+        gDebugFlagVerbose = access("/tmp/px_debug_scope_verbose", F_OK) == 0;
+        gDebugFlagCheckTime = now;
+        gDebugFlagsInitialized = YES;
+    }
+    BOOL result = verbose ? gDebugFlagVerbose : gDebugFlagEnabled;
+    os_unfair_lock_unlock(&gDebugFlagLock);
+    return result;
+}
+
 static BOOL PXScopeFileDebugEnabled(void) {
-    return access("/tmp/px_debug_scope", F_OK) == 0 || access("/tmp/px_debug_all", F_OK) == 0;
+    return PXScopeDebugFlagState(NO);
 }
 
 static BOOL PXScopeFileDebugVerboseEnabled(void) {
-    return access("/tmp/px_debug_scope_verbose", F_OK) == 0;
+    return PXScopeDebugFlagState(YES);
 }
 
 static void PXScopeFileLog(NSString *format, ...) {
@@ -186,31 +180,39 @@ static NSDictionary *PXLoadScopedAppsFromDisk(void) {
 }
 
 static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
+    // Sync once per snapshot rebuild. Individual reads below no longer force cfprefsd
+    // synchronization, avoiding repeated IPC/I/O on this otherwise hot cache-miss path.
+    PXSynchronizeSecuritySettings();
+
     // Disk/settings reads happen WITHOUT holding gSnapshotLock.
     BOOL deviceEnabled = PXReadSecuritySettingBool(@"deviceSpoofingEnabled");
     BOOL fullTest = PXReadSecuritySettingBool(@"fullSpoofTestModeEnabled");
 
     BOOL safariEnabled = deviceEnabled;
-    if (PXReadSecuritySettingHasKey(@"safariStackSpoofEnabled")) {
-        safariEnabled = deviceEnabled && PXReadSecuritySettingBool(@"safariStackSpoofEnabled");
+    id safariSetting = PXReadSecuritySettingObject(@"safariStackSpoofEnabled");
+    if (safariSetting != nil) {
+        safariEnabled = deviceEnabled && [safariSetting boolValue];
     }
     if (deviceEnabled && fullTest) {
         safariEnabled = YES;
     }
 
     BOOL uiScaleEnabled = deviceEnabled;
-    if (PXReadSecuritySettingHasKey(@"displayUIScaleSpoofEnabled")) {
-        uiScaleEnabled = deviceEnabled && PXReadSecuritySettingBool(@"displayUIScaleSpoofEnabled");
+    id uiScaleSetting = PXReadSecuritySettingObject(@"displayUIScaleSpoofEnabled");
+    if (uiScaleSetting != nil) {
+        uiScaleEnabled = deviceEnabled && [uiScaleSetting boolValue];
     }
 
     BOOL pixelMetricsEnabled = deviceEnabled;
-    if (PXReadSecuritySettingHasKey(@"displayPixelMetricsSpoofEnabled")) {
-        pixelMetricsEnabled = deviceEnabled && PXReadSecuritySettingBool(@"displayPixelMetricsSpoofEnabled");
+    id pixelMetricsSetting = PXReadSecuritySettingObject(@"displayPixelMetricsSpoofEnabled");
+    if (pixelMetricsSetting != nil) {
+        pixelMetricsEnabled = deviceEnabled && [pixelMetricsSetting boolValue];
     }
 
     BOOL webScreenEnabled = deviceEnabled;
-    if (PXReadSecuritySettingHasKey(@"displayWebScreenSpoofEnabled")) {
-        webScreenEnabled = deviceEnabled && PXReadSecuritySettingBool(@"displayWebScreenSpoofEnabled");
+    id webScreenSetting = PXReadSecuritySettingObject(@"displayWebScreenSpoofEnabled");
+    if (webScreenSetting != nil) {
+        webScreenEnabled = deviceEnabled && [webScreenSetting boolValue];
     }
 
     NSDictionary *scoped = PXLoadScopedAppsFromDisk();
@@ -224,12 +226,12 @@ static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
         displayWebScreenEnabled:webScreenEnabled
         scopedApps:scoped ?: @{}
         generation:generation
-        expirationTime:[NSDate timeIntervalSinceReferenceDate] + 1.0];
+        expirationTime:PXMonotonicNow() + 1.0];
 }
 
 static PXScopeSnapshot *PXCurrentSnapshot(void) {
     PXScopeSnapshot *local = nil;
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval now = PXMonotonicNow();
 
     os_unfair_lock_lock(&gSnapshotLock);
     local = gSnapshot;
@@ -249,7 +251,7 @@ static PXScopeSnapshot *PXCurrentSnapshot(void) {
     for (;;) {
         os_unfair_lock_lock(&gSnapshotLock);
         local = gSnapshot;
-        now = [NSDate timeIntervalSinceReferenceDate];
+        now = PXMonotonicNow();
         needsRefresh = (!local || now >= local.expirationTime);
         uint64_t generation = gScopeGeneration;
         os_unfair_lock_unlock(&gSnapshotLock);
@@ -298,6 +300,15 @@ static BOOL PXScopedBundleEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bun
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length || !snap) return NO;
     NSDictionary *entry = [snap.scopedApps[bundleID] isKindOfClass:[NSDictionary class]] ? snap.scopedApps[bundleID] : nil;
     return [entry[@"enabled"] boolValue];
+}
+
+static BOOL PXBundleIsStrictlyScopedInSnapshot(PXScopeSnapshot *snap, NSString *bundleID, NSString *processName) {
+    if (!snap.deviceSpoofEnabled) return NO;
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
+    if ([bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID isEqualToString:@"com.hydra.weaponx"]) return NO;
+    if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
+    if (PXIsWebKitHelperProcess(bundleID, processName)) return NO;
+    return PXScopedBundleEnabledInSnapshot(snap, bundleID);
 }
 
 NSDictionary<NSString *, NSDictionary *> *PXScopedAppsSnapshot(void) {
@@ -453,12 +464,12 @@ NSString *PXWebKitHostBundleIdentifier(void) {
 }
 
 BOOL PXWebKitHostIsScopedForSpoofing(void) {
-    if (!PXDeviceSpoofingEnabled()) return NO;
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
+    if (!snap.deviceSpoofEnabled) return NO;
     NSString *host = PXWebKitHostBundleIdentifier();
     if (!host.length) return NO; // fail closed
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (PXIsCriticalSystemProcess(host, proc)) return NO;
-    PXScopeSnapshot *snap = PXCurrentSnapshot();
     return PXScopedBundleEnabledInSnapshot(snap, host);
 }
 
@@ -488,23 +499,31 @@ BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName) {
 }
 
 BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
-    if (!PXDeviceSpoofingEnabled()) return NO;
-    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
-    if ([bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID isEqualToString:@"com.hydra.weaponx"]) return NO;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    if (PXIsCriticalSystemProcess(bundleID, proc)) return NO;
-    if (PXIsWebKitHelperProcess(bundleID, proc)) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
-    return PXScopedBundleEnabledInSnapshot(snap, bundleID);
+    NSString *proc = [NSProcessInfo processInfo].processName;
+    return PXBundleIsStrictlyScopedInSnapshot(snap, bundleID, proc);
 }
 
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
     if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
+
+    // Resolve one immutable snapshot for the complete decision. This avoids repeated
+    // lock/snapshot lookups through PXDeviceSpoofingEnabled/PXSafariStackSpoofEnabled/etc.
+    PXScopeSnapshot *snap = PXCurrentSnapshot();
     BOOL webKitHelper = PXIsWebKitHelperProcess(bundleID, processName);
     NSString *webKitHost = webKitHelper ? PXWebKitHostBundleIdentifier() : nil;
-    BOOL webKitHostScoped = webKitHelper && ((options & PXScopeOptionAllowSafariAuthStack) != 0) && PXSafariStackSpoofEnabled() && PXWebKitHostIsScopedForSpoofing();
-    BOOL strict = PXBundleIsStrictlyScopedForSpoofing(bundleID);
-    BOOL safari = !webKitHelper && ((options & PXScopeOptionAllowSafariAuthStack) && PXSafariStackSpoofEnabled() && PXIsSafariStackProcess(bundleID, processName));
+    BOOL safariStackEnabled = snap.safariStackEnabled;
+    BOOL webKitHostScoped = webKitHelper &&
+                            ((options & PXScopeOptionAllowSafariAuthStack) != 0) &&
+                            safariStackEnabled &&
+                            webKitHost.length &&
+                            !PXIsCriticalSystemProcess(webKitHost, processName) &&
+                            PXScopedBundleEnabledInSnapshot(snap, webKitHost);
+    BOOL strict = PXBundleIsStrictlyScopedInSnapshot(snap, bundleID, processName);
+    BOOL safari = !webKitHelper &&
+                  ((options & PXScopeOptionAllowSafariAuthStack) != 0) &&
+                  safariStackEnabled &&
+                  PXIsSafariStackProcess(bundleID, processName);
     BOOL allowed = strict || safari || webKitHostScoped;
 
     // Decision log only when debug flags enabled — no hot-path file/NSLog otherwise.
@@ -512,7 +531,7 @@ BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PX
     BOOL debugOn = PXScopeFileDebugEnabled() || verboseFile;
     if (debugOn) {
         NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%lu|%d", bundleID ?: @"", processName ?: @"", webKitHost ?: @"", (unsigned long)options, allowed];
-        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        NSTimeInterval now = PXMonotonicNow();
         BOOL shouldLog = NO;
         os_unfair_lock_lock(&gDecisionLogLock);
         if (!gDecisionLogTimes) gDecisionLogTimes = [NSMutableDictionary dictionary];

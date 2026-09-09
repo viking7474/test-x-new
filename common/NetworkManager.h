@@ -22,6 +22,8 @@
 // Local IP address methods
 + (NSString *)getCurrentLocalIPAddress;
 + (BOOL)saveLocalIPAddress:(NSString *)ipAddress;
++ (BOOL)saveLocalIPAddress:(NSString *)ipAddress
+             ipv6Address:(NSString *)ipv6Address;
 + (NSString *)getSavedLocalIPAddress;
 + (NSString *)getSavedLocalIPAddressWithForcedRefresh:(BOOL)forceRefresh;
 

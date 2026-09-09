@@ -77,13 +77,21 @@ for token in (
     require(token in injection, f"B-06 injection-filter prerequisite drifted: {token}")
 
 scope = read("TLinkIOSTweak/PXScope.m")
+require(
+    "if (!PXDeviceSpoofingEnabled()) return NO;" in scope or
+    "if (!snap.deviceSpoofEnabled) return NO;" in scope,
+    "B-06 WebKit fail-closed scope contract drifted: spoofing master gate",
+)
 for token in (
-    "if (!PXDeviceSpoofingEnabled()) return NO;",
     "if (!host.length) return NO; // fail closed",
-    "PXWebKitHostIsScopedForSpoofing()",
     "PXScopeOptionAllowSafariAuthStack",
 ):
     require(token in scope, f"B-06 WebKit fail-closed scope contract drifted: {token}")
+require(
+    "PXWebKitHostIsScopedForSpoofing()" in scope or
+    "PXScopedBundleEnabledInSnapshot(snap, webKitHost)" in scope,
+    "B-06 WebKit fail-closed scope contract drifted: scoped host decision",
+)
 
 jb = read("TLinkIOSTweak/JailbreakBypassHooks.x")
 for token in (

@@ -192,7 +192,30 @@
 }
 
 + (BOOL)saveLocalIPAddress:(NSString *)ipAddress {
-    NSString *ipv6Address = [self generateSpoofedLocalIPv6AddressFromCurrent];
+    if (!ipAddress.length) {
+        return NO;
+    }
+
+    // A single-address save must not regenerate an unrelated IPv6 value. Preserve the
+    // profile's existing spoofed IPv6 and only generate it once when no paired value exists.
+    NSString *ipv6Address = nil;
+    NSString *identityDir = [self profileIdentityPath];
+    if (identityDir.length) {
+        NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
+        NSDictionary *networkDict = [NSDictionary dictionaryWithContentsOfFile:networkPath];
+        ipv6Address = [networkDict[@"localIPv6Address"] isKindOfClass:[NSString class]]
+            ? networkDict[@"localIPv6Address"] : nil;
+        if (!ipv6Address.length) {
+            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+            ipv6Address = [deviceIds[@"LocalIPv6Address"] isKindOfClass:[NSString class]]
+                ? deviceIds[@"LocalIPv6Address"] : nil;
+        }
+    }
+    if (!ipv6Address.length) {
+        ipv6Address = [self generateSpoofedLocalIPv6AddressFromCurrent];
+    }
+
     return [self saveLocalIPAddress:ipAddress ipv6Address:ipv6Address];
 }
 
@@ -208,12 +231,13 @@
         return nil;
     }
     
-    // If forced refresh is requested, generate from the real current IPv4 only.
+    // Forced refresh creates the complete spoofed pair once, then persists that exact pair.
     if (forceRefresh) {
         NSString *localIP = [self generateSpoofedLocalIPAddressFromCurrent];
+        NSString *localIPv6 = [self generateSpoofedLocalIPv6AddressFromCurrent];
         if (localIP.length) {
-            [self saveLocalIPAddress:localIP];
-            PXLog(@"[WeaponX] Forced refresh of local IP address: %@", localIP);
+            [self saveLocalIPAddress:localIP ipv6Address:localIPv6];
+            PXLog(@"[WeaponX] Forced refresh of local IP address pair completed");
         } else {
             PXLog(@"[WeaponX] Forced refresh skipped: no current local IPv4 address is available");
         }
