@@ -1241,16 +1241,70 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     )
     clear_wipe_matches = definitions_for_selector(cleaner, clear_wipe_selector)
     expected_clear_arguments = (
-        'arguments:@[ @"--action", @"wipe", @"--groups", groupsCSV, '
-        '@"--requested-groups", groupsCSV, '
-        '@"--effective-entitlements-file", entitlementsPath ]'
+        'arguments:@[ @"wipe", bundleIdentifier, @"--groups", groupsCSV ]'
     )
     clear_wipe_body = " ".join(clear_wipe_matches[0].body_text.split()) if len(clear_wipe_matches) == 1 else ""
     collector.check("BRH-KEY-CLEAR-CLI-METADATA",
-                    len(clear_wipe_matches) == 1 and clear_wipe_body.count(expected_clear_arguments) == 1,
+                    len(clear_wipe_matches) == 1 and
+                    clear_wipe_body.count(expected_clear_arguments) == 1 and
+                    "keychain_backup.sh" in clear_wipe_body and
+                    "noLaunch=1" in clear_wipe_matches[0].body_text,
                     cleaner.path, clear_wipe_matches[0].signature_start_line if clear_wipe_matches else 1,
-                    "AppDataCleaner wipe invocation must pass the complete helper metadata contract")
+                    "AppDataCleaner wipe must route through the headless resigned-helper wrapper")
+    no_launch_tokens = (
+        "PXOpenApplication", "_inAppKeychain", "openApplicationWithBundleID:",
+        "PXWaitForKeychainBridgeResponse", "weaponx_keychain_request",
+    )
+    collector.check("BRH-KEY-NO-LAUNCH",
+                    all(token not in cleaner.masked and token not in manager.masked for token in no_launch_tokens) and
+                    "zeroItemFallbackBlocked=no_launch_policy" in manager.text and
+                    "legacyInAppMethodMigratedToHelper=1 noLaunch=1" in manager.text,
+                    manager.path, source_line_for_token(manager, "zeroItemFallbackBlocked=no_launch_policy"),
+                    "automatic Keychain clear/backup/restore must never launch the target application")
 
+    generation_start = shell.text.find("generate_helper_entitlements()")
+    generation_end = shell.text.find("px_prepare_working_helper()", generation_start)
+    generation_body = (shell.text[generation_start:generation_end]
+                       if generation_start >= 0 and generation_end > generation_start else "")
+    collector.check("BRH-KEY-ENTITLEMENT-UNIVERSAL-CLONE",
+                    generation_start >= 0 and
+                    '[ "$source_ent_file" = "$PX_APP_ENT_PATH" ]' in generation_body and
+                    '"$PX_CP_PATH" "$source_ent_file" "$output_file"' in generation_body and
+                    'if [ -n "$source_ent_file" ]' not in generation_body and
+                    "PX_SOURCE_ENT_FOR_SYSTEM" not in shell.text and
+                    "px_select_source_entitlement" not in shell.text and
+                    "PX_APP_GROUPS_CSV" not in shell.text and
+                    "parse_app_groups" not in shell.text,
+                    shell.path, source_line_for_token(shell, "generate_helper_entitlements()"),
+                    "all Keychain targets must clone the complete signed target entitlement snapshot through one pipeline")
+
+    required_overlay_tokens = (
+        'px_plutil_upsert_bool "platform-application" true "$output_file"',
+        'px_plutil_upsert_string "application-identifier" "$app_identifier" "$output_file"',
+        'px_plutil_upsert_bool "com.apple.private.security.no-sandbox" true "$output_file"',
+        'px_plutil_upsert_bool "com.apple.private.security.no-container" true "$output_file"',
+        'px_plutil_upsert_bool "com.apple.private.security.container-required" false "$output_file"',
+        'px_plutil_upsert_bool "com.apple.keystore.access-keychain-keys" true "$output_file"',
+        'px_plutil_upsert_bool "com.apple.keystore.device" true "$output_file"',
+    )
+    collector.check("BRH-KEY-ENTITLEMENT-MINIMAL-OVERLAY",
+                    all(token in generation_body for token in required_overlay_tokens) and
+                    "|| true" not in generation_body and
+                    '"$PX_PLUTIL_PATH" -lint "$output_file"' in generation_body,
+                    shell.path, source_line_for_token(shell, "platform-application"),
+                    "helper entitlement overlay must be deterministic, minimal and fail closed")
+
+    collector.check("BRH-KEY-ENTITLEMENT-REQUESTED-KAG",
+                    'px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file"' in generation_body and
+                    'generated_groups=$(parse_keychain_groups "$output_file")' in generation_body and
+                    '[ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ]' in generation_body and
+                    'generated_identifier=$(parse_app_identifier "$output_file")' in generation_body and
+                    '[ "$generated_identifier" = "$app_identifier" ]' in generation_body and
+                    'generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_APP_ENT_PATH"' in shell.text and
+                    shell.text.count('px_group_csv_is_subset "$PX_REQUESTED_GROUPS_CSV" "$PX_EFFECTIVE_GROUPS_CSV"') == 1 and
+                    shell.text.count('px_group_csv_is_subset "$PX_EFFECTIVE_GROUPS_CSV" "$PX_REQUESTED_GROUPS_CSV"') == 1,
+                    shell.path, source_line_for_token(shell, 'px_plutil_upsert_json "keychain-access-groups"'),
+                    "helper keychain-access-groups must equal the canonical requested set including application-identifier")
     keychain_sources = [source for path, source in sources.items() if path.startswith("KeychainHelper/") and path.endswith(".m")]
     delete_occurrences = [(source.path, line_number(source.text, match.start()))
                           for source in keychain_sources
@@ -1701,7 +1755,7 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     clear_cli_mutation = method_replacement(
         cleaner,
         clear_wipe_selector,
-        lambda text: text.replace('@"--requested-groups", groupsCSV,', "", 1),
+        lambda text: text.replace('@"--groups",\n                                                           groupsCSV', "", 1),
     )
     tests.append(("clear-helper-cli-metadata", "KEY",
                   replace_source_text(base, cleaner.path, clear_cli_mutation),

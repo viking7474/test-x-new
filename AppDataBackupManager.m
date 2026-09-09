@@ -1641,315 +1641,9 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
         (unsigned long)result.errorCount];
 }
 
-static BOOL PXOpenApplication(NSString *bundleID) {
-    if (!bundleID.length) return NO;
-    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
-    if (!wsCls) return NO;
-    id ws = [wsCls performSelector:@selector(defaultWorkspace)];
-    if (!ws) return NO;
-    if ([ws respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-        BOOL (*msgSend)(id, SEL, id) = (BOOL (*)(id, SEL, id))objc_msgSend;
-        return msgSend(ws, @selector(openApplicationWithBundleID:), bundleID);
-    }
-    return NO;
-}
-
-static NSString *PXSafeBundleString(NSString *bundleID) {
-    if (!bundleID.length) return @"unknown";
-    NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
-    NSMutableString *out = [NSMutableString stringWithCapacity:bundleID.length];
-    for (NSUInteger i = 0; i < bundleID.length; i++) {
-        unichar c = [bundleID characterAtIndex:i];
-        if ([allowed characterIsMember:c]) {
-            [out appendFormat:@"%C", c];
-        } else {
-            [out appendString:@"_"];
-        }
-    }
-    return out;
-}
-
-static void PXDarwinNotifyPost(NSString *name) {
-    if (!name.length) return;
-    CFNotificationCenterRef c = CFNotificationCenterGetDarwinNotifyCenter();
-    CFNotificationCenterPostNotification(c, (__bridge CFStringRef)name, NULL, NULL, true);
-}
-
-static NSDictionary *PXReadKeychainBridgeResponseIfValid(NSFileManager *fm, NSString *respPath, NSString *nonce) {
-    if (!fm || !respPath.length || !nonce.length) return nil;
-    if (![fm fileExistsAtPath:respPath]) return nil;
-    NSDictionary *candidate = [NSDictionary dictionaryWithContentsOfFile:respPath];
-    if (![candidate isKindOfClass:[NSDictionary class]]) return nil;
-    NSString *n = [candidate[@"nonce"] isKindOfClass:[NSString class]] ? candidate[@"nonce"] : nil;
-    if (!n.length || ![n isEqualToString:nonce]) return nil;
-    return candidate;
-}
-
-static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSString *respPath, NSString *nonce, NSTimeInterval timeoutSec) {
-    if (!safeBundle.length || !respPath.length || !nonce.length) return nil;
-    if (timeoutSec <= 0) timeoutSec = 20.0;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *immediate = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-    if (immediate) return immediate;
-
-    NSString *notifyName = [NSString stringWithFormat:@"com.hydra.weaponx.keychain.resp.%@", safeBundle];
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    dispatch_queue_t q = dispatch_queue_create("com.weaponx.keychainbridge.wait.backup", DISPATCH_QUEUE_SERIAL);
-    __block NSDictionary *resp = nil;
-
-    int token = 0;
-    uint32_t st = notify_register_dispatch([notifyName UTF8String], &token, q, ^(int t) {
-        (void)t;
-        if (resp) return;
-        NSDictionary *r = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-        if (r) {
-            resp = r;
-            dispatch_semaphore_signal(sema);
-        }
-    });
-
-    if (st != NOTIFY_STATUS_OK) {
-        CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
-        while ((CFAbsoluteTimeGetCurrent() - start) < timeoutSec) {
-            NSDictionary *r = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-            if (r) return r;
-            [NSThread sleepForTimeInterval:0.2];
-        }
-        return nil;
-    }
-
-    NSDictionary *afterReg = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-    if (afterReg) {
-        notify_cancel(token);
-        return afterReg;
-    }
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSec * NSEC_PER_SEC));
-    (void)dispatch_semaphore_wait(sema, deadline);
-    notify_cancel(token);
-
-    if (resp) return resp;
-    return PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-}
-
-- (BOOL)_inAppKeychainBackupForBundleID:(NSString *)bundleID
-                          containerPath:(NSString *)dataContainerPath
-                                 groups:(NSArray<NSString *> *)groups
-                                 toFile:(NSString *)destFile
-                              debugPath:(NSString *)debugKeychain
-                               warnings:(NSMutableArray<NSString *> *)warnings {
-    if (!bundleID.length || !dataContainerPath.length || !destFile.length) return NO;
-    if (!groups.count) return NO;
-
-    NSString *safeBundle = PXSafeBundleString(bundleID);
-    NSString *reqPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_request_%@.plist", safeBundle];
-    NSString *respPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_response_%@.plist", safeBundle];
-    NSString *outPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_export_%@.plist", safeBundle];
-    NSString *logPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_bridge_%@.log", safeBundle];
-
-    NSString *nonce = [[NSUUID UUID] UUIDString];
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm removeItemAtPath:reqPath error:nil];
-    [fm removeItemAtPath:respPath error:nil];
-    [fm removeItemAtPath:outPath error:nil];
-
-    NSDictionary *req = @{
-        @"action": @"backup",
-        @"bundleID": bundleID,
-        @"groups": groups,
-        @"nonce": nonce,
-        @"outPath": outPath,
-        @"respPath": respPath,
-        @"logPath": logPath,
-        @"bridgeOnly": @YES,
-    };
-    if (![req writeToFile:reqPath atomically:YES]) {
-        [warnings addObject:@"In-app keychain backup: failed to write request" ];
-        return NO;
-    }
-
-    PXDebugHeader(debugKeychain, @"In-App Keychain Backup");
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"request=%@", reqPath]);
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"tmpOut=%@", outPath]);
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"nonce=%@", nonce]);
-
-    // Notify bridge (best-effort)
-    PXDarwinNotifyPost([NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safeBundle]);
-
-    __block BOOL opened = NO;
-    if ([NSThread isMainThread]) {
-        opened = PXOpenApplication(bundleID);
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            opened = PXOpenApplication(bundleID);
-        });
-    }
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"openApplication=%@", opened ? @"YES" : @"NO"]);
-
-    // Wait via Darwin notify (avoid polling). Use shorter timeout if open failed.
-    NSTimeInterval waitSec = opened ? 30.0 : 6.0;
-    NSDictionary *resp = PXWaitForKeychainBridgeResponse(safeBundle, respPath, nonce, waitSec);
-
-    // Always capture bridge log + tmp dir state (best-effort)
-    {
-        NSString *bridgeLog = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
-        if (bridgeLog.length) {
-            PXDebugHeader(debugKeychain, @"In-App Bridge Log");
-            PXDebugAppendLine(debugKeychain, bridgeLog);
-        }
-        PXDebugRun([CommandRunner shared], debugKeychain, @"ls /tmp (keychain bridge)",
-                   @"ls -la /tmp 2>/dev/null || true");
-    }
-
-    if (![resp isKindOfClass:[NSDictionary class]]) {
-        [warnings addObject:@"In-app keychain backup: no response (timeout?)" ];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        return NO;
-    }
-
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"resp=%@", resp]);
-
-    BOOL ok = [resp[@"ok"] respondsToSelector:@selector(boolValue)] ? [resp[@"ok"] boolValue] : NO;
-    if (!ok) {
-        NSString *err = [resp[@"error"] isKindOfClass:[NSString class]] ? resp[@"error"] : @"";
-        if (err.length) [warnings addObject:[NSString stringWithFormat:@"In-app keychain backup failed: %@", err]];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        return NO;
-    }
-
-    if (![fm fileExistsAtPath:outPath]) {
-        [warnings addObject:@"In-app keychain backup: export file missing" ];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        return NO;
-    }
-
-    if (!PXProtectOwnedKeychainTemporaryFileAtPath(outPath)) {
-        [warnings addObject:@"In-app keychain backup export protection failed"];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        [fm removeItemAtPath:outPath error:nil];
-        return NO;
-    }
-    [fm removeItemAtPath:destFile error:nil];
-    if (![fm copyItemAtPath:outPath toPath:destFile error:nil]) {
-        [warnings addObject:@"In-app keychain backup: failed to copy export to destination" ];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        return NO;
-    }
-
-    [self _killRelatedProcessesForBundleID:bundleID];
-    [fm removeItemAtPath:reqPath error:nil];
-    [fm removeItemAtPath:respPath error:nil];
-    [fm removeItemAtPath:outPath error:nil];
-
-    // Keep bridge log for debugging.
-
-    return YES;
-}
-
-- (BOOL)_inAppKeychainRestoreForBundleID:(NSString *)bundleID
-                           containerPath:(NSString *)dataContainerPath
-                                  groups:(NSArray<NSString *> *)groups
-                                fromFile:(NSString *)srcFile
-                               overwrite:(BOOL)overwrite
-                               debugPath:(NSString *)debugKeychain
-                                warnings:(NSMutableArray<NSString *> *)warnings {
-    if (!bundleID.length || !dataContainerPath.length || !srcFile.length) return NO;
-    if (!groups.count) return NO;
-
-    NSString *safeBundle = PXSafeBundleString(bundleID);
-    NSString *reqPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_request_%@.plist", safeBundle];
-    NSString *respPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_response_%@.plist", safeBundle];
-    NSString *inPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_import_%@.plist", safeBundle];
-    NSString *logPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_bridge_%@.log", safeBundle];
-
-    NSString *nonce = [[NSUUID UUID] UUIDString];
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm removeItemAtPath:reqPath error:nil];
-    [fm removeItemAtPath:respPath error:nil];
-    [fm removeItemAtPath:inPath error:nil];
-
-    if (![fm copyItemAtPath:srcFile toPath:inPath error:nil]) {
-        [warnings addObject:@"In-app keychain restore: failed to stage import file" ];
-        return NO;
-    }
-    if (!PXProtectOwnedKeychainTemporaryFileAtPath(inPath)) {
-        [fm removeItemAtPath:inPath error:nil];
-        [warnings addObject:@"In-app keychain restore import protection failed"];
-        return NO;
-    }
-
-    NSDictionary *req = @{
-        @"action": @"restore",
-        @"bundleID": bundleID,
-        @"groups": groups,
-        @"inPath": inPath,
-        @"overwrite": @(overwrite),
-        @"respPath": respPath,
-        @"logPath": logPath,
-        @"nonce": nonce,
-        @"bridgeOnly": @YES,
-    };
-    if (![req writeToFile:reqPath atomically:YES]) {
-        [warnings addObject:@"In-app keychain restore: failed to write request" ];
-        return NO;
-    }
-
-    PXDebugHeader(debugKeychain, @"In-App Keychain Restore");
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"request=%@", reqPath]);
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"tmpIn=%@", inPath]);
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"nonce=%@", nonce]);
-
-    PXDarwinNotifyPost([NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safeBundle]);
-
-    __block BOOL opened = NO;
-    if ([NSThread isMainThread]) {
-        opened = PXOpenApplication(bundleID);
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            opened = PXOpenApplication(bundleID);
-        });
-    }
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"openApplication=%@", opened ? @"YES" : @"NO"]);
-
-    NSTimeInterval waitSec = opened ? 30.0 : 6.0;
-    NSDictionary *resp = PXWaitForKeychainBridgeResponse(safeBundle, respPath, nonce, waitSec);
-
-    // Always capture bridge log + tmp dir state (best-effort)
-    {
-        NSString *bridgeLog = [NSString stringWithContentsOfFile:logPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
-        if (bridgeLog.length) {
-            PXDebugHeader(debugKeychain, @"In-App Bridge Log");
-            PXDebugAppendLine(debugKeychain, bridgeLog);
-        }
-        PXDebugRun([CommandRunner shared], debugKeychain, @"ls /tmp (keychain bridge)",
-                   @"ls -la /tmp 2>/dev/null || true");
-    }
-
-    if (![resp isKindOfClass:[NSDictionary class]]) {
-        [warnings addObject:@"In-app keychain restore: no response (timeout?)" ];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        return NO;
-    }
-
-    PXDebugAppendLine(debugKeychain, [NSString stringWithFormat:@"resp=%@", resp]);
-    BOOL ok = [resp[@"ok"] respondsToSelector:@selector(boolValue)] ? [resp[@"ok"] boolValue] : NO;
-    if (!ok) {
-        NSString *err = [resp[@"error"] isKindOfClass:[NSString class]] ? resp[@"error"] : @"";
-        if (err.length) [warnings addObject:[NSString stringWithFormat:@"In-app keychain restore failed: %@", err]];
-        [self _killRelatedProcessesForBundleID:bundleID];
-        return NO;
-    }
-
-    [self _killRelatedProcessesForBundleID:bundleID];
-    [fm removeItemAtPath:reqPath error:nil];
-    [fm removeItemAtPath:respPath error:nil];
-    [fm removeItemAtPath:inPath error:nil];
-    return YES;
-}
-
+// Keychain processing is strictly headless. The former in-app bridge helpers that
+// launched the target application were removed; backup/restore/clear all use the
+// resigned helper wrapper and surface coverage failures instead of opening apps.
 - (PXKeychainHelperInvocationResult *)_runKeychainWrapperWithArguments:(NSArray<NSString *> *)arguments
                                                       expectedOperation:(PXKeychainHelperOperation)expectedOperation
                                                  expectedAccessGroups:(NSArray<NSString *> *)expectedAccessGroups {
@@ -2883,28 +2577,13 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
                     if (plistItemCount == 0 &&
                         PXGroupsContainPlatformFamily(selectedKeychainGroups)) {
+                        // Hard no-launch invariant: never start the target app to obtain
+                        // Keychain context. A suspicious zero-item helper result remains a
+                        // classified failure so callers can surface the missing coverage.
                         PXDebugAppendLine(debugKeychain,
-                                          @"zeroItemFallbackAttempted=1");
-                        BOOL inAppOK = [self _inAppKeychainBackupForBundleID:bundleID
-                                                               containerPath:dataContainerPath
-                                                                      groups:selectedKeychainGroups
-                                                                      toFile:temporaryOutputPath
-                                                                   debugPath:debugKeychain
-                                                                    warnings:warnings];
-                        if (inAppOK) {
-                            NSUInteger replacementCount = 0;
-                            if (!PXKeychainPlistItemCount(temporaryOutputPath,
-                                                         &replacementCount)) {
-                                [warnings addObject:@"In-app Keychain backup output could not be verified"];
-                                return NO;
-                            }
-                            keychainMethod = @"in_app";
-                            PXDebugAppendLine(debugKeychain,
-                                [NSString stringWithFormat:@"inAppPlistItemCount=%lu",
-                                 (unsigned long)replacementCount]);
-                            return YES;
-                        }
-                        PXDebugAppendLine(debugKeychain, @"zeroItemFallbackSucceeded=0");
+                                          @"zeroItemFallbackBlocked=no_launch_policy");
+                        [warnings addObject:@"Keychain helper returned zero items for platform-family groups; in-app fallback is disabled by the no-launch policy"];
+                        return NO;
                     }
                     if (partial && helperResult.succeededCount == 0) {
                         [warnings addObject:@"Keychain partial backup produced no usable items"];
@@ -4758,7 +4437,15 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
 
             NSString *keychainBackupPath = keychainWorkspace.validatedStage.filePath;
             NSArray<NSString *> *groups = restorePlan.keychainGroups;
-            BOOL shouldUseInApp = restorePlan.keychainUsesInAppMethod;
+            BOOL archiveRequestedInApp = restorePlan.keychainUsesInAppMethod;
+            if (archiveRequestedInApp) {
+                // Preserve compatibility with older manifests that recorded method=in_app,
+                // but never launch the target application during restore. The same archived
+                // items are restored through the resigned helper instead.
+                [warnings addObject:@"Legacy in-app Keychain restore method migrated to resigned helper by no-launch policy"];
+                PXDebugAppendLine(debugKeychain,
+                                  @"legacyInAppMethodMigratedToHelper=1 noLaunch=1");
+            }
             NSUInteger keychainExecutionWarningStart = warnings.count;
             BOOL keychainComponentSucceeded = NO;
             NSInteger keychainFailureCode = 0;
@@ -4766,27 +4453,7 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             PXKeychainHelperInvocationResult *invocation = nil;
 
             PXDebugHeader(debugKeychain, @"Keychain Restore Result");
-            if (shouldUseInApp) {
-                BOOL inAppSucceeded =
-                    [self _inAppKeychainRestoreForBundleID:bundleID
-                                             containerPath:dataContainerPath
-                                                    groups:groups
-                                                  fromFile:keychainBackupPath
-                                                 overwrite:YES
-                                                 debugPath:debugKeychain
-                                                  warnings:warnings];
-                keychainComponentSucceeded = inAppSucceeded;
-                PXDebugAppendLine(debugKeychain,
-                    inAppSucceeded
-                        ? @"operation=restore managerOutcome=completed method=in_app"
-                        : @"operation=restore managerOutcome=helper_failed method=in_app");
-                if (!inAppSucceeded) {
-                    [warnings addObject:@"In-app Keychain restore failed (continuing)"];
-                    keychainFailureCode = 322;
-                    keychainFailureMessage = @"Keychain helper operation failed";
-                }
-            } else {
-                NSError *canonicalGroupError = nil;
+            NSError *canonicalGroupError = nil;
                 NSArray<NSString *> *canonicalGroups =
                     [PXKeychainHelperInvocationResult
                         canonicalAccessGroupsFromArray:groups ?: @[]
@@ -4859,7 +4526,6 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
                         }
                     }
                 }
-            }
 
             NSError *keychainCleanupError = nil;
             if (![keychainWorkspace cleanupWithError:&keychainCleanupError]) {

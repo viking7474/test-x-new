@@ -951,58 +951,6 @@ static BOOL PXBoundedCommandSucceeded(CommandResult *result) {
            !result.stderrTruncated;
 }
 
-static BOOL PXNumberIsBooleanTrue(id value) {
-    if (![value isKindOfClass:[NSNumber class]]) return NO;
-    CFTypeRef cfValue = (__bridge CFTypeRef)value;
-    return CFGetTypeID(cfValue) == CFBooleanGetTypeID() && [(NSNumber *)value boolValue];
-}
-
-static BOOL PXReadNonnegativeInteger(id value, NSUInteger *outValue) {
-    if (![value isKindOfClass:[NSNumber class]]) return NO;
-    CFTypeRef cfValue = (__bridge CFTypeRef)value;
-    if (CFGetTypeID(cfValue) == CFBooleanGetTypeID()) return NO;
-    const char *type = [(NSNumber *)value objCType];
-    if (!type || !strchr("cCsSiIlLqQ", type[0])) return NO;
-    long long signedValue = [(NSNumber *)value longLongValue];
-    if (signedValue < 0) return NO;
-    unsigned long long unsignedValue = [(NSNumber *)value unsignedLongLongValue];
-    if (unsignedValue > (unsigned long long)NSUIntegerMax) return NO;
-    if (outValue) *outValue = (NSUInteger)unsignedValue;
-    return YES;
-}
-
-static BOOL PXKeychainBridgeResponseIsValid(id value,
-                                            NSString *bundleIdentifier,
-                                            NSString *nonce) {
-    if (![value isKindOfClass:[NSDictionary class]] ||
-        ![bundleIdentifier isKindOfClass:[NSString class]] ||
-        ![nonce isKindOfClass:[NSString class]]) {
-        return NO;
-    }
-    NSDictionary *response = (NSDictionary *)value;
-    if (![response[@"nonce"] isKindOfClass:[NSString class]] ||
-        ![response[@"nonce"] isEqualToString:nonce] ||
-        ![response[@"bundleID"] isKindOfClass:[NSString class]] ||
-        ![response[@"bundleID"] isEqualToString:bundleIdentifier] ||
-        ![response[@"action"] isKindOfClass:[NSString class]] ||
-        ![response[@"action"] isEqualToString:@"wipe"] ||
-        !PXNumberIsBooleanTrue(response[@"ok"])) {
-        return NO;
-    }
-    NSUInteger attempted = 0, succeeded = 0, failed = 0;
-    if (!PXReadNonnegativeInteger(response[@"attempted"], &attempted) ||
-        !PXReadNonnegativeInteger(response[@"succeeded"], &succeeded) ||
-        !PXReadNonnegativeInteger(response[@"failed"], &failed) ||
-        attempted == 0 ||
-        succeeded > attempted ||
-        failed != attempted - succeeded ||
-        failed != 0 ||
-        succeeded != attempted) {
-        return NO;
-    }
-    return YES;
-}
-
 typedef NS_ENUM(NSInteger, PXInstalledExtensionDiscoveryErrorCode) {
     PXInstalledExtensionDiscoveryErrorCodeInvalidRequest = 1,
     PXInstalledExtensionDiscoveryErrorCodeEnumerationFailed = 2,
@@ -1456,64 +1404,6 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     return [NSString stringWithFormat:@"dataCleanerKeychainWipeGroups_%@", bundleID ?: @""];
 }
 
-static NSDictionary *PXReadKeychainBridgeResponseIfValid(NSFileManager *fm, NSString *respPath, NSString *nonce) {
-    if (!fm || !respPath.length || !nonce.length) return nil;
-    if (![fm fileExistsAtPath:respPath]) return nil;
-    NSDictionary *candidate = [NSDictionary dictionaryWithContentsOfFile:respPath];
-    if (![candidate isKindOfClass:[NSDictionary class]]) return nil;
-    NSString *n = [candidate[@"nonce"] isKindOfClass:[NSString class]] ? candidate[@"nonce"] : nil;
-    if (!n.length || ![n isEqualToString:nonce]) return nil;
-    return candidate;
-}
-
-static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSString *respPath, NSString *nonce, NSTimeInterval timeoutSec) {
-    if (!safeBundle.length || !respPath.length || !nonce.length) return nil;
-    if (timeoutSec <= 0) timeoutSec = 20.0;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *immediate = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-    if (immediate) return immediate;
-
-    NSString *notifyName = [NSString stringWithFormat:@"com.hydra.weaponx.keychain.resp.%@", safeBundle];
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    dispatch_queue_t q = dispatch_queue_create("com.weaponx.keychainbridge.wait.cleaner", DISPATCH_QUEUE_SERIAL);
-    __block NSDictionary *resp = nil;
-
-    int token = 0;
-    uint32_t st = notify_register_dispatch([notifyName UTF8String], &token, q, ^(int t) {
-        (void)t;
-        if (resp) return;
-        NSDictionary *r = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-        if (r) {
-            resp = r;
-            dispatch_semaphore_signal(sema);
-        }
-    });
-
-    if (st != NOTIFY_STATUS_OK) {
-        CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
-        while ((CFAbsoluteTimeGetCurrent() - start) < timeoutSec) {
-            NSDictionary *r = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-            if (r) return r;
-            [NSThread sleepForTimeInterval:0.2];
-        }
-        return nil;
-    }
-
-    NSDictionary *afterReg = PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-    if (afterReg) {
-        notify_cancel(token);
-        return afterReg;
-    }
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSec * NSEC_PER_SEC));
-    (void)dispatch_semaphore_wait(sema, deadline);
-    notify_cancel(token);
-
-    if (resp) return resp;
-    return PXReadKeychainBridgeResponseIfValid(fm, respPath, nonce);
-}
-
 + (instancetype)sharedManager {
     static AppDataCleaner *sharedManager = nil;
     static dispatch_once_t onceToken;
@@ -1839,218 +1729,69 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
             return NO;
         }
     }
-    if (!systemApplication && !PXKeychainExactStringIsValid(applicationIdentifier)) {
-        PXAssignKeychainNSError(error,
-                                PXKeychainClearFailureCodeAuthorizationFailed,
-                                @"Signed application identifier is required");
-        return NO;
-    }
 
-    if (systemApplication) {
-        NSString *safeBundle = [[bundleIdentifier componentsSeparatedByCharactersInSet:
-            [[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"_"];
-        NSString *nonce = [[NSUUID UUID] UUIDString];
-        NSString *requestPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_request_%@.plist", safeBundle];
-        NSString *responsePath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_response_%@_%@.plist", safeBundle, nonce];
-        NSString *logPath = [NSString stringWithFormat:@"/tmp/weaponx_keychain_bridge_%@_%@.log", safeBundle, nonce];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        BOOL success = NO;
-        @try {
-            [fileManager removeItemAtPath:requestPath error:nil];
-            [fileManager removeItemAtPath:responsePath error:nil];
-            NSDictionary *request = @{
-                @"action": @"wipe",
-                @"bundleID": bundleIdentifier,
-                @"groups": selectedGroups,
-                @"nonce": nonce,
-                @"respPath": responsePath,
-                @"logPath": logPath,
-                @"bridgeOnly": @YES,
-            };
-            if (![request writeToFile:requestPath atomically:YES]) {
-                PXAssignKeychainNSError(error,
-                                        PXKeychainClearFailureCodeConfigurationFailed,
-                                        @"Keychain bridge request could not be created");
-                return NO;
-            }
-
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                (__bridge CFStringRef)[NSString stringWithFormat:@"com.hydra.weaponx.keychain.req.%@", safeBundle],
-                NULL, NULL, true);
-            Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
-            BOOL opened = NO;
-            if (workspaceClass) {
-                id workspace = [workspaceClass performSelector:@selector(defaultWorkspace)];
-                if (workspace && [workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                    opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
-                                                                  @selector(openApplicationWithBundleID:),
-                                                                  bundleIdentifier);
-                    NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
-                    if (selfBundle.length) {
-                        ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace,
-                                                             @selector(openApplicationWithBundleID:),
-                                                             selfBundle);
-                    }
-                }
-            }
-            NSDictionary *response = PXWaitForKeychainBridgeResponse(safeBundle,
-                                                                      responsePath,
-                                                                      nonce,
-                                                                      opened ? 30.0 : 6.0);
-            PXKillAppProcessBestEffort(self, bundleIdentifier);
-            success = PXKeychainBridgeResponseIsValid(response, bundleIdentifier, nonce);
-            if (!success) {
-                PXAssignKeychainNSError(error,
-                                        PXKeychainClearFailureCodeInternalResultFailure,
-                                        @"Keychain bridge returned incomplete execution evidence");
-            }
-            return success;
-        } @catch (__unused NSException *exception) {
-            PXAssignKeychainNSError(error,
-                                    PXKeychainClearFailureCodeInternalResultFailure,
-                                    @"Keychain bridge execution failed");
-            return NO;
-        } @finally {
-            PXKillAppProcessBestEffort(self, bundleIdentifier);
-            [fileManager removeItemAtPath:requestPath error:nil];
-            [fileManager removeItemAtPath:responsePath error:nil];
-            [fileManager removeItemAtPath:[responsePath stringByAppendingString:@".tmp"] error:nil];
-            [fileManager removeItemAtPath:logPath error:nil];
-        }
-    }
+    // Hard no-launch invariant: Keychain clear never starts the target application.
+    // The wrapper re-reads the target's signed entitlements, prepares a private
+    // resigned helper, validates its effective access groups, and performs the wipe
+    // headlessly. Planning still supplies applicationIdentifier/systemApplication,
+    // but execution authority comes from the signed target + exact selected groups.
+    (void)applicationIdentifier;
+    (void)systemApplication;
 
     CommandRunner *runner = [CommandRunner shared];
-    NSString *ldidPath = [runner firstExistingPath:@[
-        @"/usr/bin/ldid",
-        @"/var/jb/usr/bin/ldid",
-        @"/private/preboot/jb/usr/bin/ldid",
-        @"/bin/ldid"
+    NSString *scriptPath = [runner firstExistingPath:@[
+        @"/Library/WeaponX/keychain_backup.sh",
+        @"/var/jb/Library/WeaponX/keychain_backup.sh",
+        @"/private/var/jb/Library/WeaponX/keychain_backup.sh"
     ]];
-    if (!ldidPath.length || ![ldidPath hasPrefix:@"/"]) {
+    if (!scriptPath.length || ![scriptPath hasPrefix:@"/"]) {
         PXAssignKeychainNSError(error,
                                 PXKeychainClearFailureCodeConfigurationFailed,
-                                @"Keychain signing tool is unavailable");
+                                @"Headless Keychain helper wrapper is unavailable");
         return NO;
     }
-    NSString *helperPath = [runner firstExistingPath:@[
-        @"/Library/WeaponX/backup_helper",
-        @"/var/jb/Library/WeaponX/backup_helper",
-        @"/private/var/jb/Library/WeaponX/backup_helper"
-    ]];
-    if (!helperPath.length || ![helperPath hasPrefix:@"/"]) {
+
+    NSString *groupsCSV = [selectedGroups componentsJoinedByString:@","];
+    [self logMessage:@"[AppDataCleaner] Keychain wipe method=resigned_helper noLaunch=1 bundle=%@ groups=%lu",
+                     bundleIdentifier,
+                     (unsigned long)selectedGroups.count];
+    CommandResult *wipeResult = [runner runExecutableAndCapture:scriptPath
+                                                       arguments:@[
+                                                           @"wipe",
+                                                           bundleIdentifier,
+                                                           @"--groups",
+                                                           groupsCSV
+                                                       ]
+                                                      timeoutSec:120.0
+                                                  maxOutputBytes:1024 * 1024];
+    BOOL success = PXBoundedCommandSucceeded(wipeResult);
+    NSDictionary *diagnostic = @{
+        @"method": @"resigned_helper",
+        @"noLaunch": @YES,
+        @"success": @(success),
+        @"exitCode": @(wipeResult ? wipeResult.exitCode : -1),
+        @"timedOut": @(wipeResult ? wipeResult.timedOut : NO),
+        @"stdoutTruncated": @(wipeResult ? wipeResult.stdoutTruncated : NO),
+        @"stderrTruncated": @(wipeResult ? wipeResult.stderrTruncated : NO),
+        @"groupCount": @(selectedGroups.count),
+    };
+    [[NSUserDefaults standardUserDefaults] setObject:diagnostic
+                                              forKey:[NSString stringWithFormat:@"DataCleaningKeychainResult_%@",
+                                                                                 bundleIdentifier]];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    if (!success) {
+        NSString *message = [NSString stringWithFormat:@"Headless Keychain helper failed (exit=%d timeout=%d)",
+                             wipeResult ? wipeResult.exitCode : -1,
+                             wipeResult ? wipeResult.timedOut : NO];
+        [self logMessage:@"[AppDataCleaner] Keychain wipe failed method=resigned_helper noLaunch=1 bundle=%@ %@",
+                         bundleIdentifier, message];
         PXAssignKeychainNSError(error,
-                                PXKeychainClearFailureCodeConfigurationFailed,
-                                @"Keychain helper is unavailable");
-        return NO;
+                                PXKeychainClearFailureCodeInitialPassFailed,
+                                message);
     }
-
-    NSString *temporaryDirectory = [NSString stringWithFormat:@"/tmp/keychain_wipe_%d_%@",
-                                    getpid(), [[NSUUID UUID] UUIDString]];
-    NSString *workingHelper = [temporaryDirectory stringByAppendingPathComponent:@"backup_helper"];
-    NSString *entitlementsPath = [temporaryDirectory stringByAppendingPathComponent:@"helper_ent.plist"];
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    BOOL success = NO;
-    @try {
-        NSError *directoryError = nil;
-        if (![fileManager createDirectoryAtPath:temporaryDirectory
-                    withIntermediateDirectories:NO
-                                     attributes:@{NSFilePosixPermissions: @0700}
-                                          error:&directoryError]) {
-            PXAssignKeychainNSError(error,
-                                    PXKeychainClearFailureCodeConfigurationFailed,
-                                    @"Temporary Keychain workspace could not be created");
-            return NO;
-        }
-        NSError *copyError = nil;
-        if (![fileManager copyItemAtPath:helperPath toPath:workingHelper error:&copyError]) {
-            PXAssignKeychainNSError(error,
-                                    PXKeychainClearFailureCodeConfigurationFailed,
-                                    @"Keychain helper could not be prepared");
-            return NO;
-        }
-        chmod(workingHelper.fileSystemRepresentation, 0755);
-
-        NSDictionary *helperEntitlements = @{
-            @"platform-application": @YES,
-            @"application-identifier": applicationIdentifier,
-            @"com.apple.private.security.no-sandbox": @YES,
-            @"com.apple.private.security.no-container": @YES,
-            @"com.apple.private.security.container-required": @NO,
-            @"com.apple.keystore.access-keychain-keys": @YES,
-            @"com.apple.keystore.device": @YES,
-            @"keychain-access-groups": selectedGroups,
-        };
-        NSError *serializationError = nil;
-        NSData *entitlementsData = [NSPropertyListSerialization dataWithPropertyList:helperEntitlements
-                                                                               format:NSPropertyListXMLFormat_v1_0
-                                                                              options:0
-                                                                                error:&serializationError];
-        NSError *writeError = nil;
-        if (!entitlementsData.length || serializationError ||
-            ![entitlementsData writeToFile:entitlementsPath
-                                   options:NSDataWritingAtomic
-                                     error:&writeError]) {
-            PXAssignKeychainNSError(error,
-                                    PXKeychainClearFailureCodeConfigurationFailed,
-                                    @"Keychain helper authorization could not be prepared");
-            return NO;
-        }
-
-        CommandResult *signResult = [runner runExecutableAndCapture:ldidPath
-                                                           arguments:@[
-                                                               [@"-S" stringByAppendingString:entitlementsPath],
-                                                               workingHelper
-                                                           ]
-                                                          timeoutSec:60.0
-                                                      maxOutputBytes:1024 * 1024];
-        if (!PXBoundedCommandSucceeded(signResult)) {
-            PXAssignKeychainNSError(error,
-                                    PXKeychainClearFailureCodeInitialPassFailed,
-                                    @"Keychain helper signing failed");
-            return NO;
-        }
-
-        NSString *groupsCSV = [selectedGroups componentsJoinedByString:@","];
-        CommandResult *wipeResult = [runner runExecutableAndCapture:workingHelper
-                                                           arguments:@[
-                                                               @"--action", @"wipe",
-                                                               @"--groups", groupsCSV,
-                                                               @"--requested-groups", groupsCSV,
-                                                               @"--effective-entitlements-file", entitlementsPath
-                                                           ]
-                                                          timeoutSec:120.0
-                                                      maxOutputBytes:1024 * 1024];
-        success = PXBoundedCommandSucceeded(wipeResult);
-        NSDictionary *diagnostic = @{
-            @"success": @(success),
-            @"exitCode": @(wipeResult ? wipeResult.exitCode : -1),
-            @"timedOut": @(wipeResult ? wipeResult.timedOut : NO),
-            @"stdoutTruncated": @(wipeResult ? wipeResult.stdoutTruncated : NO),
-            @"stderrTruncated": @(wipeResult ? wipeResult.stderrTruncated : NO),
-            @"groupCount": @(selectedGroups.count),
-        };
-        [[NSUserDefaults standardUserDefaults] setObject:diagnostic
-                                                  forKey:[NSString stringWithFormat:@"DataCleaningKeychainResult_%@",
-                                                                                     bundleIdentifier]];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        if (!success) {
-            PXAssignKeychainNSError(error,
-                                    PXKeychainClearFailureCodeInitialPassFailed,
-                                    @"Keychain helper execution failed");
-        }
-        return success;
-    } @catch (__unused NSException *exception) {
-        PXAssignKeychainNSError(error,
-                                PXKeychainClearFailureCodeInternalResultFailure,
-                                @"Keychain helper execution failed");
-        return NO;
-    } @finally {
-        [fileManager removeItemAtPath:workingHelper error:nil];
-        [fileManager removeItemAtPath:entitlementsPath error:nil];
-        [fileManager removeItemAtPath:temporaryDirectory error:nil];
-    }
+    return success;
 }
-
 - (PXClearComponentResult *)_keychainComponentForPlan:(PXKeychainClearPlan *)plan
                                           passResults:(NSArray<NSNumber *> *)passResults {
     if (![plan isKindOfClass:[PXKeychainClearPlan class]] ||

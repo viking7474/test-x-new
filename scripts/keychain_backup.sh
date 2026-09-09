@@ -69,7 +69,6 @@ PX_REQUESTED_GROUPS_CSV=""
 PX_EFFECTIVE_GROUPS_CSV=""
 PX_EFFECTIVE_ENT_PATH=""
 PX_APP_IDENTIFIER=""
-PX_APP_GROUPS_CSV=""
 
 # === Color Output ===
 # Only use colors if running in a TTY (interactive terminal)
@@ -1048,151 +1047,111 @@ parse_app_identifier() {
     printf '%s\n' "$identifier"
 }
 
-# === Ensure a group exists in a CSV list ===
-ensure_group_in_csv() {
+# === Deterministic entitlement overlay helpers ===
+PX_JSON_ARRAY=""
+
+px_group_csv_to_json_array() {
     local csv="$1"
-    local group="$2"
-    if [ -z "$group" ]; then
-        echo "$csv"
-        return 0
-    fi
-    # Normalize: remove any surrounding whitespace
-    group="$(echo "$group" | "$PX_SED_PATH" 's/^ *//;s/ *$//')"
-    if [ -z "$group" ]; then
-        echo "$csv"
-        return 0
-    fi
-    if [ -z "$csv" ]; then
-        echo "$group"
-        return 0
-    fi
-    case ",$csv," in
-        *",$group,"*) echo "$csv" ;;
-        *) echo "$csv,$group" ;;
-    esac
+    PX_JSON_ARRAY=""
+    px_canonicalize_group_csv "$csv" || return 1
+    local canonical="$PX_CANONICAL_GROUP_CSV"
+    local groups=() group escaped json="[" separator=""
+    IFS=',' read -ra groups <<< "$canonical"
+    for group in "${groups[@]}"; do
+        px_group_value_is_valid "$group" || return 1
+        escaped=$(printf '%s' "$group" | "$PX_SED_PATH" 's/\\/\\\\/g; s/"/\\"/g') || return 1
+        json="${json}${separator}\"${escaped}\""
+        separator=","
+    done
+    json="${json}]"
+    [ "${#json}" -le 16384 ] || return 1
+    PX_JSON_ARRAY="$json"
+    return 0
 }
 
-# === Generate entitlements plist for helper tool ===
-# For system apps, copy the accepted entitlement snapshot and retain existing policy.
+px_plutil_upsert_bool() {
+    local key="$1"
+    local value="$2"
+    local plist="$3"
+    "$PX_PLUTIL_PATH" -replace "$key" -bool "$value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$key" -bool "$value" "$plist" >/dev/null 2>&1
+}
+
+px_plutil_upsert_string() {
+    local key="$1"
+    local value="$2"
+    local plist="$3"
+    "$PX_PLUTIL_PATH" -replace "$key" -string "$value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$key" -string "$value" "$plist" >/dev/null 2>&1
+}
+
+px_plutil_upsert_json() {
+    local key="$1"
+    local value="$2"
+    local plist="$3"
+    "$PX_PLUTIL_PATH" -replace "$key" -json "$value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$key" -json "$value" "$plist" >/dev/null 2>&1
+}
+
+# === Generate effective entitlements for the private helper ===
+# Every target follows one policy: clone its complete signed entitlement snapshot,
+# then overlay the minimal helper authority. The helper KAG is the canonical
+# REQUESTED set (selected target groups + application-identifier/default group).
 generate_helper_entitlements() {
     local keychain_groups="$1"
-    local app_groups="$2"
-    local output_file="$3"
-    local app_identifier="$4"
-    local source_ent_file="$5"
+    local output_file="$2"
+    local app_identifier="$3"
+    local source_ent_file="$4"
 
     px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_require_workspace_child_absent helper_ent.plist || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     [ "$output_file" = "$PX_WORKSPACE_CHILD_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ "${#keychain_groups}" -le 65536 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    [ "${#app_groups}" -le 65536 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    [ "$source_ent_file" = "$PX_APP_ENT_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    [ "${#keychain_groups}" -le 8192 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     [ "${#app_identifier}" -le 4096 ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     px_string_has_control_character "$keychain_groups" && return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_string_has_control_character "$app_groups" && return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     px_string_has_control_character "$app_identifier" && return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_group_value_is_valid "$app_identifier" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_canonicalize_group_csv "$keychain_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    local canonical_groups="$PX_CANONICAL_GROUP_CSV"
+    [ "$canonical_groups" = "$keychain_groups" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_group_csv_to_json_array "$canonical_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    local groups_json="$PX_JSON_ARRAY"
 
-    if [ -n "$source_ent_file" ]; then
-        [ "$source_ent_file" = "$PX_APP_ENT_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        px_validate_workspace_file "$source_ent_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        "$PX_CP_PATH" "$source_ent_file" "$output_file" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        px_same_complete_snapshot PX_SOURCE_ENT_BEFORE PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        "$PX_CMP_PATH" "$source_ent_file" "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-        px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-
-        "$PX_PLUTIL_PATH" -replace "com.apple.private.security.no-sandbox" -bool true "$output_file" 2>/dev/null || true
-        "$PX_PLUTIL_PATH" -replace "com.apple.private.security.no-container" -bool true "$output_file" 2>/dev/null || true
-        "$PX_PLUTIL_PATH" -replace "com.apple.private.security.container-required" -bool false "$output_file" 2>/dev/null || true
-    else
-        {
-            printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-            printf '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-            printf '<plist version="1.0">\n'
-            printf '<dict>\n'
-            printf '    <key>platform-application</key>\n'
-            printf '    <true/>\n'
-            if [ -n "$app_identifier" ]; then
-                printf '    <key>application-identifier</key>\n'
-                printf '    <string>%s</string>\n' "$app_identifier"
-            fi
-            printf '    <key>com.apple.private.security.no-sandbox</key>\n'
-            printf '    <true/>\n'
-            printf '    <key>com.apple.private.security.no-container</key>\n'
-            printf '    <true/>\n'
-            printf '    <key>com.apple.private.security.container-required</key>\n'
-            printf '    <false/>\n'
-            printf '    <key>com.apple.keystore.access-keychain-keys</key>\n'
-            printf '    <true/>\n'
-            printf '    <key>com.apple.keystore.device</key>\n'
-            printf '    <true/>\n'
-            if [ -n "$keychain_groups" ]; then
-                printf '    <key>keychain-access-groups</key>\n'
-                printf '    <array>\n'
-                IFS=',' read -ra GROUPS <<< "$keychain_groups"
-                local group
-                for group in "${GROUPS[@]}"; do
-                    printf '        <string>%s</string>\n' "$group"
-                done
-                printf '    </array>\n'
-            fi
-            if [ -n "$app_groups" ]; then
-                printf '    <key>com.apple.security.application-groups</key>\n'
-                printf '    <array>\n'
-                IFS=',' read -ra GROUPS <<< "$app_groups"
-                local group
-                for group in "${GROUPS[@]}"; do
-                    printf '        <string>%s</string>\n' "$group"
-                done
-                printf '    </array>\n'
-            fi
-            printf '</dict>\n'
-            printf '</plist>\n'
-        } > "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    fi
-
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ -f "$output_file" ] && [ ! -L "$output_file" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$source_ent_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    "$PX_CP_PATH" "$source_ent_file" "$output_file" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_same_complete_snapshot PX_SOURCE_ENT_BEFORE PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    "$PX_CMP_PATH" "$source_ent_file" "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    px_plutil_upsert_bool "platform-application" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_string "application-identifier" "$app_identifier" "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_bool "com.apple.private.security.no-sandbox" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_bool "com.apple.private.security.no-container" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_bool "com.apple.private.security.container-required" false "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_bool "com.apple.keystore.access-keychain-keys" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_bool "com.apple.keystore.device" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    "$PX_PLUTIL_PATH" -lint "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    local generated_groups generated_identifier
+    generated_groups=$(parse_keychain_groups "$output_file") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_canonicalize_group_csv "$generated_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    [ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    generated_identifier=$(parse_app_identifier "$output_file") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    [ "$generated_identifier" = "$app_identifier" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+
+    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     PX_HELPER_ENT_PATH="$output_file"
+    log_info "Universal helper entitlement overlay validated"
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
-
-# === Parse application groups from the accepted entitlement snapshot ===
-parse_app_groups() {
-    local ent_file="$1"
-    px_validate_workspace_file "$ent_file" 600 0 1 || return 1
-    px_stat_snapshot "$ent_file" PX_PARSE_APP_GROUPS_BEFORE || return 1
-    local groups=""
-    local in_groups=0
-    local line group
-    while IFS= read -r line; do
-        if printf '%s' "$line" | "$PX_GREP_PATH" -q "com.apple.security.application-groups"; then
-            in_groups=1
-            continue
-        fi
-        if [ "$in_groups" -eq 1 ]; then
-            if printf '%s' "$line" | "$PX_GREP_PATH" -q "</array>"; then
-                in_groups=0
-                continue
-            fi
-            if printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
-                group=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
-                if [ -n "$group" ]; then
-                    if [ -n "$groups" ]; then groups="$groups,$group"; else groups="$group"; fi
-                fi
-            fi
-        fi
-    done < "$ent_file"
-    px_stat_snapshot "$ent_file" PX_PARSE_APP_GROUPS_AFTER || return 1
-    px_same_complete_snapshot PX_PARSE_APP_GROUPS_BEFORE PX_PARSE_APP_GROUPS_AFTER || return 1
-    [ "${#groups}" -le 65536 ] || return 1
-    px_string_has_control_character "$groups" && return 1
-    printf '%s\n' "$groups"
-}
-
 px_prepare_working_helper() {
     px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_require_workspace_child_absent backup_helper || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
@@ -1359,21 +1318,9 @@ px_prepare_target_context() {
     return $?
 }
 
-px_select_source_entitlement() {
-    local app_identifier="$1"
-    PX_SOURCE_ENT_FOR_SYSTEM=""
-    if [ "$PX_TARGET_IS_SYSTEM" -eq 1 ]; then
-        PX_SOURCE_ENT_FOR_SYSTEM="$PX_APP_ENT_PATH"
-    else
-        case "$app_identifier" in
-            com.apple.*) PX_SOURCE_ENT_FOR_SYSTEM="$PX_APP_ENT_PATH" ;;
-        esac
-    fi
-}
-
 px_prepare_requested_groups() {
     local bundle_id="$1"
-    local source_groups selected_groups app_identifier app_groups
+    local source_groups selected_groups app_identifier
     source_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
 
     if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
@@ -1396,10 +1343,7 @@ px_prepare_requested_groups() {
     PX_REQUESTED_GROUPS_CSV="$PX_CANONICAL_GROUP_CSV"
     [ -n "$PX_REQUESTED_GROUPS_CSV" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
 
-    app_groups=$(parse_app_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     PX_APP_IDENTIFIER="$app_identifier"
-    PX_APP_GROUPS_CSV="$app_groups"
-    px_select_source_entitlement "$app_identifier"
     log_info "Requested groups validated"
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
@@ -1429,6 +1373,7 @@ px_extract_signed_helper_entitlements() {
     px_canonicalize_group_csv "$effective_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     PX_EFFECTIVE_GROUPS_CSV="$PX_CANONICAL_GROUP_CSV"
     px_group_csv_is_subset "$PX_REQUESTED_GROUPS_CSV" "$PX_EFFECTIVE_GROUPS_CSV" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_group_csv_is_subset "$PX_EFFECTIVE_GROUPS_CSV" "$PX_REQUESTED_GROUPS_CSV" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
 
     PX_SIGNED_HELPER_ENT_PATH="$signed_ent_file"
     PX_EFFECTIVE_ENT_PATH="$signed_ent_file"
@@ -1439,7 +1384,7 @@ px_extract_signed_helper_entitlements() {
 
 px_finish_signed_helper() {
     local helper_ent="$PX_WORKSPACE_PATH/helper_ent.plist"
-    generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$PX_APP_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_SOURCE_ENT_FOR_SYSTEM"
+    generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_APP_ENT_PATH"
     local status=$?
     [ "$status" -eq 0 ] || return "$status"
     px_prepare_working_helper
