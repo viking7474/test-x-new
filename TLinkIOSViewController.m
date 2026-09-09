@@ -234,6 +234,25 @@ static NSArray<NSString *> *PXExpandedResetBundleIDs(NSArray<NSString *> *mainBu
     return expanded.array;
 }
 
+// Reset selection and spoof/injection scope are intentionally different concepts.
+// MobileMail is supported by AppDataCleaner as a system clear target, but injecting
+// the full spoof stack into Mail is unsafe and unnecessary for clearing its data.
+static BOOL PXResetBundleParticipatesInSpoofScope(NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
+    if ([bundleID isEqualToString:@"com.apple.mobilemail"]) return NO;
+    return YES;
+}
+
+static NSArray<NSString *> *PXResetBundlesForSpoofScope(NSArray<NSString *> *resetBundleIDs) {
+    NSMutableArray<NSString *> *filtered = [NSMutableArray array];
+    for (NSString *bundleID in resetBundleIDs ?: @[]) {
+        if (PXResetBundleParticipatesInSpoofScope(bundleID)) {
+            [filtered addObject:bundleID];
+        }
+    }
+    return filtered;
+}
+
 static NSString *PXShellQuote(NSString *s) {
     if (![s isKindOfClass:[NSString class]]) return @"''";
     return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
@@ -6330,6 +6349,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     self.selectedResetAppIDs = [[defaults objectForKey:PXDashboardResetAppsKey] mutableCopy] ?: [NSMutableArray array];
     self.selectedRRSAppIDs = [[defaults objectForKey:PXDashboardRRSAppsKey] mutableCopy] ?: [NSMutableArray array];
+
+    // Repair persisted scope from older builds where reset selection and injection
+    // scope were coupled. In particular, keep MobileMail selectable for clear while
+    // removing it from the tweak filter before the user can relaunch Mail.
+    [self syncHookScopeToResetApps];
+
     self.nextFakeOptions = [defaults objectForKey:PXDashboardFakeOptionsKey] ?: @{};
     self.nextFakePreview = [defaults objectForKey:PXDashboardFakePreviewKey];
     self.rrsRestoreOrder = [defaults stringForKey:PXDashboardRestoreOrderKey] ?: @"oldestFirst";
@@ -7185,7 +7210,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)syncHookScopeToResetApps {
-    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(self.selectedResetAppIDs ?: @[]);
+    NSArray<NSString *> *spoofEligibleResetApps = PXResetBundlesForSpoofScope(self.selectedResetAppIDs ?: @[]);
+    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(spoofEligibleResetApps);
     NSSet<NSString *> *resetSet = [NSSet setWithArray:expandedBundles];
     NSDictionary *scopedApps = [self.manager getApplicationInfo:nil] ?: @{};
     for (NSString *bundleID in scopedApps.allKeys) {
@@ -7349,6 +7375,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         [self showDashboardMessage:@"Thiếu app reset" message:@"Hãy chọn ít nhất một app trong Chọn App RESET!."];
         return;
     }
+
+    // Reconcile the injection filter immediately before destructive reset. This also
+    // removes previously persisted clear-only system targets (notably MobileMail)
+    // from the spoof scope before AppDataCleaner kills/relaunches the target process.
+    [self syncHookScopeToResetApps];
+
     [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] completion:^(NSArray<NSString *> *allWarnings) {
         [self createNextProfileAndRandomizeWithWarnings:allWarnings];
     }];

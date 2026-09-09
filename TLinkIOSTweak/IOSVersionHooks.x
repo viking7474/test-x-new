@@ -94,13 +94,23 @@ static void PXIOSVersionInvalidateCache(void) {
 // Throttling variables to prevent excessive function calls
 static uint64_t lastSystemVersionCallTime = 0;
 static NSString *cachedSystemVersionResult = nil;
+
+// NSBundle identity used by Info.plist hooks. Capture this before %init so hook
+// bodies never need to call -bundleIdentifier and re-enter -infoDictionary.
+static NSString *gPXIOSVersionMainBundleID = nil;
+static __thread BOOL gPXInsideIOSVersionBundleInfoHook = NO;
+static __thread BOOL gPXInsideIOSVersionCFBundleInfoHook = NO;
+
 // Define constants
 #define THROTTLE_INTERVAL_NSEC 100000000  // 100ms in nanoseconds
 
 #pragma mark - Helper Functions
 
-// Get the current bundle ID
+// Get the current bundle ID. Once the constructor captures the main identity,
+// always use that immutable value so Info.plist hooks cannot recurse through
+// -[NSBundle bundleIdentifier] -> -[NSBundle infoDictionary].
 static NSString *getCurrentBundleID(void) {
+    if (gPXIOSVersionMainBundleID.length) return gPXIOSVersionMainBundleID;
     @try {
         NSBundle *mainBundle = [NSBundle mainBundle];
         if (!mainBundle) {
@@ -1483,39 +1493,43 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 %hook NSBundle
 
 - (id)objectForInfoDictionaryKey:(NSString *)key {
+    // Never resolve bundleIdentifier from an Info.plist hook: Foundation may implement
+    // bundleIdentifier through infoDictionary/objectForInfoDictionaryKey and recurse.
+    if (gPXInsideIOSVersionBundleInfoHook || self != [NSBundle mainBundle]) {
+        return %orig;
+    }
+
+    gPXInsideIOSVersionBundleInfoHook = YES;
+    id projectedValue = nil;
+    BOOL hasProjectedValue = NO;
     @try {
-        NSString *bundleID = [self bundleIdentifier];
-        if (shouldSpoofForBundle(bundleID)) {
-            // App-specific version/build spoofing (only for main bundle)
+        NSString *mainBundleID = gPXIOSVersionMainBundleID;
+        if (mainBundleID.length && shouldSpoofForBundle(mainBundleID)) {
+            // App-specific version/build spoofing is only valid for the main bundle.
             if ([key isEqualToString:@"CFBundleShortVersionString"] || [key isEqualToString:@"CFBundleVersion"]) {
-                NSString *mainBundleID = getCurrentBundleID();
-                if (mainBundleID.length && [bundleID isEqualToString:mainBundleID]) {
-                    NSString *spoofVer = nil;
-                    NSString *spoofBuild = nil;
-                    if (PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
-                        if ([key isEqualToString:@"CFBundleShortVersionString"] && spoofVer.length) {
-                            return spoofVer;
-                        }
-                        if ([key isEqualToString:@"CFBundleVersion"] && spoofBuild.length) {
-                            return spoofBuild;
-                        }
+                NSString *spoofVer = nil;
+                NSString *spoofBuild = nil;
+                if (PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
+                    if ([key isEqualToString:@"CFBundleShortVersionString"] && spoofVer.length) {
+                        projectedValue = spoofVer;
+                        hasProjectedValue = YES;
+                    } else if ([key isEqualToString:@"CFBundleVersion"] && spoofBuild.length) {
+                        projectedValue = spoofBuild;
+                        hasProjectedValue = YES;
                     }
                 }
             }
-
-            // MinimumOSVersion / DTPlatformVersion / DTSDKName describe the app binary's
-            // build contract, not the device runtime. Never rewrite them from the spoofed
-            // OS profile: doing so can select code paths for frameworks absent on this iOS.
-            if ([key isEqualToString:@"MinimumOSVersion"] ||
-                [key isEqualToString:@"DTPlatformVersion"] ||
-                [key isEqualToString:@"DTSDKName"]) {
-                return %orig;
-            }
+            // MinimumOSVersion / DTPlatformVersion / DTSDKName intentionally fall
+            // through to %orig; they describe the app binary rather than runtime identity.
         }
-    } @catch (NSException *e) {
-        // Error handling
+    } @catch (__unused NSException *e) {
+        hasProjectedValue = NO;
+        projectedValue = nil;
+    } @finally {
+        gPXInsideIOSVersionBundleInfoHook = NO;
     }
-    
+
+    if (hasProjectedValue) return projectedValue;
     return %orig;
 }
 
@@ -1549,12 +1563,24 @@ static CFStringRef PXIOSVersionBorrowedInfoString(NSString *value) {
 
 // Replacement function for CFBundleGetValueForInfoDictionaryKey
 CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFStringRef key) {
+    if (!bundle || !key) return NULL;
+    if (gPXInsideIOSVersionCFBundleInfoHook) {
+        return original_CFBundleGetValueForInfoDictionaryKey
+            ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
+            : NULL;
+    }
+
+    gPXInsideIOSVersionCFBundleInfoHook = YES;
     @try {
-        if (!bundle || !key) return NULL;
-        
-        // Get the bundle ID for CFBundle
-        CFStringRef bundleID = CFBundleGetIdentifier(bundle);
-        NSString *nsBundleID = bundleID ? (__bridge NSString*)bundleID : nil;
+        // App-version projection is only defined for the process main bundle.
+        // Never call CFBundleGetIdentifier here: it may refresh through infoDictionary.
+        if (bundle != CFBundleGetMainBundle()) {
+            gPXInsideIOSVersionCFBundleInfoHook = NO;
+            return original_CFBundleGetValueForInfoDictionaryKey
+                ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
+                : NULL;
+        }
+        NSString *nsBundleID = gPXIOSVersionMainBundleID;
         
         if (shouldSpoofForBundle(nsBundleID)) {
             // App-specific version/build spoofing (only for main bundle)
@@ -1565,10 +1591,14 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
                     NSString *spoofBuild = nil;
                     if (PXGetSpoofedAppVersionForBundle(mainBundleID, &spoofVer, &spoofBuild)) {
                         if (CFEqual(key, CFSTR("CFBundleShortVersionString")) && spoofVer.length) {
-                            return PXIOSVersionBorrowedInfoString(spoofVer);
+                            CFTypeRef value = PXIOSVersionBorrowedInfoString(spoofVer);
+                            gPXInsideIOSVersionCFBundleInfoHook = NO;
+                            return value;
                         }
                         if (CFEqual(key, CFSTR("CFBundleVersion")) && spoofBuild.length) {
-                            return PXIOSVersionBorrowedInfoString(spoofBuild);
+                            CFTypeRef value = PXIOSVersionBorrowedInfoString(spoofBuild);
+                            gPXInsideIOSVersionCFBundleInfoHook = NO;
+                            return value;
                         }
                     }
                 }
@@ -1580,6 +1610,7 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
             if (CFEqual(key, CFSTR("MinimumOSVersion")) ||
                 CFEqual(key, CFSTR("DTPlatformVersion")) ||
                 CFEqual(key, CFSTR("DTSDKName"))) {
+                gPXInsideIOSVersionCFBundleInfoHook = NO;
                 return original_CFBundleGetValueForInfoDictionaryKey
                     ? original_CFBundleGetValueForInfoDictionaryKey(bundle, key)
                     : NULL;
@@ -1588,7 +1619,9 @@ CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFSt
     } @catch (NSException *e) {
         NSLog(@"[iosversion] ❌ Error in CFBundleGetValueForInfoDictionaryKey hook: %@", e);
     }
-    
+
+    gPXInsideIOSVersionCFBundleInfoHook = NO;
+
     // Call original function if available, otherwise return NULL
     if (original_CFBundleGetValueForInfoDictionaryKey) {
         return original_CFBundleGetValueForInfoDictionaryKey(bundle, key);
@@ -1684,8 +1717,11 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 %ctor {
     @autoreleasepool {
         PXFileDebugAIDA64Log("[IOSVersion.ctor] enter");
-        // Get the bundle ID for scope checking
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        // Capture the main bundle identity before this file installs any NSBundle hooks.
+        // Hook bodies below must use this immutable value rather than re-entering
+        // -bundleIdentifier through Foundation's Info.plist accessors.
+        gPXIOSVersionMainBundleID = [[[NSBundle mainBundle] bundleIdentifier] copy];
+        NSString *bundleID = gPXIOSVersionMainBundleID;
         
         // Skip for system processes to avoid potential issues
         if (isCriticalSystemProcess(bundleID)) {

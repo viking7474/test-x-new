@@ -17,6 +17,8 @@ cleaner_h = text("AppDataCleaner.h")
 cleaner_m = text("AppDataCleaner.m")
 resolver_h = text("PXDataContainerResolver.h")
 resolver_m = text("PXDataContainerResolver.m")
+tlink_ui = text("TLinkIOSViewController.m")
+ios_version_hooks = text("TLinkIOSTweak/IOSVersionHooks.x")
 
 for symbol in ("PXClearModeQuick", "PXClearModeFull", "PXClearModeDeep"):
     require(symbol in request_h, f"missing mode: {symbol}")
@@ -107,6 +109,52 @@ require("SQLITE_OPEN_READONLY" in diag_body and "SQLITE_OPEN_READWRITE" not in d
 for mutation in ("DELETE FROM ", "UPDATE ", "INSERT INTO ", "REPLACE INTO "):
     require(mutation not in diag_body,
             f"Deep Mail Accounts3 diagnostic unexpectedly contains mutation SQL: {mutation}")
+
+# MobileMail is a clear-only system target: selecting it for reset must not inject
+# the full spoof stack into Mail when AppDataCleaner kills/relaunches the process.
+require('if ([bundleID isEqualToString:@"com.apple.mobilemail"]) return NO;' in tlink_ui,
+        "MobileMail reset target is not excluded from spoof/injection scope")
+sync_start = tlink_ui.index("- (void)syncHookScopeToResetApps")
+sync_end = tlink_ui.index("- (void)selectFakeTapped", sync_start)
+sync_body = tlink_ui[sync_start:sync_end]
+require("PXResetBundlesForSpoofScope" in sync_body,
+        "reset-scope synchronization bypasses the clear-only system-app filter")
+reset_start = tlink_ui.index("- (void)performResetAndPrepareNextProfileWithWarnings:")
+reset_end = tlink_ui.index("- (void)backupApps:", reset_start)
+reset_body = tlink_ui[reset_start:reset_end]
+require("[self syncHookScopeToResetApps]" in reset_body,
+        "reset must reconcile injection scope before destructive clear/relaunch")
+require("[self clearApps:self.selectedResetAppIDs" in reset_body,
+        "MobileMail must remain in reset selection for AppDataCleaner even when excluded from spoof scope")
+setup_start = tlink_ui.index("- (void)setupDashboardUI")
+setup_end = tlink_ui.index("- (UIView *)dashboardGroupCard", setup_start)
+setup_body = tlink_ui[setup_start:setup_end]
+require("[self syncHookScopeToResetApps]" in setup_body,
+        "dashboard startup must repair stale persisted MobileMail injection scope from older builds")
+
+# NSBundle/CFBundle recursion hardening. Foundation bundleIdentifier may resolve via
+# infoDictionary, so Info.plist hook bodies must use the constructor-cached identity.
+objc_info_start = ios_version_hooks.index("- (id)objectForInfoDictionaryKey:(NSString *)key")
+objc_info_end = ios_version_hooks.index("%end", objc_info_start)
+objc_info_body = ios_version_hooks[objc_info_start:objc_info_end]
+require("gPXInsideIOSVersionBundleInfoHook" in objc_info_body,
+        "IOSVersion NSBundle Info.plist hook is missing its re-entry guard")
+require("gPXIOSVersionMainBundleID" in objc_info_body,
+        "IOSVersion NSBundle Info.plist hook does not use cached main-bundle identity")
+require("[self bundleIdentifier]" not in objc_info_body,
+        "IOSVersion NSBundle Info.plist hook re-enters bundleIdentifier")
+
+cf_info_start = ios_version_hooks.index("CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey")
+cf_info_end = ios_version_hooks.index("#pragma mark - Notification Handling", cf_info_start)
+cf_info_body = ios_version_hooks[cf_info_start:cf_info_end]
+require("gPXInsideIOSVersionCFBundleInfoHook" in cf_info_body,
+        "IOSVersion CFBundle Info.plist hook is missing its re-entry guard")
+require("gPXIOSVersionMainBundleID" in cf_info_body,
+        "IOSVersion CFBundle Info.plist hook does not use cached main-bundle identity")
+require("CFBundleGetIdentifier(bundle)" not in cf_info_body,
+        "IOSVersion CFBundle Info.plist hook re-enters bundle identity resolution")
+require('gPXIOSVersionMainBundleID = [[[NSBundle mainBundle] bundleIdentifier] copy];' in ios_version_hooks,
+        "IOSVersion constructor no longer captures bundle identity before hook installation")
 
 # CLEAR-01: dry-run + transaction journal (Phase 14)
 require("dryRun:(BOOL)dryRun" not in cleaner_h, "CLEAR-01 dry-run must stay off the public 25-selector header")
