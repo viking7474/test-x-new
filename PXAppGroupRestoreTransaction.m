@@ -249,6 +249,31 @@ static NSString *PXAppGroupRestoreDiagnosticName(NSData *nameData) {
     return [NSString stringWithFormat:@"<base64:%@>", encoded ?: @""];
 }
 
+static NSString *PXAppGroupRestoreCleanupFailureDescription(NSString *description,
+                                                             NSData *nameData,
+                                                             int errorNumber) {
+    NSString *entryName = nameData ? PXAppGroupRestoreDiagnosticName(nameData) : @"<root>";
+    const char *systemReasonBytes = errorNumber != 0 ? strerror(errorNumber) : NULL;
+    NSString *systemReason = systemReasonBytes
+        ? [NSString stringWithUTF8String:systemReasonBytes]
+        : nil;
+    NSString *result = systemReason.length
+        ? [NSString stringWithFormat:@"%@ entry='%@' errno=%d (%@).",
+           description,
+           entryName,
+           errorNumber,
+           systemReason]
+        : [NSString stringWithFormat:@"%@ entry='%@' errno=%d.",
+           description,
+           entryName,
+           errorNumber];
+    NSLog(@"[PXAppGroupRestoreTransaction] Cleanup failure: entry=%@ errno=%d reason=%@",
+          entryName,
+          errorNumber,
+          systemReason ?: @"<unknown>");
+    return result;
+}
+
 static NSArray<NSData *> *PXAppGroupRestoreReadDirectoryNames(int descriptor,
                                                               NSUInteger maximumNameCount,
                                                               NSError **error,
@@ -631,6 +656,16 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
                                      fieldPath,
                                      @"A transaction cleanup root could not be inspected.");
     }
+    if (fchmod(rootDescriptor, 0700) != 0) {
+        int cleanupErrno = errno;
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                     fieldPath,
+                                     PXAppGroupRestoreCleanupFailureDescription(
+                                         @"A transaction-owned cleanup root could not be made writable",
+                                         nil,
+                                         cleanupErrno));
+    }
     NSArray<NSData *> *rootNames =
         PXAppGroupRestoreReadDirectoryNames(rootDescriptor,
                                             PXAppGroupRestoreMaximumCleanupEntries,
@@ -661,14 +696,24 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
             if (entryName && stack.count > 0) {
                 PXAppGroupRestoreCleanupFrame *parent = stack.lastObject;
                 char *name = PXAppGroupRestoreCopyTerminatedName(entryName);
-                if (!name || unlinkat(parent.descriptor, name, AT_REMOVEDIR) != 0) {
-                    free(name);
+                if (!name) {
                     return PXAppGroupRestoreFail(error,
                                                  PXAppGroupRestoreTransactionErrorCleanupFailed,
                                                  fieldPath,
-                                                 @"A transaction cleanup directory could not be removed.");
+                                                 @"A transaction cleanup directory name could not be prepared.");
                 }
+                int removeResult = unlinkat(parent.descriptor, name, AT_REMOVEDIR);
+                int removeError = removeResult == 0 ? 0 : errno;
                 free(name);
+                if (removeResult != 0) {
+                    return PXAppGroupRestoreFail(error,
+                                                 PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                                 fieldPath,
+                                                 PXAppGroupRestoreCleanupFailureDescription(
+                                                     @"A transaction cleanup directory could not be removed",
+                                                     entryName,
+                                                     removeError));
+                }
             }
             continue;
         }
@@ -702,12 +747,16 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
 
         if (!S_ISDIR(before.st_mode)) {
             int unlinkResult = unlinkat(frame.descriptor, name, 0);
+            int unlinkError = unlinkResult == 0 ? 0 : errno;
             free(name);
             if (unlinkResult != 0) {
                 return PXAppGroupRestoreFail(error,
                                              PXAppGroupRestoreTransactionErrorCleanupFailed,
                                              fieldPath,
-                                             @"A transaction cleanup entry could not be removed.");
+                                             PXAppGroupRestoreCleanupFailureDescription(
+                                                 @"A transaction cleanup entry could not be removed",
+                                                 nameData,
+                                                 unlinkError));
             }
             continue;
         }
@@ -715,12 +764,16 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
         int childDescriptor = openat(frame.descriptor,
                                      name,
                                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int openError = childDescriptor >= 0 ? 0 : errno;
         free(name);
         if (childDescriptor < 0) {
             return PXAppGroupRestoreFail(error,
                                          PXAppGroupRestoreTransactionErrorCleanupFailed,
                                          fieldPath,
-                                         @"A transaction cleanup directory could not be opened.");
+                                         PXAppGroupRestoreCleanupFailureDescription(
+                                             @"A transaction cleanup directory could not be opened",
+                                             nameData,
+                                             openError));
         }
         struct stat after;
         memset(&after, 0, sizeof(after));
@@ -735,6 +788,30 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
                                          PXAppGroupRestoreTransactionErrorFilesystemChanged,
                                          fieldPath,
                                          @"A transaction cleanup directory changed during traversal.");
+        }
+        if (fchmod(childDescriptor, 0700) != 0) {
+            int chmodError = errno;
+            close(childDescriptor);
+            return PXAppGroupRestoreFail(error,
+                                         PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                         fieldPath,
+                                         PXAppGroupRestoreCleanupFailureDescription(
+                                             @"A transaction-owned cleanup directory could not be made writable",
+                                             nameData,
+                                             chmodError));
+        }
+        struct stat writableStat;
+        memset(&writableStat, 0, sizeof(writableStat));
+        if (fstat(childDescriptor, &writableStat) != 0 ||
+            writableStat.st_dev != after.st_dev ||
+            writableStat.st_ino != after.st_ino ||
+            !S_ISDIR(writableStat.st_mode) ||
+            (writableStat.st_mode & 0777) != 0700) {
+            close(childDescriptor);
+            return PXAppGroupRestoreFail(error,
+                                         PXAppGroupRestoreTransactionErrorFilesystemChanged,
+                                         fieldPath,
+                                         @"A transaction cleanup directory identity changed while making it writable.");
         }
         NSUInteger remaining = PXAppGroupRestoreMaximumCleanupEntries - visited;
         NSArray<NSData *> *childNames =
@@ -882,14 +959,18 @@ static BOOL PXAppGroupRestoreRemoveNamedDirectoryIfPresent(int parentDescriptor,
                                                             NSString *fieldPath) {
     BOOL exists = NO;
     int descriptor = PXAppGroupRestoreOpenDirectoryAt(parentDescriptor, name, &exists);
+    int openError = descriptor >= 0 ? 0 : errno;
     if (descriptor < 0) {
-        if (!exists && errno == ENOENT) {
+        if (!exists && openError == ENOENT) {
             return YES;
         }
         return PXAppGroupRestoreFail(error,
                                      PXAppGroupRestoreTransactionErrorCleanupFailed,
                                      fieldPath,
-                                     @"A transaction cleanup directory could not be opened.");
+                                     PXAppGroupRestoreCleanupFailureDescription(
+                                         @"A transaction cleanup directory could not be opened",
+                                         PXAppGroupRestoreNameData(name),
+                                         openError));
     }
     struct stat parentStat;
     struct stat directoryStat;
@@ -914,14 +995,24 @@ static BOOL PXAppGroupRestoreRemoveNamedDirectoryIfPresent(int parentDescriptor,
     }
     NSData *nameData = PXAppGroupRestoreNameData(name);
     char *rawName = PXAppGroupRestoreCopyTerminatedName(nameData);
-    if (!rawName || unlinkat(parentDescriptor, rawName, AT_REMOVEDIR) != 0) {
-        free(rawName);
+    if (!rawName) {
         return PXAppGroupRestoreFail(error,
                                      PXAppGroupRestoreTransactionErrorCleanupFailed,
                                      fieldPath,
-                                     @"A transaction cleanup directory could not be removed.");
+                                     @"A transaction cleanup directory name could not be prepared.");
     }
+    int removeResult = unlinkat(parentDescriptor, rawName, AT_REMOVEDIR);
+    int removeError = removeResult == 0 ? 0 : errno;
     free(rawName);
+    if (removeResult != 0) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                     fieldPath,
+                                     PXAppGroupRestoreCleanupFailureDescription(
+                                         @"A transaction cleanup directory could not be removed",
+                                         nameData,
+                                         removeError));
+    }
     return YES;
 }
 static BOOL PXAppGroupRestoreMoveEntry(PXAppGroupRestoreEntry *entry,
@@ -2064,14 +2155,18 @@ static BOOL PXAppGroupRestoreRemoveWorkspace(PXAppGroupRestoreParticipant *parti
                                              @"$.transaction.cleanup",
                                              @"An App Group cleanup file name is invalid.");
             }
-            if (unlinkat(participant.workspaceDescriptor, rawName, 0) != 0 && errno != ENOENT) {
-                free(rawName);
+            int unlinkResult = unlinkat(participant.workspaceDescriptor, rawName, 0);
+            int unlinkError = unlinkResult == 0 ? 0 : errno;
+            free(rawName);
+            if (unlinkResult != 0 && unlinkError != ENOENT) {
                 return PXAppGroupRestoreFail(error,
                                              PXAppGroupRestoreTransactionErrorCleanupFailed,
                                              @"$.transaction.cleanup",
-                                             @"An App Group cleanup file could not be removed.");
+                                             PXAppGroupRestoreCleanupFailureDescription(
+                                                 @"An App Group cleanup file could not be removed",
+                                                 fileNameData,
+                                                 unlinkError));
             }
-            free(rawName);
         }
     }
     if (!PXAppGroupRestoreSyncDirectory(participant.workspaceDescriptor)) {
@@ -2085,16 +2180,30 @@ static BOOL PXAppGroupRestoreRemoveWorkspace(PXAppGroupRestoreParticipant *parti
         participant.workspaceDescriptor = -1;
     }
     char *workspaceName = PXAppGroupRestoreCopyTerminatedName(participant.workspaceNameData);
-    if (!workspaceName ||
-        unlinkat(participant.targetDescriptor, workspaceName, AT_REMOVEDIR) != 0 ||
-        !PXAppGroupRestoreSyncDirectory(participant.targetDescriptor)) {
-        free(workspaceName);
+    if (!workspaceName) {
         return PXAppGroupRestoreFail(error,
                                      PXAppGroupRestoreTransactionErrorCleanupFailed,
                                      @"$.transaction.cleanup",
-                                     @"An App Group transaction workspace could not be removed.");
+                                     @"An App Group transaction workspace name could not be prepared.");
     }
+    int removeResult = unlinkat(participant.targetDescriptor, workspaceName, AT_REMOVEDIR);
+    int removeError = removeResult == 0 ? 0 : errno;
     free(workspaceName);
+    if (removeResult != 0) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                     @"$.transaction.cleanup",
+                                     PXAppGroupRestoreCleanupFailureDescription(
+                                         @"An App Group transaction workspace could not be removed",
+                                         participant.workspaceNameData,
+                                         removeError));
+    }
+    if (!PXAppGroupRestoreSyncDirectory(participant.targetDescriptor)) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                     @"$.transaction.cleanup",
+                                     @"The App Group target could not be synchronized after transaction workspace cleanup.");
+    }
     participant.workspaceNameData = nil;
     return YES;
 }
