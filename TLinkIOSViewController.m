@@ -31,6 +31,22 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
+
+static const void *kPXScopedAppButtonBundleIDKey = &kPXScopedAppButtonBundleIDKey;
+
+static void PXSetScopedAppButtonBundleID(UIButton *button, NSString *bundleID) {
+    if (!button) return;
+    objc_setAssociatedObject(button,
+                             kPXScopedAppButtonBundleIDKey,
+                             [bundleID isKindOfClass:[NSString class]] ? bundleID : @"",
+                             OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+static NSString *PXGetScopedAppButtonBundleID(UIButton *button) {
+    if (!button) return nil;
+    NSString *bundleID = objc_getAssociatedObject(button, kPXScopedAppButtonBundleIDKey);
+    return [bundleID isKindOfClass:[NSString class]] && bundleID.length ? bundleID : nil;
+}
 #import "common/UIButton+SafeConfiguration.h"
 #import "PXInjectionFilter.h"
 
@@ -1619,6 +1635,11 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 @implementation TLinkIOSViewController
 
+// Legacy scroll-to-bottom control kept compatible with the retired full-form UI.
+- (void)scrollToBottomButtonTapped:(UIButton *)sender {
+    [self floatingScrollButtonTapped:sender];
+}
+
 - (void)floatingScrollButtonTapped:(UIButton *)sender {
     CGFloat y = self.scrollView.contentOffset.y;
     CGFloat maxY = self.scrollView.contentSize.height - self.scrollView.bounds.size.height;
@@ -1991,7 +2012,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIImage *plusImage = PXSystemImageNamedWithPointSize(@"plus.circle.fill", 14.0);  // Reduced size
     [extensionButton setImage:plusImage forState:UIControlStateNormal];
     extensionButton.tintColor = [UIColor systemBlueColor];
-    extensionButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+    PXSetScopedAppButtonBundleID(extensionButton, bundleID);
     [extensionButton addTarget:self action:@selector(extensionButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     
     // Set fixed size for extension button
@@ -2048,7 +2069,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *deleteButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [deleteButton setImage:PXRemoveFromScopeIcon() forState:UIControlStateNormal];
     [deleteButton setTintColor:[UIColor systemRedColor]];
-    deleteButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+    PXSetScopedAppButtonBundleID(deleteButton, bundleID);
     [deleteButton addTarget:self action:@selector(deleteAppButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [controlStack addArrangedSubview:deleteButton];
     
@@ -2056,7 +2077,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *moreOptionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [moreOptionsButton setImage:PXSystemImageNamed(@"ellipsis.circle.fill") forState:UIControlStateNormal];
     [moreOptionsButton setTintColor:[UIColor systemBlueColor]];
-    moreOptionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+    PXSetScopedAppButtonBundleID(moreOptionsButton, bundleID);
     [moreOptionsButton addTarget:self action:@selector(moreOptionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [controlStack addArrangedSubview:moreOptionsButton];
     
@@ -2064,7 +2085,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *clearDataButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [clearDataButton setImage:PXClearDataIcon() forState:UIControlStateNormal];
     [clearDataButton setTintColor:[UIColor systemRedColor]];
-    clearDataButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+    PXSetScopedAppButtonBundleID(clearDataButton, bundleID);
     [clearDataButton addTarget:self action:@selector(clearDataButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [controlStack addArrangedSubview:clearDataButton];
     
@@ -2072,7 +2093,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     UIButton *versionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [versionsButton setImage:PXSystemImageNamed(@"arrow.up.and.down.circle.fill") forState:UIControlStateNormal];
     [versionsButton setTintColor:[UIColor systemBlueColor]];
-    versionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+    PXSetScopedAppButtonBundleID(versionsButton, bundleID);
     [versionsButton addTarget:self action:@selector(versionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     [controlStack addArrangedSubview:versionsButton];
     
@@ -2360,11 +2381,6 @@ static void PXWriteSubstrateFilterPlists(void) {
     UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissKeyboard)];
     tapGesture.cancelsTouchesInView = NO;
     [self.view addGestureRecognizer:tapGesture];
-    
-    // Add long press gesture to show debug info for trial banner
-    UILongPressGestureRecognizer *longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(showTrialBannerDebugInfo:)];
-    longPressGesture.minimumPressDuration = 2.0; // 2 seconds
-    [self.view addGestureRecognizer:longPressGesture];
     
     // Register for keyboard notifications
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -2765,7 +2781,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UIImage *plusImage = PXSystemImageNamedWithPointSize(@"plus.circle.fill", 14.0);  // Reduced size
         [extensionButton setImage:plusImage forState:UIControlStateNormal];
         extensionButton.tintColor = [UIColor systemBlueColor];
-        extensionButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+        PXSetScopedAppButtonBundleID(extensionButton, bundleID);
         [extensionButton addTarget:self action:@selector(extensionButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         
         // Set fixed size for extension button
@@ -2822,7 +2838,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UIButton *deleteButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [deleteButton setImage:PXRemoveFromScopeIcon() forState:UIControlStateNormal];
         [deleteButton setTintColor:[UIColor systemRedColor]];
-        deleteButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+        PXSetScopedAppButtonBundleID(deleteButton, bundleID);
         [deleteButton addTarget:self action:@selector(deleteAppButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [controlStack addArrangedSubview:deleteButton];
         
@@ -2830,7 +2846,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UIButton *moreOptionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [moreOptionsButton setImage:PXSystemImageNamed(@"ellipsis.circle.fill") forState:UIControlStateNormal];
         [moreOptionsButton setTintColor:[UIColor systemBlueColor]];
-        moreOptionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+        PXSetScopedAppButtonBundleID(moreOptionsButton, bundleID);
         [moreOptionsButton addTarget:self action:@selector(moreOptionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [controlStack addArrangedSubview:moreOptionsButton];
         
@@ -2838,7 +2854,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UIButton *clearDataButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [clearDataButton setImage:PXClearDataIcon() forState:UIControlStateNormal];
         [clearDataButton setTintColor:[UIColor systemRedColor]];
-        clearDataButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+        PXSetScopedAppButtonBundleID(clearDataButton, bundleID);
         [clearDataButton addTarget:self action:@selector(clearDataButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [controlStack addArrangedSubview:clearDataButton];
         
@@ -2846,7 +2862,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         UIButton *versionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [versionsButton setImage:PXSystemImageNamed(@"arrow.up.and.down.circle.fill") forState:UIControlStateNormal];
         [versionsButton setTintColor:[UIColor systemBlueColor]];
-        versionsButton.tag = [self.appSwitches.allKeys indexOfObject:bundleID];
+        PXSetScopedAppButtonBundleID(versionsButton, bundleID);
         [versionsButton addTarget:self action:@selector(versionsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [controlStack addArrangedSubview:versionsButton];
         
@@ -2879,8 +2895,8 @@ static void PXWriteSubstrateFilterPlists(void) {
 
 // (Freeze logic remains for now, but is not connected to any UI)
 - (void)freezeAppButtonTapped:(UIButton *)sender {
-    NSString *bundleID = self.appSwitches.allKeys[sender.tag];
-    if (!bundleID) {
+    NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
+    if (!bundleID.length) {
         return;
     }
     
@@ -4020,7 +4036,8 @@ static void PXWriteSubstrateFilterPlists(void) {
 #pragma mark - App Versions Management
 
 - (void)versionsButtonTapped:(UIButton *)sender {
-    NSString *bundleID = self.appSwitches.allKeys[sender.tag];
+    NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
+    if (!bundleID.length) return;
     self.selectedBundleID = bundleID;
     
     // Create versions popup if not exists
@@ -4156,8 +4173,8 @@ static void PXWriteSubstrateFilterPlists(void) {
 }
 
 - (void)clearDataButtonTapped:(UIButton *)sender {
-    NSString *bundleID = self.appSwitches.allKeys[sender.tag];
-    if (!bundleID) {
+    NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
+    if (!bundleID.length) {
         return;
     }
     
@@ -4384,12 +4401,10 @@ static void PXWriteSubstrateFilterPlists(void) {
 }
 
 - (void)deleteAppButtonTapped:(UIButton *)sender {
-    NSInteger index = sender.tag;
-    if (index < 0 || index >= self.appSwitches.allKeys.count) {
+    NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
+    if (!bundleID.length) {
         return;
     }
-    
-    NSString *bundleID = self.appSwitches.allKeys[index];
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Remove App"
                                                                    message:[NSString stringWithFormat:@"Are you sure you want to remove %@ from the scoped apps list?", bundleID]
@@ -5756,13 +5771,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 // Add the extension button handler method
 - (void)extensionButtonTapped:(UIButton *)sender {
-    NSInteger index = sender.tag;
-    if (index < 0 || index >= self.appSwitches.allKeys.count) {
-        return;
-    }
-    
-    NSString *bundleID = self.appSwitches.allKeys[index];
-    if (!bundleID) return;
+    NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
+    if (!bundleID.length) return;
     
     // Add the app with exact extensions and default WebKit helpers
     NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(@[bundleID]);
@@ -7522,7 +7532,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (void)quickRestoreTapped {
     NSArray<NSString *> *apps = self.selectedRRSAppIDs.count ? self.selectedRRSAppIDs : self.selectedResetAppIDs;
-    if (!apps.count) { [self showDashboardMessage:@"Thiếu app" message:@"Hãy chọn app trong Chọn App lưu RRS trước khi Restore nhanh."]; return; }
+    if (!apps.count) { [self showDashboardMessage:@"Thiếu app" message:@"Hãy chọn app trong Chọn App lưu RRS hoặc Chọn App Reset trước khi Restore nhanh."]; return; }
     NSInteger idx = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
     NSInteger end = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreEndKey]];
 
@@ -7735,15 +7745,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 #pragma mark - More Options Button Action
 
 - (void)moreOptionsButtonTapped:(UIButton *)sender {
-    // Add safety check for the tag value
-    if (sender.tag < 0 || !self.appSwitches || sender.tag >= self.appSwitches.allKeys.count) {
-        NSLog(@"[WeaponX] ⚠️ Invalid button tag or appSwitches state");
-        return;
-    }
-    
-    NSString *bundleID = self.appSwitches.allKeys[sender.tag];
-    if (!bundleID) {
-        NSLog(@"[WeaponX] ⚠️ Could not find bundleID for tag: %ld", (long)sender.tag);
+    NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
+    if (!bundleID.length) {
+        NSLog(@"[WeaponX] ⚠️ Could not resolve bundleID for More Options button");
         return;
     }
     

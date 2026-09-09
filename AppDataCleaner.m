@@ -373,6 +373,79 @@ static void PXSQLiteLogAccountsSample(AppDataCleaner *selfRef, sqlite3 *db, NSSt
     }
 }
 
+static void PXSQLiteLogMailAccountsDiagnostic(AppDataCleaner *selfRef, NSString *dbPath) {
+    if (!selfRef || !dbPath.length) return;
+
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(dbPath.UTF8String, &db, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK || !db) {
+        NSString *msg = db ? [NSString stringWithUTF8String:sqlite3_errmsg(db)] : @"open failed";
+        [selfRef logMessage:@"[AppDataCleaner] MobileMail Accounts3 diagnostic: read-only open failed rc=%d %@", rc, msg ?: @""];
+        if (db) sqlite3_close(db);
+        return;
+    }
+
+    sqlite3_busy_timeout(db, 3000);
+    NSMutableDictionary<NSString *, NSSet<NSString *> *> *colCache = [NSMutableDictionary dictionary];
+    for (NSString *table in @[@"ZACCOUNT", @"ZACCOUNTTYPE", @"ZACCOUNTPROPERTY", @"ZCREDENTIALITEM"]) {
+        NSArray<NSString *> *cols = [[PXSQLiteColumnsForTableCached(db, table, colCache) allObjects]
+                                     sortedArrayUsingSelector:@selector(compare:)];
+        [selfRef logMessage:@"[AppDataCleaner] MobileMail Accounts3 diagnostic: table=%@ columns=%@",
+                            table, cols.count ? [cols componentsJoinedByString:@","] : @"(missing/none)"];
+    }
+
+    NSString *accountCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNT;");
+    NSString *typeCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNTTYPE;");
+    [selfRef logMessage:@"[AppDataCleaner] MobileMail Accounts3 diagnostic: accounts=%@ accountTypes=%@",
+                        accountCount ?: @"(nil)", typeCount ?: @"(nil)"];
+
+    BOOL hasAccountPK = PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", @"Z_PK", colCache);
+    BOOL hasAccountTypeFK = PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", @"ZACCOUNTTYPE", colCache);
+    BOOL hasTypePK = PXSQLiteTableHasColumnCached(db, @"ZACCOUNTTYPE", @"Z_PK", colCache);
+    BOOL hasTypeIdentifier = PXSQLiteTableHasColumnCached(db, @"ZACCOUNTTYPE", @"ZIDENTIFIER", colCache);
+    BOOL hasOwningBundle = PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", @"ZOWNINGBUNDLEID", colCache);
+
+    if (hasAccountPK && hasAccountTypeFK && hasTypePK && hasTypeIdentifier) {
+        NSString *sql = hasOwningBundle
+            ? @"SELECT a.Z_PK, t.ZIDENTIFIER, a.ZOWNINGBUNDLEID FROM ZACCOUNT a LEFT JOIN ZACCOUNTTYPE t ON a.ZACCOUNTTYPE=t.Z_PK ORDER BY a.Z_PK LIMIT 32;"
+            : @"SELECT a.Z_PK, t.ZIDENTIFIER FROM ZACCOUNT a LEFT JOIN ZACCOUNTTYPE t ON a.ZACCOUNTTYPE=t.Z_PK ORDER BY a.Z_PK LIMIT 32;";
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &st, NULL) == SQLITE_OK && st) {
+            NSMutableArray<NSString *> *rows = [NSMutableArray array];
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                sqlite3_int64 pk = sqlite3_column_int64(st, 0);
+                const unsigned char *typeText = sqlite3_column_text(st, 1);
+                NSString *typeID = typeText ? [NSString stringWithUTF8String:(const char *)typeText] : @"(nil)";
+                if (hasOwningBundle) {
+                    const unsigned char *ownerText = sqlite3_column_text(st, 2);
+                    NSString *owner = ownerText ? [NSString stringWithUTF8String:(const char *)ownerText] : @"(nil)";
+                    [rows addObject:[NSString stringWithFormat:@"pk=%lld type=%@ owner=%@", pk, typeID, owner]];
+                } else {
+                    [rows addObject:[NSString stringWithFormat:@"pk=%lld type=%@", pk, typeID]];
+                }
+            }
+            sqlite3_finalize(st);
+            [selfRef logMessage:@"[AppDataCleaner] MobileMail Accounts3 diagnostic: accountMap=%@",
+                                rows.count ? [rows componentsJoinedByString:@" | "] : @"(empty)"];
+        } else if (st) {
+            sqlite3_finalize(st);
+        }
+    }
+
+    if (hasAccountPK && PXSQLiteTableHasColumnCached(db, @"ZACCOUNTPROPERTY", @"ZOWNER", colCache)) {
+        NSString *orphans = PXSQLiteScalar(db,
+            @"SELECT count(*) FROM ZACCOUNTPROPERTY p LEFT JOIN ZACCOUNT a ON p.ZOWNER=a.Z_PK WHERE a.Z_PK IS NULL;");
+        [selfRef logMessage:@"[AppDataCleaner] MobileMail Accounts3 diagnostic: orphan ZACCOUNTPROPERTY=%@", orphans ?: @"(nil)"];
+    }
+    if (hasAccountPK && PXSQLiteTableHasColumnCached(db, @"ZCREDENTIALITEM", @"ZOWNER", colCache)) {
+        NSString *orphans = PXSQLiteScalar(db,
+            @"SELECT count(*) FROM ZCREDENTIALITEM c LEFT JOIN ZACCOUNT a ON c.ZOWNER=a.Z_PK WHERE a.Z_PK IS NULL;");
+        [selfRef logMessage:@"[AppDataCleaner] MobileMail Accounts3 diagnostic: orphan ZCREDENTIALITEM=%@", orphans ?: @"(nil)"];
+    }
+
+    sqlite3_close(db);
+}
+
 - (NSString *)_sqliteScalarAtPath:(NSString *)dbPath sql:(NSString *)sql errorOut:(NSString **)errorOut {
     if (!dbPath.length || !sql.length) {
         if (errorOut) *errorOut = @"invalid args";
@@ -3586,100 +3659,25 @@ static NSDictionary *PXWaitForKeychainBridgeResponse(NSString *safeBundle, NSStr
         [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
         [self runBatchedCommandsWithPrivileges:mailShell timeoutSec:120]; 
 
-        // Keep maild stopped while accounts cleanup runs.
+        // Keep maild stopped until the Mail store/prefs swap and post-cleanup daemon reset complete.
         PXStopMailDaemonsBestEffort(self);
 
-        // Best-effort remove Mail account rows from Accounts3 (schema varies by iOS; keep scoped to mail-type identifiers).
-        NSString *accountsDB = @"/var/mobile/Library/Accounts/Accounts3.sqlite";
-        if ([_fileManager fileExistsAtPath:accountsDB]) {
-            // Stop accountsd before touching DB (avoid "database is locked").
-            // Use TERM first to reduce crash reports.
-            PXKillallTermThenKill(@"accountsd", 0.15);
-            [NSThread sleepForTimeInterval:0.2];
+        // SECURITY BLOCK: the legacy Deep Mail Accounts3 mutation is intentionally disabled.
+        // The previous implementation selected mail-like accounts, deleted ZACCOUNT rows, and then
+        // deleted companion rows using the *remaining* ZACCOUNT set. On mixed-account devices that
+        // can delete unrelated account properties/credentials while leaving target-owned orphans.
+        //
+        // Keep the rest of Deep Mail cleanup active, but do not open or mutate Accounts3.sqlite
+        // until a schema-validated implementation snapshots exact target account IDs before DELETE,
+        // performs all required mutations transactionally, and verifies unrelated accounts are intact.
+        // This is fail-closed by design and must not be converted to a preference/feature flag.
+        [self logMessage:@"[AppDataCleaner] MobileMail: Accounts3 destructive cleanup BLOCKED (unsafe legacy SQL disabled; app/mail-store cleanup continues)"];
+        PXSQLiteLogMailAccountsDiagnostic(self, @"/var/mobile/Library/Accounts/Accounts3.sqlite");
 
-            // Use one RW connection for before/delete/after to avoid transient CANTOPEN.
-            sqlite3 *db = NULL;
-            int rc = sqlite3_open_v2(accountsDB.UTF8String, &db, SQLITE_OPEN_READWRITE, NULL);
-            if (rc != SQLITE_OK || !db) {
-                NSString *msg = db ? [NSString stringWithUTF8String:sqlite3_errmsg(db)] : @"open failed";
-                [self logMessage:@"[AppDataCleaner] MobileMail: Accounts3 open failed rc=%d %@", rc, msg ?: @""];
-                if (db) sqlite3_close(db);
-            } else {
-                sqlite3_busy_timeout(db, 3000);
-
-                NSString *beforeCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNT;");
-                [self logMessage:@"[AppDataCleaner] MobileMail: Accounts3 ZACCOUNT count before=%@", beforeCount ?: @"(nil)"];
-
-                // Identify mail-related account types.
-                NSString *typeCount = PXSQLiteScalar(db,
-                    @"SELECT count(*) FROM ZACCOUNTTYPE WHERE "
-                    "ZIDENTIFIER LIKE '%mail%' OR ZIDENTIFIER LIKE '%imap%' OR ZIDENTIFIER LIKE '%smtp%' OR ZIDENTIFIER LIKE '%exchange%' OR "
-                    "ZIDENTIFIER LIKE '%google%' OR ZIDENTIFIER LIKE '%gmail%';");
-                [self logMessage:@"[AppDataCleaner] MobileMail: mail-ish/google-ish account types=%@", typeCount ?: @"(nil)"];
-
-                NSString *errMsg = nil;
-                PXSQLiteExec(db, @"PRAGMA busy_timeout=3000;", NULL);
-                PXSQLiteExec(db, @"BEGIN IMMEDIATE;", &errMsg);
-                if (errMsg.length) {
-                    [self logMessage:@"[AppDataCleaner] MobileMail: BEGIN IMMEDIATE failed %@", errMsg];
-                    errMsg = nil;
-                }
-
-                // Delete matching accounts and best-effort related rows.
-                // We intentionally ignore errors for tables that may not exist on some iOS versions.
-                // For Gmail accounts configured in Mail, the underlying account type is often Google-based
-                // (e.g. com.apple.account.Google) and may not match mail/imap/smtp identifiers.
-                NSString *deleteAccounts =
-                    @"DELETE FROM ZACCOUNT WHERE ZACCOUNTTYPE IN (SELECT Z_PK FROM ZACCOUNTTYPE WHERE "
-                    "ZIDENTIFIER LIKE '%mail%' OR ZIDENTIFIER LIKE '%imap%' OR ZIDENTIFIER LIKE '%smtp%' OR ZIDENTIFIER LIKE '%exchange%' OR "
-                    "ZIDENTIFIER LIKE '%google%' OR ZIDENTIFIER LIKE '%gmail%');";
-                BOOL delOK = PXSQLiteExec(db, deleteAccounts, &errMsg);
-                int changes = sqlite3_changes(db);
-                [self logMessage:@"[AppDataCleaner] MobileMail: ZACCOUNT delete ok=%d changes=%d %@", delOK, changes, errMsg.length ? errMsg : @""];
-                errMsg = nil;
-
-                // Companion tables are schema-dependent. Try deletes if they exist; ignore failures.
-                // (We do not assume these tables exist on all iOS versions.)
-                PXSQLiteExec(db, @"DELETE FROM ZACCOUNTPROPERTY WHERE ZOWNER IN (SELECT Z_PK FROM ZACCOUNT);", NULL);
-                PXSQLiteExec(db, @"DELETE FROM ZCREDENTIALITEM WHERE ZOWNER IN (SELECT Z_PK FROM ZACCOUNT);", NULL);
-
-                PXSQLiteExec(db, @"COMMIT;", &errMsg);
-                if (errMsg.length) {
-                    [self logMessage:@"[AppDataCleaner] MobileMail: COMMIT failed %@", errMsg];
-                    errMsg = nil;
-                }
-                PXSQLiteExec(db, @"PRAGMA wal_checkpoint(TRUNCATE);", NULL);
-
-                NSString *afterCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNT;");
-                [self logMessage:@"[AppDataCleaner] MobileMail: Accounts3 ZACCOUNT count after=%@", afterCount ?: @"(nil)"];
-
-                // If accounts remain, log a few account type identifiers for debugging.
-                NSString *sample = nil;
-                sqlite3_stmt *st = NULL;
-                if (sqlite3_prepare_v2(db, "SELECT ZIDENTIFIER FROM ZACCOUNTTYPE LIMIT 12;", -1, &st, NULL) == SQLITE_OK && st) {
-                    NSMutableArray *ids = [NSMutableArray array];
-                    while (sqlite3_step(st) == SQLITE_ROW) {
-                        const unsigned char *txt = sqlite3_column_text(st, 0);
-                        if (txt) [ids addObject:[NSString stringWithUTF8String:(const char *)txt]];
-                    }
-                    sqlite3_finalize(st);
-                    sample = [ids componentsJoinedByString:@", "];
-                } else if (st) {
-                    sqlite3_finalize(st);
-                }
-                if (sample.length) {
-                    [self logMessage:@"[AppDataCleaner] MobileMail: ZACCOUNTTYPE sample=%@", sample];
-                }
-
-                sqlite3_close(db);
-            }
-        }
-
-        // Restart accounts daemons (best-effort) so UI reflects removal.
-        PXKillallByName(@"accountsd", SIGTERM);
+        // Accounts3 is blocked, so do not disturb the global accountsd service here.
+        // Reset only the Mail application process so it observes the fresh Mail store/prefs.
         PXKillallByName(@"Mail", SIGTERM);
         [NSThread sleepForTimeInterval:0.15];
-        PXKillallByName(@"accountsd", SIGKILL);
         PXKillallByName(@"Mail", SIGKILL);
 
         // Do not auto-restart maild; let launchd bring it back when needed.

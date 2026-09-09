@@ -78,6 +78,36 @@ require("request.mode == PXClearModeDeep" in app_wipe_body,
 require("PXClearModeIncludesExtendedContainers(request.mode)" in app_wipe_body,
         "Quick residual-cleanup exclusion missing")
 
+# Deep Mail Accounts3 release safety block.
+mail_start = app_wipe_body.index('if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilemail"])')
+mail_end = app_wipe_body.index("    // Clear preferences and cookies only", mail_start)
+mail_body = app_wipe_body[mail_start:mail_end]
+require("Accounts3 destructive cleanup BLOCKED" in mail_body,
+        "Deep Mail Accounts3 destructive cleanup release block missing")
+require("PXSQLiteLogMailAccountsDiagnostic" in mail_body,
+        "Deep Mail blocked path must emit read-only Accounts3 diagnostics for safe unblocking")
+require("/var/mobile/Library/Mail" in mail_body and "com.apple.mail.plist" in mail_body,
+        "Deep Mail store/preferences cleanup must remain active while Accounts3 is blocked")
+require('PXKillallByName(@"accountsd"' not in mail_body and 'PXKillallTermThenKill(@"accountsd"' not in mail_body,
+        "Deep Mail blocked path must not disturb accountsd when Accounts3 is not mutated")
+for destructive_token in (
+    'sqlite3_open_v2(accountsDB.UTF8String, &db, SQLITE_OPEN_READWRITE, NULL)',
+    'DELETE FROM ZACCOUNT WHERE ZACCOUNTTYPE IN',
+    'DELETE FROM ZACCOUNTPROPERTY WHERE ZOWNER IN',
+    'DELETE FROM ZCREDENTIALITEM WHERE ZOWNER IN',
+):
+    require(destructive_token not in mail_body,
+            f"Deep Mail release path still contains blocked Accounts3 mutation: {destructive_token}")
+
+diag_start = cleaner_m.index("static void PXSQLiteLogMailAccountsDiagnostic")
+diag_end = cleaner_m.index("- (NSString *)_sqliteScalarAtPath", diag_start)
+diag_body = cleaner_m[diag_start:diag_end]
+require("SQLITE_OPEN_READONLY" in diag_body and "SQLITE_OPEN_READWRITE" not in diag_body,
+        "Deep Mail Accounts3 diagnostic must remain read-only")
+for mutation in ("DELETE FROM ", "UPDATE ", "INSERT INTO ", "REPLACE INTO "):
+    require(mutation not in diag_body,
+            f"Deep Mail Accounts3 diagnostic unexpectedly contains mutation SQL: {mutation}")
+
 # CLEAR-01: dry-run + transaction journal (Phase 14)
 require("dryRun:(BOOL)dryRun" not in cleaner_h, "CLEAR-01 dry-run must stay off the public 25-selector header")
 require("dryRun:(BOOL)dryRun" in cleaner_m, "CLEAR-01 dry-run implementation missing")

@@ -251,6 +251,13 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
         self.cardView.layer.borderWidth = 0.0;
     }
     
+    // Reset reusable visual state before applying the current device state.
+    if (@available(iOS 13.0, *)) {
+        self.iconImageView.tintColor = [UIColor systemBlueColor];
+    } else {
+        self.iconImageView.tintColor = [UIColor colorWithRed:0 green:0.76 blue:1.0 alpha:1.0];
+    }
+
     // Set last seen date with proper formatting
     // Check both possible field names from the API
     NSString *lastSeen = device[@"last_seen_at"] ?: device[@"last_seen"];
@@ -395,24 +402,33 @@ static NSString *const kDeviceCardCellIdentifier = @"DeviceCardCell";
     self.statusBadge.layer.shadowOpacity = 0.1;
     self.statusBadge.layer.masksToBounds = NO;
     
-    // For current device, we'll disable the remove action
-    if (isCurrentDevice) {
-        self.removeAction = nil;
-        
-        // Find and update the remove button
-        for (UIView *subview in self.cardView.subviews) {
-            if ([subview isKindOfClass:[UIButton class]]) {
-                UIButton *removeButton = (UIButton *)subview;
-                removeButton.enabled = NO;
-                if (@available(iOS 13.0, *)) {
-                    removeButton.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.1];
-                    [removeButton setTitleColor:[UIColor systemGrayColor] forState:UIControlStateNormal];
-                } else {
-                    removeButton.backgroundColor = [UIColor colorWithWhite:0.8 alpha:0.1];
-                    [removeButton setTitleColor:[UIColor colorWithWhite:0.6 alpha:1.0] forState:UIControlStateNormal];
-                }
+    // Current device cannot be removed; every other device must restore the button
+    // to the enabled state when a reusable collection-view cell changes identity.
+    for (UIView *subview in self.cardView.subviews) {
+        if (![subview isKindOfClass:[UIButton class]]) continue;
+        UIButton *removeButton = (UIButton *)subview;
+        removeButton.enabled = !isCurrentDevice;
+        if (@available(iOS 13.0, *)) {
+            if (isCurrentDevice) {
+                removeButton.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.1];
+                [removeButton setTitleColor:[UIColor systemGrayColor] forState:UIControlStateNormal];
+            } else {
+                removeButton.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.1];
+                [removeButton setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+            }
+        } else {
+            if (isCurrentDevice) {
+                removeButton.backgroundColor = [UIColor colorWithWhite:0.8 alpha:0.1];
+                [removeButton setTitleColor:[UIColor colorWithWhite:0.6 alpha:1.0] forState:UIControlStateNormal];
+            } else {
+                removeButton.backgroundColor = [UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:0.1];
+                [removeButton setTitleColor:[UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
             }
         }
+    }
+
+    if (isCurrentDevice) {
+        self.removeAction = nil;
     }
 }
 
