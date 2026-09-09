@@ -274,6 +274,87 @@ static NSString *PXAppGroupRestoreCleanupFailureDescription(NSString *descriptio
     return result;
 }
 
+static unsigned long PXAppGroupRestoreDeletionBlockingFlags(void) {
+    unsigned long flags = 0;
+#ifdef UF_IMMUTABLE
+    flags |= UF_IMMUTABLE;
+#endif
+#ifdef UF_APPEND
+    flags |= UF_APPEND;
+#endif
+#ifdef SF_IMMUTABLE
+    flags |= SF_IMMUTABLE;
+#endif
+#ifdef SF_APPEND
+    flags |= SF_APPEND;
+#endif
+#ifdef SF_NOUNLINK
+    flags |= SF_NOUNLINK;
+#endif
+    return flags;
+}
+
+static BOOL PXAppGroupRestoreClearDeletionBlockingFlags(int descriptor,
+                                                         const struct stat *expected,
+                                                         NSData *nameData,
+                                                         NSError **error,
+                                                         NSString *fieldPath) {
+    if (descriptor < 0 || !expected) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                     fieldPath,
+                                     @"A transaction cleanup entry flag descriptor is invalid.");
+    }
+    struct stat current;
+    memset(&current, 0, sizeof(current));
+    if (fstat(descriptor, &current) != 0 ||
+        current.st_dev != expected->st_dev ||
+        current.st_ino != expected->st_ino ||
+        ((current.st_mode & S_IFMT) != (expected->st_mode & S_IFMT))) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorFilesystemChanged,
+                                     fieldPath,
+                                     @"A transaction cleanup entry identity changed before flag preparation.");
+    }
+    unsigned long blockingFlags = PXAppGroupRestoreDeletionBlockingFlags();
+    unsigned long existingFlags = (unsigned long)current.st_flags;
+    unsigned long flagsToClear = existingFlags & blockingFlags;
+    if (flagsToClear == 0) {
+        return YES;
+    }
+    unsigned long desiredFlags = existingFlags & ~blockingFlags;
+    if (fchflags(descriptor, (u_int)desiredFlags) != 0) {
+        int flagError = errno;
+        NSString *description = [NSString stringWithFormat:
+            @"A transaction-owned cleanup entry could not clear deletion-blocking flags old=0x%lx mask=0x%lx",
+            existingFlags,
+            flagsToClear];
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                     fieldPath,
+                                     PXAppGroupRestoreCleanupFailureDescription(description,
+                                                                                nameData,
+                                                                                flagError));
+    }
+    struct stat verified;
+    memset(&verified, 0, sizeof(verified));
+    if (fstat(descriptor, &verified) != 0 ||
+        verified.st_dev != current.st_dev ||
+        verified.st_ino != current.st_ino ||
+        ((verified.st_mode & S_IFMT) != (current.st_mode & S_IFMT)) ||
+        (((unsigned long)verified.st_flags) & blockingFlags) != 0) {
+        return PXAppGroupRestoreFail(error,
+                                     PXAppGroupRestoreTransactionErrorFilesystemChanged,
+                                     fieldPath,
+                                     @"A transaction cleanup entry identity or deletion flags changed unexpectedly.");
+    }
+    NSLog(@"[PXAppGroupRestoreTransaction] Cleared transaction-owned deletion flags: entry=%@ old=0x%lx new=0x%lx",
+          PXAppGroupRestoreDiagnosticName(nameData),
+          existingFlags,
+          (unsigned long)verified.st_flags);
+    return YES;
+}
+
 static NSArray<NSData *> *PXAppGroupRestoreReadDirectoryNames(int descriptor,
                                                               NSUInteger maximumNameCount,
                                                               NSError **error,
@@ -746,17 +827,57 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
         }
 
         if (!S_ISDIR(before.st_mode)) {
+            if (S_ISREG(before.st_mode)) {
+                int entryDescriptor = openat(frame.descriptor,
+                                             name,
+                                             O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+                int openError = entryDescriptor >= 0 ? 0 : errno;
+                if (entryDescriptor < 0) {
+                    free(name);
+                    return PXAppGroupRestoreFail(error,
+                                                 PXAppGroupRestoreTransactionErrorCleanupFailed,
+                                                 fieldPath,
+                                                 PXAppGroupRestoreCleanupFailureDescription(
+                                                     @"A transaction cleanup file could not be opened for flag preparation",
+                                                     nameData,
+                                                     openError));
+                }
+                if (!PXAppGroupRestoreClearDeletionBlockingFlags(entryDescriptor,
+                                                                &before,
+                                                                nameData,
+                                                                error,
+                                                                fieldPath)) {
+                    close(entryDescriptor);
+                    free(name);
+                    return NO;
+                }
+                close(entryDescriptor);
+            }
+            struct stat prepared;
+            memset(&prepared, 0, sizeof(prepared));
+            if (fstatat(frame.descriptor, name, &prepared, AT_SYMLINK_NOFOLLOW) != 0 ||
+                prepared.st_dev != before.st_dev ||
+                prepared.st_ino != before.st_ino ||
+                ((prepared.st_mode & S_IFMT) != (before.st_mode & S_IFMT))) {
+                free(name);
+                return PXAppGroupRestoreFail(error,
+                                             PXAppGroupRestoreTransactionErrorFilesystemChanged,
+                                             fieldPath,
+                                             @"A transaction cleanup entry changed before removal.");
+            }
             int unlinkResult = unlinkat(frame.descriptor, name, 0);
             int unlinkError = unlinkResult == 0 ? 0 : errno;
             free(name);
             if (unlinkResult != 0) {
+                NSString *description = [NSString stringWithFormat:
+                    @"A transaction cleanup entry could not be removed flags=0x%lx",
+                    (unsigned long)prepared.st_flags];
                 return PXAppGroupRestoreFail(error,
                                              PXAppGroupRestoreTransactionErrorCleanupFailed,
                                              fieldPath,
-                                             PXAppGroupRestoreCleanupFailureDescription(
-                                                 @"A transaction cleanup entry could not be removed",
-                                                 nameData,
-                                                 unlinkError));
+                                             PXAppGroupRestoreCleanupFailureDescription(description,
+                                                                                        nameData,
+                                                                                        unlinkError));
             }
             continue;
         }
@@ -788,6 +909,14 @@ static BOOL PXAppGroupRestoreRemoveDirectoryContents(int rootDescriptor,
                                          PXAppGroupRestoreTransactionErrorFilesystemChanged,
                                          fieldPath,
                                          @"A transaction cleanup directory changed during traversal.");
+        }
+        if (!PXAppGroupRestoreClearDeletionBlockingFlags(childDescriptor,
+                                                        &after,
+                                                        nameData,
+                                                        error,
+                                                        fieldPath)) {
+            close(childDescriptor);
+            return NO;
         }
         if (fchmod(childDescriptor, 0700) != 0) {
             int chmodError = errno;
