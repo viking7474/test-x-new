@@ -819,7 +819,9 @@ px_validate_workspace_identity() {
     [ "$PX_WORKSPACE_LIVE_INODE" = "$PX_WORKSPACE_INODE" ] || return 1
     [ "$PX_WORKSPACE_LIVE_UID" = "$PX_WORKSPACE_UID" ] || return 1
     [ "$PX_WORKSPACE_LIVE_GID" = "$PX_WORKSPACE_GID" ] || return 1
-    [ "$PX_WORKSPACE_LIVE_LINKS" = "$PX_WORKSPACE_LINKS" ] || return 1
+    # Directory link count is content metadata, not identity. Creating/removing
+    # children may change it on iOS/APFS. Keep device/inode/uid/gid/mode as the
+    # workspace authority; individual workspace files still require LINKS=1.
     [ "$PX_WORKSPACE_LIVE_UID" -eq "$EUID" ] || return 1
     px_mode_is_exact "$PX_WORKSPACE_LIVE_MODE" 700 || return 1
     return 0
