@@ -1421,6 +1421,17 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     shell.path, source_line_for_token(shell, "platform-application"),
                     "helper entitlement overlay must be deterministic, minimal and fail closed")
 
+    collector.check("BRH-KEY-ENTITLEMENT-PLUTIL-ROOT-KEYPATH",
+                    "px_plutil_escape_root_keypath()" in shell.text and
+                    'case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac' in shell.text and
+                    'local escaped="${key//./\\\\.}"' in shell.text and
+                    shell.text.count('px_plutil_escape_root_keypath "$key" || return 1') == 3 and
+                    shell.text.count('local keypath="$PX_PLUTIL_ROOT_KEYPATH"') == 3 and
+                    shell.text.count('"$PX_PLUTIL_PATH" -replace "$keypath"') == 3 and
+                    shell.text.count('"$PX_PLUTIL_PATH" -insert "$keypath"') == 3,
+                    shell.path, source_line_for_token(shell, "px_plutil_escape_root_keypath()"),
+                    "plutil entitlement mutations must escape dotted root keys before key-path operations")
+
     collector.check("BRH-KEY-ENTITLEMENT-REQUESTED-KAG",
                     'px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file"' in generation_body and
                     'generated_groups=$(parse_keychain_groups "$output_file")' in generation_body and

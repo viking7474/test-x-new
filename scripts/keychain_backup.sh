@@ -712,7 +712,7 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse|helper-overlay-platform-application|helper-overlay-application-identifier|helper-overlay-no-sandbox|helper-overlay-no-container|helper-overlay-container-required|helper-overlay-keystore-access-keychain-keys|helper-overlay-keystore-device|helper-overlay-keychain-access-groups|helper-overlay-lint|helper-overlay-groups-parse|helper-overlay-groups-mismatch|helper-overlay-app-id-parse|helper-overlay-app-id-mismatch)
             log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
             ;;
     esac
@@ -1900,28 +1900,48 @@ px_group_csv_to_json_array() {
     return 0
 }
 
+PX_PLUTIL_ROOT_KEYPATH=""
+
+px_plutil_escape_root_keypath() {
+    local key="$1"
+    PX_PLUTIL_ROOT_KEYPATH=""
+    [ -n "$key" ] && [ "${#key}" -le 512 ] || return 1
+    px_string_has_control_character "$key" && return 1
+    case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+    local escaped="${key//./\\.}"
+    [ -n "$escaped" ] || return 1
+    PX_PLUTIL_ROOT_KEYPATH="$escaped"
+    return 0
+}
+
 px_plutil_upsert_bool() {
     local key="$1"
     local value="$2"
     local plist="$3"
-    "$PX_PLUTIL_PATH" -replace "$key" -bool "$value" "$plist" >/dev/null 2>&1 && return 0
-    "$PX_PLUTIL_PATH" -insert "$key" -bool "$value" "$plist" >/dev/null 2>&1
+    px_plutil_escape_root_keypath "$key" || return 1
+    local keypath="$PX_PLUTIL_ROOT_KEYPATH"
+    "$PX_PLUTIL_PATH" -replace "$keypath" -bool "$value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$keypath" -bool "$value" "$plist" >/dev/null 2>&1
 }
 
 px_plutil_upsert_string() {
     local key="$1"
     local value="$2"
     local plist="$3"
-    "$PX_PLUTIL_PATH" -replace "$key" -string "$value" "$plist" >/dev/null 2>&1 && return 0
-    "$PX_PLUTIL_PATH" -insert "$key" -string "$value" "$plist" >/dev/null 2>&1
+    px_plutil_escape_root_keypath "$key" || return 1
+    local keypath="$PX_PLUTIL_ROOT_KEYPATH"
+    "$PX_PLUTIL_PATH" -replace "$keypath" -string "$value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$keypath" -string "$value" "$plist" >/dev/null 2>&1
 }
 
 px_plutil_upsert_json() {
     local key="$1"
     local value="$2"
     local plist="$3"
-    "$PX_PLUTIL_PATH" -replace "$key" -json "$value" "$plist" >/dev/null 2>&1 && return 0
-    "$PX_PLUTIL_PATH" -insert "$key" -json "$value" "$plist" >/dev/null 2>&1
+    px_plutil_escape_root_keypath "$key" || return 1
+    local keypath="$PX_PLUTIL_ROOT_KEYPATH"
+    "$PX_PLUTIL_PATH" -replace "$keypath" -json "$value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$keypath" -json "$value" "$plist" >/dev/null 2>&1
 }
 
 # === Generate effective entitlements for the private helper ===
@@ -1958,24 +1978,66 @@ generate_helper_entitlements() {
     "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
-    px_plutil_upsert_bool "platform-application" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_string "application-identifier" "$app_identifier" "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_bool "com.apple.private.security.no-sandbox" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_bool "com.apple.private.security.no-container" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_bool "com.apple.private.security.container-required" false "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_bool "com.apple.keystore.access-keychain-keys" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_bool "com.apple.keystore.device" true "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    "$PX_PLUTIL_PATH" -lint "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    px_plutil_upsert_bool "platform-application" true "$output_file" || {
+        px_report_failure_reason helper-overlay-platform-application
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_string "application-identifier" "$app_identifier" "$output_file" || {
+        px_report_failure_reason helper-overlay-application-identifier
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_bool "com.apple.private.security.no-sandbox" true "$output_file" || {
+        px_report_failure_reason helper-overlay-no-sandbox
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_bool "com.apple.private.security.no-container" true "$output_file" || {
+        px_report_failure_reason helper-overlay-no-container
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_bool "com.apple.private.security.container-required" false "$output_file" || {
+        px_report_failure_reason helper-overlay-container-required
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_bool "com.apple.keystore.access-keychain-keys" true "$output_file" || {
+        px_report_failure_reason helper-overlay-keystore-access-keychain-keys
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_bool "com.apple.keystore.device" true "$output_file" || {
+        px_report_failure_reason helper-overlay-keystore-device
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file" || {
+        px_report_failure_reason helper-overlay-keychain-access-groups
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    "$PX_PLUTIL_PATH" -lint "$output_file" >/dev/null 2>&1 || {
+        px_report_failure_reason helper-overlay-lint
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
     "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
     local generated_groups generated_identifier
-    generated_groups=$(parse_keychain_groups "$output_file") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_canonicalize_group_csv "$generated_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    [ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    generated_identifier=$(parse_app_identifier "$output_file") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    [ "$generated_identifier" = "$app_identifier" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    generated_groups=$(parse_keychain_groups "$output_file") || {
+        px_report_failure_reason helper-overlay-groups-parse
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    px_canonicalize_group_csv "$generated_groups" || {
+        px_report_failure_reason helper-overlay-groups-parse
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    [ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ] || {
+        px_report_failure_reason helper-overlay-groups-mismatch
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    generated_identifier=$(parse_app_identifier "$output_file") || {
+        px_report_failure_reason helper-overlay-app-id-parse
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    [ "$generated_identifier" = "$app_identifier" ] || {
+        px_report_failure_reason helper-overlay-app-id-mismatch
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
 
     px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
