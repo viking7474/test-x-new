@@ -113,6 +113,7 @@ PX_RM_PATH=""
 PX_RMDIR_PATH=""
 PX_PLUTIL_PATH=""
 PX_LDID_PATH=""
+PX_LDID_TRUST_MODE=""
 PX_GREP_PATH=""
 PX_SED_PATH=""
 PX_METADATA_READY=0
@@ -433,6 +434,59 @@ px_resolve_trusted_utility() {
     return 1
 }
 
+px_resolve_trusted_ldid() {
+    local candidates=(
+        "/usr/bin/ldid"
+        "/bin/ldid"
+        "/usr/local/bin/ldid"
+        "/var/jb/usr/bin/ldid"
+        "/var/jb/bin/ldid"
+        "/var/jb/usr/local/bin/ldid"
+        "/private/preboot/jb/usr/bin/ldid"
+        "/private/preboot/jb/bin/ldid"
+        "/private/preboot/jb/usr/local/bin/ldid"
+    )
+
+    # Prefer the generic strict resolver first: real file, trusted parent,
+    # root-owned and not group/world writable.
+    if px_resolve_trusted_utility PX_LDID_PATH "${candidates[@]}"; then
+        PX_LDID_TRUST_MODE="strict"
+        return 0
+    fi
+
+    # Jailbreak packages commonly expose ldid through a fixed-path symlink.
+    # Allow that only for ldid. Dereference the link for metadata checks and
+    # still require the effective target + exposed parent to be root-owned and
+    # non-group/world-writable before accepting it.
+    local candidate parent basename resolved
+    for candidate in "${candidates[@]}"; do
+        case "$candidate" in /*) ;; *) continue ;; esac
+        [ -L "$candidate" ] || continue
+        [ -f "$candidate" ] || continue
+        [ -x "$candidate" ] || continue
+        [ -s "$candidate" ] || continue
+        parent="${candidate%/*}"
+        basename="${candidate##*/}"
+        px_physical_directory "$parent" || continue
+        resolved="${PX_PHYSICAL_DIRECTORY%/}/$basename"
+        [ -L "$resolved" ] || continue
+        [ -f "$resolved" ] || continue
+        [ -x "$resolved" ] || continue
+        [ -s "$resolved" ] || continue
+        px_stat_snapshot "$resolved" PX_LDID_TARGET 1 || continue
+        px_stat_snapshot "$PX_PHYSICAL_DIRECTORY" PX_LDID_PARENT || continue
+        [ "$PX_LDID_TARGET_UID" -eq 0 ] || continue
+        [ "$PX_LDID_PARENT_UID" -eq 0 ] || continue
+        [ "$PX_LDID_TARGET_SIZE" -gt 0 ] || continue
+        px_mode_is_safe_executable "$PX_LDID_TARGET_MODE" || continue
+        px_mode_is_safe_executable "$PX_LDID_PARENT_MODE" || continue
+        PX_LDID_PATH="$resolved"
+        PX_LDID_TRUST_MODE="symlink-compatible"
+        return 0
+    done
+    return 1
+}
+
 px_initialize_metadata_boundary() {
     [ "$PX_METADATA_READY" -eq 0 ] || return 0
     px_bootstrap_stat || return 1
@@ -485,8 +539,7 @@ px_resolve_trusted_dependencies() {
         /usr/bin/plutil /var/jb/usr/bin/plutil /private/preboot/jb/usr/bin/plutil /bin/plutil; then
         PX_DEPENDENCY_FAILURE="plutil"; return 1
     fi
-    if ! px_resolve_trusted_utility PX_LDID_PATH \
-        /usr/bin/ldid /var/jb/usr/bin/ldid /private/preboot/jb/usr/bin/ldid /bin/ldid; then
+    if ! px_resolve_trusted_ldid; then
         PX_DEPENDENCY_FAILURE="ldid"; return 1
     fi
     if ! px_resolve_trusted_utility PX_GREP_PATH \
@@ -498,7 +551,7 @@ px_resolve_trusted_dependencies() {
         PX_DEPENDENCY_FAILURE="sed"; return 1
     fi
     readonly PX_MKTEMP_PATH PX_CP_PATH PX_CMP_PATH PX_CHMOD_PATH PX_RM_PATH PX_RMDIR_PATH
-    readonly PX_PLUTIL_PATH PX_LDID_PATH PX_GREP_PATH PX_SED_PATH
+    readonly PX_PLUTIL_PATH PX_LDID_PATH PX_LDID_TRUST_MODE PX_GREP_PATH PX_SED_PATH
     PX_DEPENDENCIES_READY=1
     return 0
 }
@@ -1793,6 +1846,7 @@ if ! px_resolve_trusted_dependencies; then
     log_error "A required trusted utility is unavailable"
     exit "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
 fi
+log_verbose "ldid path=${PX_LDID_PATH} trust=${PX_LDID_TRUST_MODE}"
 
 # Parse global options
 while [[ "$1" == --* ]]; do
