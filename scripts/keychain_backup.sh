@@ -1757,7 +1757,15 @@ px_read_plist_string_array_from_xml() {
     local key="$2"
     local xml tail between body rest prefix value out=""
 
-    xml=$("$PX_PLUTIL_PATH" -convert xml1 -o - "$plist" 2>/dev/null) || return 1
+    # Entitlement snapshots produced by ldid are already XML. Prefer reading
+    # those bytes directly so legacy plutil builds do not become a hard
+    # dependency for XML export. Fall back to plutil conversion only when the
+    # source is not an XML plist on disk.
+    if "$PX_GREP_PATH" -q '<plist' "$plist" 2>/dev/null; then
+        xml=$(<"$plist") || return 1
+    else
+        xml=$("$PX_PLUTIL_PATH" -convert xml1 -o - "$plist" 2>/dev/null) || return 1
+    fi
     [ -n "$xml" ] && [ "${#xml}" -le 16777216 ] || return 1
 
     # Parse by XML tag boundaries, not physical lines. Older iOS/jailbreak

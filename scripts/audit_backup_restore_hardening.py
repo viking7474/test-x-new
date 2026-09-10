@@ -1382,6 +1382,8 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     '"$PX_PLUTIL_PATH" -key keychain-access-groups "$ent_file"' in shell.text and
                     'px_read_plist_string_compat()' in shell.text and
                     'px_read_plist_string_array_from_xml()' in shell.text and
+                    '"$PX_GREP_PATH" -q \'<plist\' "$plist"' in shell.text and
+                    'xml=$(<"$plist")' in shell.text and
                     'tail="${xml#*"<key>${key}</key>"}"' in shell.text and
                     'body="${tail#*<array>}"' in shell.text and
                     'value="${rest%%</string>*}"' in shell.text and
@@ -1911,6 +1913,14 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     tests.append(("keychain-compound-array-index", "KEY",
                   replace_source_text(base, shell.path, compound_index_mutation),
                   "BRH-KEY-ENTITLEMENT-COMPOUND-FALLBACK"))
+    raw_xml_mutation = shell.text.replace(
+        'xml=$(<"$plist") || return 1',
+        'xml=$("$PX_PLUTIL_PATH" -convert xml1 -o - "$plist" 2>/dev/null) || return 1',
+        1,
+    )
+    tests.append(("keychain-raw-xml-reader", "KEY",
+                  replace_source_text(base, shell.path, raw_xml_mutation),
+                  "BRH-KEY-ENTITLEMENT-PLIST-COMPAT"))
 
     direct_helper = base["KeychainHelper/backup_helper.m"]
     helper_contract_mutation = direct_helper.text.replace(
