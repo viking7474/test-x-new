@@ -702,7 +702,7 @@ px_discard_unactivated_workspace() {
 px_report_failure_stage() {
     local stage="$1"
     case "$stage" in
-        workspace-create|target-locate|target-native-validate|target-entitlements|requested-groups|helper-entitlements|helper-copy|helper-sign|helper-authority|post-sign-entitlements|pre-exec-validation|post-exec-validation) ;;
+        workspace-create|target-locate|target-native-validate|target-entitlements|target-signed-identity|requested-groups|helper-entitlements|helper-copy|helper-sign|helper-authority|post-sign-entitlements|pre-exec-validation|post-exec-validation) ;;
         *) return 1 ;;
     esac
     log_error "PXKEYCHAIN_FAILURE_STAGE=$stage"
@@ -712,11 +712,10 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed) ;;
-        *) return 1 ;;
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-executable-basename|target-executable-metadata|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
+            log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
+            ;;
     esac
-    log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
-    return 0
 }
 
 px_create_workspace() {
@@ -1165,22 +1164,41 @@ px_prepare_explicit_target() {
     local bundle_id="$1"
     local app_dir="$2"
     local target="$3"
-    px_validate_bundle_id "$bundle_id" || return 1
-    px_validate_absolute_path_lexical "$app_dir" || return 1
-    px_validate_absolute_path_lexical "$target" || return 1
-    [ "${target%/*}" = "$app_dir" ] || return 1
-    case "$app_dir" in *.app) ;; *) return 1 ;; esac
 
-    px_validate_app_directory "$app_dir" || return 1
-    local info_plist="$app_dir/Info.plist"
-    px_validate_info_plist "$info_plist" || return 1
-    px_read_info_value "$info_plist" CFBundleIdentifier || return 1
-    [ "$PX_PLIST_VALUE" = "$bundle_id" ] || return 1
-    px_read_info_value "$info_plist" CFBundleExecutable || return 1
-    local executable_name="$PX_PLIST_VALUE"
-    px_validate_safe_basename "$executable_name" || return 1
-    [ "$target" = "$app_dir/$executable_name" ] || return 1
-    px_validate_target_executable "$target" || return 1
+    px_validate_bundle_id "$bundle_id" || {
+        px_report_failure_reason target-bundle-id
+        return 1
+    }
+    px_validate_absolute_path_lexical "$app_dir" || {
+        px_report_failure_reason target-bundle-path
+        return 1
+    }
+    px_validate_absolute_path_lexical "$target" || {
+        px_report_failure_reason target-executable-path
+        return 1
+    }
+    [ "${target%/*}" = "$app_dir" ] || {
+        px_report_failure_reason target-direct-child
+        return 1
+    }
+    case "$app_dir" in
+        *.app) ;;
+        *) px_report_failure_reason target-bundle-suffix; return 1 ;;
+    esac
+
+    px_validate_app_directory "$app_dir" || {
+        px_report_failure_reason target-bundle-directory
+        return 1
+    }
+    local executable_name="${target##*/}"
+    px_validate_safe_basename "$executable_name" || {
+        px_report_failure_reason target-executable-basename
+        return 1
+    }
+    px_validate_target_executable "$target" || {
+        px_report_failure_reason target-executable-metadata
+        return 1
+    }
 
     PX_TARGET_PATH="$target"
     PX_TARGET_APP_BUNDLE="$app_dir"
@@ -1376,61 +1394,101 @@ px_group_csv_is_subset() {
 }
 
 # === Parse keychain access groups from entitlements ===
-parse_keychain_groups() {
-    local ent_file="$1"
-    px_validate_workspace_file "$ent_file" 600 0 1 || return 1
-    px_stat_snapshot "$ent_file" PX_PARSE_GROUPS_BEFORE || return 1
-    local groups=""
-    local in_groups=0
-    local line group group_count=0
-    while IFS= read -r line; do
-        if printf '%s' "$line" | "$PX_GREP_PATH" -q "keychain-access-groups"; then
-            in_groups=1
-            continue
-        fi
-        if [ "$in_groups" -eq 1 ]; then
-            if printf '%s' "$line" | "$PX_GREP_PATH" -q "</array>"; then
-                in_groups=0
-                continue
-            fi
-            if printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
-                group=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
-                px_group_value_is_valid "$group" || return 1
-                group_count=$((group_count + 1))
-                [ "$group_count" -le 128 ] || return 1
-                if [ -n "$groups" ]; then groups="$groups,$group"; else groups="$group"; fi
-                [ "${#groups}" -le 8192 ] || return 1
-            fi
-        fi
-    done < "$ent_file"
-    px_stat_snapshot "$ent_file" PX_PARSE_GROUPS_AFTER || return 1
-    px_same_complete_snapshot PX_PARSE_GROUPS_BEFORE PX_PARSE_GROUPS_AFTER || return 1
-    printf '%s\n' "$groups"
+px_read_plist_string_compat() {
+    local plist="$1"
+    local key="$2"
+    local value="" status=1
+
+    value=$("$PX_PLUTIL_PATH" -extract "$key" raw -o - "$plist" 2>/dev/null)
+    status=$?
+    if [ "$status" -ne 0 ] || [ -z "$value" ]; then
+        value=$("$PX_PLUTIL_PATH" -key "$key" "$plist" 2>/dev/null)
+        status=$?
+    fi
+    if [ "$status" -ne 0 ] || [ -z "$value" ]; then
+        value=$(px_read_info_value_from_xml "$plist" "$key")
+        status=$?
+    fi
+    [ "$status" -eq 0 ] && [ -n "$value" ] || return 1
+    [ "${#value}" -le 4096 ] || return 1
+    px_string_has_control_character "$value" && return 1
+    printf '%s\n' "$value"
 }
 
-# === Parse application-identifier from entitlements ===
-parse_app_identifier() {
-    local ent_file="$1"
-    px_validate_workspace_file "$ent_file" 600 0 1 || return 1
-    px_stat_snapshot "$ent_file" PX_PARSE_IDENTIFIER_BEFORE || return 1
-    local identifier=""
-    local found_key=0
-    local line
+px_read_plist_string_array_from_xml() {
+    local plist="$1"
+    local key="$2"
+    local xml line found_key=0 in_array=0 value="" out=""
+    xml=$("$PX_PLUTIL_PATH" -convert xml1 -o - "$plist" 2>/dev/null) || return 1
+    [ -n "$xml" ] && [ "${#xml}" -le 16777216 ] || return 1
+
     while IFS= read -r line; do
-        if printf '%s' "$line" | "$PX_GREP_PATH" -q "application-identifier"; then
-            found_key=1
+        if [ "$found_key" -eq 0 ]; then
+            case "$line" in
+                *"<key>${key}</key>"*) found_key=1 ;;
+            esac
             continue
         fi
-        if [ "$found_key" -eq 1 ] && printf '%s' "$line" | "$PX_GREP_PATH" -q "<string>"; then
-            identifier=$(printf '%s' "$line" | "$PX_SED_PATH" -n 's/.*<string>\(.*\)<\/string>.*/\1/p')
-            break
+        if [ "$in_array" -eq 0 ]; then
+            case "$line" in
+                *"<array>"*) in_array=1; continue ;;
+                *"<key>"*) return 1 ;;
+            esac
+            continue
         fi
-    done < "$ent_file"
-    px_stat_snapshot "$ent_file" PX_PARSE_IDENTIFIER_AFTER || return 1
-    px_same_complete_snapshot PX_PARSE_IDENTIFIER_BEFORE PX_PARSE_IDENTIFIER_AFTER || return 1
-    [ "${#identifier}" -le 4096 ] || return 1
-    px_string_has_control_character "$identifier" && return 1
-    printf '%s\n' "$identifier"
+        case "$line" in
+            *"</array>"*)
+                printf '%s\n' "$out"
+                return 0
+                ;;
+            *"<string>"*"</string>"*)
+                value="${line#*<string>}"
+                value="${value%%</string>*}"
+                [ -n "$value" ] || return 1
+                case "$value" in *'&'*|*'<'*|*'>'*) return 1 ;; esac
+                px_group_value_is_valid "$value" || return 1
+                if [ -n "$out" ]; then out+=","; fi
+                out+="$value"
+                ;;
+            *"<key>"*) return 1 ;;
+        esac
+    done <<< "$xml"
+    return 1
+}
+
+px_application_identifier_matches_bundle_id() {
+    local app_identifier="$1"
+    local bundle_id="$2"
+    px_group_value_is_valid "$app_identifier" || return 1
+    px_validate_bundle_id "$bundle_id" || return 1
+    case "$app_identifier" in
+        "$bundle_id"|*."$bundle_id") return 0 ;;
+    esac
+    return 1
+}
+
+parse_keychain_groups() {
+    local ent_file="$1"
+    local groups_output="" parsed=""
+    groups_output=$("$PX_PLUTIL_PATH" -extract keychain-access-groups json -o - "$ent_file" 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$groups_output" ]; then
+        parsed=$(px_parse_json_string_array "$groups_output") || parsed=""
+        if [ -n "$parsed" ]; then
+            printf '%s\n' "$parsed"
+            return 0
+        fi
+    fi
+    px_read_plist_string_array_from_xml "$ent_file" keychain-access-groups
+}
+
+parse_app_identifier() {
+    local ent_file="$1"
+    local value
+    value=$(px_read_plist_string_compat "$ent_file" application-identifier) || return 1
+    [ -n "$value" ] || return 1
+    [ "${#value}" -le 512 ] || return 1
+    px_group_value_is_valid "$value" || return 1
+    printf '%s\n' "$value"
 }
 
 # === Deterministic entitlement overlay helpers ===
@@ -1719,7 +1777,11 @@ px_prepare_target_context() {
 px_prepare_requested_groups() {
     local bundle_id="$1"
     local source_groups selected_groups app_identifier
-    source_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    source_groups=$(parse_keychain_groups "$PX_APP_ENT_PATH") || {
+        px_report_failure_stage requested-groups
+        px_report_failure_reason target-groups-parse
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
 
     if [ "$OVERRIDE_KEYCHAIN_GROUPS_PRESENT" -eq 1 ]; then
         px_canonicalize_group_csv "$OVERRIDE_KEYCHAIN_GROUPS" || return "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
@@ -1732,7 +1794,11 @@ px_prepare_requested_groups() {
         selected_groups=""
     fi
 
-    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || {
+        px_report_failure_stage requested-groups
+        px_report_failure_reason target-app-id-parse
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
     if [ -z "$app_identifier" ]; then
         app_identifier="$bundle_id"
     fi

@@ -1291,6 +1291,9 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                            if target_context_start >= 0 and target_context_end > target_context_start else "")
     collector.check("BRH-KEY-NATIVE-TARGET-HANDOFF",
                     "PXExactInstalledApplicationExecutablePathFromLaunchServices" in cleaner.text and
+                    'PXExactInstalledApplicationBundlePathFromLaunchServices(bundleIdentifier)' in cleaner.text and
+                    'info[@"CFBundleExecutable"]' in cleaner.text and
+                    '[bundlePath stringByAppendingPathComponent:executableName]' in cleaner.text and
                     '@"--target-bundle"' in cleaner.text and
                     '@"--target-executable"' in cleaner.text and
                     "nativeTarget=%d" in cleaner.text and
@@ -1302,15 +1305,26 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'px_validate_absolute_path_lexical "$app_dir"' in explicit_target_body and
                     'px_validate_absolute_path_lexical "$target"' in explicit_target_body and
                     '[ "${target%/*}" = "$app_dir" ]' in explicit_target_body and
-                    'px_read_info_value "$info_plist" CFBundleIdentifier' in explicit_target_body and
-                    '[ "$PX_PLIST_VALUE" = "$bundle_id" ]' in explicit_target_body and
-                    'px_read_info_value "$info_plist" CFBundleExecutable' in explicit_target_body and
-                    '[ "$target" = "$app_dir/$executable_name" ]' in explicit_target_body and
+                    'px_validate_app_directory "$app_dir"' in explicit_target_body and
+                    'local executable_name="${target##*/}"' in explicit_target_body and
+                    'px_validate_safe_basename "$executable_name"' in explicit_target_body and
                     'px_validate_target_executable "$target"' in explicit_target_body and
                     'px_prepare_explicit_target "$bundle_id" "$OVERRIDE_TARGET_BUNDLE" "$OVERRIDE_TARGET_EXECUTABLE"' in target_context_body and
-                    'px_report_failure_stage target-native-validate' in target_context_body,
+                    'px_report_failure_stage target-native-validate' in target_context_body and
+                    'signed_app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH")' in target_context_body and
+                    'px_application_identifier_matches_bundle_id "$signed_app_identifier" "$bundle_id"' in target_context_body and
+                    'px_report_failure_stage target-signed-identity' in target_context_body,
                     shell.path, source_line_for_token(shell, "px_prepare_explicit_target()"),
                     "Keychain wipe must prefer an exact native LaunchServices target and revalidate bundle/executable identity before use")
+
+    collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
+                    'px_read_plist_string_compat()' in shell.text and
+                    'px_read_plist_string_array_from_xml()' in shell.text and
+                    'value=$(px_read_plist_string_compat "$ent_file" application-identifier)' in shell.text and
+                    'px_read_plist_string_array_from_xml "$ent_file" keychain-access-groups' in shell.text and
+                    '"$PX_PLUTIL_PATH" -extract keychain-access-groups json -o - "$ent_file"' in shell.text,
+                    shell.path, source_line_for_token(shell, "px_read_plist_string_compat()"),
+                    "signed entitlement parsing must support modern plutil plus XML fallback without broadening group values")
 
     collector.check("BRH-KEY-ENTITLEMENT-UNIVERSAL-CLONE",
                     generation_start >= 0 and
