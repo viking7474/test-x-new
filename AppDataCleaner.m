@@ -19,6 +19,7 @@
 #import "PXDestructivePathValidator.h"
 #import "PXClearRequest.h"
 #import "PXClearResult.h"
+#import "KeychainHelper/PXKeychainHelperExitCode.h"
 #import "AppGroupContainerResolver.h"
 #import "FreezeManager.h"
 #import "common/PXProcessKiller.h"
@@ -950,6 +951,26 @@ static BOOL PXBoundedCommandSucceeded(CommandResult *result) {
            !result.stdoutTruncated &&
            !result.stderrTruncated;
 }
+static NSString *PXKeychainDependencyDiagnosticToken(CommandResult *result) {
+    if (![result isKindOfClass:[CommandResult class]] ||
+        result.exitCode != PXKeychainHelperExitCodeDependencyUnavailable) return nil;
+    NSString *stderrString = result.stderrString ?: @"";
+    NSString *marker = @"PXKEYCHAIN_DEPENDENCY=";
+    NSRange markerRange = [stderrString rangeOfString:marker];
+    if (markerRange.location == NSNotFound) return nil;
+    NSUInteger start = NSMaxRange(markerRange);
+    if (start >= stderrString.length) return nil;
+    NSRange searchRange = NSMakeRange(start, stderrString.length - start);
+    NSRange newlineRange = [stderrString rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]
+                                                         options:0
+                                                           range:searchRange];
+    NSUInteger end = newlineRange.location == NSNotFound ? stderrString.length : newlineRange.location;
+    if (end <= start || end - start > 64) return nil;
+    NSString *token = [stderrString substringWithRange:NSMakeRange(start, end - start)];
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"];
+    if ([token rangeOfCharacterFromSet:[allowed invertedSet]].location != NSNotFound) return nil;
+    return token;
+}
 
 typedef NS_ENUM(NSInteger, PXInstalledExtensionDiscoveryErrorCode) {
     PXInstalledExtensionDiscoveryErrorCodeInvalidRequest = 1,
@@ -1765,7 +1786,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                                                       timeoutSec:120.0
                                                   maxOutputBytes:1024 * 1024];
     BOOL success = PXBoundedCommandSucceeded(wipeResult);
-    NSDictionary *diagnostic = @{
+    NSString *dependencyToken = PXKeychainDependencyDiagnosticToken(wipeResult);
+    NSMutableDictionary *diagnostic = [@{
         @"method": @"resigned_helper",
         @"noLaunch": @YES,
         @"success": @(success),
@@ -1774,16 +1796,21 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         @"stdoutTruncated": @(wipeResult ? wipeResult.stdoutTruncated : NO),
         @"stderrTruncated": @(wipeResult ? wipeResult.stderrTruncated : NO),
         @"groupCount": @(selectedGroups.count),
-    };
+    } mutableCopy];
+    if (dependencyToken.length) diagnostic[@"dependency"] = dependencyToken;
     [[NSUserDefaults standardUserDefaults] setObject:diagnostic
                                               forKey:[NSString stringWithFormat:@"DataCleaningKeychainResult_%@",
                                                                                  bundleIdentifier]];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
     if (!success) {
-        NSString *message = [NSString stringWithFormat:@"Headless Keychain helper failed (exit=%d timeout=%d)",
+        NSString *dependencySuffix = dependencyToken.length
+            ? [NSString stringWithFormat:@" dependency=%@", dependencyToken]
+            : @"";
+        NSString *message = [NSString stringWithFormat:@"Headless Keychain helper failed (exit=%d timeout=%d)%@",
                              wipeResult ? wipeResult.exitCode : -1,
-                             wipeResult ? wipeResult.timedOut : NO];
+                             wipeResult ? wipeResult.timedOut : NO,
+                             dependencySuffix];
         [self logMessage:@"[AppDataCleaner] Keychain wipe failed method=resigned_helper noLaunch=1 bundle=%@ %@",
                          bundleIdentifier, message];
         PXAssignKeychainNSError(error,

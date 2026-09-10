@@ -115,6 +115,7 @@ PX_GREP_PATH=""
 PX_SED_PATH=""
 PX_METADATA_READY=0
 PX_DEPENDENCIES_READY=0
+PX_DEPENDENCY_FAILURE=""
 
 px_mode_is_safe_executable() {
     local mode="$1"
@@ -293,30 +294,68 @@ px_initialize_metadata_boundary() {
 
 px_resolve_trusted_dependencies() {
     [ "$PX_DEPENDENCIES_READY" -eq 0 ] || return 0
-    px_resolve_trusted_utility PX_MKTEMP_PATH \
-        /usr/bin/mktemp /bin/mktemp /var/jb/usr/bin/mktemp /private/preboot/jb/usr/bin/mktemp || return 1
-    px_resolve_trusted_utility PX_CP_PATH \
-        /bin/cp /usr/bin/cp /var/jb/bin/cp /var/jb/usr/bin/cp /private/preboot/jb/bin/cp || return 1
-    px_resolve_trusted_utility PX_CMP_PATH \
-        /usr/bin/cmp /bin/cmp /var/jb/usr/bin/cmp /private/preboot/jb/usr/bin/cmp || return 1
-    px_resolve_trusted_utility PX_CHMOD_PATH \
-        /bin/chmod /usr/bin/chmod /var/jb/bin/chmod /private/preboot/jb/bin/chmod || return 1
-    px_resolve_trusted_utility PX_RM_PATH \
-        /bin/rm /usr/bin/rm /var/jb/bin/rm /private/preboot/jb/bin/rm || return 1
-    px_resolve_trusted_utility PX_RMDIR_PATH \
-        /bin/rmdir /usr/bin/rmdir /var/jb/bin/rmdir /private/preboot/jb/bin/rmdir || return 1
-    px_resolve_trusted_utility PX_PLUTIL_PATH \
-        /usr/bin/plutil /var/jb/usr/bin/plutil /private/preboot/jb/usr/bin/plutil /bin/plutil || return 1
-    px_resolve_trusted_utility PX_LDID_PATH \
-        /usr/bin/ldid /var/jb/usr/bin/ldid /private/preboot/jb/usr/bin/ldid /bin/ldid || return 1
-    px_resolve_trusted_utility PX_GREP_PATH \
-        /usr/bin/grep /bin/grep /var/jb/usr/bin/grep /private/preboot/jb/usr/bin/grep || return 1
-    px_resolve_trusted_utility PX_SED_PATH \
-        /usr/bin/sed /bin/sed /var/jb/usr/bin/sed /private/preboot/jb/usr/bin/sed || return 1
+    PX_DEPENDENCY_FAILURE=""
+    if ! px_resolve_trusted_utility PX_MKTEMP_PATH \
+        /usr/bin/mktemp /bin/mktemp /var/jb/usr/bin/mktemp /private/preboot/jb/usr/bin/mktemp; then
+        PX_DEPENDENCY_FAILURE="mktemp"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_CP_PATH \
+        /bin/cp /usr/bin/cp /var/jb/bin/cp /var/jb/usr/bin/cp /private/preboot/jb/bin/cp; then
+        PX_DEPENDENCY_FAILURE="cp"; return 1
+    fi
+    # cmp is an integrity hardening aid, not a functional requirement. Some
+    # rootful/rootless images do not ship it, so retain a bounded stat-size
+    # fallback instead of failing the whole Keychain pipeline.
+    if ! px_resolve_trusted_utility PX_CMP_PATH \
+        /usr/bin/cmp /bin/cmp /var/jb/usr/bin/cmp /private/preboot/jb/usr/bin/cmp; then
+        PX_CMP_PATH=""
+    fi
+    if ! px_resolve_trusted_utility PX_CHMOD_PATH \
+        /bin/chmod /usr/bin/chmod /var/jb/bin/chmod /private/preboot/jb/bin/chmod; then
+        PX_DEPENDENCY_FAILURE="chmod"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_RM_PATH \
+        /bin/rm /usr/bin/rm /var/jb/bin/rm /var/jb/usr/bin/rm /private/preboot/jb/bin/rm; then
+        PX_DEPENDENCY_FAILURE="rm"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_RMDIR_PATH \
+        /bin/rmdir /usr/bin/rmdir /var/jb/bin/rmdir /private/preboot/jb/bin/rmdir; then
+        PX_DEPENDENCY_FAILURE="rmdir"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_PLUTIL_PATH \
+        /usr/bin/plutil /var/jb/usr/bin/plutil /private/preboot/jb/usr/bin/plutil /bin/plutil; then
+        PX_DEPENDENCY_FAILURE="plutil"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_LDID_PATH \
+        /usr/bin/ldid /var/jb/usr/bin/ldid /private/preboot/jb/usr/bin/ldid /bin/ldid; then
+        PX_DEPENDENCY_FAILURE="ldid"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_GREP_PATH \
+        /usr/bin/grep /bin/grep /var/jb/usr/bin/grep /private/preboot/jb/usr/bin/grep; then
+        PX_DEPENDENCY_FAILURE="grep"; return 1
+    fi
+    if ! px_resolve_trusted_utility PX_SED_PATH \
+        /usr/bin/sed /bin/sed /var/jb/usr/bin/sed /private/preboot/jb/usr/bin/sed; then
+        PX_DEPENDENCY_FAILURE="sed"; return 1
+    fi
     readonly PX_MKTEMP_PATH PX_CP_PATH PX_CMP_PATH PX_CHMOD_PATH PX_RM_PATH PX_RMDIR_PATH
     readonly PX_PLUTIL_PATH PX_LDID_PATH PX_GREP_PATH PX_SED_PATH
     PX_DEPENDENCIES_READY=1
     return 0
+}
+
+px_validate_copied_file_integrity() {
+    local source="$1"
+    local destination="$2"
+    [ -f "$source" ] && [ ! -L "$source" ] || return 1
+    [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+    if [ -n "$PX_CMP_PATH" ]; then
+        "$PX_CMP_PATH" "$source" "$destination" >/dev/null 2>&1
+        return $?
+    fi
+    px_stat_snapshot "$source" PX_COPY_SOURCE || return 1
+    px_stat_snapshot "$destination" PX_COPY_DESTINATION || return 1
+    [ "$PX_COPY_SOURCE_SIZE" = "$PX_COPY_DESTINATION_SIZE" ]
 }
 
 px_validate_installed_helper() {
@@ -1123,7 +1162,7 @@ generate_helper_entitlements() {
     "$PX_CP_PATH" "$source_ent_file" "$output_file" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_same_complete_snapshot PX_SOURCE_ENT_BEFORE PX_SOURCE_ENT_AFTER || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    "$PX_CMP_PATH" "$source_ent_file" "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_copied_file_integrity "$source_ent_file" "$output_file" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
 
@@ -1161,7 +1200,7 @@ px_prepare_working_helper() {
     "$PX_CP_PATH" "$PX_INSTALLED_HELPER_PATH" "$destination" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_stat_snapshot "$PX_INSTALLED_HELPER_PATH" PX_HELPER_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
     px_same_complete_snapshot PX_HELPER_SOURCE_BEFORE PX_HELPER_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
-    "$PX_CMP_PATH" "$PX_INSTALLED_HELPER_PATH" "$destination" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_copied_file_integrity "$PX_INSTALLED_HELPER_PATH" "$destination" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     "$PX_CHMOD_PATH" 700 "$destination" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$destination" 700 1 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     PX_WORKING_HELPER_PATH="$destination"
@@ -1207,7 +1246,7 @@ px_prepare_restore_snapshot() {
     px_stat_snapshot "$canonical_parent" PX_RESTORE_PARENT_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
     px_same_complete_snapshot PX_RESTORE_SOURCE_BEFORE PX_RESTORE_SOURCE_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
     px_same_identity PX_RESTORE_PARENT_BEFORE PX_RESTORE_PARENT_AFTER || return "$PX_KEYCHAIN_EXIT_INVALID_INPUT"
-    "$PX_CMP_PATH" "$canonical_source" "$snapshot" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_copied_file_integrity "$canonical_source" "$snapshot" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     "$PX_CHMOD_PATH" 600 "$snapshot" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$snapshot" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     PX_RESTORE_INPUT_PATH="$snapshot"
@@ -1581,6 +1620,7 @@ print_usage() {
 
 # Initialize the trusted metadata and dependency boundary before external work.
 if ! px_initialize_metadata_boundary; then
+    log_error "PXKEYCHAIN_DEPENDENCY=stat-bootstrap"
     log_error "Trusted filesystem metadata utility is unavailable"
     exit "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
 fi
@@ -1589,6 +1629,7 @@ if ! px_validate_installed_helper; then
     exit "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
 fi
 if ! px_resolve_trusted_dependencies; then
+    log_error "PXKEYCHAIN_DEPENDENCY=${PX_DEPENDENCY_FAILURE:-utility-resolver}"
     log_error "A required trusted utility is unavailable"
     exit "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
 fi
