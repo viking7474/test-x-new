@@ -1340,6 +1340,28 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     shell.path, source_line_for_token(shell, "px_prepare_explicit_app_directory()"),
                     "native LaunchServices bundle exposure may use a non-0/501 system uid; physical mode, executable ownership coherence, stable file metadata and signed identity remain mandatory")
 
+    target_revalidate_start = shell.text.find("px_validate_target_unchanged()")
+    target_revalidate_end = shell.text.find("extract_entitlements()", target_revalidate_start)
+    target_revalidate_body = (shell.text[target_revalidate_start:target_revalidate_end]
+                              if target_revalidate_start >= 0 and target_revalidate_end > target_revalidate_start else "")
+    target_extract_start = shell.text.find("extract_entitlements()")
+    target_extract_end = shell.text.find("# === Canonical Keychain access-group authority ===", target_extract_start)
+    target_extract_body = (shell.text[target_extract_start:target_extract_end]
+                           if target_extract_start >= 0 and target_extract_end > target_extract_start else "")
+    collector.check("BRH-KEY-TARGET-REVALIDATION-MODE",
+                    'PX_TARGET_VALIDATION_MODE="explicit"' in explicit_target_body and
+                    'PX_TARGET_BUNDLE_UID="$PX_EXPLICIT_APP_DIRECTORY_UID"' in explicit_target_body and
+                    'case "$PX_TARGET_VALIDATION_MODE" in' in target_revalidate_body and
+                    'px_validate_explicit_target_executable "$PX_TARGET_PATH" "$PX_TARGET_BUNDLE_UID"' in target_revalidate_body and
+                    'px_validate_target_executable "$PX_TARGET_PATH"' in target_revalidate_body and
+                    'px_validate_target_unchanged || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"' in target_extract_body and
+                    'target-snapshot-before' in target_extract_body and
+                    'target-snapshot-after' in target_extract_body and
+                    'target-snapshot-changed' in target_extract_body and
+                    'target-ldid-extract' in target_extract_body,
+                    shell.path, source_line_for_token(shell, "px_validate_target_unchanged()"),
+                    "target revalidation must preserve explicit-vs-legacy validation policy through entitlement extraction and retain TOCTOU diagnostics")
+
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
                     'px_read_plist_string_compat()' in shell.text and
                     'px_read_plist_string_array_from_xml()' in shell.text and
