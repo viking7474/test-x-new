@@ -1376,8 +1376,15 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     "target revalidation must preserve explicit-vs-legacy policy, bind the LaunchServices and physical paths by inode, use the LaunchServices path for ldid, and keep physical TOCTOU/workspace diagnostics")
 
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
+                    'px_parse_json_string_array()' in shell.text and
+                    'parsed=$(px_parse_json_string_array "$groups_output")' in shell.text and
                     'px_read_plist_string_compat()' in shell.text and
                     'px_read_plist_string_array_from_xml()' in shell.text and
+                    'tail="${xml#*"<key>${key}</key>"}"' in shell.text and
+                    'body="${tail#*<array>}"' in shell.text and
+                    'value="${rest%%</string>*}"' in shell.text and
+                    'case "$prefix" in' in shell.text and
+                    'case "$value" in' in shell.text and
                     'value=$(px_read_plist_string_compat "$ent_file" application-identifier)' in shell.text and
                     'px_read_plist_string_array_from_xml "$ent_file" keychain-access-groups' in shell.text and
                     '"$PX_PLUTIL_PATH" -extract keychain-access-groups json -o - "$ent_file"' in shell.text,

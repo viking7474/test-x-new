@@ -1574,6 +1574,69 @@ px_group_csv_is_subset() {
 }
 
 # === Parse keychain access groups from entitlements ===
+px_parse_json_string_array() {
+    local json="$1"
+    local rest value out="" count=0 ch
+    [ -n "$json" ] && [ "${#json}" -le 16384 ] || return 1
+    rest="$json"
+
+    # Trim JSON formatting whitespace without rejecting pretty/multiline output.
+    while [ -n "$rest" ]; do
+        ch="${rest:0:1}"
+        case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+    done
+    [ "${rest:0:1}" = "[" ] || return 1
+    rest="${rest:1}"
+
+    while :; do
+        while [ -n "$rest" ]; do
+            ch="${rest:0:1}"
+            case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+        done
+
+        if [ "${rest:0:1}" = "]" ]; then
+            rest="${rest:1}"
+            while [ -n "$rest" ]; do
+                ch="${rest:0:1}"
+                case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) return 1 ;; esac
+            done
+            printf '%s\n' "$out"
+            return 0
+        fi
+
+        [ "${rest:0:1}" = '"' ] || return 1
+        rest="${rest:1}"
+        value=""
+        while [ -n "$rest" ]; do
+            ch="${rest:0:1}"
+            rest="${rest:1}"
+            case "$ch" in
+                '"') break ;;
+                '\\') return 1 ;; # escaped values fall back to the XML parser
+                $'\n'|$'\r'|$'\t') return 1 ;;
+                *) value+="$ch" ;;
+            esac
+        done
+        [ "$ch" = '"' ] || return 1
+        px_group_value_is_valid "$value" || return 1
+        count=$((count + 1))
+        [ "$count" -le 128 ] || return 1
+        if [ -n "$out" ]; then out+=","; fi
+        out+="$value"
+        [ "${#out}" -le 8192 ] || return 1
+
+        while [ -n "$rest" ]; do
+            ch="${rest:0:1}"
+            case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+        done
+        case "${rest:0:1}" in
+            ',') rest="${rest:1}" ;;
+            ']') ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
 px_read_plist_string_compat() {
     local plist="$1"
     local key="$2"
@@ -1598,42 +1661,62 @@ px_read_plist_string_compat() {
 px_read_plist_string_array_from_xml() {
     local plist="$1"
     local key="$2"
-    local xml line found_key=0 in_array=0 value="" out=""
+    local xml tail between body rest prefix value out=""
+
     xml=$("$PX_PLUTIL_PATH" -convert xml1 -o - "$plist" 2>/dev/null) || return 1
     [ -n "$xml" ] && [ "${#xml}" -le 16777216 ] || return 1
 
-    while IFS= read -r line; do
-        if [ "$found_key" -eq 0 ]; then
-            case "$line" in
-                *"<key>${key}</key>"*) found_key=1 ;;
-            esac
-            continue
-        fi
-        if [ "$in_array" -eq 0 ]; then
-            case "$line" in
-                *"<array>"*) in_array=1; continue ;;
-                *"<key>"*) return 1 ;;
-            esac
-            continue
-        fi
-        case "$line" in
-            *"</array>"*)
-                printf '%s\n' "$out"
-                return 0
-                ;;
-            *"<string>"*"</string>"*)
-                value="${line#*<string>}"
-                value="${value%%</string>*}"
-                [ -n "$value" ] || return 1
-                case "$value" in *'&'*|*'<'*|*'>'*) return 1 ;; esac
-                px_group_value_is_valid "$value" || return 1
-                if [ -n "$out" ]; then out+=","; fi
-                out+="$value"
-                ;;
-            *"<key>"*) return 1 ;;
-        esac
-    done <<< "$xml"
-    return 1
+    # Parse by XML tag boundaries, not physical lines. Older iOS/jailbreak
+    # plutil builds may emit a compact plist where <key>, <array> and one or
+    # more <string> elements share the same line.
+    case "$xml" in
+        *"<key>${key}</key>"*) ;;
+        *) return 1 ;;
+    esac
+    tail="${xml#*"<key>${key}</key>"}"
+
+    # The requested key must map directly to an array. Anything except
+    # whitespace between </key> and <array> is rejected.
+    case "$tail" in
+        *"<array>"*) ;;
+        *"<array/>"*)
+            between="${tail%%<array/>*}"
+            case "$between" in *'<'*|*'>'*|*'&'*) return 1 ;; esac
+            printf '\n'
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+    between="${tail%%<array>*}"
+    case "$between" in *'<'*|*'>'*|*'&'*) return 1 ;; esac
+
+    body="${tail#*<array>}"
+    case "$body" in *"</array>"*) ;; *) return 1 ;; esac
+    body="${body%%</array>*}"
+    rest="$body"
+
+    while case "$rest" in *"<string>"*) true ;; *) false ;; esac; do
+        prefix="${rest%%<string>*}"
+        # Arrays used as Keychain access groups may contain only strings.
+        # Reject nested XML/types instead of silently skipping them.
+        case "$prefix" in *'<'*|*'>'*|*'&'*) return 1 ;; esac
+        rest="${rest#*<string>}"
+        case "$rest" in *"</string>"*) ;; *) return 1 ;; esac
+        value="${rest%%</string>*}"
+        [ -n "$value" ] || return 1
+        case "$value" in *'&'*|*'<'*|*'>'*) return 1 ;; esac
+        px_group_value_is_valid "$value" || return 1
+        if [ -n "$out" ]; then out+=","; fi
+        out+="$value"
+        [ "${#out}" -le 8192 ] || return 1
+        rest="${rest#*</string>}"
+    done
+
+    # Only formatting whitespace may remain inside the array after all string
+    # elements have been consumed.
+    case "$rest" in *'<'*|*'>'*|*'&'*) return 1 ;; esac
+    printf '%s\n' "$out"
+    return 0
 }
 
 px_application_identifier_matches_bundle_id() {
