@@ -1266,6 +1266,19 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     generation_end = shell.text.find("px_prepare_working_helper()", generation_start)
     generation_body = (shell.text[generation_start:generation_end]
                        if generation_start >= 0 and generation_end > generation_start else "")
+    plist_reader_start = shell.text.find("px_read_info_value()")
+    plist_reader_end = shell.text.find("px_validate_target_executable()", plist_reader_start)
+    plist_reader_body = (shell.text[plist_reader_start:plist_reader_end]
+                         if plist_reader_start >= 0 and plist_reader_end > plist_reader_start else "")
+    collector.check("BRH-KEY-TARGET-PLIST-COMPAT",
+                    '"$PX_PLUTIL_PATH" -extract "$key" raw -o - "$plist"' in plist_reader_body and
+                    '"$PX_PLUTIL_PATH" -key "$key" "$plist"' in plist_reader_body and
+                    'CFBundleIdentifier|CFBundleExecutable' in plist_reader_body and
+                    '"/Applications"' in shell.text and
+                    '"/System/Applications"' in shell.text,
+                    shell.path, source_line_for_token(shell, "px_read_info_value()"),
+                    "target application discovery must support modern and legacy plutil interfaces plus system-app roots")
+
     collector.check("BRH-KEY-ENTITLEMENT-UNIVERSAL-CLONE",
                     generation_start >= 0 and
                     '[ "$source_ent_file" = "$PX_APP_ENT_PATH" ]' in generation_body and

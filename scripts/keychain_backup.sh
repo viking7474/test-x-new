@@ -1054,10 +1054,23 @@ px_read_info_value() {
     local plist="$1"
     local key="$2"
     px_validate_info_plist "$plist" || return 1
+    case "$key" in
+        CFBundleIdentifier|CFBundleExecutable) ;;
+        *) return 1 ;;
+    esac
+
     px_stat_snapshot "$plist" PX_INFO_BEFORE || return 1
-    local value
-    value=$("$PX_PLUTIL_PATH" -key "$key" "$plist" 2>/dev/null)
-    local status=$?
+    local value="" status=1
+
+    # Apple plutil on newer iOS/macOS uses -extract <key> raw -o -.
+    # Older jailbreak plutil builds may expose the legacy -key interface.
+    value=$("$PX_PLUTIL_PATH" -extract "$key" raw -o - "$plist" 2>/dev/null)
+    status=$?
+    if [ "$status" -ne 0 ] || [ -z "$value" ]; then
+        value=$("$PX_PLUTIL_PATH" -key "$key" "$plist" 2>/dev/null)
+        status=$?
+    fi
+
     px_stat_snapshot "$plist" PX_INFO_AFTER || return 1
     px_same_complete_snapshot PX_INFO_BEFORE PX_INFO_AFTER || return 1
     [ "$status" -eq 0 ] || return 1
@@ -1119,8 +1132,11 @@ find_app_executable() {
     local raw_root root app_dir uuid_dir
     local system_roots=(
         "/Applications"
+        "/System/Applications"
         "/var/jb/Applications"
+        "/var/jb/System/Applications"
         "/private/preboot/jb/Applications"
+        "/private/preboot/jb/System/Applications"
     )
     for raw_root in "${system_roots[@]}"; do
         [ -e "$raw_root" ] || continue
