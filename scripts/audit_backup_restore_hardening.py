@@ -1427,13 +1427,27 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'local escaped="${key//./\\\\.}"' in shell.text and
                     shell.text.count('px_plutil_escape_root_keypath "$key" || return 1') == 3 and
                     shell.text.count('local keypath="$PX_PLUTIL_ROOT_KEYPATH"') == 3 and
-                    shell.text.count('"$PX_PLUTIL_PATH" -replace "$keypath"') == 3 and
-                    shell.text.count('"$PX_PLUTIL_PATH" -insert "$keypath"') == 3,
+                    shell.text.count('"$PX_PLUTIL_PATH" -replace "$keypath"') == 4 and
+                    shell.text.count('"$PX_PLUTIL_PATH" -insert "$keypath"') == 4,
                     shell.path, source_line_for_token(shell, "px_plutil_escape_root_keypath()"),
                     "plutil entitlement mutations must escape dotted root keys before key-path operations")
 
+    collector.check("BRH-KEY-ENTITLEMENT-COMPOUND-FALLBACK",
+                    "px_group_csv_to_xml_array()" in shell.text and
+                    "PX_XML_ARRAY" in shell.text and
+                    "px_plutil_upsert_compound()" in shell.text and
+                    '"$PX_PLUTIL_PATH" -replace "$keypath" -json "$json_value" "$plist"' in shell.text and
+                    '"$PX_PLUTIL_PATH" -insert "$keypath" -json "$json_value" "$plist"' in shell.text and
+                    '"$PX_PLUTIL_PATH" -replace "$keypath" -xml "$xml_value" "$plist"' in shell.text and
+                    '"$PX_PLUTIL_PATH" -insert "$keypath" -xml "$xml_value" "$plist"' in shell.text and
+                    "s/&/\\&amp;/g; s/</\\&lt;/g; s/>/\\&gt;/g" in shell.text,
+                    shell.path, source_line_for_token(shell, "px_plutil_upsert_compound()"),
+                    "compound Keychain group mutation must retain deterministic JSON plus XML compatibility paths")
+
     collector.check("BRH-KEY-ENTITLEMENT-REQUESTED-KAG",
-                    'px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file"' in generation_body and
+                    'px_group_csv_to_json_array "$canonical_groups"' in generation_body and
+                    'px_group_csv_to_xml_array "$canonical_groups"' in generation_body and
+                    'px_plutil_upsert_compound "keychain-access-groups" "$groups_json" "$groups_xml" "$output_file"' in generation_body and
                     'generated_groups=$(parse_keychain_groups "$output_file")' in generation_body and
                     '[ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ]' in generation_body and
                     'generated_identifier=$(parse_app_identifier "$output_file")' in generation_body and
@@ -1441,7 +1455,7 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_APP_ENT_PATH"' in shell.text and
                     shell.text.count('px_group_csv_is_subset "$PX_REQUESTED_GROUPS_CSV" "$PX_EFFECTIVE_GROUPS_CSV"') == 1 and
                     shell.text.count('px_group_csv_is_subset "$PX_EFFECTIVE_GROUPS_CSV" "$PX_REQUESTED_GROUPS_CSV"') == 1,
-                    shell.path, source_line_for_token(shell, 'px_plutil_upsert_json "keychain-access-groups"'),
+                    shell.path, source_line_for_token(shell, 'px_plutil_upsert_compound "keychain-access-groups"'),
                     "helper keychain-access-groups must equal the canonical requested set including application-identifier")
     keychain_sources = [source for path, source in sources.items() if path.startswith("KeychainHelper/") and path.endswith(".m")]
     delete_occurrences = [(source.path, line_number(source.text, match.start()))

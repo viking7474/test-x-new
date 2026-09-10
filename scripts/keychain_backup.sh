@@ -1880,6 +1880,7 @@ parse_app_identifier() {
 
 # === Deterministic entitlement overlay helpers ===
 PX_JSON_ARRAY=""
+PX_XML_ARRAY=""
 
 px_group_csv_to_json_array() {
     local csv="$1"
@@ -1897,6 +1898,25 @@ px_group_csv_to_json_array() {
     json="${json}]"
     [ "${#json}" -le 16384 ] || return 1
     PX_JSON_ARRAY="$json"
+    return 0
+}
+
+px_group_csv_to_xml_array() {
+    local csv="$1"
+    PX_XML_ARRAY=""
+    px_canonicalize_group_csv "$csv" || return 1
+    local canonical="$PX_CANONICAL_GROUP_CSV"
+    local groups=() group escaped xml="<array>"
+    IFS=',' read -ra groups <<< "$canonical"
+    for group in "${groups[@]}"; do
+        px_group_value_is_valid "$group" || return 1
+        escaped=$(printf '%s' "$group" | "$PX_SED_PATH" 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g') || return 1
+        xml="${xml}<string>${escaped}</string>"
+        [ "${#xml}" -le 32768 ] || return 1
+    done
+    xml="${xml}</array>"
+    [ "${#xml}" -le 32768 ] || return 1
+    PX_XML_ARRAY="$xml"
     return 0
 }
 
@@ -1934,14 +1954,21 @@ px_plutil_upsert_string() {
     "$PX_PLUTIL_PATH" -insert "$keypath" -string "$value" "$plist" >/dev/null 2>&1
 }
 
-px_plutil_upsert_json() {
+px_plutil_upsert_compound() {
     local key="$1"
-    local value="$2"
-    local plist="$3"
+    local json_value="$2"
+    local xml_value="$3"
+    local plist="$4"
     px_plutil_escape_root_keypath "$key" || return 1
     local keypath="$PX_PLUTIL_ROOT_KEYPATH"
-    "$PX_PLUTIL_PATH" -replace "$keypath" -json "$value" "$plist" >/dev/null 2>&1 && return 0
-    "$PX_PLUTIL_PATH" -insert "$keypath" -json "$value" "$plist" >/dev/null 2>&1
+
+    # Newer Apple plutil accepts JSON fragments for compound values. Older iOS
+    # builds can reject -json here even though scalar -replace/-insert works, so
+    # retry the exact same canonical value as an XML plist fragment.
+    "$PX_PLUTIL_PATH" -replace "$keypath" -json "$json_value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$keypath" -json "$json_value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -replace "$keypath" -xml "$xml_value" "$plist" >/dev/null 2>&1 && return 0
+    "$PX_PLUTIL_PATH" -insert "$keypath" -xml "$xml_value" "$plist" >/dev/null 2>&1
 }
 
 # === Generate effective entitlements for the private helper ===
@@ -1968,6 +1995,8 @@ generate_helper_entitlements() {
     [ "$canonical_groups" = "$keychain_groups" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     px_group_csv_to_json_array "$canonical_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     local groups_json="$PX_JSON_ARRAY"
+    px_group_csv_to_xml_array "$canonical_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    local groups_xml="$PX_XML_ARRAY"
 
     px_validate_workspace_file "$source_ent_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_stat_snapshot "$source_ent_file" PX_SOURCE_ENT_BEFORE || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
@@ -2006,7 +2035,7 @@ generate_helper_entitlements() {
         px_report_failure_reason helper-overlay-keystore-device
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     }
-    px_plutil_upsert_json "keychain-access-groups" "$groups_json" "$output_file" || {
+    px_plutil_upsert_compound "keychain-access-groups" "$groups_json" "$groups_xml" "$output_file" || {
         px_report_failure_reason helper-overlay-keychain-access-groups
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     }
