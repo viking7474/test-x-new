@@ -103,6 +103,8 @@ log_verbose() {
 }
 
 PX_STAT_PATH=""
+PX_STAT_STYLE=""
+PX_STAT_TRUST_MODE=""
 PX_MKTEMP_PATH=""
 PX_CP_PATH=""
 PX_CMP_PATH=""
@@ -126,15 +128,144 @@ px_mode_is_safe_executable() {
     [ $((mode_value & 0022)) -eq 0 ]
 }
 
-px_bootstrap_stat() {
+px_mode_string_to_octal() {
+    local permissions="$1"
+    [ "${#permissions}" -ge 10 ] || return 1
+    permissions="${permissions:0:10}"
+    local u=0 g=0 o=0 special=0 ch
+    ch="${permissions:1:1}"; [ "$ch" = "r" ] && u=$((u + 4))
+    ch="${permissions:2:1}"; [ "$ch" = "w" ] && u=$((u + 2))
+    ch="${permissions:3:1}"
+    case "$ch" in x) u=$((u + 1));; s) u=$((u + 1)); special=$((special + 4));; S) special=$((special + 4));; esac
+    ch="${permissions:4:1}"; [ "$ch" = "r" ] && g=$((g + 4))
+    ch="${permissions:5:1}"; [ "$ch" = "w" ] && g=$((g + 2))
+    ch="${permissions:6:1}"
+    case "$ch" in x) g=$((g + 1));; s) g=$((g + 1)); special=$((special + 2));; S) special=$((special + 2));; esac
+    ch="${permissions:7:1}"; [ "$ch" = "r" ] && o=$((o + 4))
+    ch="${permissions:8:1}"; [ "$ch" = "w" ] && o=$((o + 2))
+    ch="${permissions:9:1}"
+    case "$ch" in x) o=$((o + 1));; t) o=$((o + 1)); special=$((special + 1));; T) special=$((special + 1));; esac
+    PX_PORTABLE_MODE="${special}${u}${g}${o}"
+    return 0
+}
+
+px_portable_ls_stat_output() {
+    local executable="$1"
+    local path="$2"
+    local follow_symlink="${3:-0}"
+    local output inode permissions links uid gid size rest
+    if [ "$follow_symlink" -eq 1 ]; then
+        output=$("$executable" -Llidn "$path" 2>/dev/null) || return 1
+    else
+        output=$("$executable" -lidn "$path" 2>/dev/null) || return 1
+    fi
+    case "$output" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    read -r inode permissions links uid gid size rest <<< "$output"
+    [ -n "$inode" ] && [ -n "$permissions" ] && [ -n "$links" ] || return 1
+    [ -n "$uid" ] && [ -n "$gid" ] && [ -n "$size" ] || return 1
+    case "$inode:$links:$uid:$gid:$size" in *[!0-9:]*|::*|:*:) return 1 ;; esac
+    px_mode_string_to_octal "$permissions" || return 1
+    printf '0|%s|%s|%s|%s|%s|%s|0|0\n' "$inode" "$uid" "$gid" "$PX_PORTABLE_MODE" "$size" "$links"
+}
+
+px_stat_probe_output() {
+    local executable="$1"
+    local style="$2"
+    local path="$3"
+    local follow_symlink="${4:-0}"
+    case "$style:$follow_symlink" in
+        bsd:0)
+            "$executable" -f '%d|%i|%u|%g|%Lp|%z|%l|%m|%c' "$path" 2>/dev/null
+            ;;
+        bsd:1)
+            "$executable" -L -f '%d|%i|%u|%g|%Lp|%z|%l|%m|%c' "$path" 2>/dev/null
+            ;;
+        gnu:0)
+            "$executable" -c '%d|%i|%u|%g|%a|%s|%h|%Y|%Z' "$path" 2>/dev/null
+            ;;
+        gnu:1)
+            "$executable" -L -c '%d|%i|%u|%g|%a|%s|%h|%Y|%Z' "$path" 2>/dev/null
+            ;;
+        portable:0)
+            px_portable_ls_stat_output "$executable" "$path" 0
+            ;;
+        portable:1)
+            px_portable_ls_stat_output "$executable" "$path" 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+px_stat_output_is_valid() {
+    local output="$1"
+    case "$output" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    local device inode uid gid mode size links mtime ctime extra
+    IFS='|' read -r device inode uid gid mode size links mtime ctime extra <<< "$output"
+    [ -z "$extra" ] || return 1
+    [ -n "$device" ] && [ -n "$inode" ] && [ -n "$uid" ] && [ -n "$gid" ] || return 1
+    [ -n "$size" ] && [ -n "$links" ] && [ -n "$mtime" ] && [ -n "$ctime" ] || return 1
+    case "$device:$inode:$uid:$gid:$size:$links:$mtime:$ctime" in
+        *[!0-9:]*|::*|:*:) return 1 ;;
+    esac
+    case "$mode" in ""|*[!0-7]*) return 1 ;; esac
+    PX_STAT_PROBE_UID="$uid"
+    PX_STAT_PROBE_MODE="$mode"
+    PX_STAT_PROBE_SIZE="$size"
+    return 0
+}
+
+px_try_bootstrap_stat_candidate() {
+    local candidate="$1"
+    local allow_symlink="$2"
+    local parent basename physical_parent resolved output style
+    [ -e "$candidate" ] || return 1
+    [ -f "$candidate" ] || return 1
+    [ -x "$candidate" ] || return 1
+    [ -s "$candidate" ] || return 1
+    if [ "$allow_symlink" -eq 0 ]; then
+        [ ! -L "$candidate" ] || return 1
+    fi
+    parent="${candidate%/*}"
+    basename="${candidate##*/}"
+    physical_parent=$(cd -P "$parent" 2>/dev/null && pwd -P) || return 1
+    resolved="${physical_parent%/}/$basename"
+    [ -f "$resolved" ] || return 1
+    [ -x "$resolved" ] || return 1
+    [ -s "$resolved" ] || return 1
+    if [ "$allow_symlink" -eq 0 ]; then
+        [ ! -L "$resolved" ] || return 1
+    fi
+
+    for style in bsd gnu; do
+        output=$(px_stat_probe_output "$resolved" "$style" "$resolved" "$allow_symlink") || continue
+        px_stat_output_is_valid "$output" || continue
+        [ "$PX_STAT_PROBE_UID" -eq 0 ] || continue
+        [ "$PX_STAT_PROBE_SIZE" -gt 0 ] || continue
+        px_mode_is_safe_executable "$PX_STAT_PROBE_MODE" || continue
+        PX_STAT_PATH="$resolved"
+        PX_STAT_STYLE="$style"
+        if [ "$allow_symlink" -eq 0 ]; then
+            PX_STAT_TRUST_MODE="strict"
+        else
+            PX_STAT_TRUST_MODE="symlink-compatible"
+        fi
+        return 0
+    done
+    return 1
+}
+
+px_bootstrap_portable_metadata() {
     local candidates=(
-        "/usr/bin/stat"
-        "/bin/stat"
-        "/var/jb/usr/bin/stat"
-        "/private/preboot/jb/usr/bin/stat"
+        "/bin/ls"
+        "/usr/bin/ls"
+        "/var/jb/bin/ls"
+        "/var/jb/usr/bin/ls"
+        "/private/preboot/jb/bin/ls"
+        "/private/preboot/jb/usr/bin/ls"
     )
     local candidate parent basename physical_parent resolved output
-    local device inode uid gid mode size links mtime ctime extra
     for candidate in "${candidates[@]}"; do
         [ -f "$candidate" ] || continue
         [ ! -L "$candidate" ] || continue
@@ -147,21 +278,46 @@ px_bootstrap_stat() {
         [ -f "$resolved" ] || continue
         [ ! -L "$resolved" ] || continue
         [ -x "$resolved" ] || continue
-        output=$("$resolved" -f '%d|%i|%u|%g|%Lp|%z|%l|%m|%c' "$resolved" 2>/dev/null) || continue
-        case "$output" in *$'\n'*|*$'\r'*) continue ;; esac
-        IFS='|' read -r device inode uid gid mode size links mtime ctime extra <<< "$output"
-        [ -z "$extra" ] || continue
-        [ -n "$device" ] && [ -n "$inode" ] && [ -n "$uid" ] && [ -n "$gid" ] || continue
-        [ -n "$size" ] && [ -n "$links" ] && [ -n "$mtime" ] && [ -n "$ctime" ] || continue
-        case "$device:$inode:$uid:$gid:$size:$links:$mtime:$ctime" in
-            *[!0-9:]*|::*|:*:) continue ;;
-        esac
-        [ "$uid" -eq 0 ] || continue
-        [ "$size" -gt 0 ] || continue
-        px_mode_is_safe_executable "$mode" || continue
+        [ -s "$resolved" ] || continue
+        output=$(px_stat_probe_output "$resolved" portable "$resolved" 0) || continue
+        px_stat_output_is_valid "$output" || continue
+        [ "$PX_STAT_PROBE_UID" -eq 0 ] || continue
+        [ "$PX_STAT_PROBE_SIZE" -gt 0 ] || continue
+        px_mode_is_safe_executable "$PX_STAT_PROBE_MODE" || continue
         PX_STAT_PATH="$resolved"
+        PX_STAT_STYLE="portable"
+        PX_STAT_TRUST_MODE="portable-strict"
         return 0
     done
+    return 1
+}
+
+px_bootstrap_stat() {
+    local candidates=(
+        "/usr/bin/stat"
+        "/bin/stat"
+        "/var/jb/usr/bin/stat"
+        "/var/jb/bin/stat"
+        "/private/preboot/jb/usr/bin/stat"
+        "/private/preboot/jb/bin/stat"
+    )
+    local candidate
+
+    # Prefer a non-symlink root-owned stat binary when the jailbreak exposes one.
+    for candidate in "${candidates[@]}"; do
+        px_try_bootstrap_stat_candidate "$candidate" 0 && return 0
+    done
+
+    # Rootless/bootstrap layouts commonly expose trusted utilities through symlinks.
+    # Probe only the same fixed absolute paths and require the invoked target to
+    # report root ownership, safe mode and a supported stat format before use.
+    for candidate in "${candidates[@]}"; do
+        px_try_bootstrap_stat_candidate "$candidate" 1 && return 0
+    done
+
+    # Stock/minimal jailbreak images may not ship a stat utility at all.
+    # Fall back to numeric long-list metadata from a fixed, non-symlink ls binary.
+    px_bootstrap_portable_metadata && return 0
     return 1
 }
 
@@ -181,11 +337,12 @@ px_valid_snapshot_prefix() {
 px_stat_snapshot() {
     local path="$1"
     local prefix="$2"
+    local follow_symlink="${3:-0}"
     [ "$PX_METADATA_READY" -eq 1 ] || return 1
     [ -n "$path" ] || return 1
     px_valid_snapshot_prefix "$prefix" || return 1
     local output device inode uid gid mode size links mtime ctime extra
-    output=$("$PX_STAT_PATH" -f '%d|%i|%u|%g|%Lp|%z|%l|%m|%c' "$path" 2>/dev/null) || return 1
+    output=$(px_stat_probe_output "$PX_STAT_PATH" "$PX_STAT_STYLE" "$path" "$follow_symlink") || return 1
     case "$output" in *$'\n'*|*$'\r'*) return 1 ;; esac
     IFS='|' read -r device inode uid gid mode size links mtime ctime extra <<< "$output"
     [ -z "$extra" ] || return 1
@@ -280,7 +437,9 @@ px_initialize_metadata_boundary() {
     [ "$PX_METADATA_READY" -eq 0 ] || return 0
     px_bootstrap_stat || return 1
     PX_METADATA_READY=1
-    px_stat_snapshot "$PX_STAT_PATH" PX_STAT_SELF || return 1
+    local stat_self_follow=0
+    [ "$PX_STAT_TRUST_MODE" = "symlink-compatible" ] && stat_self_follow=1
+    px_stat_snapshot "$PX_STAT_PATH" PX_STAT_SELF "$stat_self_follow" || return 1
     [ "$PX_STAT_SELF_UID" -eq 0 ] || return 1
     [ "$PX_STAT_SELF_SIZE" -gt 0 ] || return 1
     px_mode_is_safe_executable "$PX_STAT_SELF_MODE" || return 1
@@ -288,7 +447,7 @@ px_initialize_metadata_boundary() {
     px_stat_snapshot "$PX_PHYSICAL_DIRECTORY" PX_STAT_PARENT || return 1
     [ "$PX_STAT_PARENT_UID" -eq 0 ] || return 1
     px_mode_is_safe_executable "$PX_STAT_PARENT_MODE" || return 1
-    readonly PX_STAT_PATH
+    readonly PX_STAT_PATH PX_STAT_STYLE PX_STAT_TRUST_MODE
     return 0
 }
 
@@ -1620,10 +1779,11 @@ print_usage() {
 
 # Initialize the trusted metadata and dependency boundary before external work.
 if ! px_initialize_metadata_boundary; then
-    log_error "PXKEYCHAIN_DEPENDENCY=stat-bootstrap"
+    log_error "PXKEYCHAIN_DEPENDENCY=metadata-bootstrap"
     log_error "Trusted filesystem metadata utility is unavailable"
     exit "$PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE"
 fi
+log_verbose "Metadata stat backend=${PX_STAT_STYLE} trust=${PX_STAT_TRUST_MODE}"
 if ! px_validate_installed_helper; then
     log_error "Installed Keychain helper failed safety validation"
     exit "$PX_KEYCHAIN_EXIT_HELPER_UNAVAILABLE"
