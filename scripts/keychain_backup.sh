@@ -712,7 +712,7 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse|helper-overlay-platform-application|helper-overlay-application-identifier|helper-overlay-no-sandbox|helper-overlay-no-container|helper-overlay-container-required|helper-overlay-keystore-access-keychain-keys|helper-overlay-keystore-device|helper-overlay-keychain-access-groups|helper-overlay-kag-array-input|helper-overlay-kag-array-create|helper-overlay-kag-array-item|helper-overlay-lint|helper-overlay-groups-parse|helper-overlay-groups-mismatch|helper-overlay-app-id-parse|helper-overlay-app-id-mismatch)
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse|helper-overlay-platform-application|helper-overlay-application-identifier|helper-overlay-no-sandbox|helper-overlay-no-container|helper-overlay-container-required|helper-overlay-keystore-access-keychain-keys|helper-overlay-keystore-device|helper-overlay-keychain-access-groups|helper-overlay-kag-array-input|helper-overlay-kag-array-create|helper-overlay-kag-array-item|helper-overlay-lint|helper-overlay-groups-parse|helper-overlay-groups-missing|helper-overlay-groups-extra|helper-overlay-groups-mismatch|helper-overlay-app-id-parse|helper-overlay-app-id-mismatch)
             log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
             ;;
     esac
@@ -2096,10 +2096,14 @@ generate_helper_entitlements() {
         px_report_failure_reason helper-overlay-groups-parse
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     }
-    [ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ] || {
-        px_report_failure_reason helper-overlay-groups-mismatch
+    if ! px_group_csv_is_subset "$canonical_groups" "$generated_groups"; then
+        px_report_failure_reason helper-overlay-groups-missing
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    }
+    fi
+    if ! px_group_csv_is_subset "$generated_groups" "$canonical_groups"; then
+        px_report_failure_reason helper-overlay-groups-extra
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    fi
     generated_identifier=$(parse_app_identifier "$output_file") || {
         px_report_failure_reason helper-overlay-app-id-parse
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"

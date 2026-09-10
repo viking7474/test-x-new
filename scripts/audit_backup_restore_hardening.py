@@ -1456,7 +1456,8 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'px_group_csv_to_xml_array "$canonical_groups"' in generation_body and
                     'px_plutil_upsert_compound "keychain-access-groups" "$groups_json" "$groups_xml" "$output_file" "$canonical_groups"' in generation_body and
                     'generated_groups=$(parse_keychain_groups "$output_file")' in generation_body and
-                    '[ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ]' in generation_body and
+                    'px_group_csv_is_subset "$canonical_groups" "$generated_groups"' in generation_body and
+                    'px_group_csv_is_subset "$generated_groups" "$canonical_groups"' in generation_body and
                     'generated_identifier=$(parse_app_identifier "$output_file")' in generation_body and
                     '[ "$generated_identifier" = "$app_identifier" ]' in generation_body and
                     'generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_APP_ENT_PATH"' in shell.text and
