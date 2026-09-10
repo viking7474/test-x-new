@@ -1306,10 +1306,13 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'px_validate_absolute_path_lexical "$app_dir"' in explicit_target_body and
                     'px_validate_absolute_path_lexical "$target"' in explicit_target_body and
                     '[ "${target%/*}" = "$app_dir" ]' in explicit_target_body and
-                    'px_validate_app_directory "$app_dir"' in explicit_target_body and
+                    'px_prepare_explicit_app_directory "$app_dir"' in explicit_target_body and
+                    'local physical_app_dir="$PX_EXPLICIT_APP_DIRECTORY"' in explicit_target_body and
+                    'local physical_target="${physical_app_dir%/}/$executable_name"' in explicit_target_body and
+                    'PX_TARGET_PATH="$physical_target"' in explicit_target_body and
                     'local executable_name="${target##*/}"' in explicit_target_body and
                     'px_validate_safe_basename "$executable_name"' in explicit_target_body and
-                    'px_validate_target_executable "$target"' in explicit_target_body and
+                    'px_validate_target_executable "$physical_target"' in explicit_target_body and
                     'px_prepare_explicit_target "$bundle_id" "$OVERRIDE_TARGET_BUNDLE" "$OVERRIDE_TARGET_EXECUTABLE"' in target_context_body and
                     'px_report_failure_stage target-native-validate' in target_context_body and
                     'signed_app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH")' in target_context_body and
@@ -1317,6 +1320,19 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'px_report_failure_stage target-signed-identity' in target_context_body,
                     shell.path, source_line_for_token(shell, "px_prepare_explicit_target()"),
                     "Keychain wipe must prefer an exact native LaunchServices target and revalidate bundle/executable identity before use")
+
+    explicit_bundle_start = shell.text.find("px_prepare_explicit_app_directory()")
+    explicit_bundle_end = shell.text.find("px_prepare_explicit_target()", explicit_bundle_start)
+    explicit_bundle_body = (shell.text[explicit_bundle_start:explicit_bundle_end]
+                            if explicit_bundle_start >= 0 and explicit_bundle_end > explicit_bundle_start else "")
+    collector.check("BRH-KEY-NATIVE-BUNDLE-PHYSICALIZE",
+                    'px_physical_directory "$exposed_directory"' in explicit_bundle_body and
+                    'px_stat_snapshot "$physical_directory" PX_EXPLICIT_APP_DIRECTORY_META' in explicit_bundle_body and
+                    'px_owner_is_app_trusted "$PX_EXPLICIT_APP_DIRECTORY_META_UID"' in explicit_bundle_body and
+                    'px_mode_is_safe_executable "$PX_EXPLICIT_APP_DIRECTORY_META_MODE"' in explicit_bundle_body and
+                    '[ ! -L "$exposed_directory" ]' not in explicit_bundle_body,
+                    shell.path, source_line_for_token(shell, "px_prepare_explicit_app_directory()"),
+                    "native LaunchServices bundle exposure may be symlinked, but its physical directory must retain trusted ownership and mode")
 
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
                     'px_read_plist_string_compat()' in shell.text and

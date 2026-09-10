@@ -712,7 +712,7 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-executable-basename|target-executable-metadata|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-bundle-directory|target-executable-basename|target-executable-metadata|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
             log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
             ;;
     esac
@@ -1160,6 +1160,44 @@ px_consider_app_bundle() {
     return 0
 }
 
+PX_EXPLICIT_APP_DIRECTORY=""
+
+px_prepare_explicit_app_directory() {
+    local exposed_directory="$1"
+    PX_EXPLICIT_APP_DIRECTORY=""
+
+    # LaunchServices may expose a trusted system bundle through a symlink or
+    # redirected ancestor. Resolve that exposure to its physical directory,
+    # then apply ownership/mode trust checks to the actual directory.
+    px_physical_directory "$exposed_directory" || {
+        px_report_failure_reason target-bundle-physicalize
+        return 1
+    }
+    local physical_directory="$PX_PHYSICAL_DIRECTORY"
+    [ -d "$physical_directory" ] || {
+        px_report_failure_reason target-bundle-not-directory
+        return 1
+    }
+    [ -x "$physical_directory" ] || {
+        px_report_failure_reason target-bundle-not-searchable
+        return 1
+    }
+    px_stat_snapshot "$physical_directory" PX_EXPLICIT_APP_DIRECTORY_META || {
+        px_report_failure_reason target-bundle-stat
+        return 1
+    }
+    px_owner_is_app_trusted "$PX_EXPLICIT_APP_DIRECTORY_META_UID" || {
+        px_report_failure_reason target-bundle-owner
+        return 1
+    }
+    px_mode_is_safe_executable "$PX_EXPLICIT_APP_DIRECTORY_META_MODE" || {
+        px_report_failure_reason target-bundle-mode
+        return 1
+    }
+    PX_EXPLICIT_APP_DIRECTORY="$physical_directory"
+    return 0
+}
+
 px_prepare_explicit_target() {
     local bundle_id="$1"
     local app_dir="$2"
@@ -1186,7 +1224,9 @@ px_prepare_explicit_target() {
         *) px_report_failure_reason target-bundle-suffix; return 1 ;;
     esac
 
-    px_validate_app_directory "$app_dir" || {
+    px_prepare_explicit_app_directory "$app_dir" || return 1
+    local physical_app_dir="$PX_EXPLICIT_APP_DIRECTORY"
+    [ -n "$physical_app_dir" ] || {
         px_report_failure_reason target-bundle-directory
         return 1
     }
@@ -1195,13 +1235,14 @@ px_prepare_explicit_target() {
         px_report_failure_reason target-executable-basename
         return 1
     }
-    px_validate_target_executable "$target" || {
+    local physical_target="${physical_app_dir%/}/$executable_name"
+    px_validate_target_executable "$physical_target" || {
         px_report_failure_reason target-executable-metadata
         return 1
     }
 
-    PX_TARGET_PATH="$target"
-    PX_TARGET_APP_BUNDLE="$app_dir"
+    PX_TARGET_PATH="$physical_target"
+    PX_TARGET_APP_BUNDLE="$physical_app_dir"
     case "$bundle_id" in com.apple.*) PX_TARGET_IS_SYSTEM=1 ;; *) PX_TARGET_IS_SYSTEM=0 ;; esac
     PX_TARGET_DEVICE="$PX_TARGET_CANDIDATE_DEVICE"
     PX_TARGET_INODE="$PX_TARGET_CANDIDATE_INODE"
