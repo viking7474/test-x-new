@@ -1312,7 +1312,7 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'PX_TARGET_PATH="$physical_target"' in explicit_target_body and
                     'local executable_name="${target##*/}"' in explicit_target_body and
                     'px_validate_safe_basename "$executable_name"' in explicit_target_body and
-                    'px_validate_target_executable "$physical_target"' in explicit_target_body and
+                    'px_validate_explicit_target_executable "$physical_target" "$PX_EXPLICIT_APP_DIRECTORY_UID"' in explicit_target_body and
                     'px_prepare_explicit_target "$bundle_id" "$OVERRIDE_TARGET_BUNDLE" "$OVERRIDE_TARGET_EXECUTABLE"' in target_context_body and
                     'px_report_failure_stage target-native-validate' in target_context_body and
                     'signed_app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH")' in target_context_body and
@@ -1328,11 +1328,17 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     collector.check("BRH-KEY-NATIVE-BUNDLE-PHYSICALIZE",
                     'px_physical_directory "$exposed_directory"' in explicit_bundle_body and
                     'px_stat_snapshot "$physical_directory" PX_EXPLICIT_APP_DIRECTORY_META' in explicit_bundle_body and
-                    'px_owner_is_app_trusted "$PX_EXPLICIT_APP_DIRECTORY_META_UID"' in explicit_bundle_body and
+                    'px_owner_is_app_trusted "$PX_EXPLICIT_APP_DIRECTORY_META_UID"' not in explicit_bundle_body and
+                    'PX_EXPLICIT_APP_DIRECTORY_UID="$PX_EXPLICIT_APP_DIRECTORY_META_UID"' in explicit_bundle_body and
                     'px_mode_is_safe_executable "$PX_EXPLICIT_APP_DIRECTORY_META_MODE"' in explicit_bundle_body and
-                    '[ ! -L "$exposed_directory" ]' not in explicit_bundle_body,
+                    '[ ! -L "$exposed_directory" ]' not in explicit_bundle_body and
+                    'px_validate_explicit_target_executable()' in shell.text and
+                    'px_owner_is_app_trusted "$PX_TARGET_CANDIDATE_UID"' in shell.text and
+                    '[ "$PX_TARGET_CANDIDATE_UID" != "$bundle_uid" ]' in shell.text and
+                    'px_mode_is_safe_executable "$PX_TARGET_CANDIDATE_MODE"' in shell.text and
+                    '[ "$PX_TARGET_CANDIDATE_LINKS" -eq 1 ]' in shell.text,
                     shell.path, source_line_for_token(shell, "px_prepare_explicit_app_directory()"),
-                    "native LaunchServices bundle exposure may be symlinked, but its physical directory must retain trusted ownership and mode")
+                    "native LaunchServices bundle exposure may use a non-0/501 system uid; physical mode, executable ownership coherence, stable file metadata and signed identity remain mandatory")
 
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
                     'px_read_plist_string_compat()' in shell.text and

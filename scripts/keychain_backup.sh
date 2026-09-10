@@ -712,7 +712,7 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-bundle-directory|target-executable-basename|target-executable-metadata|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
             log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
             ;;
     esac
@@ -1165,10 +1165,13 @@ PX_EXPLICIT_APP_DIRECTORY=""
 px_prepare_explicit_app_directory() {
     local exposed_directory="$1"
     PX_EXPLICIT_APP_DIRECTORY=""
+    PX_EXPLICIT_APP_DIRECTORY_UID=""
+    PX_EXPLICIT_APP_DIRECTORY_GID=""
 
-    # LaunchServices may expose a trusted system bundle through a symlink or
-    # redirected ancestor. Resolve that exposure to its physical directory,
-    # then apply ownership/mode trust checks to the actual directory.
+    # LaunchServices may expose a system bundle through a symlink/redirect and
+    # modern jailbreak/bootstrap layouts do not guarantee uid 0/501 for the
+    # physical bundle directory. Canonicalize it and bind the executable to the
+    # resulting directory ownership instead of trusting a fixed uid whitelist.
     px_physical_directory "$exposed_directory" || {
         px_report_failure_reason target-bundle-physicalize
         return 1
@@ -1186,15 +1189,53 @@ px_prepare_explicit_app_directory() {
         px_report_failure_reason target-bundle-stat
         return 1
     }
-    px_owner_is_app_trusted "$PX_EXPLICIT_APP_DIRECTORY_META_UID" || {
-        px_report_failure_reason target-bundle-owner
-        return 1
-    }
     px_mode_is_safe_executable "$PX_EXPLICIT_APP_DIRECTORY_META_MODE" || {
         px_report_failure_reason target-bundle-mode
         return 1
     }
     PX_EXPLICIT_APP_DIRECTORY="$physical_directory"
+    PX_EXPLICIT_APP_DIRECTORY_UID="$PX_EXPLICIT_APP_DIRECTORY_META_UID"
+    PX_EXPLICIT_APP_DIRECTORY_GID="$PX_EXPLICIT_APP_DIRECTORY_META_GID"
+    return 0
+}
+
+px_validate_explicit_target_executable() {
+    local target="$1"
+    local bundle_uid="$2"
+
+    [ -f "$target" ] || {
+        px_report_failure_reason target-executable-file
+        return 1
+    }
+    [ ! -L "$target" ] || {
+        px_report_failure_reason target-executable-symlink
+        return 1
+    }
+    [ -x "$target" ] || {
+        px_report_failure_reason target-executable-not-executable
+        return 1
+    }
+    px_stat_snapshot "$target" PX_TARGET_CANDIDATE || {
+        px_report_failure_reason target-executable-stat
+        return 1
+    }
+    if ! px_owner_is_app_trusted "$PX_TARGET_CANDIDATE_UID" &&
+       [ "$PX_TARGET_CANDIDATE_UID" != "$bundle_uid" ]; then
+        px_report_failure_reason target-executable-owner-mismatch
+        return 1
+    fi
+    px_mode_is_safe_executable "$PX_TARGET_CANDIDATE_MODE" || {
+        px_report_failure_reason target-executable-mode
+        return 1
+    }
+    [ "$PX_TARGET_CANDIDATE_LINKS" -eq 1 ] || {
+        px_report_failure_reason target-executable-links
+        return 1
+    }
+    [ "$PX_TARGET_CANDIDATE_SIZE" -gt 0 ] || {
+        px_report_failure_reason target-executable-size
+        return 1
+    }
     return 0
 }
 
@@ -1236,10 +1277,7 @@ px_prepare_explicit_target() {
         return 1
     }
     local physical_target="${physical_app_dir%/}/$executable_name"
-    px_validate_target_executable "$physical_target" || {
-        px_report_failure_reason target-executable-metadata
-        return 1
-    }
+    px_validate_explicit_target_executable "$physical_target" "$PX_EXPLICIT_APP_DIRECTORY_UID" || return 1
 
     PX_TARGET_PATH="$physical_target"
     PX_TARGET_APP_BUNDLE="$physical_app_dir"
