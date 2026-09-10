@@ -951,11 +951,9 @@ static BOOL PXBoundedCommandSucceeded(CommandResult *result) {
            !result.stdoutTruncated &&
            !result.stderrTruncated;
 }
-static NSString *PXKeychainDependencyDiagnosticToken(CommandResult *result) {
-    if (![result isKindOfClass:[CommandResult class]] ||
-        result.exitCode != PXKeychainHelperExitCodeDependencyUnavailable) return nil;
+static NSString *PXKeychainDiagnosticTokenForMarker(CommandResult *result, NSString *marker) {
+    if (![result isKindOfClass:[CommandResult class]] || !marker.length) return nil;
     NSString *stderrString = result.stderrString ?: @"";
-    NSString *marker = @"PXKEYCHAIN_DEPENDENCY=";
     NSRange markerRange = [stderrString rangeOfString:marker];
     if (markerRange.location == NSNotFound) return nil;
     NSUInteger start = NSMaxRange(markerRange);
@@ -970,6 +968,20 @@ static NSString *PXKeychainDependencyDiagnosticToken(CommandResult *result) {
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"];
     if ([token rangeOfCharacterFromSet:[allowed invertedSet]].location != NSNotFound) return nil;
     return token;
+}
+
+static NSString *PXKeychainDependencyDiagnosticToken(CommandResult *result) {
+    if (![result isKindOfClass:[CommandResult class]] ||
+        result.exitCode != PXKeychainHelperExitCodeDependencyUnavailable) return nil;
+    return PXKeychainDiagnosticTokenForMarker(result, @"PXKEYCHAIN_DEPENDENCY=");
+}
+
+static NSString *PXKeychainFailureStageDiagnosticToken(CommandResult *result) {
+    return PXKeychainDiagnosticTokenForMarker(result, @"PXKEYCHAIN_FAILURE_STAGE=");
+}
+
+static NSString *PXKeychainFailureReasonDiagnosticToken(CommandResult *result) {
+    return PXKeychainDiagnosticTokenForMarker(result, @"PXKEYCHAIN_FAILURE_REASON=");
 }
 
 typedef NS_ENUM(NSInteger, PXInstalledExtensionDiscoveryErrorCode) {
@@ -1787,6 +1799,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                                                   maxOutputBytes:1024 * 1024];
     BOOL success = PXBoundedCommandSucceeded(wipeResult);
     NSString *dependencyToken = PXKeychainDependencyDiagnosticToken(wipeResult);
+    NSString *stageToken = PXKeychainFailureStageDiagnosticToken(wipeResult);
+    NSString *reasonToken = PXKeychainFailureReasonDiagnosticToken(wipeResult);
     NSMutableDictionary *diagnostic = [@{
         @"method": @"resigned_helper",
         @"noLaunch": @YES,
@@ -1798,6 +1812,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         @"groupCount": @(selectedGroups.count),
     } mutableCopy];
     if (dependencyToken.length) diagnostic[@"dependency"] = dependencyToken;
+    if (stageToken.length) diagnostic[@"stage"] = stageToken;
+    if (reasonToken.length) diagnostic[@"reason"] = reasonToken;
     [[NSUserDefaults standardUserDefaults] setObject:diagnostic
                                               forKey:[NSString stringWithFormat:@"DataCleaningKeychainResult_%@",
                                                                                  bundleIdentifier]];
@@ -1807,10 +1823,18 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         NSString *dependencySuffix = dependencyToken.length
             ? [NSString stringWithFormat:@" dependency=%@", dependencyToken]
             : @"";
-        NSString *message = [NSString stringWithFormat:@"Headless Keychain helper failed (exit=%d timeout=%d)%@",
+        NSString *stageSuffix = stageToken.length
+            ? [NSString stringWithFormat:@" stage=%@", stageToken]
+            : @"";
+        NSString *reasonSuffix = reasonToken.length
+            ? [NSString stringWithFormat:@" reason=%@", reasonToken]
+            : @"";
+        NSString *message = [NSString stringWithFormat:@"Headless Keychain helper failed (exit=%d timeout=%d)%@%@%@",
                              wipeResult ? wipeResult.exitCode : -1,
                              wipeResult ? wipeResult.timedOut : NO,
-                             dependencySuffix];
+                             dependencySuffix,
+                             stageSuffix,
+                             reasonSuffix];
         [self logMessage:@"[AppDataCleaner] Keychain wipe failed method=resigned_helper noLaunch=1 bundle=%@ %@",
                          bundleIdentifier, message];
         PXAssignKeychainNSError(error,

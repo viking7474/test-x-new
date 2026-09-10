@@ -681,65 +681,97 @@ px_discard_unactivated_workspace() {
     return 0
 }
 
+px_report_failure_stage() {
+    local stage="$1"
+    case "$stage" in
+        workspace-create|target-locate|target-entitlements|requested-groups|helper-entitlements|helper-copy|helper-sign|helper-authority|post-sign-entitlements|pre-exec-validation|post-exec-validation) ;;
+        *) return 1 ;;
+    esac
+    log_error "PXKEYCHAIN_FAILURE_STAGE=$stage"
+    return 0
+}
+
+px_report_failure_reason() {
+    local reason="$1"
+    case "$reason" in
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed) ;;
+        *) return 1 ;;
+    esac
+    log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
+    return 0
+}
+
 px_create_workspace() {
-    [ "$PX_WORKSPACE_CREATE_ATTEMPTED" -eq 0 ] || return 1
+    [ "$PX_WORKSPACE_CREATE_ATTEMPTED" -eq 0 ] || { px_report_failure_reason workspace-repeat; return 1; }
     PX_WORKSPACE_CREATE_ATTEMPTED=1
-    px_validate_workspace_parent || return 1
-    px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_BEFORE || return 1
+    px_validate_workspace_parent || { px_report_failure_reason workspace-parent; return 1; }
+    px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_BEFORE || { px_report_failure_reason workspace-parent-snapshot; return 1; }
 
     local created
-    created=$("$PX_MKTEMP_PATH" -d "$PX_WORKSPACE_PARENT/$PX_WORKSPACE_PREFIX"XXXXXXXX 2>/dev/null) || return 1
-    case "$created" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    created=$("$PX_MKTEMP_PATH" -d "$PX_WORKSPACE_PARENT/$PX_WORKSPACE_PREFIX"XXXXXXXX 2>/dev/null) || { px_report_failure_reason workspace-mktemp; return 1; }
+    case "$created" in *$'\n'*|*$'\r'*) px_report_failure_reason workspace-path; return 1 ;; esac
     if ! px_workspace_path_has_authority "$created"; then
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-path
         return 1
     fi
     if [ -L "$created" ] || [ ! -d "$created" ]; then
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-directory
         return 1
     fi
 
     px_stat_snapshot "$created" PX_WORKSPACE_NEW || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-stat
         return 1
     }
     if ! px_mode_is_exact "$PX_WORKSPACE_NEW_MODE" 700; then
         "$PX_CHMOD_PATH" 700 "$created" >/dev/null 2>&1 || {
             px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+            px_report_failure_reason workspace-chmod
             return 1
         }
         px_stat_snapshot "$created" PX_WORKSPACE_NEW || {
             px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+            px_report_failure_reason workspace-restat
             return 1
         }
     fi
 
     [ "$PX_WORKSPACE_NEW_UID" -eq "$EUID" ] || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-owner
         return 1
     }
     px_mode_is_exact "$PX_WORKSPACE_NEW_MODE" 700 || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-mode
         return 1
     }
     [ "$PX_WORKSPACE_NEW_DEVICE" = "$PX_WORKSPACE_PARENT_BEFORE_DEVICE" ] || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-device
         return 1
     }
     px_directory_is_empty "$created" || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-not-empty
         return 1
     }
     px_validate_workspace_parent || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-parent-revalidate
         return 1
     }
     px_stat_snapshot "$PX_WORKSPACE_PARENT" PX_WORKSPACE_PARENT_AFTER || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-parent-resnapshot
         return 1
     }
     px_same_identity PX_WORKSPACE_PARENT_BEFORE PX_WORKSPACE_PARENT_AFTER || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
+        px_report_failure_reason workspace-parent-changed
         return 1
     }
 
@@ -1563,10 +1595,12 @@ px_validate_helper_execution() {
 # === Main functions ===
 px_prepare_target_context() {
     local bundle_id="$1"
-    find_app_executable "$bundle_id" || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    find_app_executable "$bundle_id" || { px_report_failure_stage target-locate; return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"; }
     local ent_file="$PX_WORKSPACE_PATH/app_ent.xml"
     extract_entitlements "$PX_TARGET_PATH" "$ent_file"
-    return $?
+    local status=$?
+    [ "$status" -eq 0 ] || px_report_failure_stage target-entitlements
+    return "$status"
 }
 
 px_prepare_requested_groups() {
@@ -1637,16 +1671,21 @@ px_finish_signed_helper() {
     local helper_ent="$PX_WORKSPACE_PATH/helper_ent.plist"
     generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_APP_ENT_PATH"
     local status=$?
-    [ "$status" -eq 0 ] || return "$status"
+    if [ "$status" -ne 0 ]; then px_report_failure_stage helper-entitlements; return "$status"; fi
     px_prepare_working_helper
     status=$?
-    [ "$status" -eq 0 ] || return "$status"
+    if [ "$status" -ne 0 ]; then px_report_failure_stage helper-copy; return "$status"; fi
     resign_helper "$PX_HELPER_ENT_PATH" "$PX_WORKING_HELPER_PATH"
     status=$?
-    [ "$status" -eq 0 ] || return "$status"
-    px_stat_snapshot "$PX_HELPER_ENT_PATH" PX_HELPER_ENT_AUTHORITY || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    if [ "$status" -ne 0 ]; then px_report_failure_stage helper-sign; return "$status"; fi
+    px_stat_snapshot "$PX_HELPER_ENT_PATH" PX_HELPER_ENT_AUTHORITY || {
+        px_report_failure_stage helper-authority
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
     px_extract_signed_helper_entitlements
-    return $?
+    status=$?
+    if [ "$status" -ne 0 ]; then px_report_failure_stage post-sign-entitlements; return "$status"; fi
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
 do_backup() {
@@ -1750,19 +1789,28 @@ do_wipe() {
     local bundle_id="$1"
 
     log_info "Starting keychain wipe"
-    px_create_workspace || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_create_workspace || {
+        px_report_failure_stage workspace-create
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
     px_prepare_target_context "$bundle_id"
     local context_status=$?
     [ "$context_status" -eq 0 ] || return "$context_status"
     px_prepare_requested_groups "$bundle_id"
     local group_status=$?
-    [ "$group_status" -eq 0 ] || return "$group_status"
+    if [ "$group_status" -ne 0 ]; then
+        px_report_failure_stage requested-groups
+        return "$group_status"
+    fi
 
     log_warn "This will delete all Keychain items for the selected groups"
     px_finish_signed_helper
     local helper_status=$?
     [ "$helper_status" -eq 0 ] || return "$helper_status"
-    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_helper_execution || {
+        px_report_failure_stage pre-exec-validation
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
 
     local helper_args=(
         "--action" "wipe"
@@ -1774,7 +1822,10 @@ do_wipe() {
     "$PX_WORKING_HELPER_PATH" "${helper_args[@]}"
     local raw_exit_code=$?
 
-    px_validate_helper_execution || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_helper_execution || {
+        px_report_failure_stage post-exec-validation
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
     normalize_helper_exit_status "$raw_exit_code"
     return $?
 }
