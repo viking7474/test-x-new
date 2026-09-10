@@ -1317,6 +1317,7 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     'px_report_failure_stage target-native-validate' in target_context_body and
                     'signed_app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH")' in target_context_body and
                     'px_application_identifier_matches_bundle_id "$signed_app_identifier" "$bundle_id"' in target_context_body and
+                    'extract_entitlements "$PX_TARGET_ENTITLEMENT_PATH" "$ent_file"' in target_context_body and
                     'px_report_failure_stage target-signed-identity' in target_context_body,
                     shell.path, source_line_for_token(shell, "px_prepare_explicit_target()"),
                     "Keychain wipe must prefer an exact native LaunchServices target and revalidate bundle/executable identity before use")
@@ -1351,16 +1352,28 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     collector.check("BRH-KEY-TARGET-REVALIDATION-MODE",
                     'PX_TARGET_VALIDATION_MODE="explicit"' in explicit_target_body and
                     'PX_TARGET_BUNDLE_UID="$PX_EXPLICIT_APP_DIRECTORY_UID"' in explicit_target_body and
+                    'PX_TARGET_ENTITLEMENT_PATH="$target"' in explicit_target_body and
+                    'px_stat_snapshot "$target" PX_TARGET_EXPOSED' in explicit_target_body and
+                    '[ "$PX_TARGET_EXPOSED_DEVICE" = "$PX_TARGET_CANDIDATE_DEVICE" ]' in explicit_target_body and
+                    '[ "$PX_TARGET_EXPOSED_INODE" = "$PX_TARGET_CANDIDATE_INODE" ]' in explicit_target_body and
                     'case "$PX_TARGET_VALIDATION_MODE" in' in target_revalidate_body and
                     'px_validate_explicit_target_executable "$PX_TARGET_PATH" "$PX_TARGET_BUNDLE_UID"' in target_revalidate_body and
                     'px_validate_target_executable "$PX_TARGET_PATH"' in target_revalidate_body and
+                    '[ "$app_binary" = "$PX_TARGET_ENTITLEMENT_PATH" ]' in target_extract_body and
                     'px_validate_target_unchanged || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"' in target_extract_body and
+                    'px_stat_snapshot "$PX_TARGET_PATH" PX_TARGET_EXTRACT_BEFORE' in target_extract_body and
+                    '"$PX_LDID_PATH" -e "$app_binary" > "$output_file"' in target_extract_body and
+                    'px_stat_snapshot "$PX_TARGET_PATH" PX_TARGET_EXTRACT_AFTER' in target_extract_body and
+                    'target-workspace-prevalidate' in target_extract_body and
+                    'target-workspace-postextract' in target_extract_body and
+                    'target-entitlements-empty' in target_extract_body and
+                    'target-entitlements-output-validation' in target_extract_body and
                     'target-snapshot-before' in target_extract_body and
                     'target-snapshot-after' in target_extract_body and
                     'target-snapshot-changed' in target_extract_body and
                     'target-ldid-extract' in target_extract_body,
                     shell.path, source_line_for_token(shell, "px_validate_target_unchanged()"),
-                    "target revalidation must preserve explicit-vs-legacy validation policy through entitlement extraction and retain TOCTOU diagnostics")
+                    "target revalidation must preserve explicit-vs-legacy policy, bind the LaunchServices and physical paths by inode, use the LaunchServices path for ldid, and keep physical TOCTOU/workspace diagnostics")
 
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
                     'px_read_plist_string_compat()' in shell.text and

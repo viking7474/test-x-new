@@ -712,7 +712,7 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse)
             log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
             ;;
     esac
@@ -921,6 +921,7 @@ find_plutil() {
 
 # === Path and target validation ===
 PX_TARGET_PATH=""
+PX_TARGET_ENTITLEMENT_PATH=""
 PX_TARGET_APP_BUNDLE=""
 PX_TARGET_IS_SYSTEM=0
 PX_TARGET_VALIDATION_MODE=""
@@ -1148,6 +1149,7 @@ px_consider_app_bundle() {
     px_validate_target_executable "$target" || return 1
 
     PX_TARGET_PATH="$target"
+    PX_TARGET_ENTITLEMENT_PATH="$target"
     PX_TARGET_APP_BUNDLE="$app_dir"
     PX_TARGET_IS_SYSTEM="$is_system"
     PX_TARGET_VALIDATION_MODE="legacy"
@@ -1283,7 +1285,22 @@ px_prepare_explicit_target() {
     local physical_target="${physical_app_dir%/}/$executable_name"
     px_validate_explicit_target_executable "$physical_target" "$PX_EXPLICIT_APP_DIRECTORY_UID" || return 1
 
+    [ -f "$target" ] && [ ! -L "$target" ] || {
+        px_report_failure_reason target-entitlement-path-missing
+        return 1
+    }
+    px_stat_snapshot "$target" PX_TARGET_EXPOSED || {
+        px_report_failure_reason target-entitlement-path-stat
+        return 1
+    }
+    [ "$PX_TARGET_EXPOSED_DEVICE" = "$PX_TARGET_CANDIDATE_DEVICE" ] &&
+    [ "$PX_TARGET_EXPOSED_INODE" = "$PX_TARGET_CANDIDATE_INODE" ] || {
+        px_report_failure_reason target-entitlement-path-mismatch
+        return 1
+    }
+
     PX_TARGET_PATH="$physical_target"
+    PX_TARGET_ENTITLEMENT_PATH="$target"
     PX_TARGET_APP_BUNDLE="$physical_app_dir"
     case "$bundle_id" in com.apple.*) PX_TARGET_IS_SYSTEM=1 ;; *) PX_TARGET_IS_SYSTEM=0 ;; esac
     PX_TARGET_VALIDATION_MODE="explicit"
@@ -1305,6 +1322,7 @@ find_app_executable() {
     local bundle_id="$1"
     px_validate_bundle_id "$bundle_id" || return 1
     PX_TARGET_PATH=""
+    PX_TARGET_ENTITLEMENT_PATH=""
     PX_TARGET_VALIDATION_MODE=""
     PX_TARGET_BUNDLE_UID=""
     local raw_root root app_dir uuid_dir
@@ -1382,25 +1400,49 @@ px_validate_target_unchanged() {
 extract_entitlements() {
     local app_binary="$1"
     local output_file="$2"
-    [ "$app_binary" = "$PX_TARGET_PATH" ] || {
+    [ -n "$PX_TARGET_ENTITLEMENT_PATH" ] || {
+        px_report_failure_reason target-entitlement-path-missing
+        return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+    }
+    [ "$app_binary" = "$PX_TARGET_ENTITLEMENT_PATH" ] || {
         px_report_failure_reason target-extract-path-mismatch
         return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_workspace_child_path app_ent.xml || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ "$output_file" = "$PX_WORKSPACE_CHILD_PATH" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    [ ! -e "$output_file" ] && [ ! -L "$output_file" ] || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    px_validate_workspace_identity || {
+        px_report_failure_reason target-workspace-prevalidate
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    px_workspace_child_path app_ent.xml || {
+        px_report_failure_reason target-workspace-child
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    [ "$output_file" = "$PX_WORKSPACE_CHILD_PATH" ] || {
+        px_report_failure_reason target-workspace-output-path
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    [ ! -e "$output_file" ] && [ ! -L "$output_file" ] || {
+        px_report_failure_reason target-workspace-output-exists
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+
+    # Security authority stays on the canonical physical target.
     px_validate_target_unchanged || return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
-    px_stat_snapshot "$app_binary" PX_TARGET_EXTRACT_BEFORE || {
+    px_stat_snapshot "$PX_TARGET_PATH" PX_TARGET_EXTRACT_BEFORE || {
         px_report_failure_reason target-snapshot-before
         return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
 
+    # ldid must see the exact LaunchServices path. AppEntitlementsReader uses the
+    # same exposed path during planning; the explicit-target setup has already
+    # proven that it resolves to the same device+inode as PX_TARGET_PATH.
     "$PX_LDID_PATH" -e "$app_binary" > "$output_file" 2>/dev/null
     local extract_status=$?
 
-    px_validate_workspace_identity || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_stat_snapshot "$app_binary" PX_TARGET_EXTRACT_AFTER || {
+    px_validate_workspace_identity || {
+        px_report_failure_reason target-workspace-postextract
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    px_stat_snapshot "$PX_TARGET_PATH" PX_TARGET_EXTRACT_AFTER || {
         px_report_failure_reason target-snapshot-after
         return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
     }
@@ -1412,8 +1454,31 @@ extract_entitlements() {
         px_report_failure_reason target-ldid-extract
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     }
-    "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
-    px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    [ -f "$output_file" ] || {
+        px_report_failure_reason target-entitlements-output-file
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    [ ! -L "$output_file" ] || {
+        px_report_failure_reason target-entitlements-output-symlink
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    px_stat_snapshot "$output_file" PX_APP_ENT_RAW || {
+        px_report_failure_reason target-entitlements-output-stat
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    [ "$PX_APP_ENT_RAW_SIZE" -gt 0 ] || {
+        px_report_failure_reason target-entitlements-empty
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
+    "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || {
+        px_report_failure_reason target-entitlements-chmod
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
+    px_validate_workspace_file "$output_file" 600 0 1 || {
+        px_report_failure_reason target-entitlements-output-validation
+        return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+    }
     PX_APP_ENT_PATH="$output_file"
     return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
@@ -1881,7 +1946,7 @@ px_prepare_target_context() {
         }
     fi
     local ent_file="$PX_WORKSPACE_PATH/app_ent.xml"
-    extract_entitlements "$PX_TARGET_PATH" "$ent_file"
+    extract_entitlements "$PX_TARGET_ENTITLEMENT_PATH" "$ent_file"
     local status=$?
     if [ "$status" -ne 0 ]; then
         px_report_failure_stage target-entitlements
