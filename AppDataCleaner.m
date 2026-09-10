@@ -1212,6 +1212,32 @@ static NSString *PXExactInstalledApplicationBundlePathFromLaunchServices(NSStrin
     }
 }
 
+static NSString *PXExactInstalledApplicationExecutablePathFromLaunchServices(
+    NSString *bundleIdentifier,
+    NSString **bundlePathOut) {
+    if (bundlePathOut) *bundlePathOut = nil;
+    NSString *bundlePath = PXExactInstalledApplicationBundlePathFromLaunchServices(bundleIdentifier);
+    if (!bundlePath.length) return nil;
+
+    NSString *infoPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
+    if (!PXReadOnlyRegularNonSymlinkFileAtPath(infoPath)) return nil;
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+    id executableObject = [info isKindOfClass:[NSDictionary class]]
+        ? info[@"CFBundleExecutable"]
+        : nil;
+    if (![executableObject isKindOfClass:[NSString class]]) return nil;
+    NSString *executableName = (NSString *)executableObject;
+    if (executableName.length == 0 ||
+        [executableName containsString:@"/"] ||
+        [executableName isEqualToString:@"."] ||
+        [executableName isEqualToString:@".."]) return nil;
+
+    NSString *executablePath = [bundlePath stringByAppendingPathComponent:executableName];
+    if (!PXReadOnlyRegularNonSymlinkFileAtPath(executablePath)) return nil;
+    if (bundlePathOut) *bundlePathOut = [bundlePath copy];
+    return [executablePath copy];
+}
+
 static void PXInstalledExtensionDiscoveryAssignError(NSError **error,
                                                       PXInstalledExtensionDiscoveryErrorCode code,
                                                       NSString *message) {
@@ -1785,16 +1811,30 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     }
 
     NSString *groupsCSV = [selectedGroups componentsJoinedByString:@","];
-    [self logMessage:@"[AppDataCleaner] Keychain wipe method=resigned_helper noLaunch=1 bundle=%@ groups=%lu",
+    NSString *resolvedBundlePath = nil;
+    NSString *resolvedExecutablePath =
+        PXExactInstalledApplicationExecutablePathFromLaunchServices(bundleIdentifier,
+                                                                    &resolvedBundlePath);
+    NSMutableArray<NSString *> *wipeArguments = [NSMutableArray arrayWithObjects:
+                                                  @"wipe",
+                                                  bundleIdentifier,
+                                                  nil];
+    if (resolvedBundlePath.length && resolvedExecutablePath.length) {
+        [wipeArguments addObjectsFromArray:@[
+            @"--target-bundle", resolvedBundlePath,
+            @"--target-executable", resolvedExecutablePath,
+        ]];
+    }
+    [wipeArguments addObjectsFromArray:@[
+        @"--groups", groupsCSV,
+    ]];
+
+    [self logMessage:@"[AppDataCleaner] Keychain wipe method=resigned_helper noLaunch=1 bundle=%@ groups=%lu nativeTarget=%d",
                      bundleIdentifier,
-                     (unsigned long)selectedGroups.count];
+                     (unsigned long)selectedGroups.count,
+                     (resolvedBundlePath.length && resolvedExecutablePath.length) ? 1 : 0];
     CommandResult *wipeResult = [runner runExecutableAndCapture:scriptPath
-                                                       arguments:@[
-                                                           @"wipe",
-                                                           bundleIdentifier,
-                                                           @"--groups",
-                                                           groupsCSV
-                                                       ]
+                                                       arguments:wipeArguments
                                                       timeoutSec:120.0
                                                   maxOutputBytes:1024 * 1024];
     BOOL success = PXBoundedCommandSucceeded(wipeResult);

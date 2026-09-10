@@ -1240,17 +1240,17 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
         "applicationIdentifier:systemApplication:error:"
     )
     clear_wipe_matches = definitions_for_selector(cleaner, clear_wipe_selector)
-    expected_clear_arguments = (
-        'arguments:@[ @"wipe", bundleIdentifier, @"--groups", groupsCSV ]'
-    )
     clear_wipe_body = " ".join(clear_wipe_matches[0].body_text.split()) if len(clear_wipe_matches) == 1 else ""
     collector.check("BRH-KEY-CLEAR-CLI-METADATA",
                     len(clear_wipe_matches) == 1 and
-                    clear_wipe_body.count(expected_clear_arguments) == 1 and
+                    'NSMutableArray<NSString *> *wipeArguments' in clear_wipe_body and
+                    '@"wipe", bundleIdentifier' in clear_wipe_body and
+                    '@"--groups", groupsCSV' in clear_wipe_body and
+                    'arguments:wipeArguments' in clear_wipe_body and
                     "keychain_backup.sh" in clear_wipe_body and
                     "noLaunch=1" in clear_wipe_matches[0].body_text,
                     cleaner.path, clear_wipe_matches[0].signature_start_line if clear_wipe_matches else 1,
-                    "AppDataCleaner wipe must route through the headless resigned-helper wrapper")
+                    "AppDataCleaner wipe must route through the headless resigned-helper wrapper with explicit group metadata")
     no_launch_tokens = (
         "PXOpenApplication", "_inAppKeychain", "openApplicationWithBundleID:",
         "PXWaitForKeychainBridgeResponse", "weaponx_keychain_request",
@@ -1273,11 +1273,44 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     collector.check("BRH-KEY-TARGET-PLIST-COMPAT",
                     '"$PX_PLUTIL_PATH" -extract "$key" raw -o - "$plist"' in plist_reader_body and
                     '"$PX_PLUTIL_PATH" -key "$key" "$plist"' in plist_reader_body and
+                    'value=$(px_read_info_value_from_xml "$plist" "$key")' in plist_reader_body and
+                    '"$PX_PLUTIL_PATH" -convert xml1 -o - "$plist"' in shell.text and
                     'CFBundleIdentifier|CFBundleExecutable' in plist_reader_body and
                     '"/Applications"' in shell.text and
                     '"/System/Applications"' in shell.text,
                     shell.path, source_line_for_token(shell, "px_read_info_value()"),
-                    "target application discovery must support modern and legacy plutil interfaces plus system-app roots")
+                    "target application discovery must support modern, legacy and XML plutil interfaces plus system-app roots")
+
+    explicit_target_start = shell.text.find("px_prepare_explicit_target()")
+    explicit_target_end = shell.text.find("find_app_executable()", explicit_target_start)
+    explicit_target_body = (shell.text[explicit_target_start:explicit_target_end]
+                            if explicit_target_start >= 0 and explicit_target_end > explicit_target_start else "")
+    target_context_start = shell.text.find("px_prepare_target_context()")
+    target_context_end = shell.text.find("px_prepare_requested_groups()", target_context_start)
+    target_context_body = (shell.text[target_context_start:target_context_end]
+                           if target_context_start >= 0 and target_context_end > target_context_start else "")
+    collector.check("BRH-KEY-NATIVE-TARGET-HANDOFF",
+                    "PXExactInstalledApplicationExecutablePathFromLaunchServices" in cleaner.text and
+                    '@"--target-bundle"' in cleaner.text and
+                    '@"--target-executable"' in cleaner.text and
+                    "nativeTarget=%d" in cleaner.text and
+                    'OVERRIDE_TARGET_BUNDLE_PRESENT' in shell.text and
+                    'OVERRIDE_TARGET_EXECUTABLE_PRESENT' in shell.text and
+                    '--target-bundle)' in shell.text and
+                    '--target-executable)' in shell.text and
+                    '[ "$OVERRIDE_TARGET_BUNDLE_PRESENT" -eq "$OVERRIDE_TARGET_EXECUTABLE_PRESENT" ]' in shell.text and
+                    'px_validate_absolute_path_lexical "$app_dir"' in explicit_target_body and
+                    'px_validate_absolute_path_lexical "$target"' in explicit_target_body and
+                    '[ "${target%/*}" = "$app_dir" ]' in explicit_target_body and
+                    'px_read_info_value "$info_plist" CFBundleIdentifier' in explicit_target_body and
+                    '[ "$PX_PLIST_VALUE" = "$bundle_id" ]' in explicit_target_body and
+                    'px_read_info_value "$info_plist" CFBundleExecutable' in explicit_target_body and
+                    '[ "$target" = "$app_dir/$executable_name" ]' in explicit_target_body and
+                    'px_validate_target_executable "$target"' in explicit_target_body and
+                    'px_prepare_explicit_target "$bundle_id" "$OVERRIDE_TARGET_BUNDLE" "$OVERRIDE_TARGET_EXECUTABLE"' in target_context_body and
+                    'px_report_failure_stage target-native-validate' in target_context_body,
+                    shell.path, source_line_for_token(shell, "px_prepare_explicit_target()"),
+                    "Keychain wipe must prefer an exact native LaunchServices target and revalidate bundle/executable identity before use")
 
     collector.check("BRH-KEY-ENTITLEMENT-UNIVERSAL-CLONE",
                     generation_start >= 0 and
@@ -1768,7 +1801,7 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     clear_cli_mutation = method_replacement(
         cleaner,
         clear_wipe_selector,
-        lambda text: text.replace('@"--groups",\n                                                           groupsCSV', "", 1),
+        lambda text: text.replace('@"--groups", groupsCSV', '@"--groups-missing", groupsCSV', 1),
     )
     tests.append(("clear-helper-cli-metadata", "KEY",
                   replace_source_text(base, cleaner.path, clear_cli_mutation),

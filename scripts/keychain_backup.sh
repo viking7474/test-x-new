@@ -65,6 +65,10 @@ readonly PX_KEYCHAIN_EXIT_DEPENDENCY_UNAVAILABLE=65
 # Optional subset of keychain groups (CSV) provided by caller.
 OVERRIDE_KEYCHAIN_GROUPS=""
 OVERRIDE_KEYCHAIN_GROUPS_PRESENT=0
+OVERRIDE_TARGET_BUNDLE=""
+OVERRIDE_TARGET_BUNDLE_PRESENT=0
+OVERRIDE_TARGET_EXECUTABLE=""
+OVERRIDE_TARGET_EXECUTABLE_PRESENT=0
 PX_REQUESTED_GROUPS_CSV=""
 PX_EFFECTIVE_GROUPS_CSV=""
 PX_EFFECTIVE_ENT_PATH=""
@@ -698,7 +702,7 @@ px_discard_unactivated_workspace() {
 px_report_failure_stage() {
     local stage="$1"
     case "$stage" in
-        workspace-create|target-locate|target-entitlements|requested-groups|helper-entitlements|helper-copy|helper-sign|helper-authority|post-sign-entitlements|pre-exec-validation|post-exec-validation) ;;
+        workspace-create|target-locate|target-native-validate|target-entitlements|requested-groups|helper-entitlements|helper-copy|helper-sign|helper-authority|post-sign-entitlements|pre-exec-validation|post-exec-validation) ;;
         *) return 1 ;;
     esac
     log_error "PXKEYCHAIN_FAILURE_STAGE=$stage"
@@ -1050,6 +1054,34 @@ px_validate_info_plist() {
     return 0
 }
 
+px_read_info_value_from_xml() {
+    local plist="$1"
+    local key="$2"
+    local xml line found=0 value=""
+    xml=$("$PX_PLUTIL_PATH" -convert xml1 -o - "$plist" 2>/dev/null) || return 1
+    [ -n "$xml" ] && [ "${#xml}" -le 16777216 ] || return 1
+    while IFS= read -r line; do
+        if [ "$found" -eq 0 ]; then
+            case "$line" in
+                *"<key>${key}</key>"*) found=1 ;;
+            esac
+            continue
+        fi
+        case "$line" in
+            *"<string>"*"</string>"*)
+                value="${line#*<string>}"
+                value="${value%%</string>*}"
+                break
+                ;;
+            *"<key>"*) return 1 ;;
+        esac
+    done <<< "$xml"
+    [ -n "$value" ] || return 1
+    case "$value" in *'&'*|*'<'*|*'>'*) return 1 ;; esac
+    printf '%s\n' "$value"
+    return 0
+}
+
 px_read_info_value() {
     local plist="$1"
     local key="$2"
@@ -1068,6 +1100,10 @@ px_read_info_value() {
     status=$?
     if [ "$status" -ne 0 ] || [ -z "$value" ]; then
         value=$("$PX_PLUTIL_PATH" -key "$key" "$plist" 2>/dev/null)
+        status=$?
+    fi
+    if [ "$status" -ne 0 ] || [ -z "$value" ]; then
+        value=$(px_read_info_value_from_xml "$plist" "$key")
         status=$?
     fi
 
@@ -1122,6 +1158,43 @@ px_consider_app_bundle() {
     PX_TARGET_LINKS="$PX_TARGET_CANDIDATE_LINKS"
     PX_TARGET_MTIME="$PX_TARGET_CANDIDATE_MTIME"
     PX_TARGET_CTIME="$PX_TARGET_CANDIDATE_CTIME"
+    return 0
+}
+
+px_prepare_explicit_target() {
+    local bundle_id="$1"
+    local app_dir="$2"
+    local target="$3"
+    px_validate_bundle_id "$bundle_id" || return 1
+    px_validate_absolute_path_lexical "$app_dir" || return 1
+    px_validate_absolute_path_lexical "$target" || return 1
+    [ "${target%/*}" = "$app_dir" ] || return 1
+    case "$app_dir" in *.app) ;; *) return 1 ;; esac
+
+    px_validate_app_directory "$app_dir" || return 1
+    local info_plist="$app_dir/Info.plist"
+    px_validate_info_plist "$info_plist" || return 1
+    px_read_info_value "$info_plist" CFBundleIdentifier || return 1
+    [ "$PX_PLIST_VALUE" = "$bundle_id" ] || return 1
+    px_read_info_value "$info_plist" CFBundleExecutable || return 1
+    local executable_name="$PX_PLIST_VALUE"
+    px_validate_safe_basename "$executable_name" || return 1
+    [ "$target" = "$app_dir/$executable_name" ] || return 1
+    px_validate_target_executable "$target" || return 1
+
+    PX_TARGET_PATH="$target"
+    PX_TARGET_APP_BUNDLE="$app_dir"
+    case "$bundle_id" in com.apple.*) PX_TARGET_IS_SYSTEM=1 ;; *) PX_TARGET_IS_SYSTEM=0 ;; esac
+    PX_TARGET_DEVICE="$PX_TARGET_CANDIDATE_DEVICE"
+    PX_TARGET_INODE="$PX_TARGET_CANDIDATE_INODE"
+    PX_TARGET_UID="$PX_TARGET_CANDIDATE_UID"
+    PX_TARGET_GID="$PX_TARGET_CANDIDATE_GID"
+    PX_TARGET_MODE="$PX_TARGET_CANDIDATE_MODE"
+    PX_TARGET_SIZE="$PX_TARGET_CANDIDATE_SIZE"
+    PX_TARGET_LINKS="$PX_TARGET_CANDIDATE_LINKS"
+    PX_TARGET_MTIME="$PX_TARGET_CANDIDATE_MTIME"
+    PX_TARGET_CTIME="$PX_TARGET_CANDIDATE_CTIME"
+    log_info "Using caller-resolved application target"
     return 0
 }
 
@@ -1625,7 +1698,17 @@ px_validate_helper_execution() {
 # === Main functions ===
 px_prepare_target_context() {
     local bundle_id="$1"
-    find_app_executable "$bundle_id" || { px_report_failure_stage target-locate; return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"; }
+    if [ "$OVERRIDE_TARGET_BUNDLE_PRESENT" -eq 1 ] && [ "$OVERRIDE_TARGET_EXECUTABLE_PRESENT" -eq 1 ]; then
+        px_prepare_explicit_target "$bundle_id" "$OVERRIDE_TARGET_BUNDLE" "$OVERRIDE_TARGET_EXECUTABLE" || {
+            px_report_failure_stage target-native-validate
+            return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+        }
+    else
+        find_app_executable "$bundle_id" || {
+            px_report_failure_stage target-locate
+            return "$PX_KEYCHAIN_EXIT_TARGET_UNAVAILABLE"
+        }
+    fi
     local ent_file="$PX_WORKSPACE_PATH/app_ent.xml"
     extract_entitlements "$PX_TARGET_PATH" "$ent_file"
     local status=$?
@@ -2063,11 +2146,33 @@ case "$ACTION" in
                     OVERRIDE_KEYCHAIN_GROUPS="${1#*=}"
                     shift 1
                     ;;
+                --target-bundle)
+                    if [ "$OVERRIDE_TARGET_BUNDLE_PRESENT" -eq 1 ] || [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                        log_error "Invalid or duplicate --target-bundle option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_TARGET_BUNDLE_PRESENT=1
+                    OVERRIDE_TARGET_BUNDLE="$2"
+                    shift 2
+                    ;;
+                --target-executable)
+                    if [ "$OVERRIDE_TARGET_EXECUTABLE_PRESENT" -eq 1 ] || [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+                        log_error "Invalid or duplicate --target-executable option"
+                        exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+                    fi
+                    OVERRIDE_TARGET_EXECUTABLE_PRESENT=1
+                    OVERRIDE_TARGET_EXECUTABLE="$2"
+                    shift 2
+                    ;;
                 *)
                     break
                     ;;
             esac
         done
+        [ "$OVERRIDE_TARGET_BUNDLE_PRESENT" -eq "$OVERRIDE_TARGET_EXECUTABLE_PRESENT" ] || {
+            log_error "--target-bundle and --target-executable must be supplied together"
+            exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"
+        }
         [ $# -eq 0 ] || { log_error "Unexpected wipe argument"; exit "$PX_KEYCHAIN_EXIT_INVALID_ARGUMENTS"; }
         do_wipe "$BUNDLE_ID"
         ;;
