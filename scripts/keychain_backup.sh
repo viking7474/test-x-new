@@ -1770,8 +1770,25 @@ px_prepare_target_context() {
     local ent_file="$PX_WORKSPACE_PATH/app_ent.xml"
     extract_entitlements "$PX_TARGET_PATH" "$ent_file"
     local status=$?
-    [ "$status" -eq 0 ] || px_report_failure_stage target-entitlements
-    return "$status"
+    if [ "$status" -ne 0 ]; then
+        px_report_failure_stage target-entitlements
+        return "$status"
+    fi
+
+    if [ "$OVERRIDE_TARGET_BUNDLE_PRESENT" -eq 1 ]; then
+        local signed_app_identifier=""
+        signed_app_identifier=$(parse_app_identifier "$PX_APP_ENT_PATH") || {
+            px_report_failure_stage target-signed-identity
+            px_report_failure_reason target-signed-app-id
+            return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+        }
+        px_application_identifier_matches_bundle_id "$signed_app_identifier" "$bundle_id" || {
+            px_report_failure_stage target-signed-identity
+            px_report_failure_reason target-signed-app-id-mismatch
+            return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+        }
+    fi
+    return "$PX_KEYCHAIN_EXIT_COMPLETED"
 }
 
 px_prepare_requested_groups() {

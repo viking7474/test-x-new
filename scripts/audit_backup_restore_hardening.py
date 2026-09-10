@@ -1289,9 +1289,10 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     target_context_end = shell.text.find("px_prepare_requested_groups()", target_context_start)
     target_context_body = (shell.text[target_context_start:target_context_end]
                            if target_context_start >= 0 and target_context_end > target_context_start else "")
+    native_cleaner_text = "".join(cleaner.text.split())
     collector.check("BRH-KEY-NATIVE-TARGET-HANDOFF",
                     "PXExactInstalledApplicationExecutablePathFromLaunchServices" in cleaner.text and
-                    'PXExactInstalledApplicationBundlePathFromLaunchServices(bundleIdentifier)' in cleaner.text and
+                    'PXExactInstalledApplicationBundlePathFromLaunchServices(bundleIdentifier)' in native_cleaner_text and
                     'info[@"CFBundleExecutable"]' in cleaner.text and
                     '[bundlePath stringByAppendingPathComponent:executableName]' in cleaner.text and
                     '@"--target-bundle"' in cleaner.text and
