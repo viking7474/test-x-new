@@ -1378,6 +1378,8 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
                     'px_parse_json_string_array()' in shell.text and
                     'parsed=$(px_parse_json_string_array "$groups_output")' in shell.text and
+                    'px_parse_legacy_plutil_string_array()' in shell.text and
+                    '"$PX_PLUTIL_PATH" -key keychain-access-groups "$ent_file"' in shell.text and
                     'px_read_plist_string_compat()' in shell.text and
                     'px_read_plist_string_array_from_xml()' in shell.text and
                     'tail="${xml#*"<key>${key}</key>"}"' in shell.text and

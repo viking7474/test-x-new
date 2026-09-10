@@ -1637,6 +1637,100 @@ px_parse_json_string_array() {
     done
 }
 
+px_parse_legacy_plutil_string_array() {
+    local text="$1"
+    local rest ch token="" out="" count=0
+    [ -n "$text" ] && [ "${#text}" -le 16384 ] || return 1
+    rest="$text"
+
+    while [ -n "$rest" ]; do
+        ch="${rest:0:1}"
+        case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+    done
+
+    # Older jailbreak plutil implementations print NSArray via -description.
+    # Depending on the build, that is either `( ... )` or `Array ( ... )`.
+    if [ "${rest:0:5}" = "Array" ]; then
+        rest="${rest:5}"
+        while [ -n "$rest" ]; do
+            ch="${rest:0:1}"
+            case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+        done
+    fi
+
+    [ "${rest:0:1}" = "(" ] || return 1
+    rest="${rest:1}"
+
+    while :; do
+        while [ -n "$rest" ]; do
+            ch="${rest:0:1}"
+            case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+        done
+
+        if [ "${rest:0:1}" = ")" ]; then
+            rest="${rest:1}"
+            while [ -n "$rest" ]; do
+                ch="${rest:0:1}"
+                case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) return 1 ;; esac
+            done
+            printf '%s\n' "$out"
+            return 0
+        fi
+
+        token=""
+        if [ "${rest:0:1}" = '"' ]; then
+            rest="${rest:1}"
+            ch=""
+            while [ -n "$rest" ]; do
+                ch="${rest:0:1}"
+                rest="${rest:1}"
+                case "$ch" in
+                    '"') break ;;
+                    '\\'|$'\n'|$'\r'|$'\t') return 1 ;;
+                    *) token+="$ch" ;;
+                esac
+            done
+            [ "$ch" = '"' ] || return 1
+        else
+            while [ -n "$rest" ]; do
+                ch="${rest:0:1}"
+                case "$ch" in
+                    ','|')'|' '|$'\t'|$'\n'|$'\r') break ;;
+                    '"'|'\\'|'('|')'|'{'|'}'|'['|']'|'<'|'>') return 1 ;;
+                    *) token+="$ch"; rest="${rest:1}" ;;
+                esac
+            done
+            # NSArray's textual description loses the original plist type for
+            # unquoted atoms. Reject values that can be scalar plist values so
+            # an NSNumber/boolean cannot be mistaken for a Keychain group.
+            case "$token" in
+                YES|NO|true|false|null|nil|NULL) return 1 ;;
+            esac
+            case "$token" in
+                ''|*[!0-9.+-]*) ;;
+                *) return 1 ;;
+            esac
+        fi
+
+        px_group_value_is_valid "$token" || return 1
+        count=$((count + 1))
+        [ "$count" -le 128 ] || return 1
+        if [ -n "$out" ]; then out+=","; fi
+        out+="$token"
+        [ "${#out}" -le 8192 ] || return 1
+
+        while [ -n "$rest" ]; do
+            ch="${rest:0:1}"
+            case "$ch" in ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}" ;; *) break ;; esac
+        done
+        case "${rest:0:1}" in
+            ',') rest="${rest:1}" ;;
+            ')') ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
 px_read_plist_string_compat() {
     local plist="$1"
     local key="$2"
@@ -1732,16 +1826,46 @@ px_application_identifier_matches_bundle_id() {
 
 parse_keychain_groups() {
     local ent_file="$1"
-    local groups_output="" parsed=""
+    local groups_output="" parsed="" status=1
+    local json_state="command" xml_state="failed" legacy_state="command"
+
     groups_output=$("$PX_PLUTIL_PATH" -extract keychain-access-groups json -o - "$ent_file" 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$groups_output" ]; then
-        parsed=$(px_parse_json_string_array "$groups_output") || parsed=""
-        if [ -n "$parsed" ]; then
+    status=$?
+    if [ "$status" -eq 0 ] && [ -n "$groups_output" ]; then
+        parsed=$(px_parse_json_string_array "$groups_output")
+        status=$?
+        if [ "$status" -eq 0 ]; then
             printf '%s\n' "$parsed"
             return 0
         fi
+        json_state="format"
+    elif [ "$status" -eq 0 ]; then
+        json_state="empty-output"
     fi
-    px_read_plist_string_array_from_xml "$ent_file" keychain-access-groups
+
+    parsed=$(px_read_plist_string_array_from_xml "$ent_file" keychain-access-groups)
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$parsed"
+        return 0
+    fi
+
+    groups_output=$("$PX_PLUTIL_PATH" -key keychain-access-groups "$ent_file" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 0 ] && [ -n "$groups_output" ]; then
+        parsed=$(px_parse_legacy_plutil_string_array "$groups_output")
+        status=$?
+        if [ "$status" -eq 0 ]; then
+            printf '%s\n' "$parsed"
+            return 0
+        fi
+        legacy_state="format"
+    elif [ "$status" -eq 0 ]; then
+        legacy_state="empty-output"
+    fi
+
+    log_error "PXKEYCHAIN_GROUP_PARSE_STATUS=json-${json_state}_xml-${xml_state}_legacy-${legacy_state}"
+    return 1
 }
 
 parse_app_identifier() {
