@@ -379,6 +379,20 @@ px_same_identity() {
     return 0
 }
 
+px_same_directory_identity() {
+    local left="$1"
+    local right="$2"
+    local field left_value right_value
+    # Directory link count is expected to change when a child directory is
+    # created/removed. Identity is therefore device+inode+ownership+mode.
+    for field in DEVICE INODE UID GID MODE; do
+        eval "left_value=\${${left}_${field}}"
+        eval "right_value=\${${right}_${field}}"
+        [ "$left_value" = "$right_value" ] || return 1
+    done
+    return 0
+}
+
 px_same_complete_snapshot() {
     px_valid_snapshot_prefix "$1" || return 1
     px_valid_snapshot_prefix "$2" || return 1
@@ -769,7 +783,7 @@ px_create_workspace() {
         px_report_failure_reason workspace-parent-resnapshot
         return 1
     }
-    px_same_identity PX_WORKSPACE_PARENT_BEFORE PX_WORKSPACE_PARENT_AFTER || {
+    px_same_directory_identity PX_WORKSPACE_PARENT_BEFORE PX_WORKSPACE_PARENT_AFTER || {
         px_discard_unactivated_workspace "$created" >/dev/null 2>&1 || true
         px_report_failure_reason workspace-parent-changed
         return 1
