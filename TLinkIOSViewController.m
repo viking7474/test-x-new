@@ -739,6 +739,76 @@ static void PXWriteSubstrateFilterPlists(void) {
     return cell;
 }
 
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
+    // Freeze is an explicit user action in the Reset app picker. It must never be
+    // coupled to selectionDraftAppIDs / selectedResetAppIDs.
+    if (tableView != self.installedAppsTableView ||
+        ![self.selectionPickerMode isEqualToString:@"reset"] ||
+        indexPath.row < 0 || indexPath.row >= (NSInteger)self.filteredApps.count) {
+        return nil;
+    }
+
+    NSDictionary *app = self.filteredApps[(NSUInteger)indexPath.row];
+    NSString *bundleID = [app[@"bundleID"] isKindOfClass:[NSString class]] ? app[@"bundleID"] : nil;
+    if (!bundleID.length) return nil;
+
+    NSString *appName = [app[@"name"] isKindOfClass:[NSString class]] ? app[@"name"] : bundleID;
+    FreezeManager *freezeManager = [FreezeManager sharedManager];
+    BOOL frozen = [freezeManager isApplicationFrozen:bundleID];
+    NSString *title = frozen ? @"B? ??ng b?ng" : @"??ng b?ng";
+    UIContextualActionStyle style = frozen ? UIContextualActionStyleNormal : UIContextualActionStyleDestructive;
+
+    __weak typeof(self) weakSelf = self;
+    __weak UITableView *weakTableView = tableView;
+    UIContextualAction *action = [UIContextualAction contextualActionWithStyle:style
+                                                                         title:title
+                                                                       handler:^(__unused UIContextualAction *contextAction,
+                                                                                 __unused UIView *sourceView,
+                                                                                 void (^completionHandler)(BOOL)) {
+        __strong typeof(weakSelf) self = weakSelf;
+        UITableView *strongTableView = weakTableView;
+        if (!self || !strongTableView) {
+            completionHandler(NO);
+            return;
+        }
+
+        void (^reloadFrozenState)(void) = ^{
+            if ([self.selectionPickerMode isEqualToString:@"reset"]) {
+                [strongTableView reloadData];
+            }
+        };
+
+        if (frozen) {
+            [freezeManager unfreezeApplication:bundleID];
+            reloadFrozenState();
+            completionHandler(YES);
+            return;
+        }
+
+        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"??ng b?ng %@?", appName]
+                                                                         message:@"?ng d?ng s? kh?ng th? m? cho ??n khi b?n b? ??ng b?ng."
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"H?y"
+                                                   style:UIAlertActionStyleCancel
+                                                 handler:^(__unused UIAlertAction *cancelAction) {
+            completionHandler(NO);
+        }]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"??ng b?ng"
+                                                   style:UIAlertActionStyleDestructive
+                                                 handler:^(__unused UIAlertAction *freezeAction) {
+            [freezeManager freezeApplication:bundleID];
+            reloadFrozenState();
+            completionHandler(YES);
+        }]];
+        [self presentViewController:confirm animated:YES completion:nil];
+    }];
+
+    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[action]];
+    configuration.performsFirstActionWithFullSwipe = NO;
+    return configuration;
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     self.fullRandom = NO;
     if (tableView.tag == 9101) {
@@ -1774,7 +1844,9 @@ static void PXWriteSubstrateFilterPlists(void) {
             NSString *bundleID = [app[@"bundleID"] isKindOfClass:[NSString class]] ? app[@"bundleID"] : @"";
             UIImage *icon = [self dashboardInstalledAppIconForBundleID:bundleID];
             BOOL selected = [self.selectionDraftAppIDs containsObject:bundleID];
-            [cell configureWithApp:app icon:icon selected:selected];
+            BOOL frozen = [self.selectionPickerMode isEqualToString:@"reset"] &&
+                          [[FreezeManager sharedManager] isApplicationFrozen:bundleID];
+            [cell configureWithApp:app icon:icon selected:selected frozen:frozen];
             return cell;
         }
 

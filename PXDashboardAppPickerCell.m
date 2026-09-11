@@ -132,14 +132,17 @@ UIColor *PXAppPickerBorderColor(void) {
     self.appDetailLabel.text = nil;
 }
 
-- (void)configureWithApp:(NSDictionary *)app icon:(UIImage *)icon selected:(BOOL)selected {
+- (void)configureWithApp:(NSDictionary *)app icon:(UIImage *)icon selected:(BOOL)selected frozen:(BOOL)frozen {
     NSString *bundleID = [app[@"bundleID"] isKindOfClass:[NSString class]] ? app[@"bundleID"] : @"";
     NSString *name = [app[@"name"] isKindOfClass:[NSString class]] ? app[@"name"] : bundleID;
     NSString *version = [app[@"version"] isKindOfClass:[NSString class]] ? app[@"version"] : @"1.0";
 
     self.representedBundleID = bundleID;
     self.appNameLabel.text = name.length ? name : @"Ứng dụng";
-    self.appDetailLabel.text = [NSString stringWithFormat:@"%@ (v%@)", bundleID, version];
+    NSString *baseDetail = [NSString stringWithFormat:@"%@ (v%@)", bundleID, version];
+    self.appDetailLabel.text = frozen
+        ? [baseDetail stringByAppendingString:@"  ?  ? ?? ??ng b?ng"]
+        : baseDetail;
     self.appIconView.image = icon;
 
     UIColor *blue = nil;

@@ -24,6 +24,7 @@ PHASE_TESTS = [
     "scripts/test_phase6_lockdown_device_identity_static.py",
     "scripts/test_phase7_lockdown_soc_cellular_static.py",
     "scripts/test_phase8_clear_modes_static.py",
+    "scripts/test_reset_picker_freeze_ui_static.py",
     "scripts/test_phase9_web_cellular_backup_static.py",
     "scripts/test_phase10_release_hardening_static.py",
     "scripts/test_phase11_p2_static.py",

@@ -17,5 +17,5 @@ UIColor *PXAppPickerBorderColor(void);
 @property (nonatomic, strong) UIView *selectionCircleView;
 @property (nonatomic, strong) UILabel *selectionCheckLabel;
 @property (nonatomic, copy) NSString *representedBundleID;
-- (void)configureWithApp:(NSDictionary *)app icon:(UIImage *)icon selected:(BOOL)selected;
+- (void)configureWithApp:(NSDictionary *)app icon:(UIImage *)icon selected:(BOOL)selected frozen:(BOOL)frozen;
 @end
