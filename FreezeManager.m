@@ -73,17 +73,12 @@
         return;
     }
     
-    if (![self.identifierManager isApplicationEnabled:bundleID]) {
-        NSLog(@"[FreezeManager] Skipping freeze for disabled app: %@", bundleID);
-        return;
-    }
-    
-    // Kill the application
-    [self killApplication:bundleID];
-    
-    // Update frozen state
+    // Freeze state is independent from spoof/reset scope.
     self.frozenApps[bundleID] = @YES;
     [self saveFrozenState];
+
+    // Best-effort: stop a currently running instance after state is committed.
+    [self killApplication:bundleID];
     
     // Post notification for UI update
     [[NSNotificationCenter defaultCenter] postNotificationName:@"AppFrozenStateChanged"
@@ -103,19 +98,10 @@
         return;
     }
     
-    // Verify app is installed and enabled
-    NSDictionary *appInfo = [self.identifierManager getApplicationInfo:bundleID];
-    if (!appInfo || ![appInfo[@"installed"] boolValue]) {
-        NSLog(@"[FreezeManager] App is not installed: %@", bundleID);
-        return;
-    }
     
-    if (![self.identifierManager isApplicationEnabled:bundleID]) {
-        NSLog(@"[FreezeManager] App is not enabled: %@", bundleID);
-        return;
-    }
     
-    // Remove from frozen state
+    // Unfreeze is idempotent and independent from spoof/reset scope.
+    // Always clear stale state even when the app is unscoped or no longer installed.
     [self.frozenApps removeObjectForKey:bundleID];
     [self saveFrozenState];
     
@@ -136,6 +122,14 @@
     NSUserDefaults *freezeDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.freezer"];
     [freezeDefaults setObject:self.frozenApps forKey:@"FrozenApps"];
     [freezeDefaults synchronize];
+
+    // SpringBoard runs in a different process; NSNotificationCenter is not enough.
+    // Publish a Darwin notification so its launch-block cache is invalidated immediately.
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.freezer.changed"),
+                                         NULL,
+                                         NULL,
+                                         YES);
     
     NSLog(@"[FreezeManager] Saved frozen app state: %@", self.frozenApps);
 }

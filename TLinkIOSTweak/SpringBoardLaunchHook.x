@@ -24,7 +24,24 @@ static void (*orig_willActivateApplication)(id, SEL, id);
 // Cache to improve performance and reduce CPU usage
 static NSMutableDictionary *frozenStatusCache = nil;
 static NSDate *cacheLastUpdated = nil;
-static NSTimeInterval cacheRefreshInterval = 2.0; // Refresh cache every 2 seconds
+static NSTimeInterval cacheRefreshInterval = 2.0; // Fallback refresh if Darwin notification is missed
+
+static void PXFreezePreferencesChanged(CFNotificationCenterRef center,
+                                       void *observer,
+                                       CFStringRef name,
+                                       const void *object,
+                                       CFDictionaryRef userInfo) {
+    (void)center;
+    (void)observer;
+    (void)name;
+    (void)object;
+    (void)userInfo;
+    @autoreleasepool {
+        // Do not mutate the dictionary from the notification callback. Mark it stale;
+        // the next launch query will reload FrozenApps in its normal code path.
+        cacheLastUpdated = [NSDate distantPast];
+    }
+}
 
 // AIDA64 root-cause probe. This is diagnostics only: it is completely inert unless
 // /tmp/px_debug_aida64 (or /tmp/px_debug_all) exists before SpringBoard loads the tweak.
@@ -54,7 +71,7 @@ static BOOL isApplicationFrozen(NSString *bundleID) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         frozenStatusCache = [NSMutableDictionary dictionary];
-        cacheLastUpdated = [NSDate date];
+        cacheLastUpdated = [NSDate distantPast];
     });
     
     // Check if we have a cached result for this bundle ID
@@ -384,6 +401,13 @@ static void setupFreezeHooks(void) {
 
 // Initialize hooks
 __attribute__((constructor)) static void initHooks(void) {
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                    NULL,
+                                    PXFreezePreferencesChanged,
+                                    CFSTR("com.hydra.tlinkios.freezer.changed"),
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+
     // Set up the hooks
     setupFreezeHooks();
 } 
