@@ -106,10 +106,13 @@ for token in (
 # observer/full app spoof stack starts. WebKit helpers likewise cannot install the
 # ordinary native spoof hook group just because the helper process is injected.
 tweak = read("TLinkIOSTweak/Tweak.x")
-minimal = '''        });\n        return;\n    }\n\n    PXIdentitySnapshotStartObserving();'''
-require(minimal in tweak,
-        "B-06 SpringBoard minimal return no longer precedes identity/full spoof initialization")
-require("shouldInstallSpoofHooks = enabled && !isWebKitHelper;" in tweak,
+springboard_gate = tweak.index("if (PXIsSpringBoardProcess() ||")
+springboard_return = tweak.index("        return;", springboard_gate)
+unscoped_gate = tweak.index("if (!currentProcessAllowed)", springboard_return)
+identity_start = tweak.index("PXIdentitySnapshotStartObserving();", unscoped_gate)
+require(springboard_gate < springboard_return < unscoped_gate < identity_start,
+        "B-06 SpringBoard/unscoped returns no longer precede identity/full spoof initialization")
+require("shouldInstallSpoofHooks = currentProcessAllowed && !isWebKitHelper;" in tweak,
         "B-06 WebKit helper can enter ordinary native spoof hook profile")
 require("if (!shouldInstallSpoofHooks) {" in tweak and "return;" in tweak.split("if (!shouldInstallSpoofHooks) {", 1)[1][:600],
         "B-06 ordinary native spoof hook profile no longer fails closed")

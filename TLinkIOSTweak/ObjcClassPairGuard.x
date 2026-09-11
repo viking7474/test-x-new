@@ -1,6 +1,7 @@
 // ObjcClassPairGuard.x
 // Prevent crashes when third-party swizzlers incorrectly register a NULL class.
 
+#import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <substrate.h>
@@ -9,6 +10,8 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <syslog.h>
+
+#import "PXScope.h"
 
 static Class (*orig_objc_allocateClassPair)(Class superclass, const char *name, size_t extraBytes);
 static void (*orig_objc_registerClassPair)(Class cls);
@@ -111,6 +114,19 @@ static void hooked_objc_registerClassPair(Class cls) {
 
 __attribute__((constructor(101)))
 static void PXInstallObjcClassPairGuards(void) {
+    @autoreleasepool {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *processName = [NSProcessInfo processInfo].processName;
+
+        // This guard exists only to protect explicitly scoped app processes that
+        // load Firebase/GUL swizzlers. Never patch the ObjC runtime in shared
+        // WebKit helpers; doing so can perturb launch paths of unrelated apps.
+        if (!bundleID.length || PXIsWebKitHelperProcess(bundleID, processName) ||
+            !PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionNone)) {
+            return;
+        }
+    }
+
     // Prefer resolving from libobjc explicitly to avoid edge cases with RTLD_DEFAULT.
     void *libobjc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW);
     void *allocatePtr = NULL;

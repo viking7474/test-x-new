@@ -49,22 +49,13 @@ static inline BOOL PXFileDebugAIDA64Enabled(void) {
     return enabled == 1;
 }
 
+/// WebKit tracing is OPT-IN only. Never auto-enable merely because the current
+/// process is a WebKit/Safari helper: those helpers are shared launch-path
+/// processes and synchronous ctor logging can stall unrelated, unscoped apps.
+/// Enable with: touch /tmp/px_debug_webkit  OR  touch /tmp/px_debug_all
 static inline BOOL PXFileDebugWebKitTraceEnabled(void) {
-    if (access("/tmp/px_debug_all", F_OK) == 0 || access("/tmp/px_debug_webkit", F_OK) == 0) return YES;
-    @autoreleasepool {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        NSString *processName = [NSProcessInfo processInfo].processName;
-        if ([bundleID isEqualToString:@"com.apple.SafariViewService"] ||
-            [bundleID hasPrefix:@"com.apple.WebKit"] ||
-            [processName containsString:@"SafariViewService"] ||
-            [processName containsString:@"WebContent"] ||
-            [processName containsString:@"Networking"] ||
-            [processName containsString:@"GPU"] ||
-            [processName containsString:@"WebKit"]) {
-            return YES;
-        }
-    }
-    return NO;
+    return access("/tmp/px_debug_all", F_OK) == 0 ||
+           access("/tmp/px_debug_webkit", F_OK) == 0;
 }
 
 static inline void PXFileDebugWebKitTrace(NSString *component) {

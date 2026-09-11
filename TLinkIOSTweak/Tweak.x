@@ -4271,6 +4271,19 @@ static char* hook_GSSystemGetSerialNo(void) {
         return;
     }
 
+    // Injection filters intentionally include shared WebKit helpers whenever the
+    // scope is non-empty. Resolve host scope before any observer registration,
+    // debug tracing, environment setup or NSUserDefaults synchronization so an
+    // unrelated/unscoped host sees effectively zero TLinkIOS startup work.
+    BOOL isWebKitHelper = PXIsWebKitHelperProcess(currentBundleID, currentProcessName);
+    BOOL currentProcessAllowed = currentBundleID.length &&
+        PXProcessIsAllowedForSpoofing(currentBundleID,
+                                      currentProcessName,
+                                      PXScopeOptionAllowSafariAuthStack);
+    if (!currentProcessAllowed) {
+        return;
+    }
+
     PXIdentitySnapshotStartObserving();
 
     CFNotificationCenterRef identityCenter = CFNotificationCenterGetDarwinNotifyCenter();
@@ -4308,8 +4321,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     
     PXLog(@"TLinkIOS tweak initializing...");
     
-    BOOL shouldInstallSpoofHooks = NO;
-    BOOL isWebKitHelper = PXIsWebKitHelperProcess(currentBundleID, currentProcessName);
+    BOOL shouldInstallSpoofHooks = currentProcessAllowed && !isWebKitHelper;
     if (isWebKitHelper) {
         PXFileDebugWebKitTrace(@"TLinkIOSTweak.Tweak.ctor");
     }
@@ -4320,8 +4332,7 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXFileDebugAIDA64Log("[Tweak.ctor] before IdentifierManager/scope decision");
         IdentifierManager *mgr = [%c(IdentifierManager) sharedManager];
         if (mgr) {
-            BOOL enabled = PXProcessIsAllowedForSpoofing(currentBundleID, currentProcessName, PXScopeOptionAllowSafariAuthStack);
-            shouldInstallSpoofHooks = enabled && !isWebKitHelper;
+            BOOL enabled = currentProcessAllowed;
             PXFileDebugAIDA64Log("[Tweak.ctor] after scope decision enabled=%d", enabled);
             PXLog(@"[WeaponX] 🔍 App Enabled Check: %@ -> %@", currentBundleID, enabled ? @"YES" : @"NO");
             

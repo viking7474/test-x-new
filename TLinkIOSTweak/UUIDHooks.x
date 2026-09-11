@@ -688,6 +688,17 @@ static BOOL PXUUIDInstallGatePasses(void) {
 // Update constructor to initialize the additional hooks
 %ctor {
     @autoreleasepool {
+        // Shared WebKit helpers are present in the injection filter whenever the
+        // global scope is non-empty. Reject unscoped helpers before enqueueing
+        // any main-queue startup work. The delayed block still re-checks scope.
+        NSString *launchBundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *launchProcessName = [NSProcessInfo processInfo].processName;
+        if (!launchBundleID.length ||
+            PXIsWebKitHelperProcess(launchBundleID, launchProcessName) ||
+            !PXProcessIsAllowedForSpoofing(launchBundleID, launchProcessName, PXScopeOptionAllowSafariAuthStack)) {
+            return;
+        }
+
         // Delay hook initialization to ensure everything is properly set up
         // This helps avoid early hooking that might cause crashes
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{

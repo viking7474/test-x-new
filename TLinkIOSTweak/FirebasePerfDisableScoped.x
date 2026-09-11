@@ -50,12 +50,13 @@ static void PXDisableFIRPerformance(void) {
 __attribute__((constructor(101)))
 static void PXFirebasePerfDisableCtor(void) {
     @autoreleasepool {
-        // Try early (some apps start Firebase very early).
-        if (PXIsInTLinkIOSScope()) {
-            PXDisableFIRPerformance();
-        }
+        // Unscoped/shared helpers must not enqueue startup work at all.
+        if (!PXIsInTLinkIOSScope()) return;
 
-        // Re-check on main queue (scope/Firebase may be ready later).
+        // Try early (some apps start Firebase very early).
+        PXDisableFIRPerformance();
+
+        // Re-check on main queue (Firebase may be ready later).
         dispatch_async(dispatch_get_main_queue(), ^{
             if (PXIsInTLinkIOSScope()) {
                 PXDisableFIRPerformance();
