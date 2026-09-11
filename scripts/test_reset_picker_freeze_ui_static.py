@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 controller = (ROOT / "TLinkIOSViewController.m").read_text(encoding="utf-8", errors="replace")
@@ -15,6 +15,9 @@ require('#import "FreezeManager.h"' in controller, "Reset picker must use Freeze
 require('selected:(BOOL)selected frozen:(BOOL)frozen' in cell_h, "cell API must expose frozen independently of selected")
 require('? ?? ??ng b?ng' in cell_m, "frozen state must be visible in the Reset picker row")
 require('trailingSwipeActionsConfigurationForRowAtIndexPath' in controller, "Reset picker must expose a trailing swipe action")
+main_impl = controller.index('@implementation TLinkIOSViewController')
+swipe_pos = controller.index('trailingSwipeActionsConfigurationForRowAtIndexPath')
+require(swipe_pos > main_impl, "freeze swipe method must belong to TLinkIOSViewController, not an earlier helper controller")
 require('![self.selectionPickerMode isEqualToString:@"reset"]' in controller, "freeze swipe must be restricted to Reset picker mode")
 require('[freezeManager freezeApplication:bundleID]' in controller, "Freeze swipe must call FreezeManager")
 require('[freezeManager unfreezeApplication:bundleID]' in controller, "Unfreeze swipe must call FreezeManager")
