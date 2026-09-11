@@ -712,7 +712,7 @@ px_report_failure_stage() {
 px_report_failure_reason() {
     local reason="$1"
     case "$reason" in
-        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse|helper-overlay-platform-application|helper-overlay-application-identifier|helper-overlay-no-sandbox|helper-overlay-no-container|helper-overlay-container-required|helper-overlay-keystore-access-keychain-keys|helper-overlay-keystore-device|helper-overlay-keychain-access-groups|helper-overlay-kag-array-input|helper-overlay-kag-array-create|helper-overlay-kag-array-item|helper-overlay-kag-array-verify-parse|helper-overlay-kag-array-verify-missing|helper-overlay-kag-array-verify-extra|helper-overlay-lint|helper-overlay-groups-parse|helper-overlay-groups-missing|helper-overlay-groups-extra|helper-overlay-groups-mismatch|helper-overlay-app-id-parse|helper-overlay-app-id-mismatch)
+        workspace-repeat|workspace-parent|workspace-parent-snapshot|workspace-mktemp|workspace-path|workspace-directory|workspace-stat|workspace-chmod|workspace-restat|workspace-owner|workspace-mode|workspace-device|workspace-not-empty|workspace-parent-revalidate|workspace-parent-resnapshot|workspace-parent-changed|target-bundle-id|target-bundle-path|target-executable-path|target-direct-child|target-bundle-suffix|target-bundle-directory|target-bundle-physicalize|target-bundle-not-directory|target-bundle-not-searchable|target-bundle-stat|target-bundle-owner|target-bundle-mode|target-executable-basename|target-executable-file|target-executable-symlink|target-executable-not-executable|target-executable-stat|target-executable-owner-mismatch|target-executable-mode|target-executable-links|target-executable-size|target-executable-metadata|target-extract-path-mismatch|target-entitlement-path-missing|target-entitlement-path-stat|target-entitlement-path-mismatch|target-workspace-prevalidate|target-workspace-child|target-workspace-output-path|target-workspace-output-exists|target-workspace-postextract|target-entitlements-output-file|target-entitlements-output-symlink|target-entitlements-output-stat|target-entitlements-empty|target-entitlements-chmod|target-entitlements-output-validation|target-snapshot-before|target-snapshot-after|target-snapshot-changed|target-ldid-extract|target-signed-app-id|target-signed-app-id-mismatch|target-groups-parse|target-app-id-parse|helper-overlay-platform-application|helper-overlay-application-identifier|helper-overlay-no-sandbox|helper-overlay-no-container|helper-overlay-container-required|helper-overlay-keystore-access-keychain-keys|helper-overlay-keystore-device|helper-overlay-keychain-access-groups|helper-overlay-kag-xml-source|helper-overlay-kag-xml-write|helper-overlay-kag-xml-verify-parse|helper-overlay-kag-xml-verify-missing|helper-overlay-kag-xml-verify-extra|helper-overlay-lint|helper-overlay-groups-parse|helper-overlay-groups-missing|helper-overlay-groups-extra|helper-overlay-groups-mismatch|helper-overlay-app-id-parse|helper-overlay-app-id-mismatch)
             log_error "PXKEYCHAIN_FAILURE_REASON=$reason"
             ;;
     esac
@@ -1887,27 +1887,7 @@ parse_app_identifier() {
 }
 
 # === Deterministic entitlement overlay helpers ===
-PX_JSON_ARRAY=""
 PX_XML_ARRAY=""
-
-px_group_csv_to_json_array() {
-    local csv="$1"
-    PX_JSON_ARRAY=""
-    px_canonicalize_group_csv "$csv" || return 1
-    local canonical="$PX_CANONICAL_GROUP_CSV"
-    local groups=() group escaped json="[" separator=""
-    IFS=',' read -ra groups <<< "$canonical"
-    for group in "${groups[@]}"; do
-        px_group_value_is_valid "$group" || return 1
-        escaped=$(printf '%s' "$group" | "$PX_SED_PATH" 's/\\/\\\\/g; s/"/\\"/g') || return 1
-        json="${json}${separator}\"${escaped}\""
-        separator=","
-    done
-    json="${json}]"
-    [ "${#json}" -le 16384 ] || return 1
-    PX_JSON_ARRAY="$json"
-    return 0
-}
 
 px_group_csv_to_xml_array() {
     local csv="$1"
@@ -1962,95 +1942,114 @@ px_plutil_upsert_string() {
     "$PX_PLUTIL_PATH" -insert "$keypath" -string "$value" "$plist" >/dev/null 2>&1
 }
 
-px_plist_string_array_matches_exact() {
+PX_XML_KAG_FAILURE_REASON=""
+
+px_xml_replace_keychain_groups() {
     local plist="$1"
-    local key="$2"
-    local expected_groups="$3"
-    local actual_groups
+    local xml_value="$2"
+    local canonical_groups="$3"
+    local key="keychain-access-groups"
+    local marker="<key>${key}</key>"
+    local xml prefix tail between after_open suffix current_groups generated_groups new_xml
 
-    actual_groups=$(px_read_plist_string_array_from_xml "$plist" "$key") || return 1
-    [ -n "$actual_groups" ] || return 1
-    px_group_csv_is_subset "$expected_groups" "$actual_groups" || return 1
-    px_group_csv_is_subset "$actual_groups" "$expected_groups"
-}
-
-PX_PLUTIL_COMPOUND_FAILURE_REASON=""
-
-px_plutil_upsert_compound() {
-    local key="$1"
-    local json_value="$2"
-    local xml_value="$3"
-    local plist="$4"
-    local canonical_groups="$5"
-    PX_PLUTIL_COMPOUND_FAILURE_REASON=""
-    px_plutil_escape_root_keypath "$key" || return 1
-    local keypath="$PX_PLUTIL_ROOT_KEYPATH"
-
-    # Newer Apple plutil accepts JSON fragments for compound values. Some iOS
-    # builds reject compound fragments even though scalar mutation works, so
-    # try both fragment formats before falling back to explicit array creation.
-    if "$PX_PLUTIL_PATH" -replace "$keypath" -json "$json_value" "$plist" >/dev/null 2>&1; then
-        px_plist_string_array_matches_exact "$plist" "$key" "$canonical_groups" && return 0
-    fi
-    if "$PX_PLUTIL_PATH" -insert "$keypath" -json "$json_value" "$plist" >/dev/null 2>&1; then
-        px_plist_string_array_matches_exact "$plist" "$key" "$canonical_groups" && return 0
-    fi
-    if "$PX_PLUTIL_PATH" -replace "$keypath" -xml "$xml_value" "$plist" >/dev/null 2>&1; then
-        px_plist_string_array_matches_exact "$plist" "$key" "$canonical_groups" && return 0
-    fi
-    if "$PX_PLUTIL_PATH" -insert "$keypath" -xml "$xml_value" "$plist" >/dev/null 2>&1; then
-        px_plist_string_array_matches_exact "$plist" "$key" "$canonical_groups" && return 0
-    fi
-
-    # Legacy compatibility path: recreate the target as an empty array, then
-    # insert each already-canonicalized group by numeric key-path. This only
-    # mutates the private workspace plist and remains fail-closed on any error.
+    PX_XML_KAG_FAILURE_REASON=""
     px_canonicalize_group_csv "$canonical_groups" || {
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-input"
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
         return 1
     }
     [ "$PX_CANONICAL_GROUP_CSV" = "$canonical_groups" ] || {
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-input"
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
         return 1
     }
-
-    "$PX_PLUTIL_PATH" -remove "$keypath" "$plist" >/dev/null 2>&1 || true
-    "$PX_PLUTIL_PATH" -insert "$keypath" -array "$plist" >/dev/null 2>&1 || {
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-create"
+    [ -f "$plist" ] && [ ! -L "$plist" ] || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
         return 1
     }
-
-    local groups=() group index rebuilt_groups
-    IFS=',' read -ra groups <<< "$canonical_groups"
-    [ "${#groups[@]}" -gt 0 ] && [ "${#groups[@]}" -le 128 ] || {
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-input"
+    "$PX_GREP_PATH" -q '<plist' "$plist" 2>/dev/null || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
         return 1
     }
+    xml=$(<"$plist") || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+        return 1
+    }
+    [ -n "$xml" ] && [ "${#xml}" -le 16777216 ] || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+        return 1
+    }
+    case "$xml" in *"$marker"*) ;; *)
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+        return 1
+        ;;
+    esac
+    tail="${xml#*"$marker"}"
+    case "$tail" in *"$marker"*)
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+        return 1
+        ;;
+    esac
 
-    # Prepend in reverse order. This avoids relying on legacy plutil accepting
-    # an end-index insertion for every append while preserving canonical order.
-    for (( index=${#groups[@]}-1; index>=0; index-- )); do
-        group="${groups[$index]}"
-        px_group_value_is_valid "$group" || {
-            PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-input"
+    # Validate the existing direct string-array value before rewriting it.
+    # This rejects duplicate/nested/non-array shapes instead of guessing at
+    # XML boundaries in an entitlement document we do not structurally trust.
+    current_groups=$(px_read_plist_string_array_from_xml "$plist" "$key") || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+        return 1
+    }
+    : "$current_groups"
+
+    prefix="${xml%%"$marker"*}"
+    case "$tail" in
+        *"<array>"*)
+            between="${tail%%<array>*}"
+            case "$between" in *'<'*|*'>'*|*'&'*)
+                PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+                return 1
+                ;;
+            esac
+            after_open="${tail#*<array>}"
+            case "$after_open" in *"</array>"*) ;; *)
+                PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+                return 1
+                ;;
+            esac
+            suffix="${after_open#*</array>}"
+            ;;
+        *"<array/>"*)
+            between="${tail%%<array/>*}"
+            case "$between" in *'<'*|*'>'*|*'&'*)
+                PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
+                return 1
+                ;;
+            esac
+            suffix="${tail#*<array/>}"
+            ;;
+        *)
+            PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"
             return 1
-        }
-        "$PX_PLUTIL_PATH" -insert "$keypath.0" -string "$group" "$plist" >/dev/null 2>&1 || {
-            PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-item"
-            return 1
-        }
-    done
+            ;;
+    esac
 
-    rebuilt_groups=$(px_read_plist_string_array_from_xml "$plist" "$key") || {
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-verify-parse"
+    new_xml="${prefix}${marker}${between}${xml_value}${suffix}"
+    [ -n "$new_xml" ] && [ "${#new_xml}" -le 16777216 ] || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-write"
         return 1
     }
-    if ! px_group_csv_is_subset "$canonical_groups" "$rebuilt_groups"; then
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-verify-missing"
+    printf '%s' "$new_xml" > "$plist" || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-write"
+        return 1
+    }
+
+    generated_groups=$(px_read_plist_string_array_from_xml "$plist" "$key") || {
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-verify-parse"
+        return 1
+    }
+    if ! px_group_csv_is_subset "$canonical_groups" "$generated_groups"; then
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-verify-missing"
         return 1
     fi
-    if ! px_group_csv_is_subset "$rebuilt_groups" "$canonical_groups"; then
-        PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-verify-extra"
+    if ! px_group_csv_is_subset "$generated_groups" "$canonical_groups"; then
+        PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-verify-extra"
         return 1
     fi
     return 0
@@ -2078,8 +2077,6 @@ generate_helper_entitlements() {
     px_canonicalize_group_csv "$keychain_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     local canonical_groups="$PX_CANONICAL_GROUP_CSV"
     [ "$canonical_groups" = "$keychain_groups" ] || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    px_group_csv_to_json_array "$canonical_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    local groups_json="$PX_JSON_ARRAY"
     px_group_csv_to_xml_array "$canonical_groups" || return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     local groups_xml="$PX_XML_ARRAY"
 
@@ -2091,6 +2088,18 @@ generate_helper_entitlements() {
     px_validate_copied_file_integrity "$source_ent_file" "$output_file" || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     "$PX_CHMOD_PATH" 600 "$output_file" >/dev/null 2>&1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
     px_validate_workspace_file "$output_file" 600 0 1 || return "$PX_KEYCHAIN_EXIT_WORKSPACE_FAILURE"
+
+    # ldid emits XML entitlements. Replace only the existing KAG array before
+    # scalar plutil mutations so this path never depends on compound-plist
+    # support from legacy/jailbreak plutil implementations.
+    px_xml_replace_keychain_groups "$output_file" "$groups_xml" "$canonical_groups" || {
+        if [ -n "$PX_XML_KAG_FAILURE_REASON" ]; then
+            px_report_failure_reason "$PX_XML_KAG_FAILURE_REASON"
+        else
+            px_report_failure_reason helper-overlay-keychain-access-groups
+        fi
+        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
+    }
 
     px_plutil_upsert_bool "platform-application" true "$output_file" || {
         px_report_failure_reason helper-overlay-platform-application
@@ -2118,14 +2127,6 @@ generate_helper_entitlements() {
     }
     px_plutil_upsert_bool "com.apple.keystore.device" true "$output_file" || {
         px_report_failure_reason helper-overlay-keystore-device
-        return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
-    }
-    px_plutil_upsert_compound "keychain-access-groups" "$groups_json" "$groups_xml" "$output_file" "$canonical_groups" || {
-        if [ -n "$PX_PLUTIL_COMPOUND_FAILURE_REASON" ]; then
-            px_report_failure_reason "$PX_PLUTIL_COMPOUND_FAILURE_REASON"
-        else
-            px_report_failure_reason helper-overlay-keychain-access-groups
-        fi
         return "$PX_KEYCHAIN_EXIT_ENTITLEMENT_FAILURE"
     }
     "$PX_PLUTIL_PATH" -lint "$output_file" >/dev/null 2>&1 || {

@@ -1375,25 +1375,29 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     shell.path, source_line_for_token(shell, "px_validate_target_unchanged()"),
                     "target revalidation must preserve explicit-vs-legacy policy, bind the LaunchServices and physical paths by inode, use the LaunchServices path for ldid, and keep physical TOCTOU/workspace diagnostics")
 
+    plist_array_reader_start = shell.text.find("px_read_plist_string_array_from_xml()")
+    plist_array_reader_end = shell.text.find("px_application_identifier_matches_bundle_id()", plist_array_reader_start)
+    plist_array_reader_body = (shell.text[plist_array_reader_start:plist_array_reader_end]
+                               if plist_array_reader_start >= 0 and plist_array_reader_end > plist_array_reader_start else "")
     collector.check("BRH-KEY-ENTITLEMENT-PLIST-COMPAT",
                     'px_parse_json_string_array()' in shell.text and
                     'parsed=$(px_parse_json_string_array "$groups_output")' in shell.text and
                     'px_parse_legacy_plutil_string_array()' in shell.text and
                     '"$PX_PLUTIL_PATH" -key keychain-access-groups "$ent_file"' in shell.text and
                     'px_read_plist_string_compat()' in shell.text and
-                    'px_read_plist_string_array_from_xml()' in shell.text and
-                    '"$PX_GREP_PATH" -q \'<plist\' "$plist"' in shell.text and
-                    'xml=$(<"$plist")' in shell.text and
-                    'tail="${xml#*"<key>${key}</key>"}"' in shell.text and
-                    'body="${tail#*<array>}"' in shell.text and
-                    'value="${rest%%</string>*}"' in shell.text and
-                    'case "$prefix" in' in shell.text and
-                    'case "$value" in' in shell.text and
+                    plist_array_reader_start >= 0 and
+                    '"$PX_GREP_PATH" -q \'<plist\' "$plist"' in plist_array_reader_body and
+                    'xml=$(<"$plist")' in plist_array_reader_body and
+                    'tail="${xml#*"<key>${key}</key>"}"' in plist_array_reader_body and
+                    'body="${tail#*<array>}"' in plist_array_reader_body and
+                    'value="${rest%%</string>*}"' in plist_array_reader_body and
+                    'case "$prefix" in' in plist_array_reader_body and
+                    'case "$value" in' in plist_array_reader_body and
                     'value=$(px_read_plist_string_compat "$ent_file" application-identifier)' in shell.text and
                     'px_read_plist_string_array_from_xml "$ent_file" keychain-access-groups' in shell.text and
                     '"$PX_PLUTIL_PATH" -extract keychain-access-groups json -o - "$ent_file"' in shell.text,
                     shell.path, source_line_for_token(shell, "px_read_plist_string_compat()"),
-                    "signed entitlement parsing must support modern plutil plus XML fallback without broadening group values")
+                    "signed entitlement parsing must support modern plutil plus raw-XML fallback without broadening group values")
 
     collector.check("BRH-KEY-ENTITLEMENT-UNIVERSAL-CLONE",
                     generation_start >= 0 and
@@ -1427,52 +1431,62 @@ def guard_keychain(sources: Mapping[str, SourceFile], collector: GuardCollector)
                     "px_plutil_escape_root_keypath()" in shell.text and
                     'case "$key" in *[!A-Za-z0-9._-]*) return 1 ;; esac' in shell.text and
                     'local escaped="${key//./\\\\.}"' in shell.text and
-                    shell.text.count('px_plutil_escape_root_keypath "$key" || return 1') == 3 and
-                    shell.text.count('local keypath="$PX_PLUTIL_ROOT_KEYPATH"') == 3 and
+                    shell.text.count('px_plutil_escape_root_keypath "$key" || return 1') == 2 and
+                    shell.text.count('local keypath="$PX_PLUTIL_ROOT_KEYPATH"') == 2 and
                     '"$PX_PLUTIL_PATH" -replace "$keypath" -bool' in shell.text and
                     '"$PX_PLUTIL_PATH" -replace "$keypath" -string' in shell.text and
-                    '"$PX_PLUTIL_PATH" -replace "$keypath" -json' in shell.text and
-                    '"$PX_PLUTIL_PATH" -replace "$keypath" -xml' in shell.text,
+                    '"$PX_PLUTIL_PATH" -replace "$keypath" -json' not in shell.text and
+                    '"$PX_PLUTIL_PATH" -replace "$keypath" -xml' not in shell.text,
                     shell.path, source_line_for_token(shell, "px_plutil_escape_root_keypath()"),
-                    "plutil entitlement mutations must escape dotted root keys before key-path operations")
+                    "plutil scalar entitlement mutations must escape dotted root keys; KAG compound mutation must stay off plutil")
 
     collector.check("BRH-KEY-ENTITLEMENT-COMPOUND-FALLBACK",
                     "px_group_csv_to_xml_array()" in shell.text and
                     "PX_XML_ARRAY" in shell.text and
-                    "px_plutil_upsert_compound()" in shell.text and
-                    '"$PX_PLUTIL_PATH" -replace "$keypath" -json "$json_value" "$plist"' in shell.text and
-                    '"$PX_PLUTIL_PATH" -insert "$keypath" -json "$json_value" "$plist"' in shell.text and
-                    '"$PX_PLUTIL_PATH" -replace "$keypath" -xml "$xml_value" "$plist"' in shell.text and
-                    '"$PX_PLUTIL_PATH" -insert "$keypath" -xml "$xml_value" "$plist"' in shell.text and
-                    '"$PX_PLUTIL_PATH" -remove "$keypath" "$plist"' in shell.text and
-                    '"$PX_PLUTIL_PATH" -insert "$keypath" -array "$plist"' in shell.text and
-                    'for (( index=${#groups[@]}-1; index>=0; index-- )); do' in shell.text and
-                    '"$PX_PLUTIL_PATH" -insert "$keypath.0" -string "$group" "$plist"' in shell.text and
-                    "px_plist_string_array_matches_exact()" in shell.text and
-                    shell.text.count('px_plist_string_array_matches_exact "$plist" "$key" "$canonical_groups" && return 0') == 4 and
-                    'rebuilt_groups=$(px_read_plist_string_array_from_xml "$plist" "$key")' in shell.text and
-                    'PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-create"' in shell.text and
-                    'PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-item"' in shell.text and
-                    'PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-verify-missing"' in shell.text and
-                    'PX_PLUTIL_COMPOUND_FAILURE_REASON="helper-overlay-kag-array-verify-extra"' in shell.text and
+                    "PX_JSON_ARRAY" not in shell.text and
+                    "px_group_csv_to_json_array" not in shell.text and
+                    "px_plutil_upsert_compound" not in shell.text and
+                    '"$PX_PLUTIL_PATH" -insert "$keypath" -array "$plist"' not in shell.text and
+                    '"$PX_PLUTIL_PATH" -insert "$keypath.0" -string "$group" "$plist"' not in shell.text and
+                    "px_xml_replace_keychain_groups()" in shell.text and
+                    'local key="keychain-access-groups"' in shell.text and
+                    'local marker="<key>${key}</key>"' in shell.text and
+                    'tail="${xml#*"$marker"}"' in shell.text and
+                    'case "$tail" in *"$marker"*)' in shell.text and
+                    'current_groups=$(px_read_plist_string_array_from_xml "$plist" "$key")' in shell.text and
+                    'new_xml="${prefix}${marker}${between}${xml_value}${suffix}"' in shell.text and
+                    'printf \'%s\' "$new_xml" > "$plist"' in shell.text and
+                    'generated_groups=$(px_read_plist_string_array_from_xml "$plist" "$key")' in shell.text and
+                    'PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-source"' in shell.text and
+                    'PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-write"' in shell.text and
+                    'PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-verify-parse"' in shell.text and
+                    'PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-verify-missing"' in shell.text and
+                    'PX_XML_KAG_FAILURE_REASON="helper-overlay-kag-xml-verify-extra"' in shell.text and
                     "s/&/\\&amp;/g; s/</\\&lt;/g; s/>/\\&gt;/g" in shell.text,
-                    shell.path, source_line_for_token(shell, "px_plutil_upsert_compound()"),
-                    "compound Keychain group mutation must verify fragment writes and retain a reverse-prepend legacy array-builder with exact XML set validation")
+                    shell.path, source_line_for_token(shell, "px_xml_replace_keychain_groups()"),
+                    "keychain-access-groups mutation must be XML-only, exact-set verified, and must not regress to compound plutil mutation")
 
     collector.check("BRH-KEY-ENTITLEMENT-REQUESTED-KAG",
-                    'px_group_csv_to_json_array "$canonical_groups"' in generation_body and
                     'px_group_csv_to_xml_array "$canonical_groups"' in generation_body and
-                    'px_plutil_upsert_compound "keychain-access-groups" "$groups_json" "$groups_xml" "$output_file" "$canonical_groups"' in generation_body and
+                    'px_xml_replace_keychain_groups "$output_file" "$groups_xml" "$canonical_groups"' in generation_body and
+                    'px_group_csv_to_json_array "$canonical_groups"' not in generation_body and
+                    'px_plutil_upsert_compound "keychain-access-groups"' not in generation_body and
                     'generated_groups=$(px_read_plist_string_array_from_xml "$output_file" keychain-access-groups)' in generation_body and
                     'px_group_csv_is_subset "$canonical_groups" "$generated_groups"' in generation_body and
                     'px_group_csv_is_subset "$generated_groups" "$canonical_groups"' in generation_body and
                     'generated_identifier=$(parse_app_identifier "$output_file")' in generation_body and
                     '[ "$generated_identifier" = "$app_identifier" ]' in generation_body and
+                    positions_strictly_increasing(identifier_positions(generation_body, (
+                        'px_xml_replace_keychain_groups "$output_file" "$groups_xml" "$canonical_groups"',
+                        'px_plutil_upsert_bool "platform-application" true "$output_file"',
+                        '"$PX_PLUTIL_PATH" -lint "$output_file"',
+                        'generated_groups=$(px_read_plist_string_array_from_xml "$output_file" keychain-access-groups)',
+                    ))) and
                     'generate_helper_entitlements "$PX_REQUESTED_GROUPS_CSV" "$helper_ent" "$PX_APP_IDENTIFIER" "$PX_APP_ENT_PATH"' in shell.text and
                     shell.text.count('px_group_csv_is_subset "$PX_REQUESTED_GROUPS_CSV" "$PX_EFFECTIVE_GROUPS_CSV"') == 1 and
                     shell.text.count('px_group_csv_is_subset "$PX_EFFECTIVE_GROUPS_CSV" "$PX_REQUESTED_GROUPS_CSV"') == 1,
-                    shell.path, source_line_for_token(shell, 'px_plutil_upsert_compound "keychain-access-groups"'),
-                    "helper keychain-access-groups must equal the canonical requested set including application-identifier")
+                    shell.path, source_line_for_token(shell, 'px_xml_replace_keychain_groups "$output_file"'),
+                    "helper keychain-access-groups must be XML-replaced before scalar overlays and equal the canonical requested set")
     keychain_sources = [source for path, source in sources.items() if path.startswith("KeychainHelper/") and path.endswith(".m")]
     delete_occurrences = [(source.path, line_number(source.text, match.start()))
                           for source in keychain_sources
@@ -1905,13 +1919,13 @@ def run_negative_mutation_tests(root: Path) -> Tuple[int, int]:
     shell_exit = shell.text.replace("readonly PX_KEYCHAIN_EXIT_PARTIAL=10", "readonly PX_KEYCHAIN_EXIT_PARTIAL=11", 1)
     tests.append(("shell-exit-code", "KEY", replace_source_text(base, shell.path, shell_exit),
                   "BRH-KEY-EXIT-PARITY"))
-    compound_index_mutation = shell.text.replace(
-        '"$PX_PLUTIL_PATH" -insert "$keypath.0" -string "$group" "$plist"',
-        '"$PX_PLUTIL_PATH" -insert "$keypath.$index" -string "$group" "$plist"',
+    compound_regression_mutation = shell.text.replace(
+        'px_xml_replace_keychain_groups "$output_file" "$groups_xml" "$canonical_groups" || {',
+        'px_plutil_upsert_compound "keychain-access-groups" "$groups_xml" "$output_file" "$canonical_groups" || {',
         1,
     )
-    tests.append(("keychain-compound-array-index", "KEY",
-                  replace_source_text(base, shell.path, compound_index_mutation),
+    tests.append(("keychain-compound-plutil-regression", "KEY",
+                  replace_source_text(base, shell.path, compound_regression_mutation),
                   "BRH-KEY-ENTITLEMENT-COMPOUND-FALLBACK"))
     raw_xml_mutation = shell.text.replace(
         'xml=$(<"$plist") || return 1',
