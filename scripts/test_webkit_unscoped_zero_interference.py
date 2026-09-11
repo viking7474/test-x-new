@@ -79,4 +79,17 @@ dispatch_pos = fb_ctor.index("dispatch_async(dispatch_get_main_queue()")
 require(return_pos < dispatch_pos,
         "Firebase retry is not enqueued for unscoped processes")
 
+
+filter_source = text("common/PXInjectionFilter.m")
+require("PXInjectionBundleIsSharedWebKitHelper(bundleID)" in filter_source,
+        "Monolithic filter strips shared WebKit helpers centrally")
+require("PXInjectionPlaceholderBundleID" in filter_source and
+        "PXInjectionLegacyPlaceholderBundleID" in filter_source,
+        "Filter migration preserves placeholder-only empty state")
+view = text("TLinkIOSViewController.m")
+require("addObjectsFromArray:PXDefaultWebKitHelperBundleIDs" not in view,
+        "App-side filter writer no longer appends WebKit cluster to monolithic tweak")
+daemon = text("WeaponXMountDaemon/WeaponXDaemon.m")
+require("PXInjectionComputeTweakBundles(bundles)" in daemon,
+        "Daemon sanitizes stale monolithic WebKit targets before install")
 print("PASS: WebKit unscoped zero-interference static regression")

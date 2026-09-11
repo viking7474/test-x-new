@@ -137,15 +137,6 @@ static UIImage *PXRemoveFromScopeIcon(void) {
 @property (nonatomic, readonly) NSString *buildVersionString;  // Add this line to get build number
 @end
 
-static NSArray<NSString *> *PXDefaultWebKitHelperBundleIDs(void) {
-    return @[
-        @"com.apple.SafariViewService",
-        @"com.apple.WebKit.WebContent",
-        @"com.apple.WebKit.Networking",
-        @"com.apple.WebKit.GPU"
-    ];
-}
-
 static BOOL PXBundleIDIsTLinkIOSApp(NSString *bundleID) {
     return [bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID isEqualToString:@"com.hydra.weaponx"];
 }
@@ -228,9 +219,9 @@ static NSArray<NSString *> *PXExpandedResetBundleIDs(NSArray<NSString *> *mainBu
     for (NSString *bundleID in mainBundleIDs) {
         [expanded addObjectsFromArray:PXEnumerateAppAndExtensionBundleIDs(bundleID)];
     }
-    if (expanded.count > 0) {
-        [expanded addObjectsFromArray:PXDefaultWebKitHelperBundleIDs()];
-    }
+    // Deliberately do not append shared WebKit/Safari helpers here. The full
+    // TLinkIOSTweak dylib is app/extension scoped only; WebKit support must be
+    // provided by a separate minimal helper tweak so unrelated hosts stay isolated.
     return expanded.array;
 }
 
@@ -299,7 +290,7 @@ static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
 static void PXWriteSubstrateFilterPlists(void) {
     // 1–5. Canonical filter computation lives in PXInjectionFilter (single source of
     // truth shared with the mount daemon): enabled mains from global_scope → expand
-    // extensions + WebKit cluster → tweak list (+SpringBoard, never empty, never the
+    // extensions; shared WebKit helpers excluded from monolithic filter → tweak list (+SpringBoard, never empty, never the
     // placeholder) → keychain bridge (third-party only, placeholder when empty).
     NSArray<NSString *> *enabledMain = PXEnabledScopeBundleIDs();
     NSArray<NSString *> *expanded = PXExpandedResetBundleIDs(enabledMain);

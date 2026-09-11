@@ -13,32 +13,24 @@ Modern apps often use WebKit helper processes for webviews, login, captcha, paym
 
 ## Filter Strategy
 
-The runtime filter is generated dynamically from `Chọn App RESET`:
+The runtime monolithic `TLinkIOSTweak` filter is generated dynamically from the scoped app selection:
 
 - Main app bundle ID.
 - Exact extension bundle IDs found in `PlugIns/*.appex` and `Plugins/*.appex`.
-- Default WebKit cluster:
-  - `com.apple.SafariViewService`
-  - `com.apple.WebKit.WebContent`
-  - `com.apple.WebKit.Networking`
-  - `com.apple.WebKit.GPU`
+- `com.apple.springboard` while scope is non-empty, for Profile Indicator UI.
+- Shared WebKit/Safari helpers are intentionally **excluded** from this monolithic dylib.
 
-The filter is staged by the TLinkIOS app at:
+Current runtime evidence shows that AIDA64 hangs whenever the global scope is non-empty, while constructor/scope hardening alone did not fix it. This build therefore performs a clean A/B isolation by preventing the full `TLinkIOSTweak.dylib` from loading into shared WebKit helpers. If that resolves the hang, WebKit-specific spoofing will move to a separately built minimal helper tweak before these bundles are re-enabled:
 
-```text
-/var/mobile/Library/TLinkIOS/filter_plists/TLinkIOSTweak.plist
-/var/mobile/Library/TLinkIOS/filter_plists/WeaponXKeychainBridge.plist
-```
-
-`WeaponXDaemon` runs as root, validates the staging plist, and atomically installs it into:
-
-```text
-/Library/MobileSubstrate/DynamicLibraries/
-```
-
-The daemon rejects invalid filter plists, `com.apple.UIKit`, and wildcard bundle IDs.
+- `com.apple.SafariViewService`
+- `com.apple.WebKit.WebContent`
+- `com.apple.WebKit.Networking`
+- `com.apple.WebKit.GPU`
 
 ## WebKit Host Detection
+
+> **Current isolation state:** the monolithic tweak does not target shared WebKit helpers. The host-detection/runtime rules below are retained for the planned minimal WebKit helper tweak and for app-local WebKit surfaces.
+
 
 WebKit helpers are shared services, so their own bundle ID is not enough to decide whether spoofing should run.
 

@@ -30,6 +30,12 @@ BOOL PXInjectionBundleIsAppleOrWebKit(NSString *bundleID) {
     return NO;
 }
 
+BOOL PXInjectionBundleIsSharedWebKitHelper(NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
+    return [bundleID isEqualToString:@"com.apple.SafariViewService"] ||
+           [bundleID hasPrefix:@"com.apple.WebKit"];
+}
+
 NSArray<NSString *> *PXInjectionDefaultWebKitHelperBundleIDs(void) {
     return @[
         @"com.apple.SafariViewService",
@@ -46,7 +52,7 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary *s
         (void)stop;
         if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return;
         if (PXInjectionBundleIsTLinkIOSApp(bundleID)) return;
-        if ([bundleID hasPrefix:@"com.apple.WebKit"] || [bundleID isEqualToString:@"com.apple.SafariViewService"]) return;
+        if (PXInjectionBundleIsSharedWebKitHelper(bundleID)) return;
         if ([entry isKindOfClass:[NSDictionary class]] && ![entry[@"enabled"] boolValue]) return;
         [bundleIDs addObject:bundleID];
     }];
@@ -55,19 +61,29 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary *s
 
 NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> *expandedEnabledBundles) {
     NSArray<NSString *> *normalizedEnabled = PXInjectionNormalizeBundleList(expandedEnabledBundles ?: @[]);
-    // Empty state (no scoped apps): write the no-injection placeholder ONLY — never Bundles=[]
-    // and never SpringBoard — so the tweak filter matches the keychain bridge and the daemon
-    // accepts a placeholder-only plist (Newplan: "remove all apps -> installed filter only placeholder").
-    if (normalizedEnabled.count == 0) {
+
+    // Shared WebKit/Safari helpers are intentionally NOT targets of the monolithic
+    // TLinkIOSTweak.dylib. Runtime testing showed that merely loading the full tweak
+    // into an unrelated host's shared helper can stall that host at launch. WebKit
+    // support must live in a separately built minimal tweak with its own filter.
+    NSMutableArray<NSString *> *monolithicTargets = [NSMutableArray array];
+    for (NSString *bundleID in normalizedEnabled) {
+        if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID] ||
+            [bundleID isEqualToString:PXInjectionLegacyPlaceholderBundleID]) continue;
+        if (PXInjectionBundleIsSharedWebKitHelper(bundleID)) continue;
+        [monolithicTargets addObject:bundleID];
+    }
+
+    // Empty state (no scoped app/extension targets): placeholder only, never Bundles=[].
+    if (monolithicTargets.count == 0) {
         return @[PXInjectionPlaceholderBundleID];
     }
-    // Non-empty scope: Profile Indicator runs inside SpringBoard, so add it alongside the scoped
-    // apps. The list is guaranteed non-empty here, so it must never carry the placeholder.
-    NSMutableArray<NSString *> *withSystem = [NSMutableArray arrayWithArray:normalizedEnabled];
-    if (![withSystem containsObject:PXInjectionSpringBoardBundleID]) {
-        [withSystem addObject:PXInjectionSpringBoardBundleID];
+
+    // Non-empty scope: Profile Indicator runs inside SpringBoard.
+    if (![monolithicTargets containsObject:PXInjectionSpringBoardBundleID]) {
+        [monolithicTargets addObject:PXInjectionSpringBoardBundleID];
     }
-    return PXInjectionNormalizeBundleList(withSystem);
+    return PXInjectionNormalizeBundleList(monolithicTargets);
 }
 
 NSArray<NSString *> *PXInjectionComputeBridgeBundles(NSArray<NSString *> *tweakBundles) {

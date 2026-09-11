@@ -65,16 +65,26 @@ for token in (
 ):
     require(token in phase_a, f"B-06 lost Phase-A identity regression prerequisite: {token}")
 
-# App/extension/WebKit injection expansion remains centralized and bridge-safe.
+# App/extension injection remains centralized; the monolithic tweak must exclude
+# shared WebKit helpers and the bridge must remain third-party-only.
 injection = read("tests/PXInjectionFilterTests.m")
 for token in (
     '"tweak keeps extension bundle"',
+    '"monolithic tweak drops WebKit helpers"',
     '"bridge keeps only third-party app/extensions, sorted"',
     '"bridge drops SpringBoard"',
     '"bridge drops WebKit helpers"',
     '"empty scope -> placeholder-only tweak filter"',
 ):
     require(token in injection, f"B-06 injection-filter prerequisite drifted: {token}")
+
+daemon = read("WeaponXMountDaemon/WeaponXDaemon.m")
+require('if ([name isEqualToString:@"TLinkIOSTweak.plist"])' in daemon,
+        "B-06 daemon lost monolithic filter migration gate")
+require("PXInjectionComputeTweakBundles(bundles)" in daemon,
+        "B-06 daemon no longer sanitizes legacy WebKit helper targets")
+require('sanitizedPlist writeToFile:src atomically:YES' in daemon,
+        "B-06 daemon does not persist sanitized staging filter")
 
 scope = read("TLinkIOSTweak/PXScope.m")
 require(

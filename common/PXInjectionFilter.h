@@ -24,15 +24,18 @@ BOOL PXInjectionBundleIsTLinkIOSApp(NSString * _Nullable bundleID);
 /// Apple- or WebKit-family bundles (excluded from the keychain bridge filter).
 BOOL PXInjectionBundleIsAppleOrWebKit(NSString * _Nullable bundleID);
 
-/// Default WebKit / Safari helper cluster added whenever at least one app is scoped.
+/// Shared Safari/WebKit helper bundles. These are intentionally excluded from the
+/// monolithic TLinkIOSTweak filter and reserved for a future minimal WebKit tweak.
+BOOL PXInjectionBundleIsSharedWebKitHelper(NSString * _Nullable bundleID);
 NSArray<NSString *> *PXInjectionDefaultWebKitHelperBundleIDs(void);
 
 /// Enabled third-party main bundles from a loaded global_scope plist dictionary.
 /// Only ScopedApps entries with enabled == YES; TLinkIOS and WebKit/SafariViewService removed.
 NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary * _Nullable scopePlist);
 
-/// Final TLinkIOSTweak bundle list: expanded scope + SpringBoard, normalized.
-/// SpringBoard is always present, so the result is never empty and never needs the placeholder.
+/// Final monolithic TLinkIOSTweak bundle list: scoped app/extensions + SpringBoard.
+/// Shared Safari/WebKit helpers are always removed so unrelated hosts never load the
+/// full tweak merely because some other app is scoped. Empty -> placeholder-only.
 NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> * _Nullable expandedEnabledBundles);
 
 /// Keychain bridge bundle list: third-party app/extensions only (Apple/WebKit + placeholder dropped).

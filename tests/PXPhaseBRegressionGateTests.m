@@ -91,6 +91,8 @@ static void PXPhaseBCaseAppExtension(void) {
                 "B-06 tweak filter dropped scoped main app");
     PX_B_ASSERT([tweak containsObject:@"com.fixture.app.share-extension"],
                 "B-06 tweak filter dropped scoped app extension");
+    PX_B_ASSERT(![tweak containsObject:@"com.apple.WebKit.WebContent"],
+                "B-06 monolithic tweak must not target shared WebKit helpers");
 
     NSArray *bridge = PXInjectionComputeBridgeBundles(tweak);
     PX_B_ASSERT([bridge containsObject:@"com.fixture.app"] &&

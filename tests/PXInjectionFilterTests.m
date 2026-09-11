@@ -67,6 +67,7 @@ static void PXTTestTweakBundles(void) {
     PXT_ASSERT([tweak containsObject:PXInjectionSpringBoardBundleID], "tweak always contains SpringBoard");
     PXT_ASSERT([tweak containsObject:@"com.acme.app"], "tweak keeps main bundle");
     PXT_ASSERT([tweak containsObject:@"com.acme.app.ext"], "tweak keeps extension bundle");
+    PXT_ASSERT(![tweak containsObject:@"com.apple.WebKit.GPU"], "monolithic tweak drops WebKit helpers");
     PXT_ASSERT(![tweak containsObject:PXInjectionPlaceholderBundleID], "tweak never contains placeholder");
     PXT_ASSERT(PXTArrayEquals(tweak, PXInjectionNormalizeBundleList(tweak)), "tweak output is normalized");
 
@@ -76,6 +77,10 @@ static void PXTTestTweakBundles(void) {
                "empty scope -> placeholder-only tweak filter");
     PXT_ASSERT(![emptyTweak containsObject:PXInjectionSpringBoardBundleID],
                "empty tweak drops SpringBoard when no apps are scoped");
+
+    NSArray *migratedPlaceholder = PXInjectionComputeTweakBundles(@[PXInjectionPlaceholderBundleID]);
+    PXT_ASSERT(PXTArrayEquals(migratedPlaceholder, (@[PXInjectionPlaceholderBundleID])),
+               "placeholder staging migration remains placeholder-only");
 }
 
 static void PXTTestBridgeBundles(void) {
@@ -130,12 +135,16 @@ static void PXTTestConsistencyRoundTrip(void) {
         }
     };
     NSArray *enabled = PXInjectionEnabledMainBundlesFromScopePlist(scope);
-    // Simulate expansion by appending an extension + WebKit cluster to the enabled mains.
+    // Even if an old caller appends the legacy WebKit cluster, the canonical
+    // monolithic filter computation must strip all shared helpers.
     NSMutableArray *expanded = [enabled mutableCopy];
     [expanded addObject:@"com.acme.app.ext"];
     [expanded addObjectsFromArray:PXInjectionDefaultWebKitHelperBundleIDs()];
 
     NSArray *tweak = PXInjectionComputeTweakBundles(expanded);
+    for (NSString *helper in PXInjectionDefaultWebKitHelperBundleIDs()) {
+        PXT_ASSERT(![tweak containsObject:helper], "round-trip: monolithic tweak excludes shared WebKit helper");
+    }
     NSArray *bridge = PXInjectionComputeBridgeBundles(tweak);
     NSDictionary *tweakPlist = PXInjectionFilterPlistDictionary(tweak);
     NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridge);
