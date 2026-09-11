@@ -1,5 +1,6 @@
 #import "UIKit/UIKit.h"
 #import <objc/runtime.h>
+#import "PXFileDebug.h"
 // #import "include/ellekit/ellekit.h" // Removed for rootful - using Substrate
 #include <dlfcn.h>
 
@@ -24,6 +25,26 @@ static void (*orig_willActivateApplication)(id, SEL, id);
 static NSMutableDictionary *frozenStatusCache = nil;
 static NSDate *cacheLastUpdated = nil;
 static NSTimeInterval cacheRefreshInterval = 2.0; // Refresh cache every 2 seconds
+
+// AIDA64 root-cause probe. This is diagnostics only: it is completely inert unless
+// /tmp/px_debug_aida64 (or /tmp/px_debug_all) exists before SpringBoard loads the tweak.
+// Keep this path behavior-neutral: never block, rewrite scope, or change launch results.
+static inline BOOL PXAIDA64IsTargetBundle(NSString *bundleID) {
+    return [bundleID isKindOfClass:[NSString class]] &&
+           [bundleID isEqualToString:@"com.finalwire.aida64"];
+}
+
+static inline void PXAIDA64SpringBoardTrace(const char *caller,
+                                             const char *phase,
+                                             NSString *bundleID,
+                                             int value) {
+    if (!PXFileDebugAIDA64Enabled() || !PXAIDA64IsTargetBundle(bundleID)) return;
+    PXFileDebugAIDA64Log("[SBLaunch] caller=%s phase=%s bundle=%s value=%d",
+                         caller ?: "<unknown>",
+                         phase ?: "<unknown>",
+                         bundleID.UTF8String ?: "<nil>",
+                         value);
+}
 
 // Direct implementation of isApplicationFrozen without requiring FreezeManager
 static BOOL isApplicationFrozen(NSString *bundleID) {
@@ -109,10 +130,19 @@ static BOOL shouldBlockAppLaunch(NSString *bundleID, NSString *appName) {
     return NO;
 }
 
+static BOOL PXAIDA64TraceShouldBlockAppLaunch(NSString *bundleID,
+                                               NSString *appName,
+                                               const char *caller) {
+    PXAIDA64SpringBoardTrace(caller, "shouldBlock.begin", bundleID, -1);
+    BOOL blocked = shouldBlockAppLaunch(bundleID, appName);
+    PXAIDA64SpringBoardTrace(caller, "shouldBlock.end", bundleID, blocked ? 1 : 0);
+    return blocked;
+}
+
 // Hook SBApplicationController to prevent frozen apps from launching
 static id new_applicationWithBundleIdentifier(id self, SEL _cmd, NSString *identifier) {
     // Check if app is frozen before getting instance
-    if (shouldBlockAppLaunch(identifier, nil)) {
+    if (PXAIDA64TraceShouldBlockAppLaunch(identifier, nil, __func__)) {
         // Instead of returning nil, let the original method run but then block activation
         // This prevents nil being passed to methods expecting valid app objects
         id appInstance = orig_applicationWithBundleIdentifier(self, _cmd, identifier);
@@ -120,7 +150,10 @@ static id new_applicationWithBundleIdentifier(id self, SEL _cmd, NSString *ident
         return appInstance;
     }
     
-    return orig_applicationWithBundleIdentifier(self, _cmd, identifier);
+    PXAIDA64SpringBoardTrace(__func__, "orig.begin", identifier, -1);
+    id result = orig_applicationWithBundleIdentifier(self, _cmd, identifier);
+    PXAIDA64SpringBoardTrace(__func__, "orig.end", identifier, result ? 1 : 0);
+    return result;
 }
 
 // Hook FBApplicationProcess to prevent frozen apps from spawning
@@ -143,7 +176,7 @@ static BOOL new_launchWithDelegate(id self, SEL _cmd, id delegate) {
         appName = bundleIdentifier;
     }
     
-    if (shouldBlockAppLaunch(bundleIdentifier, appName)) {
+    if (PXAIDA64TraceShouldBlockAppLaunch(bundleIdentifier, appName, __func__)) {
         NSLog(@"[FreezeManager] Blocked process launch for frozen app: %@", bundleIdentifier);
         // Return NO without calling original implementation
         return NO;
@@ -154,11 +187,14 @@ static BOOL new_launchWithDelegate(id self, SEL _cmd, id delegate) {
 
 // Hook LSApplicationWorkspace to prevent frozen apps from launching
 static BOOL new_openApplicationWithBundleID(id self, SEL _cmd, NSString *bundleID) {
-    if (shouldBlockAppLaunch(bundleID, nil)) {
+    if (PXAIDA64TraceShouldBlockAppLaunch(bundleID, nil, __func__)) {
         return NO;
     }
     
-    return orig_openApplicationWithBundleID(self, _cmd, bundleID);
+    PXAIDA64SpringBoardTrace(__func__, "orig.begin", bundleID, -1);
+    BOOL result = orig_openApplicationWithBundleID(self, _cmd, bundleID);
+    PXAIDA64SpringBoardTrace(__func__, "orig.end", bundleID, result ? 1 : 0);
+    return result;
 }
 
 // Additional method to block app launching via URL schemes
@@ -174,7 +210,7 @@ static BOOL new_openURL(id self, SEL _cmd, NSURL *url, NSDictionary *options) {
                 NSString *bundleID = [appWithScheme performSelector:@selector(bundleIdentifier)];
                 NSString *appName = [appWithScheme performSelector:@selector(bundleExecutable)];
                 
-                if (shouldBlockAppLaunch(bundleID, appName)) {
+                if (PXAIDA64TraceShouldBlockAppLaunch(bundleID, appName, __func__)) {
                     NSLog(@"[FreezeManager] Blocked URL scheme launch for frozen app: %@", bundleID);
                     return NO;
                 }
@@ -187,8 +223,8 @@ static BOOL new_openURL(id self, SEL _cmd, NSURL *url, NSDictionary *options) {
 
 // Hook SBUIController for iOS 14-15
 static BOOL new_activateApplication(id self, SEL _cmd, id application, id icon, int location) {
+    NSString *bundleID = nil;
     if (application) {
-        NSString *bundleID = nil;
         NSString *appName = nil;
         
         // Try to get bundle ID using different methods
@@ -203,12 +239,15 @@ static BOOL new_activateApplication(id self, SEL _cmd, id application, id icon, 
             appName = [application performSelector:@selector(bundleExecutable)];
         }
         
-        if (shouldBlockAppLaunch(bundleID, appName)) {
+        if (PXAIDA64TraceShouldBlockAppLaunch(bundleID, appName, __func__)) {
             return NO;
         }
     }
     
-    return orig_activateApplication(self, _cmd, application, icon, location);
+    PXAIDA64SpringBoardTrace(__func__, "orig.begin", bundleID, -1);
+    BOOL result = orig_activateApplication(self, _cmd, application, icon, location);
+    PXAIDA64SpringBoardTrace(__func__, "orig.end", bundleID, result ? 1 : 0);
+    return result;
 }
 
 // Additional hook to prevent crashes in SpringBoard's application animation system
@@ -237,7 +276,7 @@ static void new_willActivateApplication(id self, SEL _cmd, id application) {
 
 // Hook SBApplicationProcessManager to prevent app spawning
 static id new_createApplicationProcessForBundleID(id self, SEL _cmd, NSString *bundleID) {
-    if (shouldBlockAppLaunch(bundleID, nil)) {
+    if (PXAIDA64TraceShouldBlockAppLaunch(bundleID, nil, __func__)) {
         NSLog(@"[FreezeManager] Blocked process creation for frozen app: %@", bundleID);
         // Instead of returning nil, create a dummy process object that won't actually launch
         // First get a valid process object for a system app that we can use as a placeholder
@@ -247,7 +286,10 @@ static id new_createApplicationProcessForBundleID(id self, SEL _cmd, NSString *b
         return systemAppProcess;
     }
     
-    return orig_createApplicationProcessForBundleID(self, _cmd, bundleID);
+    PXAIDA64SpringBoardTrace(__func__, "orig.begin", bundleID, -1);
+    id result = orig_createApplicationProcessForBundleID(self, _cmd, bundleID);
+    PXAIDA64SpringBoardTrace(__func__, "orig.end", bundleID, result ? 1 : 0);
+    return result;
 }
 
 // Setup function that installs all hooks

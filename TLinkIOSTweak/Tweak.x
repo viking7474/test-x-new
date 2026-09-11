@@ -4280,6 +4280,14 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXProcessIsAllowedForSpoofing(currentBundleID,
                                       currentProcessName,
                                       PXScopeOptionAllowSafariAuthStack);
+    // Root-cause diagnostics: this marker executes before the unscoped early-return,
+    // so a debug run can distinguish "dylib loaded but denied by scope" from
+    // "dylib never loaded" without changing the actual scope decision.
+    PXFileDebugAIDA64Log("[Tweak.ctor] pre-scope bundle=%s process=%s allowed=%d webkit=%d",
+                         currentBundleID.UTF8String ?: "<nil>",
+                         currentProcessName.UTF8String ?: "<nil>",
+                         currentProcessAllowed ? 1 : 0,
+                         isWebKitHelper ? 1 : 0);
     if (!currentProcessAllowed) {
         return;
     }

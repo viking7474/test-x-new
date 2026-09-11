@@ -44,6 +44,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_missing_hook_completion_static.py",
     "scripts/test_ifake_parity_static.py",
     "scripts/test_phase_b_regression_static.py",
+    "scripts/test_aida_springboard_launch_trace_static.py",
     "scripts/test_webkit_unscoped_zero_interference.py",
     "scripts/test_c02_propertylist_evidence_static.py",
     "scripts/test_ifake_final_crosswalk_static.py",
