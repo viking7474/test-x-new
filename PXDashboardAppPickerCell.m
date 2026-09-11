@@ -141,7 +141,7 @@ UIColor *PXAppPickerBorderColor(void) {
     self.appNameLabel.text = name.length ? name : @"Ứng dụng";
     NSString *baseDetail = [NSString stringWithFormat:@"%@ (v%@)", bundleID, version];
     self.appDetailLabel.text = frozen
-        ? [baseDetail stringByAppendingString:@"  ?  ? ?? ??ng b?ng"]
+        ? [baseDetail stringByAppendingString:@" | Frozen"]
         : baseDetail;
     self.appIconView.image = icon;
 

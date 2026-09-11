@@ -2156,7 +2156,7 @@ static void PXWriteSubstrateFilterPlists(void) {
     NSString *appName = [app[@"name"] isKindOfClass:[NSString class]] ? app[@"name"] : bundleID;
     FreezeManager *freezeManager = [FreezeManager sharedManager];
     BOOL frozen = [freezeManager isApplicationFrozen:bundleID];
-    NSString *title = frozen ? @"B? ??ng b?ng" : @"??ng b?ng";
+    NSString *title = frozen ? @"Unfreeze" : @"Freeze";
     UIContextualActionStyle style = frozen ? UIContextualActionStyleNormal : UIContextualActionStyleDestructive;
 
     __weak typeof(self) weakSelf = self;
@@ -2180,28 +2180,44 @@ static void PXWriteSubstrateFilterPlists(void) {
         };
 
         if (frozen) {
+            NSLog(@"[ResetPicker][Freeze] action=unfreeze bundle=%@ before=1", bundleID);
             [freezeManager unfreezeApplication:bundleID];
+            BOOL stillFrozen = [freezeManager isApplicationFrozen:bundleID];
+            NSLog(@"[ResetPicker][Freeze] action=unfreeze bundle=%@ after=%d", bundleID, stillFrozen ? 1 : 0);
             reloadFrozenState();
-            completionHandler(YES);
+            completionHandler(!stillFrozen);
             return;
         }
 
-        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"??ng b?ng %@?", appName]
-                                                                         message:@"?ng d?ng s? kh?ng th? m? cho ??n khi b?n b? ??ng b?ng."
+        completionHandler(NO);
+        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Freeze %@?", appName]
+                                                                         message:@"This app will be blocked from launching until you unfreeze it."
                                                                   preferredStyle:UIAlertControllerStyleAlert];
-        [confirm addAction:[UIAlertAction actionWithTitle:@"H?y"
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                                    style:UIAlertActionStyleCancel
-                                                 handler:^(__unused UIAlertAction *cancelAction) {
-            completionHandler(NO);
-        }]];
-        [confirm addAction:[UIAlertAction actionWithTitle:@"??ng b?ng"
+                                                 handler:nil]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Freeze"
                                                    style:UIAlertActionStyleDestructive
                                                  handler:^(__unused UIAlertAction *freezeAction) {
+            NSLog(@"[ResetPicker][Freeze] action=freeze bundle=%@ before=0", bundleID);
             [freezeManager freezeApplication:bundleID];
+            BOOL nowFrozen = [freezeManager isApplicationFrozen:bundleID];
+            NSLog(@"[ResetPicker][Freeze] action=freeze bundle=%@ after=%d", bundleID, nowFrozen ? 1 : 0);
             reloadFrozenState();
-            completionHandler(YES);
         }]];
-        [self presentViewController:confirm animated:YES completion:nil];
+        // The Reset picker is a modal child controller. Present from the view
+        // controller that owns this table instead of TLinkIOSViewController
+        // underneath the modal.
+        UIViewController *presenter = nil;
+        UIResponder *responder = strongTableView;
+        while (responder && !presenter) {
+            responder = responder.nextResponder;
+            if ([responder isKindOfClass:[UIViewController class]]) {
+                presenter = (UIViewController *)responder;
+            }
+        }
+        if (!presenter) return;
+        [presenter presentViewController:confirm animated:YES completion:nil];
     }];
 
     UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[action]];
@@ -3976,7 +3992,7 @@ static void PXWriteSubstrateFilterPlists(void) {
         
         // Add search bar
         self.appSearchBar = [[UISearchBar alloc] init];
-        self.appSearchBar.placeholder = @"Search Apps";
+    self.appSearchBar.placeholder = @"Search apps...";
         self.appSearchBar.delegate = self;
         self.appSearchBar.translatesAutoresizingMaskIntoConstraints = NO;
         [self.installedAppsPopupVC.view addSubview:self.appSearchBar];
@@ -7093,7 +7109,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    titleLabel.text = @"Tổng ứng dụng";
+    titleLabel.text = @"Apps";
     titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
     [card addSubview:titleLabel];
 
@@ -7166,7 +7182,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (!self.selectionPickerMode.length) return;
     NSUInteger selectedCount = self.selectionDraftAppIDs.count;
     NSUInteger totalCount = self.installedApps.count;
-    self.appPickerSelectionSummaryLabel.text = [NSString stringWithFormat:@"Đã chọn %lu ứng dụng", (unsigned long)selectedCount];
+    self.appPickerSelectionSummaryLabel.text = [NSString stringWithFormat:@"%lu selected", (unsigned long)selectedCount];
     self.appPickerSelectionCountLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)selectedCount, (unsigned long)totalCount];
 }
 
@@ -7176,7 +7192,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.selectionDraftAppIDs = [NSMutableSet setWithArray:source ?: @[]];
 
     UIViewController *picker = [[UIViewController alloc] init];
-    picker.title = [mode isEqualToString:@"reset"] ? @"Chọn App Reset" : @"Chọn App lưu RRS";
+    picker.title = [mode isEqualToString:@"reset"] ? @"Select Reset Apps" : @"Select RRS Apps";
     picker.view.backgroundColor = PXAppPickerBackgroundColor();
     picker.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
 
@@ -7195,16 +7211,18 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         nav.navigationBar.compactAppearance = appearance;
     }
 
-    picker.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
-                                                                                           target:self
-                                                                                           action:@selector(cancelDashboardAppPicker)];
-    picker.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-                                                                                            target:self
-                                                                                            action:@selector(doneDashboardAppPicker)];
+    picker.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Cancel"
+                                                                                style:UIBarButtonItemStylePlain
+                                                                               target:self
+                                                                               action:@selector(cancelDashboardAppPicker)];
+    picker.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Done"
+                                                                                 style:UIBarButtonItemStyleDone
+                                                                                target:self
+                                                                                action:@selector(doneDashboardAppPicker)];
 
     self.appSearchBar = [[UISearchBar alloc] init];
     self.appSearchBar.delegate = self;
-    self.appSearchBar.placeholder = @"Tìm kiếm ứng dụng...";
+    self.appSearchBar.placeholder = @"Search apps...";
     self.appSearchBar.searchBarStyle = UISearchBarStyleMinimal;
     self.appSearchBar.backgroundImage = [[UIImage alloc] init];
     self.appSearchBar.translatesAutoresizingMaskIntoConstraints = NO;
