@@ -430,16 +430,26 @@ int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
 // Hook for -[NSProcessInfo systemUptime]
 static NSTimeInterval (*orig_systemUptime)(NSProcessInfo *, SEL);
 static NSTimeInterval hook_systemUptime(NSProcessInfo *self, SEL _cmd) {
-    // Recursion guard
+    // The guard must cover the scope predicate itself. PXScope is infrastructure
+    // used by every spoof hook; if scope evaluation ever touches uptime (directly
+    // or indirectly), entering shouldSpoofBootTimeForApp() unguarded creates:
+    // systemUptime -> scope decision -> systemUptime -> ...
     if (isInsideHook) {
         return orig_systemUptime(self, _cmd);
     }
-    
-    if (shouldSpoofBootTimeForApp() && isBootTimeOrUptimeEnabled()) {
-        isInsideHook = YES;
-        updateCachedBootTimeValues();
+
+    BOOL shouldSpoof = NO;
+    isInsideHook = YES;
+    @try {
+        shouldSpoof = shouldSpoofBootTimeForApp() && isBootTimeOrUptimeEnabled();
+        if (shouldSpoof) {
+            updateCachedBootTimeValues();
+        }
+    } @finally {
         isInsideHook = NO;
-        
+    }
+
+    if (shouldSpoof) {
         NSTimeInterval uptime = PXCachedUptimeValue();
         if (uptime > 0) return uptime;
     }

@@ -11,6 +11,9 @@
 #import <unistd.h>
 
 static __thread BOOL gPXReadingSecuritySettings = NO;
+// Scope decisions are called from hook predicates. Nested evaluation must fail
+// closed instead of re-entering Foundation/other hooks recursively.
+static __thread unsigned int gPXScopeDecisionDepth = 0;
 
 BOOL PXScopeIsReadingSecuritySettings(void) {
     return gPXReadingSecuritySettings;
@@ -57,7 +60,15 @@ static void PXSynchronizeSecuritySettings(void) {
 }
 
 static NSTimeInterval PXMonotonicNow(void) {
-    return [NSProcessInfo processInfo].systemUptime;
+    // Scope decisions sit underneath many spoof hooks, including our own
+    // -[NSProcessInfo systemUptime] hook. Never use an Objective-C/Foundation
+    // clock here: doing so can re-enter PXProcessIsAllowedForSpoofing while a
+    // scope decision is already in progress and recurse until the stack dies.
+    struct timespec ts = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (NSTimeInterval)ts.tv_sec + ((NSTimeInterval)ts.tv_nsec / 1000000000.0);
 }
 
 // Immutable snapshot for hot-path scope decisions.
@@ -506,7 +517,11 @@ BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
 
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
     if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
+    if (gPXScopeDecisionDepth != 0) return NO;
 
+    gPXScopeDecisionDepth++;
+    BOOL allowed = NO;
+    @try {
     // Resolve one immutable snapshot for the complete decision. This avoids repeated
     // lock/snapshot lookups through PXDeviceSpoofingEnabled/PXSafariStackSpoofEnabled/etc.
     PXScopeSnapshot *snap = PXCurrentSnapshot();
@@ -524,7 +539,7 @@ BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PX
                   ((options & PXScopeOptionAllowSafariAuthStack) != 0) &&
                   safariStackEnabled &&
                   PXIsSafariStackProcess(bundleID, processName);
-    BOOL allowed = strict || safari || webKitHostScoped;
+    allowed = strict || safari || webKitHostScoped;
 
     // Decision log only when debug flags enabled — no hot-path file/NSLog otherwise.
     BOOL verboseFile = PXScopeFileDebugVerboseEnabled();
@@ -550,6 +565,9 @@ BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PX
             PXScopeFileLog(@"[PXScopeDecision] bundle=%@ proc=%@ host=%@ strict=%d safari=%d webkitHost=%d options=%lu allowed=%d gen=%llu",
                            bundleID, processName, webKitHost, strict, safari, webKitHostScoped, (unsigned long)options, allowed, (unsigned long long)PXScopeGeneration());
         }
+    }
+    } @finally {
+        gPXScopeDecisionDepth--;
     }
 
     return allowed;

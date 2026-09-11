@@ -143,6 +143,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     scope_load = function_body(SOURCES["scope"], "PXLoadScopedAppsFromDisk")
     scope_current = function_body(SOURCES["scope"], "PXCurrentSnapshot")
     scope_invalidate = function_body(SOURCES["scope"], "PXInvalidateScopeDecisionCache")
+    scope_clock = function_body(SOURCES["scope"], "PXMonotonicNow")
+    scope_decision = function_body(SOURCES["scope"], "PXProcessIsAllowedForSpoofing")
+    boot_uptime = function_body(SOURCES["boot"], "hook_systemUptime")
     log_claim = function_body(SOURCES["runtime"], "PXLogOnceClaim")
     log_reset = function_body(SOURCES["runtime"], "PXLogOnceResetNamespace")
 
@@ -157,6 +160,27 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: PXScope observes settings notification", 'CFSTR("com.hydra.tlinkios.settings.changed")' in SOURCES["scope"])
     matrix.check("source: PXScope observes profile notification", 'CFSTR("com.hydra.tlinkios.profileChanged")' in SOURCES["scope"])
     matrix.check("source: PXScope observes scoped-app notification", 'CFSTR("com.hydra.tlinkios.scopedAppsChanged")' in SOURCES["scope"])
+    matrix.check(
+        "source: scope monotonic clock bypasses spoofed NSProcessInfo uptime",
+        "clock_gettime(CLOCK_MONOTONIC" in scope_clock and
+        "return [NSProcessInfo processInfo].systemUptime;" not in scope_clock,
+    )
+    matrix.check(
+        "source: recursive scope decisions fail closed",
+        "if (gPXScopeDecisionDepth != 0) return NO;" in scope_decision and
+        "gPXScopeDecisionDepth++;" in scope_decision and
+        "@finally" in scope_decision and
+        "gPXScopeDecisionDepth--;" in scope_decision,
+    )
+    boot_guard_assignment = boot_uptime.find("isInsideHook = YES;")
+    boot_scope_predicate = boot_uptime.find("shouldSpoof = shouldSpoofBootTimeForApp()")
+    matrix.check(
+        "source: uptime recursion guard covers the scope predicate",
+        boot_guard_assignment >= 0 and
+        boot_scope_predicate > boot_guard_assignment and
+        "@finally" in boot_uptime and
+        "isInsideHook = NO;" in boot_uptime,
+    )
 
     forbidden_scope_tokens = ["scopedAppsCache", "scopedAppsCacheTimestamp", "kScopedAppsPath", "kScopedAppsCacheValidDuration"]
     for token in forbidden_scope_tokens:
