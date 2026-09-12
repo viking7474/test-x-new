@@ -688,6 +688,7 @@ static BOOL PXUUIDInstallGatePasses(void) {
 // Update constructor to initialize the additional hooks
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         // Shared WebKit helpers are present in the injection filter whenever the
         // global scope is non-empty. Reject unscoped helpers before enqueueing
         // any main-queue startup work. The delayed block still re-checks scope.

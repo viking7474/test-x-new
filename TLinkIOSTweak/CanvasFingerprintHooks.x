@@ -1174,6 +1174,7 @@ static void refreshSettings(CFNotificationCenterRef center, void *observer, CFSt
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityWebContent)) return;
         PXFileDebugAIDA64Log("[Canvas.ctor] enter");
         PXLog(@"[CanvasFingerprint] Initializing Canvas Fingerprint Protection hooks");
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];

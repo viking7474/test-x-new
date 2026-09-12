@@ -1716,6 +1716,7 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityWebContent | PXHookCapabilityWebNetworking)) return;
         PXFileDebugAIDA64Log("[IOSVersion.ctor] enter");
         // Capture the main bundle identity before this file installs any NSBundle hooks.
         // Hook bodies below must use this immutable value rather than re-entering

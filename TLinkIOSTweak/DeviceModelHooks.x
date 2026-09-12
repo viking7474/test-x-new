@@ -178,6 +178,7 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         PXFileDebugAIDA64Log("[DeviceModel.ctor] enter");
         PXLog(@"[model] Initializing device model foundation hooks");
         

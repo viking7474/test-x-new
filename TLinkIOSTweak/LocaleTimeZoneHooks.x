@@ -306,6 +306,7 @@ static void LTZSettingsChanged(CFNotificationCenterRef center, void *observer, C
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityWebContent)) return;
         if (!LTZShouldApply()) return;
         %init(PXLocaleTimeZoneRuntime);
         LTZApplyProcessTimeZone();

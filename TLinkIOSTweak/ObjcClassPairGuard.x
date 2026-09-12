@@ -115,6 +115,7 @@ static void hooked_objc_registerClassPair(Class cls) {
 __attribute__((constructor(101)))
 static void PXInstallObjcClassPairGuards(void) {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *processName = [NSProcessInfo processInfo].processName;
 

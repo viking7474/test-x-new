@@ -52,8 +52,10 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary *s
         (void)stop;
         if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return;
         if (PXInjectionBundleIsTLinkIOSApp(bundleID)) return;
-        if (PXInjectionBundleIsSharedWebKitHelper(bundleID)) return;
-        if ([entry isKindOfClass:[NSDictionary class]] && ![entry[@"enabled"] boolValue]) return;
+        if (PXInjectionBundleIsSharedWebKitHelper(bundleID) ||
+            [bundleID isEqualToString:@"com.apple.UIKit"] ||
+            [bundleID isEqualToString:PXInjectionSpringBoardBundleID]) return;
+        if (![entry isKindOfClass:[NSDictionary class]] || ![entry[@"enabled"] boolValue]) return;
         [bundleIDs addObject:bundleID];
     }];
     return PXInjectionNormalizeBundleList(bundleIDs);
@@ -62,15 +64,16 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary *s
 NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> *expandedEnabledBundles) {
     NSArray<NSString *> *normalizedEnabled = PXInjectionNormalizeBundleList(expandedEnabledBundles ?: @[]);
 
-    // Shared WebKit/Safari helpers are intentionally NOT targets of the monolithic
-    // TLinkIOSTweak.dylib. Runtime testing showed that merely loading the full tweak
-    // into an unrelated host's shared helper can stall that host at launch. WebKit
-    // support must live in a separately built minimal tweak with its own filter.
+    // Rebuild coverage targets from real scope anchors. Coverage-only/legacy input
+    // must not keep UIKit injection alive after the last scoped app is removed.
     NSMutableArray<NSString *> *monolithicTargets = [NSMutableArray array];
     for (NSString *bundleID in normalizedEnabled) {
         if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID] ||
             [bundleID isEqualToString:PXInjectionLegacyPlaceholderBundleID]) continue;
         if (PXInjectionBundleIsSharedWebKitHelper(bundleID)) continue;
+        if (PXInjectionBundleIsTLinkIOSApp(bundleID) ||
+            [bundleID isEqualToString:@"com.apple.UIKit"] ||
+            [bundleID isEqualToString:PXInjectionSpringBoardBundleID]) continue;
         [monolithicTargets addObject:bundleID];
     }
 
@@ -79,10 +82,10 @@ NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> *expande
         return @[PXInjectionPlaceholderBundleID];
     }
 
-    // Non-empty scope: Profile Indicator runs inside SpringBoard.
-    if (![monolithicTargets containsObject:PXInjectionSpringBoardBundleID]) {
-        [monolithicTargets addObject:PXInjectionSpringBoardBundleID];
-    }
+    // Loading grants no spoofing permission: every active constructor is gated.
+    [monolithicTargets addObject:PXInjectionSpringBoardBundleID];
+    [monolithicTargets addObject:@"com.apple.UIKit"];
+    [monolithicTargets addObjectsFromArray:PXInjectionDefaultWebKitHelperBundleIDs()];
     return PXInjectionNormalizeBundleList(monolithicTargets);
 }
 
@@ -93,6 +96,7 @@ NSArray<NSString *> *PXInjectionComputeBridgeBundles(NSArray<NSString *> *tweakB
         if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID] ||
             [bundleID isEqualToString:PXInjectionLegacyPlaceholderBundleID]) continue;
         if (PXInjectionBundleIsAppleOrWebKit(bundleID)) continue;
+        if (PXInjectionBundleIsTLinkIOSApp(bundleID)) continue;
         [builder addObject:bundleID];
     }
     NSArray<NSString *> *bridge = PXInjectionNormalizeBundleList(builder);
@@ -123,6 +127,12 @@ BOOL PXInjectionFilterPlistIsValid(NSDictionary *plist,
         if (outReason) *outReason = @"missing-Filter";
         return NO;
     }
+    for (id key in filter) {
+        if (![key isEqual:@"Bundles"] && ![key isEqual:@"Mode"]) {
+            if (outReason) *outReason = @"unsupported-filter-key";
+            return NO; // no Executables/Classes escape from canonical bundle policy
+        }
+    }
     NSString *mode = [filter[@"Mode"] isKindOfClass:[NSString class]] ? filter[@"Mode"] : nil;
     if (mode.length && ![mode isEqualToString:@"Any"]) {
         if (outReason) *outReason = @"invalid-Mode";
@@ -139,10 +149,6 @@ BOOL PXInjectionFilterPlistIsValid(NSDictionary *plist,
             return NO;
         }
         NSString *bundleID = (NSString *)obj;
-        if ([bundleID isEqualToString:@"com.apple.UIKit"]) {
-            if (outReason) *outReason = @"blocked-com.apple.UIKit";
-            return NO;
-        }
         if ([bundleID containsString:@"*"]) {
             if (outReason) *outReason = @"wildcard-not-allowed";
             return NO;

@@ -1,3 +1,4 @@
+#import "PXScope.h"
 #import "UIKit/UIKit.h"
 #import <objc/runtime.h>
 #import "PXFileDebug.h"
@@ -401,6 +402,7 @@ static void setupFreezeHooks(void) {
 
 // Initialize hooks
 __attribute__((constructor)) static void initHooks(void) {
+    if (!PXBootstrapAllows(PXHookCapabilitySpringBoard)) return;
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                     NULL,
                                     PXFreezePreferencesChanged,

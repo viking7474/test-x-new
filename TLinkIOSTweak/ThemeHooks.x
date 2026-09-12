@@ -319,6 +319,7 @@ static void themeSettingsChanged(CFNotificationCenterRef center, void *observer,
 // Constructor to initialize hooks
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         @try {
             PXLog(@"[ThemeHooks] Initializing theme hooks");
             

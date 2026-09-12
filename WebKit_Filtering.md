@@ -1,176 +1,134 @@
-# WebKit Filtering Notes
+# UIKit/WebKit injection and bootstrap policy
 
-## Problem
+TLinkIOS uses broad loading with explicit runtime capabilities. `com.apple.UIKit`
+only makes a process eligible for dylib loading; it grants no spoofing permission.
+The full dylib and linked frameworks are still mapped before a constructor can
+return. This implementation does not claim zero loading cost in unrelated apps.
 
-TLinkIOS no longer uses `com.apple.UIKit` as the tweak filter because that injects into too many UIKit/system helper processes and can break app launch paths.
+## Filter pipeline
 
-Modern apps often use WebKit helper processes for webviews, login, captcha, payment, ads, and Safari/Mail content. If TLinkIOS only injects into the main app bundle, web fingerprinting can leak through:
+`common/PXInjectionFilter.m` is shared by the app writer and mount daemon.
+With at least one real scoped app/extension, the canonical tweak filter contains:
 
-- `com.apple.WebKit.WebContent`: JavaScript, canvas, WebGL, screen metrics, UA-visible behavior.
-- `com.apple.WebKit.Networking`: network requests, headers, cookies, UA paths.
-- `com.apple.WebKit.GPU`: GPU/WebGL-related rendering paths.
-- `com.apple.SafariViewService`: in-app Safari/SFSafariViewController flows.
+- Exact scoped app and discovered extension bundle IDs.
+- `com.apple.UIKit` and `com.apple.springboard`.
+- `com.apple.WebKit.WebContent`, `com.apple.WebKit.Networking`,
+  `com.apple.WebKit.GPU`, and `com.apple.SafariViewService`.
 
-## Filter Strategy
+Empty scope remains placeholder-only. Coverage targets, self bundles and legacy
+placeholders do not count as real scope anchors. Canonicalizing an already
+expanded filter is idempotent. The daemon now canonicalizes both staged filters;
+the Keychain Bridge remains restricted to third-party app/extensions. Alternate
+`Executables`/`Classes` filter keys are rejected rather than silently widening it.
+The checked-in package plist intentionally remains placeholder-only until scope
+selection generates the runtime filter.
 
-The runtime monolithic `TLinkIOSTweak` filter is generated dynamically from the scoped app selection:
+`UberURLHooks.x` is retired and excluded from the build; its source is untouched.
 
-- Main app bundle ID.
-- Exact extension bundle IDs found in `PlugIns/*.appex` and `Plugins/*.appex`.
-- `com.apple.springboard` while scope is non-empty, for Profile Indicator UI.
-- Shared WebKit/Safari helpers are intentionally **excluded** from this monolithic dylib.
+## Runtime capabilities
 
-Current runtime evidence shows that AIDA64 hangs whenever the global scope is non-empty, while constructor/scope hardening alone did not fix it. This build therefore performs a clean A/B isolation by preventing the full `TLinkIOSTweak.dylib` from loading into shared WebKit helpers. If that resolves the hang, WebKit-specific spoofing will move to a separately built minimal helper tweak before these bundles are re-enabled:
+`PXBootstrapDecisionForCurrentProcess()` captures original process identity once,
+then evaluates a live immutable scope snapshot using `common/PXBootstrapPolicy.h`.
+The result includes role, capabilities, denial reason and scope generation.
+All 27 remaining explicit hook constructors in source (including the optional
+research constructor) enter this gate before module setup, logging or scheduling.
+There is one additional debug-only early load marker, guarded by explicit files.
+The old unconditional PXScope constructor is replaced by lazy scope observers.
 
-- `com.apple.SafariViewService`
-- `com.apple.WebKit.WebContent`
-- `com.apple.WebKit.Networking`
-- `com.apple.WebKit.GPU`
+| Process | Allowed capabilities when its owner is scoped and master is on |
+| --- | --- |
+| Main app | Native, WebContent, WebNetworking, WebGraphics, Telephony server identity |
+| Extension | Native, WebContent, WebNetworking, WebGraphics |
+| WebContent | WebContent, WebGraphics |
+| Networking | WebNetworking |
+| GPU | WebGraphics |
+| SafariViewService | WebContent, WebNetworking |
+| SpringBoard | Freeze/Profile Indicator only, independent of spoofing toggles |
+| Unknown helper/system daemon/unscoped app | None |
 
-## WebKit Host Detection
+WebKit helper capabilities also require the Safari-stack toggle. Enabling that
+toggle or full-spoof test mode does not implicitly scope Safari or another app.
+An extension inherits only an actual enclosing `.app/PlugIns/*.appex` owner's
+scope; an explicit disabled extension entry takes precedence. A bundle prefix or
+process-name substring is not ownership evidence.
 
-> **Current isolation state:** the monolithic tweak does not target shared WebKit helpers. The host-detection/runtime rules below are retained for the planned minimal WebKit helper tweak and for app-local WebKit surfaces.
+Canvas's WKWebView construction/document-start script hooks stay in the app and
+SafariViewService. iOS version/UA hooks can run in WebContent and Networking;
+locale/timezone in WebContent; domain blocking in Networking; Metal identity in
+WebContent/GPU. Native UUID/dyld, ObjC runtime guards, private identity wrappers,
+DeviceSpec, storage, Wi-Fi and pasteboard hooks remain excluded from helpers.
+Tweak.x's monolithic native constructor does not run in any WebKit helper.
+Capabilities allow installation; existing feature toggles and profile-backed
+value checks remain additional requirements.
+The Telephony capability gates `CoreTelephonyServerIdentityHooks`; existing
+app/extension network-information hooks remain in the Native capability.
 
+## Host evidence and lifecycle
 
-WebKit helpers are shared services, so their own bundle ID is not enough to decide whether spoofing should run.
+WebKit host resolution reads `MCMMetadataIdentifier` only from captured HOME
+candidates resolving under an application data-container directory. Missing or
+conflicting readable metadata denies access. Names of known helpers are matched
+exactly; unknown WebKit variants have no capability policy and are denied.
+This is container evidence, not an IPC/audit-token ownership proof. It must be
+validated separately for each helper kind and supported iOS/loader version.
 
-TLinkIOS now detects the host app using the WebKit helper HOME container metadata:
+Host evidence is cached for at most one second and tied to scope generation;
+negative results are retryable. Scope predicates fail closed on recursive entry,
+including direct snapshot/setting getters during preference reads. Hook callers
+re-evaluate scope through the central decision; no cached YES permanently grants
+permission. Missing/new identity or settings after a constructor has returned do
+not automatically install hooks: restart the app/helper after changing scope,
+profile, master toggles, or host availability. Existing JS documents and
+process-global changes likewise require restart for a deterministic transition.
 
-```text
-NSHomeDirectory()/.com.apple.mobile_container_manager.metadata.plist
-```
+SpringBoard's capability is independent of spoofing. The existing empty-scope
+filter behavior is preserved: a fresh SpringBoard is not injected when the filter
+is placeholder-only. This change does not redesign Freeze's injection lifecycle.
 
-The key used is:
+## Verification and on-device acceptance
 
-```text
-MCMMetadataIdentifier
-```
-
-Example from Safari:
-
-```text
-bundleID = com.apple.WebKit.WebContent
-MCMMetadataIdentifier = com.apple.mobilesafari
-```
-
-This means WebKit spoofing is only allowed when the detected host bundle is explicitly enabled in `global_scope.plist`.
-
-## Runtime Scope Rules
-
-`PXProcessIsAllowedForSpoofing()` applies these rules:
-
-- Critical system processes are always denied.
-- Main apps/extensions are allowed only if explicitly enabled in `global_scope.plist`.
-- WebKit/SafariViewService helpers are allowed only if:
-  - The hook requested `PXScopeOptionAllowSafariAuthStack`.
-  - Safari/WebKit stack spoofing is enabled.
-  - `MCMMetadataIdentifier` resolves to a host app that is enabled in scope.
-- WebKit helpers are not allowed just because their bundle ID is `com.apple.WebKit.*`.
-
-Scope decision logs include the detected host:
-
-```text
-[PXScopeDecision] bundle=com.apple.WebKit.WebContent proc=com.apple.WebKit.WebContent host=com.apple.mobilesafari strict=0 safari=0 webkitHost=1 options=1 allowed=1
-```
-
-## WebKit-Safe Hook Profile
-
-WebKit helpers should not run the same native/low-level hooks as normal app processes.
-
-Currently skipped in WebKit:
-
-- Main low-level native hook path in `Tweak.x`.
-- `BootTimeHooks.x`
-- `StorageHooks.x`
-- `UUIDHooks.x`
-- `PasteboardHooks.x`
-- `WiFiHook.x`
-- `UserDefaultsHooks.x`
-- `DeviceSpecHooks.x`
-- `NetworkConnectionTypeHooks.x`
-- `WeaponXKeychainBridge` is excluded from WebKit in the generated bridge filter.
-
-Allowed in WebKit when host is scoped:
-
-- Canvas/WebGL fingerprint protection.
-- iOS version and UA-related hooks.
-- Locale/timezone hooks.
-- Missing spoof hooks such as Metal/WebGL-facing names.
-- Domain blocking if enabled by settings.
-
-## Debugging
-
-Enable WebKit trace:
+Local portable production-policy tests:
 
 ```sh
+python scripts/test_bootstrap_policy.py
+python scripts/test_bootstrap_topology.py
+python scripts/test_webkit_unscoped_zero_interference.py
+python scripts/release_hardening.py regression --iterations 2
+```
+
+macOS CI additionally compiles/runs `PXBootstrapScopeTests.m` against the actual
+PXScope adapter and `PXInjectionFilterTests.m` against the actual shared filter
+implementation, then builds the iOS package. Static checks and the C capability
+matrix do not prove dylib load safety, host attribution, or WebKit hook coverage
+on a device.
+
+Compare the previous scoped-filter build against this build with identical
+profile, Freeze state and debug settings. Restart target apps/helpers between
+runs and respring after filter changes. Test scoped and unscoped apps running
+concurrently, explicit extension disable, Safari not in scope, unresolved helper
+host, empty scope, and disabled spoofing master. Check actual API/JS outputs as
+well as installed hooks; merely seeing the dylib in a process is not coverage.
+Measure startup latency, memory, helper crashes/restarts and cross-app identity
+leakage. Test iPhone/iPad and each supported iOS/loader combination before release.
+AIDA64's earlier Freeze failure is not treated as proof for or against load safety.
+
+Optional diagnostics, disabled by default:
+
+```sh
+touch /tmp/px_debug_scope
 touch /tmp/px_debug_webkit
-rm -f /var/mobile/Library/TLinkIOS/webkit_trace.log /tmp/webkit_trace.log
-```
-
-Open Safari, Mail, or an app with WebView, then inspect:
-
-```sh
-cat /var/mobile/Library/TLinkIOS/webkit_trace.log
-cat /tmp/webkit_trace.log
-```
-
-Disable trace:
-
-```sh
-rm -f /tmp/px_debug_webkit
-```
-
-Check daemon filter sync:
-
-```sh
+cat /var/mobile/Library/TLinkIOS/scope_decision.log
+cat /tmp/tlinkios_loads.log
 cat /var/mobile/Library/TLinkIOS/filter_daemon_debug.plist
 cat /Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist
 cat /Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist
 ```
 
-After filter changes, respring so Substrate reloads the updated filter.
-
-## Scope Decision File Logging
-
-Unified logs can miss early or short-lived helper-process messages. Scope decisions can be logged directly to file with flag files:
-
-```sh
-touch /tmp/px_debug_scope
-rm -f /var/mobile/Library/TLinkIOS/scope_decision.log /tmp/scope_decision.log
-```
-
-Read logs:
-
-```sh
-cat /var/mobile/Library/TLinkIOS/scope_decision.log
-cat /tmp/scope_decision.log
-```
-
-Disable scope file logging:
-
-```sh
-rm -f /tmp/px_debug_scope
-```
-
-By default, repeated identical scope decisions are throttled. For full verbose logging, enable:
-
-```sh
-touch /tmp/px_debug_scope_verbose
-```
-
-Disable verbose mode:
-
-```sh
-rm -f /tmp/px_debug_scope_verbose
-```
-
-`/tmp/px_debug_all` also enables scope file logging.
-
-Do not leave verbose scope logging enabled while testing performance-sensitive apps like Safari or Chrome. Verbose mode writes every scope decision to disk and can make older browser builds load slowly. Prefer this sequence for normal tests:
-
-```sh
-rm -f /tmp/px_debug_scope_verbose /tmp/px_debug_all
-touch /tmp/px_debug_scope
-```
-
-Use verbose only for short captures, then disable it immediately.
+`[PXBootstrap]` logs role/capability/reason changes, with numeric definitions in
+`PXBootstrapPolicy.h`. The early marker proves loading even when all module gates
+deny. `[PXScopeDecision]` logs the resolved WebKit host for allowed module paths.
+Rootless installations may use `/var/jb/Library/MobileSubstrate/DynamicLibraries`.
+Disable marker files for performance measurements; do not leave verbose logging
+on. Roll back by installing the previous matching app/daemon/tweak build and
+regenerating filters, then restart affected processes; editing the installed
+plist alone is overwritten by daemon canonicalization.

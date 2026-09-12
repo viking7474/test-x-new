@@ -132,6 +132,7 @@ static NSString *hook_MTLDevice_name(id self, SEL _cmd) {
 static id (*orig_MTLCreateSystemDefaultDevice)(void);
 static id new_MTLCreateSystemDefaultDevice(void) {
     id device = orig_MTLCreateSystemDefaultDevice();
+    if (!PXBootstrapAllows(PXHookCapabilityWebGraphics)) return device;
     if (device) {
         // Check if we already hooked this class
         static NSMutableSet *hookedClasses = nil;
@@ -157,6 +158,7 @@ static id new_MTLCreateSystemDefaultDevice(void) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityWebGraphics)) return;
         PXLog(@"[MissingHooks] Init");
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;

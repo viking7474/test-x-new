@@ -167,6 +167,7 @@ static void PXVPNInstallFunctionHook(void *handle, const char *symbol, void *rep
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         NSString *processName = NSProcessInfo.processInfo.processName;
         if (!PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) return;

@@ -915,6 +915,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 // Setup hooks - Use %ctor for constructor, runs when module loads
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         @try {
             PXFileDebugAIDA64Log("[Storage.ctor] enter");
             PXLog(@"[StorageHooks] Initializing storage hooks");

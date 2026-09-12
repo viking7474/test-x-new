@@ -1,5 +1,11 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
+#import "PXBootstrapPolicy.h"
+
+// Process identity is captured before our first hook. Decisions use live scope
+// snapshots; denied constructors require a process restart after scope changes.
+PXBootstrapDecision PXBootstrapDecisionForCurrentProcess(void);
+BOOL PXBootstrapAllows(uint32_t anyCapability);
 
 typedef NS_OPTIONS(NSUInteger, PXScopeOptions) {
     PXScopeOptionNone = 0,
@@ -12,7 +18,7 @@ typedef NS_OPTIONS(NSUInteger, PXScopeOptions) {
 BOOL PXDeviceSpoofingEnabled(void);
 BOOL PXSafariStackSpoofEnabled(void);
 
-// Test mode: forces spoofing in Safari/Auth stack for failure testing.
+// Test mode enables Safari/Auth surfaces but never bypasses explicit owner scope.
 BOOL PXFullSpoofTestModeEnabled(void);
 
 // Display spoof controls (native + web). These are intended for test builds.

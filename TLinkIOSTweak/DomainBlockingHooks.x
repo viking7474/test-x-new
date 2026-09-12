@@ -600,6 +600,7 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityWebNetworking)) return;
         // Never run domain blocking work in SpringBoard / critical system processes.
         if (PXIsSpringBoardProcess()) return;
         NSString *bundleID = getCurrentBundleID();

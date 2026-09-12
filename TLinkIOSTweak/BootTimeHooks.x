@@ -558,6 +558,7 @@ static void installSystemCallHooks(void) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         @try {
             PXFileDebugAIDA64Log("[BootTime.ctor] enter");
             NSString *bundleID = getCurrentBundleID();

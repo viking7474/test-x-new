@@ -34,6 +34,8 @@ PHASE_TESTS = [
     "scripts/test_phase13_lockdown_hook_wiring_static.py",
 ]
 EXTENDED_PYTHON_TESTS = [
+    "scripts/test_bootstrap_policy.py",
+    "scripts/test_bootstrap_topology.py",
     "scripts/test_device_spec_p1_1.py",
     "scripts/test_device_spec_p1_2.py",
     "scripts/test_device_spec_p1_3.py",

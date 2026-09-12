@@ -174,6 +174,7 @@ static void PXInstallCoreTelephonyServerIdentityHooks(void) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityTelephony)) return;
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         NSString *processName = NSProcessInfo.processInfo.processName;
         if (!bundleID.length ||

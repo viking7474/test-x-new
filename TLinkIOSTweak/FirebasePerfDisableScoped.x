@@ -50,6 +50,7 @@ static void PXDisableFIRPerformance(void) {
 __attribute__((constructor(101)))
 static void PXFirebasePerfDisableCtor(void) {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         // Unscoped/shared helpers must not enqueue startup work at all.
         if (!PXIsInTLinkIOSScope()) return;
 

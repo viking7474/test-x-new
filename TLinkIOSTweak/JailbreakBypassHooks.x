@@ -5123,6 +5123,7 @@ static void PXJBInstallLSCanOpenURLManagerHook(void) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         // P0-C: resolve process identity and scope once, before installing hooks.
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;

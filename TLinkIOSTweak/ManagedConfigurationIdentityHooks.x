@@ -150,6 +150,7 @@ static void PXInstallManagedConfigurationIdentityHooks(void) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         NSString *processName = NSProcessInfo.processInfo.processName;
         if (!bundleID.length ||

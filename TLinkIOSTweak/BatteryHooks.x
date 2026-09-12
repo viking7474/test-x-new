@@ -311,6 +311,7 @@ static BOOL hook_isLowPowerModeEnabled(NSProcessInfo *self, SEL _cmd) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         PXFileDebugAIDA64Log("[Battery.ctor] enter");
         NSString *bundleID = getCurrentBundleID();
         NSString *proc = [NSProcessInfo processInfo].processName;

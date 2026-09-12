@@ -9,11 +9,82 @@
 #import <sys/time.h>
 #import <time.h>
 #import <unistd.h>
+#import <stdlib.h>
 
 static __thread BOOL gPXReadingSecuritySettings = NO;
 // Scope decisions are called from hook predicates. Nested evaluation must fail
 // closed instead of re-entering Foundation/other hooks recursively.
 static __thread unsigned int gPXScopeDecisionDepth = 0;
+
+// Captured once, before any TLinkIOS hook is installed. Do not classify a process
+// from subsequently projected NSBundle/NSProcessInfo values or substring matches.
+static NSString *gPXProcessBundleID;
+static NSString *gPXProcessName;
+static NSString *gPXExtensionOwner;
+static NSArray<NSString *> *gPXHostHomes;
+static PXProcessRole gPXProcessRole = PXProcessUnknown;
+static void PXScopeStartObserving(void);
+
+static void PXCaptureProcessIdentity(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSBundle *bundle = NSBundle.mainBundle;
+        gPXProcessBundleID = [bundle.bundleIdentifier copy] ?: @"";
+        gPXProcessName = [NSProcessInfo.processInfo.processName copy] ?: @"";
+        NSString *path = bundle.bundlePath.stringByStandardizingPath;
+        NSString *executable = bundle.executablePath;
+        if ([gPXProcessBundleID isEqualToString:@"com.apple.springboard"] &&
+            [gPXProcessName isEqualToString:@"SpringBoard"]) {
+            gPXProcessRole = PXProcessSpringBoard;
+        } else if (PXIsCriticalSystemProcess(gPXProcessBundleID, gPXProcessName) ||
+                   [gPXProcessBundleID isEqualToString:@"com.hydra.tlinkios"] ||
+                   [gPXProcessBundleID isEqualToString:@"com.hydra.projectx"] ||
+                   [gPXProcessBundleID isEqualToString:@"com.hydra.weaponx"]) {
+            gPXProcessRole = PXProcessSystemDaemon;
+        } else if ([gPXProcessBundleID isEqualToString:@"com.apple.WebKit.WebContent"]) {
+            gPXProcessRole = PXProcessWebContent;
+        } else if ([gPXProcessBundleID isEqualToString:@"com.apple.WebKit.Networking"]) {
+            gPXProcessRole = PXProcessWebNetworking;
+        } else if ([gPXProcessBundleID isEqualToString:@"com.apple.WebKit.GPU"]) {
+            gPXProcessRole = PXProcessWebGPU;
+        } else if ([gPXProcessBundleID isEqualToString:@"com.apple.SafariViewService"]) {
+            gPXProcessRole = PXProcessSafariViewService;
+        } else if (PXIsWebKitHelperProcess(gPXProcessBundleID, gPXProcessName)) {
+            // A new/private helper variant needs an explicit policy first.
+            gPXProcessRole = PXProcessUnknown;
+        } else if ([executable hasPrefix:@"/usr/"] || [executable hasPrefix:@"/bin/"] ||
+                   [executable hasPrefix:@"/sbin/"] || [executable hasPrefix:@"/var/jb/usr/"]) {
+            gPXProcessRole = PXProcessSystemDaemon;
+        } else if ([path.pathExtension.lowercaseString isEqualToString:@"appex"]) {
+            gPXProcessRole = PXProcessExtension;
+            // Inherit only from an actual enclosing .app/PlugIns/*.appex bundle.
+            // A disabled explicit extension entry always overrides inheritance.
+            NSString *plugins = path.stringByDeletingLastPathComponent;
+            NSString *ownerPath = plugins.stringByDeletingLastPathComponent;
+            if ([plugins.lastPathComponent.lowercaseString isEqualToString:@"plugins"] &&
+                [ownerPath.pathExtension.lowercaseString isEqualToString:@"app"]) {
+                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                    [ownerPath stringByAppendingPathComponent:@"Info.plist"]];
+                id owner = info[@"CFBundleIdentifier"];
+                if ([owner isKindOfClass:NSString.class]) gPXExtensionOwner = [owner copy];
+            }
+        } else if ([path.pathExtension.lowercaseString isEqualToString:@"app"] &&
+                   gPXProcessBundleID.length) {
+            gPXProcessRole = PXProcessMainApp;
+        }
+        if (gPXProcessRole >= PXProcessWebContent && gPXProcessRole <= PXProcessSafariViewService) {
+            NSMutableOrderedSet *homes = [NSMutableOrderedSet orderedSet];
+            NSString *home = NSHomeDirectory();
+            if (home.length) [homes addObject:home.stringByStandardizingPath];
+            for (NSString *key in @[@"HOME", @"CFFIXED_USER_HOME"]) {
+                const char *raw = getenv(key.UTF8String);
+                NSString *candidate = raw ? [NSString stringWithUTF8String:raw] : nil;
+                if (candidate.length) [homes addObject:candidate.stringByStandardizingPath];
+            }
+            gPXHostHomes = [homes.array copy];
+        }
+    });
+}
 
 BOOL PXScopeIsReadingSecuritySettings(void) {
     return gPXReadingSecuritySettings;
@@ -313,22 +384,33 @@ static BOOL PXScopedBundleEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bun
     return [entry[@"enabled"] boolValue];
 }
 
+static BOOL PXScopedOwnerEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bundleID) {
+    if (!bundleID.length) return NO;
+    if (gPXProcessRole == PXProcessExtension && [bundleID isEqualToString:gPXProcessBundleID] &&
+        snap.scopedApps[bundleID] == nil && gPXExtensionOwner.length) {
+        return PXScopedBundleEnabledInSnapshot(snap, gPXExtensionOwner);
+    }
+    return PXScopedBundleEnabledInSnapshot(snap, bundleID);
+}
+
 static BOOL PXBundleIsStrictlyScopedInSnapshot(PXScopeSnapshot *snap, NSString *bundleID, NSString *processName) {
     if (!snap.deviceSpoofEnabled) return NO;
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
     if ([bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID isEqualToString:@"com.hydra.weaponx"]) return NO;
     if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
     if (PXIsWebKitHelperProcess(bundleID, processName)) return NO;
-    return PXScopedBundleEnabledInSnapshot(snap, bundleID);
+    return PXScopedOwnerEnabledInSnapshot(snap, bundleID);
 }
 
 NSDictionary<NSString *, NSDictionary *> *PXScopedAppsSnapshot(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return @{};
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return [snap.scopedApps isKindOfClass:[NSDictionary class]] ? snap.scopedApps : @{};
 }
 
 BOOL PXBundleIsEnabledInScope(NSString *bundleID) {
-    return PXScopedBundleEnabledInSnapshot(PXCurrentSnapshot(), bundleID);
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
+    return PXScopedOwnerEnabledInSnapshot(PXCurrentSnapshot(), bundleID);
 }
 
 NSArray<NSString *> *PXBrowserBundleIdentifierPrefixes(void) {
@@ -361,42 +443,50 @@ BOOL PXIsSafariBrowserBundleIdentifier(NSString *bundleID) {
         ([bundleID isEqualToString:safariPrefix] || [bundleID hasPrefix:safariPrefix]);
 }
 
-__attribute__((constructor))
-static void PXScopeInit(void) {
-    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
-    if (!center) return;
-    CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.profileChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.scopedAppsChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+static void PXScopeStartObserving(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+        if (!center) return;
+        CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.profileChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.scopedAppsChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    });
 }
 
 BOOL PXDeviceSpoofingEnabled(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return snap.deviceSpoofEnabled;
 }
 
 BOOL PXSafariStackSpoofEnabled(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return snap.safariStackEnabled;
 }
 
 BOOL PXFullSpoofTestModeEnabled(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return snap.fullSpoofTestModeEnabled;
 }
 
 BOOL PXDisplayUIScaleSpoofEnabled(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return snap.displayUIScaleEnabled;
 }
 
 BOOL PXDisplayPixelMetricsSpoofEnabled(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return snap.displayPixelMetricsEnabled;
 }
 
 BOOL PXDisplayWebScreenSpoofEnabled(void) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     return snap.displayWebScreenEnabled;
 }
@@ -425,56 +515,71 @@ BOOL PXIsCriticalSystemProcess(NSString *bundleID, NSString *processName) {
 }
 
 BOOL PXIsSpringBoardProcess(void) {
-    static int cached = -1;
-    if (cached != -1) return cached == 1;
-    NSString *proc = [NSProcessInfo processInfo].processName;
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    cached = ([proc isEqualToString:@"SpringBoard"] || [bid isEqualToString:@"com.apple.springboard"]) ? 1 : 0;
-    return cached == 1;
+    return PXBootstrapAllows(PXHookCapabilitySpringBoard);
 }
 
 BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
-    if ([bundleID isEqualToString:@"com.apple.SafariViewService"]) return YES;
-    if ([bundleID hasPrefix:@"com.apple.WebKit"]) return YES;
-    if ([processName isKindOfClass:[NSString class]]) {
-        if ([processName containsString:@"SafariViewService"] ||
-            [processName containsString:@"WebContent"] ||
-            [processName containsString:@"Networking"] ||
-            [processName containsString:@"GPU"] ||
-            [processName containsString:@"WebKit"]) {
-            return YES;
-        }
+    if ([bundleID isEqualToString:@"com.apple.SafariViewService"] ||
+        [bundleID hasPrefix:@"com.apple.WebKit."]) return YES;
+    // Exact fallback identifies helpers with no bundle; bootstrap still denies
+    // unknown bundle identity. Never classify an app called "GPU Viewer" as WebKit.
+    if (!bundleID.length) {
+        return [processName isEqualToString:@"SafariViewService"] ||
+            [processName isEqualToString:@"com.apple.WebKit.WebContent"] ||
+            [processName isEqualToString:@"com.apple.WebKit.Networking"] ||
+            [processName isEqualToString:@"com.apple.WebKit.GPU"];
     }
     return NO;
 }
 
 NSString *PXWebKitHostBundleIdentifier(void) {
-    static NSString *resolvedHostBundle = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSString *resolved = nil;
-        NSArray<NSString *> *homeCandidates = @[
-            NSHomeDirectory() ?: @"",
-            [[[NSProcessInfo processInfo] environment][@"HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"HOME"] : @"",
-            [[[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] isKindOfClass:[NSString class]] ? [[NSProcessInfo processInfo] environment][@"CFFIXED_USER_HOME"] : @""
-        ];
-        for (NSString *home in homeCandidates) {
-            if (![home isKindOfClass:[NSString class]] || !home.length) continue;
-            NSString *metadataPath = [home stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+    // Called by bootstrap after canonical identity capture. No dispatch_once
+    // negative sentinel: sandbox/container metadata can become readable later.
+    if (!gPXHostHomes.count) return nil;
+    static os_unfair_lock hostLock = OS_UNFAIR_LOCK_INIT;
+    static NSString *cachedHost;
+    static uint64_t cachedGeneration;
+    static NSTimeInterval expires;
+    NSTimeInterval now = PXMonotonicNow();
+    uint64_t generation = PXScopeGeneration();
+    if (!os_unfair_lock_trylock(&hostLock)) return nil; // no loader-thread wait
+    if (generation == cachedGeneration && now < expires) {
+        NSString *host = cachedHost;
+        os_unfair_lock_unlock(&hostLock);
+        return host;
+    }
+    // Only container metadata from application data directories is admissible.
+    // Conflicting readable identifiers are ambiguous and must fail closed.
+    NSString *resolved = nil;
+    @try {
+        for (NSString *home in gPXHostHomes) {
+            NSString *canonical = home.stringByResolvingSymlinksInPath;
+            if (![canonical hasPrefix:@"/private/var/mobile/Containers/Data/Application/"] &&
+                ![canonical hasPrefix:@"/var/mobile/Containers/Data/Application/"]) continue;
+            NSString *metadataPath = [canonical stringByAppendingPathComponent:
+                @".com.apple.mobile_container_manager.metadata.plist"];
             NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
-            NSString *identifier = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] ? metadata[@"MCMMetadataIdentifier"] : nil;
-            if (identifier.length) {
-                resolved = [identifier copy];
+            id identifier = [metadata isKindOfClass:NSDictionary.class] ? metadata[@"MCMMetadataIdentifier"] : nil;
+            if (![identifier isKindOfClass:NSString.class] || ![identifier length]) continue;
+            if (resolved && ![resolved isEqualToString:identifier]) {
+                resolved = nil;
                 break;
             }
+            resolved = identifier;
         }
-        // Empty sentinel means resolution completed with no host bundle.
-        resolvedHostBundle = resolved ?: @"";
-    });
-    return resolvedHostBundle.length ? resolvedHostBundle : nil;
+        cachedHost = [resolved copy];
+        cachedGeneration = generation;
+        expires = now + 1.0;
+    } @finally {
+        os_unfair_lock_unlock(&hostLock);
+    }
+    return resolved;
 }
 
 BOOL PXWebKitHostIsScopedForSpoofing(void) {
+    PXBootstrapDecision decision = PXBootstrapDecisionForCurrentProcess();
+    if (decision.role < PXProcessWebContent || decision.role > PXProcessSafariViewService ||
+        !decision.capabilities) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     if (!snap.deviceSpoofEnabled) return NO;
     NSString *host = PXWebKitHostBundleIdentifier();
@@ -510,12 +615,80 @@ BOOL PXIsSafariStackProcess(NSString *bundleID, NSString *processName) {
 }
 
 BOOL PXBundleIsStrictlyScopedForSpoofing(NSString *bundleID) {
+    if (gPXScopeDecisionDepth != 0 || gPXReadingSecuritySettings) return NO;
     PXScopeSnapshot *snap = PXCurrentSnapshot();
     NSString *proc = [NSProcessInfo processInfo].processName;
     return PXBundleIsStrictlyScopedInSnapshot(snap, bundleID, proc);
 }
 
+PXBootstrapDecision PXBootstrapDecisionForCurrentProcess(void) {
+    PXBootstrapDecision denied = {PXProcessUnknown, 0, PXBootstrapDeniedUnknown, 0};
+    if (gPXScopeDecisionDepth != 0) return denied;
+    gPXScopeDecisionDepth++;
+    PXBootstrapDecision result = denied;
+    @try {
+        @autoreleasepool {
+            PXCaptureProcessIdentity();
+            if (gPXProcessRole == PXProcessSpringBoard ||
+                gPXProcessRole == PXProcessSystemDaemon || gPXProcessRole == PXProcessUnknown) {
+                result = PXBootstrapEvaluate(gPXProcessRole, false, false, false, 0);
+            } else {
+                PXScopeSnapshot *snap = PXCurrentSnapshot();
+                BOOL ownerScoped = NO;
+                if (gPXProcessRole == PXProcessMainApp || gPXProcessRole == PXProcessExtension) {
+                    ownerScoped = PXScopedOwnerEnabledInSnapshot(snap, gPXProcessBundleID);
+                } else if (snap.deviceSpoofEnabled && snap.safariStackEnabled) {
+                    NSString *host = PXWebKitHostBundleIdentifier();
+                    ownerScoped = host.length && !PXIsWebKitHelperProcess(host, nil) &&
+                        !PXIsCriticalSystemProcess(host, nil) &&
+                        ![host isEqualToString:@"com.hydra.tlinkios"] &&
+                        ![host isEqualToString:@"com.hydra.weaponx"] &&
+                        ![host isEqualToString:@"com.hydra.projectx"] &&
+                        PXScopedBundleEnabledInSnapshot(snap, host);
+                }
+                result = PXBootstrapEvaluate(gPXProcessRole, ownerScoped,
+                    snap.deviceSpoofEnabled, snap.safariStackEnabled, snap.generation);
+                if (result.capabilities) PXScopeStartObserving();
+            }
+            if (PXScopeFileDebugEnabled()) {
+                static os_unfair_lock traceLock = OS_UNFAIR_LOCK_INIT;
+                static PXBootstrapDecision last;
+                static BOOL hasLast = NO;
+                os_unfair_lock_lock(&traceLock);
+                BOOL changed = !hasLast || last.role != result.role ||
+                    last.capabilities != result.capabilities || last.reason != result.reason ||
+                    last.scopeGeneration != result.scopeGeneration;
+                last = result;
+                hasLast = YES;
+                os_unfair_lock_unlock(&traceLock);
+                if (changed) {
+                    PXScopeFileLog(@"[PXBootstrap] bundle=%@ proc=%@ role=%u capabilities=0x%x reason=%u gen=%llu",
+                        gPXProcessBundleID, gPXProcessName, (unsigned)result.role,
+                        (unsigned)result.capabilities, (unsigned)result.reason,
+                        (unsigned long long)result.scopeGeneration);
+                }
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        result = denied;
+    } @finally {
+        gPXScopeDecisionDepth--;
+    }
+    return result;
+}
+
+BOOL PXBootstrapAllows(uint32_t anyCapability) {
+    return PXBootstrapDecisionAllows(PXBootstrapDecisionForCurrentProcess(), anyCapability);
+}
+
 BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PXScopeOptions options) {
+    PXBootstrapDecision decision = PXBootstrapDecisionForCurrentProcess();
+    uint32_t requested = PXHookCapabilityNative;
+    if (options & PXScopeOptionAllowSafariAuthStack) {
+        requested |= PXHookCapabilityWebContent | PXHookCapabilityWebNetworking | PXHookCapabilityWebGraphics;
+    }
+    if (!PXBootstrapDecisionAllows(decision, requested)) return NO;
+    if (![bundleID isEqualToString:gPXProcessBundleID]) return NO;
     if (PXIsCriticalSystemProcess(bundleID, processName)) return NO;
     if (gPXScopeDecisionDepth != 0) return NO;
 
@@ -535,10 +708,7 @@ BOOL PXProcessIsAllowedForSpoofing(NSString *bundleID, NSString *processName, PX
                             !PXIsCriticalSystemProcess(webKitHost, processName) &&
                             PXScopedBundleEnabledInSnapshot(snap, webKitHost);
     BOOL strict = PXBundleIsStrictlyScopedInSnapshot(snap, bundleID, processName);
-    BOOL safari = !webKitHelper &&
-                  ((options & PXScopeOptionAllowSafariAuthStack) != 0) &&
-                  safariStackEnabled &&
-                  PXIsSafariStackProcess(bundleID, processName);
+    BOOL safari = NO; // UIKit injection never implicitly grants unscoped Safari access.
     allowed = strict || safari || webKitHostScoped;
 
     // Decision log only when debug flags enabled — no hot-path file/NSLog otherwise.

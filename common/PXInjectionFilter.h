@@ -12,7 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Bundle ID written when a filter would otherwise be empty (Substrate rejects Bundles=[]).
 extern NSString * const PXInjectionPlaceholderBundleID;
-/// SpringBoard always injects the tweak so the Profile Indicator UI can load.
+/// SpringBoard target added while scope is non-empty for Freeze/Profile Indicator.
 extern NSString * const PXInjectionSpringBoardBundleID;
 
 /// Sorted, de-duplicated, non-empty string bundle IDs (stable output for compare + writing).
@@ -24,8 +24,7 @@ BOOL PXInjectionBundleIsTLinkIOSApp(NSString * _Nullable bundleID);
 /// Apple- or WebKit-family bundles (excluded from the keychain bridge filter).
 BOOL PXInjectionBundleIsAppleOrWebKit(NSString * _Nullable bundleID);
 
-/// Shared Safari/WebKit helper bundles. These are intentionally excluded from the
-/// monolithic TLinkIOSTweak filter and reserved for a future minimal WebKit tweak.
+/// Safari/WebKit helper coverage targets; runtime bootstrap requires a scoped host.
 BOOL PXInjectionBundleIsSharedWebKitHelper(NSString * _Nullable bundleID);
 NSArray<NSString *> *PXInjectionDefaultWebKitHelperBundleIDs(void);
 
@@ -33,9 +32,9 @@ NSArray<NSString *> *PXInjectionDefaultWebKitHelperBundleIDs(void);
 /// Only ScopedApps entries with enabled == YES; TLinkIOS and WebKit/SafariViewService removed.
 NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary * _Nullable scopePlist);
 
-/// Final monolithic TLinkIOSTweak bundle list: scoped app/extensions + SpringBoard.
-/// Shared Safari/WebKit helpers are always removed so unrelated hosts never load the
-/// full tweak merely because some other app is scoped. Empty -> placeholder-only.
+/// Final tweak filter: app/extensions + SpringBoard + UIKit + explicit WebKit cluster.
+/// Coverage targets alone never count as scope anchors. Empty -> placeholder-only.
+/// Idempotent: safe to canonicalize an already generated staging filter.
 NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> * _Nullable expandedEnabledBundles);
 
 /// Keychain bridge bundle list: third-party app/extensions only (Apple/WebKit + placeholder dropped).

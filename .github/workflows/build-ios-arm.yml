@@ -16,6 +16,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Test bootstrap scope and injection filter adapters
+        run: |
+          set -euo pipefail
+          xcrun clang -fobjc-arc -fblocks -Icommon tests/PXBootstrapScopeTests.m \
+            -framework Foundation -framework CoreFoundation -o "$RUNNER_TEMP/px-bootstrap-scope"
+          "$RUNNER_TEMP/px-bootstrap-scope"
+          xcrun clang -fobjc-arc -fblocks -Icommon common/PXInjectionFilter.m \
+            tests/PXInjectionFilterTests.m tests/PXInjectionFilterMain.m \
+            -framework Foundation -o "$RUNNER_TEMP/px-injection-filter"
+          "$RUNNER_TEMP/px-injection-filter"
+
       - name: Audit backup/restore hardening invariants
         run: |
           python3 scripts/audit_backup_restore_hardening.py --self-test

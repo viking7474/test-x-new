@@ -891,6 +891,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         if (PXIsSpringBoardProcess()) return;
 
         NSString *bundleID = getCurrentBundleID();

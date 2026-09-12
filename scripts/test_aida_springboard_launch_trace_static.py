@@ -33,5 +33,5 @@ require('PXTLinkIOSTweakEarlyLoadMarker' in TWEAK and 'PXFileDebugLoadMarker("TL
 pre_scope = TWEAK.index('[Tweak.ctor] pre-scope')
 scope_return = TWEAK.index('if (!currentProcessAllowed)')
 require(pre_scope < scope_return,
-        "AIDA ctor marker executes before unscoped process early-return")
+        "AIDA native ctor marker precedes its second scope check")
 print("PASS: AIDA64 SpringBoard launch root-cause trace static regression")

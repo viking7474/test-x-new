@@ -742,6 +742,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         @try {
             PXLog(@"[WiFiHook] Initializing WiFi hooks");
             

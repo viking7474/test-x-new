@@ -531,6 +531,7 @@ static BOOL isUUIDKey(NSString *key) {
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         // Skip for system processes
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;

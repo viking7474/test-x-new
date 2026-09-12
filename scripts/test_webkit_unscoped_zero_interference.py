@@ -82,7 +82,7 @@ require(return_pos < dispatch_pos,
 
 filter_source = text("common/PXInjectionFilter.m")
 require("PXInjectionBundleIsSharedWebKitHelper(bundleID)" in filter_source,
-        "Monolithic filter strips shared WebKit helpers centrally")
+        "Filter canonicalization separates helper coverage from scope anchors")
 require("PXInjectionPlaceholderBundleID" in filter_source and
         "PXInjectionLegacyPlaceholderBundleID" in filter_source,
         "Filter migration preserves placeholder-only empty state")
@@ -91,5 +91,12 @@ require("addObjectsFromArray:PXDefaultWebKitHelperBundleIDs" not in view,
         "App-side filter writer no longer appends WebKit cluster to monolithic tweak")
 daemon = text("WeaponXMountDaemon/WeaponXDaemon.m")
 require("PXInjectionComputeTweakBundles(bundles)" in daemon,
-        "Daemon sanitizes stale monolithic WebKit targets before install")
-print("PASS: WebKit unscoped zero-interference static regression")
+        "Daemon canonicalizes broad coverage before install")
+
+require('[monolithicTargets addObjectsFromArray:PXInjectionDefaultWebKitHelperBundleIDs()]' in filter_source and
+        '[monolithicTargets addObject:@"com.apple.UIKit"]' in filter_source,
+        "Non-empty tweak filter restores explicit WebKit and UIKit coverage")
+require('PXInjectionComputeBridgeBundles(bundles)' in daemon,
+        "Daemon separately narrows bridge staging before installation")
+
+print("PASS: WebKit constructor and filter static regression")

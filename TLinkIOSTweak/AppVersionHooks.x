@@ -547,6 +547,7 @@ static void PXAppVersionCacheInvalidateNotification(CFNotificationCenterRef cent
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         PXFileDebugAIDA64Log("[AppVersion.ctor] enter");
         // Capture main bundle ID BEFORE installing hooks — prevents
         // infoDictionary ↔ bundleIdentifier recursion under spoof paths.

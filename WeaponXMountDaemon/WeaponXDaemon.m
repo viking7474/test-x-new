@@ -212,31 +212,29 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
             continue;
         }
 
-        // Migration/safety invariant: the monolithic TLinkIOSTweak must never be
-        // installed into shared WebKit/Safari helpers. Older staging plists may
-        // still contain that cluster, so sanitize the persisted staging source
-        // before atomically installing it. App/extension/SpringBoard targets remain.
+        // Canonicalize both staged filters. Broad UIKit/WebKit coverage belongs
+        // only to TLinkIOSTweak; stale/malformed bridge targets are narrowed here.
+        NSArray *sanitizedBundles;
         if ([name isEqualToString:@"TLinkIOSTweak.plist"]) {
-            NSArray *sanitizedBundles = PXInjectionComputeTweakBundles(bundles);
-            if (![sanitizedBundles isEqualToArray:PXInjectionNormalizeBundleList(bundles)]) {
-                NSDictionary *sanitizedPlist = PXInjectionFilterPlistDictionary(sanitizedBundles);
-                if (![sanitizedPlist writeToFile:src atomically:YES]) {
-                    result[name] = @{
-                        @"status": @"sanitize-staging-failed",
-                        @"src": src,
-                        @"dst": dst,
-                        @"bundles": bundles ?: @[],
-                        @"sanitizedBundles": sanitizedBundles ?: @[]
-                    };
-                    continue;
-                }
-                chmod([src fileSystemRepresentation], 0644);
-                chown([src fileSystemRepresentation], 501, 501);
-                plist = sanitizedPlist;
-                bundles = sanitizedBundles;
-                [self log:[NSString stringWithFormat:@"Sanitized legacy WebKit helpers from %@", name]
-                     withType:OS_LOG_TYPE_INFO];
+            sanitizedBundles = PXInjectionComputeTweakBundles(bundles);
+        } else {
+            sanitizedBundles = PXInjectionComputeBridgeBundles(bundles);
+        }
+        if (![sanitizedBundles isEqualToArray:PXInjectionNormalizeBundleList(bundles)]) {
+            NSDictionary *sanitizedPlist = PXInjectionFilterPlistDictionary(sanitizedBundles);
+            if (![sanitizedPlist writeToFile:src atomically:YES]) {
+                result[name] = @{
+                    @"status": @"sanitize-staging-failed", @"src": src, @"dst": dst,
+                    @"bundles": bundles ?: @[], @"sanitizedBundles": sanitizedBundles ?: @[]
+                };
+                continue;
             }
+            chmod([src fileSystemRepresentation], 0644);
+            chown([src fileSystemRepresentation], 501, 501);
+            plist = sanitizedPlist;
+            bundles = sanitizedBundles;
+            [self log:[NSString stringWithFormat:@"Canonicalized injection policy for %@", name]
+                 withType:OS_LOG_TYPE_INFO];
         }
 
         NSDictionary *syncResult = [self atomicInstallPlistFromPath:src toPath:dst bundles:bundles];

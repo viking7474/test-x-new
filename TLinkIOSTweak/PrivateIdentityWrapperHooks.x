@@ -250,6 +250,7 @@ static void PXPrivateIdentityDyldImageAdded(const struct mach_header *header, in
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         if (!PXPrivateIdentityProcessAllowed()) return;
         gPXPrivateWrapperInstalled = [NSMutableArray array];
         gPXPrivateWrapperInstallQueue =

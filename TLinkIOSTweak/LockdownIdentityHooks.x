@@ -237,6 +237,7 @@ static void PXLockdownSettingsChanged(CFNotificationCenterRef center, void *obse
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         @try {
             NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
             if (bundleID.length == 0) return;

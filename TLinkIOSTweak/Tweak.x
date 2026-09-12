@@ -4247,6 +4247,7 @@ static char* hook_GSSystemGetSerialNo(void) {
 
 // Constructor
 %ctor {
+    if (!PXBootstrapAllows(PXHookCapabilityNative | PXHookCapabilitySpringBoard)) return;
     NSString *currentProcessName = [NSProcessInfo processInfo].processName;
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     // SpringBoard hosts Profile Indicator only. Loading the full spoof stack + debug I/O
@@ -4271,18 +4272,16 @@ static char* hook_GSSystemGetSerialNo(void) {
         return;
     }
 
-    // Injection filters intentionally include shared WebKit helpers whenever the
-    // scope is non-empty. Resolve host scope before any observer registration,
-    // debug tracing, environment setup or NSUserDefaults synchronization so an
-    // unrelated/unscoped host sees effectively zero TLinkIOS startup work.
+    // The central bootstrap above restricts this constructor to native app work.
+    // Dedicated capability-gated modules own WebKit helper support. Keep the
+    // legacy predicate as a live scope re-check before native infrastructure.
     BOOL isWebKitHelper = PXIsWebKitHelperProcess(currentBundleID, currentProcessName);
     BOOL currentProcessAllowed = currentBundleID.length &&
         PXProcessIsAllowedForSpoofing(currentBundleID,
                                       currentProcessName,
                                       PXScopeOptionAllowSafariAuthStack);
-    // Root-cause diagnostics: this marker executes before the unscoped early-return,
-    // so a debug run can distinguish "dylib loaded but denied by scope" from
-    // "dylib never loaded" without changing the actual scope decision.
+    // The early load marker and PXBootstrap trace report denied processes.
+    // This marker records the native constructor's second scope check.
     PXFileDebugAIDA64Log("[Tweak.ctor] pre-scope bundle=%s process=%s allowed=%d webkit=%d",
                          currentBundleID.UTF8String ?: "<nil>",
                          currentProcessName.UTF8String ?: "<nil>",

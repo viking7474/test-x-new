@@ -1322,6 +1322,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 
 %ctor {
     @autoreleasepool {
+        if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
         @try {
             PXFileDebugAIDA64Log("[DeviceSpec.ctor] enter");
             PXLog(@"[DeviceSpec] Initializing device specifications spoofing hooks");
