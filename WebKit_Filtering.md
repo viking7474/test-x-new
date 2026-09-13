@@ -87,7 +87,24 @@ is placeholder-only. This change does not redesign Freeze's injection lifecycle.
 
 ## Verification and on-device acceptance
 
-Local portable production-policy tests:
+### Current accepted baseline
+
+The current production policy is the broad filter described above: when at least
+one real app/extension is scoped, `TLinkIOSTweak.plist` contains the scoped
+app/extensions plus SpringBoard, UIKit, SafariViewService and the WebKit helper
+cluster. This configuration has been exercised on-device across multiple apps and
+is the accepted stable baseline. Do not narrow the filter or introduce an A/B
+coverage variant merely as routine verification when the build is behaving
+normally.
+
+The current source does **not** implement runtime selector files named
+`enable_webkit_filter` or `enable_uikit_filter`. Creating or deleting such files
+does not select narrow/WebKit/UIKit stages. `PXInjectionComputeTweakBundles()` and
+the daemon canonicalizer intentionally reconstruct the current broad policy for
+every non-empty real scope. Any future staged selector must be implemented and
+tested in both the app writer and daemon before it is used as an experiment.
+
+Local portable production-policy tests remain useful before packaging:
 
 ```sh
 python scripts/test_bootstrap_policy.py
@@ -102,33 +119,99 @@ implementation, then builds the iOS package. Static checks and the C capability
 matrix do not prove dylib load safety, host attribution, or WebKit hook coverage
 on a device.
 
-Compare the previous scoped-filter build against this build with identical
-profile, Freeze state and debug settings. Restart target apps/helpers between
-runs and respring after filter changes. Test scoped and unscoped apps running
-concurrently, explicit extension disable, Safari not in scope, unresolved helper
-host, empty scope, and disabled spoofing master. Check actual API/JS outputs as
-well as installed hooks; merely seeing the dylib in a process is not coverage.
-Measure startup latency, memory, helper crashes/restarts and cross-app identity
-leakage. Test iPhone/iPad and each supported iOS/loader combination before release.
-AIDA64's earlier Freeze failure is not treated as proof for or against load safety.
+### Regression-only diagnostic runbook
 
-Optional diagnostics, disabled by default:
+Return to this section only when a new launch hang, crash, cross-app identity leak,
+missing spoof surface, unexpected helper behavior, or measurable startup/memory
+regression appears. First reproduce the problem on the unchanged broad baseline.
+Keep profile, Freeze state, selected scope, feature toggles and test steps fixed so
+only the suspected injection/loading variable changes.
+
+Before changing code or filters, capture the actual pipeline on the affected
+device:
 
 ```sh
-touch /tmp/px_debug_scope
-touch /tmp/px_debug_webkit
-cat /var/mobile/Library/TLinkIOS/scope_decision.log
-cat /tmp/tlinkios_loads.log
-cat /var/mobile/Library/TLinkIOS/filter_daemon_debug.plist
+cat /var/mobile/Library/TLinkIOS/filter_plists/TLinkIOSTweak.plist
 cat /Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist
-cat /Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist
+cat /var/mobile/Library/TLinkIOS/filter_daemon_debug.plist
 ```
 
-`[PXBootstrap]` logs role/capability/reason changes, with numeric definitions in
-`PXBootstrapPolicy.h`. The early marker proves loading even when all module gates
-deny. `[PXScopeDecision]` logs the resolved WebKit host for allowed module paths.
-Rootless installations may use `/var/jb/Library/MobileSubstrate/DynamicLibraries`.
-Disable marker files for performance measurements; do not leave verbose logging
-on. Roll back by installing the previous matching app/daemon/tweak build and
-regenerating filters, then restart affected processes; editing the installed
-plist alone is overwritten by daemon canonicalization.
+Rootless installations may use:
+
+```sh
+cat /var/jb/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist
+```
+
+For the current broad baseline, a non-empty real scope is expected to contain the
+scoped app/extensions together with:
+
+```text
+com.apple.springboard
+com.apple.UIKit
+com.apple.SafariViewService
+com.apple.WebKit.WebContent
+com.apple.WebKit.Networking
+com.apple.WebKit.GPU
+```
+
+`STAGING == INSTALLED` for the bundle list means the daemon installed the policy it
+received. If they differ, debug the writer/daemon pipeline before drawing any
+conclusion about hook behavior. Do not edit only the installed plist: daemon
+canonicalization will overwrite non-canonical changes.
+
+Enable load/scope diagnostics only while reproducing the regression by creating
+`/tmp/px_debug_scope` and `/tmp/px_debug_webkit`, then clear any previous
+`tlinkios_loads.log` and `tlinkios_scope_debug.log` before the run.
+
+Restart the affected app/helper (and respring after an actual filter change),
+reproduce the exact failure, and collect:
+
+```sh
+cat /tmp/tlinkios_loads.log
+cat /tmp/tlinkios_scope_debug.log
+cat /var/mobile/Library/TLinkIOS/scope_decision.log
+```
+
+`[PXBootstrap]` records role/capability/reason changes using the numeric definitions
+in `PXBootstrapPolicy.h`. The early load marker proves that the dylib reached a
+process even when all module gates deny. `[PXScopeDecision]` records the resolved
+WebKit host for module paths that evaluate scope. Interpret evidence in this order:
+
+```text
+no load marker                  -> loader/filter/process-lifecycle problem
+load marker + denied decision   -> bootstrap/scope/host-attribution decision
+allowed decision + no spoof     -> hook/API/feature-toggle problem
+unscoped host + allowed work    -> policy leak; stop broad-policy rollout
+```
+
+Host ownership must remain fail-closed. Missing, conflicting or unresolved helper
+metadata must not grant spoofing. Test the affected scoped app and at least one
+unscoped control app concurrently; for WebKit regressions also test helper restart,
+Safari/SafariViewService when relevant, and a host whose ownership cannot be
+resolved.
+
+If the broad baseline is reproducibly implicated, perform an isolation experiment
+in a dedicated diagnostic build, one variable at a time:
+
+```text
+1. current broad baseline (UIKit + WebKit cluster)
+2. WebKit cluster without UIKit
+3. narrow scoped apps/extensions + SpringBoard
+```
+
+These are **diagnostic build variants**, not marker-file modes in the current
+production source. The app writer, `PXInjectionFilter`, validator, daemon
+canonicalizer and tests must agree on the chosen variant; changing only one layer
+invalidates the comparison. Restart affected processes between variants and keep
+all profile/Freeze/scope settings identical.
+
+For each variant, record real outputs rather than only hook installation: affected
+API/JS values, launch latency, memory, helper crashes/restarts, and cross-app
+identity leakage. Merely seeing the dylib in a process is not feature coverage.
+AIDA64's earlier Freeze failure remains evidence about Freeze/SpringBoard state,
+not proof for or against UIKit/WebKit load safety.
+
+After testing, delete the two temporary debug marker files and do not leave verbose
+logging enabled. Roll back by installing the previous matching app/daemon/tweak
+build, regenerating filters through the normal scope writer, and restarting
+affected processes.
