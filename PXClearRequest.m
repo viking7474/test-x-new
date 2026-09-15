@@ -14,7 +14,9 @@ const PXClearScope PXClearScopeDefaultMask =
     PXClearScopePluginKitData |
     PXClearScopeKeychain;
 
-const PXClearOptions PXClearOptionsKnownMask = PXClearOptionICloudData;
+const PXClearOptions PXClearOptionsKnownMask =
+    PXClearOptionICloudData |
+    PXClearOptionSafariSharedWebData;
 
 BOOL PXClearModeIsValid(PXClearMode mode) {
     return mode == PXClearModeQuick || mode == PXClearModeFull || mode == PXClearModeDeep;

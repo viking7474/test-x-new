@@ -23,7 +23,7 @@ ios_version_hooks = text("TLinkIOSTweak/IOSVersionHooks.x")
 for symbol in ("PXClearModeQuick", "PXClearModeFull", "PXClearModeDeep"):
     require(symbol in request_h, f"missing mode: {symbol}")
 require("mode:(PXClearMode)mode" in request_h, "typed mode initializer missing")
-for symbol in ("PXClearOptionNone", "PXClearOptionICloudData", "PXClearOptionsKnownMask"):
+for symbol in ("PXClearOptionNone", "PXClearOptionICloudData", "PXClearOptionSafariSharedWebData", "PXClearOptionsKnownMask"):
     require(symbol in request_h, f"missing Clear option contract: {symbol}")
 require("options:(PXClearOptions)options" in request_h,
         "immutable Clear options initializer missing")
@@ -36,7 +36,7 @@ require("return _mode == PXClearModeDeep" in request_m,
 require("mode:(PXClearMode)mode" in cleaner_h,
         "mode-aware public clear API missing")
 
-mode_start = cleaner_m.index("- (void)clearDataForBundleID:(NSString *)bundleID\n                        mode:(PXClearMode)mode")
+mode_start = cleaner_m.index("- (void)clearDataForBundleID:(NSString *)bundleID\n                        mode:(PXClearMode)mode\n                  completion:(void (^)(BOOL, NSError *))completion {")
 mode_end = cleaner_m.index("#pragma mark - Improved Rootless-Compatible App Data Wiping", mode_start)
 mode_body = cleaner_m[mode_start:mode_end]
 require("sync();" not in mode_body, "canonical mode-aware clear must not call global sync")
@@ -50,6 +50,8 @@ require("plan.plannedPassCount != 1 || passResults.count != 1" in cleaner_m,
         "single-pass accounting guard missing")
 require("Step 1: Planning and running single Keychain pass" in mode_body,
         "single Keychain execution log missing")
+require("PXStopSafariDaemonsBestEffort" not in mode_body,
+        "canonical worker must not stop shared Safari/WebKit helpers before explicit shared-data authorization")
 
 aggregate_start = cleaner_m.index("- (PXClearResult *)_completeDataWipeForMigratedRequest:")
 aggregate_end = cleaner_m.index("#pragma mark - Main Public Methods", aggregate_start)
@@ -90,8 +92,12 @@ require("Clear iCloud Data policy OFF; skipping iCloud/Accounts cleanup" in app_
 require("options:request.options" in aggregate_body,
         "derived ApplicationData request does not preserve immutable Clear options")
 require('PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in mode_body and
+        'PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)' in mode_body and
         mode_body.count("options:clearOptions") >= 2,
-        "canonical Clear does not snapshot the persisted iCloud policy into both requests")
+        "canonical Clear does not snapshot persisted destructive policies into both requests")
+require("PXClearOptionSafariSharedWebData" in mode_body and
+        '@"clearSafariSharedWebData"' in mode_body,
+        "Safari shared-web policy is not journaled as part of the immutable request snapshot")
 
 # Exact iCloud/Accounts authorization: no bundle-component/name fuzzy matching may
 # cross the destructive boundary. Unsupported entitlement mappings fail closed.
@@ -136,15 +142,87 @@ require("PXCurrentClearOperationContext" in compat_icloud_body and
         "no authorized request snapshot" in compat_icloud_body,
         "public clearICloudData compatibility selector does not fail closed without an immutable request")
 
-safari_start = cleaner_m.index("- (void)_wipeMobileSafariSystemStores")
+safari_start = cleaner_m.index("- (void)_wipeMobileSafariSystemStoresForRequest:(PXClearRequest *)request {")
 safari_end = cleaner_m.index("- (NSArray *)findExtensionDataContainersForBundleID", safari_start)
 safari_body = cleaner_m[safari_start:safari_end]
 require("shared Accounts3 mutation skipped (exact-ownership policy)" in safari_body,
         "MobileSafari must explicitly skip shared Accounts3 mutation")
 for token in ("ZACCOUNT", "%google%", "%gmail%", 'PXKillallByName(@"accountsd"'):
     require(token not in safari_body, f"MobileSafari still mutates or targets shared Accounts3 state: {token}")
+
+# Shared Safari/WebKit state is never implicit in Deep mode. It requires the
+# immutable Safari-specific option in addition to exact MobileSafari + Deep gating.
+require("PXClearOptionSafariSharedWebData" in app_wipe_body,
+        "MobileSafari shared-store wipe lacks immutable option gate")
+require('[bundleID isEqualToString:@"com.apple.mobilesafari"]' in app_wipe_body and
+        "request.mode == PXClearModeDeep" in app_wipe_body and
+        "Clear Safari Shared Web Data policy OFF; shared Safari/WebKit stores preserved" in app_wipe_body,
+        "MobileSafari shared-store policy does not require Deep + exact target + explicit option")
+require(app_wipe_body.count("[self _wipeMobileSafariSystemStoresForRequest:request]") == 1,
+        "MobileSafari shared-store wipe must have exactly one gated call site")
+require("request.mode != PXClearModeDeep" in safari_body and
+        'request.bundleIdentifier isEqualToString:@"com.apple.mobilesafari"' in safari_body and
+        "request.options & PXClearOptionSafariSharedWebData" in safari_body and
+        "missing explicit immutable policy" in safari_body,
+        "Safari shared-store helper does not independently enforce the immutable policy")
+require('@"wouldClearSafariSharedWebData"' in cleaner_m and
+        "PXClearOptionSafariSharedWebData" in cleaner_m,
+        "dry-run does not expose Safari shared-store policy")
 require("PXClearModeIncludesExtendedContainers(request.mode)" in app_wipe_body,
         "Quick residual-cleanup exclusion missing")
+
+# Canonical Clear ownership boundary: global system refresh is quarantined.
+require("[self refreshSystemServices]" not in app_wipe_body,
+        "canonical ApplicationData wipe still invokes global refreshSystemServices")
+refresh_start = cleaner_m.index("- (void)refreshSystemServices {")
+refresh_end = cleaner_m.index("#pragma mark - Container Discovery Methods", refresh_start)
+refresh_body = cleaner_m[refresh_start:refresh_end]
+require("quarantined: no global mutations performed" in refresh_body,
+        "refreshSystemServices compatibility selector is not explicitly quarantined")
+for forbidden_global_mutation in (
+    "drop_caches",
+    'PXKillallByName(@"cfprefsd"',
+    'PXKillallByName(@"nsurlsessiond"',
+    "ApplicationState.db",
+    "VACUUM",
+    "sync;",
+):
+    require(forbidden_global_mutation not in refresh_body,
+            f"quarantined refreshSystemServices still mutates global state: {forbidden_global_mutation}")
+
+require("[self cleanSiriAnalyticsDatabase:bundleID]" not in app_wipe_body,
+        "canonical Deep clear still mutates shared SiriAnalytics.db")
+siri_start = cleaner_m.index("- (void)cleanSiriAnalyticsDatabase:(NSString *)bundleID {")
+siri_end = cleaner_m.index("// NEW: Method to clean LaunchServices database", siri_start)
+siri_body = cleaner_m[siri_start:siri_end]
+require("cleanSiriAnalyticsDatabase quarantined" in siri_body,
+        "Siri analytics compatibility selector is not explicitly quarantined")
+for forbidden_siri_mutation in (
+    "SiriAnalytics.db",
+    "DELETE FROM",
+    "LIKE",
+    "VACUUM",
+    "componentsSeparatedByString",
+):
+    require(forbidden_siri_mutation not in siri_body,
+            f"quarantined Siri analytics selector still contains unsafe ownership/mutation logic: {forbidden_siri_mutation}")
+
+# Legacy public global-state helpers remain source-compatible but are no-op quarantines.
+icon_start = cleaner_m.index("- (void)cleanIconStatePlist:(NSString *)bundleID {")
+icon_end = cleaner_m.index("// NEW: Method to clean SiriAnalytics database", icon_start)
+icon_body = cleaner_m[icon_start:icon_end]
+require("cleanIconStatePlist quarantined" in icon_body,
+        "IconState compatibility selector is not quarantined")
+for token in ("IconState.plist", "DefaultIconState.plist", "grep -v", "plutil", "runCommandWithPrivileges"):
+    require(token not in icon_body, f"quarantined IconState selector still mutates global state: {token}")
+
+ls_start = cleaner_m.index("- (void)cleanLaunchServicesDatabase:(NSString *)bundleID {")
+ls_end = cleaner_m.index("// NEW: Method to refresh system services to apply changes", ls_start)
+ls_body = cleaner_m[ls_start:ls_end]
+require("cleanLaunchServicesDatabase quarantined" in ls_body,
+        "LaunchServices compatibility selector is not quarantined")
+for token in ("SBAppTagsFileManager", "SBIconModelCache.plist", "LaunchServices-*", "rm -rf", "findPathsMatchingPattern"):
+    require(token not in ls_body, f"quarantined LaunchServices selector still mutates global state: {token}")
 
 # Deep Mail Accounts3 release safety block.
 mail_start = app_wipe_body.index('if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilemail"])')

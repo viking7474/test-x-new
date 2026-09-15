@@ -3113,9 +3113,13 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         PXClearModeName(mode), bundleID];
     PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_plan",
                         @{ @"deepClean": @(PXClearModeIncludesDeepDiagnostics(mode)) });
-    PXClearOptions dryRunOptions = PXReadSecurityBool(@"clearICloudDataEnabled", NO)
-        ? PXClearOptionICloudData
-        : PXClearOptionNone;
+    PXClearOptions dryRunOptions = PXClearOptionNone;
+    if (PXReadSecurityBool(@"clearICloudDataEnabled", NO)) {
+        dryRunOptions |= PXClearOptionICloudData;
+    }
+    if (PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)) {
+        dryRunOptions |= PXClearOptionSafariSharedWebData;
+    }
     NSDictionary *pxDryRunPlan = @{
         @"mode": PXClearModeName(mode) ?: @"unknown",
         @"scopes": @((unsigned long long)PXMigratedFullClearScopes),
@@ -3125,6 +3129,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         @"wouldRunDataAggregate": @YES,
         @"wouldClearICloudData": @(PXClearModeIncludesExtendedContainers(mode) &&
                                      ((dryRunOptions & PXClearOptionICloudData) != 0)),
+        @"wouldClearSafariSharedWebData": @(mode == PXClearModeDeep &&
+                                              [bundleID isEqualToString:@"com.apple.mobilesafari"] &&
+                                              ((dryRunOptions & PXClearOptionSafariSharedWebData) != 0)),
         @"wouldRunDeepResidualScan": @(PXClearModeIncludesDeepDiagnostics(mode))
     };
     PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_commit", pxDryRunPlan);
@@ -3149,9 +3156,13 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         return;
     }
     BOOL deepClean = PXClearModeIncludesDeepDiagnostics(mode);
-    PXClearOptions clearOptions = PXReadSecurityBool(@"clearICloudDataEnabled", NO)
-        ? PXClearOptionICloudData
-        : PXClearOptionNone;
+    PXClearOptions clearOptions = PXClearOptionNone;
+    if (PXReadSecurityBool(@"clearICloudDataEnabled", NO)) {
+        clearOptions |= PXClearOptionICloudData;
+    }
+    if (PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)) {
+        clearOptions |= PXClearOptionSafariSharedWebData;
+    }
     PXClearRequest *fullRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                             scopes:PXMigratedFullClearScopes
                                                                               mode:mode
@@ -3181,7 +3192,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     // CLEAR-01: write the transaction begin journal before any destructive step.
     PXClearWriteJournal(bundleID, mode, fullRequest.scopes, NO, @"begin",
                         @{ @"deepClean": @(deepClean),
-                           @"clearICloudData": @((clearOptions & PXClearOptionICloudData) != 0) });
+                           @"clearICloudData": @((clearOptions & PXClearOptionICloudData) != 0),
+                           @"clearSafariSharedWebData": @((clearOptions & PXClearOptionSafariSharedWebData) != 0) });
 
     __block BOOL completionCalled = NO;
     __block dispatch_semaphore_t completionLock = dispatch_semaphore_create(1);
@@ -3310,11 +3322,6 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                     safeCompletion(NO, PXClearOperationCancellationError(operationContext));
                     return;
                 }
-                if (mode != PXClearModeQuick && [bundleID isEqualToString:@"com.apple.mobilesafari"]) {
-                    [strongSelf logMessage:@"[AppDataCleaner] MobileSafari: stopping WebKit/Safari helper processes..."];
-                    PXStopSafariDaemonsBestEffort(strongSelf);
-                }
-
                 CFAbsoluteTime keychainStartedAt = CFAbsoluteTimeGetCurrent();
                 [strongSelf logMessage:@"[AppDataCleaner] Step 1: Planning and running single Keychain pass..."];
                 PXKeychainClearPlan *keychainPlan =
@@ -3493,9 +3500,13 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         @autoreleasepool {
             BOOL deepClean = [self _deepCleanEnabled];
             PXClearMode mode = deepClean ? PXClearModeDeep : PXClearModeFull;
-            PXClearOptions clearOptions = PXReadSecurityBool(@"clearICloudDataEnabled", NO)
-                ? PXClearOptionICloudData
-                : PXClearOptionNone;
+            PXClearOptions clearOptions = PXClearOptionNone;
+            if (PXReadSecurityBool(@"clearICloudDataEnabled", NO)) {
+                clearOptions |= PXClearOptionICloudData;
+            }
+            if (PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)) {
+                clearOptions |= PXClearOptionSafariSharedWebData;
+            }
             PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                                 scopes:PXMigratedDataClearScopes
                                                                                   mode:mode
@@ -3791,28 +3802,29 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     // [self clearMediaData:bundleID];
     // [self clearHealthData:bundleID];
 
-    // Safari is special: it uses system-scoped stores under /var/mobile/Library.
-    // Without clearing those, sessions/cookies can persist even after wiping the app container.
-    if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilesafari"]) {
-        [self _wipeMobileSafariSystemStores];
+    // Shared Safari/WebKit/Cookie stores cross the normal per-app ownership boundary.
+    // They require an explicit immutable policy in addition to Deep + MobileSafari.
+    if (request.mode == PXClearModeDeep &&
+        [bundleID isEqualToString:@"com.apple.mobilesafari"] &&
+        ((request.options & PXClearOptionSafariSharedWebData) != 0)) {
+        [self logMessage:@"[AppDataCleaner] Clear Safari Shared Web Data policy ON; wiping shared Safari/WebKit stores"];
+        [self _wipeMobileSafariSystemStoresForRequest:request];
+    } else if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilesafari"]) {
+        [self logMessage:@"[AppDataCleaner] Clear Safari Shared Web Data policy OFF; shared Safari/WebKit stores preserved"];
     }
-    
-    // Clean SiriAnalytics
+    // SiriAnalytics.db is shared system state. App ownership cannot be proven from
+    // bundle/app/company-name substrings, so canonical Clear does not mutate it.
     if (request.mode == PXClearModeDeep) {
-        [self logMessage:@"[AppDataCleaner] DEBUG: Deep-only Siri analytics cleanup..."];
-        [self cleanSiriAnalyticsDatabase:bundleID];
+        [self logMessage:@"[AppDataCleaner] Siri analytics cleanup skipped (ownership boundary)"];
     }
     
     // Skip these - they modify system state and can cause respring:
     // [self cleanIconStatePlist:bundleID];
     // [self cleanLaunchServicesDatabase:bundleID];
-    
-    // SAFE to run now (modified to avoid respring)
-    if (PXClearModeIncludesExtendedContainers(request.mode)) {
-        [self refreshSystemServices];
-    }
-    
-    [self logMessage:@"[AppDataCleaner] Skipped unsafe system state modifications"];
+    // Canonical Clear must not mutate global system state. Historically this
+    // called refreshSystemServices, which dropped global VM caches, killed shared
+    // daemons, and VACUUMed SpringBoard state unrelated to the selected app.
+    [self logMessage:@"[AppDataCleaner] Global system refresh skipped (ownership boundary)"];
     
     // NOTE: Universal keychain wipe removed (too broad / can delete unrelated items).
 
@@ -6529,147 +6541,31 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
 // NEW: Method to clean IconState.plist
 - (void)cleanIconStatePlist:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Cleaning SpringBoard IconState.plist for %@", bundleID);
-    
-    // First, backup the original plist
-    [self runCommandWithPrivileges:@"cp '/var/mobile/Library/SpringBoard/IconState.plist' '/var/tmp/IconState.plist'"];
-    [self runCommandWithPrivileges:@"chmod 644 '/var/tmp/IconState.plist'"];
-    
-    // Convert binary plist to XML format for easy text processing
-    [self runCommandWithPrivileges:@"plutil -convert xml1 '/var/tmp/IconState.plist'"];
-    
-    // Aggressively remove any references to this app by bundle ID
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"grep -v '%@' '/var/tmp/IconState.plist' > '/var/tmp/IconState_filtered.plist'", bundleID]];
-    
-    // Convert back to binary format
-    [self runCommandWithPrivileges:@"plutil -convert binary1 '/var/tmp/IconState_filtered.plist'"];
-    
-    // Replace the original plist with the filtered one
-    [self runCommandWithPrivileges:@"cp '/var/tmp/IconState_filtered.plist' '/var/mobile/Library/SpringBoard/IconState.plist'"];
-    
-    // Clean up the temporary files
-    [self runCommandWithPrivileges:@"rm -f '/var/tmp/IconState.plist' '/var/tmp/IconState_filtered.plist'"];
-    
-    // Additional aggressive cleanup of IconState
-    // Use a more comprehensive approach to also clean any partial fragments
-    // Extract app name from bundle ID (e.g., "UberClient" from "com.ubercab.UberClient")
-    NSArray *components = [bundleID componentsSeparatedByString:@"."];
-    NSString *appName = components.lastObject;
-    
-    // Dump, filter, and restore method  
-    [self runCommandWithPrivileges:@"cp '/var/mobile/Library/SpringBoard/IconState.plist' '/var/tmp/IconState2.plist'"];
-    [self runCommandWithPrivileges:@"chmod 644 '/var/tmp/IconState2.plist'"];
-    [self runCommandWithPrivileges:@"plutil -convert xml1 '/var/tmp/IconState2.plist'"];
-    
-    if (appName && appName.length > 0) {
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"grep -v '%@' '/var/tmp/IconState2.plist' > '/var/tmp/IconState2_filtered.plist'", appName]];
-        [self runCommandWithPrivileges:@"plutil -convert binary1 '/var/tmp/IconState2_filtered.plist'"];
-        [self runCommandWithPrivileges:@"cp '/var/tmp/IconState2_filtered.plist' '/var/mobile/Library/SpringBoard/IconState.plist'"];
-        [self runCommandWithPrivileges:@"rm -f '/var/tmp/IconState2.plist' '/var/tmp/IconState2_filtered.plist'"];
-    }
-    
-    // Also clean up DefaultIconState.plist as a safety measure
-    if ([_fileManager fileExistsAtPath:@"/var/mobile/Library/SpringBoard/DefaultIconState.plist"]) {
-        [self runCommandWithPrivileges:@"cp '/var/mobile/Library/SpringBoard/DefaultIconState.plist' '/var/tmp/DefaultIconState.plist'"];
-        [self runCommandWithPrivileges:@"chmod 644 '/var/tmp/DefaultIconState.plist'"];
-        [self runCommandWithPrivileges:@"plutil -convert xml1 '/var/tmp/DefaultIconState.plist'"];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"grep -v '%@' '/var/tmp/DefaultIconState.plist' > '/var/tmp/DefaultIconState_filtered.plist'", bundleID]];
-        [self runCommandWithPrivileges:@"plutil -convert binary1 '/var/tmp/DefaultIconState_filtered.plist'"];
-        [self runCommandWithPrivileges:@"cp '/var/tmp/DefaultIconState_filtered.plist' '/var/mobile/Library/SpringBoard/DefaultIconState.plist'"];
-        [self runCommandWithPrivileges:@"rm -f '/var/tmp/DefaultIconState.plist' '/var/tmp/DefaultIconState_filtered.plist'"];
-    }
+    // Retained only for source/API compatibility. SpringBoard icon-state files are
+    // shared system state and are outside a single app Clear ownership boundary.
+    [self logMessage:@"[AppDataCleaner] cleanIconStatePlist quarantined for %@", bundleID ?: @"(nil)"];
 }
 
 // NEW: Method to clean SiriAnalytics database
 - (void)cleanSiriAnalyticsDatabase:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Cleaning SiriAnalytics database for %@", bundleID);
-    
-    // Extract app name from bundle ID (e.g., "UberClient" from "com.ubercab.UberClient")
-    NSArray *components = [bundleID componentsSeparatedByString:@"."];
-    NSString *appName = components.lastObject;
-    
-    // Delete from main table
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM main WHERE bundleid = '%@';\"", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM main WHERE app_id = '%@';\"", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM app_usage WHERE bundleid = '%@';\"", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM usage_contexts WHERE data LIKE '%%%@%%';\"", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM analytics WHERE data LIKE '%%%@%%';\"", bundleID]];
-    
-    // Also check by app name
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM main WHERE bundleid LIKE '%%%@%%';\"", appName]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM main WHERE app_id LIKE '%%%@%%';\"", appName]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM app_usage WHERE bundleid LIKE '%%%@%%';\"", appName]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM usage_contexts WHERE data LIKE '%%%@%%';\"", appName]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM analytics WHERE data LIKE '%%%@%%';\"", appName]];
-    
-    // Also delete by company name if available (e.g., "ubercab" from "com.ubercab.UberClient")
-    if (components.count > 1) {
-        NSString *companyName = components[1];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM main WHERE bundleid LIKE '%%%@%%';\"", companyName]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM app_usage WHERE bundleid LIKE '%%%@%%';\"", companyName]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM usage_contexts WHERE data LIKE '%%%@%%';\"", companyName]];
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"DELETE FROM analytics WHERE data LIKE '%%%@%%';\"", companyName]];
-    }
-    
-    // Force data flush by running VACUUM
-    [self runCommandWithPrivileges:@"sqlite3 '/var/mobile/Library/Assistant/SiriAnalytics.db' \"VACUUM;\""];
-    
+    // Retained only for source/API compatibility. The analytics store is shared system
+    // state and this selector must not infer row ownership from bundle/name substrings.
+    [self logMessage:@"[AppDataCleaner] cleanSiriAnalyticsDatabase quarantined for %@", bundleID ?: @"(nil)"];
 }
 
 // NEW: Method to clean LaunchServices database
 - (void)cleanLaunchServicesDatabase:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Cleaning LaunchServices database for %@", bundleID);
-    
-    // Remove SBAppTagsFileManager which stores app categorization
-    [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/CoreServices/SpringBoard.app/SBAppTagsFileManager"];
-    [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/CoreServices/SpringBoard.app/SBIconModelCache.plist"];
-    
-    // Also remove rootless versions
-    [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/CoreServices/SpringBoard.app/SBAppTagsFileManager"];
-    [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/CoreServices/SpringBoard.app/SBIconModelCache.plist"];
-    
-    // Find and remove LaunchServices caches
-    NSArray *lsCachePaths = [self findPathsMatchingPattern:@"/var/mobile/Library/Caches/com.apple.LaunchServices-*"];
-    for (NSString *path in lsCachePaths) {
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", path]];
-    }
-    
-    // Find and remove rootless LaunchServices caches
-    lsCachePaths = [self findPathsMatchingPattern:@"/var/mobile/Library/Caches/com.apple.LaunchServices-*"];
-    for (NSString *path in lsCachePaths) {
-        [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf '%@'", path]];
-    }
+    // Retained only for source/API compatibility. LaunchServices/SpringBoard caches
+    // are shared system state and must not be globally removed by app Clear.
+    [self logMessage:@"[AppDataCleaner] cleanLaunchServicesDatabase quarantined for %@", bundleID ?: @"(nil)"];
 }
 
 // NEW: Method to refresh system services to apply changes
 - (void)refreshSystemServices {
-    [self logMessage:@"[AppDataCleaner] Refreshing system services (SAFE MODE)..."];
-    
-    // REMOVED: Send HUP signal to SpringBoard - CAUSES RESPRING
-    // [self runCommandWithPrivileges:@"killall -HUP SpringBoard 2>/dev/null || true"];
-    
-    // Enhanced: Force system caches to be cleared
-    [self runCommandWithPrivileges:@"sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true"];
-    
-    // Enhanced: Clear application launch cache (Safe to restart cfprefsd)
-    PXKillallByName(@"cfprefsd", SIGTERM);
-    
-    // Enhanced: Clear system connectivity caches
-    PXKillallByName(@"nsurlsessiond", SIGTERM);
-    
-    // REMOVED: Force cache regen in filesystem - MAY CAUSE RESPRING
-    // [self runCommandWithPrivileges:@"rm -rf /var/mobile/Library/Caches/com.apple.LaunchServices-* 2>/dev/null || true"];
-    
-    // Enhanced: Force database vacuum on key databases to remove deleted data
-    NSArray *dbsToVacuum = @[
-        @"/var/mobile/Library/SpringBoard/ApplicationState.db"
-    ];
-    
-    for (NSString *dbPath in dbsToVacuum) {
-        if ([[NSFileManager defaultManager] fileExistsAtPath:dbPath]) {
-            [self runCommandWithPrivileges:[NSString stringWithFormat:@"sqlite3 '%@' \"VACUUM;\" 2>/dev/null || true", dbPath]];
-        }
-    }
+    // Retained only for source/API compatibility. Global cache flushing, shared-daemon
+    // termination, and shared-database maintenance are intentionally quarantined because
+    // they are not owned by a single app Clear request.
+    [self logMessage:@"[AppDataCleaner] refreshSystemServices quarantined: no global mutations performed"];
 }
 
 #pragma mark - Container Discovery Methods
@@ -6798,8 +6694,15 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
-- (void)_wipeMobileSafariSystemStores {
-    [self logMessage:@"[AppDataCleaner] MobileSafari: wiping global Safari/WebKit/Cookies stores..."];
+- (void)_wipeMobileSafariSystemStoresForRequest:(PXClearRequest *)request {
+    if (![request isKindOfClass:[PXClearRequest class]] ||
+        request.mode != PXClearModeDeep ||
+        ![request.bundleIdentifier isEqualToString:@"com.apple.mobilesafari"] ||
+        ((request.options & PXClearOptionSafariSharedWebData) == 0)) {
+        [self logMessage:@"[AppDataCleaner] MobileSafari shared-store wipe rejected: missing explicit immutable policy"];
+        return;
+    }
+    [self logMessage:@"[AppDataCleaner] MobileSafari: wiping explicitly authorized shared Safari/WebKit/Cookies stores..."];
 
     // Ensure processes are stopped first to avoid sqlite "database is locked" and detached DB crashes.
     PXStopSafariDaemonsBestEffort(self);

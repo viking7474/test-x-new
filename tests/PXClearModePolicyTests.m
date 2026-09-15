@@ -43,6 +43,23 @@ void PXRunClearModePolicyTests(void) {
     PXRequire([iCloud copy] == iCloud,
               @"immutable request copy contract changed");
 
+    PXClearRequest *safariShared = [[PXClearRequest alloc] initWithBundleIdentifier:@"com.apple.mobilesafari"
+                                                                            scopes:PXClearScopeDefaultMask
+                                                                              mode:PXClearModeDeep
+                                                                           options:PXClearOptionSafariSharedWebData];
+    PXRequire(safariShared != nil &&
+              (safariShared.options & PXClearOptionSafariSharedWebData) != 0 &&
+              (safariShared.options & PXClearOptionICloudData) == 0,
+              @"explicit Safari shared-web policy must be snapshotted independently");
+
+    PXClearRequest *combinedOptions = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                               scopes:PXClearScopeDefaultMask
+                                                                                 mode:PXClearModeDeep
+                                                                              options:(PXClearOptionICloudData | PXClearOptionSafariSharedWebData)];
+    PXRequire(combinedOptions != nil &&
+              combinedOptions.options == (PXClearOptionICloudData | PXClearOptionSafariSharedWebData),
+              @"known Clear option bits must compose without losing policy state");
+
     PXClearRequest *compatFull = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                            scopes:PXClearScopeDefaultMask
                                                                         deepClean:NO];
@@ -52,7 +69,7 @@ void PXRunClearModePolicyTests(void) {
     PXRequire(compatFull.mode == PXClearModeFull && compatDeep.mode == PXClearModeDeep,
               @"legacy initializer mapping changed");
     PXRequire(compatFull.options == PXClearOptionNone && compatDeep.options == PXClearOptionNone,
-              @"legacy deepClean initializer must not implicitly arm iCloud deletion");
+              @"legacy deepClean initializer must not implicitly arm optional destructive policies");
 
     PXClearRequest *invalid = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                          scopes:PXClearScopeDefaultMask

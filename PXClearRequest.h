@@ -17,8 +17,9 @@ FOUNDATION_EXPORT const PXClearScope PXClearScopeDefaultMask;
 /// contract. They are snapshotted when the request is created so a setting
 /// change cannot alter an in-flight Clear operation.
 typedef NS_OPTIONS(NSUInteger, PXClearOptions) {
-    PXClearOptionNone       = 0,
-    PXClearOptionICloudData = 1UL << 0,
+    PXClearOptionNone                = 0,
+    PXClearOptionICloudData          = 1UL << 0,
+    PXClearOptionSafariSharedWebData = 1UL << 1,
 };
 
 FOUNDATION_EXPORT const PXClearOptions PXClearOptionsKnownMask;

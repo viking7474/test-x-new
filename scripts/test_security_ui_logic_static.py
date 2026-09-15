@@ -126,6 +126,19 @@ require('@"Clear iCloud Data"' in security and
         'securityCompactSwitchOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in security,
         "Security root does not expose Clear iCloud Data as an OFF-by-default option")
 
+# Shared Safari/WebKit/Cookie clearing is a separate explicit destructive policy.
+safari_shared_toggle = method_body(security, "- (void)clearSafariSharedWebDataToggleChanged:", 4500)
+require('PXWriteSecurityBool(@"clearSafariSharedWebDataEnabled", YES' in safari_shared_toggle and
+        'PXWriteSecurityBool(@"clearSafariSharedWebDataEnabled", NO' in safari_shared_toggle,
+        "Shared Safari Web Data toggle does not persist both enabled and disabled states")
+require('PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)' in safari_shared_toggle and
+        'UIAlertActionStyleDestructive' in safari_shared_toggle and
+        'com.apple.mobilesafari' in security,
+        "Shared Safari Web Data enable flow lacks destructive confirmation/scope explanation")
+require('@"Clear Safari Shared Web Data"' in security and
+        'securityCompactSwitchOn:PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)' in security,
+        "Security root does not expose Shared Safari Web Data as an OFF-by-default option")
+
 # Audited Security toggles use verified persistence and rollback instead of direct false-success writes.
 for path, key in (
     ("JailbreakDetailViewController.m", "jailbreakDetectionEnabled"),
