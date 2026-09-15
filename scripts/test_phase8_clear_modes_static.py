@@ -192,6 +192,11 @@ require("shared Accounts3 mutation skipped (exact-ownership policy)" in safari_b
         "MobileSafari must explicitly skip shared Accounts3 mutation")
 for token in ("ZACCOUNT", "%google%", "%gmail%", 'PXKillallByName(@"accountsd"'):
     require(token not in safari_body, f"MobileSafari still mutates or targets shared Accounts3 state: {token}")
+safari_stop_start = cleaner_m.index("static void PXStopSafariDaemonsBestEffort(AppDataCleaner *selfRef) {")
+safari_stop_end = cleaner_m.index("static NSString *PXFirstExistingPath", safari_stop_start)
+safari_stop_body = cleaner_m[safari_stop_start:safari_stop_end]
+require('@"accountsd"' not in safari_stop_body,
+        "explicit Safari shared-store cleanup must not transitively stop the shared accountsd daemon")
 
 # Shared Safari/WebKit state is never implicit in Deep mode. It requires the
 # immutable Safari-specific option in addition to exact MobileSafari + Deep gating.
@@ -548,7 +553,7 @@ require("[self syncHookScopeToResetApps]" in setup_body,
 
 # Dormant generic database/system-reference helpers remain source-compatible but fail closed.
 legacy_db_start = cleaner_m.index("- (void)cleanDatabaseFile:(NSString *)dbPath bundleID:")
-legacy_db_end = cleaner_m.index("// Helper method to check if directory exists", legacy_db_start)
+legacy_db_end = cleaner_m.index("- (BOOL)directoryExistsAndHasAnyContent:(NSString *)path {", legacy_db_start)
 legacy_db_body = strip_objc_comments(cleaner_m[legacy_db_start:legacy_db_end])
 require("PXLogQuarantinedLegacyClearSelector(_cmd)" in legacy_db_body,
         "generic cleanDatabaseFile helper is not quarantined")
@@ -583,6 +588,46 @@ for token in ("findDataContainerUUID:bundleID", "findRootlessDataContainerUUID:b
 require("Exact App Group entitlement discovery failed" in verify_body and
         "Exact installed-extension discovery failed" in verify_body,
         "standalone exact discovery failures do not fail verification conservatively")
+require("operationContext.keychainPlanSnapshot" in verify_body and
+        "_keychainClearPlanForBundleIdentifier:bundleID" in verify_body and
+        "Canonical Keychain verification snapshot is unavailable" in verify_body and
+        "keychainVerificationPlan.selectedGroups" in verify_body and
+        "_hasExactKeychainItemsForBundleIdentifier:bundleID" in verify_body and
+        "Exact selected-group Keychain verification was unavailable" in verify_body,
+        "Deep/standalone verification does not bind Keychain residual checks to the operation snapshot/exact selected groups")
+require("useOperationContext\n        ? operationContext.keychainPlanSnapshot\n        : [self _keychainClearPlanForBundleIdentifier:bundleID]" in verify_body,
+        "canonical Keychain verification can re-plan from mutable settings instead of using the operation snapshot")
+require("hasKeychainItemsForBundleID:bundleID" not in verify_body,
+        "verifyDataCleared must not use the public all-authorized-groups Keychain probe")
+
+# Public/read-only Keychain presence must use the same signed-helper authorization protocol as wipe.
+keychain_list_start = cleaner_m.index("- (PXKeychainHelperResult *)_readOnlyKeychainListResultForBundleIdentifier:(NSString *)bundleIdentifier\n                                                              accessGroups:(NSArray<NSString *> *)accessGroups {")
+keychain_list_end = cleaner_m.index("- (BOOL)_hasExactKeychainItemsForBundleIdentifier:", keychain_list_start)
+keychain_list_body = cleaner_m[keychain_list_start:keychain_list_end]
+for token in ('@"list"', 'keychain_backup.sh', 'runExecutableAndCapture',
+              'PXKeychainHelperResultOutputPrefix', 'resultFromMachineReadableLine',
+              'PXKeychainHelperOperationList', 'PXKeychainHelperCompletionCompleted',
+              'result.requestedAccessGroups', 'result.effectiveAccessGroups',
+              'result.attemptedCount != result.succeededCount'):
+    require(token in keychain_list_body,
+            f"exact read-only Keychain list protocol missing invariant: {token}")
+require("clampedTimeoutForStepLimit:60.0" in keychain_list_body and
+        "maxOutputBytes:1024 * 1024" in keychain_list_body,
+        "read-only Keychain list probe is not bounded by timeout/output limits")
+for token in ("SecItemCopyMatching", "kSecAttrService", "kSecAttrAccessGroup", "containsString"):
+    require(token not in keychain_list_body,
+            f"read-only Keychain list probe reintroduced local heuristic ownership: {token}")
+
+has_keychain_start = cleaner_m.index("- (BOOL)hasKeychainItemsForBundleID:(NSString *)bundleID {")
+has_keychain_end = cleaner_m.index("// Support methods (aliases for backwards compatibility)", has_keychain_start)
+has_keychain_body = cleaner_m[has_keychain_start:has_keychain_end]
+require("_hasExactKeychainItemsForBundleIdentifier:bundleID" in has_keychain_body and
+        "accessGroups:nil" in has_keychain_body and
+        "failing closed" in has_keychain_body,
+        "public Keychain presence API is not delegated to the exact signed-helper probe")
+for token in ("SecItemCopyMatching", "kSecAttrService", "kSecAttrAccessGroup", "kSecClassGenericPassword"):
+    require(token not in has_keychain_body,
+            f"public Keychain presence API still performs heuristic direct SecItem lookup: {token}")
 
 # Read-only UI attribution must use exact ownership sources and never cause global side effects.
 read_exact_start = cleaner_m.index("static NSArray<NSString *> *PXExactReadOnlyApplicationDataPathsForBundleID")
@@ -695,6 +740,41 @@ for token in ("contentsOfDirectoryAtPath", "MCMMetadataIdentifier", "containsStr
     require(token not in legacy_bundle_body,
             f"legacy bundle UUID finder still owns/scans filesystem state instead of delegating exactly: {token}")
 
+bundle_uuid_start = cleaner_m.index("- (NSString *)findBundleUUID:(NSString *)bundleID {")
+bundle_uuid_end = cleaner_m.index("- (NSString *)findDataContainerUUID:(NSString *)bundleID aggressive:", bundle_uuid_start)
+bundle_uuid_body = cleaner_m[bundle_uuid_start:bundle_uuid_end]
+require("findBundleContainerUUIDForBundleID:bundleID" in bundle_uuid_body,
+        "findBundleUUID compatibility method does not delegate to the exact bundle resolver")
+for token in ("listDirectoriesInPath", "directoryHasContent", "contentsOfDirectoryAtPath", "CFBundleIdentifier"):
+    require(token not in bundle_uuid_body,
+            f"findBundleUUID still owns/scans filesystem state: {token}")
+
+helper_list_start = cleaner_m.index("- (NSArray *)listDirectoriesInPath:(NSString *)path {")
+helper_list_end = cleaner_m.index("- (BOOL)directoryHasContent:(NSString *)path {", helper_list_start)
+helper_list_body = cleaner_m[helper_list_start:helper_list_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in helper_list_body and "return @[];" in helper_list_body,
+        "orphan generic directory-list helper is not quarantined")
+require("contentsOfDirectoryAtPath" not in helper_list_body,
+        "quarantined generic directory-list helper still enumerates filesystem state")
+
+helper_content_start = helper_list_end
+helper_content_end = cleaner_m.index("- (NSArray<NSString *> *)runBoundedFindWithArguments:", helper_content_start)
+helper_content_body = cleaner_m[helper_content_start:helper_content_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in helper_content_body and "return NO;" in helper_content_body,
+        "orphan generic directory-content helper is not quarantined")
+for token in ("contentsOfDirectoryAtPath", "fileExistsAtPath", "hasPrefix"):
+    require(token not in helper_content_body,
+            f"quarantined directory-content helper still inspects filesystem state: {token}")
+
+bounded_find_start = cleaner_m.index("- (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments {")
+bounded_find_end = cleaner_m.index("- (NSArray *)findPathsMatchingPattern:(NSString *)pattern {", bounded_find_start)
+bounded_find_body = cleaner_m[bounded_find_start:bounded_find_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in bounded_find_body and "return @[];" in bounded_find_body,
+        "orphan bounded-find subprocess helper is not quarantined")
+for token in ("runExecutableAndCapture", "/usr/bin/find", "PXFind", "stdoutString"):
+    require(token not in bounded_find_body,
+            f"quarantined bounded-find helper still spawns/parses generic filesystem traversal: {token}")
+
 optimized_start = cleaner_m.index("- (NSString *)optimized_findDataContainerUUID:")
 optimized_end = cleaner_m.index("// Helper method to create human-readable file sizes", optimized_start)
 optimized_body = cleaner_m[optimized_start:optimized_end]
@@ -717,6 +797,81 @@ for token in ("baseIdentifier", "containsString", "hasPrefix:baseIdentifier", 'c
               'containsString:@".appex."', 'containsString:@".plugin."'):
     require(token not in public_ext_body,
             f"public extension-data finder still uses naming/prefix heuristics: {token}")
+
+# App Group compatibility APIs must share the exact entitlement resolver instead of duplicating attribution logic.
+rootless_group_start = cleaner_m.index("- (NSArray *)findRootlessAppGroupUUIDs:(NSString *)bundleID {")
+rootless_group_end = cleaner_m.index("#pragma mark - Cleaning Methods", rootless_group_start)
+rootless_group_body = cleaner_m[rootless_group_start:rootless_group_end]
+require("PXStrictBundleIdentifierIsValid" in rootless_group_body and
+        "_resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES" in rootless_group_body,
+        "rootless App Group compatibility finder does not delegate to exact entitlement resolution")
+for token in ("AppEntitlementsReader", "resolveGroupContainersForGroupIDs", "hasPrefix", "MCMMetadataIdentifier"):
+    require(token not in rootless_group_body,
+            f"rootless App Group compatibility finder reintroduced duplicate/fuzzy attribution: {token}")
+
+public_group_start = cleaner_m.index("- (NSArray *)findGroupContainerUUIDsForBundleID:(NSString *)bundleID {")
+public_group_end = cleaner_m.index("- (void)_wipeRelatedDataContainersForBundleIDs:", public_group_start)
+public_group_body = cleaner_m[public_group_start:public_group_end]
+require("PXStrictBundleIdentifierIsValid" in public_group_body and
+        "_resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO" in public_group_body and
+        "_resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES" in public_group_body and
+        "NSMutableOrderedSet" in public_group_body,
+        "public App Group UUID finder does not compose exact rootful/rootless entitlement resolution")
+for token in ("AppEntitlementsReader", "resolveGroupContainersForGroupIDs", "MCMMetadataIdentifier", "containsString"):
+    require(token not in public_group_body,
+            f"public App Group UUID finder reintroduced independent/fuzzy ownership logic: {token}")
+
+# Orphan shell/path scanners stay quarantined; wildcard traversal must not silently become an ownership source again.
+pattern_scan_start = cleaner_m.index("- (NSArray *)findPathsMatchingPattern:(NSString *)pattern {")
+pattern_scan_end = cleaner_m.index("- (void)runCommandWithPrivileges:(NSString *)command {", pattern_scan_start)
+pattern_scan_body = cleaner_m[pattern_scan_start:pattern_scan_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in pattern_scan_body and "return @[];" in pattern_scan_body,
+        "legacy wildcard path finder is not fail-closed")
+for token in ('@"-L"', "runBoundedFindWithArguments", "fileExistsAtPath", "rangeOfString"):
+    require(token not in pattern_scan_body,
+            f"quarantined wildcard path finder still traverses filesystem state: {token}")
+
+root_scan_start = cleaner_m.index("- (NSArray<NSString *> *)findPathsUnderRoot:(NSString *)root")
+root_scan_end = cleaner_m.index("- (CommandResult *)runCommandWithPrivilegesResult:", root_scan_start)
+root_scan_body = cleaner_m[root_scan_start:root_scan_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in root_scan_body and "return @[];" in root_scan_body,
+        "legacy root wildcard scanner is not fail-closed")
+for token in ('@"-L"', "runBoundedFindWithArguments", "fileExistsAtPath", 'addObject:@"-name"'):
+    require(token not in root_scan_body,
+            f"quarantined root wildcard scanner still traverses filesystem state: {token}")
+
+directory_probe_start = cleaner_m.index("- (BOOL)directoryExistsAndHasAnyContent:(NSString *)path {")
+directory_probe_end = cleaner_m.index("// Helper method to check if the app has any references in system databases", directory_probe_start)
+directory_probe_body = cleaner_m[directory_probe_start:directory_probe_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in directory_probe_body and "return NO;" in directory_probe_body,
+        "legacy shell directory-content probe is not fail-closed")
+for token in ("runCommandAndGetOutput", 'find \'%@\'', "grep -v", "head -n 1"):
+    require(token not in directory_probe_body,
+            f"quarantined directory-content probe still launches shell discovery: {token}")
+
+# Process-exit polling uses argv-based pgrep; the old arbitrary shell-output query API stays quarantined.
+process_wait_start = cleaner_m.index("static BOOL PXWaitForProcessExit(AppDataCleaner *selfRef, NSString *procName, NSTimeInterval timeout) {")
+process_wait_end = cleaner_m.index("- (BOOL)_deepCleanEnabled", process_wait_start)
+process_wait_body = cleaner_m[process_wait_start:process_wait_end]
+require("firstExistingPath" in process_wait_body and
+        '@"/usr/bin/pgrep"' in process_wait_body and
+        "runExecutableAndCapture" in process_wait_body and
+        'arguments:@[@"-x", procName]' in process_wait_body and
+        "probe.exitCode == 1" in process_wait_body,
+        "process-exit polling is not an argv-based bounded pgrep probe")
+for token in ("runCommandAndGetOutput", "/bin/sh", "pgrep -x", "head -n 1"):
+    require(token not in process_wait_body,
+            f"process-exit polling still uses shell command interpolation/pipeline: {token}")
+
+output_query_start = cleaner_m.index("- (NSString *)runCommandAndGetOutput:(NSString *)command {")
+output_query_end = cleaner_m.index("#pragma mark - Public Header Methods", output_query_start)
+output_query_body = cleaner_m[output_query_start:output_query_end]
+require(output_query_body.count("PXLogQuarantinedLegacyClearSelector(_cmd)") == 2 and
+        output_query_body.count('return @"";') == 2,
+        "orphan arbitrary shell-output query overloads are not fully quarantined")
+for token in ("runCommandWithPrivilegesResult", "stdoutString", "stderrString", "componentsSeparatedByString"):
+    require(token not in output_query_body,
+            f"quarantined shell-output query API still executes/parses commands: {token}")
 
 # Dormant fuzzy verification/extension helper family stays fail-closed and cannot be revived transitively.
 legacy_verify_keychain_start = cleaner_m.index("- (void)verifyKeychainClearedForBundleID:(NSString *)bundleID reportingTo:(NSMutableArray *)unclearedPaths {")
@@ -793,6 +948,14 @@ require("clampedTimeoutForStepLimit" in cleaner_m and "MIN(normalizedStep, remai
         "P0 child timeout is not clamped to remaining operation deadline")
 require("PXCurrentClearOperationContext" in cleaner_m,
         "P0 operation context is not threaded through canonical helpers")
+require("@property (nonatomic, strong) PXKeychainClearPlan *keychainPlanSnapshot;" in cleaner_m,
+        "P0 operation context does not own the immutable Keychain plan snapshot")
+require("operationContext.keychainPlanSnapshot = keychainPlan;" in mode_body,
+        "canonical Clear does not snapshot the Keychain plan before execution/verification")
+keychain_snapshot_index = mode_body.index("operationContext.keychainPlanSnapshot = keychainPlan;")
+keychain_execute_index = mode_body.index("_executeKeychainWipeForBundleIdentifier:keychainPlan.bundleIdentifier")
+require(keychain_snapshot_index < keychain_execute_index,
+        "Keychain plan snapshot is captured after the destructive Keychain pass starts")
 require("operationContext.applicationDataCanonicalPaths" in app_wipe_body,
         "P0 ApplicationData canonical paths are not operation-local")
 require("operationContext.extensionDataCanonicalPaths" in aggregate_body and

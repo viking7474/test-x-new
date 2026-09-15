@@ -29,7 +29,7 @@ require("CLEAR-07 (Phase 11)" in cleaner, "CLEAR-07: rationale marker missing")
 
 # ---- CLEAR-09: generic shared-database mutation is fully quarantined ----
 start = cleaner.index("- (void)cleanDatabaseFile:")
-end = cleaner.index("// Helper method to check if directory exists", start)
+end = cleaner.index("- (BOOL)directoryExistsAndHasAnyContent:(NSString *)path {", start)
 clean_database_body = cleaner[start:end]
 require("PXLogQuarantinedLegacyClearSelector(_cmd)" in clean_database_body,
         "CLEAR-09: generic cleanDatabaseFile must remain fail-closed")

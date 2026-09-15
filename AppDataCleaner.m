@@ -20,17 +20,15 @@
 #import "PXDestructivePathValidator.h"
 #import "PXClearRequest.h"
 #import "PXClearResult.h"
+#import "PXKeychainClearPlan.h"
 #import "KeychainHelper/PXKeychainHelperExitCode.h"
+#import "KeychainHelper/PXKeychainHelperResult.h"
 #import "AppGroupContainerResolver.h"
 #import "FreezeManager.h"
 #import "common/PXProcessKiller.h"
 #import "common/PXSecuritySettingsStore.h"
 
 static const NSUInteger PXPrivilegedCommandMaxOutputBytes = 1024 * 1024;
-static const NSTimeInterval PXOutputQueryDefaultTimeoutSec = 60.0;
-static NSString * const PXFindExecutablePath = @"/usr/bin/find";
-static const NSTimeInterval PXFindCommandTimeoutSec = 120.0;
-static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 
 // 7.4 Clear Data metrics: process-lifetime cumulative counters. The Clear entry
 // point snapshots these before a run and reports per-run deltas in a [metric] line.
@@ -54,6 +52,7 @@ typedef NS_ENUM(NSInteger, PXClearOperationErrorCode) {
 @property (nonatomic, copy) NSArray<NSString *> *appGroupCanonicalPaths;
 @property (nonatomic, copy) NSArray<NSString *> *extensionDataCanonicalPaths;
 @property (nonatomic, copy) NSArray<NSString *> *pluginKitDataCanonicalPaths;
+@property (nonatomic, strong) PXKeychainClearPlan *keychainPlanSnapshot;
 @property (nonatomic, assign) BOOL wasFrozenBeforeOperation;
 @property (nonatomic, assign) BOOL ownsFreezeLease;
 @property (nonatomic, assign) double resolveContainerMs;
@@ -181,8 +180,6 @@ static NSError *PXClearOperationCancellationError(PXClearOperationContext *conte
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
 
-#import "PXKeychainClearPlan.h"
-
 @interface AppDataCleaner ()
 // CLEAR-01: dry-run capable execution (internal). When dryRun is YES the clear
 // only plans and journals the work and performs no destructive operations.
@@ -221,6 +218,11 @@ static NSError *PXClearOperationCancellationError(PXClearOperationContext *conte
 - (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID
                                                          deepClean:(BOOL)deepClean;
 - (PXKeychainClearPlan *)_keychainClearPlanForBundleIdentifier:(NSString *)bundleIdentifier;
+- (PXKeychainHelperResult *)_readOnlyKeychainListResultForBundleIdentifier:(NSString *)bundleIdentifier
+                                                              accessGroups:(NSArray<NSString *> *)accessGroups;
+- (BOOL)_hasExactKeychainItemsForBundleIdentifier:(NSString *)bundleIdentifier
+                                     accessGroups:(NSArray<NSString *> *)accessGroups
+                                            known:(BOOL *)known;
 - (BOOL)_executeKeychainWipeForBundleIdentifier:(NSString *)bundleIdentifier
                                   selectedGroups:(NSArray<NSString *> *)selectedGroups
                            applicationIdentifier:(NSString *)applicationIdentifier
@@ -769,7 +771,6 @@ static void PXStopSafariDaemonsBestEffort(AppDataCleaner *selfRef) {
         @"com.apple.WebKit.Networking",
         @"com.apple.WebKit.GPU",
         @"nsurlsessiond",
-        @"accountsd",
         @"webbookmarksd"
     ];
     (void)selfRef;
@@ -787,24 +788,36 @@ static NSString *PXFirstExistingPath(NSFileManager *fm, NSArray<NSString *> *pat
 }
 
 static BOOL PXWaitForProcessExit(AppDataCleaner *selfRef, NSString *procName, NSTimeInterval timeout) {
-    if (!selfRef || !procName.length) return YES;
+    if (!selfRef || ![procName isKindOfClass:[NSString class]] || procName.length == 0 || timeout <= 0.0) {
+        return NO;
+    }
+    CommandRunner *runner = [CommandRunner shared];
+    NSString *pgrepPath = [runner firstExistingPath:@[@"/usr/bin/pgrep", @"/bin/pgrep"]];
+    if (!pgrepPath.length) return NO;
+
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
     while (YES) {
-        NSTimeInterval elapsed = CFAbsoluteTimeGetCurrent() - start;
-        NSTimeInterval remaining = timeout - elapsed;
-        if (remaining <= 0) {
-            break;
-        }
-
+        NSTimeInterval remaining = timeout - (CFAbsoluteTimeGetCurrent() - start);
+        if (remaining <= 0.0) break;
         NSTimeInterval probeTimeout = MIN(1.0, remaining);
-        if (probeTimeout <= 0) {
-            break;
-        }
 
-        NSString *cmd = [NSString stringWithFormat:@"pgrep -x '%@' 2>/dev/null | head -n 1", procName];
-        NSString *out = [selfRef runCommandAndGetOutput:cmd timeoutSec:probeTimeout];
-        if ([out isKindOfClass:[NSString class]] && out.length == 0) {
-            return YES;
+        CommandResult *probe = [runner runExecutableAndCapture:pgrepPath
+                                                     arguments:@[@"-x", procName]
+                                                    timeoutSec:probeTimeout
+                                                maxOutputBytes:4096];
+        if (probe &&
+            probe.spawnError == 0 &&
+            probe.runnerError == 0 &&
+            !probe.timedOut &&
+            probe.exitedNormally &&
+            !probe.stdoutTruncated &&
+            !probe.stderrTruncated) {
+            if (probe.exitCode == 1 && probe.stdoutString.length == 0) {
+                return YES;
+            }
+            if (probe.exitCode != 0 && probe.exitCode != 1) {
+                return NO;
+            }
         }
         [NSThread sleepForTimeInterval:0.1];
     }
@@ -1766,6 +1779,99 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 }
 
 #pragma mark - Keychain Wipe Settings
+
+- (PXKeychainHelperResult *)_readOnlyKeychainListResultForBundleIdentifier:(NSString *)bundleIdentifier
+                                                              accessGroups:(NSArray<NSString *> *)accessGroups {
+    if (!PXStrictBundleIdentifierIsValid(bundleIdentifier)) return nil;
+
+    NSArray<NSString *> *requestedGroups = nil;
+    if (accessGroups != nil) {
+        if (![accessGroups isKindOfClass:[NSArray class]] || accessGroups.count == 0 || accessGroups.count > 128) {
+            return nil;
+        }
+        NSMutableSet<NSString *> *uniqueGroups = [NSMutableSet set];
+        for (id group in accessGroups) {
+            if (!PXKeychainExactStringIsValid(group)) return nil;
+            [uniqueGroups addObject:(NSString *)group];
+        }
+        requestedGroups = [[uniqueGroups allObjects] sortedArrayUsingSelector:@selector(compare:)];
+        if (requestedGroups.count != accessGroups.count) return nil;
+    }
+
+    CommandRunner *runner = [CommandRunner shared];
+    NSString *scriptPath = [runner firstExistingPath:@[
+        @"/Library/WeaponX/keychain_backup.sh",
+        @"/var/jb/Library/WeaponX/keychain_backup.sh",
+        @"/private/var/jb/Library/WeaponX/keychain_backup.sh"
+    ]];
+    if (!scriptPath.length || ![scriptPath hasPrefix:@"/"]) return nil;
+
+    NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithObjects:@"list", bundleIdentifier, nil];
+    if (requestedGroups.count > 0) {
+        [arguments addObjectsFromArray:@[
+            @"--groups",
+            [requestedGroups componentsJoinedByString:@","]
+        ]];
+    }
+
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    NSTimeInterval timeout = operationContext
+        ? [operationContext clampedTimeoutForStepLimit:60.0]
+        : 60.0;
+    if (operationContext && timeout <= 0.0) return nil;
+
+    CommandResult *commandResult = [runner runExecutableAndCapture:scriptPath
+                                                          arguments:arguments
+                                                         timeoutSec:timeout
+                                                     maxOutputBytes:1024 * 1024];
+    if (!PXBoundedCommandSucceeded(commandResult)) return nil;
+
+    NSString *machineLine = nil;
+    for (NSString *line in [commandResult.stdoutString ?: @"" componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if (![line hasPrefix:PXKeychainHelperResultOutputPrefix]) continue;
+        if (machineLine != nil) return nil;
+        machineLine = line;
+    }
+    if (!machineLine.length) return nil;
+
+    NSError *parseError = nil;
+    PXKeychainHelperResult *result =
+        [PXKeychainHelperResult resultFromMachineReadableLine:machineLine error:&parseError];
+    if (!result || parseError ||
+        result.operation != PXKeychainHelperOperationList ||
+        result.completion != PXKeychainHelperCompletionCompleted ||
+        result.fatalErrorPresent ||
+        result.failedCount != 0 ||
+        result.errorCount != 0 ||
+        result.attemptedCount != result.succeededCount) {
+        return nil;
+    }
+
+    if (requestedGroups != nil) {
+        if (![result.requestedAccessGroups isEqualToArray:requestedGroups]) return nil;
+        NSSet<NSString *> *effectiveMembership = [NSSet setWithArray:result.effectiveAccessGroups];
+        for (NSString *group in requestedGroups) {
+            if (![effectiveMembership containsObject:group]) return nil;
+        }
+    }
+    return result;
+}
+
+- (BOOL)_hasExactKeychainItemsForBundleIdentifier:(NSString *)bundleIdentifier
+                                     accessGroups:(NSArray<NSString *> *)accessGroups
+                                            known:(BOOL *)known {
+    if (known) *known = NO;
+    if (accessGroups != nil && accessGroups.count == 0) {
+        if (known) *known = YES;
+        return NO;
+    }
+
+    PXKeychainHelperResult *result =
+        [self _readOnlyKeychainListResultForBundleIdentifier:bundleIdentifier accessGroups:accessGroups];
+    if (!result) return NO;
+    if (known) *known = YES;
+    return result.attemptedCount > 0;
+}
 
 - (PXKeychainClearPlan *)_keychainClearPlanForBundleIdentifier:(NSString *)bundleIdentifier {
     BOOL systemApplication = [bundleIdentifier hasPrefix:@"com.apple."];
@@ -3446,6 +3552,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                 [strongSelf logMessage:@"[AppDataCleaner] Step 1: Planning and running single Keychain pass..."];
                 PXKeychainClearPlan *keychainPlan =
                     [strongSelf _keychainClearPlanForBundleIdentifier:fullRequest.bundleIdentifier];
+                operationContext.keychainPlanSnapshot = keychainPlan;
                 NSMutableArray<NSNumber *> *keychainPassResults = [NSMutableArray array];
                 if (keychainPlan.planningFailureCode == 0 &&
                     keychainPlan.skipDetail.length == 0 &&
@@ -4042,50 +4149,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 #pragma mark - UUID Finding Methods
 
 - (NSString *)findBundleUUID:(NSString *)bundleID {
-    NSArray *bundleDirs = [self listDirectoriesInPath:@"/var/containers/Bundle/Application"];
-    
-    for (NSString *uuid in bundleDirs) {
-        NSString *appPath = [NSString stringWithFormat:@"/var/containers/Bundle/Application/%@", uuid];
-        NSArray *appContents = [self listDirectoriesInPath:appPath];
-        
-        for (NSString *item in appContents) {
-            if ([item hasSuffix:@".app"]) {
-                NSString *infoPlistPath = [NSString stringWithFormat:@"/var/containers/Bundle/Application/%@/%@/Info.plist", 
-                                          uuid, item];
-                NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
-                NSString *itemBundleID = infoPlist[@"CFBundleIdentifier"];
-                
-                if ([itemBundleID isEqualToString:bundleID]) {
-                    return uuid;
-                }
-            }
-        }
-    }
-    
-    // Try rootless path if standard path didn't work
-    if ([self directoryHasContent:@"/containers/Bundle/Application"]) {
-        NSArray *bundleDirs = [self listDirectoriesInPath:@"/containers/Bundle/Application"];
-        
-        for (NSString *uuid in bundleDirs) {
-            NSString *appPath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@", uuid];
-            NSArray *appContents = [self listDirectoriesInPath:appPath];
-            
-            for (NSString *item in appContents) {
-                if ([item hasSuffix:@".app"]) {
-                    NSString *infoPlistPath = [NSString stringWithFormat:@"/containers/Bundle/Application/%@/%@/Info.plist", 
-                                              uuid, item];
-                    NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
-                    NSString *itemBundleID = infoPlist[@"CFBundleIdentifier"];
-                    
-                    if ([itemBundleID isEqualToString:bundleID]) {
-                        return uuid;
-                    }
-                }
-            }
-        }
-    }
-    
-    return nil;
+    return [self findBundleContainerUUIDForBundleID:bundleID];
 }
 
 - (NSString *)findDataContainerUUID:(NSString *)bundleID aggressive:(BOOL)aggressive {
@@ -4133,47 +4197,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 }
 
 - (NSArray *)findRootlessAppGroupUUIDs:(NSString *)bundleID {
-    if (!bundleID.length) return @[];
-
-    // Use entitlements + resolver; filter only /containers-based results.
-    AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
-    NSError *entErr = nil;
-    NSDictionary *ent = [reader fullEntitlementsForBundleID:bundleID error:&entErr];
-    NSArray *groups = nil;
-    if ([ent isKindOfClass:[NSDictionary class]]) {
-        id v = ent[@"com.apple.security.application-groups"];
-        if ([v isKindOfClass:[NSArray class]]) {
-            groups = (NSArray *)v;
-        } else {
-            v = ent[@"application-groups"];
-            if ([v isKindOfClass:[NSArray class]]) {
-                groups = (NSArray *)v;
-            }
-        }
-    }
-    if (!groups.count) {
-        return @[];
-    }
-
-    NSMutableArray<NSString *> *groupIDs = [NSMutableArray array];
-    for (id g in groups) {
-        if ([g isKindOfClass:[NSString class]] && [(NSString *)g length] > 0) {
-            [groupIDs addObject:(NSString *)g];
-        }
-    }
-    if (!groupIDs.count) {
-        return @[];
-    }
-
-    AppGroupContainerResolver *resolver = [[AppGroupContainerResolver alloc] init];
-    NSArray<AppGroupContainerInfo *> *infos = [resolver resolveGroupContainersForGroupIDs:groupIDs];
-    NSMutableArray<NSString *> *uuids = [NSMutableArray array];
-    for (AppGroupContainerInfo *info in infos) {
-        if (![info.path isKindOfClass:[NSString class]] || !info.path.length) continue;
-        if (![info.path hasPrefix:@"/containers/Shared/AppGroup/"]) continue;
-        [uuids addObject:[info.path lastPathComponent]];
-    }
-    return uuids;
+    if (!PXStrictBundleIdentifierIsValid(bundleID)) return @[];
+    return [self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES] ?: @[];
 }
 
 #pragma mark - Cleaning Methods
@@ -4605,143 +4630,27 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 #pragma mark - Helper Methods
 
 - (NSArray *)listDirectoriesInPath:(NSString *)path {
-    NSError *error;
-    NSArray *contents = [_fileManager contentsOfDirectoryAtPath:path error:&error];
-    if (error) {
-        NSLog(@"[AppDataCleaner] Error listing directory %@: %@", path, error.localizedDescription);
-        return @[];
-    }
-    return contents;
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return @[];
 }
 
 - (BOOL)directoryHasContent:(NSString *)path {
-    if (![_fileManager fileExistsAtPath:path]) {
-        NSLog(@"[AppDataCleaner] Directory does not exist: %@", path);
-        return NO;
-    }
-    
-    NSError *error;
-    NSArray *contents = [_fileManager contentsOfDirectoryAtPath:path error:&error];
-    
-    if (error) {
-        NSLog(@"[AppDataCleaner] Error reading directory %@: %@", path, error.localizedDescription);
-        return NO;
-    }
-    
-    // Filter out system files that start with .com.apple
-    NSMutableArray *nonSystemFiles = [NSMutableArray array];
-    for (NSString *item in contents) {
-        if (![item hasPrefix:@".com.apple"]) {
-            [nonSystemFiles addObject:item];
-        }
-    }
-    
-    NSLog(@"[AppDataCleaner] Directory %@ has %lu non-system files", path, (unsigned long)nonSystemFiles.count);
-    if (nonSystemFiles.count > 0) {
-        NSLog(@"[AppDataCleaner] First few files: %@", [nonSystemFiles subarrayWithRange:NSMakeRange(0, MIN(5, nonSystemFiles.count))]);
-    }
-    
-    return (nonSystemFiles.count > 0);
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return NO;
 }
 
 - (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments {
-    if (![arguments isKindOfClass:[NSArray class]] || arguments.count == 0) {
-        return @[];
-    }
-
-    for (id argument in arguments) {
-        if (![argument isKindOfClass:[NSString class]] || [(NSString *)argument length] == 0) {
-            return @[];
-        }
-    }
-
-    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
-    NSTimeInterval effectiveTimeout = operationContext
-        ? [operationContext clampedTimeoutForStepLimit:PXFindCommandTimeoutSec]
-        : PXFindCommandTimeoutSec;
-    if (operationContext && effectiveTimeout <= 0.0) {
-        return @[];
-    }
-
-    atomic_fetch_add(&gPXClearShellProcessCount, 1);
-    CommandResult *result =
-        [[CommandRunner shared] runExecutableAndCapture:PXFindExecutablePath
-                                              arguments:arguments
-                                             timeoutSec:effectiveTimeout
-                                         maxOutputBytes:PXFindCommandMaxOutputBytes];
-
-    if (result == nil ||
-        result.spawnError != 0 ||
-        result.runnerError != 0 ||
-        result.timedOut ||
-        !result.exitedNormally ||
-        result.stdoutTruncated ||
-        result.stderrTruncated) {
-        NSLog(@"[AppDataCleaner] Find command failed: resultNil=%d spawnError=%d runnerError=%d timedOut=%d exitedNormally=%d terminationSignal=%d exitCode=%d stdoutTruncated=%d stderrTruncated=%d",
-              result == nil,
-              result.spawnError,
-              result.runnerError,
-              result.timedOut,
-              result.exitedNormally,
-              result.terminationSignal,
-              result.exitCode,
-              result.stdoutTruncated,
-              result.stderrTruncated);
-        return @[];
-    }
-
-    NSString *output = result.stdoutString ?: @"";
-    NSArray<NSString *> *parts =
-        [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    NSArray<NSString *> *matchedPaths = [parts filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
-        (void)bindings;
-        return [object isKindOfClass:[NSString class]] && [(NSString *)object length] > 0;
-    }]];
-    atomic_fetch_add(&gPXClearPathsScannedCount, (uint_fast64_t)matchedPaths.count);
-    return matchedPaths;
+    (void)arguments;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return @[];
 }
 
 - (NSArray *)findPathsMatchingPattern:(NSString *)pattern {
-    if (![pattern isKindOfClass:[NSString class]] || pattern.length == 0) {
-        return @[];
-    }
-
-    // Optimize search root: Default to /, but if pattern starts with exact path prefix, use that
-    NSString *searchRoot = @"/";
-    
-    // Find the first wildcard char to determine static prefix
-    NSRange rangeStar = [pattern rangeOfString:@"*"];
-    NSRange rangeQ = [pattern rangeOfString:@"?"];
-    NSRange rangeBrack = [pattern rangeOfString:@"["];
-    
-    NSUInteger firstWildcard = NSNotFound;
-    if (rangeStar.location != NSNotFound) firstWildcard = rangeStar.location;
-    if (rangeQ.location != NSNotFound && (firstWildcard == NSNotFound || rangeQ.location < firstWildcard)) firstWildcard = rangeQ.location;
-    if (rangeBrack.location != NSNotFound && (firstWildcard == NSNotFound || rangeBrack.location < firstWildcard)) firstWildcard = rangeBrack.location;
-    
-    if (firstWildcard != NSNotFound && firstWildcard > 1) {
-        // Get the path up to the last slash before the wildcard
-        NSString *prefix = [pattern substringToIndex:firstWildcard];
-        NSString *directory = [prefix stringByDeletingLastPathComponent];
-        
-        // Ensure we have a valid absolute path to start from
-        if (directory.length > 1 && [directory hasPrefix:@"/"]) {
-            // Check if directory exists
-            BOOL isDir = NO;
-            if ([[NSFileManager defaultManager] fileExistsAtPath:directory isDirectory:&isDir] && isDir) {
-                searchRoot = directory;
-                // NSLog(@"[AppDataCleaner] Optimized find search root: %@", searchRoot);
-            }
-        }
-    }
-    
-    NSArray<NSString *> *arguments = @[
-        @"-L",
-        searchRoot,
-        @"-path",
-        pattern
-    ];
-    return [self runBoundedFindWithArguments:arguments];
+    (void)pattern;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return @[];
 }
 
 - (void)runCommandWithPrivileges:(NSString *)command {
@@ -4772,43 +4681,15 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     [self runCommandWithPrivileges:batched timeoutSec:timeoutSec];
 }
 
-// Optimized: find files/dirs under root matching any basename pattern (single traversal).
+// Legacy wildcard traversal helper retained only for source compatibility.
 - (NSArray<NSString *> *)findPathsUnderRoot:(NSString *)root
                                directories:(BOOL)directories
                               namePatterns:(NSArray<NSString *> *)namePatterns {
-    if (![root isKindOfClass:[NSString class]] || root.length == 0) return @[];
-    if (![namePatterns isKindOfClass:[NSArray class]] || namePatterns.count == 0) return @[];
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL isDir = NO;
-    if (![fm fileExistsAtPath:root isDirectory:&isDir] || !isDir) return @[];
-
-    NSMutableArray<NSString *> *patterns = [NSMutableArray array];
-    for (id p in namePatterns) {
-        if (![p isKindOfClass:[NSString class]]) continue;
-        NSString *s = (NSString *)p;
-        if (s.length) [patterns addObject:s];
-    }
-    if (patterns.count == 0) return @[];
-
-    NSMutableArray<NSString *> *arguments = [NSMutableArray array];
-    [arguments addObject:@"-L"];
-    [arguments addObject:root];
-    [arguments addObject:@"-type"];
-    [arguments addObject:(directories ? @"d" : @"f")];
-    [arguments addObject:@"("];
-
-    for (NSUInteger index = 0; index < patterns.count; index++) {
-        if (index > 0) {
-            [arguments addObject:@"-o"];
-        }
-        [arguments addObject:@"-name"];
-        [arguments addObject:patterns[index]];
-    }
-
-    [arguments addObject:@")"];
-    [arguments addObject:@"-print"];
-    return [self runBoundedFindWithArguments:arguments];
+    (void)root;
+    (void)directories;
+    (void)namePatterns;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return @[];
 }
 
 - (CommandResult *)runCommandWithPrivilegesResult:(NSString *)command
@@ -5003,12 +4884,39 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         }
     }
     
-    // 5. Verify keychain items
-    if ([self hasKeychainItemsForBundleID:bundleID]) {
+    // 5. Verify only the exact Keychain groups captured by this operation's immutable plan.
+    // Standalone verification has no operation snapshot, so it may construct a live read-only plan.
+    PXKeychainClearPlan *keychainVerificationPlan = useOperationContext
+        ? operationContext.keychainPlanSnapshot
+        : [self _keychainClearPlanForBundleIdentifier:bundleID];
+    if (useOperationContext && ![keychainVerificationPlan isKindOfClass:[PXKeychainClearPlan class]]) {
         [unclearedPaths addObject:@{
             @"path": @"Keychain",
-            @"info": @"Keychain still contains items for this bundle ID"
+            @"info": @"Canonical Keychain verification snapshot is unavailable"
         }];
+    } else if (keychainVerificationPlan.planningFailureCode != 0) {
+        [unclearedPaths addObject:@{
+            @"path": @"Keychain",
+            @"info": @"Exact Keychain verification plan could not be authorized"
+        }];
+    } else if (keychainVerificationPlan.plannedPassCount > 0 &&
+               keychainVerificationPlan.selectedGroups.count > 0) {
+        BOOL keychainKnown = NO;
+        BOOL keychainItemsRemain =
+            [self _hasExactKeychainItemsForBundleIdentifier:bundleID
+                                               accessGroups:keychainVerificationPlan.selectedGroups
+                                                      known:&keychainKnown];
+        if (!keychainKnown) {
+            [unclearedPaths addObject:@{
+                @"path": @"Keychain",
+                @"info": @"Exact selected-group Keychain verification was unavailable"
+            }];
+        } else if (keychainItemsRemain) {
+            [unclearedPaths addObject:@{
+                @"path": @"Keychain",
+                @"info": @"Selected Keychain access groups still contain items"
+            }];
+        }
     }
     
     // 6. Filter out special paths and expected system-created directories before reporting
@@ -5173,57 +5081,17 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
 // Helper to run a command and get its output
 - (NSString *)runCommandAndGetOutput:(NSString *)command {
-    return [self runCommandAndGetOutput:command
-                                timeoutSec:PXOutputQueryDefaultTimeoutSec];
+    (void)command;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return @"";
 }
 
 - (NSString *)runCommandAndGetOutput:(NSString *)command
                           timeoutSec:(NSTimeInterval)timeoutSec {
-    NSLog(@"[AppDataCleaner] Running command: %@", command);
-
-    if (![command isKindOfClass:[NSString class]] ||
-        command.length == 0 ||
-        !isfinite(timeoutSec)) {
-        NSLog(@"[AppDataCleaner] Command query failed: invalid input");
-        return @"error";
-    }
-
-    NSTimeInterval effectiveTimeout = timeoutSec <= 0
-        ? PXOutputQueryDefaultTimeoutSec
-        : timeoutSec;
-    CommandResult *result = [self runCommandWithPrivilegesResult:command
-                                                       timeoutSec:effectiveTimeout];
-
-    BOOL failed = result.runnerError != 0 ||
-                  result.spawnError != 0 ||
-                  result.timedOut ||
-                  !result.exitedNormally ||
-                  result.stdoutTruncated ||
-                  result.stderrTruncated;
-    if (failed) {
-        NSLog(@"[AppDataCleaner] Command query failed: spawnError=%d runnerError=%d timedOut=%d exitedNormally=%d terminationSignal=%d stdoutTruncated=%d stderrTruncated=%d",
-              result.spawnError,
-              result.runnerError,
-              result.timedOut,
-              result.exitedNormally,
-              result.terminationSignal,
-              result.stdoutTruncated,
-              result.stderrTruncated);
-        return @"error";
-    }
-
-    NSString *stdoutString = result.stdoutString ?: @"";
-    NSString *stderrString = result.stderrString ?: @"";
-    NSMutableString *mergedOutput = [NSMutableString stringWithString:stdoutString];
-    if (stderrString.length > 0) {
-        if (mergedOutput.length > 0 && ![mergedOutput hasSuffix:@"\n"]) {
-            [mergedOutput appendString:@"\n"];
-        }
-        [mergedOutput appendString:stderrString];
-    }
-
-    return [mergedOutput stringByTrimmingCharactersInSet:
-                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    (void)command;
+    (void)timeoutSec;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+    return @"";
 }
 #pragma mark - Public Header Methods
 
@@ -5755,38 +5623,16 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 #pragma mark - Container Discovery Methods
 
 - (BOOL)hasKeychainItemsForBundleID:(NSString *)bundleID {
-    // This will require Security.framework access
-    // For now we'll use a simple check to see if there are any keychain items for this app
-    NSMutableDictionary *query = [NSMutableDictionary dictionary];
-    query[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
-    query[(__bridge id)kSecAttrService] = bundleID;
-    query[(__bridge id)kSecReturnAttributes] = @YES;
-    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
-    
-    CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    
-    if (status == errSecSuccess) {
-        NSArray *items = (__bridge_transfer NSArray *)result;
-        return items.count > 0;
+    BOOL known = NO;
+    BOOL hasItems = [self _hasExactKeychainItemsForBundleIdentifier:bundleID
+                                                       accessGroups:nil
+                                                              known:&known];
+    if (!known) {
+        [self logMessage:@"[AppDataCleaner] Exact Keychain presence probe unavailable for %@; failing closed",
+                         bundleID ?: @"(nil)"];
+        return NO;
     }
-    
-    // Try again with a different approach - check for access groups
-    query = [NSMutableDictionary dictionary];
-    query[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
-    query[(__bridge id)kSecAttrAccessGroup] = bundleID;
-    query[(__bridge id)kSecReturnAttributes] = @YES;
-    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitAll;
-    
-    result = NULL;
-    status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    
-    if (status == errSecSuccess) {
-        NSArray *items = (__bridge_transfer NSArray *)result;
-        return items.count > 0;
-    }
-    
-    return NO;
+    return hasItems;
 }
 
 // Support methods (aliases for backwards compatibility)
@@ -5803,49 +5649,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 }
 
 - (NSArray *)findGroupContainerUUIDsForBundleID:(NSString *)bundleID {
-    if (!bundleID.length) return @[];
-
-    // Resolve app groups from entitlements (authoritative), then map to UUID/path.
-    AppEntitlementsReader *reader = [[AppEntitlementsReader alloc] init];
-    NSError *entErr = nil;
-    NSDictionary *ent = [reader fullEntitlementsForBundleID:bundleID error:&entErr];
-    NSArray *groups = nil;
-    if ([ent isKindOfClass:[NSDictionary class]]) {
-        id v = ent[@"com.apple.security.application-groups"];
-        if ([v isKindOfClass:[NSArray class]]) {
-            groups = (NSArray *)v;
-        } else {
-            v = ent[@"application-groups"];
-            if ([v isKindOfClass:[NSArray class]]) {
-                groups = (NSArray *)v;
-            }
-        }
-    }
-    if (!groups.count) {
-        return @[];
-    }
-
-    NSMutableArray<NSString *> *groupIDs = [NSMutableArray array];
-    for (id g in groups) {
-        if ([g isKindOfClass:[NSString class]] && [(NSString *)g length] > 0) {
-            [groupIDs addObject:(NSString *)g];
-        }
-    }
-    if (!groupIDs.count) {
-        return @[];
-    }
-
-    AppGroupContainerResolver *resolver = [[AppGroupContainerResolver alloc] init];
-    NSArray<AppGroupContainerInfo *> *infos = [resolver resolveGroupContainersForGroupIDs:groupIDs];
-    NSMutableArray<NSString *> *uuids = [NSMutableArray array];
-    for (AppGroupContainerInfo *info in infos) {
-        if ([info.uuid isKindOfClass:[NSString class]] && info.uuid.length) {
-            [uuids addObject:info.uuid];
-        } else if ([info.path isKindOfClass:[NSString class]] && info.path.length) {
-            [uuids addObject:[info.path lastPathComponent]];
-        }
-    }
-    return uuids;
+    if (!PXStrictBundleIdentifierIsValid(bundleID)) return @[];
+    NSMutableOrderedSet<NSString *> *uuids = [NSMutableOrderedSet orderedSet];
+    [uuids addObjectsFromArray:[self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO] ?: @[]];
+    [uuids addObjectsFromArray:[self _resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:YES] ?: @[]];
+    return uuids.array;
 }
 
 - (void)_wipeRelatedDataContainersForBundleIDs:(NSArray<NSString *> *)bundleIDs {
@@ -6090,32 +5898,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
-// Helper method to check if directory exists and has any content at all, ignoring system files
+// Legacy shell-based content probe retained only for source compatibility.
 - (BOOL)directoryExistsAndHasAnyContent:(NSString *)path {
-    if (!path.length) {
-        return NO;
-    }
-    if (![_fileManager fileExistsAtPath:path]) {
-        NSLog(@"[AppDataCleaner] Directory does not exist: %@", path);
-        return NO;
-    }
-
-    // Check for any regular file (ignore dotpaths) up to a shallow depth.
-    NSString *command = [NSString stringWithFormat:@"find '%@' -maxdepth 3 -type f -not -path '*/\\.*' -print | head -n 1", path];
-    NSString *result = [self runCommandAndGetOutput:command];
-    if (result.length > 0 && ![result isEqualToString:@"error"]) {
-        NSLog(@"[AppDataCleaner] Found at least one file in directory: %@", path);
-        return YES;
-    }
-
-    // Backup: check for any non-system subdirectory (ignore .com.apple*).
-    command = [NSString stringWithFormat:@"find '%@' -mindepth 1 -maxdepth 2 -type d -not -path '*/\\.*' -print | grep -v '\\.?com\\.apple' | head -n 1", path];
-    result = [self runCommandAndGetOutput:command];
-    if (result.length > 0 && ![result isEqualToString:@"error"]) {
-        NSLog(@"[AppDataCleaner] Found subdirectories in: %@", path);
-        return YES;
-    }
-
+    (void)path;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
     return NO;
 }
 
