@@ -250,17 +250,27 @@ for forbidden_siri_mutation in (
     require(forbidden_siri_mutation not in siri_body,
             f"quarantined Siri analytics selector still contains unsafe ownership/mutation logic: {forbidden_siri_mutation}")
 
-# App-state cleanup keeps only exact bundle-derived files; fuzzy recursive directory scans are quarantined.
+# Exact-file deletion primitive refuses directories/symlinks and performs no shell/glob expansion.
+exact_file_start = cleaner_m.index("static BOOL PXRemoveExactRegularNonSymlinkFile(NSString *path) {")
+exact_file_end = cleaner_m.index("static NSString *PXExactInstalledApplicationBundlePathFromLaunchServices", exact_file_start)
+exact_file_body = cleaner_m[exact_file_start:exact_file_end]
+for token in ("lstat", "S_ISREG", "S_ISLNK", "unlink"):
+    require(token in exact_file_body, f"exact-file primitive missing safety/execution token: {token}")
+for token in ("rm -rf", "runCommandWithPrivileges", "removeItemAtPath", "findPathsMatchingPattern"):
+    require(token not in exact_file_body, f"exact-file primitive unexpectedly expands into generic deletion: {token}")
+
+# App-state cleanup keeps only exact bundle-derived files and uses the exact-file primitive.
 app_state_start = cleaner_m.index("- (void)_internalClearAppStateData:(NSString *)bundleID {")
 app_state_end = cleaner_m.index("// Helper to scan a directory and wipe files/folders matching a string", app_state_start)
 app_state_body = cleaner_m[app_state_start:app_state_end]
 require("ApplicationState/%@.plist" in app_state_body and
         "com.apple.UIKit.SplitView.%@.plist" in app_state_body and
-        "securelyWipeFile" in app_state_body,
-        "exact app-state file cleanup missing")
-for fuzzy_state_token in ("FrontBoard", "LiveActivities", "RecentlyTerminatedAppState", "BackgroundTasks", "/TCC", "scanAndWipeInDirectory", "containsString"):
+        "PXStrictBundleIdentifierIsValid" in app_state_body and
+        "PXRemoveExactRegularNonSymlinkFile" in app_state_body,
+        "exact app-state file cleanup missing strict identity/exact deletion")
+for fuzzy_state_token in ("FrontBoard", "LiveActivities", "RecentlyTerminatedAppState", "BackgroundTasks", "/TCC", "scanAndWipeInDirectory", "containsString", "securelyWipeFile"):
     require(fuzzy_state_token not in app_state_body,
-            f"app-state cleanup still uses fuzzy shared-directory ownership: {fuzzy_state_token}")
+            f"app-state cleanup still uses fuzzy/generic shared-directory deletion: {fuzzy_state_token}")
 scan_start = cleaner_m.index("- (void)scanAndWipeInDirectory:(NSString *)directory matching:(NSString *)matchString {")
 scan_end = cleaner_m.index("- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {", scan_start)
 scan_body = cleaner_m[scan_start:scan_end]
@@ -353,6 +363,39 @@ require("PXLogQuarantinedLegacyClearSelector(_cmd)" in clipboard_body,
 for token in ("UIPasteboard", "generalPasteboard", "setItems"):
     require(token not in clipboard_body,
             f"quarantined clipboard selector still mutates device-global pasteboard: {token}")
+
+# Narrow-name legacy aliases must not transitively trigger a full application-data reset.
+# Keep each selector locally fail-closed so a future change to another helper cannot revive it.
+legacy_narrow_aliases = (
+    "clearSharedContainers", "clearUserDefaults", "clearSQLiteDatabases", "clearPrivateVarData",
+    "clearDeviceDatabase", "clearInstallationLogs", "clearNetworkConfigurations", "clearCarrierData",
+    "clearNetworkData", "clearDNSCache", "clearCrashReports", "clearDiagnosticData",
+    "clearBluetoothData", "clearPushNotificationData", "clearThumbnailCache", "clearWebCache",
+    "clearGameData", "clearTemporaryFiles", "clearBinaryPlists", "clearEncryptedData",
+    "clearJailbreakDetectionLogs", "clearSpotlightData", "clearSiriData", "clearSystemLoggerData",
+    "clearASLLogs", "clearPasteboardData", "clearURLCache", "clearBackgroundAssets",
+    "clearSharedStorage",
+)
+for selector in legacy_narrow_aliases:
+    marker = f"- (void){selector}:(NSString *)bundleID {{"
+    start = cleaner_m.index(marker)
+    end = cleaner_m.find("\n- (void)", start + len(marker))
+    require(end != -1, f"could not bound legacy alias implementation: {selector}")
+    alias_code = strip_objc_comments(cleaner_m[start:end])
+    require("PXLogQuarantinedLegacyClearSelector(_cmd)" in alias_code,
+            f"legacy narrow alias is not locally quarantined: {selector}")
+    for forbidden in ("completeAppDataWipe", "clearSystemLogs:", "clearClipboard", "clearThumbnailCaches:",
+                      "clearAppWebKitData:", "_internalClearEncryptedData:", "cleanRootHideVarData:"):
+        require(forbidden not in alias_code,
+                f"legacy narrow alias still delegates/transitively mutates state: {selector} -> {forbidden}")
+
+# Generic whole-data compatibility aliases remain explicit canonical data-wipe entry points.
+for selector in ("performSecondaryCleanup", "clearAppData"):
+    marker = f"- (void){selector}:(NSString *)bundleID {{"
+    start = cleaner_m.index(marker)
+    end = cleaner_m.find("\n- (void)", start + len(marker))
+    require(end != -1 and "[self completeAppDataWipe:bundleID]" in cleaner_m[start:end],
+            f"generic whole-data compatibility alias changed unexpectedly: {selector}")
 
 # Canonical Clear must not scan/mutate ambiguous CrashReporter or Spotlight global state.
 require("[self clearSpotlightIndexes:bundleID]" not in app_wipe_body,
@@ -449,17 +492,28 @@ for forbidden_account_mutation in ("Accounts3", "ZACCOUNT", 'PXKillallByName(@"a
     require(forbidden_account_mutation not in mail_helper_body,
             f"Mail shared-store option must not authorize Accounts3/accountsd mutation: {forbidden_account_mutation}")
 
-# Encrypted preferences outside the app container must have an exact bundle-id filename boundary.
+# Encrypted preferences outside the app container use direct-directory enumeration plus
+# exact bundle-id filename prefixes; no wildcard/find or generic delete helper participates.
 encrypted_start = cleaner_m.index("- (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID\n                                                         deepClean:(BOOL)deepClean {")
 encrypted_end = cleaner_m.index("- (void)_internalClearEncryptedData:(NSString *)bundleID", encrypted_start)
 encrypted_body = cleaner_m[encrypted_start:encrypted_end]
-for exact_pattern in ("%@.enc*", "%@.encrypted*", "%@.secure*"):
-    require(exact_pattern in encrypted_body, f"missing exact encrypted preference boundary: {exact_pattern}")
-for fuzzy_pattern in ("%@*.enc*", "%@*.encrypted*", "%@*.secure*"):
-    require(fuzzy_pattern not in encrypted_body,
-            f"encrypted preference scan can still match sibling bundle-id prefixes: {fuzzy_pattern}")
-require("findPathsMatchingPattern" in encrypted_body and "securelyWipeFile" in encrypted_body,
-        "encrypted preference cleanup unexpectedly lost bounded discovery/wipe flow")
+require("PXStrictBundleIdentifierIsValid" in encrypted_body and
+        "PXReadOnlyRealDirectoryAtPath" in encrypted_body and
+        "contentsOfDirectoryAtPath" in encrypted_body and
+        "stringByStandardizingPath" in encrypted_body and
+        "stringByDeletingLastPathComponent" in encrypted_body and
+        "PXRemoveExactRegularNonSymlinkFile" in encrypted_body,
+        "encrypted preference cleanup lost exact-path authorization/deletion flow")
+for base in ("/var/mobile/Library/Preferences", "/private/var/mobile/Library/Preferences",
+             "/var/jb/var/mobile/Library/Preferences", "/private/var/jb/var/mobile/Library/Preferences"):
+    require(base in encrypted_body, f"encrypted preference exact base missing: {base}")
+for suffix in ('stringByAppendingString:@".enc"', 'stringByAppendingString:@".encrypted"', 'stringByAppendingString:@".secure"'):
+    require(suffix in encrypted_body, f"encrypted preference exact filename prefix missing: {suffix}")
+require("hasPrefix:prefix" in encrypted_body,
+        "encrypted preference filename authorization is not prefix-bound to the exact bundle id")
+for forbidden in ("findPathsMatchingPattern", "securelyWipeFile", "%@*.enc*", "%@.enc*", "rm -rf"):
+    require(forbidden not in encrypted_body,
+            f"encrypted preference cleanup still uses wildcard/generic deletion: {forbidden}")
 
 diag_start = cleaner_m.index("static void PXSQLiteLogMailAccountsDiagnostic")
 diag_end = cleaner_m.index("- (NSString *)_sqliteScalarAtPath", diag_start)
@@ -491,6 +545,232 @@ setup_end = tlink_ui.index("- (UIView *)dashboardGroupCard", setup_start)
 setup_body = tlink_ui[setup_start:setup_end]
 require("[self syncHookScopeToResetApps]" in setup_body,
         "dashboard startup must repair stale persisted MobileMail injection scope from older builds")
+
+# Dormant generic database/system-reference helpers remain source-compatible but fail closed.
+legacy_db_start = cleaner_m.index("- (void)cleanDatabaseFile:(NSString *)dbPath bundleID:")
+legacy_db_end = cleaner_m.index("// Helper method to check if directory exists", legacy_db_start)
+legacy_db_body = strip_objc_comments(cleaner_m[legacy_db_start:legacy_db_end])
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in legacy_db_body,
+        "generic cleanDatabaseFile helper is not quarantined")
+for token in ("DELETE FROM", " LIKE ", "VACUUM", "runCommandWithPrivileges", "rm -f", "sqlite3"):
+    require(token not in legacy_db_body,
+            f"quarantined generic database helper still mutates shared SQL/files: {token}")
+
+system_ref_start = cleaner_m.index("- (BOOL)hasSystemDatabaseReferencesForBundleID:(NSString *)bundleID {")
+system_ref_end = cleaner_m.index("// NEW: Method to check if there are keychain items for a bundle ID", system_ref_start)
+system_ref_body = strip_objc_comments(cleaner_m[system_ref_start:system_ref_end])
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in system_ref_body and "return NO;" in system_ref_body,
+        "fuzzy system-database reference probe is not fail-closed")
+for token in ("componentsSeparatedByString", "runCommandAndGetOutput", "grep", "sqlite3", "containsString"):
+    require(token not in system_ref_body,
+            f"quarantined system-reference probe still performs fuzzy inspection: {token}")
+
+# Standalone verification must use the same exact read-only authorities as canonical verification.
+verify_start = cleaner_m.index("- (BOOL)verifyDataCleared:(NSString *)bundleID {")
+verify_end = cleaner_m.index("- (void)verifyClearedPath:", verify_start)
+verify_body = cleaner_m[verify_start:verify_end]
+require("PXExactReadOnlyApplicationDataPathsForBundleID" in verify_body and
+        "_exactApplicationGroupIdentifiersForBundleIdentifier" in verify_body and
+        "resolveAllAppGroupContainersForGroupIdentifier" in verify_body and
+        "_exactInstalledExtensionIdentifiersForApplicationIdentifier" in verify_body and
+        "resolveDataContainerForIdentifier" in verify_body,
+        "standalone verification lost exact application/group/extension resolution")
+for token in ("findDataContainerUUID:bundleID", "findRootlessDataContainerUUID:bundleID",
+              "findGroupContainerUUIDsForBundleID", "findExtensionDataContainersForBundleID",
+              "optimized_findExtensionContainers"):
+    require(token not in verify_body,
+            f"standalone verification still uses legacy/fuzzy fallback: {token}")
+require("Exact App Group entitlement discovery failed" in verify_body and
+        "Exact installed-extension discovery failed" in verify_body,
+        "standalone exact discovery failures do not fail verification conservatively")
+
+# Read-only UI attribution must use exact ownership sources and never cause global side effects.
+read_exact_start = cleaner_m.index("static NSArray<NSString *> *PXExactReadOnlyApplicationDataPathsForBundleID")
+read_exact_end = cleaner_m.index("static ", read_exact_start + len("static NSArray<NSString *> *PXExactReadOnlyApplicationDataPathsForBundleID"))
+read_exact_body = cleaner_m[read_exact_start:read_exact_end]
+require("PXStrictBundleIdentifierIsValid" in read_exact_body and
+        "resolveApplicationDataContainerForIdentifier" in read_exact_body and
+        "PXResolvedContainerRootRootful" in read_exact_body and
+        "PXResolvedContainerRootRootless" in read_exact_body and
+        "PXReadOnlyRealDirectoryAtPath" in read_exact_body,
+        "read-only application-data attribution is not exact-resolver based")
+
+has_data_start = cleaner_m.index("- (BOOL)hasDataToClear:(NSString *)bundleID {")
+has_data_end = cleaner_m.index("// --- Optimized lookup helpers", has_data_start)
+has_data_body = cleaner_m[has_data_start:has_data_end]
+require("PXExactReadOnlyApplicationDataPathsForBundleID" in has_data_body and
+        has_data_body.count("_resolvedAppGroupUUIDsFromEntitlements") >= 2 and
+        "PXReadOnlyRegularNonSymlinkFileAtPath" in has_data_body and
+        "hasKeychainItemsForBundleID" in has_data_body,
+        "hasDataToClear lost exact container/group/preference/keychain attribution")
+for forbidden in ("runCommandWithPrivileges", '"sync"', "findDataContainerUUID:",
+                  "findRootlessDataContainerUUID:", "findAppGroupUUIDs:",
+                  "findRootlessAppGroupUUIDs:", "hasSystemDatabaseReferencesForBundleID"):
+    require(forbidden not in has_data_body,
+            f"hasDataToClear still performs global/fuzzy attribution: {forbidden}")
+
+usage_start = cleaner_m.index("- (NSDictionary *)getDataUsage:(NSString *)bundleID {")
+usage_end = cleaner_m.index("// Helper method for getDataUsage", usage_start)
+usage_body = cleaner_m[usage_start:usage_end]
+require("PXExactReadOnlyApplicationDataPathsForBundleID" in usage_body and
+        "PXExactInstalledApplicationBundlePathFromLaunchServices" in usage_body and
+        usage_body.count("_resolvedAppGroupUUIDsFromEntitlements") >= 2,
+        "getDataUsage is not based on exact app/container/group ownership")
+for forbidden in ("findDataContainerUUID:", "findRootlessDataContainerUUID:",
+                  "findAppGroupUUIDs:", "findRootlessAppGroupUUIDs:", "findBundleUUID:"):
+    require(forbidden not in usage_body,
+            f"getDataUsage still uses aggressive/fuzzy ownership discovery: {forbidden}")
+
+# Compatibility UUID resolvers used by metrics/entitlements must not re-enter legacy fuzzy scanners.
+compat_data_start = cleaner_m.index("- (NSString *)findDataContainerUUIDForBundleID:(NSString *)bundleID {")
+compat_data_end = cleaner_m.index("- (NSString *)findBundleContainerUUIDForBundleID:", compat_data_start)
+compat_data_body = cleaner_m[compat_data_start:compat_data_end]
+require("PXExactReadOnlyApplicationDataPathsForBundleID" in compat_data_body and
+        "findDataContainerUUID:bundleID" not in compat_data_body,
+        "data-container compatibility resolver still delegates to aggressive discovery")
+compat_bundle_start = compat_data_end
+compat_bundle_end = cleaner_m.index("- (NSArray *)findGroupContainerUUIDsForBundleID:", compat_bundle_start)
+compat_bundle_body = cleaner_m[compat_bundle_start:compat_bundle_end]
+require("PXExactInstalledApplicationBundlePathWithFilesystemFallback" in compat_bundle_body and
+        "stringByDeletingLastPathComponent" in compat_bundle_body and
+        "findBundleContainerUUID:bundleID" not in compat_bundle_body,
+        "bundle-container compatibility resolver still delegates to fuzzy filesystem discovery")
+
+bundle_fallback_start = cleaner_m.index("static NSString *PXExactInstalledApplicationBundlePathWithFilesystemFallback")
+bundle_fallback_end = cleaner_m.index("static NSArray<NSString *> *PXExactReadOnlyApplicationDataPathsForBundleID", bundle_fallback_start)
+bundle_fallback_body = cleaner_m[bundle_fallback_start:bundle_fallback_end]
+require("PXExactInstalledApplicationBundlePathFromLaunchServices" in bundle_fallback_body and
+        "PXStrictBundleIdentifierIsValid" in bundle_fallback_body and
+        "PXReadOnlyRealDirectoryAtPath" in bundle_fallback_body and
+        "PXReadOnlyRegularNonSymlinkFileAtPath" in bundle_fallback_body and
+        'info[@"CFBundleIdentifier"]' in bundle_fallback_body and
+        "[exactIdentifier isEqualToString:bundleIdentifier]" in bundle_fallback_body and
+        "matches.count == 1" in bundle_fallback_body,
+        "exact bundle filesystem fallback lost identity/path/ambiguity guards")
+for token in ("hasPrefix:bundleIdentifier", "containsString:bundleIdentifier", "componentsSeparatedByString"):
+    require(token not in bundle_fallback_body,
+            f"exact bundle filesystem fallback introduced fuzzy identity logic: {token}")
+
+# Legacy read-only container compatibility finders must no longer perform fuzzy filesystem attribution.
+legacy_data_start = cleaner_m.index("- (NSString *)findDataContainerUUID:(NSString *)bundleID aggressive:(BOOL)aggressive {")
+legacy_data_end = cleaner_m.index("- (NSString *)findRootlessDataContainerUUID:(NSString *)bundleID aggressive:(BOOL)aggressive {", legacy_data_start)
+legacy_data_body = cleaner_m[legacy_data_start:legacy_data_end]
+require("PXStrictBundleIdentifierIsValid" in legacy_data_body and
+        "resolveApplicationDataContainerForIdentifier" in legacy_data_body and
+        "PXResolvedContainerRootRootful" in legacy_data_body and
+        "aggressive:NO" in legacy_data_body,
+        "legacy rootful data finder is not an exact resolver compatibility wrapper")
+for token in ("containsString", "listDirectoriesInPath", "MCMMetadataIdentifier", "company", "shortName"):
+    require(token not in legacy_data_body,
+            f"legacy rootful data finder still performs fuzzy attribution: {token}")
+
+legacy_rootless_start = legacy_data_end
+legacy_rootless_end = cleaner_m.index("- (NSArray *)findAppGroupUUIDs:(NSString *)bundleID aggressive:(BOOL)aggressive {", legacy_rootless_start)
+legacy_rootless_body = cleaner_m[legacy_rootless_start:legacy_rootless_end]
+require("resolveApplicationDataContainerForIdentifier" in legacy_rootless_body and
+        "PXResolvedContainerRootRootless" in legacy_rootless_body and
+        "aggressive:NO" in legacy_rootless_body,
+        "legacy rootless data finder is not an exact resolver compatibility wrapper")
+for token in ("containsString", "listDirectoriesInPath", "MCMMetadataIdentifier", "company", "shortName"):
+    require(token not in legacy_rootless_body,
+            f"legacy rootless data finder still performs fuzzy attribution: {token}")
+
+legacy_group_start = legacy_rootless_end
+legacy_group_end = cleaner_m.index("- (NSArray *)findRootlessAppGroupUUIDs:(NSString *)bundleID {", legacy_group_start)
+legacy_group_body = cleaner_m[legacy_group_start:legacy_group_end]
+require("_resolvedAppGroupUUIDsFromEntitlements:bundleID rootless:NO" in legacy_group_body and
+        "PXStrictBundleIdentifierIsValid" in legacy_group_body and
+        "aggressive:NO" in legacy_group_body,
+        "legacy App Group finder is not entitlement/exact-resolver based")
+for token in ("containsString", "listDirectoriesInPath", "MCMMetadataIdentifier", "company", "shortName"):
+    require(token not in legacy_group_body,
+            f"legacy App Group finder still performs fuzzy attribution: {token}")
+
+legacy_bundle_start = cleaner_m.index("- (NSString *)findBundleContainerUUID:(NSString *)bundleID {")
+legacy_bundle_end = cleaner_m.index("- (void)clearMediaData:(NSString *)bundleID {", legacy_bundle_start)
+legacy_bundle_body = cleaner_m[legacy_bundle_start:legacy_bundle_end]
+require("findBundleContainerUUIDForBundleID:bundleID" in legacy_bundle_body,
+        "legacy bundle UUID finder does not delegate to the exact public compatibility resolver")
+for token in ("contentsOfDirectoryAtPath", "MCMMetadataIdentifier", "containsString", "PXExactInstalledApplicationBundlePathFromLaunchServices"):
+    require(token not in legacy_bundle_body,
+            f"legacy bundle UUID finder still owns/scans filesystem state instead of delegating exactly: {token}")
+
+optimized_start = cleaner_m.index("- (NSString *)optimized_findDataContainerUUID:")
+optimized_end = cleaner_m.index("// Helper method to create human-readable file sizes", optimized_start)
+optimized_body = cleaner_m[optimized_start:optimized_end]
+require(optimized_body.count("PXLogQuarantinedLegacyClearSelector(_cmd)") == 5,
+        "orphan optimized fuzzy finder family is not fully quarantined")
+for token in ("containsString", "dispatch_apply", "MCMMetadataIdentifier", "listDirectoriesInPath"):
+    require(token not in optimized_body,
+            f"quarantined optimized finder family still scans/fuzzily attributes state: {token}")
+
+public_ext_start = cleaner_m.index("- (NSArray *)findExtensionDataContainersForBundleID:(NSString *)bundleID {")
+public_ext_end = cleaner_m.index("- (void)cleanAppGroupContainers:(NSString *)bundleID {", public_ext_start)
+public_ext_body = cleaner_m[public_ext_start:public_ext_end]
+require("_exactInstalledExtensionIdentifiersForApplicationIdentifier" in public_ext_body and
+        "resolveDataContainerForIdentifier" in public_ext_body and
+        "PXResolvedContainerKindExtensionData" in public_ext_body and
+        "PXResolvedContainerRootRootful" in public_ext_body and
+        "PXReadOnlyRealDirectoryAtPath" in public_ext_body,
+        "public extension-data finder is not backed by exact installed-extension/container resolution")
+for token in ("baseIdentifier", "containsString", "hasPrefix:baseIdentifier", 'containsString:@".extension."',
+              'containsString:@".appex."', 'containsString:@".plugin."'):
+    require(token not in public_ext_body,
+            f"public extension-data finder still uses naming/prefix heuristics: {token}")
+
+# Dormant fuzzy verification/extension helper family stays fail-closed and cannot be revived transitively.
+legacy_verify_keychain_start = cleaner_m.index("- (void)verifyKeychainClearedForBundleID:(NSString *)bundleID reportingTo:(NSMutableArray *)unclearedPaths {")
+legacy_verify_keychain_end = cleaner_m.index("- (void)verifySQLiteReferencesCleared:(NSString *)bundleID reportingTo:(NSMutableArray *)unclearedPaths {", legacy_verify_keychain_start)
+legacy_verify_keychain_body = cleaner_m[legacy_verify_keychain_start:legacy_verify_keychain_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in legacy_verify_keychain_body,
+        "legacy fuzzy Keychain verifier is not quarantined")
+for token in ("SecItemCopyMatching", "containsString", "componentsSeparatedByString", "kSecAttrService", "kSecAttrAccessGroup"):
+    require(token not in legacy_verify_keychain_body,
+            f"quarantined Keychain verifier still infers fuzzy ownership: {token}")
+
+legacy_verify_sql_start = legacy_verify_keychain_end
+legacy_verify_sql_end = cleaner_m.index("// Helper to run a command and get its output", legacy_verify_sql_start)
+legacy_verify_sql_body = cleaner_m[legacy_verify_sql_start:legacy_verify_sql_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in legacy_verify_sql_body,
+        "legacy shared-system SQL verifier is not quarantined")
+for token in ("ApplicationHistory.sqlite", "SiriAnalytics.db", "IconState.plist", "containsString", "dictionaryWithContentsOfFile"):
+    require(token not in legacy_verify_sql_body,
+            f"quarantined shared-system verifier still inspects ambiguous global state: {token}")
+
+legacy_ext_start = cleaner_m.index("- (NSArray *)findExtensionContainers:(NSString *)bundleID {")
+legacy_ext_end = cleaner_m.index("// Method to clear extension containers", legacy_ext_start)
+legacy_ext_body = cleaner_m[legacy_ext_start:legacy_ext_end]
+require(legacy_ext_body.count("PXLogQuarantinedLegacyClearSelector(_cmd)") == 3 and
+        "return @[];" in legacy_ext_body and legacy_ext_body.count("return nil;") == 2,
+        "legacy extension finder family is not fully quarantined")
+for token in ("MCMMetadataIdentifier", "hasPrefix:bundleID", "findPathsMatchingPattern", "listDirectoriesInPath", "containsString"):
+    require(token not in legacy_ext_body,
+            f"quarantined legacy extension finder family still scans/fuzzily attributes state: {token}")
+legacy_extension_signatures = (
+    ("- (NSArray *)findExtensionContainers:(NSString *)bundleID {", "[self findExtensionContainers:"),
+    ("- (NSString *)findBundleUUIDForExtension:(NSString *)extensionBundleID {", "[self findBundleUUIDForExtension:"),
+    ("- (NSString *)findRootlessBundleUUIDForExtension:(NSString *)extensionBundleID {", "[self findRootlessBundleUUIDForExtension:"),
+)
+for signature, send in legacy_extension_signatures:
+    require(cleaner_m.count(signature) == 1 and send not in cleaner_m,
+            f"legacy extension helper unexpectedly has a caller/duplicate implementation: {signature}")
+
+# Process-kill fallback must stay exact even when LaunchServices executable lookup is unavailable.
+kill_start = cleaner_m.index("static void PXKillAppProcessBestEffort(AppDataCleaner *selfRef, NSString *bundleID) {")
+kill_end = cleaner_m.index("static void PXStopMailDaemonsBestEffort", kill_start)
+kill_body = cleaner_m[kill_start:kill_end]
+require("findBundleContainerUUIDForBundleID:bundleID" in kill_body and
+        "PXReadOnlyRealDirectoryAtPath" in kill_body and
+        "PXReadOnlyRegularNonSymlinkFileAtPath" in kill_body and
+        'info[@"CFBundleIdentifier"]' in kill_body and
+        "[exactBundleID isEqualToString:bundleID]" in kill_body,
+        "process-kill fallback lost exact bundle/path identity validation")
+for forbidden in ("findBundleContainerUUID:bundleID", "containsString:bundleID", "hasPrefix:bundleID"):
+    require(forbidden not in kill_body,
+            f"process-kill fallback re-entered legacy/fuzzy bundle discovery: {forbidden}")
+require("static BOOL PXReadOnlyRealDirectoryAtPath(NSString *path);" in cleaner_m[:kill_start] and
+        "static BOOL PXReadOnlyRegularNonSymlinkFileAtPath(NSString *path);" in cleaner_m[:kill_start],
+        "process-kill fallback is missing compile-order validator declarations")
 
 # P0 Clear operation coordination: one serialized destructive worker, cancellation-first timeout,
 # monotonic deadline clamping, and operation-local canonical verification state.

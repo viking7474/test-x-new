@@ -662,30 +662,26 @@ QUARANTINE_SELECTORS = TASK61_REMOVED_SELECTORS + (
 )
 
 DATA_ONLY_ALIASES = (
-    "performSecondaryCleanup:", "clearAppData:", "clearSQLiteDatabases:",
-    "clearDeviceDatabase:", "clearNetworkConfigurations:", "clearCarrierData:",
-    "clearNetworkData:", "clearDNSCache:", "clearBluetoothData:",
-    "clearPushNotificationData:", "clearGameData:", "clearTemporaryFiles:",
-    "clearBinaryPlists:", "clearJailbreakDetectionLogs:", "clearSpotlightData:",
-    "clearSiriData:", "clearURLCache:", "clearBackgroundAssets:", "clearSharedStorage:",
+    "performSecondaryCleanup:", "clearAppData:",
 )
 
+QUARANTINED_ALIASES = (
+    "clearSharedContainers:", "clearUserDefaults:", "clearSQLiteDatabases:",
+    "clearPrivateVarData:", "clearDeviceDatabase:", "clearInstallationLogs:",
+    "clearNetworkConfigurations:", "clearCarrierData:", "clearNetworkData:",
+    "clearDNSCache:", "clearCrashReports:", "clearDiagnosticData:",
+    "clearBluetoothData:", "clearPushNotificationData:", "clearThumbnailCache:",
+    "clearWebCache:", "clearGameData:", "clearTemporaryFiles:",
+    "clearBinaryPlists:", "clearEncryptedData:", "clearJailbreakDetectionLogs:",
+    "clearSpotlightData:", "clearSiriData:", "clearSystemLoggerData:",
+    "clearASLLogs:", "clearPasteboardData:", "clearURLCache:",
+    "clearBackgroundAssets:", "clearSharedStorage:",
+)
+
+ALIAS_QUARANTINE_TARGET = "__local_quarantine__"
 ALIAS_TARGETS: Dict[str, str] = {selector: "completeAppDataWipe:" for selector in DATA_ONLY_ALIASES}
-ALIAS_TARGETS.update({
-    "clearSharedContainers:": "clearAppGroupData:",
-    "clearUserDefaults:": "clearAppPreferences:",
-    "clearWebCache:": "clearAppWebKitData:",
-    "clearEncryptedData:": "_internalClearEncryptedData:",
-    "clearInstallationLogs:": "clearSystemLogs:",
-    "clearCrashReports:": "clearSystemLogs:",
-    "clearDiagnosticData:": "clearSystemLogs:",
-    "clearSystemLoggerData:": "clearSystemLogs:",
-    "clearASLLogs:": "clearSystemLogs:",
-    "clearPrivateVarData:": "cleanRootHideVarData:",
-    "clearThumbnailCache:": "clearThumbnailCaches:",
-    "clearPasteboardData:": "clearClipboard",
-    "clearAppStateData:": "_internalClearAppStateData:",
-})
+ALIAS_TARGETS.update({selector: ALIAS_QUARANTINE_TARGET for selector in QUARANTINED_ALIASES})
+ALIAS_TARGETS["clearAppStateData:"] = "_internalClearAppStateData:"
 
 REQUIRED_FILES = (
     "AppDataCleaner.h", "AppDataCleaner.m", "PXClearRequest.h", "PXClearRequest.m",
@@ -921,41 +917,50 @@ def guard_aliases(sources: Mapping[str, SourceFile], collector: GuardCollector) 
                         f"alias {selector} must retain exactly one implementation")
         if len(matches) != 1:
             collector.check(f"BRH-ALS-MAP-{slug}", False, source.path, 1,
-                            f"cannot verify target mapping for alias {selector}")
+                            f"cannot verify target/quarantine mapping for alias {selector}")
             collector.check(f"BRH-ALS-SINGLE-{slug}", False, source.path, 1,
-                            f"cannot verify single-send body for alias {selector}")
+                            f"cannot verify single-action body for alias {selector}")
             collector.check(f"BRH-ALS-SHAPE-{slug}", False, source.path, 1,
                             f"cannot verify body shape for alias {selector}")
             continue
+
         method = matches[0]
         sends = extract_self_message_selectors(method.sanitized_body_text)
-        collector.check(f"BRH-ALS-MAP-{slug}", sends == (target,), source.path, method.signature_start_line,
-                        f"alias {selector} must send exactly to {target}")
         bracket_sends = method.sanitized_body_text.count("[")
-        collector.check(f"BRH-ALS-SINGLE-{slug}", len(sends) == 1 and bracket_sends == 1,
-                        source.path, method.signature_start_line,
-                        f"alias {selector} must contain exactly one Objective-C message send")
+        if target == ALIAS_QUARANTINE_TARGET:
+            quarantine_calls = method.sanitized_body_text.count("PXLogQuarantinedLegacyClearSelector")
+            collector.check(f"BRH-ALS-MAP-{slug}", quarantine_calls == 1 and sends == (),
+                            source.path, method.signature_start_line,
+                            f"alias {selector} must be a local fail-closed quarantine")
+            collector.check(f"BRH-ALS-SINGLE-{slug}", quarantine_calls == 1 and bracket_sends == 0,
+                            source.path, method.signature_start_line,
+                            f"alias {selector} quarantine must contain exactly one local action and no Objective-C send")
+            group_counts["quarantine"] += 1
+        else:
+            collector.check(f"BRH-ALS-MAP-{slug}", sends == (target,), source.path, method.signature_start_line,
+                            f"alias {selector} must send exactly to {target}")
+            collector.check(f"BRH-ALS-SINGLE-{slug}", len(sends) == 1 and bracket_sends == 1,
+                            source.path, method.signature_start_line,
+                            f"alias {selector} must contain exactly one Objective-C message send")
+            if selector in DATA_ONLY_ALIASES:
+                group_counts["data"] += 1
+            else:
+                group_counts["direct"] += 1
+
         forbidden = re.search(r"\b(if|for|while|switch|dispatch_|NSLog|return|SecItem|NSFileManager)\b",
                               method.sanitized_body_text)
         collector.check(f"BRH-ALS-SHAPE-{slug}", forbidden is None,
                         source.path, method.signature_start_line,
                         f"alias {selector} contains control flow, logging, return fabrication or new mutation")
-        if selector in DATA_ONLY_ALIASES:
-            group_counts["data"] += 1
-        elif selector in ("clearSharedContainers:", "clearUserDefaults:", "clearWebCache:", "clearEncryptedData:"):
-            group_counts["quarantine"] += 1
-        elif target == "clearSystemLogs:":
-            group_counts["logs"] += 1
-        else:
-            group_counts["direct"] += 1
-    collector.check("BRH-ALS-GROUP-DATA", group_counts["data"] == 19, source.path, 1,
-                    "data-only alias mapping group must contain exactly 19 selectors")
-    collector.check("BRH-ALS-GROUP-QUARANTINE", group_counts["quarantine"] == 4, source.path, 1,
-                    "quarantine-target alias mapping group must contain exactly 4 selectors")
-    collector.check("BRH-ALS-GROUP-LOGS", group_counts["logs"] == 5, source.path, 1,
-                    "system-log alias mapping group must contain exactly 5 selectors")
-    collector.check("BRH-ALS-GROUP-DIRECT", group_counts["direct"] == 4, source.path, 1,
-                    "direct-mutator alias mapping group must contain exactly 4 selectors")
+
+    collector.check("BRH-ALS-GROUP-DATA", group_counts["data"] == 2, source.path, 1,
+                    "whole-data alias mapping group must contain exactly 2 selectors")
+    collector.check("BRH-ALS-GROUP-QUARANTINE", group_counts["quarantine"] == 29, source.path, 1,
+                    "local quarantine alias group must contain exactly 29 selectors")
+    collector.check("BRH-ALS-GROUP-LOGS", group_counts["logs"] == 0, source.path, 1,
+                    "legacy system-log alias delegation group must remain empty")
+    collector.check("BRH-ALS-GROUP-DIRECT", group_counts["direct"] == 1, source.path, 1,
+                    "exact direct alias group must contain only clearAppStateData:")
 
 
 def exact_scope_enum() -> Dict[str, int]:

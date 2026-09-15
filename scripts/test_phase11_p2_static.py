@@ -27,18 +27,18 @@ require(re.search(r"(?<![A-Za-z_])sync\(\);", cleaner) is None,
         "CLEAR-07: process-wide sync(); must be removed from AppDataCleaner.m")
 require("CLEAR-07 (Phase 11)" in cleaner, "CLEAR-07: rationale marker missing")
 
-# ---- CLEAR-09: no hard-coded competitor-brand SQL in cleanDatabaseFile ----
-require("CLEAR-09 (Phase 11)" in cleaner, "CLEAR-09: rationale marker missing")
+# ---- CLEAR-09: generic shared-database mutation is fully quarantined ----
 start = cleaner.index("- (void)cleanDatabaseFile:")
-head = cleaner[start:cleaner.index("// Also try to delete data", start)]
-for token in ("%lyft%", "%zimride%", "%uber%", "%helix%", "com.lyft.ios", "com.ubercab.UberClient",
-              "LIKE '%%lyft%%'", "LIKE '%%uber%%'", "LIKE '%%helix%%'", "LIKE '%%zimride%%'"):
-    require(token not in head, f"CLEAR-09: hard-coded brand SQL still present in cleanDatabaseFile: {token}")
-# The generic, bundle/app/company-driven deletes must remain the sole mechanism.
-require("DELETE FROM main WHERE bundleid = '%@';" in head,
-        "CLEAR-09: generic bundleID-driven delete must remain")
-require("DELETE FROM main WHERE data LIKE '%%%@%%';" in cleaner,
-        "CLEAR-09: appName/companyName-driven delete must remain")
+end = cleaner.index("// Helper method to check if directory exists", start)
+clean_database_body = cleaner[start:end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in clean_database_body,
+        "CLEAR-09: generic cleanDatabaseFile must remain fail-closed")
+for token in ("DELETE FROM", " LIKE ", "VACUUM", "runCommandWithPrivileges", "rm -f", "sqlite3"):
+    require(token not in clean_database_body,
+            f"CLEAR-09: quarantined cleanDatabaseFile still mutates shared SQL/files: {token}")
+for token in ("%lyft%", "%zimride%", "%uber%", "%helix%", "com.lyft.ios", "com.ubercab.UberClient"):
+    require(token not in clean_database_body,
+            f"CLEAR-09: hard-coded brand token returned to cleanDatabaseFile: {token}")
 
 # ---- IOS-04: uname stays a single Tweak-owned hook ----
 require("IOS-04 (Phase 11): canonical uname owner" in tweak, "IOS-04: ownership marker missing")
