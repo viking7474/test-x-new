@@ -24,6 +24,7 @@
 #import "AppGroupContainerResolver.h"
 #import "FreezeManager.h"
 #import "common/PXProcessKiller.h"
+#import "common/PXSecuritySettingsStore.h"
 
 static const NSUInteger PXPrivilegedCommandMaxOutputBytes = 1024 * 1024;
 static const NSTimeInterval PXOutputQueryDefaultTimeoutSec = 60.0;
@@ -194,6 +195,8 @@ static NSError *PXClearOperationCancellationError(PXClearOperationContext *conte
 - (NSArray<NSString *> *)runBoundedFindWithArguments:(NSArray<NSString *> *)arguments;
 - (PXClearResult *)_completeDataWipeForMigratedRequest:(PXClearRequest *)request;
 - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request;
+- (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request;
+- (void)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleIdentifier;
 - (NSArray<NSString *> *)_exactInstalledExtensionIdentifiersForApplicationIdentifier:(NSString *)bundleIdentifier
                                                                                 error:(NSError **)error;
 - (NSArray<NSString *> *)_exactApplicationGroupIdentifiersForBundleIdentifier:(NSString *)bundleIdentifier
@@ -2931,7 +2934,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         PXClearRequest *applicationRequest =
             [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
                                                       scopes:PXClearScopeApplicationData
-                                                        mode:request.mode];
+                                                        mode:request.mode
+                                                     options:request.options];
         PXClearComponentResult *applicationResult = applicationRequest
             ? [self _completeAppDataWipeForApplicationDataRequest:applicationRequest]
             : nil;
@@ -2970,7 +2974,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     PXClearRequest *applicationRequest =
         [[PXClearRequest alloc] initWithBundleIdentifier:request.bundleIdentifier
                                                   scopes:PXClearScopeApplicationData
-                                                    mode:request.mode];
+                                                    mode:request.mode
+                                                 options:request.options];
     PXClearComponentResult *applicationResult = applicationRequest
         ? [self _completeAppDataWipeForApplicationDataRequest:applicationRequest]
         : nil;
@@ -3108,6 +3113,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         PXClearModeName(mode), bundleID];
     PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_plan",
                         @{ @"deepClean": @(PXClearModeIncludesDeepDiagnostics(mode)) });
+    PXClearOptions dryRunOptions = PXReadSecurityBool(@"clearICloudDataEnabled", NO)
+        ? PXClearOptionICloudData
+        : PXClearOptionNone;
     NSDictionary *pxDryRunPlan = @{
         @"mode": PXClearModeName(mode) ?: @"unknown",
         @"scopes": @((unsigned long long)PXMigratedFullClearScopes),
@@ -3115,6 +3123,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         @"wouldClearKeychain": @YES,
         @"wouldClearURLCredentials": @(mode != PXClearModeQuick),
         @"wouldRunDataAggregate": @YES,
+        @"wouldClearICloudData": @(PXClearModeIncludesExtendedContainers(mode) &&
+                                     ((dryRunOptions & PXClearOptionICloudData) != 0)),
         @"wouldRunDeepResidualScan": @(PXClearModeIncludesDeepDiagnostics(mode))
     };
     PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_commit", pxDryRunPlan);
@@ -3139,12 +3149,17 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         return;
     }
     BOOL deepClean = PXClearModeIncludesDeepDiagnostics(mode);
+    PXClearOptions clearOptions = PXReadSecurityBool(@"clearICloudDataEnabled", NO)
+        ? PXClearOptionICloudData
+        : PXClearOptionNone;
     PXClearRequest *fullRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                             scopes:PXMigratedFullClearScopes
-                                                                              mode:mode];
+                                                                              mode:mode
+                                                                           options:clearOptions];
     PXClearRequest *dataRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                             scopes:PXMigratedDataClearScopes
-                                                                              mode:mode];
+                                                                              mode:mode
+                                                                           options:clearOptions];
     if (!fullRequest || !dataRequest) {
         NSError *requestError = PXMigratedInternalError(@"Invalid full Clear request");
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -3165,7 +3180,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
     // CLEAR-01: write the transaction begin journal before any destructive step.
     PXClearWriteJournal(bundleID, mode, fullRequest.scopes, NO, @"begin",
-                        @{ @"deepClean": @(deepClean) });
+                        @{ @"deepClean": @(deepClean),
+                           @"clearICloudData": @((clearOptions & PXClearOptionICloudData) != 0) });
 
     __block BOOL completionCalled = NO;
     __block dispatch_semaphore_t completionLock = dispatch_semaphore_create(1);
@@ -3476,9 +3492,14 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     dispatch_sync(PXClearCoordinatorQueue(), ^{
         @autoreleasepool {
             BOOL deepClean = [self _deepCleanEnabled];
+            PXClearMode mode = deepClean ? PXClearModeDeep : PXClearModeFull;
+            PXClearOptions clearOptions = PXReadSecurityBool(@"clearICloudDataEnabled", NO)
+                ? PXClearOptionICloudData
+                : PXClearOptionNone;
             PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                                 scopes:PXMigratedDataClearScopes
-                                                                             deepClean:deepClean];
+                                                                                  mode:mode
+                                                                               options:clearOptions];
             PXClearResult *result = request ? [self _completeDataWipeForMigratedRequest:request] : nil;
             if (!PXMigratedDataClearResultIsStructurallyValid(result)) {
                 [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid migrated aggregate"];
@@ -3741,12 +3762,15 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     // Skip RootHide var data clearing - uses slow findPathsMatchingPattern
     [self logMessage:@"[AppDataCleaner] Skipping RootHide cleaning (optimization)"];
 
-    // Clear iCloud-related data
-    if (PXClearModeIncludesExtendedContainers(request.mode)) {
-        [self logMessage:@"[AppDataCleaner] Clearing iCloud-related data"];
+    // Optional iCloud/Accounts policy is immutable for this Clear request.
+    if (PXClearModeIncludesExtendedContainers(request.mode) &&
+        ((request.options & PXClearOptionICloudData) != 0)) {
+        [self logMessage:@"[AppDataCleaner] Clearing exact-authorized iCloud/Accounts data"];
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-        [self clearICloudData:bundleID];
-        [self logMessage:@"[AppDataCleaner] iCloud cleanup took %.2fs", CFAbsoluteTimeGetCurrent() - t0];
+        [self _clearAuthorizedICloudDataForRequest:request];
+        [self logMessage:@"[AppDataCleaner] exact iCloud/Accounts cleanup took %.2fs", CFAbsoluteTimeGetCurrent() - t0];
+    } else if (PXClearModeIncludesExtendedContainers(request.mode)) {
+        [self logMessage:@"[AppDataCleaner] Clear iCloud Data policy OFF; skipping iCloud/Accounts cleanup"];
     }
     
     // Clear app state data - SKIP second call to avoid respring
@@ -4405,115 +4429,365 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     }
 }
 
-- (void)clearICloudData:(NSString *)bundleID {
-    [self logMessage:@"[AppDataCleaner] Clearing iCloud-related data for %@", bundleID];
+- (void)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleID {
+    if (!bundleID.length) return;
+    if ([bundleID hasPrefix:@"com.apple."]) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup BLOCKED for system app; shared system-account policy required"];
+        return;
+    }
 
-    // Keep the broad iCloud/CloudKit/CloudDocs/Accounts cleanup behavior, but optimize it:
-    // - avoid repeated deep "**" scans with many find calls
-    // - fast mode (Deep Clean OFF): shallow maxdepth scan (still wipes top-level app containers)
-    // - deep mode (Deep Clean ON): deeper scan
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    if (operationContext && [operationContext isCancellationRequested]) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup skipped: operation cancelled"];
+        return;
+    }
+    int (^boundedSQLiteBusyTimeoutMs)(void) = ^int {
+        if (!operationContext) return 3000;
+        NSTimeInterval remaining = [operationContext remainingTime];
+        if (remaining <= 0.0) return 0;
+        double remainingMs = floor(remaining * 1000.0);
+        return (int)MAX(1.0, MIN(3000.0, remainingMs));
+    };
 
-    BOOL deep = [self _deepCleanEnabled];
-    int maxDepth = deep ? 8 : 2;
-    int findTimeout = deep ? (25 * 60) : (8 * 60);
+    NSString *accountsDBPath = PXFirstExistingPath(_fileManager, @[
+        @"/var/mobile/Library/Accounts/Accounts3.sqlite",
+        @"/private/var/mobile/Library/Accounts/Accounts3.sqlite"
+    ]);
+    if (!accountsDBPath.length) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: database not found"];
+        return;
+    }
 
-    NSArray *bundleComponents = [bundleID componentsSeparatedByString:@"."];
-    NSString *tildeID = [[bundleID stringByReplacingOccurrencesOfString:@"." withString:@"~"] stringByReplacingOccurrencesOfString:@"-" withString:@"~"]; 
-    NSString *iCloudTilde = tildeID.length ? [NSString stringWithFormat:@"iCloud~%@", tildeID] : @"";
+    NSArray<NSNumber *> *(^readPrimaryKeys)(sqlite3 *, BOOL, BOOL *) =
+        ^NSArray<NSNumber *> *(sqlite3 *db, BOOL matchingOwner, BOOL *okOut) {
+            if (okOut) *okOut = NO;
+            const char *sql = matchingOwner
+                ? "SELECT Z_PK FROM ZACCOUNT WHERE ZOWNINGBUNDLEID = ? ORDER BY Z_PK;"
+                : "SELECT Z_PK FROM ZACCOUNT WHERE ZOWNINGBUNDLEID IS NULL OR ZOWNINGBUNDLEID <> ? ORDER BY Z_PK;";
+            sqlite3_stmt *stmt = NULL;
+            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+                if (stmt) sqlite3_finalize(stmt);
+                return @[];
+            }
+            if (sqlite3_bind_text(stmt, 1, bundleID.UTF8String, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+                sqlite3_finalize(stmt);
+                return @[];
+            }
+            NSMutableArray<NSNumber *> *keys = [NSMutableArray array];
+            int step = SQLITE_OK;
+            while ((step = sqlite3_step(stmt)) == SQLITE_ROW) {
+                [keys addObject:@(sqlite3_column_int64(stmt, 0))];
+            }
+            sqlite3_finalize(stmt);
+            if (step != SQLITE_DONE) return @[];
+            if (okOut) *okOut = YES;
+            return [keys copy];
+        };
 
-    NSMutableOrderedSet<NSString *> *searchSet = [NSMutableOrderedSet orderedSet];
-    if (bundleID.length) [searchSet addObject:bundleID];
-    if (tildeID.length) [searchSet addObject:tildeID];
-    if (iCloudTilde.length) [searchSet addObject:iCloudTilde];
+    // Plan read-only first. accountsd is not disturbed unless exact ownership exists.
+    sqlite3 *planDB = NULL;
+    int planRC = sqlite3_open_v2(accountsDBPath.UTF8String, &planDB, SQLITE_OPEN_READONLY, NULL);
+    if (planRC != SQLITE_OK || !planDB) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: read-only open failed rc=%d", planRC];
+        if (planDB) sqlite3_close(planDB);
+        return;
+    }
+    int planBusyTimeoutMs = boundedSQLiteBusyTimeoutMs();
+    if (planBusyTimeoutMs <= 0) { sqlite3_close(planDB); return; }
+    sqlite3_busy_timeout(planDB, planBusyTimeoutMs);
+    NSMutableDictionary<NSString *, NSSet<NSString *> *> *planColumns = [NSMutableDictionary dictionary];
+    BOOL exactSchema = PXSQLiteTableHasColumnCached(planDB, @"ZACCOUNT", @"Z_PK", planColumns) &&
+                       PXSQLiteTableHasColumnCached(planDB, @"ZACCOUNT", @"ZOWNINGBUNDLEID", planColumns);
+    if (!exactSchema) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: Z_PK/ZOWNINGBUNDLEID unavailable; fail closed"];
+        sqlite3_close(planDB);
+        return;
+    }
+    BOOL planReadOK = NO;
+    NSArray<NSNumber *> *plannedTargets = readPrimaryKeys(planDB, YES, &planReadOK);
+    sqlite3_close(planDB);
+    if (!planReadOK) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: ownership query failed; fail closed"];
+        return;
+    }
+    if (plannedTargets.count == 0) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: no rows exactly owned by target bundle"];
+        return;
+    }
 
-    for (NSString *component in bundleComponents) {
-        if (component.length > 3 && ![component isEqualToString:@"com"] && ![component isEqualToString:@"org"] && ![component isEqualToString:@"net"]) {
-            [searchSet addObject:component];
-            [searchSet addObject:[NSString stringWithFormat:@"iCloud.%@", component]];
-            [searchSet addObject:[NSString stringWithFormat:@"%@.icloud", component]];
-            [searchSet addObject:[NSString stringWithFormat:@"com.apple.CloudDocs.%@", component]];
+    if (operationContext && [operationContext isCancellationRequested]) return;
+    [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: authorized target rows=%lu", (unsigned long)plannedTargets.count];
+    PXKillallTermThenKill(@"accountsd", 0.2);
+    if (operationContext && [operationContext isCancellationRequested]) return;
+
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(accountsDBPath.UTF8String, &db, SQLITE_OPEN_READWRITE, NULL);
+    if (rc != SQLITE_OK || !db) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: read-write open failed rc=%d", rc];
+        if (db) sqlite3_close(db);
+        return;
+    }
+    int mutationBusyTimeoutMs = boundedSQLiteBusyTimeoutMs();
+    if (mutationBusyTimeoutMs <= 0) { sqlite3_close(db); return; }
+    sqlite3_busy_timeout(db, mutationBusyTimeoutMs);
+
+    NSMutableDictionary<NSString *, NSSet<NSString *> *> *columns = [NSMutableDictionary dictionary];
+    if (!PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", @"Z_PK", columns) ||
+        !PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", @"ZOWNINGBUNDLEID", columns)) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: schema changed before mutation; fail closed"];
+        sqlite3_close(db);
+        return;
+    }
+
+    NSString *transactionError = nil;
+    if (!PXSQLiteExec(db, @"BEGIN IMMEDIATE;", &transactionError)) {
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: BEGIN IMMEDIATE failed %@", transactionError ?: @""];
+        sqlite3_close(db);
+        return;
+    }
+
+    BOOL mutationOK = YES;
+    BOOL readOK = NO;
+    NSArray<NSNumber *> *targetsNow = readPrimaryKeys(db, YES, &readOK);
+    NSSet<NSNumber *> *plannedSet = [NSSet setWithArray:plannedTargets];
+    NSSet<NSNumber *> *targetSet = [NSSet setWithArray:targetsNow];
+    if (!readOK || ![plannedSet isEqualToSet:targetSet]) {
+        mutationOK = NO;
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: target ownership changed before mutation; rolling back"];
+    }
+
+    BOOL unrelatedReadOK = NO;
+    NSArray<NSNumber *> *unrelatedBefore = mutationOK ? readPrimaryKeys(db, NO, &unrelatedReadOK) : @[];
+    if (mutationOK && !unrelatedReadOK) mutationOK = NO;
+    NSSet<NSNumber *> *unrelatedBeforeSet = [NSSet setWithArray:unrelatedBefore];
+
+    if (mutationOK && operationContext && [operationContext isCancellationRequested]) {
+        mutationOK = NO;
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: cancelled before mutation; rolling back"];
+    }
+
+    BOOL (^deleteCompanionOwner)(NSString *, sqlite3_int64) = ^BOOL(NSString *table, sqlite3_int64 ownerPK) {
+        if (!PXSQLiteTableHasColumnCached(db, table, @"ZOWNER", columns)) return YES;
+        if (!PXSQLiteIsSafeIdentifier(table)) return NO;
+        NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@ WHERE ZOWNER = ?;", table];
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, sql.UTF8String, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+            if (stmt) sqlite3_finalize(stmt);
+            return NO;
+        }
+        sqlite3_bind_int64(stmt, 1, ownerPK);
+        int step = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return step == SQLITE_DONE;
+    };
+
+    sqlite3_stmt *deleteAccount = NULL;
+    if (mutationOK &&
+        sqlite3_prepare_v2(db, "DELETE FROM ZACCOUNT WHERE Z_PK = ? AND ZOWNINGBUNDLEID = ?;", -1, &deleteAccount, NULL) != SQLITE_OK) {
+        mutationOK = NO;
+    }
+
+    if (mutationOK) {
+        for (NSNumber *pkNumber in plannedTargets) {
+            if (operationContext && [operationContext isCancellationRequested]) {
+                mutationOK = NO;
+                [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: cancelled during target mutation; rolling back"];
+                break;
+            }
+            sqlite3_int64 pk = (sqlite3_int64)pkNumber.longLongValue;
+            if (!deleteCompanionOwner(@"ZACCOUNTPROPERTY", pk) ||
+                !deleteCompanionOwner(@"ZCREDENTIALITEM", pk)) {
+                mutationOK = NO;
+                break;
+            }
+            sqlite3_reset(deleteAccount);
+            sqlite3_clear_bindings(deleteAccount);
+            if (sqlite3_bind_int64(deleteAccount, 1, pk) != SQLITE_OK ||
+                sqlite3_bind_text(deleteAccount, 2, bundleID.UTF8String, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+                sqlite3_step(deleteAccount) != SQLITE_DONE ||
+                sqlite3_changes(db) != 1) {
+                mutationOK = NO;
+                break;
+            }
         }
     }
+    if (deleteAccount) sqlite3_finalize(deleteAccount);
 
-    // Dedupe lowercased variants
-    NSMutableOrderedSet<NSString *> *finalTerms = [NSMutableOrderedSet orderedSet];
-    for (NSString *t in searchSet) {
-        if (![t isKindOfClass:[NSString class]] || t.length < 3) continue;
-        [finalTerms addObject:t];
-        [finalTerms addObject:[t lowercaseString]];
+    BOOL targetAfterOK = NO;
+    NSArray<NSNumber *> *targetsAfter = mutationOK ? readPrimaryKeys(db, YES, &targetAfterOK) : @[];
+    if (mutationOK && (!targetAfterOK || targetsAfter.count != 0)) mutationOK = NO;
+
+    BOOL unrelatedAfterOK = NO;
+    NSArray<NSNumber *> *unrelatedAfter = mutationOK ? readPrimaryKeys(db, NO, &unrelatedAfterOK) : @[];
+    NSSet<NSNumber *> *unrelatedAfterSet = [NSSet setWithArray:unrelatedAfter];
+    if (mutationOK && (!unrelatedAfterOK || ![unrelatedBeforeSet isEqualToSet:unrelatedAfterSet])) {
+        mutationOK = NO;
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: unrelated account PK set changed; rolling back"];
     }
 
-    NSArray<NSString *> *bases = @[
-        @"/var/mobile/Library/Mobile Documents",
-        @"/var/mobile/Library/Application Support/CloudDocs",
-        @"/var/mobile/Library/Application Support/CloudKit",
-        @"/var/mobile/Library/Accounts"
+    if (mutationOK && operationContext && [operationContext isCancellationRequested]) {
+        mutationOK = NO;
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup: cancelled before commit; rolling back"];
+    }
+
+    if (!mutationOK) {
+        PXSQLiteExec(db, @"ROLLBACK;", NULL);
+        sqlite3_close(db);
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup failed closed; no transaction committed"];
+        return;
+    }
+
+    NSString *commitError = nil;
+    if (!PXSQLiteExec(db, @"COMMIT;", &commitError)) {
+        PXSQLiteExec(db, @"ROLLBACK;", NULL);
+        sqlite3_close(db);
+        [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup COMMIT failed %@", commitError ?: @""];
+        return;
+    }
+    PXSQLiteExec(db, @"PRAGMA wal_checkpoint(TRUNCATE);", NULL);
+    sqlite3_close(db);
+    [self logMessage:@"[AppDataCleaner] Accounts3 exact cleanup committed rows=%lu", (unsigned long)plannedTargets.count];
+}
+
+- (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {
+    if (![request isKindOfClass:[PXClearRequest class]] ||
+        !PXClearModeIncludesExtendedContainers(request.mode) ||
+        ((request.options & PXClearOptionICloudData) == 0)) {
+        [self logMessage:@"[AppDataCleaner] iCloud exact cleanup rejected: request is not authorized"];
+        return;
+    }
+
+    NSString *bundleID = request.bundleIdentifier;
+    if ([bundleID hasPrefix:@"com.apple."]) {
+        [self logMessage:@"[AppDataCleaner] iCloud exact cleanup BLOCKED for system app; dedicated system-cloud policy required"];
+        return;
+    }
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    if (operationContext && [operationContext isCancellationRequested]) return;
+
+    NSError *entitlementError = nil;
+    NSDictionary *entitlements = [[[AppEntitlementsReader alloc] init] fullEntitlementsForBundleID:bundleID
+                                                                                              error:&entitlementError];
+    if (![entitlements isKindOfClass:[NSDictionary class]] || entitlementError) {
+        [self logMessage:@"[AppDataCleaner] iCloud exact cleanup: signed entitlements unavailable; fail closed"];
+        return;
+    }
+
+    NSArray<NSString *> *keys = @[
+        @"com.apple.developer.ubiquity-container-identifiers",
+        @"com.apple.developer.icloud-container-identifiers"
     ];
+    NSMutableOrderedSet<NSString *> *containerIDs = [NSMutableOrderedSet orderedSet];
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_"];
+    NSCharacterSet *disallowed = [allowed invertedSet];
 
-    // One find per base path.
-    for (NSString *basePath in bases) {
-        if (![_fileManager fileExistsAtPath:basePath]) continue;
-
-        NSMutableString *expr = [NSMutableString string];
-        for (NSString *t in finalTerms.array) {
-            if (expr.length) [expr appendString:@" -o "];
-            // Match common iCloud directory naming; keep broad for compatibility.
-            [expr appendFormat:@"-iname '*%@*'", t];
+    for (NSString *key in keys) {
+        id raw = entitlements[key];
+        if (!raw) continue;
+        if (![raw isKindOfClass:[NSArray class]]) {
+            [self logMessage:@"[AppDataCleaner] iCloud exact cleanup: entitlement %@ has unsupported shape; fail closed", key];
+            return;
         }
-        if (!expr.length) continue;
-
-        // Escape parentheses for /bin/sh
-        NSString *cmd = [NSString stringWithFormat:
-                         @"find '%@' -mindepth 1 -maxdepth %d \\( %@ \\) -exec rm -rf {} + 2>/dev/null || true",
-                         basePath, maxDepth, expr];
-        [self runCommandWithPrivileges:cmd timeoutSec:findTimeout];
+        for (id value in (NSArray *)raw) {
+            if (![value isKindOfClass:[NSString class]]) {
+                [self logMessage:@"[AppDataCleaner] iCloud exact cleanup: non-string container entitlement; fail closed"];
+                return;
+            }
+            NSString *identifier = (NSString *)value;
+            BOOL valid = identifier.length > 0 && identifier.length <= 255 &&
+                         [identifier rangeOfCharacterFromSet:disallowed].location == NSNotFound &&
+                         [identifier rangeOfString:@".."].location == NSNotFound &&
+                         ![identifier hasPrefix:@"."] && ![identifier hasSuffix:@"."];
+            if (!valid) {
+                [self logMessage:@"[AppDataCleaner] iCloud exact cleanup: invalid signed container identifier; fail closed"];
+                return;
+            }
+            [containerIDs addObject:identifier];
+        }
     }
 
-    // Clear iCloud accounts info (batch, in-process sqlite to avoid missing sqlite3 tool)
-    NSString *accountsDBPath = @"/var/mobile/Library/Accounts/Accounts3.sqlite";
-    if ([_fileManager fileExistsAtPath:accountsDBPath] && finalTerms.count) {
-        sqlite3 *db = NULL;
-        int rc = sqlite3_open_v2(accountsDBPath.UTF8String, &db, SQLITE_OPEN_READWRITE, NULL);
-        if (rc == SQLITE_OK && db) {
-            sqlite3_busy_timeout(db, 3000);
+    NSString *mobileDocuments = PXFirstExistingPath(_fileManager, @[
+        @"/var/mobile/Library/Mobile Documents",
+        @"/private/var/mobile/Library/Mobile Documents"
+    ]);
+    NSUInteger authorizedCount = 0;
+    NSUInteger clearedCount = 0;
+    NSUInteger skippedCount = 0;
 
-            // Build a predicate using only columns that exist on this iOS schema.
-            NSMutableDictionary<NSString *, NSSet<NSString *> *> *colCache = [NSMutableDictionary dictionary];
-            NSMutableArray<NSString *> *cols = [NSMutableArray array];
-            for (NSString *c in @[@"ZIDENTIFIER", @"ZOWNINGBUNDLEID", @"ZUSERNAME", @"ZACCOUNTDESCRIPTION", @"ZDISPLAYNAME", @"ZEMAILADDRESS"]) {
-                if (PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", c, colCache)) {
-                    [cols addObject:c];
-                }
+    if (mobileDocuments.length && containerIDs.count) {
+        NSString *resolvedBase = [mobileDocuments stringByResolvingSymlinksInPath];
+        for (NSString *identifier in containerIDs.array) {
+            if (operationContext && [operationContext isCancellationRequested]) break;
+            // Only iCloud.* identifiers have a stable direct-child Mobile Documents mapping.
+            if (![identifier hasPrefix:@"iCloud."]) {
+                skippedCount++;
+                continue;
             }
-            if (!cols.count) {
-                sqlite3_close(db);
+            authorizedCount++;
+            NSString *directoryName = [identifier stringByReplacingOccurrencesOfString:@"." withString:@"~"];
+            NSString *candidate = [mobileDocuments stringByAppendingPathComponent:directoryName];
+            NSString *standardCandidate = [candidate stringByStandardizingPath];
+            NSString *standardBase = [mobileDocuments stringByStandardizingPath];
+            if (![[standardCandidate stringByDeletingLastPathComponent] isEqualToString:standardBase]) {
+                skippedCount++;
+                continue;
+            }
+
+            NSError *attributesError = nil;
+            NSDictionary *attributes = [_fileManager attributesOfItemAtPath:candidate error:&attributesError];
+            if (!attributes) {
+                // Exact entitled container is simply not materialized on this device.
+                skippedCount++;
+                continue;
+            }
+            NSString *fileType = attributes[NSFileType];
+            if (![fileType isEqualToString:NSFileTypeDirectory] || [fileType isEqualToString:NSFileTypeSymbolicLink]) {
+                skippedCount++;
+                continue;
+            }
+            NSString *resolvedCandidate = [candidate stringByResolvingSymlinksInPath];
+            if (![[resolvedCandidate stringByDeletingLastPathComponent] isEqualToString:resolvedBase]) {
+                skippedCount++;
+                continue;
+            }
+
+            NSString *command = [NSString stringWithFormat:
+                @"find %@ -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null",
+                PXShellQuote(resolvedCandidate)];
+            CommandResult *result = [self runCommandWithPrivilegesResult:command timeoutSec:120.0];
+            if (result.isSucceeded) {
+                clearedCount++;
             } else {
-                NSString *errMsg = nil;
-                PXSQLiteExec(db, @"PRAGMA busy_timeout=3000;", NULL);
-                PXSQLiteExec(db, @"BEGIN IMMEDIATE;", &errMsg);
-                if (errMsg.length) {
-                    errMsg = nil;
-                }
-
-                for (NSString *term in finalTerms.array) {
-                    NSString *t = [term stringByReplacingOccurrencesOfString:@"'" withString:@"''"]; 
-                    NSMutableArray<NSString *> *preds = [NSMutableArray array];
-                    for (NSString *c in cols) {
-                        [preds addObject:[NSString stringWithFormat:@"%@ LIKE '%%%%%@%%%%'", c, t]];
-                    }
-                    NSString *where = [preds componentsJoinedByString:@" OR "];
-                    NSString *del = [NSString stringWithFormat:@"DELETE FROM ZACCOUNT WHERE %@;", where];
-                    PXSQLiteExec(db, del, NULL);
-                }
-
-                PXSQLiteExec(db, @"COMMIT;", NULL);
-                PXSQLiteExec(db, @"PRAGMA wal_checkpoint(TRUNCATE);", NULL);
-                sqlite3_close(db);
+                skippedCount++;
+                [self logMessage:@"[AppDataCleaner] iCloud exact container wipe failed exit=%d timeout=%d runnerError=%d",
+                                 result.exitCode, result.timedOut, result.runnerError];
             }
-        } else {
-            if (db) sqlite3_close(db);
         }
     }
+
+    [self logMessage:@"[AppDataCleaner] iCloud exact authorization: signed=%lu mapped=%lu cleared=%lu skipped=%lu",
+                     (unsigned long)containerIDs.count,
+                     (unsigned long)authorizedCount,
+                     (unsigned long)clearedCount,
+                     (unsigned long)skippedCount];
+
+    if (!(operationContext && [operationContext isCancellationRequested])) {
+        [self _clearExactAccountsOwnedByBundleIdentifier:bundleID];
+    }
+}
+
+- (void)clearICloudData:(NSString *)bundleID {
+    // Public compatibility selector remains, but no longer re-reads mutable settings
+    // or performs fuzzy deletion. Only an active immutable Clear request can authorize it.
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    PXClearRequest *request = operationContext.dataRequest;
+    if (!request || ![request.bundleIdentifier isEqualToString:bundleID] ||
+        ((request.options & PXClearOptionICloudData) == 0)) {
+        [self logMessage:@"[AppDataCleaner] clearICloudData compatibility call blocked: no authorized request snapshot"];
+        return;
+    }
+    [self _clearAuthorizedICloudDataForRequest:request];
 }
 
 - (void)fastWipeDirectoryContents:(NSString *)path keepDirectoryStructure:(BOOL)keepStructure timeoutSec:(int)timeoutSec {
@@ -6530,125 +6804,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     // Ensure processes are stopped first to avoid sqlite "database is locked" and detached DB crashes.
     PXStopSafariDaemonsBestEffort(self);
 
-    // Google sign-in can surface "Continue as <gmail>" from system Accounts even when cookies are gone.
-    // For Safari clear-data, we treat it as web session state and remove Google account rows best-effort.
-    {
-        NSString *accountsDB = PXFirstExistingPath(_fileManager, @[
-            @"/var/mobile/Library/Accounts/Accounts3.sqlite",
-            @"/private/var/mobile/Library/Accounts/Accounts3.sqlite",
-            @"/var/jb/var/mobile/Library/Accounts/Accounts3.sqlite",
-            @"/private/var/jb/var/mobile/Library/Accounts/Accounts3.sqlite"
-        ]);
-        if (accountsDB.length && [_fileManager fileExistsAtPath:accountsDB]) {
-            [self logMessage:@"[AppDataCleaner] MobileSafari: removing Google accounts from Accounts3 (shared) ..."]; 
-
-            // Stop accountsd before touching DB (avoid "database is locked").
-            PXKillallByName(@"accountsd", SIGTERM);
-            [NSThread sleepForTimeInterval:0.2];
-            PXKillallByName(@"accountsd", SIGKILL);
-            [NSThread sleepForTimeInterval:0.2];
-
-            sqlite3 *db = NULL;
-            int rc = sqlite3_open_v2(accountsDB.UTF8String, &db, SQLITE_OPEN_READWRITE, NULL);
-            if (rc != SQLITE_OK || !db) {
-                NSString *msg = db ? [NSString stringWithUTF8String:sqlite3_errmsg(db)] : @"open failed";
-                [self logMessage:@"[AppDataCleaner] MobileSafari: Accounts3 open failed rc=%d %@", rc, msg ?: @""];
-                if (db) sqlite3_close(db);
-            } else {
-                sqlite3_busy_timeout(db, 3000);
-
-                NSString *beforeCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNT;");
-                [self logMessage:@"[AppDataCleaner] MobileSafari: Accounts3 ZACCOUNT count before=%@", beforeCount ?: @"(nil)"];
-                PXSQLiteLogAccountsSample(self, db, @"MobileSafari(before)");
-
-                NSString *typeCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNTTYPE WHERE ZIDENTIFIER LIKE '%google%' OR ZIDENTIFIER LIKE '%gmail%';");
-                if (typeCount.length) {
-                    [self logMessage:@"[AppDataCleaner] MobileSafari: google-ish account types=%@", typeCount];
-                }
-
-                NSMutableDictionary<NSString *, NSSet<NSString *> *> *colCache = [NSMutableDictionary dictionary];
-                BOOL hasZAccountType = PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", @"ZACCOUNTTYPE", colCache);
-
-                NSMutableArray<NSString *> *preds = [NSMutableArray array];
-                if (hasZAccountType) {
-                    [preds addObject:@"ZACCOUNTTYPE IN (SELECT Z_PK FROM ZACCOUNTTYPE WHERE ZIDENTIFIER LIKE '%google%' OR ZIDENTIFIER LIKE '%gmail%')"]; 
-                }
-                // Match on any existing identifier-like columns.
-                NSArray<NSString *> *maybeCols = @[
-                    @"ZIDENTIFIER",
-                    @"ZUSERNAME",
-                    @"ZACCOUNTDESCRIPTION",
-                    @"ZDISPLAYNAME",
-                    @"ZEMAILADDRESS",
-                    @"ZOWNINGBUNDLEID"
-                ];
-                for (NSString *c in maybeCols) {
-                    if (PXSQLiteTableHasColumnCached(db, @"ZACCOUNT", c, colCache)) {
-                        [preds addObject:[NSString stringWithFormat:@"%@ LIKE '%%google%%' OR %@ LIKE '%%gmail%%'", c, c]];
-                    }
-                }
-
-                NSString *where = preds.count ? [preds componentsJoinedByString:@" OR "] : nil;
-
-                NSString *errMsg = nil;
-                PXSQLiteExec(db, @"PRAGMA busy_timeout=3000;", NULL);
-                PXSQLiteExec(db, @"BEGIN IMMEDIATE;", &errMsg);
-                if (errMsg.length) {
-                    [self logMessage:@"[AppDataCleaner] MobileSafari: BEGIN IMMEDIATE failed %@", errMsg];
-                    errMsg = nil;
-                }
-
-                if (where.length) {
-                    NSString *del = [NSString stringWithFormat:@"DELETE FROM ZACCOUNT WHERE %@;", where];
-                    BOOL ok = PXSQLiteExec(db, del, &errMsg);
-                    int changes = sqlite3_changes(db);
-                    [self logMessage:@"[AppDataCleaner] MobileSafari: ZACCOUNT delete ok=%d changes=%d %@", ok, changes, errMsg.length ? errMsg : @""];
-                    errMsg = nil;
-                } else {
-                    [self logMessage:@"[AppDataCleaner] MobileSafari: Accounts3 schema unknown; skip delete"]; 
-                }
-
-                // Best-effort cleanup of orphan rows (ignore failures if tables don't exist).
-                PXSQLiteExec(db, @"DELETE FROM ZACCOUNTPROPERTY WHERE ZOWNER NOT IN (SELECT Z_PK FROM ZACCOUNT);", NULL);
-                PXSQLiteExec(db, @"DELETE FROM ZCREDENTIALITEM WHERE ZOWNER NOT IN (SELECT Z_PK FROM ZACCOUNT);", NULL);
-
-                PXSQLiteExec(db, @"COMMIT;", &errMsg);
-                if (errMsg.length) {
-                    [self logMessage:@"[AppDataCleaner] MobileSafari: COMMIT failed %@", errMsg];
-                    errMsg = nil;
-                    PXSQLiteExec(db, @"ROLLBACK;", NULL);
-                }
-                PXSQLiteExec(db, @"PRAGMA wal_checkpoint(TRUNCATE);", NULL);
-
-                NSString *afterCount = PXSQLiteScalar(db, @"SELECT count(*) FROM ZACCOUNT;");
-                [self logMessage:@"[AppDataCleaner] MobileSafari: Accounts3 ZACCOUNT count after=%@", afterCount ?: @"(nil)"];
-                PXSQLiteLogAccountsSample(self, db, @"MobileSafari(after)");
-
-                // Debug sample of account types (helps tune predicates across iOS versions)
-                sqlite3_stmt *st = NULL;
-                if (sqlite3_prepare_v2(db, "SELECT ZIDENTIFIER FROM ZACCOUNTTYPE LIMIT 12;", -1, &st, NULL) == SQLITE_OK && st) {
-                    NSMutableArray *ids = [NSMutableArray array];
-                    while (sqlite3_step(st) == SQLITE_ROW) {
-                        const unsigned char *txt = sqlite3_column_text(st, 0);
-                        if (txt) [ids addObject:[NSString stringWithUTF8String:(const char *)txt]];
-                    }
-                    sqlite3_finalize(st);
-                    if (ids.count) {
-                        [self logMessage:@"[AppDataCleaner] MobileSafari: ZACCOUNTTYPE sample=%@", [ids componentsJoinedByString:@", "]];
-                    }
-                } else if (st) {
-                    sqlite3_finalize(st);
-                }
-
-                sqlite3_close(db);
-            }
-
-            // Restart accountsd so UI refreshes.
-            PXKillallByName(@"accountsd", SIGTERM);
-        } else {
-            [self logMessage:@"[AppDataCleaner] MobileSafari: Accounts3.sqlite not found; skipping Google accounts cleanup"]; 
-        }
-    }
+    // Accounts3 is shared system state, not Safari-owned web state. Never infer
+    // account ownership from provider/name substrings during an app Clear operation.
+    [self logMessage:@"[AppDataCleaner] MobileSafari: shared Accounts3 mutation skipped (exact-ownership policy)"];
 
     NSArray<NSString *> *libraryBases = @[
         @"/var/mobile/Library",

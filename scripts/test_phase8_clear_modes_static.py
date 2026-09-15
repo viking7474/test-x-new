@@ -23,6 +23,12 @@ ios_version_hooks = text("TLinkIOSTweak/IOSVersionHooks.x")
 for symbol in ("PXClearModeQuick", "PXClearModeFull", "PXClearModeDeep"):
     require(symbol in request_h, f"missing mode: {symbol}")
 require("mode:(PXClearMode)mode" in request_h, "typed mode initializer missing")
+for symbol in ("PXClearOptionNone", "PXClearOptionICloudData", "PXClearOptionsKnownMask"):
+    require(symbol in request_h, f"missing Clear option contract: {symbol}")
+require("options:(PXClearOptions)options" in request_h,
+        "immutable Clear options initializer missing")
+require("options:PXClearOptionNone" in request_m,
+        "legacy/default Clear requests must leave optional destructive policies OFF")
 require("deepClean ? PXClearModeDeep : PXClearModeFull" in request_m,
         "compatibility deepClean mapping changed")
 require("return _mode == PXClearModeDeep" in request_m,
@@ -77,6 +83,66 @@ app_wipe_end = cleaner_m.index('    NSLog(@"[AppDataCleaner] Completed wipe for 
 app_wipe_body = cleaner_m[app_wipe_start:app_wipe_end]
 require("request.mode == PXClearModeDeep" in app_wipe_body,
         "Deep-only specialized cleanup guards missing")
+require("request.options & PXClearOptionICloudData" in app_wipe_body,
+        "iCloud cleanup is not gated by the immutable request option")
+require("Clear iCloud Data policy OFF; skipping iCloud/Accounts cleanup" in app_wipe_body,
+        "option-OFF iCloud skip path missing")
+require("options:request.options" in aggregate_body,
+        "derived ApplicationData request does not preserve immutable Clear options")
+require('PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in mode_body and
+        mode_body.count("options:clearOptions") >= 2,
+        "canonical Clear does not snapshot the persisted iCloud policy into both requests")
+
+# Exact iCloud/Accounts authorization: no bundle-component/name fuzzy matching may
+# cross the destructive boundary. Unsupported entitlement mappings fail closed.
+accounts_start = cleaner_m.index("- (void)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleID {")
+accounts_end = cleaner_m.index("- (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {", accounts_start)
+accounts_body = cleaner_m[accounts_start:accounts_end]
+require("ZOWNINGBUNDLEID = ?" in accounts_body and "sqlite3_bind_text" in accounts_body,
+        "Accounts3 authorization must bind an exact owning bundle id")
+require('[bundleID hasPrefix:@"com.apple."]' in accounts_body and "BLOCKED for system app" in accounts_body,
+        "Accounts3 exact path must keep system apps behind a separate blocked policy")
+require("BEGIN IMMEDIATE" in accounts_body and "ROLLBACK" in accounts_body and "COMMIT" in accounts_body,
+        "Accounts3 exact mutation is not transactional")
+require("boundedSQLiteBusyTimeoutMs" in accounts_body and "remainingTime" in accounts_body,
+        "Accounts3 SQLite lock waits are not bounded by the active Clear deadline")
+require(accounts_body.count("isCancellationRequested") >= 4 and "cancelled before commit" in accounts_body,
+        "Accounts3 transaction does not cooperatively cancel before/while mutating and before commit")
+require("unrelatedBeforeSet" in accounts_body and "unrelatedAfterSet" in accounts_body and
+        "isEqualToSet" in accounts_body,
+        "Accounts3 mutation does not prove unrelated account PKs are unchanged")
+for fuzzy in (" LIKE ", "%google%", "%gmail%", "NOT IN (SELECT Z_PK FROM ZACCOUNT)"):
+    require(fuzzy not in accounts_body, f"fuzzy/global Accounts3 mutation remains: {fuzzy}")
+
+icloud_start = cleaner_m.index("- (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {")
+icloud_end = cleaner_m.index("- (void)clearICloudData:(NSString *)bundleID", icloud_start)
+icloud_body = cleaner_m[icloud_start:icloud_end]
+require("com.apple.developer.ubiquity-container-identifiers" in icloud_body and
+        "com.apple.developer.icloud-container-identifiers" in icloud_body,
+        "iCloud authorization is not sourced from signed container entitlements")
+require('[bundleID hasPrefix:@"com.apple."]' in icloud_body and "dedicated system-cloud policy required" in icloud_body,
+        "iCloud exact path must fail closed for com.apple.* system targets")
+require('hasPrefix:@"iCloud."' in icloud_body and
+        'stringByReplacingOccurrencesOfString:@"." withString:@"~"' in icloud_body,
+        "exact Mobile Documents container mapping missing")
+require("stringByResolvingSymlinksInPath" in icloud_body and "stringByDeletingLastPathComponent" in icloud_body,
+        "exact iCloud candidate does not enforce direct-child canonicalization")
+for fuzzy in ("componentsSeparatedByString", "-iname", "CloudDocs", "Application Support/CloudKit", "LIKE"):
+    require(fuzzy not in icloud_body, f"fuzzy iCloud authorization remains: {fuzzy}")
+compat_icloud_start = cleaner_m.index("- (void)clearICloudData:(NSString *)bundleID")
+compat_icloud_end = cleaner_m.index("- (void)fastWipeDirectoryContents:", compat_icloud_start)
+compat_icloud_body = cleaner_m[compat_icloud_start:compat_icloud_end]
+require("PXCurrentClearOperationContext" in compat_icloud_body and
+        "no authorized request snapshot" in compat_icloud_body,
+        "public clearICloudData compatibility selector does not fail closed without an immutable request")
+
+safari_start = cleaner_m.index("- (void)_wipeMobileSafariSystemStores")
+safari_end = cleaner_m.index("- (NSArray *)findExtensionDataContainersForBundleID", safari_start)
+safari_body = cleaner_m[safari_start:safari_end]
+require("shared Accounts3 mutation skipped (exact-ownership policy)" in safari_body,
+        "MobileSafari must explicitly skip shared Accounts3 mutation")
+for token in ("ZACCOUNT", "%google%", "%gmail%", 'PXKillallByName(@"accountsd"'):
+    require(token not in safari_body, f"MobileSafari still mutates or targets shared Accounts3 state: {token}")
 require("PXClearModeIncludesExtendedContainers(request.mode)" in app_wipe_body,
         "Quick residual-cleanup exclusion missing")
 

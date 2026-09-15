@@ -114,6 +114,18 @@ safari_toggle = method_body(security, "- (void)safariStackSpoofingToggleChanged:
 require('PXReadSecurityBool(@"fullSpoofTestModeEnabled", NO)' in safari_toggle,
         "Safari/Auth handler rejects mutation while Full Spoof Test is active")
 
+# Clear iCloud Data is an explicit destructive policy, defaults OFF, and requires confirmation.
+icloud_toggle = method_body(security, "- (void)clearICloudDataToggleChanged:", 4200)
+require('PXWriteSecurityBool(@"clearICloudDataEnabled", YES' in icloud_toggle and
+        'PXWriteSecurityBool(@"clearICloudDataEnabled", NO' in icloud_toggle,
+        "Clear iCloud Data toggle does not persist both enabled and disabled states")
+require('PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in icloud_toggle and
+        'UIAlertActionStyleDestructive' in icloud_toggle,
+        "Clear iCloud Data enable flow lacks fail-safe rollback/confirmation")
+require('@"Clear iCloud Data"' in security and
+        'securityCompactSwitchOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in security,
+        "Security root does not expose Clear iCloud Data as an OFF-by-default option")
+
 # Audited Security toggles use verified persistence and rollback instead of direct false-success writes.
 for path, key in (
     ("JailbreakDetailViewController.m", "jailbreakDetectionEnabled"),

@@ -14,6 +14,8 @@ const PXClearScope PXClearScopeDefaultMask =
     PXClearScopePluginKitData |
     PXClearScopeKeychain;
 
+const PXClearOptions PXClearOptionsKnownMask = PXClearOptionICloudData;
+
 BOOL PXClearModeIsValid(PXClearMode mode) {
     return mode == PXClearModeQuick || mode == PXClearModeFull || mode == PXClearModeDeep;
 }
@@ -87,26 +89,43 @@ static BOOL PXClearRequestScopesAreValid(PXClearScope scopes) {
     return scopes != 0 && (scopes & ~PXClearScopeKnownMask) == 0;
 }
 
+static BOOL PXClearRequestOptionsAreValid(PXClearOptions options) {
+    return (options & ~PXClearOptionsKnownMask) == 0;
+}
+
 @implementation PXClearRequest
 
 @synthesize bundleIdentifier = _bundleIdentifier;
 @synthesize scopes = _scopes;
 @synthesize mode = _mode;
+@synthesize options = _options;
 
 - (nullable instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
                                             scopes:(PXClearScope)scopes
-                                              mode:(PXClearMode)mode {
+                                              mode:(PXClearMode)mode
+                                           options:(PXClearOptions)options {
     if (!PXClearRequestBundleIdentifierIsValid(bundleIdentifier) ||
         !PXClearRequestScopesAreValid(scopes) ||
-        !PXClearModeIsValid(mode)) return nil;
+        !PXClearModeIsValid(mode) ||
+        !PXClearRequestOptionsAreValid(options)) return nil;
 
     self = [super init];
     if (self) {
         _bundleIdentifier = [bundleIdentifier copy];
         _scopes = scopes;
         _mode = mode;
+        _options = options;
     }
     return self;
+}
+
+- (nullable instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
+                                            scopes:(PXClearScope)scopes
+                                              mode:(PXClearMode)mode {
+    return [self initWithBundleIdentifier:bundleIdentifier
+                                   scopes:scopes
+                                     mode:mode
+                                  options:PXClearOptionNone];
 }
 
 - (nullable instancetype)initWithBundleIdentifier:(NSString *)bundleIdentifier
@@ -114,7 +133,8 @@ static BOOL PXClearRequestScopesAreValid(PXClearScope scopes) {
                                          deepClean:(BOOL)deepClean {
     return [self initWithBundleIdentifier:bundleIdentifier
                                    scopes:scopes
-                                     mode:deepClean ? PXClearModeDeep : PXClearModeFull];
+                                     mode:deepClean ? PXClearModeDeep : PXClearModeFull
+                                  options:PXClearOptionNone];
 }
 
 - (BOOL)isDeepClean {
@@ -124,7 +144,8 @@ static BOOL PXClearRequestScopesAreValid(PXClearScope scopes) {
 + (nullable instancetype)defaultRequestForBundleIdentifier:(NSString *)bundleIdentifier {
     return [[self alloc] initWithBundleIdentifier:bundleIdentifier
                                            scopes:PXClearScopeDefaultMask
-                                             mode:PXClearModeFull];
+                                             mode:PXClearModeFull
+                                          options:PXClearOptionNone];
 }
 
 - (id)copyWithZone:(NSZone *)zone {
@@ -137,13 +158,14 @@ static BOOL PXClearRequestScopesAreValid(PXClearScope scopes) {
     if (![object isMemberOfClass:[PXClearRequest class]]) return NO;
     PXClearRequest *other = (PXClearRequest *)object;
     return [_bundleIdentifier isEqualToString:other->_bundleIdentifier] &&
-           _scopes == other->_scopes && _mode == other->_mode;
+           _scopes == other->_scopes && _mode == other->_mode && _options == other->_options;
 }
 
 - (NSUInteger)hash {
     NSUInteger hashValue = _bundleIdentifier.hash;
     hashValue = hashValue * 31u + (NSUInteger)_scopes;
     hashValue = hashValue * 31u + (NSUInteger)_mode;
+    hashValue = hashValue * 31u + (NSUInteger)_options;
     return hashValue;
 }
 

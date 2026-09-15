@@ -56,6 +56,7 @@
 
 @property (nonatomic, strong) UILabel *fullSpoofTestModeLabel;
 @property (nonatomic, strong) UISwitch *fullSpoofTestModeToggleSwitch;
+@property (nonatomic, strong) UISwitch *clearICloudDataToggleSwitch;
 
 @property (nonatomic, strong) UILabel *displayUIScaleSpoofLabel;
 @property (nonatomic, strong) UISwitch *displayUIScaleSpoofToggleSwitch;
@@ -989,6 +990,7 @@
     self.deepCleanModeControl.selectedSegmentIndex = deepEnabled ? 1 : 0;
     self.deepCleanHintLabel.text = [self deepCleanHintTextForDeep:deepEnabled];
 
+    [self.clearICloudDataToggleSwitch setOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO) animated:NO];
     [self.systemKeychainWipeToggleSwitch setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:NO];
     [self.profileIndicatorToggleSwitch setOn:PXReadSecurityBool(@"profileIndicatorEnabled", NO) animated:NO];
     [self.ipMonitorToggleSwitch setOn:[self.securitySettings boolForKey:@"ipMonitorEnabled"] animated:NO];
@@ -4185,6 +4187,54 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
 }
 
+
+- (void)showClearICloudDataInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear iCloud Data"
+                                                                   message:@"Optional destructive policy for Clear Data. When enabled, Full/Deep may clear iCloud containers authorized by a non-system target app signed entitlements and Accounts3 rows whose ZOWNINGBUNDLEID exactly equals that bundle. Unsupported mappings and com.apple.* system targets are skipped. Entitled iCloud containers can be shared by apps in the same developer suite; no ownership is inferred from app/provider/name substrings."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)clearICloudDataToggleChanged:(UISwitch *)sender {
+    BOOL enabled = sender.isOn;
+    if (enabled) {
+        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Enable Clear iCloud Data?"
+                                                                        message:@"This does not erase data immediately. It arms an optional Clear Data policy. A later Full/Deep clear may remove signed-entitlement iCloud containers and Accounts3 rows exactly owned by the target bundle. iCloud containers can be shared by apps in the same developer suite, so enable this only when you intend to clear that cloud/account state."
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+            [sender setOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO) animated:YES];
+        }]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Enable" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
+            NSError *error = nil;
+            if (!PXWriteSecurityBool(@"clearICloudDataEnabled", YES, &error)) {
+                [sender setOn:NO animated:YES];
+                [self showToastWithMessage:@"Could not enable Clear iCloud Data"];
+                return;
+            }
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 CFSTR("com.hydra.tlinkios.settings.changed"),
+                                                 NULL, NULL, YES);
+            [self showToastWithMessage:@"Clear iCloud Data enabled"];
+            [self updateSecurityHeroCount];
+        }]];
+        [self presentViewController:confirm animated:YES completion:nil];
+        return;
+    }
+
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"clearICloudDataEnabled", NO, &error)) {
+        [sender setOn:YES animated:YES];
+        [self showToastWithMessage:@"Could not disable Clear iCloud Data"];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+    [self showToastWithMessage:@"Clear iCloud Data disabled"];
+    [self updateSecurityHeroCount];
+}
+
 - (void)showSystemKeychainWipeInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"System Keychain Wipe"
                                                                    message:@"Dangerous. Enables Keychain Wipe for com.apple.* apps in Clear Data.\n\nThis may remove system accounts, credentials, Apple ID tokens, and can break system services. Use only if you know what you're doing."
@@ -5524,6 +5574,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     ]];
     [self.cardsStack addArrangedSubview:deviceCard];
 
+    self.clearICloudDataToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO) selector:@selector(clearICloudDataToggleChanged:) destructive:YES];
     self.systemKeychainWipeToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) selector:@selector(systemKeychainWipeToggleChanged:) destructive:YES];
     DomainBlockingSettings *domainSettings = [DomainBlockingSettings sharedSettings];
     [domainSettings loadSettings];
@@ -5533,6 +5584,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self.cardsStack addArrangedSubview:[self securitySectionHeaderWithTitle:@"DỮ LIỆU & KEYCHAIN"]];
     UIView *dataCard = [self securityCompactCardWithRows:@[
         [self securityCompactRowWithTitle:@"Clear Data Mode" subtitle:@"Chọn mức dọn dữ liệu mặc định" icon:@"trash" color:[UIColor systemRedColor] trailingSwitch:nil value:cleanMode selector:@selector(openDeepCleanDetail)],
+        [self securityCompactRowWithTitle:@"Clear iCloud Data" subtitle:@"Optional · exact iCloud containers + owned Accounts rows" icon:@"icloud" color:[UIColor systemBlueColor] trailingSwitch:self.clearICloudDataToggleSwitch value:nil selector:@selector(showClearICloudDataInfo)],
         [self securityCompactRowWithTitle:@"System Keychain Wipe" subtitle:@"Destructive · cần xác nhận" icon:@"key" color:[UIColor systemOrangeColor] trailingSwitch:self.systemKeychainWipeToggleSwitch value:nil selector:@selector(openSystemKeychainWipeDetail)],
         [self securityCompactRowWithTitle:@"Domain Blocking" subtitle:@"Blocklist cho scoped apps" icon:@"nosign" color:[UIColor systemGrayColor] trailingSwitch:self.domainBlockingToggleSwitch value:nil selector:@selector(showDomainManagement)]
     ]];
@@ -5638,6 +5690,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     add(self.deviceSpoofingToggleSwitch);
     add(self.appVersionSpoofingToggleSwitch);
     add(self.fixVersionToggleSwitch);
+    add(self.clearICloudDataToggleSwitch);
     add(self.systemKeychainWipeToggleSwitch);
     add(self.domainBlockingToggleSwitch);
     add(self.profileIndicatorToggleSwitch);
