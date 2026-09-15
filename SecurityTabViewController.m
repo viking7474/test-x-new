@@ -58,6 +58,7 @@
 @property (nonatomic, strong) UISwitch *fullSpoofTestModeToggleSwitch;
 @property (nonatomic, strong) UISwitch *clearICloudDataToggleSwitch;
 @property (nonatomic, strong) UISwitch *clearSafariSharedWebDataToggleSwitch;
+@property (nonatomic, strong) UISwitch *clearMailSharedStoreToggleSwitch;
 
 @property (nonatomic, strong) UILabel *displayUIScaleSpoofLabel;
 @property (nonatomic, strong) UISwitch *displayUIScaleSpoofToggleSwitch;
@@ -993,6 +994,7 @@
 
     [self.clearICloudDataToggleSwitch setOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO) animated:NO];
     [self.clearSafariSharedWebDataToggleSwitch setOn:PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO) animated:NO];
+    [self.clearMailSharedStoreToggleSwitch setOn:PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO) animated:NO];
     [self.systemKeychainWipeToggleSwitch setOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) animated:NO];
     [self.profileIndicatorToggleSwitch setOn:PXReadSecurityBool(@"profileIndicatorEnabled", NO) animated:NO];
     [self.ipMonitorToggleSwitch setOn:[self.securitySettings boolForKey:@"ipMonitorEnabled"] animated:NO];
@@ -4284,6 +4286,53 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     [self updateSecurityHeroCount];
 }
 
+- (void)showClearMailSharedStoreInfo {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Mail Shared Store"
+                                                                   message:@"Optional destructive policy used only for Deep Clear of com.apple.mobilemail. It resets the shared /var/mobile/Library/Mail store and Mail preferences after stopping Mail/maild. This can affect all configured Mail data on the device. Accounts3 remains blocked and is never deleted by this option. Defaults OFF."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)clearMailSharedStoreToggleChanged:(UISwitch *)sender {
+    BOOL enabled = sender.isOn;
+    if (enabled) {
+        UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Enable Mail Shared Store Clear?"
+                                                                        message:@"This does not erase data immediately. It arms a policy used only when Deep-clearing MobileMail. A later clear may reset the shared Mail store and Mail preferences for all configured mailboxes. Accounts3 stays blocked. Continue?"
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+            [sender setOn:PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO) animated:YES];
+        }]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Enable" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
+            NSError *error = nil;
+            if (!PXWriteSecurityBool(@"clearMailSharedStoreEnabled", YES, &error)) {
+                [sender setOn:NO animated:YES];
+                [self showToastWithMessage:@"Could not enable Mail Shared Store clear"];
+                return;
+            }
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 CFSTR("com.hydra.tlinkios.settings.changed"),
+                                                 NULL, NULL, YES);
+            [self showToastWithMessage:@"Mail Shared Store clear enabled"];
+            [self updateSecurityHeroCount];
+        }]];
+        [self presentViewController:confirm animated:YES completion:nil];
+        return;
+    }
+
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"clearMailSharedStoreEnabled", NO, &error)) {
+        [sender setOn:YES animated:YES];
+        [self showToastWithMessage:@"Could not disable Mail Shared Store clear"];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+    [self showToastWithMessage:@"Mail Shared Store clear disabled"];
+    [self updateSecurityHeroCount];
+}
+
 - (void)showSystemKeychainWipeInfo {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"System Keychain Wipe"
                                                                    message:@"Dangerous. Enables Keychain Wipe for com.apple.* apps in Clear Data.\n\nThis may remove system accounts, credentials, Apple ID tokens, and can break system services. Use only if you know what you're doing."
@@ -5625,6 +5674,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     self.clearICloudDataToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"clearICloudDataEnabled", NO) selector:@selector(clearICloudDataToggleChanged:) destructive:YES];
     self.clearSafariSharedWebDataToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO) selector:@selector(clearSafariSharedWebDataToggleChanged:) destructive:YES];
+    self.clearMailSharedStoreToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO) selector:@selector(clearMailSharedStoreToggleChanged:) destructive:YES];
     self.systemKeychainWipeToggleSwitch = [self securityCompactSwitchOn:PXReadSecurityBool(@"allowSystemKeychainWipeEnabled", NO) selector:@selector(systemKeychainWipeToggleChanged:) destructive:YES];
     DomainBlockingSettings *domainSettings = [DomainBlockingSettings sharedSettings];
     [domainSettings loadSettings];
@@ -5636,6 +5686,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         [self securityCompactRowWithTitle:@"Clear Data Mode" subtitle:@"Chọn mức dọn dữ liệu mặc định" icon:@"trash" color:[UIColor systemRedColor] trailingSwitch:nil value:cleanMode selector:@selector(openDeepCleanDetail)],
         [self securityCompactRowWithTitle:@"Clear iCloud Data" subtitle:@"Optional · exact iCloud containers + owned Accounts rows" icon:@"icloud" color:[UIColor systemBlueColor] trailingSwitch:self.clearICloudDataToggleSwitch value:nil selector:@selector(showClearICloudDataInfo)],
         [self securityCompactRowWithTitle:@"Clear Safari Shared Web Data" subtitle:@"Optional · global Safari/WebKit/Cookies · Deep Safari only" icon:@"safari" color:[UIColor systemBlueColor] trailingSwitch:self.clearSafariSharedWebDataToggleSwitch value:nil selector:@selector(showClearSafariSharedWebDataInfo)],
+        [self securityCompactRowWithTitle:@"Clear Mail Shared Store" subtitle:@"Optional · shared Mail store/prefs · Deep Mail only" icon:@"envelope" color:[UIColor systemOrangeColor] trailingSwitch:self.clearMailSharedStoreToggleSwitch value:nil selector:@selector(showClearMailSharedStoreInfo)],
         [self securityCompactRowWithTitle:@"System Keychain Wipe" subtitle:@"Destructive · cần xác nhận" icon:@"key" color:[UIColor systemOrangeColor] trailingSwitch:self.systemKeychainWipeToggleSwitch value:nil selector:@selector(openSystemKeychainWipeDetail)],
         [self securityCompactRowWithTitle:@"Domain Blocking" subtitle:@"Blocklist cho scoped apps" icon:@"nosign" color:[UIColor systemGrayColor] trailingSwitch:self.domainBlockingToggleSwitch value:nil selector:@selector(showDomainManagement)]
     ]];
@@ -5743,6 +5794,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     add(self.fixVersionToggleSwitch);
     add(self.clearICloudDataToggleSwitch);
     add(self.clearSafariSharedWebDataToggleSwitch);
+    add(self.clearMailSharedStoreToggleSwitch);
     add(self.systemKeychainWipeToggleSwitch);
     add(self.domainBlockingToggleSwitch);
     add(self.profileIndicatorToggleSwitch);

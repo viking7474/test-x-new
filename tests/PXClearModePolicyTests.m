@@ -52,12 +52,24 @@ void PXRunClearModePolicyTests(void) {
               (safariShared.options & PXClearOptionICloudData) == 0,
               @"explicit Safari shared-web policy must be snapshotted independently");
 
+    PXClearRequest *mailShared = [[PXClearRequest alloc] initWithBundleIdentifier:@"com.apple.mobilemail"
+                                                                          scopes:PXClearScopeDefaultMask
+                                                                            mode:PXClearModeDeep
+                                                                         options:PXClearOptionMailSharedStore];
+    PXRequire(mailShared != nil &&
+              (mailShared.options & PXClearOptionMailSharedStore) != 0 &&
+              (mailShared.options & PXClearOptionICloudData) == 0 &&
+              (mailShared.options & PXClearOptionSafariSharedWebData) == 0,
+              @"explicit Mail shared-store policy must be snapshotted independently");
+
+    PXClearOptions allOptions = (PXClearOptionICloudData |
+                                 PXClearOptionSafariSharedWebData |
+                                 PXClearOptionMailSharedStore);
     PXClearRequest *combinedOptions = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                                scopes:PXClearScopeDefaultMask
                                                                                  mode:PXClearModeDeep
-                                                                              options:(PXClearOptionICloudData | PXClearOptionSafariSharedWebData)];
-    PXRequire(combinedOptions != nil &&
-              combinedOptions.options == (PXClearOptionICloudData | PXClearOptionSafariSharedWebData),
+                                                                              options:allOptions];
+    PXRequire(combinedOptions != nil && combinedOptions.options == allOptions,
               @"known Clear option bits must compose without losing policy state");
 
     PXClearRequest *compatFull = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID

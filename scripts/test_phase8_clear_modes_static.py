@@ -23,7 +23,7 @@ ios_version_hooks = text("TLinkIOSTweak/IOSVersionHooks.x")
 for symbol in ("PXClearModeQuick", "PXClearModeFull", "PXClearModeDeep"):
     require(symbol in request_h, f"missing mode: {symbol}")
 require("mode:(PXClearMode)mode" in request_h, "typed mode initializer missing")
-for symbol in ("PXClearOptionNone", "PXClearOptionICloudData", "PXClearOptionSafariSharedWebData", "PXClearOptionsKnownMask"):
+for symbol in ("PXClearOptionNone", "PXClearOptionICloudData", "PXClearOptionSafariSharedWebData", "PXClearOptionMailSharedStore", "PXClearOptionsKnownMask"):
     require(symbol in request_h, f"missing Clear option contract: {symbol}")
 require("options:(PXClearOptions)options" in request_h,
         "immutable Clear options initializer missing")
@@ -93,11 +93,18 @@ require("options:request.options" in aggregate_body,
         "derived ApplicationData request does not preserve immutable Clear options")
 require('PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in mode_body and
         'PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)' in mode_body and
+        'PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)' in mode_body and
         mode_body.count("options:clearOptions") >= 2,
         "canonical Clear does not snapshot persisted destructive policies into both requests")
 require("PXClearOptionSafariSharedWebData" in mode_body and
         '@"clearSafariSharedWebData"' in mode_body,
         "Safari shared-web policy is not journaled as part of the immutable request snapshot")
+require("PXClearOptionMailSharedStore" in mode_body and
+        '@"clearMailSharedStore"' in mode_body,
+        "Mail shared-store policy is not journaled as part of the immutable request snapshot")
+require('@"wouldClearMailSharedStore"' in cleaner_m and
+        'PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)' in cleaner_m,
+        "dry-run does not expose the explicit Mail shared-store policy")
 
 # Exact iCloud/Accounts authorization: no bundle-component/name fuzzy matching may
 # cross the destructive boundary. Unsupported entitlement mappings fail closed.
@@ -207,6 +214,135 @@ for forbidden_siri_mutation in (
     require(forbidden_siri_mutation not in siri_body,
             f"quarantined Siri analytics selector still contains unsafe ownership/mutation logic: {forbidden_siri_mutation}")
 
+# App-state cleanup keeps only exact bundle-derived files; fuzzy recursive directory scans are quarantined.
+app_state_start = cleaner_m.index("- (void)_internalClearAppStateData:(NSString *)bundleID {")
+app_state_end = cleaner_m.index("// Helper to scan a directory and wipe files/folders matching a string", app_state_start)
+app_state_body = cleaner_m[app_state_start:app_state_end]
+require("ApplicationState/%@.plist" in app_state_body and
+        "com.apple.UIKit.SplitView.%@.plist" in app_state_body and
+        "securelyWipeFile" in app_state_body,
+        "exact app-state file cleanup missing")
+for fuzzy_state_token in ("FrontBoard", "LiveActivities", "RecentlyTerminatedAppState", "BackgroundTasks", "/TCC", "scanAndWipeInDirectory", "containsString"):
+    require(fuzzy_state_token not in app_state_body,
+            f"app-state cleanup still uses fuzzy shared-directory ownership: {fuzzy_state_token}")
+scan_start = cleaner_m.index("- (void)scanAndWipeInDirectory:(NSString *)directory matching:(NSString *)matchString {")
+scan_end = cleaner_m.index("- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {", scan_start)
+scan_body = cleaner_m[scan_start:scan_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in scan_body,
+        "fuzzy scanAndWipe helper is not quarantined")
+for token in ("enumeratorAtURL", "containsString", "securelyWipeFile", "contentsOfDirectoryAtPath"):
+    require(token not in scan_body,
+            f"quarantined scanAndWipe helper still scans/mutates shared state: {token}")
+require("Step 3: Clearing exact app state files" in mode_body,
+        "canonical worker does not advertise exact-only app-state cleanup")
+
+# Shared NSURLCredentialStorage ownership cannot be inferred from bundle-id components.
+require("[strongSelf clearURLCredentialsForBundleID:bundleID]" not in mode_body,
+        "canonical Full/Deep Clear still invokes fuzzy shared URL credential cleanup")
+require("URL credential cleanup skipped (ownership boundary)" in mode_body,
+        "canonical URL credential ownership-boundary skip log missing")
+require('@"wouldClearURLCredentials": @NO' in cleaner_m,
+        "dry-run still claims shared URL credential mutation")
+urlcred_start = cleaner_m.index("- (void)clearURLCredentialsForBundleID:(NSString *)bundleID {")
+urlcred_end = cleaner_m.index("- (void)cleanRootHideVarData:(NSString *)bundleID {", urlcred_start)
+urlcred_body = cleaner_m[urlcred_start:urlcred_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in urlcred_body,
+        "public URL credential selector is not quarantined")
+for token in ("sharedCredentialStorage", "allCredentials", "componentsSeparatedByString", "containsString", "removeCredential"):
+    require(token not in urlcred_body,
+            f"quarantined URL credential selector still infers/mutates shared state: {token}")
+
+# Remaining legacy helpers that mutate shared/global state stay source-compatible but fail closed.
+root_hide_start = cleaner_m.index("- (void)cleanRootHideVarData:(NSString *)bundleID {")
+root_hide_end = cleaner_m.index("- (void)clearPluginKitData:(NSString *)bundleID {", root_hide_start)
+root_hide_body = cleaner_m[root_hide_start:root_hide_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in root_hide_body,
+        "RootHide compatibility selector is not quarantined")
+for token in ("findPathsMatchingPattern", "rm -rf", "WebKit/WebsiteData", "/Cookies/", "securelyWipeFile"):
+    require(token not in root_hide_body,
+            f"quarantined RootHide selector still scans/mutates shared state: {token}")
+
+thumbnail_start = cleaner_m.index("- (void)clearThumbnailCaches:(NSString *)bundleID {")
+thumbnail_end = cleaner_m.index("- (void)_clearExactAccountsOwnedByBundleIdentifier:", thumbnail_start)
+thumbnail_body = cleaner_m[thumbnail_start:thumbnail_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in thumbnail_body,
+        "thumbnail compatibility selector is not quarantined")
+for token in ("thumbnailservices", "QuickLook.thumbnailcache", "findPathsMatchingPattern", "securelyWipeFile"):
+    require(token not in thumbnail_body,
+            f"quarantined thumbnail selector still scans/mutates shared state: {token}")
+
+system_logs_start = cleaner_m.index("- (void)clearSystemLogs:(NSString *)bundleID {")
+system_logs_end = cleaner_m.index("#pragma mark - Helper Methods", system_logs_start)
+system_logs_body = cleaner_m[system_logs_start:system_logs_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in system_logs_body,
+        "system-log compatibility selector is not quarantined")
+for token in ("/var/log", "CrashReporter", "DiagnosticReports", "/ASL", "findPathsMatchingPattern", "securelyWipeFile"):
+    require(token not in system_logs_body,
+            f"quarantined system-log selector still scans/mutates shared state: {token}")
+
+media_start = cleaner_m.index("- (void)clearMediaData:(NSString *)bundleID {")
+media_end = cleaner_m.index("- (void)clearHealthData:(NSString *)bundleID {", media_start)
+media_body = cleaner_m[media_start:media_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in media_body,
+        "media compatibility selector is not quarantined")
+for token in ("/var/mobile/Media", "SMS/Attachments", "enumeratorAtURL", "containsString", "securelyWipeFile"):
+    require(token not in media_body,
+            f"quarantined media selector still scans/mutates shared user data: {token}")
+
+health_start = cleaner_m.index("- (void)clearHealthData:(NSString *)bundleID {")
+health_end = cleaner_m.index("- (void)clearSafariData:(NSString *)bundleID {", health_start)
+health_body = cleaner_m[health_start:health_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in health_body,
+        "health compatibility selector is not quarantined")
+for token in ("/Library/Health", "/HealthKit", "enumeratorAtURL", "containsString", "securelyWipeFile"):
+    require(token not in health_body,
+            f"quarantined health selector still scans/mutates shared protected data: {token}")
+
+legacy_safari_start = cleaner_m.index("- (void)clearSafariData:(NSString *)bundleID {")
+legacy_safari_end = cleaner_m.index("- (void)completelyWipeContainer:(NSString *)containerPath {", legacy_safari_start)
+legacy_safari_body = cleaner_m[legacy_safari_start:legacy_safari_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in legacy_safari_body,
+        "legacy Safari compatibility selector is not quarantined")
+for token in ("/Library/Safari", "cleanDatabaseFile", "LIKE", "VACUUM", "enumeratorAtURL", "containsString"):
+    require(token not in legacy_safari_body,
+            f"quarantined legacy Safari selector still scans/mutates shared state: {token}")
+
+clipboard_start = cleaner_m.index("- (void)clearClipboard {")
+clipboard_end = cleaner_m.index("- (void)clearPasteboardData:(NSString *)bundleID", clipboard_start)
+clipboard_body = cleaner_m[clipboard_start:clipboard_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in clipboard_body,
+        "clipboard compatibility selector is not quarantined")
+for token in ("UIPasteboard", "generalPasteboard", "setItems"):
+    require(token not in clipboard_body,
+            f"quarantined clipboard selector still mutates device-global pasteboard: {token}")
+
+# Canonical Clear must not scan/mutate ambiguous CrashReporter or Spotlight global state.
+require("[self clearSpotlightIndexes:bundleID]" not in app_wipe_body,
+        "canonical Clear still invokes ambiguous/global Spotlight cleanup")
+require("[self removeCrashLogsForBundleID:bundleID]" not in app_wipe_body,
+        "canonical Deep Clear still scans ambiguous CrashReporter state")
+require("Spotlight cleanup skipped (ownership boundary)" in app_wipe_body and
+        "CrashReporter cleanup skipped (ownership boundary)" in app_wipe_body,
+        "canonical ownership-boundary skip logs missing for external system state")
+
+crash_start = cleaner_m.index("- (void)removeCrashLogsForBundleID:(NSString *)bundleID {")
+crash_end = cleaner_m.index("// NEW: Method to clear app store receipt data", crash_start)
+crash_body = cleaner_m[crash_start:crash_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in crash_body,
+        "CrashReporter compatibility selector is not quarantined")
+for token in ("CrashReporter", "containsString", "contentsOfDirectoryAtPath", "fixPermissionsAndRemovePath"):
+    require(token not in crash_body,
+            f"quarantined CrashReporter selector still scans/mutates shared state: {token}")
+
+spot_start = cleaner_m.index("- (void)clearSpotlightIndexes:(NSString *)bundleID {")
+spot_end = cleaner_m.index("#pragma mark - UUID Finding Methods", spot_start)
+spot_body = cleaner_m[spot_start:spot_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in spot_body,
+        "Spotlight compatibility selector is not quarantined")
+for token in ("CSSearchableIndex", "deleteSearchableItemsWithDomainIdentifiers", "com.apple.Spotlight", "findPathsMatchingPattern", "securelyWipeFile"):
+    require(token not in spot_body,
+            f"quarantined Spotlight selector still mutates global/ambiguous state: {token}")
+
 # Legacy public global-state helpers remain source-compatible but are no-op quarantines.
 icon_start = cleaner_m.index("- (void)cleanIconStatePlist:(NSString *)bundleID {")
 icon_end = cleaner_m.index("// NEW: Method to clean SiriAnalytics database", icon_start)
@@ -224,16 +360,27 @@ require("cleanLaunchServicesDatabase quarantined" in ls_body,
 for token in ("SBAppTagsFileManager", "SBIconModelCache.plist", "LaunchServices-*", "rm -rf", "findPathsMatchingPattern"):
     require(token not in ls_body, f"quarantined LaunchServices selector still mutates global state: {token}")
 
-# Deep Mail Accounts3 release safety block.
+# Deep Mail shared-store policy + Accounts3 release safety block.
 mail_start = app_wipe_body.index('if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilemail"])')
 mail_end = app_wipe_body.index("    // Clear preferences and cookies only", mail_start)
 mail_body = app_wipe_body[mail_start:mail_end]
+require("request.options & PXClearOptionMailSharedStore" in mail_body and
+        "Clear Mail Shared Store policy OFF; shared /var/mobile/Library/Mail preserved" in mail_body and
+        "[self _wipeMobileMailSharedStoreForRequest:request]" in mail_body,
+        "MobileMail shared store is not gated by Deep + exact target + explicit immutable option")
+for implicit_mail_mutation in (
+    "PXStopMailDaemonsBestEffort",
+    'PXKillallByName(@"Mail"',
+    "mailShell",
+    "com.apple.mail.plist",
+    "Mail.WeaponXTrash",
+):
+    require(implicit_mail_mutation not in mail_body,
+            f"MobileMail canonical gate still performs shared mutation before authorization: {implicit_mail_mutation}")
 require("Accounts3 destructive cleanup BLOCKED" in mail_body,
         "Deep Mail Accounts3 destructive cleanup release block missing")
 require("PXSQLiteLogMailAccountsDiagnostic" in mail_body,
         "Deep Mail blocked path must emit read-only Accounts3 diagnostics for safe unblocking")
-require("/var/mobile/Library/Mail" in mail_body and "com.apple.mail.plist" in mail_body,
-        "Deep Mail store/preferences cleanup must remain active while Accounts3 is blocked")
 require('PXKillallByName(@"accountsd"' not in mail_body and 'PXKillallTermThenKill(@"accountsd"' not in mail_body,
         "Deep Mail blocked path must not disturb accountsd when Accounts3 is not mutated")
 for destructive_token in (
@@ -244,6 +391,37 @@ for destructive_token in (
 ):
     require(destructive_token not in mail_body,
             f"Deep Mail release path still contains blocked Accounts3 mutation: {destructive_token}")
+
+mail_helper_start = cleaner_m.index("- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {")
+mail_helper_end = cleaner_m.index("// Override the existing clearAppStateData method", mail_helper_start)
+mail_helper_body = cleaner_m[mail_helper_start:mail_helper_end]
+require("request.mode != PXClearModeDeep" in mail_helper_body and
+        'request.bundleIdentifier isEqualToString:@"com.apple.mobilemail"' in mail_helper_body and
+        "request.options & PXClearOptionMailSharedStore" in mail_helper_body and
+        "missing explicit immutable policy" in mail_helper_body,
+        "MobileMail shared-store helper does not independently enforce immutable authorization")
+require("PXStopMailDaemonsBestEffort" in mail_helper_body and
+        "/var/mobile/Library/Mail" in mail_helper_body and
+        "com.apple.mail.plist" in mail_helper_body and
+        "Mail.WeaponXTrash" in mail_helper_body,
+        "authorized MobileMail shared-store helper lost its intended destructive work")
+require(mail_helper_body.count("isCancellationRequested") >= 3,
+        "MobileMail shared-store helper lacks cancellation checkpoints")
+for forbidden_account_mutation in ("Accounts3", "ZACCOUNT", 'PXKillallByName(@"accountsd"'):
+    require(forbidden_account_mutation not in mail_helper_body,
+            f"Mail shared-store option must not authorize Accounts3/accountsd mutation: {forbidden_account_mutation}")
+
+# Encrypted preferences outside the app container must have an exact bundle-id filename boundary.
+encrypted_start = cleaner_m.index("- (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID\n                                                         deepClean:(BOOL)deepClean {")
+encrypted_end = cleaner_m.index("- (void)_internalClearEncryptedData:(NSString *)bundleID", encrypted_start)
+encrypted_body = cleaner_m[encrypted_start:encrypted_end]
+for exact_pattern in ("%@.enc*", "%@.encrypted*", "%@.secure*"):
+    require(exact_pattern in encrypted_body, f"missing exact encrypted preference boundary: {exact_pattern}")
+for fuzzy_pattern in ("%@*.enc*", "%@*.encrypted*", "%@*.secure*"):
+    require(fuzzy_pattern not in encrypted_body,
+            f"encrypted preference scan can still match sibling bundle-id prefixes: {fuzzy_pattern}")
+require("findPathsMatchingPattern" in encrypted_body and "securelyWipeFile" in encrypted_body,
+        "encrypted preference cleanup unexpectedly lost bounded discovery/wipe flow")
 
 diag_start = cleaner_m.index("static void PXSQLiteLogMailAccountsDiagnostic")
 diag_end = cleaner_m.index("- (NSString *)_sqliteScalarAtPath", diag_start)

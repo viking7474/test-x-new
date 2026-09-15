@@ -20,6 +20,7 @@ typedef NS_OPTIONS(NSUInteger, PXClearOptions) {
     PXClearOptionNone                = 0,
     PXClearOptionICloudData          = 1UL << 0,
     PXClearOptionSafariSharedWebData = 1UL << 1,
+    PXClearOptionMailSharedStore      = 1UL << 2,
 };
 
 FOUNDATION_EXPORT const PXClearOptions PXClearOptionsKnownMask;

@@ -197,6 +197,7 @@ static NSError *PXClearOperationCancellationError(PXClearOperationContext *conte
 - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request;
 - (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request;
 - (void)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleIdentifier;
+- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request;
 - (NSArray<NSString *> *)_exactInstalledExtensionIdentifiersForApplicationIdentifier:(NSString *)bundleIdentifier
                                                                                 error:(NSError **)error;
 - (NSArray<NSString *> *)_exactApplicationGroupIdentifiersForBundleIdentifier:(NSString *)bundleIdentifier
@@ -3120,18 +3121,24 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     if (PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)) {
         dryRunOptions |= PXClearOptionSafariSharedWebData;
     }
+    if (PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)) {
+        dryRunOptions |= PXClearOptionMailSharedStore;
+    }
     NSDictionary *pxDryRunPlan = @{
         @"mode": PXClearModeName(mode) ?: @"unknown",
         @"scopes": @((unsigned long long)PXMigratedFullClearScopes),
         @"wouldKillApp": @YES,
         @"wouldClearKeychain": @YES,
-        @"wouldClearURLCredentials": @(mode != PXClearModeQuick),
+        @"wouldClearURLCredentials": @NO,
         @"wouldRunDataAggregate": @YES,
         @"wouldClearICloudData": @(PXClearModeIncludesExtendedContainers(mode) &&
                                      ((dryRunOptions & PXClearOptionICloudData) != 0)),
         @"wouldClearSafariSharedWebData": @(mode == PXClearModeDeep &&
                                               [bundleID isEqualToString:@"com.apple.mobilesafari"] &&
                                               ((dryRunOptions & PXClearOptionSafariSharedWebData) != 0)),
+        @"wouldClearMailSharedStore": @(mode == PXClearModeDeep &&
+                                        [bundleID isEqualToString:@"com.apple.mobilemail"] &&
+                                        ((dryRunOptions & PXClearOptionMailSharedStore) != 0)),
         @"wouldRunDeepResidualScan": @(PXClearModeIncludesDeepDiagnostics(mode))
     };
     PXClearWriteJournal(bundleID, mode, PXMigratedFullClearScopes, YES, @"dry_run_commit", pxDryRunPlan);
@@ -3163,6 +3170,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     if (PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)) {
         clearOptions |= PXClearOptionSafariSharedWebData;
     }
+    if (PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)) {
+        clearOptions |= PXClearOptionMailSharedStore;
+    }
     PXClearRequest *fullRequest = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                             scopes:PXMigratedFullClearScopes
                                                                               mode:mode
@@ -3193,7 +3203,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     PXClearWriteJournal(bundleID, mode, fullRequest.scopes, NO, @"begin",
                         @{ @"deepClean": @(deepClean),
                            @"clearICloudData": @((clearOptions & PXClearOptionICloudData) != 0),
-                           @"clearSafariSharedWebData": @((clearOptions & PXClearOptionSafariSharedWebData) != 0) });
+                           @"clearSafariSharedWebData": @((clearOptions & PXClearOptionSafariSharedWebData) != 0),
+                           @"clearMailSharedStore": @((clearOptions & PXClearOptionMailSharedStore) != 0) });
 
     __block BOOL completionCalled = NO;
     __block dispatch_semaphore_t completionLock = dispatch_semaphore_create(1);
@@ -3354,10 +3365,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                 }
 
                 if (mode != PXClearModeQuick) {
-                    [strongSelf logMessage:@"[AppDataCleaner] Step 2: Clearing URL credentials..."];
-                    [strongSelf clearURLCredentialsForBundleID:bundleID];
+                    [strongSelf logMessage:@"[AppDataCleaner] URL credential cleanup skipped (ownership boundary)"];
                 }
-                [strongSelf logMessage:@"[AppDataCleaner] Step 3: Clearing app state data..."];
+                [strongSelf logMessage:@"[AppDataCleaner] Step 3: Clearing exact app state files..."];
                 [strongSelf _internalClearAppStateData:bundleID];
 
                 if (!operationContext.wasFrozenBeforeOperation) {
@@ -3506,6 +3516,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
             }
             if (PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)) {
                 clearOptions |= PXClearOptionSafariSharedWebData;
+            }
+            if (PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)) {
+                clearOptions |= PXClearOptionMailSharedStore;
             }
             PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
                                                                                 scopes:PXMigratedDataClearScopes
@@ -3691,64 +3704,19 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     // Clear App Store receipt
     [self clearAppReceiptData:bundleID withBundleUUID:nil];
     
-    // Extra cleanup for MobileMail: email/account display is primarily system-scoped (Accounts3 + /var/mobile/Library/Mail).
+    // MobileMail shared Mail store is system-scoped and requires an explicit immutable policy.
     if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilemail"]) {
-        [self logMessage:@"[AppDataCleaner] MobileMail: wiping /var/mobile/Library/Mail and mail prefs"]; 
-
-        // Stop mail-related daemons and wait for exit to avoid maild SIGABRT on detached DB.
-        PXStopMailDaemonsBestEffort(self);
-        if (!PXWaitForProcessExit(self, @"maild", 5.0)) {
-            [self logMessage:@"[AppDataCleaner] MobileMail: maild still running; forcing kill"]; 
-            PXKillallByName(@"maild", SIGKILL);
-            (void)PXWaitForProcessExit(self, @"maild", 2.0);
+        if ((request.options & PXClearOptionMailSharedStore) != 0) {
+            [self logMessage:@"[AppDataCleaner] Clear Mail Shared Store policy ON; wiping shared MobileMail store/prefs"];
+            [self _wipeMobileMailSharedStoreForRequest:request];
+        } else {
+            [self logMessage:@"[AppDataCleaner] Clear Mail Shared Store policy OFF; shared /var/mobile/Library/Mail preserved"];
         }
-        (void)PXWaitForProcessExit(self, @"Mail", 2.0);
 
-        // Avoid detaching an open sqlite DB: quarantine the Mail directory via rename.
-        // If any lingering maild instance still holds files open, rename is safe; rm -rf can trigger SIGABRT later.
-        NSString *mailPath = @"/var/mobile/Library/Mail";
-        NSString *trashPath = [NSString stringWithFormat:@"/var/mobile/Library/Mail.WeaponXTrash.%@", PXTimestampSuffix()];
-        NSMutableArray<NSString *> *mailShell = [NSMutableArray array];
-        if ([_fileManager fileExistsAtPath:mailPath]) {
-            [mailShell addObject:[NSString stringWithFormat:@"mv '%@' '%@' 2>/dev/null || true", mailPath, trashPath]];
-        }
-        [mailShell addObject:@"mkdir -p '/var/mobile/Library/Mail' 2>/dev/null || true"];
-        [mailShell addObject:@"chown mobile:mobile '/var/mobile/Library/Mail' 2>/dev/null || true"];
-        [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
-        [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
-        [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
-        [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
-        [self runBatchedCommandsWithPrivileges:mailShell timeoutSec:120]; 
-
-        // Keep maild stopped until the Mail store/prefs swap and post-cleanup daemon reset complete.
-        PXStopMailDaemonsBestEffort(self);
-
-        // SECURITY BLOCK: the legacy Deep Mail Accounts3 mutation is intentionally disabled.
-        // The previous implementation selected mail-like accounts, deleted ZACCOUNT rows, and then
-        // deleted companion rows using the *remaining* ZACCOUNT set. On mixed-account devices that
-        // can delete unrelated account properties/credentials while leaving target-owned orphans.
-        //
-        // Keep the rest of Deep Mail cleanup active, but do not open or mutate Accounts3.sqlite
-        // until a schema-validated implementation snapshots exact target account IDs before DELETE,
-        // performs all required mutations transactionally, and verifies unrelated accounts are intact.
-        // This is fail-closed by design and must not be converted to a preference/feature flag.
-        [self logMessage:@"[AppDataCleaner] MobileMail: Accounts3 destructive cleanup BLOCKED (unsafe legacy SQL disabled; app/mail-store cleanup continues)"];
+        // Accounts3 remains a separate shared system account database. Keep mutation blocked
+        // regardless of the Mail shared-store option; only emit read-only diagnostics.
+        [self logMessage:@"[AppDataCleaner] MobileMail: Accounts3 destructive cleanup BLOCKED (shared account ownership policy)"];
         PXSQLiteLogMailAccountsDiagnostic(self, @"/var/mobile/Library/Accounts/Accounts3.sqlite");
-
-        // Accounts3 is blocked, so do not disturb the global accountsd service here.
-        // Reset only the Mail application process so it observes the fresh Mail store/prefs.
-        PXKillallByName(@"Mail", SIGTERM);
-        [NSThread sleepForTimeInterval:0.15];
-        PXKillallByName(@"Mail", SIGKILL);
-
-        // Do not auto-restart maild; let launchd bring it back when needed.
-
-        // IMPORTANT: Do not delete the quarantined old store in the same run.
-        // maild can still have open sqlite connections or scheduled vacuum activities; deleting can cause SIGABRT
-        // (detached database IO error). Leaving it avoids crashes; user can delete later (e.g. after reboot).
-        if ([trashPath hasPrefix:@"/var/mobile/Library/Mail.WeaponXTrash."]) {
-            [self logMessage:@"[AppDataCleaner] MobileMail: kept old store at %@ (safe).", trashPath];
-        }
     }
     
     // Clear preferences and cookies only (SAFE paths, no SpringBoard state!) — one shell for all paths.
@@ -3791,10 +3759,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     
     // Clear encrypted data 
     if (PXClearModeIncludesExtendedContainers(request.mode)) {
-        [self logMessage:@"[AppDataCleaner] DEBUG: Clearing encrypted data..."];
+        [self logMessage:@"[AppDataCleaner] DEBUG: Clearing exact-boundary encrypted preferences..."];
         [self _internalClearEncryptedDataOutsideMainApplicationContainer:bundleID deepClean:request.deepClean];
-        [self logMessage:@"[AppDataCleaner] DEBUG: Clearing Spotlight indexes..."];
-        [self clearSpotlightIndexes:bundleID];
+        [self logMessage:@"[AppDataCleaner] Spotlight cleanup skipped (ownership boundary)"];
     }
     
     // Skip slow media/health/safari clearing for now
@@ -3828,9 +3795,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     
     // NOTE: Universal keychain wipe removed (too broad / can delete unrelated items).
 
-    // Sweep for crash logs and system logs.
     if (request.mode == PXClearModeDeep) {
-        [self removeCrashLogsForBundleID:bundleID];
+        [self logMessage:@"[AppDataCleaner] CrashReporter cleanup skipped (ownership boundary)"];
     }
 
     // Main application-data final sweep is read-only and consumes this operation's canonical paths.
@@ -3922,22 +3888,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
 // Remove crash logs and system logs for this bundleID
 - (void)removeCrashLogsForBundleID:(NSString *)bundleID {
-    NSArray *crashLogDirs = @[
-        @"/var/mobile/Library/Logs/CrashReporter",
-        @"/private/var/logs/CrashReporter"
-    ];
-    for (NSString *dir in crashLogDirs) {
-        NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *file in contents) {
-            if ([file containsString:bundleID]) {
-                NSString *fullPath = [dir stringByAppendingPathComponent:file];
-                [self fixPermissionsAndRemovePath:fullPath];
-                if ([[NSFileManager defaultManager] fileExistsAtPath:fullPath]) {
-                    NSLog(@"[AppDataCleaner][CrashLogSweep] Could not delete crash log: %@", fullPath);
-                }
-            }
-        }
-    }
+    (void)bundleID;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 
@@ -3971,53 +3923,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
 // Add the Spotlight indexes clearing method
 - (void)clearSpotlightIndexes:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing Spotlight indexes for %@", bundleID);
-    
-    // Use reflection to check if CoreSpotlight is available
-    Class csSearchableIndexClass = NSClassFromString(@"CSSearchableIndex");
-    if (csSearchableIndexClass) {
-        // Use performSelector to avoid direct link dependency
-        id defaultIndex = [csSearchableIndexClass performSelector:@selector(defaultSearchableIndex)];
-        if (defaultIndex && [defaultIndex respondsToSelector:@selector(deleteSearchableItemsWithDomainIdentifiers:completionHandler:)]) {
-            NSLog(@"[AppDataCleaner] Using CSSearchableIndex to clear Spotlight data");
-            
-            // Create dispatch group to wait for completion
-            dispatch_group_t group = dispatch_group_create();
-            dispatch_group_enter(group);
-            
-            // Delete searchable items
-            [defaultIndex performSelector:@selector(deleteSearchableItemsWithDomainIdentifiers:completionHandler:) 
-                               withObject:@[bundleID]
-                               withObject:^(NSError * _Nullable error) {
-                if (error) {
-                    NSLog(@"[AppDataCleaner] Error clearing Spotlight indexes: %@", error.localizedDescription);
-                } else {
-                    NSLog(@"[AppDataCleaner] Spotlight indexes cleared successfully");
-                }
-                dispatch_group_leave(group);
-            }];
-            
-            // Wait for completion with timeout
-            dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
-            dispatch_group_wait(group, timeout);
-        }
-    }
-    
-    // Also manually clear Spotlight directories regardless of API result
-    NSArray *spotlightPaths = @[
-        [NSString stringWithFormat:@"/var/mobile/Library/Spotlight/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Spotlight/%@*", bundleID],
-        @"/var/mobile/Library/Caches/com.apple.Spotlight*",
-        @"/var/mobile/Library/Caches/com.apple.Spotlight*"
-    ];
-    
-    for (NSString *pattern in spotlightPaths) {
-            NSArray *matches = [self findPathsMatchingPattern:pattern];
-            for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Removing Spotlight file: %@", path);
-                [self securelyWipeFile:path];
-        }
-    }
+    (void)bundleID;
+    // Retained for public selector compatibility. CoreSpotlight domain identifiers and
+    // filesystem cache names are not proven app-owned by a Clear request, so this path
+    // deliberately performs no mutation.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 #pragma mark - UUID Finding Methods
@@ -4334,89 +4244,17 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 }
 
 - (void)clearURLCredentialsForBundleID:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing URL credentials for %@", bundleID);
-    
-    // Get URL credential storage
-    NSURLCredentialStorage *storage = [NSURLCredentialStorage sharedCredentialStorage];
-    
-    // Get all the host/protection space combinations
-    NSDictionary *allCredentials = [storage allCredentials];
-    
-    // Parse out domain names from the bundle ID (like 'uber' from 'com.ubercab.UberClient')
-    NSArray *bundleComponents = [bundleID componentsSeparatedByString:@"."];
-    NSMutableArray *possibleDomains = [NSMutableArray array];
-    for (NSString *component in bundleComponents) {
-        if (component.length > 3 && ![component isEqualToString:@"com"] && 
-            ![component isEqualToString:@"org"] && ![component isEqualToString:@"net"]) {
-            [possibleDomains addObject:component];
-        }
-    }
-    
-    // Loop through all credentials and remove any that might be related to this app
-    for (NSURLProtectionSpace *protectionSpace in allCredentials.allKeys) {
-        BOOL shouldClear = NO;
-        
-        // Check if host matches any possible domain
-        for (NSString *domain in possibleDomains) {
-            if ([protectionSpace.host containsString:domain]) {
-                shouldClear = YES;
-                break;
-            }
-        }
-        
-        // Also check for matches in the realm
-        if (!shouldClear && protectionSpace.realm) {
-            for (NSString *domain in possibleDomains) {
-                if ([protectionSpace.realm containsString:domain]) {
-                    shouldClear = YES;
-                    break;
-                }
-            }
-        }
-        
-        if (shouldClear) {
-            NSDictionary *credentials = [storage credentialsForProtectionSpace:protectionSpace];
-            for (NSString *username in credentials.allKeys) {
-                NSURLCredential *credential = credentials[username];
-                [storage removeCredential:credential forProtectionSpace:protectionSpace];
-                NSLog(@"[AppDataCleaner] Removed credential for %@ at %@", username, protectionSpace.host);
-            }
-        }
-    }
+    (void)bundleID;
+    // Retained for public selector compatibility. Shared URL credential storage does not
+    // expose an app-ownership key that can be proven from a target bundle identifier.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)cleanRootHideVarData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Cleaning RootHide var data for %@", bundleID);
-    
-    // RootHide stores some data in these locations
-    NSArray *rootHidePaths = @[
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.plist", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/%@", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/tmp/%@*", bundleID],
-        [NSString stringWithFormat:@"/tmp/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/WebKit/WebsiteData/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Application Support/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Cookies/%@*", bundleID],
-        // RootHide specific paths
-        [NSString stringWithFormat:@"/var/root/Library/Preferences/%@*.plist", bundleID],
-        [NSString stringWithFormat:@"/private/var/mobile/Library/Preferences/%@*.plist", bundleID]
-    ];
-    
-    for (NSString *pattern in rootHidePaths) {
-        NSArray *matches = [self findPathsMatchingPattern:pattern];
-        for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Wiping RootHide path: %@", path);
-            [self securelyWipeFile:path];
-        }
-    }
-    
-    // Use elevated permissions to ensure clean var
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Caches/%@*", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/mobile/Library/Preferences/%@*", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /var/root/Library/Preferences/%@*", bundleID]];
-    [self runCommandWithPrivileges:[NSString stringWithFormat:@"rm -rf /private/var/mobile/Library/Preferences/%@*", bundleID]];
+    (void)bundleID;
+    // RootHide compatibility cleanup historically used bundle-prefix wildcards across
+    // shared mobile/root preferences, caches, WebKit, cookies and temporary directories.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)clearPluginKitData:(NSString *)bundleID {
@@ -4425,20 +4263,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 }
 
 - (void)clearThumbnailCaches:(NSString *)bundleID {
-    NSArray *paths = @[
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/com.apple.thumbnailservices/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/com.apple.QuickLook.thumbnailcache/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/com.apple.thumbnailservices/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Caches/com.apple.QuickLook.thumbnailcache/%@*", bundleID]
-    ];
-    
-    for (NSString *pattern in paths) {
-        NSArray *matches = [self findPathsMatchingPattern:pattern];
-        for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Wiping thumbnail cache: %@", path);
-            [self securelyWipeFile:path];
-        }
-    }
+    (void)bundleID;
+    // ThumbnailServices/QuickLook caches are shared system stores; filename prefixes do
+    // not prove ownership by the selected application.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 - (void)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleID {
@@ -4810,22 +4638,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 }
 
 - (void)clearSystemLogs:(NSString *)bundleID {
-    NSArray *logPaths = @[
-        [NSString stringWithFormat:@"/var/mobile/Library/Logs/CrashReporter/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Logs/DiagnosticReports/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/log/asl/*%@*", bundleID],
-        [NSString stringWithFormat:@"/var/log/system.log.*%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Logs/CrashReporter/%@*", bundleID],
-        [NSString stringWithFormat:@"/var/mobile/Library/Logs/DiagnosticReports/%@*", bundleID]
-    ];
-    
-    for (NSString *pattern in logPaths) {
-        NSArray *matches = [self findPathsMatchingPattern:pattern];
-        for (NSString *path in matches) {
-            NSLog(@"[AppDataCleaner] Wiping system log: %@", path);
-            [self securelyWipeFile:path];
-        }
-    }
+    (void)bundleID;
+    // CrashReporter/DiagnosticReports/ASL/system logs are shared diagnostic stores and
+    // bundle-name wildcard matching is not an ownership boundary.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 #pragma mark - Helper Methods
@@ -5884,9 +5700,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 - (void)clearSiriData:(NSString *)bundleID { [self completeAppDataWipe:bundleID]; }
 - (void)clearSystemLoggerData:(NSString *)bundleID { [self clearSystemLogs:bundleID]; }
 - (void)clearASLLogs:(NSString *)bundleID { [self clearSystemLogs:bundleID]; }
-- (void)clearClipboard { 
-    UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
-    [pasteboard setItems:@[]];
+- (void)clearClipboard {
+    // The general pasteboard is device-wide shared state and has no target bundle owner.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 - (void)clearPasteboardData:(NSString *)bundleID { [self clearClipboard]; }
 - (void)clearURLCache:(NSString *)bundleID { [self completeAppDataWipe:bundleID]; }
@@ -6008,59 +5824,68 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 // Add new method to handle app state data cleaning for modern apps
 // Add new method to handle app state data cleaning for modern apps
 - (void)_internalClearAppStateData:(NSString *)bundleID {
-    [self logMessage:@"[AppDataCleaner] Clearing app state data for %@", bundleID];
-    
-    // 1. Direct file paths (Fastest)
-    NSArray *directPaths = @[
+    [self logMessage:@"[AppDataCleaner] Clearing exact app state files for %@", bundleID];
+
+    NSArray<NSString *> *directPaths = @[
         [NSString stringWithFormat:@"/var/mobile/Library/SpringBoard/ApplicationState/%@.plist", bundleID],
         [NSString stringWithFormat:@"/var/mobile/Library/Preferences/com.apple.UIKit.SplitView.%@.plist", bundleID]
     ];
-    
+
     for (NSString *path in directPaths) {
         [self securelyWipeFile:path];
     }
-    
-    // 2. Scan specific directories for files containing bundleID (Much faster than find /)
-    
-    // FrontBoard
-    [self scanAndWipeInDirectory:@"/var/mobile/Library/FrontBoard" matching:bundleID];
-    
-    // LiveActivities
-    [self scanAndWipeInDirectory:@"/var/mobile/Library/LiveActivities" matching:bundleID];
-    
-    // SpringBoard RecentlyTerminatedAppState
-    [self scanAndWipeInDirectory:@"/var/mobile/Library/SpringBoard/RecentlyTerminatedAppState" matching:bundleID];
-    
-    // BackgroundTasks - recursive scan needed but limited depth
-    [self scanAndWipeInDirectory:@"/var/mobile/Library/BackgroundTasks" matching:bundleID];
-    
-    // TCC
-    [self scanAndWipeInDirectory:@"/var/mobile/Library/TCC" matching:bundleID];
-    
-    // 3. Special handling for difficult paths (Containers)
-    // Instead of scanning all containers, we use a targeted approach if possible, or skip deeply nested widely scattered scans if not critical.
-    // For com.apple.nsurlsessiond, we can try a more limited scan if essential, but often the main cleanup handles the app's own container.
-    // We will skip scanning /var/mobile/Library/Containers/*/Data/System/... to avoid timeout as it involves iterating thousands of folders.
 }
 
 // Helper to scan a directory and wipe files/folders matching a string
 - (void)scanAndWipeInDirectory:(NSString *)directory matching:(NSString *)matchString {
-    if (![_fileManager fileExistsAtPath:directory]) return;
-    
-    NSDirectoryEnumerator *enumerator = [_fileManager enumeratorAtURL:[NSURL fileURLWithPath:directory]
-                                           includingPropertiesForKeys:@[NSURLNameKey, NSURLIsDirectoryKey]
-                                                              options:NSDirectoryEnumerationSkipsHiddenFiles
-                                                         errorHandler:nil];
-    
-    for (NSURL *fileURL in enumerator) {
-        NSString *filename = [fileURL lastPathComponent];
-        if ([filename containsString:matchString]) {
-            NSString *path = [fileURL path];
-            [self logMessage:@"[AppDataCleaner] Wiping matched state file: %@", path];
-            [self securelyWipeFile:path];
-            // If we deleted a directory, stick to standard enumeration or beware of modification during enumeration
-            // securelyWipeFile handles file deletion.
-        }
+    (void)directory;
+    (void)matchString;
+    PXLogQuarantinedLegacyClearSelector(_cmd);
+}
+
+- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {
+    if (![request isKindOfClass:[PXClearRequest class]] ||
+        request.mode != PXClearModeDeep ||
+        ![request.bundleIdentifier isEqualToString:@"com.apple.mobilemail"] ||
+        ((request.options & PXClearOptionMailSharedStore) == 0)) {
+        [self logMessage:@"[AppDataCleaner] MobileMail shared-store wipe rejected: missing explicit immutable policy"];
+        return;
+    }
+
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    if (operationContext && [operationContext isCancellationRequested]) return;
+
+    PXStopMailDaemonsBestEffort(self);
+    if (!PXWaitForProcessExit(self, @"maild", 5.0)) {
+        [self logMessage:@"[AppDataCleaner] MobileMail: maild still running; forcing kill"];
+        PXKillallByName(@"maild", SIGKILL);
+        (void)PXWaitForProcessExit(self, @"maild", 2.0);
+    }
+    (void)PXWaitForProcessExit(self, @"Mail", 2.0);
+    if (operationContext && [operationContext isCancellationRequested]) return;
+
+    NSString *mailPath = @"/var/mobile/Library/Mail";
+    NSString *trashPath = [NSString stringWithFormat:@"/var/mobile/Library/Mail.WeaponXTrash.%@", PXTimestampSuffix()];
+    NSMutableArray<NSString *> *mailShell = [NSMutableArray array];
+    if ([_fileManager fileExistsAtPath:mailPath]) {
+        [mailShell addObject:[NSString stringWithFormat:@"mv '%@' '%@' 2>/dev/null || true", mailPath, trashPath]];
+    }
+    [mailShell addObject:@"mkdir -p '/var/mobile/Library/Mail' 2>/dev/null || true"];
+    [mailShell addObject:@"chown mobile:mobile '/var/mobile/Library/Mail' 2>/dev/null || true"];
+    [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
+    [mailShell addObject:@"rm -f '/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
+    [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mail.plist' 2>/dev/null || true"];
+    [mailShell addObject:@"rm -f '/private/var/mobile/Library/Preferences/com.apple.mobilemail.plist' 2>/dev/null || true"];
+    [self runBatchedCommandsWithPrivileges:mailShell timeoutSec:120];
+
+    if (operationContext && [operationContext isCancellationRequested]) return;
+    PXStopMailDaemonsBestEffort(self);
+    PXKillallByName(@"Mail", SIGTERM);
+    [NSThread sleepForTimeInterval:0.15];
+    PXKillallByName(@"Mail", SIGKILL);
+
+    if ([trashPath hasPrefix:@"/var/mobile/Library/Mail.WeaponXTrash."]) {
+        [self logMessage:@"[AppDataCleaner] MobileMail: kept old store at %@ for deferred cleanup", trashPath];
     }
 }
 
@@ -6071,11 +5896,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                                                          deepClean:(BOOL)deepClean {
     NSLog(@"[AppDataCleaner] Clearing encrypted data outside the migrated main application-data container for %@", bundleID);
 
-    NSArray *encryptedPrefs = [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.enc*", bundleID]];
+    NSArray *encryptedPrefs = [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.enc*", bundleID]];
     encryptedPrefs = [encryptedPrefs arrayByAddingObjectsFromArray:
-                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.encrypted*", bundleID]]];
+                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.encrypted*", bundleID]]];
     encryptedPrefs = [encryptedPrefs arrayByAddingObjectsFromArray:
-                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@*.secure*", bundleID]]];
+                     [self findPathsMatchingPattern:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.secure*", bundleID]]];
     for (NSString *path in encryptedPrefs) {
         [self securelyWipeFile:path];
     }
@@ -6088,9 +5913,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     NSMutableArray *rootlessEncryptedPrefs = [NSMutableArray array];
     for (NSString *base in prefBases) {
         if (![_fileManager fileExistsAtPath:base]) continue;
-        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.enc*", base, bundleID]]];
-        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.encrypted*", base, bundleID]]];
-        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@*.secure*", base, bundleID]]];
+        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@.enc*", base, bundleID]]];
+        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@.encrypted*", base, bundleID]]];
+        [rootlessEncryptedPrefs addObjectsFromArray:[self findPathsMatchingPattern:[NSString stringWithFormat:@"%@/%@.secure*", base, bundleID]]];
     }
     for (NSString *path in rootlessEncryptedPrefs) {
         [self securelyWipeFile:path];
@@ -6406,131 +6231,26 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
 // MEDIA STORAGE: Add method to clean media traces that apps sometimes leave behind
 - (void)clearMediaData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing media data for %@", bundleID);
-    
-    // Parse app name from bundle ID
-    NSArray *components = [bundleID componentsSeparatedByString:@"."];
-    NSString *appName = [components lastObject];
-    
-    if (appName.length > 3) {  // Skip short/generic names
-        // Check Camera Roll for app-generated photos
-        NSString *dcimPath = @"/var/mobile/Media/DCIM/100APPLE/";
-        if ([_fileManager fileExistsAtPath:dcimPath]) {
-            NSString *command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                                dcimPath, appName];
-            [self runCommandWithPrivileges:command];
-        }
-        
-        // Check Downloads folder
-        NSString *downloadsPath = @"/var/mobile/Media/Downloads/";
-        if ([_fileManager fileExistsAtPath:downloadsPath]) {
-            NSString *command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                                downloadsPath, appName];
-            [self runCommandWithPrivileges:command];
-        }
-        
-        // Check for attachments in Messages
-        NSString *attachmentsPath = @"/var/mobile/Library/SMS/Attachments/";
-        if ([_fileManager fileExistsAtPath:attachmentsPath]) {
-            NSString *command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                                attachmentsPath, appName];
-            [self runCommandWithPrivileges:command];
-        }
-    }
-    
-    // Check for app's media in general Library locations
-    NSArray *mediaPaths = @[
-        @"/var/mobile/Media/PhotoData/LocalItems/",
-        @"/var/mobile/Media/PhotoData/Caches/",
-        @"/var/mobile/Media/PhotoData/Thumbnails/",
-        @"/var/mobile/Media/PhotoStreamsData/",
-        @"/var/mobile/Media/Photos/Thumbnails/",
-        @"/var/mobile/Library/Photos/"
-    ];
-    
-    for (NSString *basePath in mediaPaths) {
-        if ([_fileManager fileExistsAtPath:basePath]) {
-            NSString *command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                                basePath, bundleID];
-            [self runCommandWithPrivileges:command];
-            
-            if (appName.length > 3) {
-                command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                          basePath, appName];
-                [self runCommandWithPrivileges:command];
-            }
-        }
-    }
+    (void)bundleID;
+    // Camera Roll, Downloads, Messages attachments and Photos databases are shared user
+    // media. App-name/bundle substring matching cannot authorize destructive deletion.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // HEALTH DATA: Some apps like fitness trackers can store health data
 - (void)clearHealthData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing health data for %@", bundleID);
-    
-    NSArray *healthPaths = @[
-        @"/var/mobile/Library/Health/",
-        @"/var/mobile/Library/HealthKit/",
-        @"/var/mobile/Library/Health/",
-        @"/var/mobile/Library/HealthKit/"
-    ];
-    
-    for (NSString *basePath in healthPaths) {
-        if ([_fileManager fileExistsAtPath:basePath]) {
-            NSString *command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                                basePath, bundleID];
-            [self runCommandWithPrivileges:command];
-        }
-    }
+    (void)bundleID;
+    // Health/HealthKit are shared protected stores. A filename containing a bundle id
+    // is not proof that the target application owns the health record or database row.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // SAFARI DATA: Some apps use SafariViewController and leave data there
 - (void)clearSafariData:(NSString *)bundleID {
-    NSLog(@"[AppDataCleaner] Clearing Safari data for %@", bundleID);
-    
-    NSArray *components = [bundleID componentsSeparatedByString:@"."];
-    NSString *appName = [components lastObject];
-    
-    NSArray *safariPaths = @[
-        @"/var/mobile/Library/Safari/History.db",
-        @"/var/mobile/Library/Safari/Bookmarks.db",
-        @"/var/mobile/Library/Safari/TopSites.db",
-        @"/var/mobile/Library/Safari/RecentlyClosedTabs.plist",
-        @"/var/mobile/Library/Safari/Tabs/"
-    ];
-    
-    for (NSString *path in safariPaths) {
-        if ([_fileManager fileExistsAtPath:path]) {
-            if ([path hasSuffix:@".db"]) {
-                // Use sqlite3 to delete records related to the app
-                NSString *sqlCommand = [NSString stringWithFormat:
-                                      @"sqlite3 '%@' \"DELETE FROM history_items WHERE url LIKE '%%%@%%';\"",
-                                      path, bundleID];
-                [self runCommandWithPrivileges:sqlCommand];
-                
-                if (appName.length > 3) {
-                    sqlCommand = [NSString stringWithFormat:
-                                @"sqlite3 '%@' \"DELETE FROM history_items WHERE title LIKE '%%%@%%';\"",
-                                path, appName];
-                    [self runCommandWithPrivileges:sqlCommand];
-                }
-                
-                // Vacuum database
-                sqlCommand = [NSString stringWithFormat:@"sqlite3 '%@' \"VACUUM;\"", path];
-                [self runCommandWithPrivileges:sqlCommand];
-            } else if ([path.lastPathComponent isEqualToString:@"Tabs"]) {
-                // Find and delete tab files related to the app
-                NSString *command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                                    path, bundleID];
-                [self runCommandWithPrivileges:command];
-                
-                if (appName.length > 3) {
-                    command = [NSString stringWithFormat:@"find '%@' -name '*%@*' -exec rm -f {} \\; 2>/dev/null || true", 
-                              path, appName];
-                    [self runCommandWithPrivileges:command];
-                }
-            }
-        }
-    }
+    (void)bundleID;
+    // Shared Safari history/bookmark/tab databases must not be edited by fuzzy URL/title
+    // matching. Explicit MobileSafari shared-web cleanup is separately policy-gated.
+    PXLogQuarantinedLegacyClearSelector(_cmd);
 }
 
 // NEW: Method to completely wipe a container directory

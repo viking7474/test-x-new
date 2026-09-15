@@ -139,6 +139,19 @@ require('@"Clear Safari Shared Web Data"' in security and
         'securityCompactSwitchOn:PXReadSecurityBool(@"clearSafariSharedWebDataEnabled", NO)' in security,
         "Security root does not expose Shared Safari Web Data as an OFF-by-default option")
 
+# Shared MobileMail store clearing is independently opt-in and defaults OFF.
+mail_shared_toggle = method_body(security, "- (void)clearMailSharedStoreToggleChanged:", 4600)
+require('PXWriteSecurityBool(@"clearMailSharedStoreEnabled", YES' in mail_shared_toggle and
+        'PXWriteSecurityBool(@"clearMailSharedStoreEnabled", NO' in mail_shared_toggle,
+        "Mail Shared Store toggle does not persist both enabled and disabled states")
+require('PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)' in mail_shared_toggle and
+        'UIAlertActionStyleDestructive' in mail_shared_toggle and
+        'com.apple.mobilemail' in security and 'Accounts3 stays blocked' in security,
+        "Mail Shared Store enable flow lacks destructive confirmation/scope explanation")
+require('@"Clear Mail Shared Store"' in security and
+        'securityCompactSwitchOn:PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)' in security,
+        "Security root does not expose Mail Shared Store as an OFF-by-default option")
+
 # Audited Security toggles use verified persistence and rollback instead of direct false-success writes.
 for path, key in (
     ("JailbreakDetailViewController.m", "jailbreakDetectionEnabled"),
