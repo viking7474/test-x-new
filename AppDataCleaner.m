@@ -8,6 +8,7 @@
 #import <sys/stat.h>
 #import <signal.h>
 #import <math.h>
+#import <float.h>
 #import <string.h>
 #import <sqlite3.h>
 #import <notify.h>
@@ -35,6 +36,146 @@ static const NSUInteger PXFindCommandMaxOutputBytes = 4 * 1024 * 1024;
 static _Atomic(uint_fast64_t) gPXClearShellProcessCount = 0;
 static _Atomic(uint_fast64_t) gPXClearPathsScannedCount = 0;
 static _Atomic(uint_fast64_t) gPXClearSqliteNanos = 0;
+
+static NSString * const PXClearOperationThreadContextKey = @"PXClearOperationThreadContext";
+static NSString * const PXClearOperationErrorDomain = @"PXClearOperation";
+
+typedef NS_ENUM(NSInteger, PXClearOperationErrorCode) {
+    PXClearOperationErrorCodeCancelled = 1,
+    PXClearOperationErrorCodeDeadlineExceeded = 2,
+};
+
+@interface PXClearOperationContext : NSObject
+@property (nonatomic, copy, readonly) NSString *operationID;
+@property (nonatomic, strong, readonly) PXClearRequest *fullRequest;
+@property (nonatomic, strong, readonly) PXClearRequest *dataRequest;
+@property (nonatomic, copy) NSArray<NSString *> *applicationDataCanonicalPaths;
+@property (nonatomic, copy) NSArray<NSString *> *appGroupCanonicalPaths;
+@property (nonatomic, copy) NSArray<NSString *> *extensionDataCanonicalPaths;
+@property (nonatomic, copy) NSArray<NSString *> *pluginKitDataCanonicalPaths;
+@property (nonatomic, assign) BOOL wasFrozenBeforeOperation;
+@property (nonatomic, assign) BOOL ownsFreezeLease;
+@property (nonatomic, assign) double resolveContainerMs;
+@property (nonatomic, assign) uint_fast64_t timeoutFallbackCount;
+@property (nonatomic, assign, readonly) NSTimeInterval startedUptime;
+@property (nonatomic, assign, readonly) NSTimeInterval deadlineUptime;
+- (instancetype)initWithFullRequest:(PXClearRequest *)fullRequest
+                        dataRequest:(PXClearRequest *)dataRequest;
+- (void)beginWithTimeout:(NSTimeInterval)timeoutSec;
+- (void)requestCancellationWithReason:(NSString *)reason;
+- (BOOL)isCancellationRequested;
+- (NSString *)cancellationReason;
+- (NSTimeInterval)remainingTime;
+- (NSTimeInterval)clampedTimeoutForStepLimit:(NSTimeInterval)stepLimit;
+@end
+
+@implementation PXClearOperationContext {
+    BOOL _cancellationRequested;
+    NSString *_cancellationReason;
+    NSTimeInterval _startedUptime;
+    NSTimeInterval _deadlineUptime;
+}
+
+- (instancetype)initWithFullRequest:(PXClearRequest *)fullRequest
+                        dataRequest:(PXClearRequest *)dataRequest {
+    self = [super init];
+    if (self) {
+        _operationID = [[[NSUUID UUID] UUIDString] copy];
+        _fullRequest = fullRequest;
+        _dataRequest = dataRequest;
+        _applicationDataCanonicalPaths = @[];
+        _appGroupCanonicalPaths = @[];
+        _extensionDataCanonicalPaths = @[];
+        _pluginKitDataCanonicalPaths = @[];
+    }
+    return self;
+}
+
+- (void)beginWithTimeout:(NSTimeInterval)timeoutSec {
+    @synchronized (self) {
+        if (_startedUptime > 0.0) return;
+        NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+        _startedUptime = now;
+        _deadlineUptime = now + MAX(0.001, timeoutSec);
+    }
+}
+
+- (NSTimeInterval)startedUptime {
+    @synchronized (self) { return _startedUptime; }
+}
+
+- (NSTimeInterval)deadlineUptime {
+    @synchronized (self) { return _deadlineUptime; }
+}
+
+- (void)requestCancellationWithReason:(NSString *)reason {
+    @synchronized (self) {
+        if (_cancellationRequested) return;
+        _cancellationRequested = YES;
+        _cancellationReason = [reason.length ? reason : @"cancelled" copy];
+    }
+}
+
+- (BOOL)isCancellationRequested {
+    @synchronized (self) { return _cancellationRequested; }
+}
+
+- (NSString *)cancellationReason {
+    @synchronized (self) { return [_cancellationReason copy]; }
+}
+
+- (NSTimeInterval)remainingTime {
+    @synchronized (self) {
+        if (_cancellationRequested) return 0.0;
+        if (_deadlineUptime <= 0.0) return DBL_MAX;
+        return MAX(0.0, _deadlineUptime - [NSProcessInfo processInfo].systemUptime);
+    }
+}
+
+- (NSTimeInterval)clampedTimeoutForStepLimit:(NSTimeInterval)stepLimit {
+    if (![self isCancellationRequested]) {
+        NSTimeInterval remaining = [self remainingTime];
+        if (remaining <= 0.0) {
+            [self requestCancellationWithReason:@"deadline"];
+            return 0.0;
+        }
+        NSTimeInterval normalizedStep = (isfinite(stepLimit) && stepLimit > 0.0) ? stepLimit : remaining;
+        return MIN(normalizedStep, remaining);
+    }
+    return 0.0;
+}
+@end
+
+static dispatch_queue_t PXClearCoordinatorQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.weaponx.app-data-cleaner.clear-coordinator", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static PXClearOperationContext *PXCurrentClearOperationContext(void) {
+    id value = [[[NSThread currentThread] threadDictionary] objectForKey:PXClearOperationThreadContextKey];
+    return [value isKindOfClass:[PXClearOperationContext class]] ? value : nil;
+}
+
+static void PXSetCurrentClearOperationContext(PXClearOperationContext *context) {
+    NSMutableDictionary *threadDictionary = [[NSThread currentThread] threadDictionary];
+    if (context) {
+        threadDictionary[PXClearOperationThreadContextKey] = context;
+    } else {
+        [threadDictionary removeObjectForKey:PXClearOperationThreadContextKey];
+    }
+}
+
+static NSError *PXClearOperationCancellationError(PXClearOperationContext *context) {
+    BOOL deadline = [[context cancellationReason] isEqualToString:@"deadline"];
+    return [NSError errorWithDomain:PXClearOperationErrorDomain
+                               code:(deadline ? PXClearOperationErrorCodeDeadlineExceeded : PXClearOperationErrorCodeCancelled)
+                           userInfo:@{NSLocalizedDescriptionKey:
+                                          deadline ? @"Clear Data deadline exceeded" : @"Clear Data cancelled"}];
+}
 
 // Add SearchableIndex framework if available
 #import <CoreSpotlight/CoreSpotlight.h>
@@ -1833,10 +1974,20 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                      bundleIdentifier,
                      (unsigned long)selectedGroups.count,
                      (resolvedBundlePath.length && resolvedExecutablePath.length) ? 1 : 0];
-    CommandResult *wipeResult = [runner runExecutableAndCapture:scriptPath
-                                                       arguments:wipeArguments
-                                                      timeoutSec:120.0
-                                                  maxOutputBytes:1024 * 1024];
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    NSTimeInterval keychainTimeout = operationContext
+        ? [operationContext clampedTimeoutForStepLimit:120.0]
+        : 120.0;
+    CommandResult *wipeResult = nil;
+    if (operationContext && keychainTimeout <= 0.0) {
+        wipeResult = [[CommandResult alloc] init];
+        wipeResult.runnerError = [[operationContext cancellationReason] isEqualToString:@"deadline"] ? ETIMEDOUT : ECANCELED;
+    } else {
+        wipeResult = [runner runExecutableAndCapture:scriptPath
+                                            arguments:wipeArguments
+                                           timeoutSec:keychainTimeout
+                                       maxOutputBytes:1024 * 1024];
+    }
     BOOL success = PXBoundedCommandSucceeded(wipeResult);
     NSString *dependencyToken = PXKeychainDependencyDiagnosticToken(wipeResult);
     NSString *stageToken = PXKeychainFailureStageDiagnosticToken(wipeResult);
@@ -2895,9 +3046,16 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                                                         canonicalPaths:appGroupCanonicalPaths
                                               successfulCanonicalPaths:successfulAppGroupPaths];
 
-    _wipeCacheExtensionDataCanonicalPaths = [extensionCanonicalPaths copy] ?: @[];
-    _wipeCacheAppGroupCanonicalPaths = [appGroupCanonicalPaths copy] ?: @[];
-    _wipeCachePluginKitDataCanonicalPaths = [pluginKitCanonicalPaths copy] ?: @[];
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    if (operationContext) {
+        operationContext.extensionDataCanonicalPaths = [extensionCanonicalPaths copy] ?: @[];
+        operationContext.appGroupCanonicalPaths = [appGroupCanonicalPaths copy] ?: @[];
+        operationContext.pluginKitDataCanonicalPaths = [pluginKitCanonicalPaths copy] ?: @[];
+    } else {
+        _wipeCacheExtensionDataCanonicalPaths = [extensionCanonicalPaths copy] ?: @[];
+        _wipeCacheAppGroupCanonicalPaths = [appGroupCanonicalPaths copy] ?: @[];
+        _wipeCachePluginKitDataCanonicalPaths = [pluginKitCanonicalPaths copy] ?: @[];
+    }
 
     if (!PXExactDataComponentResultIsStructurallyValid(extensionResult,
                                                        PXClearScopeExtensionData)) {
@@ -2995,6 +3153,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         return;
     }
 
+    PXClearOperationContext *operationContext = [[PXClearOperationContext alloc]
+        initWithFullRequest:fullRequest dataRequest:dataRequest];
+
     // 7.4: snapshot cumulative metric counters so this run reports per-run deltas.
     uint_fast64_t pxMetricShellAtStart = atomic_load(&gPXClearShellProcessCount);
     uint_fast64_t pxMetricPathsAtStart = atomic_load(&gPXClearPathsScannedCount);
@@ -3009,13 +3170,14 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     __block BOOL completionCalled = NO;
     __block dispatch_semaphore_t completionLock = dispatch_semaphore_create(1);
     FreezeManager *freezer = [FreezeManager sharedManager];
-    __block BOOL wasFrozen = [freezer isApplicationFrozen:bundleID];
-    __block BOOL frozeForThisClear = NO;
+    operationContext.wasFrozenBeforeOperation = [freezer isApplicationFrozen:bundleID];
     __weak typeof(self) weakSelf = self;
     __block UIBackgroundTaskIdentifier bgTask = UIBackgroundTaskInvalid;
     dispatch_async(dispatch_get_main_queue(), ^{
         bgTask = [[UIApplication sharedApplication] beginBackgroundTaskWithName:@"AppDataCleaner"
-                                                              expirationHandler:^{}];
+                                                              expirationHandler:^{
+            [operationContext requestCancellationWithReason:@"background-expiration"];
+        }];
     });
     __block dispatch_source_t watchdogTimer = nil;
 
@@ -3024,9 +3186,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         if (!completionCalled) {
             completionCalled = YES;
             dispatch_semaphore_signal(completionLock);
-            if (frozeForThisClear) {
+            if (operationContext.ownsFreezeLease) {
                 @try { [freezer unfreezeApplication:bundleID]; }
                 @catch (__unused NSException *exception) {}
+                operationContext.ownsFreezeLease = NO;
             }
             if (watchdogTimer) {
                 dispatch_source_cancel(watchdogTimer);
@@ -3084,6 +3247,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     BOOL isSystemApp = [bundleID hasPrefix:@"com.apple."];
     int timeoutSec = (deepClean || isSystemApp) ? (30 * 60)
         : (mode == PXClearModeQuick ? 90 : 300);
+    [operationContext beginWithTimeout:(NSTimeInterval)timeoutSec];
     watchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
         dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
     dispatch_source_set_timer(watchdogTimer,
@@ -3096,19 +3260,25 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         dispatch_semaphore_signal(completionLock);
         if (alreadyCompleted) return;
         pxTimeoutFallbackCount += 1;
-        [weakSelf logMessage:@"[AppDataCleaner][metric] timeout_fallback event=watchdog timeout_sec=%d", timeoutSec];
-        [weakSelf logMessage:@"[AppDataCleaner] WATCHDOG: %d second timeout reached", timeoutSec];
-        safeCompletion(NO, [NSError errorWithDomain:@"AppDataCleaner"
-                                               code:-100
-                                           userInfo:@{NSLocalizedDescriptionKey: @"Clear Data timed out"}]);
+        operationContext.timeoutFallbackCount += 1;
+        [operationContext requestCancellationWithReason:@"deadline"];
+        [weakSelf logMessage:@"[AppDataCleaner][metric] timeout_fallback event=watchdog timeout_sec=%d operation=%@",
+            timeoutSec, operationContext.operationID];
+        [weakSelf logMessage:@"[AppDataCleaner] WATCHDOG: cancellation requested after %d seconds; waiting for worker quiescence", timeoutSec];
     });
     dispatch_resume(watchdogTimer);
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    dispatch_async(PXClearCoordinatorQueue(), ^{
         @autoreleasepool {
+            PXSetCurrentClearOperationContext(operationContext);
             __strong typeof(weakSelf) strongSelf = weakSelf;
-            [strongSelf logMessage:@"[AppDataCleaner] Background cleaning started for %@", bundleID];
+            [strongSelf logMessage:@"[AppDataCleaner] Serialized cleaning started operation=%@ bundle=%@", operationContext.operationID, bundleID];
             @try {
+                if ([operationContext isCancellationRequested]) {
+                    safeCompletion(NO, PXClearOperationCancellationError(operationContext));
+                    PXSetCurrentClearOperationContext(nil);
+                    return;
+                }
                 CFAbsoluteTime pxResolveStartedAt = CFAbsoluteTimeGetCurrent();
                 NSString *pxResolvedDataUUID = [strongSelf findDataContainerUUIDForBundleID:bundleID];
                 pxResolveContainerMs = (CFAbsoluteTimeGetCurrent() - pxResolveStartedAt) * 1000.0;
@@ -3120,6 +3290,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                 [NSThread sleepForTimeInterval:(mode == PXClearModeQuick ? 0.1 : 0.5)];
                 [strongSelf logMessage:@"[AppDataCleaner][metric] step=kill duration_ms=%.0f",
                     (CFAbsoluteTimeGetCurrent() - killStartedAt) * 1000.0];
+                if ([operationContext isCancellationRequested]) {
+                    safeCompletion(NO, PXClearOperationCancellationError(operationContext));
+                    return;
+                }
                 if (mode != PXClearModeQuick && [bundleID isEqualToString:@"com.apple.mobilesafari"]) {
                     [strongSelf logMessage:@"[AppDataCleaner] MobileSafari: stopping WebKit/Safari helper processes..."];
                     PXStopSafariDaemonsBestEffort(strongSelf);
@@ -3151,6 +3325,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                 [strongSelf logMessage:@"[AppDataCleaner][metric] step=keychain duration_ms=%.0f passes=%lu",
                     (CFAbsoluteTimeGetCurrent() - keychainStartedAt) * 1000.0,
                     (unsigned long)keychainPassResults.count];
+                if ([operationContext isCancellationRequested]) {
+                    safeCompletion(NO, PXClearOperationCancellationError(operationContext));
+                    return;
+                }
 
                 if (mode != PXClearModeQuick) {
                     [strongSelf logMessage:@"[AppDataCleaner] Step 2: Clearing URL credentials..."];
@@ -3159,11 +3337,15 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                 [strongSelf logMessage:@"[AppDataCleaner] Step 3: Clearing app state data..."];
                 [strongSelf _internalClearAppStateData:bundleID];
 
-                if (!wasFrozen) {
+                if (!operationContext.wasFrozenBeforeOperation) {
                     [strongSelf logMessage:@"[AppDataCleaner] Freezing app launch to prevent relaunch during wipe..."];
                     @try { [freezer freezeApplication:bundleID]; }
                     @catch (__unused NSException *exception) {}
-                    frozeForThisClear = [freezer isApplicationFrozen:bundleID];
+                    operationContext.ownsFreezeLease = [freezer isApplicationFrozen:bundleID];
+                }
+                if ([operationContext isCancellationRequested]) {
+                    safeCompletion(NO, PXClearOperationCancellationError(operationContext));
+                    return;
                 }
 
                 CFAbsoluteTime dataStartedAt = CFAbsoluteTimeGetCurrent();
@@ -3195,6 +3377,10 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
                 [strongSelf logMessage:@"[AppDataCleaner][metric] step=data_aggregate duration_ms=%.0f",
                     (CFAbsoluteTimeGetCurrent() - dataStartedAt) * 1000.0];
+                if ([operationContext isCancellationRequested]) {
+                    safeCompletion(NO, PXClearOperationCancellationError(operationContext));
+                    return;
+                }
                 // The target application's container cleanup owns its cookies.
                 // Never delete this process's global in-memory cookie jar.
 
@@ -3275,6 +3461,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                                                       code:-1
                                                   userInfo:@{NSLocalizedDescriptionKey:
                                                                  exception.reason ?: @"Unknown error"}]);
+            } @finally {
+                PXSetCurrentClearOperationContext(nil);
             }
         }
     });
@@ -3285,25 +3473,29 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 #pragma mark - Improved Rootless-Compatible App Data Wiping
 
 - (void)completeAppDataWipe:(NSString *)bundleID {
-    BOOL deepClean = [self _deepCleanEnabled];
-    PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
-                                                                        scopes:PXMigratedDataClearScopes
-                                                                     deepClean:deepClean];
-    PXClearResult *result = request ? [self _completeDataWipeForMigratedRequest:request] : nil;
-    if (!PXMigratedDataClearResultIsStructurallyValid(result)) {
-        [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid migrated aggregate"];
-        return;
-    }
+    dispatch_sync(PXClearCoordinatorQueue(), ^{
+        @autoreleasepool {
+            BOOL deepClean = [self _deepCleanEnabled];
+            PXClearRequest *request = [[PXClearRequest alloc] initWithBundleIdentifier:bundleID
+                                                                                scopes:PXMigratedDataClearScopes
+                                                                             deepClean:deepClean];
+            PXClearResult *result = request ? [self _completeDataWipeForMigratedRequest:request] : nil;
+            if (!PXMigratedDataClearResultIsStructurallyValid(result)) {
+                [self logMessage:@"[AppDataCleaner] completeAppDataWipe produced an invalid migrated aggregate"];
+                return;
+            }
 
-    for (PXClearComponentResult *component in result.componentResults) {
-        NSString *componentName = PXMigratedComponentName(component.scope);
-        [self logMessage:@"[AppDataCleaner] completeAppDataWipe %@ status=%@ attempted=%lu succeeded=%lu failed=%lu",
-              componentName,
-              PXApplicationDataStatusName(component.status),
-              (unsigned long)component.attemptedUnitCount,
-              (unsigned long)component.succeededUnitCount,
-              (unsigned long)component.failedUnitCount];
-    }
+            for (PXClearComponentResult *component in result.componentResults) {
+                NSString *componentName = PXMigratedComponentName(component.scope);
+                [self logMessage:@"[AppDataCleaner] completeAppDataWipe %@ status=%@ attempted=%lu succeeded=%lu failed=%lu",
+                      componentName,
+                      PXApplicationDataStatusName(component.status),
+                      (unsigned long)component.attemptedUnitCount,
+                      (unsigned long)component.succeededUnitCount,
+                      (unsigned long)component.failedUnitCount];
+            }
+        }
+    });
 }
 
 - (PXClearComponentResult *)_completeAppDataWipeForApplicationDataRequest:(PXClearRequest *)request {
@@ -3450,9 +3642,14 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         [successfulApplicationDataRoots addObject:@{ @"path": [canonicalPath copy], @"index": @(rootIndex) }];
     }
 
-    // Cache canonical paths in rootful/rootless order; never reconstruct them from UUIDs.
-    _wipeCacheBundleID = [bundleID copy];
-    _wipeCacheApplicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
+    // Cache canonical paths in rootful/rootless order; canonical Clear owns them per operation.
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    if (operationContext) {
+        operationContext.applicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
+    } else {
+        _wipeCacheBundleID = [bundleID copy];
+        _wipeCacheApplicationDataCanonicalPaths = [canonicalApplicationDataPaths copy] ?: @[];
+    }
 
     [self logMessage:@"[AppDataCleaner] ApplicationData roots attempted=%lu succeeded=%lu failed=%lu",
           (unsigned long)attemptedUnits,
@@ -3600,8 +3797,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         [self removeCrashLogsForBundleID:bundleID];
     }
 
-    // Main application-data final sweep is read-only and consumes the canonical path cache directly.
-    for (NSString *canonicalPath in (_wipeCacheApplicationDataCanonicalPaths ?: @[])) {
+    // Main application-data final sweep is read-only and consumes this operation's canonical paths.
+    NSArray<NSString *> *finalApplicationPaths = operationContext
+        ? operationContext.applicationDataCanonicalPaths
+        : (_wipeCacheApplicationDataCanonicalPaths ?: @[]);
+    for (NSString *canonicalPath in finalApplicationPaths) {
         NSDictionary *successfulRoot = nil;
         for (NSDictionary *candidate in successfulApplicationDataRoots) {
             if ([candidate[@"path"] isEqualToString:canonicalPath]) {
@@ -4395,11 +4595,19 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         }
     }
 
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    NSTimeInterval effectiveTimeout = operationContext
+        ? [operationContext clampedTimeoutForStepLimit:PXFindCommandTimeoutSec]
+        : PXFindCommandTimeoutSec;
+    if (operationContext && effectiveTimeout <= 0.0) {
+        return @[];
+    }
+
     atomic_fetch_add(&gPXClearShellProcessCount, 1);
     CommandResult *result =
         [[CommandRunner shared] runExecutableAndCapture:PXFindExecutablePath
                                               arguments:arguments
-                                             timeoutSec:PXFindCommandTimeoutSec
+                                             timeoutSec:effectiveTimeout
                                          maxOutputBytes:PXFindCommandMaxOutputBytes];
 
     if (result == nil ||
@@ -4552,6 +4760,15 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     }
 
     NSTimeInterval effectiveTimeout = timeoutSec <= 0 ? 60.0 : timeoutSec;
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    if (operationContext) {
+        effectiveTimeout = [operationContext clampedTimeoutForStepLimit:effectiveTimeout];
+        if (effectiveTimeout <= 0.0) {
+            CommandResult *cancelled = [[CommandResult alloc] init];
+            cancelled.runnerError = [[operationContext cancellationReason] isEqualToString:@"deadline"] ? ETIMEDOUT : ECANCELED;
+            return cancelled;
+        }
+    }
     atomic_fetch_add(&gPXClearShellProcessCount, 1);
     return [[CommandRunner shared] runAndCapture:command
                                       timeoutSec:effectiveTimeout
@@ -4578,13 +4795,24 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     NSMutableArray *unclearedPaths = [NSMutableArray array];
     NSMutableSet<NSString *> *verifiedPaths = [NSMutableSet set];
 
-    // Main application-data verification consumes only canonical validator outputs from the wipe pass.
-    BOOL useWipeCache = (_wipeCacheBundleID.length && bundleID.length &&
-                         [_wipeCacheBundleID isEqualToString:bundleID]);
+    // Main verification consumes only canonical validator outputs from this operation when available.
+    PXClearOperationContext *operationContext = PXCurrentClearOperationContext();
+    BOOL useOperationContext = operationContext != nil &&
+        [operationContext.fullRequest.bundleIdentifier isEqualToString:bundleID];
+    BOOL useWipeCache = !useOperationContext &&
+        (_wipeCacheBundleID.length && bundleID.length && [_wipeCacheBundleID isEqualToString:bundleID]);
+    NSArray<NSString *> *verificationApplicationPaths = useOperationContext
+        ? operationContext.applicationDataCanonicalPaths : (_wipeCacheApplicationDataCanonicalPaths ?: @[]);
+    NSArray<NSString *> *verificationAppGroupPaths = useOperationContext
+        ? operationContext.appGroupCanonicalPaths : (_wipeCacheAppGroupCanonicalPaths ?: @[]);
+    NSArray<NSString *> *verificationExtensionPaths = useOperationContext
+        ? operationContext.extensionDataCanonicalPaths : (_wipeCacheExtensionDataCanonicalPaths ?: @[]);
+    NSArray<NSString *> *verificationPluginKitPaths = useOperationContext
+        ? operationContext.pluginKitDataCanonicalPaths : (_wipeCachePluginKitDataCanonicalPaths ?: @[]);
 
     // 1. Main-wipe verification uses canonical paths. Standalone verification keeps its legacy read-only fallback.
-    if (useWipeCache) {
-        for (NSString *canonicalPath in (_wipeCacheApplicationDataCanonicalPaths ?: @[])) {
+    if (useOperationContext || useWipeCache) {
+        for (NSString *canonicalPath in verificationApplicationPaths) {
             [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
         }
     } else {
@@ -4603,8 +4831,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     }
     
     // 2. Main-wipe App Group verification consumes canonical validator outputs directly.
-    if (useWipeCache) {
-        for (NSString *canonicalPath in (_wipeCacheAppGroupCanonicalPaths ?: @[])) {
+    if (useOperationContext || useWipeCache) {
+        for (NSString *canonicalPath in verificationAppGroupPaths) {
             [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
         }
     } else {
@@ -4629,11 +4857,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     }
     
     // 3. Verify extension and PluginKit data containers.
-    if (useWipeCache) {
-        for (NSString *canonicalPath in (_wipeCacheExtensionDataCanonicalPaths ?: @[])) {
+    if (useOperationContext || useWipeCache) {
+        for (NSString *canonicalPath in verificationExtensionPaths) {
             [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
         }
-        for (NSString *canonicalPath in (_wipeCachePluginKitDataCanonicalPaths ?: @[])) {
+        for (NSString *canonicalPath in verificationPluginKitPaths) {
             [self verifyClearedPath:canonicalPath reportingTo:unclearedPaths seen:verifiedPaths];
         }
         NSLog(@"[AppDataCleaner] Verify reusing canonical migrated wipe cache for %@", bundleID);

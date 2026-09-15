@@ -132,6 +132,36 @@ setup_body = tlink_ui[setup_start:setup_end]
 require("[self syncHookScopeToResetApps]" in setup_body,
         "dashboard startup must repair stale persisted MobileMail injection scope from older builds")
 
+# P0 Clear operation coordination: one serialized destructive worker, cancellation-first timeout,
+# monotonic deadline clamping, and operation-local canonical verification state.
+require('dispatch_queue_create("com.weaponx.app-data-cleaner.clear-coordinator", DISPATCH_QUEUE_SERIAL)' in cleaner_m,
+        "P0 serialized Clear coordinator missing")
+require("dispatch_async(PXClearCoordinatorQueue()" in mode_body,
+        "P0 canonical Clear is not running on the serialized coordinator")
+require("dispatch_sync(PXClearCoordinatorQueue()" in cleaner_m,
+        "P0 synchronous destructive compatibility entry bypasses the serialized coordinator")
+require('requestCancellationWithReason:@"deadline"' in mode_body,
+        "P0 watchdog does not request cancellation")
+watchdog_start = mode_body.index("dispatch_source_set_event_handler(watchdogTimer")
+watchdog_end = mode_body.index("dispatch_resume(watchdogTimer)", watchdog_start)
+watchdog_body = mode_body[watchdog_start:watchdog_end]
+require("safeCompletion(" not in watchdog_body,
+        "P0 watchdog must not complete/unfreeze before worker quiescence")
+require('requestCancellationWithReason:@"background-expiration"' in mode_body,
+        "P0 background expiration does not cancel the active operation")
+require("clampedTimeoutForStepLimit" in cleaner_m and "MIN(normalizedStep, remaining)" in cleaner_m,
+        "P0 child timeout is not clamped to remaining operation deadline")
+require("PXCurrentClearOperationContext" in cleaner_m,
+        "P0 operation context is not threaded through canonical helpers")
+require("operationContext.applicationDataCanonicalPaths" in app_wipe_body,
+        "P0 ApplicationData canonical paths are not operation-local")
+require("operationContext.extensionDataCanonicalPaths" in aggregate_body and
+        "operationContext.appGroupCanonicalPaths" in aggregate_body and
+        "operationContext.pluginKitDataCanonicalPaths" in aggregate_body,
+        "P0 exact-scope canonical paths are not operation-local")
+require("useOperationContext || useWipeCache" in cleaner_m,
+        "P0 verifier does not prefer operation-local canonical state")
+
 # NSBundle/CFBundle recursion hardening. Foundation bundleIdentifier may resolve via
 # infoDictionary, so Info.plist hook bodies must use the constructor-cached identity.
 objc_info_start = ios_version_hooks.index("- (id)objectForInfoDictionaryKey:(NSString *)key")
