@@ -11,6 +11,42 @@ def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
 
+def strip_objc_comments(source: str) -> str:
+    """Remove // and /* */ comments while preserving Objective-C/C string contents."""
+    out = []
+    i = 0
+    quote = None
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(source):
+                i += 1
+                out.append(source[i])
+            elif ch == quote:
+                quote = None
+        elif ch in ('\"', "'"):
+            quote = ch
+            out.append(ch)
+        elif ch == "/" and nxt == "/":
+            i += 2
+            while i < len(source) and source[i] not in "\r\n":
+                i += 1
+            if i < len(source):
+                out.append(source[i])
+        elif ch == "/" and nxt == "*":
+            i += 2
+            while i + 1 < len(source) and not (source[i] == "*" and source[i + 1] == "/"):
+                if source[i] in "\r\n":
+                    out.append(source[i])
+                i += 1
+            i += 1
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
 request_h = text("PXClearRequest.h")
 request_m = text("PXClearRequest.m")
 cleaner_h = text("AppDataCleaner.h")
@@ -274,10 +310,11 @@ for token in ("thumbnailservices", "QuickLook.thumbnailcache", "findPathsMatchin
 system_logs_start = cleaner_m.index("- (void)clearSystemLogs:(NSString *)bundleID {")
 system_logs_end = cleaner_m.index("#pragma mark - Helper Methods", system_logs_start)
 system_logs_body = cleaner_m[system_logs_start:system_logs_end]
-require("PXLogQuarantinedLegacyClearSelector(_cmd)" in system_logs_body,
+system_logs_code = strip_objc_comments(system_logs_body)
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in system_logs_code,
         "system-log compatibility selector is not quarantined")
 for token in ("/var/log", "CrashReporter", "DiagnosticReports", "/ASL", "findPathsMatchingPattern", "securelyWipeFile"):
-    require(token not in system_logs_body,
+    require(token not in system_logs_code,
             f"quarantined system-log selector still scans/mutates shared state: {token}")
 
 media_start = cleaner_m.index("- (void)clearMediaData:(NSString *)bundleID {")
@@ -292,10 +329,11 @@ for token in ("/var/mobile/Media", "SMS/Attachments", "enumeratorAtURL", "contai
 health_start = cleaner_m.index("- (void)clearHealthData:(NSString *)bundleID {")
 health_end = cleaner_m.index("- (void)clearSafariData:(NSString *)bundleID {", health_start)
 health_body = cleaner_m[health_start:health_end]
-require("PXLogQuarantinedLegacyClearSelector(_cmd)" in health_body,
+health_code = strip_objc_comments(health_body)
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in health_code,
         "health compatibility selector is not quarantined")
 for token in ("/Library/Health", "/HealthKit", "enumeratorAtURL", "containsString", "securelyWipeFile"):
-    require(token not in health_body,
+    require(token not in health_code,
             f"quarantined health selector still scans/mutates shared protected data: {token}")
 
 legacy_safari_start = cleaner_m.index("- (void)clearSafariData:(NSString *)bundleID {")
