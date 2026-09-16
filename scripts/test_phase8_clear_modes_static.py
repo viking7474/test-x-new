@@ -144,8 +144,8 @@ require('@"wouldClearMailSharedStore"' in cleaner_m and
 
 # Exact iCloud/Accounts authorization: no bundle-component/name fuzzy matching may
 # cross the destructive boundary. Unsupported entitlement mappings fail closed.
-accounts_start = cleaner_m.index("- (void)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleID {")
-accounts_end = cleaner_m.index("- (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {", accounts_start)
+accounts_start = cleaner_m.index("- (BOOL)_clearExactAccountsOwnedByBundleIdentifier:(NSString *)bundleID {")
+accounts_end = cleaner_m.index("- (BOOL)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {", accounts_start)
 accounts_body = cleaner_m[accounts_start:accounts_end]
 require("ZOWNINGBUNDLEID = ?" in accounts_body and "sqlite3_bind_text" in accounts_body,
         "Accounts3 authorization must bind an exact owning bundle id")
@@ -160,10 +160,20 @@ require(accounts_body.count("isCancellationRequested") >= 4 and "cancelled befor
 require("unrelatedBeforeSet" in accounts_body and "unrelatedAfterSet" in accounts_body and
         "isEqualToSet" in accounts_body,
         "Accounts3 mutation does not prove unrelated account PKs are unchanged")
+require("return NO;" in accounts_body and "return YES;" in accounts_body and "return;" not in accounts_body,
+        "Accounts3 exact cleanup does not expose fail-closed BOOL completion")
+require("Accounts3 exact cleanup: database not found" in accounts_body and
+        "no rows exactly owned by target bundle" in accounts_body and
+        "Accounts3 exact cleanup committed rows=" in accounts_body,
+        "Accounts3 BOOL semantics lost no-op/commit terminal states")
+require("PXFirstExistingRegularNonSymlinkFile" in accounts_body and
+        "accountsPathInvalid" in accounts_body and
+        "database path is symlink/non-regular/uninspectable; fail closed" in accounts_body,
+        "Accounts3 destructive DB selection is not regular-file/non-symlink/fail-closed")
 for fuzzy in (" LIKE ", "%google%", "%gmail%", "NOT IN (SELECT Z_PK FROM ZACCOUNT)"):
     require(fuzzy not in accounts_body, f"fuzzy/global Accounts3 mutation remains: {fuzzy}")
 
-icloud_start = cleaner_m.index("- (void)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {")
+icloud_start = cleaner_m.index("- (BOOL)_clearAuthorizedICloudDataForRequest:(PXClearRequest *)request {")
 icloud_end = cleaner_m.index("- (void)clearICloudData:(NSString *)bundleID", icloud_start)
 icloud_body = cleaner_m[icloud_start:icloud_end]
 require("com.apple.developer.ubiquity-container-identifiers" in icloud_body and
@@ -176,6 +186,30 @@ require('hasPrefix:@"iCloud."' in icloud_body and
         "exact Mobile Documents container mapping missing")
 require("stringByResolvingSymlinksInPath" in icloud_body and "stringByDeletingLastPathComponent" in icloud_body,
         "exact iCloud candidate does not enforce direct-child canonicalization")
+require("PXApplicationDataCommandResultSucceeded" in icloud_body and
+        "lstat(candidateFS, &candidateStat)" in icloud_body and
+        "S_ISLNK(candidateStat.st_mode)" in icloud_body and
+        "contents.count != 0" in icloud_body and
+        "containersSucceeded" in icloud_body and
+        "accountsSucceeded" in icloud_body and
+        "return containersSucceeded && accountsSucceeded;" in icloud_body,
+        "iCloud policy does not propagate exact container/Accounts failures with postconditions")
+require("result.isSucceeded" not in icloud_body and "return;" not in icloud_body,
+        "iCloud exact policy retains weak/void success handling")
+require("unsupported signed container mapping" in icloud_body and
+        "containersSucceeded = NO" in icloud_body,
+        "unsupported signed iCloud mapping does not fail closed")
+require("iCloudAccountsSucceeded" in app_wipe_body and
+        "icloud-accounts: succeeded" in app_wipe_body and
+        "icloud-accounts: failed" in app_wipe_body and
+        "iCloud/Accounts policy cleanup failed" in app_wipe_body,
+        "iCloud/Accounts explicit policy is not represented in ApplicationData accounting")
+require("PXFirstExistingRealDirectory" in icloud_body and
+        "mobileDocumentsPathInvalid" in icloud_body and
+        "Mobile Documents base is symlink/non-directory/uninspectable; fail closed" in icloud_body,
+        "iCloud destructive base selection is not real-directory/non-symlink/fail-closed")
+require("PXFirstExistingPath" not in accounts_body and "PXFirstExistingPath" not in icloud_body,
+        "generic first-existing path selection returned to destructive Accounts/iCloud code")
 for fuzzy in ("componentsSeparatedByString", "-iname", "CloudDocs", "Application Support/CloudKit", "LIKE"):
     require(fuzzy not in icloud_body, f"fuzzy iCloud authorization remains: {fuzzy}")
 compat_icloud_start = cleaner_m.index("- (void)clearICloudData:(NSString *)bundleID")
@@ -185,18 +219,50 @@ require("PXCurrentClearOperationContext" in compat_icloud_body and
         "no authorized request snapshot" in compat_icloud_body,
         "public clearICloudData compatibility selector does not fail closed without an immutable request")
 
-safari_start = cleaner_m.index("- (void)_wipeMobileSafariSystemStoresForRequest:(PXClearRequest *)request {")
+safari_start = cleaner_m.index("- (BOOL)_wipeMobileSafariSystemStoresForRequest:(PXClearRequest *)request {")
 safari_end = cleaner_m.index("- (NSArray *)findExtensionDataContainersForBundleID", safari_start)
 safari_body = cleaner_m[safari_start:safari_end]
+safari_code = strip_objc_comments(safari_body)
+for global_token in ('@"nsurlsessiond"', '@"webbookmarksd"', 'PXKillallByName(@"cfprefsd"',
+                     "com.apple.nsurlsessiond", "SafariSafeBrowsing", "com.apple.CFNetwork"):
+    require(global_token not in safari_code,
+            f"Safari explicit policy still mutates/stops broader global state: {global_token}")
 require("shared Accounts3 mutation skipped (exact-ownership policy)" in safari_body,
         "MobileSafari must explicitly skip shared Accounts3 mutation")
 for token in ("ZACCOUNT", "%google%", "%gmail%", 'PXKillallByName(@"accountsd"'):
     require(token not in safari_body, f"MobileSafari still mutates or targets shared Accounts3 state: {token}")
 safari_stop_start = cleaner_m.index("static void PXStopSafariDaemonsBestEffort(AppDataCleaner *selfRef) {")
-safari_stop_end = cleaner_m.index("static NSString *PXFirstExistingPath", safari_stop_start)
+safari_stop_end = cleaner_m.index("static NSString *PXFirstExistingRegularNonSymlinkFile", safari_stop_start)
 safari_stop_body = cleaner_m[safari_stop_start:safari_stop_end]
-require('@"accountsd"' not in safari_stop_body,
-        "explicit Safari shared-store cleanup must not transitively stop the shared accountsd daemon")
+safari_stop_code = strip_objc_comments(safari_stop_body)
+for daemon in ('@"accountsd"', '@"nsurlsessiond"', '@"webbookmarksd"', '@"cfprefsd"'):
+    require(daemon not in safari_stop_code,
+            f"explicit Safari shared-store cleanup stops a broader shared daemon: {daemon}")
+for required_process in ('@"MobileSafari"', '@"SafariViewService"',
+                         '@"com.apple.WebKit.WebContent"', '@"com.apple.WebKit.Networking"',
+                         '@"com.apple.WebKit.GPU"'):
+    require(required_process in safari_stop_code,
+            f"Safari explicit-policy stop list lost intended process: {required_process}")
+
+
+
+
+
+
+
+
+
+
+
+# Quarantined broad container scrub helpers must remain globally unreachable.
+for send in ("[self _wipeRelatedDataContainersForBundleIDs:",
+             "[self _wipeRelatedSystemGroupContainersForIdentifiers:",
+             "[self _wipeContainersInBasePaths:",
+             "[self _wipeDataContainersByIdentifierPrefixOrSubstring:",
+             "[self _scrubWebKitStateInSharedContainerBase:",
+             "[self completelyWipeContainer:",
+             "[self fastWipeDirectoryContents:"):
+    require(send not in cleaner_m, f"quarantined broad destructive helper regained a production caller: {send}")
 
 # Shared Safari/WebKit state is never implicit in Deep mode. It requires the
 # immutable Safari-specific option in addition to exact MobileSafari + Deep gating.
@@ -213,6 +279,49 @@ require("request.mode != PXClearModeDeep" in safari_body and
         "request.options & PXClearOptionSafariSharedWebData" in safari_body and
         "missing explicit immutable policy" in safari_body,
         "Safari shared-store helper does not independently enforce the immutable policy")
+require("classifyRealDirectory" in safari_body and
+        "lstat(fileSystemPath, &pathStat)" in safari_body and
+        "S_ISDIR(pathStat.st_mode)" in safari_body and
+        "S_ISLNK(pathStat.st_mode)" in safari_body and
+        "errno == ENOENT" in safari_body and
+        safari_body.count("classifyRealDirectory(") >= 6,
+        "Safari shared-store path authority is not lstat-based/fail-closed for Library/subdirectories")
+require("fileExistsAtPath:" not in safari_body,
+        "Safari shared-store helper still follows symlinks through fileExistsAtPath")
+require("return NO;" in safari_body and
+        "PXCurrentClearOperationContext" in safari_body and
+        "isCancellationRequested" in safari_body and
+        "runBatchedCommandsWithPrivileges" in safari_body and
+        "allSucceeded" in safari_body and
+        "return allSucceeded;" in safari_body,
+        "Safari shared-store helper does not propagate bounded execution/cancellation failures")
+for forbidden in ("|| true", "_wipeRelatedDataContainersForBundleIDs",
+                  "_wipeDataContainersByIdentifierPrefixOrSubstring",
+                  "_wipeRelatedSystemGroupContainersForIdentifiers",
+                  "_wipeContainersInBasePaths",
+                  "_scrubWebKitStateInSharedContainerBase",
+                  "[self runCommandWithPrivileges:@\"rm -rf"):
+    require(forbidden not in safari_body,
+            f"Safari shared-store helper still hides failures or invokes dead/generic fallback: {forbidden}")
+require("safariSharedStoreSucceeded" in app_wipe_body and
+        "safari-shared-store: succeeded" in app_wipe_body and
+        "safari-shared-store: failed" in app_wipe_body and
+        "MobileSafari shared-store cleanup failed" in app_wipe_body,
+        "Safari shared-store execution is not represented in ApplicationData accounting")
+
+batch_start = cleaner_m.index("- (BOOL)runBatchedCommandsWithPrivileges:(NSArray<NSString *> *)commands timeoutSec:(int)timeoutSec {")
+batch_end = cleaner_m.index("// Legacy wildcard traversal helper retained only for source compatibility.", batch_start)
+batch_body = cleaner_m[batch_start:batch_end]
+require("commands.count == 0" in batch_body and
+        "return NO;" in batch_body and
+        '@"{ %@; } || status=1"' in batch_body and
+        '@"status=0; %@; exit $status"' in batch_body and
+        "runCommandWithPrivilegesResult" in batch_body and
+        "PXApplicationDataCommandResultSucceeded(result)" in batch_body,
+        "bounded batch shell helper does not aggregate per-snippet failure into a BOOL result")
+for forbidden in ("[self runCommandWithPrivileges:parts[0]", "[self runCommandWithPrivileges:batched"):
+    require(forbidden not in batch_body,
+            f"bounded batch shell helper retains old void/non-accounting path: {forbidden}")
 require('@"wouldClearSafariSharedWebData"' in cleaner_m and
         "PXClearOptionSafariSharedWebData" in cleaner_m,
         "dry-run does not expose Safari shared-store policy")
@@ -264,8 +373,40 @@ for token in ("lstat", "S_ISREG", "S_ISLNK", "unlink"):
 for token in ("rm -rf", "runCommandWithPrivileges", "removeItemAtPath", "findPathsMatchingPattern"):
     require(token not in exact_file_body, f"exact-file primitive unexpectedly expands into generic deletion: {token}")
 
+# Legacy per-app CFPreferences compatibility is constrained to exact regular files.
+legacy_pref_start = cleaner_m.index("static NSArray<NSString *> *PXExactLegacyPreferenceDomainPathsForBundleID")
+legacy_pref_end = cleaner_m.index("static NSString *PXExactInstalledApplicationExecutablePathFromLaunchServices", legacy_pref_start)
+legacy_pref_body = cleaner_m[legacy_pref_start:legacy_pref_end]
+require("PXStrictBundleIdentifierIsValid" in legacy_pref_body and
+        'stringByAppendingString:@".plist"' in legacy_pref_body and
+        "stringByStandardizingPath" in legacy_pref_body,
+        "legacy preference-domain path helper lost exact bundle/path construction")
+for base in ("/var/mobile/Library/Preferences", "/private/var/mobile/Library/Preferences",
+             "/var/jb/var/mobile/Library/Preferences", "/private/var/jb/var/mobile/Library/Preferences"):
+    require(base in legacy_pref_body, f"legacy preference-domain root missing: {base}")
+for forbidden in ("/var/root/Library/Preferences", "/Library/Caches", "/Library/Cookies", "Application Support", "containsString", "hasPrefix"):
+    require(forbidden not in legacy_pref_body,
+            f"legacy preference-domain helper crosses exact file ownership boundary: {forbidden}")
+
+require("PXExactLegacyPreferenceDomainPathsForBundleID(bundleID)" in app_wipe_body and
+        "PXRemoveExactRegularNonSymlinkFile(preferencePath)" in app_wipe_body and
+        "Shared cache/cookie/root-preference cleanup skipped (ownership boundary)" in app_wipe_body,
+        "canonical ApplicationData cleanup is not constrained to exact legacy preference files")
+require("legacyPreferenceSucceeded" in app_wipe_body and
+        "lstat(preferenceFS, &preferenceStat)" in app_wipe_body and
+        "S_ISREG(preferenceStat.st_mode)" in app_wipe_body and
+        "S_ISLNK(preferenceStat.st_mode)" in app_wipe_body and
+        "legacy-preferences: succeeded" in app_wipe_body and
+        "legacy-preferences: failed" in app_wipe_body and
+        "Exact legacy preference cleanup failed" in app_wipe_body,
+        "exact legacy preference cleanup is not represented in ApplicationData accounting")
+for forbidden in ("/var/mobile/Library/Caches/%@", "/var/mobile/Library/Cookies/%@.binarycookies",
+                  "/var/root/Library/Preferences/%@.plist", "Clearing preferences and cookies (batched shell)"):
+    require(forbidden not in app_wipe_body,
+            f"canonical ApplicationData cleanup still mutates bundle-name-derived shared state: {forbidden}")
+
 # App-state cleanup keeps only exact bundle-derived files and uses the exact-file primitive.
-app_state_start = cleaner_m.index("- (void)_internalClearAppStateData:(NSString *)bundleID {")
+app_state_start = cleaner_m.index("- (BOOL)_internalClearAppStateData:(NSString *)bundleID {")
 app_state_end = cleaner_m.index("// Helper to scan a directory and wipe files/folders matching a string", app_state_start)
 app_state_body = cleaner_m[app_state_start:app_state_end]
 require("ApplicationState/%@.plist" in app_state_body and
@@ -273,11 +414,16 @@ require("ApplicationState/%@.plist" in app_state_body and
         "PXStrictBundleIdentifierIsValid" in app_state_body and
         "PXRemoveExactRegularNonSymlinkFile" in app_state_body,
         "exact app-state file cleanup missing strict identity/exact deletion")
+require("BOOL allSucceeded = YES" in app_state_body and
+        "allSucceeded = NO" in app_state_body and
+        "return allSucceeded;" in app_state_body and
+        "return NO;" in app_state_body,
+        "exact app-state cleanup does not propagate deletion/cancellation failure")
 for fuzzy_state_token in ("FrontBoard", "LiveActivities", "RecentlyTerminatedAppState", "BackgroundTasks", "/TCC", "scanAndWipeInDirectory", "containsString", "securelyWipeFile"):
     require(fuzzy_state_token not in app_state_body,
             f"app-state cleanup still uses fuzzy/generic shared-directory deletion: {fuzzy_state_token}")
 scan_start = cleaner_m.index("- (void)scanAndWipeInDirectory:(NSString *)directory matching:(NSString *)matchString {")
-scan_end = cleaner_m.index("- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {", scan_start)
+scan_end = cleaner_m.index("- (BOOL)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {", scan_start)
 scan_body = cleaner_m[scan_start:scan_end]
 require("PXLogQuarantinedLegacyClearSelector(_cmd)" in scan_body,
         "fuzzy scanAndWipe helper is not quarantined")
@@ -286,6 +432,16 @@ for token in ("enumeratorAtURL", "containsString", "securelyWipeFile", "contents
             f"quarantined scanAndWipe helper still scans/mutates shared state: {token}")
 require("Step 3: Clearing exact app state files" in mode_body,
         "canonical worker does not advertise exact-only app-state cleanup")
+require("BOOL appStateSucceeded = [strongSelf _internalClearAppStateData:bundleID]" in mode_body and
+        "AppDataCleaner.AppState" in mode_body and
+        "Exact app-state cleanup failed; reporting Clear failure" in mode_body and
+        "if (!appStateSucceeded && !callbackError)" in mode_body,
+        "canonical worker does not propagate exact app-state failure to final callback")
+app_state_call_index = mode_body.index("BOOL appStateSucceeded = [strongSelf _internalClearAppStateData:bundleID]")
+freeze_index = mode_body.index("if (!operationContext.wasFrozenBeforeOperation)", app_state_call_index)
+cancel_after_app_state = mode_body.index("if ([operationContext isCancellationRequested])", app_state_call_index)
+require(app_state_call_index < cancel_after_app_state < freeze_index,
+        "canonical worker does not process app-state cancellation before acquiring freeze lease")
 
 # Shared NSURLCredentialStorage ownership cannot be inferred from bundle-id components.
 require("[strongSelf clearURLCredentialsForBundleID:bundleID]" not in mode_body,
@@ -314,7 +470,7 @@ for token in ("findPathsMatchingPattern", "rm -rf", "WebKit/WebsiteData", "/Cook
             f"quarantined RootHide selector still scans/mutates shared state: {token}")
 
 thumbnail_start = cleaner_m.index("- (void)clearThumbnailCaches:(NSString *)bundleID {")
-thumbnail_end = cleaner_m.index("- (void)_clearExactAccountsOwnedByBundleIdentifier:", thumbnail_start)
+thumbnail_end = cleaner_m.index("- (BOOL)_clearExactAccountsOwnedByBundleIdentifier:", thumbnail_start)
 thumbnail_body = cleaner_m[thumbnail_start:thumbnail_end]
 require("PXLogQuarantinedLegacyClearSelector(_cmd)" in thumbnail_body,
         "thumbnail compatibility selector is not quarantined")
@@ -448,12 +604,17 @@ for token in ("SBAppTagsFileManager", "SBIconModelCache.plist", "LaunchServices-
 
 # Deep Mail shared-store policy + Accounts3 release safety block.
 mail_start = app_wipe_body.index('if (request.mode == PXClearModeDeep && [bundleID isEqualToString:@"com.apple.mobilemail"])')
-mail_end = app_wipe_body.index("    // Clear preferences and cookies only", mail_start)
+mail_end = app_wipe_body.index("    // Legacy CFPreferences application-domain compatibility", mail_start)
 mail_body = app_wipe_body[mail_start:mail_end]
 require("request.options & PXClearOptionMailSharedStore" in mail_body and
         "Clear Mail Shared Store policy OFF; shared /var/mobile/Library/Mail preserved" in mail_body and
         "[self _wipeMobileMailSharedStoreForRequest:request]" in mail_body,
         "MobileMail shared store is not gated by Deep + exact target + explicit immutable option")
+require("attemptedUnits++" in mail_body and
+        "mailSharedStoreSucceeded" in mail_body and
+        "failedUnits++" in mail_body and
+        "MobileMail shared-store cleanup failed" in mail_body,
+        "authorized MobileMail shared-store cleanup is not represented in ApplicationData accounting")
 for implicit_mail_mutation in (
     "PXStopMailDaemonsBestEffort",
     'PXKillallByName(@"Mail"',
@@ -478,37 +639,59 @@ for destructive_token in (
     require(destructive_token not in mail_body,
             f"Deep Mail release path still contains blocked Accounts3 mutation: {destructive_token}")
 
-mail_helper_start = cleaner_m.index("- (void)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {")
+mail_helper_start = cleaner_m.index("- (BOOL)_wipeMobileMailSharedStoreForRequest:(PXClearRequest *)request {")
 mail_helper_end = cleaner_m.index("// Override the existing clearAppStateData method", mail_helper_start)
 mail_helper_body = cleaner_m[mail_helper_start:mail_helper_end]
 require("request.mode != PXClearModeDeep" in mail_helper_body and
         'request.bundleIdentifier isEqualToString:@"com.apple.mobilemail"' in mail_helper_body and
         "request.options & PXClearOptionMailSharedStore" in mail_helper_body and
-        "missing explicit immutable policy" in mail_helper_body,
+        "missing explicit immutable policy" in mail_helper_body and
+        "return NO;" in mail_helper_body,
         "MobileMail shared-store helper does not independently enforce immutable authorization")
 require("PXStopMailDaemonsBestEffort" in mail_helper_body and
         "/var/mobile/Library/Mail" in mail_helper_body and
         "com.apple.mail.plist" in mail_helper_body and
-        "Mail.WeaponXTrash" in mail_helper_body,
-        "authorized MobileMail shared-store helper lost its intended destructive work")
-require(mail_helper_body.count("isCancellationRequested") >= 3,
-        "MobileMail shared-store helper lacks cancellation checkpoints")
+        "Mail.WeaponXTrash." in mail_helper_body and
+        "runCommandWithPrivilegesResult" in mail_helper_body and
+        "PXApplicationDataCommandResultSucceeded" in mail_helper_body and
+        "Mail still running; forcing kill before store detach" in mail_helper_body,
+        "authorized MobileMail shared-store helper lost its bounded destructive work/pre-detach quiescence")
+require("stringByDeletingLastPathComponent" in mail_helper_body and
+        "decimalDigitCharacterSet" in mail_helper_body and
+        "S_ISDIR" in mail_helper_body and
+        "S_ISLNK" in mail_helper_body,
+        "MobileMail trash/mail path validation is not exact/fail-closed")
+require("rm -rf %@ || status=1" in mail_helper_body and
+        "trashRemoved" in mail_helper_body and
+        "PXReadOnlyRealDirectoryAtPath(mailPath)" in mail_helper_body and
+        "detached old store removed" in mail_helper_body,
+        "MobileMail shared-store cleanup does not delete/verify the detached old store")
+require(mail_helper_body.count("isCancellationRequested") >= 2,
+        "MobileMail shared-store helper lacks pre-mutation cancellation checkpoints")
+for forbidden_mail_token in ("deferred cleanup", "runBatchedCommandsWithPrivileges", "Mail.WeaponXTrash.*"):
+    require(forbidden_mail_token not in mail_helper_body,
+            f"MobileMail helper still leaves or wildcard-cleans detached data: {forbidden_mail_token}")
 for forbidden_account_mutation in ("Accounts3", "ZACCOUNT", 'PXKillallByName(@"accountsd"'):
     require(forbidden_account_mutation not in mail_helper_body,
             f"Mail shared-store option must not authorize Accounts3/accountsd mutation: {forbidden_account_mutation}")
 
 # Encrypted preferences outside the app container use direct-directory enumeration plus
 # exact bundle-id filename prefixes; no wildcard/find or generic delete helper participates.
-encrypted_start = cleaner_m.index("- (void)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID\n                                                         deepClean:(BOOL)deepClean {")
+encrypted_start = cleaner_m.index("- (BOOL)_internalClearEncryptedDataOutsideMainApplicationContainer:(NSString *)bundleID\n                                                         deepClean:(BOOL)deepClean {")
 encrypted_end = cleaner_m.index("- (void)_internalClearEncryptedData:(NSString *)bundleID", encrypted_start)
 encrypted_body = cleaner_m[encrypted_start:encrypted_end]
 require("PXStrictBundleIdentifierIsValid" in encrypted_body and
-        "PXReadOnlyRealDirectoryAtPath" in encrypted_body and
+        "lstat(baseFS, &baseStat)" in encrypted_body and
+        "S_ISDIR(baseStat.st_mode)" in encrypted_body and
+        "S_ISLNK(baseStat.st_mode)" in encrypted_body and
+        "errno == ENOENT" in encrypted_body and
         "contentsOfDirectoryAtPath" in encrypted_body and
         "stringByStandardizingPath" in encrypted_body and
         "stringByDeletingLastPathComponent" in encrypted_body and
-        "PXRemoveExactRegularNonSymlinkFile" in encrypted_body,
-        "encrypted preference cleanup lost exact-path authorization/deletion flow")
+        "PXRemoveExactRegularNonSymlinkFile" in encrypted_body and
+        "allSucceeded = NO" in encrypted_body and
+        "return allSucceeded;" in encrypted_body,
+        "encrypted preference cleanup lost exact-path/fail-closed deletion flow")
 for base in ("/var/mobile/Library/Preferences", "/private/var/mobile/Library/Preferences",
              "/var/jb/var/mobile/Library/Preferences", "/private/var/jb/var/mobile/Library/Preferences"):
     require(base in encrypted_body, f"encrypted preference exact base missing: {base}")
@@ -519,6 +702,12 @@ require("hasPrefix:prefix" in encrypted_body,
 for forbidden in ("findPathsMatchingPattern", "securelyWipeFile", "%@*.enc*", "%@.enc*", "rm -rf"):
     require(forbidden not in encrypted_body,
             f"encrypted preference cleanup still uses wildcard/generic deletion: {forbidden}")
+
+require("encryptedPreferencesSucceeded" in app_wipe_body and
+        "encrypted-preferences: succeeded" in app_wipe_body and
+        "encrypted-preferences: failed" in app_wipe_body and
+        "Exact encrypted preference cleanup failed" in app_wipe_body,
+        "exact encrypted preference cleanup is not represented in ApplicationData accounting")
 
 diag_start = cleaner_m.index("static void PXSQLiteLogMailAccountsDiagnostic")
 diag_end = cleaner_m.index("- (NSString *)_sqliteScalarAtPath", diag_start)
@@ -585,6 +774,15 @@ for token in ("findDataContainerUUID:bundleID", "findRootlessDataContainerUUID:b
               "optimized_findExtensionContainers"):
     require(token not in verify_body,
             f"standalone verification still uses legacy/fuzzy fallback: {token}")
+require("PXExactLegacyPreferenceDomainPathsForBundleID(bundleID)" in verify_body and
+        "Exact legacy preference-domain path still exists" in verify_body and
+        "lstat(fileSystemPath, &pathStat) == 0" in verify_body,
+        "Deep verification lost exact legacy preference-domain residual checks")
+for forbidden in ("/var/mobile/Library/Caches/%@", "/var/mobile/Library/Cookies/%@.binarycookies",
+                  "/var/mobile/Library/Application Support/%@", "/var/root/Library/Preferences/%@.plist"):
+    require(forbidden not in verify_body,
+            f"Deep verification still treats bundle-name-derived shared state as app-owned: {forbidden}")
+
 require("Exact App Group entitlement discovery failed" in verify_body and
         "Exact installed-extension discovery failed" in verify_body,
         "standalone exact discovery failures do not fail verification conservatively")
@@ -599,6 +797,25 @@ require("useOperationContext\n        ? operationContext.keychainPlanSnapshot\n 
         "canonical Keychain verification can re-plan from mutable settings instead of using the operation snapshot")
 require("hasKeychainItemsForBundleID:bundleID" not in verify_body,
         "verifyDataCleared must not use the public all-authorized-groups Keychain probe")
+
+# Deep exact-container verification must reuse the canonical destructive postcondition.
+verify_path_start = cleaner_m.index("- (void)verifyClearedPath:(NSString *)path reportingTo:(NSMutableArray *)unclearedPaths {")
+verify_path_end = cleaner_m.index("// Helper to check if an array contains only system files", verify_path_start)
+verify_path_body = cleaner_m[verify_path_start:verify_path_end]
+require("PXApplicationDataPostconditionIsValid(path, &postconditionError)" in verify_path_body and
+        "postconditionError.localizedDescription" in verify_path_body,
+        "Deep exact-container verifier does not reuse canonical postcondition")
+for forbidden in ("fileExistsAtPath", "contentsOfDirectoryAtPath", "containsOnlySystemFiles", "hasPrefix"):
+    require(forbidden not in verify_path_body,
+            f"Deep exact-container verifier retains weaker/follow-symlink heuristic: {forbidden}")
+system_files_start = cleaner_m.index("- (BOOL)containsOnlySystemFiles:(NSArray *)files {")
+system_files_end = cleaner_m.find("\n- (", system_files_start + 1)
+require(system_files_end != -1, "could not bound containsOnlySystemFiles compatibility helper")
+system_files_body = cleaner_m[system_files_start:system_files_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in system_files_body and "return NO;" in system_files_body,
+        "orphan containsOnlySystemFiles heuristic is not quarantined")
+require("[self containsOnlySystemFiles:" not in cleaner_m,
+        "quarantined containsOnlySystemFiles helper regained a caller")
 
 # Public/read-only Keychain presence must use the same signed-helper authorization protocol as wipe.
 keychain_list_start = cleaner_m.index("- (PXKeychainHelperResult *)_readOnlyKeychainListResultForBundleIdentifier:(NSString *)bundleIdentifier\n                                                              accessGroups:(NSArray<NSString *> *)accessGroups {")
@@ -645,6 +862,7 @@ has_data_end = cleaner_m.index("// --- Optimized lookup helpers", has_data_start
 has_data_body = cleaner_m[has_data_start:has_data_end]
 require("PXExactReadOnlyApplicationDataPathsForBundleID" in has_data_body and
         has_data_body.count("_resolvedAppGroupUUIDsFromEntitlements") >= 2 and
+        "PXExactLegacyPreferenceDomainPathsForBundleID(bundleID)" in has_data_body and
         "PXReadOnlyRegularNonSymlinkFileAtPath" in has_data_body and
         "hasKeychainItemsForBundleID" in has_data_body,
         "hasDataToClear lost exact container/group/preference/keychain attribution")
@@ -910,6 +1128,53 @@ for signature, send in legacy_extension_signatures:
     require(cleaner_m.count(signature) == 1 and send not in cleaner_m,
             f"legacy extension helper unexpectedly has a caller/duplicate implementation: {signature}")
 
+# Mail daemon shutdown must use argv-based launchctl and exact hard-coded labels; no shell interpolation.
+mail_stop_start = cleaner_m.index("static void PXStopMailDaemonsBestEffort(AppDataCleaner *selfRef) {")
+mail_stop_end = cleaner_m.index("static void PXStopSafariDaemonsBestEffort", mail_stop_start)
+mail_stop_body = cleaner_m[mail_stop_start:mail_stop_end]
+require("firstExistingPath" in mail_stop_body and
+        '@"/bin/launchctl"' in mail_stop_body and
+        "runExecutableAndCapture" in mail_stop_body and
+        'arguments:@[@"kill", @"SIGTERM", label]' in mail_stop_body and
+        'arguments:@[@"stop", label]' in mail_stop_body and
+        "clampedTimeoutForStepLimit:2.0" in mail_stop_body,
+        "Mail daemon stop path is not argv-based/bounded")
+for label in ("gui/501/com.apple.maild", "gui/501/com.apple.mobilemail.maild",
+              "system/com.apple.maild", "system/com.apple.mobilemail.maild"):
+    require(label in mail_stop_body, f"Mail daemon stop path lost exact launchd label: {label}")
+for forbidden in ("runCommandWithPrivileges", "/bin/sh", "stringWithFormat:@\"launchctl", "|| true"):
+    require(forbidden not in mail_stop_body,
+            f"Mail daemon stop path reintroduced shell interpolation/fire-and-forget execution: {forbidden}")
+
+# Legacy void privileged-shell wrappers remain source-compatible but fail closed.
+void_shell_start = cleaner_m.index("- (void)runCommandWithPrivileges:(NSString *)command {")
+void_shell_end = cleaner_m.index("- (BOOL)runBatchedCommandsWithPrivileges:", void_shell_start)
+void_shell_body = cleaner_m[void_shell_start:void_shell_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in void_shell_body and
+        "runCommandWithPrivilegesResult" not in void_shell_body,
+        "single-argument privileged-shell compatibility wrapper is not quarantined")
+void_timeout_start = cleaner_m.index("- (void)runCommandWithPrivileges:(NSString *)command timeoutSec:(int)timeoutSec {")
+void_timeout_end = cleaner_m.index("- (BOOL)verifyDataCleared:(NSString *)bundleID {", void_timeout_start)
+void_timeout_body = cleaner_m[void_timeout_start:void_timeout_end]
+require("PXLogQuarantinedLegacyClearSelector(_cmd)" in void_timeout_body and
+        "runCommandWithPrivilegesResult" not in void_timeout_body,
+        "timeout privileged-shell compatibility wrapper is not quarantined")
+
+typed_file_start = cleaner_m.index("static NSString *PXFirstExistingRegularNonSymlinkFile")
+typed_file_end = cleaner_m.index("static NSString *PXFirstExistingRealDirectory", typed_file_start)
+typed_file_body = cleaner_m[typed_file_start:typed_file_end]
+typed_dir_start = typed_file_end
+typed_dir_end = cleaner_m.index("static BOOL PXWaitForProcessExit", typed_dir_start)
+typed_dir_body = cleaner_m[typed_dir_start:typed_dir_end]
+require("lstat(" in typed_file_body and "S_ISREG" in typed_file_body and "S_ISLNK" in typed_file_body and
+        "errno == ENOENT" in typed_file_body and "invalidOut" in typed_file_body,
+        "typed destructive file selector lost lstat/non-symlink/fail-closed semantics")
+require("lstat(" in typed_dir_body and "S_ISDIR" in typed_dir_body and "S_ISLNK" in typed_dir_body and
+        "errno == ENOENT" in typed_dir_body and "invalidOut" in typed_dir_body,
+        "typed destructive directory selector lost lstat/non-symlink/fail-closed semantics")
+require("static NSString *PXFirstExistingPath(" not in cleaner_m,
+        "generic first-existing destructive path helper still exists")
+
 # Process-kill fallback must stay exact even when LaunchServices executable lookup is unavailable.
 kill_start = cleaner_m.index("static void PXKillAppProcessBestEffort(AppDataCleaner *selfRef, NSString *bundleID) {")
 kill_end = cleaner_m.index("static void PXStopMailDaemonsBestEffort", kill_start)
@@ -1004,6 +1269,11 @@ for field in ("step=resolve_container", "resolve_container_ms=", "sqlite_ms=",
     require(field in cleaner_m, f"7.4 metric field missing: {field}")
 for counter in ("gPXClearShellProcessCount", "gPXClearPathsScannedCount", "gPXClearSqliteNanos"):
     require(counter in cleaner_m, f"7.4 metric counter missing: {counter}")
+
+# Dead broad container-wipe shell builders must stay removed; exact canonical wipe owns container mutation.
+for dead_shell_builder in ("PXShellWipeContainerKeepMetadata", "PXShellFastDataContainerWipe"):
+    require(dead_shell_builder not in cleaner_m,
+            f"orphan broad container-wipe shell builder returned: {dead_shell_builder}")
 
 # CLEAR-09: dead brand-specific iOS15 clear path removed (Phase 14)
 require("clearAppIssuesForIOS15" not in cleaner_m, "CLEAR-09 dead method still present")
