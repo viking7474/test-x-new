@@ -1209,6 +1209,9 @@ require("safeCompletion(" not in watchdog_body,
         "P0 watchdog must not complete/unfreeze before worker quiescence")
 require('requestCancellationWithReason:@"background-expiration"' in mode_body,
         "P0 background expiration does not cancel the active operation")
+require("[AppDataCleaner][metric] cancellation reason=%@ operation=%@ error_domain=%@ error_code=%ld" in mode_body and
+        "[operationContext cancellationReason]" in mode_body,
+        "P0 cancellation completion does not emit a machine-readable reason metric")
 require("clampedTimeoutForStepLimit" in cleaner_m and "MIN(normalizedStep, remaining)" in cleaner_m,
         "P0 child timeout is not clamped to remaining operation deadline")
 require("PXCurrentClearOperationContext" in cleaner_m,

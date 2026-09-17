@@ -3519,6 +3519,13 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                     (success && pxTimeoutFallbackCount == 0),
                     pxFirstAttemptSuccessPct];
             }
+            if ([operationContext isCancellationRequested]) {
+                [weakSelf logMessage:@"[AppDataCleaner][metric] cancellation reason=%@ operation=%@ error_domain=%@ error_code=%ld",
+                    [operationContext cancellationReason] ?: @"cancelled",
+                    operationContext.operationID ?: @"(nil)",
+                    error.domain ?: @"(none)",
+                    (long)error.code];
+            }
             [weakSelf logMessage:@"[AppDataCleaner] Calling completion handler (success=%d)", success];
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(success, error);
