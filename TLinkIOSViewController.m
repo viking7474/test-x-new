@@ -6879,11 +6879,19 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return [fmt stringFromDate:date ?: [NSDate date]];
 }
 
-- (NSString *)rrsFallbackNoteForBundleID:(NSString *)bundleID appName:(NSString *)appName date:(NSDate *)date {
-    NSString *profileName = [ProfileManager sharedManager].currentProfile.name ?: @"Profile";
+- (NSString *)rrsFallbackNoteForProfileName:(NSString *)profileName
+                                   bundleID:(NSString *)bundleID
+                                    appName:(NSString *)appName
+                                       date:(NSDate *)date {
+    if (!profileName.length) profileName = @"Profile";
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.dateFormat = @"dd-MM HH:mm";
     return [NSString stringWithFormat:@"%@ + %@ + %@", profileName, appName ?: bundleID ?: @"App", [fmt stringFromDate:date ?: [NSDate date]]];
+}
+
+- (NSString *)rrsFallbackNoteForBundleID:(NSString *)bundleID appName:(NSString *)appName date:(NSDate *)date {
+    NSString *profileName = [ProfileManager sharedManager].currentProfile.name ?: @"Profile";
+    return [self rrsFallbackNoteForProfileName:profileName bundleID:bundleID appName:appName date:date];
 }
 
 - (NSMutableDictionary<NSString *, NSDictionary *> *)mutableRRSMetadataStore {
@@ -7603,12 +7611,59 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return dirs;
 }
 
+- (NSString *)rrsProfileIdForBackupDirectory:(NSString *)backupDir
+                                    manifest:(NSDictionary *)manifest
+                                    isLegacy:(BOOL *)isLegacy {
+    if (isLegacy) *isLegacy = NO;
+
+    NSString *standardDir = [backupDir stringByStandardizingPath];
+    NSString *legacyRoot = [[PXWeaponXBasePath() stringByAppendingPathComponent:@"Backups"] stringByStandardizingPath];
+    BOOL legacy = [standardDir isEqualToString:legacyRoot] ||
+        [standardDir hasPrefix:[legacyRoot stringByAppendingString:@"/"]];
+    if (isLegacy) *isLegacy = legacy;
+
+    id manifestProfileValue = manifest[@"profileId"];
+    NSString *manifestProfileId = [manifestProfileValue isKindOfClass:[NSString class]]
+        ? manifestProfileValue
+        : ([manifestProfileValue respondsToSelector:@selector(stringValue)] ? [manifestProfileValue stringValue] : nil);
+    if (manifestProfileId.length) return manifestProfileId;
+
+    NSString *profilesRoot = [PXProfilesPath() stringByStandardizingPath];
+    NSString *profilesPrefix = [profilesRoot stringByAppendingString:@"/"];
+    if ([standardDir hasPrefix:profilesPrefix]) {
+        NSString *relative = [standardDir substringFromIndex:profilesPrefix.length];
+        NSString *profileId = [relative pathComponents].firstObject;
+        return [profileId isKindOfClass:[NSString class]] ? profileId : @"";
+    }
+
+    return @"";
+}
+
+- (NSDictionary<NSString *, NSString *> *)rrsProfileNamesById {
+    NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary dictionary];
+    for (Profile *profile in [ProfileManager sharedManager].profiles) {
+        if (profile.profileId.length) {
+            names[profile.profileId] = profile.name.length
+                ? profile.name
+                : [NSString stringWithFormat:@"Profile %@", profile.profileId];
+        }
+    }
+    return [names copy];
+}
+
 - (NSArray<NSDictionary *> *)rrsEntries {
     NSMutableArray *entries = [NSMutableArray array];
+    NSDictionary<NSString *, NSString *> *profileNames = [self rrsProfileNamesById];
+    NSString *activeProfileId = [ProfileManager sharedManager].currentProfile.profileId ?: PXActiveProfileID() ?: @"";
     for (NSString *dir in [self allRRSBackupDirectories]) {
             NSError *err = nil;
             NSDictionary *m = [[AppDataBackupManager shared] readManifestAtBackupDirectory:dir error:&err];
             if (!m) continue;
+            BOOL isLegacy = NO;
+            NSString *profileId = [self rrsProfileIdForBackupDirectory:dir manifest:m isLegacy:&isLegacy];
+            NSString *profileName = isLegacy
+                ? @"Legacy"
+                : (profileNames[profileId] ?: (profileId.length ? [NSString stringWithFormat:@"Profile %@", profileId] : @"Không rõ profile"));
             NSDictionary *metadata = [self rrsMetadataForBackupDirectory:dir];
             NSString *bundleID = m[@"bundleID"] ?: dir.stringByDeletingLastPathComponent.lastPathComponent;
             NSDate *created = [m[@"createdAt"] isKindOfClass:[NSDate class]] ? m[@"createdAt"] : nil;
@@ -7618,11 +7673,22 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             else if ([restored isKindOfClass:[NSString class]] && [restored length]) restoreText = restored;
             NSString *checksum = m[@"archiveChecksum"] ?: @"";
             if (checksum.length > 24) checksum = [checksum substringToIndex:24];
+            NSString *note = metadata[@"rrsNote"];
+            if (![note isKindOfClass:[NSString class]] || !note.length) {
+                note = [self rrsFallbackNoteForProfileName:profileName
+                                                 bundleID:bundleID
+                                                  appName:m[@"appName"]
+                                                     date:created];
+            }
             [entries addObject:@{
                 @"dir": dir,
+                @"profileId": profileId ?: @"",
+                @"profileName": profileName ?: @"",
+                @"isActiveProfile": @(!isLegacy && [profileId isEqualToString:activeProfileId]),
+                @"isLegacy": @(isLegacy),
                 @"bundleID": m[@"bundleID"] ?: bundleID,
                 @"appName": m[@"appName"] ?: [self displayNameForBundleID:bundleID],
-                @"note": metadata[@"rrsNote"] ?: [self rrsFallbackNoteForBundleID:bundleID appName:m[@"appName"] date:created],
+                @"note": note,
                 @"checksum": checksum,
                 @"ip": metadata[@"backupIPAddress"] ?: @"",
                 @"size": [self rrsFormattedSize:m[@"totalSize"] ?: @0],
@@ -7725,6 +7791,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 
 - (void)manageRRSTapped {
     PXRRSManagerViewController *vc = [[PXRRSManagerViewController alloc] initWithStyle:PXCompatibleInsetGroupedStyle()];
+    Profile *activeProfile = [ProfileManager sharedManager].currentProfile;
+    NSString *activeProfileId = activeProfile.profileId ?: PXActiveProfileID() ?: @"";
+    vc.activeProfileId = activeProfileId;
+    vc.activeProfileName = activeProfile.name.length
+        ? activeProfile.name
+        : (activeProfileId.length ? [NSString stringWithFormat:@"Profile %@", activeProfileId] : @"Profile hiện tại");
+    vc.scope = PXRRSScopeCurrentProfile;
     vc.entries = [self rrsEntries];
     vc.nextIndex = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreIndexKey]];
     NSInteger endBound = [[NSUserDefaults standardUserDefaults] integerForKey:[self currentProfileRestoreEndKey]];

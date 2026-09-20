@@ -2,11 +2,20 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, PXRRSScope) {
+    PXRRSScopeCurrentProfile = 0,
+    PXRRSScopeAllProfiles = 1,
+};
+
 /// Modern RRS manager (list / multi-select delete with confirm / detail / sequence sheet).
 /// Callback contracts match the previous inline controller used by TLinkIOSViewController.
 @interface PXRRSManagerViewController : UITableViewController
 
 @property (nonatomic, copy) NSArray<NSDictionary *> *entries;
+/// Profile snapshot used to scope the list while this controller is visible.
+@property (nonatomic, copy) NSString *activeProfileId;
+@property (nonatomic, copy) NSString *activeProfileName;
+@property (nonatomic, assign) PXRRSScope scope;
 @property (nonatomic, assign) NSInteger nextIndex;
 /// 0 = oldest→newest, 1 = newest→oldest, 2 = by begin/end range
 @property (nonatomic, assign) NSInteger sequenceMode;

@@ -243,6 +243,33 @@ require("respondsToSelector" in uikit_m and "NSClassFromString" in uikit_m,
 require('NSClassFromString(@"NSRelativeDateTimeFormatter")' in rrs_ui and
         "if (@available(iOS 13.0, *)) {\n        NSRelativeDateTimeFormatter" not in rrs_ui,
         "RRS relative-date formatter uses runtime class detection")
+
+# RRS management defaults to the active profile while preserving an explicit all-profile view.
+rrs_visible = method_body(rrs_ui, "- (NSArray<NSDictionary *> *)visibleEntries", 2600)
+require("PXRRSScopeCurrentProfile" in rrs_visible and
+        '[profileId isEqualToString:activeProfileId]' in rrs_visible and
+        "!isLegacy" in rrs_visible,
+        "RRS current-profile scope excludes other profiles and Legacy backups")
+require("- (void)scopeTapped" in rrs_ui and
+        '@"Tất cả profile"' in rrs_ui and
+        "PXRRSScopeAllProfiles" in rrs_ui,
+        "RRS title exposes an explicit all-profile scope")
+rrs_chrome = method_body(rrs_ui, "- (void)refreshChrome", 2200)
+require("NSUInteger count = [self visibleEntries].count" in rrs_chrome and
+        "self.scope == PXRRSScopeCurrentProfile" in rrs_chrome,
+        "RRS count and Restore NEXT follow the visible current-profile scope")
+rrs_restore = method_body(rrs_ui, "- (void)performRestoreForEntry:", 4200)
+require("isDifferentProfile" in rrs_restore and
+        "Restore từ profile khác?" in rrs_restore and
+        "self.navigationController.topViewController" in rrs_restore,
+        "cross-profile and Legacy RRS restore requires confirmation")
+rrs_entries = method_body(legacy_ui, "- (NSArray<NSDictionary *> *)rrsEntries", 5000)
+for token in ('@"profileId"', '@"profileName"', '@"isActiveProfile"', '@"isLegacy"'):
+    require(token in rrs_entries, f"RRS entries expose source metadata {token}")
+rrs_manager = method_body(legacy_ui, "- (void)manageRRSTapped", 2400)
+require("vc.activeProfileId = activeProfileId" in rrs_manager and
+        "vc.scope = PXRRSScopeCurrentProfile" in rrs_manager,
+        "RRS manager opens in the active-profile scope")
 require('NSSelectorFromString(@"searchTextField")' in legacy_ui and
         "self.appSearchBar.searchTextField" not in legacy_ui,
         "UISearchBar searchTextField access is runtime-gated")

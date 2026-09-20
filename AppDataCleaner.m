@@ -284,7 +284,7 @@ static NSError *PXClearOperationCancellationError(PXClearOperationContext *conte
 - (void)clearBackgroundAssets:(NSString *)bundleID;
 - (void)clearSharedStorage:(NSString *)bundleID;
 - (void)clearAppStateData:(NSString *)bundleID;
-- (BOOL)_internalClearAppStateData:(NSString *)bundleID;
+- (BOOL)_clearExactAppStateDataForBundleID:(NSString *)bundleID;
 @end
 
 
@@ -3621,7 +3621,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                     [strongSelf logMessage:@"[AppDataCleaner] URL credential cleanup skipped (ownership boundary)"];
                 }
                 [strongSelf logMessage:@"[AppDataCleaner] Step 3: Clearing exact app state files..."];
-                BOOL appStateSucceeded = [strongSelf _internalClearAppStateData:bundleID];
+                BOOL appStateSucceeded = [strongSelf _clearExactAppStateDataForBundleID:bundleID];
                 if ([operationContext isCancellationRequested]) {
                     safeCompletion(NO, PXClearOperationCancellationError(operationContext));
                     return;
@@ -5424,7 +5424,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
 
 // Add new method to handle app state data cleaning for modern apps
 // Add new method to handle app state data cleaning for modern apps
-- (BOOL)_internalClearAppStateData:(NSString *)bundleID {
+- (void)_internalClearAppStateData:(NSString *)bundleID {
+    (void)[self _clearExactAppStateDataForBundleID:bundleID];
+}
+
+- (BOOL)_clearExactAppStateDataForBundleID:(NSString *)bundleID {
     if (!PXStrictBundleIdentifierIsValid(bundleID)) {
         [self logMessage:@"[AppDataCleaner] Exact app-state cleanup rejected invalid bundle identifier"];
         return NO;

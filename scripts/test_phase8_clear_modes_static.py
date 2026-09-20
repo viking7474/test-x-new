@@ -406,7 +406,14 @@ for forbidden in ("/var/mobile/Library/Caches/%@", "/var/mobile/Library/Cookies/
             f"canonical ApplicationData cleanup still mutates bundle-name-derived shared state: {forbidden}")
 
 # App-state cleanup keeps only exact bundle-derived files and uses the exact-file primitive.
-app_state_start = cleaner_m.index("- (BOOL)_internalClearAppStateData:(NSString *)bundleID {")
+require("- (void)_internalClearAppStateData:(NSString *)bundleID;" in cleaner_h,
+        "retained app-state selector must keep its historical void ABI")
+require("- (BOOL)_internalClearAppStateData:(NSString *)bundleID;" not in cleaner_h,
+        "retained app-state selector must not change return ABI")
+require("- (void)_internalClearAppStateData:(NSString *)bundleID {" in cleaner_m and
+        "(void)[self _clearExactAppStateDataForBundleID:bundleID];" in cleaner_m,
+        "retained void app-state selector does not bridge to exact BOOL helper")
+app_state_start = cleaner_m.index("- (BOOL)_clearExactAppStateDataForBundleID:(NSString *)bundleID {")
 app_state_end = cleaner_m.index("// Helper to scan a directory and wipe files/folders matching a string", app_state_start)
 app_state_body = cleaner_m[app_state_start:app_state_end]
 require("ApplicationState/%@.plist" in app_state_body and
@@ -432,12 +439,12 @@ for token in ("enumeratorAtURL", "containsString", "securelyWipeFile", "contents
             f"quarantined scanAndWipe helper still scans/mutates shared state: {token}")
 require("Step 3: Clearing exact app state files" in mode_body,
         "canonical worker does not advertise exact-only app-state cleanup")
-require("BOOL appStateSucceeded = [strongSelf _internalClearAppStateData:bundleID]" in mode_body and
+require("BOOL appStateSucceeded = [strongSelf _clearExactAppStateDataForBundleID:bundleID]" in mode_body and
         "AppDataCleaner.AppState" in mode_body and
         "Exact app-state cleanup failed; reporting Clear failure" in mode_body and
         "if (!appStateSucceeded && !callbackError)" in mode_body,
         "canonical worker does not propagate exact app-state failure to final callback")
-app_state_call_index = mode_body.index("BOOL appStateSucceeded = [strongSelf _internalClearAppStateData:bundleID]")
+app_state_call_index = mode_body.index("BOOL appStateSucceeded = [strongSelf _clearExactAppStateDataForBundleID:bundleID]")
 freeze_index = mode_body.index("if (!operationContext.wasFrozenBeforeOperation)", app_state_call_index)
 cancel_after_app_state = mode_body.index("if ([operationContext isCancellationRequested])", app_state_call_index)
 require(app_state_call_index < cancel_after_app_state < freeze_index,

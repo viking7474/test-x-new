@@ -158,7 +158,11 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         cell.imageView.image = PXRRSAppPlaceholder(appName);
         cell.textLabel.text = appName;
         cell.textLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-        cell.detailTextLabel.text = PXRRSString(e, @"dir").lastPathComponent;
+        NSString *profileName = PXRRSString(e, @"profileName");
+        NSString *leaf = PXRRSString(e, @"dir").lastPathComponent;
+        cell.detailTextLabel.text = profileName.length
+            ? [NSString stringWithFormat:@"%@ · %@", profileName, leaf]
+            : leaf;
         cell.detailTextLabel.font = PXMonospacedSystemFont(12, UIFontWeightRegular);
         cell.detailTextLabel.textColor = PXSecondaryLabelColor();
         cell.detailTextLabel.numberOfLines = 2;
@@ -269,6 +273,16 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
 - (instancetype)init {
     return [self initWithStyle:PXRRSSCompatibleInsetGrouped()];
+}
+
+- (instancetype)initWithStyle:(UITableViewStyle)style {
+    self = [super initWithStyle:style];
+    if (self) {
+        _scope = PXRRSScopeCurrentProfile;
+        _activeProfileId = @"";
+        _activeProfileName = @"";
+    }
+    return self;
 }
 
 - (void)viewDidLoad {
@@ -439,12 +453,22 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 
 - (NSArray<NSDictionary *> *)visibleEntries {
     NSArray *src = self.entries ?: @[];
+    if (self.scope == PXRRSScopeCurrentProfile) {
+        NSString *activeProfileId = self.activeProfileId ?: @"";
+        NSPredicate *scopePredicate = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, NSDictionary *bindings) {
+            NSString *profileId = PXRRSString(e, @"profileId");
+            BOOL isLegacy = [e[@"isLegacy"] respondsToSelector:@selector(boolValue)] && [e[@"isLegacy"] boolValue];
+            return !isLegacy && activeProfileId.length && [profileId isEqualToString:activeProfileId];
+        }];
+        src = [src filteredArrayUsingPredicate:scopePredicate];
+    }
     if (!self.filterText.length) return src;
     NSString *q = self.filterText;
     NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(NSDictionary *e, NSDictionary *bindings) {
-        NSString *hay = [NSString stringWithFormat:@"%@ %@ %@ %@",
+        NSString *hay = [NSString stringWithFormat:@"%@ %@ %@ %@ %@ %@",
                          PXRRSString(e, @"note"), PXRRSString(e, @"checksum"),
-                         PXRRSString(e, @"ip"), PXRRSString(e, @"appName")];
+                         PXRRSString(e, @"ip"), PXRRSString(e, @"appName"),
+                         PXRRSString(e, @"profileName"), PXRRSString(e, @"profileId")];
         return [hay rangeOfString:q options:NSCaseInsensitiveSearch].location != NSNotFound;
     }];
     return [src filteredArrayUsingPredicate:p];
@@ -484,9 +508,17 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     stack.spacing = 7.0;
 
     UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"RRS";
+    NSString *scopeName = self.scope == PXRRSScopeAllProfiles
+        ? @"Tất cả"
+        : (self.activeProfileName.length ? self.activeProfileName : @"Hiện tại");
+    titleLabel.text = [NSString stringWithFormat:@"RRS · %@", scopeName];
     titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
     titleLabel.textColor = PXLabelColor();
+    titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    titleLabel.adjustsFontSizeToFitWidth = YES;
+    titleLabel.minimumScaleFactor = 0.72;
+    [titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                                forAxis:UILayoutConstraintAxisHorizontal];
     [stack addArrangedSubview:titleLabel];
 
     UIView *badge = [[UIView alloc] init];
@@ -514,11 +546,23 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     ]];
 
     [stack addArrangedSubview:badge];
+
+    UILabel *chevron = [[UILabel alloc] init];
+    chevron.text = @"⌄";
+    chevron.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    chevron.textColor = PXSecondaryLabelColor();
+    [stack addArrangedSubview:chevron];
+
+    stack.userInteractionEnabled = YES;
+    stack.isAccessibilityElement = YES;
+    stack.accessibilityTraits = UIAccessibilityTraitButton;
+    stack.accessibilityLabel = @"Chọn phạm vi RRS";
+    [stack addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(scopeTapped)]];
     return stack;
 }
 
 - (void)refreshChrome {
-    NSUInteger count = self.entries.count;
+    NSUInteger count = [self visibleEntries].count;
     self.navigationItem.prompt = nil;
 
     if (self.editingSelection) {
@@ -544,9 +588,44 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
         self.sequenceFooterButton.hidden = NO;
         self.deleteFooterButton.hidden = YES;
         self.selectButton.enabled = count > 0;
-        self.sequenceFooterButton.enabled = count > 0;
-        self.sequenceFooterButton.alpha = count > 0 ? 1.0 : 0.45;
+        BOOL sequenceEnabled = count > 0 && self.scope == PXRRSScopeCurrentProfile;
+        self.sequenceFooterButton.enabled = sequenceEnabled;
+        self.sequenceFooterButton.alpha = sequenceEnabled ? 1.0 : 0.45;
     }
+}
+
+- (void)scopeTapped {
+    if (self.editingSelection) return;
+    NSString *profileName = self.activeProfileName.length ? self.activeProfileName : @"Profile hiện tại";
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Phạm vi RRS"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"Profile hiện tại · %@", profileName]
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(__unused UIAlertAction *a) {
+        [weakSelf applyScope:PXRRSScopeCurrentProfile];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Tất cả profile"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(__unused UIAlertAction *a) {
+        [weakSelf applyScope:PXRRSScopeAllProfiles];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = self.navigationItem.titleView;
+        popover.sourceRect = self.navigationItem.titleView.bounds;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)applyScope:(PXRRSScope)scope {
+    if (self.scope == scope) return;
+    self.scope = scope;
+    [self.selectedDirs removeAllObjects];
+    [self.tableView reloadData];
+    [self refreshChrome];
 }
 
 #pragma mark - Selection mode
@@ -710,7 +789,13 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     sub.textColor = PXSecondaryLabelColor();
     NSString *size = PXRRSString(e, @"size");
     NSString *when = PXRRSRelativeDate(PXRRSString(e, @"backupDate"));
-    sub.text = size.length ? [NSString stringWithFormat:@"%@ · %@", when, size] : when;
+    NSString *summary = size.length ? [NSString stringWithFormat:@"%@ · %@", when, size] : when;
+    if (self.scope == PXRRSScopeAllProfiles) {
+        NSString *profileName = PXRRSString(e, @"profileName");
+        if (!profileName.length) profileName = @"Không rõ profile";
+        summary = [NSString stringWithFormat:@"%@ · %@", profileName, summary];
+    }
+    sub.text = summary;
     sub.lineBreakMode = NSLineBreakByTruncatingTail;
 
     NSMutableArray *rows = [NSMutableArray arrayWithObject:title];
@@ -813,12 +898,11 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (self.editingSelection) return nil;
     NSDictionary *e = [self visibleEntries][(NSUInteger)indexPath.row];
-    NSString *dir = PXRRSString(e, @"dir");
     __weak typeof(self) weakSelf = self;
     UIContextualAction *restore = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
                                                                           title:@"Restore"
                                                                         handler:^(__unused UIContextualAction *action, __unused UIView *sourceView, void (^completion)(BOOL)) {
-        if (weakSelf.onRestoreOnly && dir.length) weakSelf.onRestoreOnly(dir);
+        [weakSelf performRestoreForEntry:e saveCurrentFirst:NO];
         completion(YES);
     }];
     restore.backgroundColor = [UIColor systemBlueColor];
@@ -831,11 +915,11 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     PXRRSDetailViewController *detail = [[PXRRSDetailViewController alloc] initWithStyle:PXRRSSCompatibleInsetGrouped()];
     detail.entry = entry;
     __weak typeof(self) weakSelf = self;
-    detail.onSaveAndRestore = ^(NSString *backupDir) {
-        if (weakSelf.onSaveAndRestore) weakSelf.onSaveAndRestore(backupDir);
+    detail.onSaveAndRestore = ^(__unused NSString *backupDir) {
+        [weakSelf performRestoreForEntry:entry saveCurrentFirst:YES];
     };
-    detail.onRestoreOnly = ^(NSString *backupDir) {
-        if (weakSelf.onRestoreOnly) weakSelf.onRestoreOnly(backupDir);
+    detail.onRestoreOnly = ^(__unused NSString *backupDir) {
+        [weakSelf performRestoreForEntry:entry saveCurrentFirst:NO];
     };
     detail.onDelete = ^(NSString *backupDir) {
         if (weakSelf.onDelete) weakSelf.onDelete(@[backupDir ?: @""]);
@@ -844,10 +928,64 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
     [self.navigationController pushViewController:detail animated:YES];
 }
 
+- (void)performRestoreForEntry:(NSDictionary *)entry saveCurrentFirst:(BOOL)saveCurrentFirst {
+    NSString *backupDir = PXRRSString(entry, @"dir");
+    if (!backupDir.length) return;
+
+    void (^performRestore)(void) = ^{
+        if (saveCurrentFirst) {
+            if (self.onSaveAndRestore) self.onSaveAndRestore(backupDir);
+        } else {
+            if (self.onRestoreOnly) self.onRestoreOnly(backupDir);
+        }
+    };
+
+    NSString *sourceProfileId = PXRRSString(entry, @"profileId");
+    BOOL isLegacy = [entry[@"isLegacy"] respondsToSelector:@selector(boolValue)] && [entry[@"isLegacy"] boolValue];
+    BOOL hasUnknownProfile = !sourceProfileId.length;
+    BOOL isDifferentProfile = sourceProfileId.length &&
+        self.activeProfileId.length &&
+        ![sourceProfileId isEqualToString:self.activeProfileId];
+    if (!isLegacy && !hasUnknownProfile && !isDifferentProfile) {
+        performRestore();
+        return;
+    }
+
+    NSString *sourceName = PXRRSString(entry, @"profileName");
+    if (!sourceName.length) sourceName = isLegacy ? @"Legacy" : sourceProfileId;
+    NSString *destinationName = self.activeProfileName.length ? self.activeProfileName : self.activeProfileId;
+    if (!destinationName.length) destinationName = @"profile hiện tại";
+    NSString *message = nil;
+    if (isLegacy) {
+        message = [NSString stringWithFormat:@"Không xác định được profile gốc của RRS Legacy này. Dữ liệu sẽ được restore vào profile đang hoạt động là %@.", destinationName];
+    } else if (hasUnknownProfile) {
+        message = [NSString stringWithFormat:@"Không xác định được profile gốc của RRS này. Dữ liệu sẽ được restore vào profile đang hoạt động là %@.", destinationName];
+    } else {
+        message = [NSString stringWithFormat:@"RRS này được tạo từ %@. Dữ liệu sẽ được restore vào profile đang hoạt động là %@.", sourceName, destinationName];
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restore từ profile khác?"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Restore"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(__unused UIAlertAction *a) {
+        performRestore();
+    }]];
+    UIViewController *presenter = self.navigationController.topViewController ?: self;
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
 #pragma mark - Sequence sheet
 
 - (void)presentSequenceSheet {
-    if (!self.entries.count) {
+    if (self.scope != PXRRSScopeCurrentProfile) {
+        [self showMessage:@"Chọn profile hiện tại"
+                  message:@"Restore NEXT chỉ hoạt động với danh sách của profile hiện tại."];
+        return;
+    }
+    NSArray *visible = [self visibleEntries];
+    if (!visible.count) {
         [self showMessage:@"Chưa có RRS" message:@"Không có bản RRS nào để restore."];
         return;
     }
@@ -865,7 +1003,7 @@ static UIImage *PXRRSAppPlaceholder(NSString *name) {
                   @"index": @(s.nextIndex + 1),
                   @"size": PXRRSString(n, @"size"),
                   @"available": @(n != nil),
-                  @"total": @(s.entries.count),
+                  @"total": @([s visibleEntries].count),
                   @"begin": @(s.rangeBegin),
                   @"end": @(s.rangeEnd),
                   @"mode": @(s.sequenceMode) };
