@@ -114,7 +114,7 @@ require("tests/PXCoreTelephonyServerIdentityTests.m", [
 require("TLinkIOSTweak/Tweak.x", [
     '#import "PXIdentitySurfaceRegistry.h"',
     'PXIdentitySurfaceEntryForKey(propertyString, PXIdentitySurfaceMobileGestalt)',
-    'PXIdentitySurfaceResolveValue(surfaceEntry, deviceIds)',
+    'PXIdentitySurfaceResolveObject(surfaceEntry, deviceIds)',
     'PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceIORegistry)',
     'PXIOKitCreateRegistryReplacement', '@"IOKitBulk"', '@"IOKitSearch"',
     'PXIdentityExpectedTypeData',

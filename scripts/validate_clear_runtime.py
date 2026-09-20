@@ -380,10 +380,21 @@ def validate_policy_logs(report: ValidationReport, run: Sequence[str], expectati
             )
 
     if expectation.icloud_option is True and expectation.mode in ("Full", "Deep"):
-        report.check(
-            "Clearing exact-authorized iCloud/Accounts data" in joined,
-            "iCloud option ON reaches exact-authorized policy path",
-        )
+        if expectation.bundle.startswith("com.apple."):
+            report.check(
+                "Clear iCloud Data policy not applicable to system target "
+                f"{expectation.bundle}; skipping without failure" in joined,
+                "iCloud option ON safely skips the unsupported system target",
+            )
+            report.check(
+                "Clearing exact-authorized iCloud/Accounts data" not in joined,
+                "system target does not enter exact-authorized iCloud/Accounts mutation",
+            )
+        else:
+            report.check(
+                "Clearing exact-authorized iCloud/Accounts data" in joined,
+                "iCloud option ON reaches exact-authorized policy path",
+            )
     elif expectation.icloud_option is False and expectation.mode in ("Full", "Deep"):
         report.check(
             "Clear iCloud Data policy OFF; skipping iCloud/Accounts cleanup" in joined,

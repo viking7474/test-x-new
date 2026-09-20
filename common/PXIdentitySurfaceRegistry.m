@@ -1,5 +1,6 @@
 #import "PXIdentitySurfaceRegistry.h"
 #import "PXRuntimeOSCompatibility.h"
+#include <math.h>
 
 @interface PXIdentitySurfaceEntry ()
 @property (nonatomic, copy, readwrite) NSString *canonicalKey;
@@ -9,9 +10,19 @@
 @property (nonatomic, copy, readwrite, nullable) NSString *constantValue;
 @property (nonatomic, readwrite) PXIdentitySurfaceMask surfaces;
 @property (nonatomic, readwrite) PXIdentityExpectedType expectedType;
+@property (nonatomic, readwrite) PXIdentityProjectionKind projectionKind;
 @end
 @implementation PXIdentitySurfaceEntry
 @end
+
+static PXIdentitySurfaceEntry *PXEntryWithProjection(NSString *canonicalKey,
+                                                     NSArray<NSString *> *aliases,
+                                                     NSString *toggle,
+                                                     NSString *deviceIDKey,
+                                                     NSString *constantValue,
+                                                     PXIdentitySurfaceMask surfaces,
+                                                     PXIdentityExpectedType expectedType,
+                                                     PXIdentityProjectionKind projectionKind);
 
 static PXIdentitySurfaceEntry *PXEntry(NSString *canonicalKey,
                                        NSArray<NSString *> *aliases,
@@ -20,6 +31,19 @@ static PXIdentitySurfaceEntry *PXEntry(NSString *canonicalKey,
                                        NSString *constantValue,
                                        PXIdentitySurfaceMask surfaces,
                                        PXIdentityExpectedType expectedType) {
+    return PXEntryWithProjection(canonicalKey, aliases, toggle, deviceIDKey,
+                                 constantValue, surfaces, expectedType,
+                                 PXIdentityProjectionDirect);
+}
+
+static PXIdentitySurfaceEntry *PXEntryWithProjection(NSString *canonicalKey,
+                                                     NSArray<NSString *> *aliases,
+                                                     NSString *toggle,
+                                                     NSString *deviceIDKey,
+                                                     NSString *constantValue,
+                                                     PXIdentitySurfaceMask surfaces,
+                                                     PXIdentityExpectedType expectedType,
+                                                     PXIdentityProjectionKind projectionKind) {
     PXIdentitySurfaceEntry *entry = [PXIdentitySurfaceEntry new];
     entry.canonicalKey = canonicalKey;
     entry.aliases = aliases;
@@ -28,6 +52,7 @@ static PXIdentitySurfaceEntry *PXEntry(NSString *canonicalKey,
     entry.constantValue = constantValue;
     entry.surfaces = surfaces;
     entry.expectedType = expectedType;
+    entry.projectionKind = projectionKind;
     return entry;
 }
 
@@ -48,6 +73,35 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
             PXEntry(@"ProductVersion", @[], @"IOSVersion", @"IOSVersion", nil, mg, PXIdentityExpectedTypeString),
             PXEntry(@"ProductBuildVersion", @[@"BuildVersion"], @"IOSVersion", @"IOSBuild", nil, mg, PXIdentityExpectedTypeString),
             PXEntry(@"ReleaseType", @[], @"IOSVersion", nil, @"User", mg, PXIdentityExpectedTypeString),
+
+            // P0-01: typed MobileGestalt parity.  Every entry is backed by an
+            // existing canonical profile field and an existing feature toggle.
+            // Unknown/missing values fail open in the hook and call the original.
+            PXEntry(@"MLBSerialNumber", @[], @"SerialNumber", @"MLBSerialNumber", nil, mg, PXIdentityExpectedTypeString),
+            PXEntryWithProjection(@"UniqueChipID", @[@"ChipID"], @"DeviceModel", @"UniqueChipID", nil, mg,
+                                  PXIdentityExpectedTypeNumber, PXIdentityProjectionUnsignedInteger),
+            PXEntry(@"CPUArchitecture", @[], @"DeviceModel", @"CPUArchitecture", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"HardwarePlatform", @[], @"DeviceModel", @"HwModel", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"UserAssignedDeviceName", @[@"DeviceName", @"ComputerName"], @"DeviceName", @"DeviceName", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"marketing-name", @[@"MarketingName"], @"DeviceModel", @"DeviceModelName", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"InternationalMobileEquipmentIdentity2", @[@"IMEI2"], @"IMEI", @"IMEI2", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"InternationalMobileSubscriberIdentity", @[@"IMSI"], @"IMEI", @"IMSI", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"IntegratedCircuitCardIdentifier", @[@"ICCID"], @"IMEI", @"ICCID", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"BasebandFirmwareVersion", @[@"BasebandVersion"], @"IMEI", @"BasebandVersion", nil, mg, PXIdentityExpectedTypeString),
+            PXEntry(@"WifiAddress", @[@"WiFiAddress"], @"WiFi", @"WiFiAddress", nil, mg, PXIdentityExpectedTypeString),
+            PXEntryWithProjection(@"WifiAddressData", @[@"WiFiAddressData"], @"WiFi", @"WiFiAddress", nil, mg,
+                                  PXIdentityExpectedTypeData, PXIdentityProjectionMACAddressData),
+            PXEntry(@"BluetoothAddress", @[], @"WiFi", @"BluetoothAddress", nil, mg, PXIdentityExpectedTypeString),
+            PXEntryWithProjection(@"main-screen-width", @[], @"DeviceModel", @"ScreenResolution", nil, mg,
+                                  PXIdentityExpectedTypeNumber, PXIdentityProjectionResolutionWidth),
+            PXEntryWithProjection(@"main-screen-height", @[], @"DeviceModel", @"ScreenResolution", nil, mg,
+                                  PXIdentityExpectedTypeNumber, PXIdentityProjectionResolutionHeight),
+            PXEntryWithProjection(@"main-screen-scale", @[], @"DeviceModel", @"DevicePixelRatio", nil, mg,
+                                  PXIdentityExpectedTypeNumber, PXIdentityProjectionPositiveNumber),
+            PXEntryWithProjection(@"main-screen-pitch", @[], @"DeviceModel", @"ScreenDensityPPI", nil, mg,
+                                  PXIdentityExpectedTypeNumber, PXIdentityProjectionPositiveNumber),
+            PXEntryWithProjection(@"BatteryCurrentCapacity", @[], @"Battery", @"BatteryLevel", nil, mg,
+                                  PXIdentityExpectedTypeNumber, PXIdentityProjectionFractionToPercent),
 
             // ManagedConfiguration compatibility getters.  Keep API names as
             // surface keys while resolving every value from the canonical profile.
@@ -156,6 +210,174 @@ NSString *PXIdentitySurfaceResolveValue(PXIdentitySurfaceEntry *entry, NSDiction
     return [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length ? value : nil;
 }
 
+static NSString *PXTrimmedNonemptyString(id raw) {
+    if (![raw isKindOfClass:[NSString class]]) return nil;
+    NSString *trimmed = [(NSString *)raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return trimmed.length ? trimmed : nil;
+}
+
+static NSNumber *PXStrictNumber(id raw) {
+    if ([raw isKindOfClass:[NSNumber class]]) {
+        CFTypeRef cf = (__bridge CFTypeRef)raw;
+        if (CFGetTypeID(cf) == CFBooleanGetTypeID()) return nil;
+        double value = [(NSNumber *)raw doubleValue];
+        return isfinite(value) ? raw : nil;
+    }
+    NSString *text = PXTrimmedNonemptyString(raw);
+    if (!text || ![text isEqualToString:raw]) return nil;
+
+    NSScanner *scanner = [NSScanner scannerWithString:text];
+    scanner.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    if ([text hasPrefix:@"0x"] || [text hasPrefix:@"0X"]) {
+        unsigned long long value = 0;
+        scanner.scanLocation = 2;
+        if (![scanner scanHexLongLong:&value] || !scanner.isAtEnd) return nil;
+        return @(value);
+    }
+    double value = 0;
+    if (![scanner scanDouble:&value] || !scanner.isAtEnd || !isfinite(value)) return nil;
+    return @(value);
+}
+
+static NSNumber *PXStrictUnsignedInteger(id raw) {
+    if ([raw isKindOfClass:[NSNumber class]]) {
+        CFTypeRef cf = (__bridge CFTypeRef)raw;
+        if (CFGetTypeID(cf) == CFBooleanGetTypeID()) return nil;
+        double value = [(NSNumber *)raw doubleValue];
+        if (!isfinite(value) || value <= 0.0 || floor(value) != value) return nil;
+        return raw;
+    }
+
+    NSString *text = PXTrimmedNonemptyString(raw);
+    if (!text || ![text isEqualToString:raw]) return nil;
+
+    BOOL hexadecimal = [text hasPrefix:@"0x"] || [text hasPrefix:@"0X"];
+    NSString *digits = hexadecimal ? [text substringFromIndex:2] : text;
+    NSCharacterSet *allowed = hexadecimal
+        ? [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"]
+        : [NSCharacterSet characterSetWithCharactersInString:@"0123456789"];
+    if (digits.length == 0 || [digits rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound) return nil;
+
+    NSUInteger firstSignificant = 0;
+    while (firstSignificant < digits.length && [digits characterAtIndex:firstSignificant] == '0') firstSignificant++;
+    if (firstSignificant == digits.length) return nil;
+    NSString *significant = [digits substringFromIndex:firstSignificant];
+    NSString *maximum = hexadecimal ? @"FFFFFFFFFFFFFFFF" : @"18446744073709551615";
+    if (significant.length > maximum.length ||
+        (significant.length == maximum.length && [significant caseInsensitiveCompare:maximum] == NSOrderedDescending)) {
+        return nil;
+    }
+
+    NSScanner *scanner = [NSScanner scannerWithString:digits];
+    unsigned long long value = 0;
+    BOOL scanned = hexadecimal ? [scanner scanHexLongLong:&value] : [scanner scanUnsignedLongLong:&value];
+    if (!scanned || !scanner.isAtEnd || value == 0) return nil;
+    return @(value);
+}
+
+static NSNumber *PXStrictBoolean(id raw) {
+    if ([raw isKindOfClass:[NSNumber class]]) return @([(NSNumber *)raw boolValue]);
+    NSString *text = [PXTrimmedNonemptyString(raw) lowercaseString];
+    if ([text isEqualToString:@"true"] || [text isEqualToString:@"1"]) return @YES;
+    if ([text isEqualToString:@"false"] || [text isEqualToString:@"0"]) return @NO;
+    return nil;
+}
+
+static NSData *PXMACAddressData(id raw) {
+    NSString *text = PXTrimmedNonemptyString(raw);
+    if (!text) return nil;
+    NSArray<NSString *> *parts = [text componentsSeparatedByString:@":"];
+    if (parts.count != 6) return nil;
+    uint8_t bytes[6] = {0};
+    for (NSUInteger index = 0; index < parts.count; index++) {
+        NSString *part = parts[index];
+        if (part.length != 2) return nil;
+        NSScanner *scanner = [NSScanner scannerWithString:part];
+        unsigned int value = 0;
+        if (![scanner scanHexInt:&value] || !scanner.isAtEnd || value > 0xFF) return nil;
+        bytes[index] = (uint8_t)value;
+    }
+    return [NSData dataWithBytes:bytes length:sizeof(bytes)];
+}
+
+static NSNumber *PXResolutionComponent(id raw, BOOL height) {
+    NSString *text = PXTrimmedNonemptyString(raw);
+    if (!text) return nil;
+    NSString *normalized = [[text stringByReplacingOccurrencesOfString:@"×" withString:@"x"]
+                            stringByReplacingOccurrencesOfString:@"X" withString:@"x"];
+    normalized = [[normalized componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                  componentsJoinedByString:@""];
+    NSArray<NSString *> *parts = [normalized componentsSeparatedByString:@"x"];
+    if (parts.count != 2) return nil;
+    NSNumber *value = PXStrictNumber(parts[height ? 1 : 0]);
+    return value.doubleValue > 0 ? value : nil;
+}
+
+id PXIdentitySurfaceResolveObject(PXIdentitySurfaceEntry *entry, NSDictionary *deviceIDs) {
+    if (![entry isKindOfClass:[PXIdentitySurfaceEntry class]]) return nil;
+    if (![deviceIDs isKindOfClass:[NSDictionary class]] && !entry.constantValue.length) return nil;
+
+    id raw = entry.constantValue;
+    if (!raw) {
+        if ([entry.toggle isEqualToString:@"IOSVersion"] &&
+            ([entry.deviceIDKey isEqualToString:@"IOSVersion"] || [entry.deviceIDKey isEqualToString:@"IOSBuild"])) {
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            raw = PXReportingIOSValueForDeviceIDKey(entry.deviceIDKey, deviceIDs, bundleID);
+        } else {
+            raw = deviceIDs[entry.deviceIDKey];
+        }
+    }
+    if (!raw || raw == NSNull.null) return nil;
+
+    switch (entry.projectionKind) {
+        case PXIdentityProjectionPositiveNumber: {
+            NSNumber *number = PXStrictNumber(raw);
+            return number.doubleValue > 0.0 ? number : nil;
+        }
+        case PXIdentityProjectionUnsignedInteger:
+            return PXStrictUnsignedInteger(raw);
+        case PXIdentityProjectionMACAddressData:
+            return PXMACAddressData(raw);
+        case PXIdentityProjectionResolutionWidth:
+            return PXResolutionComponent(raw, NO);
+        case PXIdentityProjectionResolutionHeight:
+            return PXResolutionComponent(raw, YES);
+        case PXIdentityProjectionFractionToPercent: {
+            NSNumber *fraction = PXStrictNumber(raw);
+            double value = fraction.doubleValue;
+            if (!fraction || value < 0.0 || value > 1.0) return nil;
+            return @((NSInteger)llround(value * 100.0));
+        }
+        case PXIdentityProjectionDirect:
+            break;
+    }
+
+    switch (entry.expectedType) {
+        case PXIdentityExpectedTypeString:
+            return PXTrimmedNonemptyString(raw);
+        case PXIdentityExpectedTypeData:
+            if ([raw isKindOfClass:[NSData class]] && [(NSData *)raw length]) return [raw copy];
+            return nil;
+        case PXIdentityExpectedTypeNumber:
+            return PXStrictNumber(raw);
+        case PXIdentityExpectedTypeBoolean:
+            return PXStrictBoolean(raw);
+        case PXIdentityExpectedTypeStringOrData:
+            if ([raw isKindOfClass:[NSData class]] && [(NSData *)raw length]) return [raw copy];
+            return PXTrimmedNonemptyString(raw);
+        case PXIdentityExpectedTypeStringOrDataArray: {
+            if (![raw isKindOfClass:[NSArray class]] || [(NSArray *)raw count] == 0) return nil;
+            for (id item in (NSArray *)raw) {
+                BOOL validString = PXTrimmedNonemptyString(item) != nil;
+                BOOL validData = [item isKindOfClass:[NSData class]] && [(NSData *)item length] > 0;
+                if (!validString && !validData) return nil;
+            }
+            return [raw copy];
+        }
+    }
+    return nil;
+}
+
 BOOL PXIdentitySurfaceRegistryIsWellFormed(NSArray<NSString *> **outFailures) {
     NSMutableArray<NSString *> *failures = [NSMutableArray array];
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
@@ -169,6 +391,21 @@ BOOL PXIdentitySurfaceRegistryIsWellFormed(NSArray<NSString *> **outFailures) {
         }
         if (entry.expectedType < PXIdentityExpectedTypeString || entry.expectedType > PXIdentityExpectedTypeStringOrDataArray) {
             [failures addObject:[NSString stringWithFormat:@"%@ has invalid expected type", entry.canonicalKey]];
+        }
+        if (entry.projectionKind > PXIdentityProjectionFractionToPercent) {
+            [failures addObject:[NSString stringWithFormat:@"%@ has invalid projection kind", entry.canonicalKey]];
+        }
+        BOOL dataProjection = entry.projectionKind == PXIdentityProjectionMACAddressData;
+        BOOL numberProjection = entry.projectionKind == PXIdentityProjectionPositiveNumber ||
+                                entry.projectionKind == PXIdentityProjectionUnsignedInteger ||
+                                entry.projectionKind == PXIdentityProjectionResolutionWidth ||
+                                entry.projectionKind == PXIdentityProjectionResolutionHeight ||
+                                entry.projectionKind == PXIdentityProjectionFractionToPercent;
+        if (dataProjection && entry.expectedType != PXIdentityExpectedTypeData) {
+            [failures addObject:[NSString stringWithFormat:@"%@ data projection has non-data ABI", entry.canonicalKey]];
+        }
+        if (numberProjection && entry.expectedType != PXIdentityExpectedTypeNumber) {
+            [failures addObject:[NSString stringWithFormat:@"%@ numeric projection has non-number ABI", entry.canonicalKey]];
         }
         NSArray<NSString *> *keys = [@[entry.canonicalKey] arrayByAddingObjectsFromArray:entry.aliases ?: @[]];
         for (NSString *key in keys) {

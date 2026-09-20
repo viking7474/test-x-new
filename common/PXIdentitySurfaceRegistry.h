@@ -14,8 +14,22 @@ typedef NS_OPTIONS(NSUInteger, PXIdentitySurfaceMask) {
 typedef NS_ENUM(NSUInteger, PXIdentityExpectedType) {
     PXIdentityExpectedTypeString = 1,
     PXIdentityExpectedTypeData,
+    PXIdentityExpectedTypeNumber,
+    PXIdentityExpectedTypeBoolean,
     PXIdentityExpectedTypeStringOrData,
     PXIdentityExpectedTypeStringOrDataArray,
+};
+
+// Most surfaces copy the canonical profile field directly.  A small number of
+// MobileGestalt answers need a deterministic, typed projection from that field.
+typedef NS_ENUM(NSUInteger, PXIdentityProjectionKind) {
+    PXIdentityProjectionDirect = 0,
+    PXIdentityProjectionPositiveNumber,
+    PXIdentityProjectionUnsignedInteger,
+    PXIdentityProjectionMACAddressData,
+    PXIdentityProjectionResolutionWidth,
+    PXIdentityProjectionResolutionHeight,
+    PXIdentityProjectionFractionToPercent,
 };
 
 @interface PXIdentitySurfaceEntry : NSObject
@@ -26,6 +40,7 @@ typedef NS_ENUM(NSUInteger, PXIdentityExpectedType) {
 @property (nonatomic, copy, readonly, nullable) NSString *constantValue;
 @property (nonatomic, readonly) PXIdentitySurfaceMask surfaces;
 @property (nonatomic, readonly) PXIdentityExpectedType expectedType;
+@property (nonatomic, readonly) PXIdentityProjectionKind projectionKind;
 @end
 
 FOUNDATION_EXPORT NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void);
@@ -33,6 +48,10 @@ FOUNDATION_EXPORT PXIdentitySurfaceEntry * _Nullable PXIdentitySurfaceEntryForKe
                                                                                   PXIdentitySurfaceMask surface);
 FOUNDATION_EXPORT NSString * _Nullable PXIdentitySurfaceResolveValue(PXIdentitySurfaceEntry *entry,
                                                                       NSDictionary *deviceIDs);
+/// Typed resolver used by MobileGestalt. Returns NSString/NSData/NSNumber/NSArray,
+/// or nil when the profile source is absent or cannot be represented safely.
+FOUNDATION_EXPORT id _Nullable PXIdentitySurfaceResolveObject(PXIdentitySurfaceEntry *entry,
+                                                               NSDictionary *deviceIDs);
 FOUNDATION_EXPORT BOOL PXIdentitySurfaceRegistryIsWellFormed(NSArray<NSString *> * _Nullable * _Nullable failures);
 
 NS_ASSUME_NONNULL_END

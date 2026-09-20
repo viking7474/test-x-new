@@ -285,6 +285,9 @@ REQUIRED_FIXTURE_KEYS = {
     "DeviceModel", "DeviceModelName", "HwModel", "BoardID", "ModelNumber", "DeviceName",
     "SerialNumber", "MLBSerialNumber", "UDID", "SystemBootUUID", "IDFA",
     "IMEI", "IMEI2", "MEID", "IMSI", "ICCID", "BasebandVersion",
+    "UniqueChipID", "WiFiAddress", "BluetoothAddress", "CPUArchitecture",
+    "ScreenResolution", "ViewportResolution", "DevicePixelRatio", "ScreenDensityPPI",
+    "BatteryLevel",
     "LocaleIdentifier", "Language", "TimeZone",
 }
 missing = sorted(REQUIRED_FIXTURE_KEYS - set(ids))

@@ -3369,6 +3369,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     if (PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)) {
         dryRunOptions |= PXClearOptionMailSharedStore;
     }
+    BOOL iCloudAccountsApplicable = ![bundleID hasPrefix:@"com.apple."];
     NSDictionary *pxDryRunPlan = @{
         @"mode": PXClearModeName(mode) ?: @"unknown",
         @"scopes": @((unsigned long long)PXMigratedFullClearScopes),
@@ -3376,7 +3377,8 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         @"wouldClearKeychain": @YES,
         @"wouldClearURLCredentials": @NO,
         @"wouldRunDataAggregate": @YES,
-        @"wouldClearICloudData": @(PXClearModeIncludesExtendedContainers(mode) &&
+        @"wouldClearICloudData": @(iCloudAccountsApplicable &&
+                                     PXClearModeIncludesExtendedContainers(mode) &&
                                      ((dryRunOptions & PXClearOptionICloudData) != 0)),
         @"wouldClearSafariSharedWebData": @(mode == PXClearModeDeep &&
                                               [bundleID isEqualToString:@"com.apple.mobilesafari"] &&
@@ -4034,9 +4036,14 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     // Skip RootHide var data clearing - uses slow findPathsMatchingPattern
     [self logMessage:@"[AppDataCleaner] Skipping RootHide cleaning (optimization)"];
 
-    // Optional iCloud/Accounts policy is immutable for this Clear request.
-    if (PXClearModeIncludesExtendedContainers(request.mode) &&
-        ((request.options & PXClearOptionICloudData) != 0)) {
+    // Optional iCloud/Accounts policy is immutable for this Clear request. The exact
+    // implementation deliberately rejects com.apple.* targets because they require a
+    // dedicated system-cloud ownership policy. Treat that case as not applicable here
+    // instead of turning a safe policy skip into a failed Clear operation.
+    BOOL iCloudAccountsRequested = PXClearModeIncludesExtendedContainers(request.mode) &&
+        ((request.options & PXClearOptionICloudData) != 0);
+    BOOL iCloudAccountsApplicable = ![bundleID hasPrefix:@"com.apple."];
+    if (iCloudAccountsRequested && iCloudAccountsApplicable) {
         [self logMessage:@"[AppDataCleaner] Clearing exact-authorized iCloud/Accounts data"];
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
         attemptedUnits++;
@@ -4044,6 +4051,9 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
         if (iCloudAccountsSucceeded) { succeededUnits++; [rootSummaries addObject:@"icloud-accounts: succeeded"]; }
         else { failedUnits++; [rootSummaries addObject:@"icloud-accounts: failed"]; if (!firstFailure) firstFailure = PXApplicationDataFailure(PXApplicationDataClearFailureCodeExecutionFailed, @"iCloud/Accounts policy cleanup failed"); }
         [self logMessage:@"[AppDataCleaner] exact iCloud/Accounts cleanup took %.2fs success=%d", CFAbsoluteTimeGetCurrent() - t0, iCloudAccountsSucceeded];
+    } else if (iCloudAccountsRequested) {
+        [rootSummaries addObject:@"icloud-accounts: skipped (system target)"];
+        [self logMessage:@"[AppDataCleaner] Clear iCloud Data policy not applicable to system target %@; skipping without failure", bundleID];
     } else if (PXClearModeIncludesExtendedContainers(request.mode)) {
         [self logMessage:@"[AppDataCleaner] Clear iCloud Data policy OFF; skipping iCloud/Accounts cleanup"];
     }

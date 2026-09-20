@@ -74,6 +74,8 @@ extern "C" {
     static const CFStringRef kMGCarrierBundleInfo = CFSTR("CarrierBundleInfoArray");
     static const CFStringRef kMGCarrierInstallCapability = CFSTR("CarrierInstallCapability");
     static const CFStringRef kMGInternationalMobileEquipmentIdentity = CFSTR("InternationalMobileEquipmentIdentity");
+    static const CFStringRef kMGInternationalMobileEquipmentIdentity2 = CFSTR("InternationalMobileEquipmentIdentity2");
+    static const CFStringRef kMGInternationalMobileSubscriberIdentity = CFSTR("InternationalMobileSubscriberIdentity");
     static const CFStringRef kMGMobileSubscriberCountryCode = CFSTR("MobileSubscriberCountryCode");
     static const CFStringRef kMGMobileSubscriberNetworkCode = CFSTR("MobileSubscriberNetworkCode");
     
@@ -116,6 +118,11 @@ extern "C" {
     static const CFStringRef kMGSupportedDeviceFamilies = CFSTR("SupportedDeviceFamilies");
     static const CFStringRef kMSupportedKeyboards = CFSTR("SupportedKeyboards");
     static const CFStringRef kMGTotalSystemAvailable = CFSTR("TotalSystemAvailable");
+    static const CFStringRef kMGMarketingName = CFSTR("marketing-name");
+    static const CFStringRef kMGMainScreenWidth = CFSTR("main-screen-width");
+    static const CFStringRef kMGMainScreenHeight = CFSTR("main-screen-height");
+    static const CFStringRef kMGMainScreenScale = CFSTR("main-screen-scale");
+    static const CFStringRef kMGMainScreenPitch = CFSTR("main-screen-pitch");
     
 #pragma mark - Capability Information
     

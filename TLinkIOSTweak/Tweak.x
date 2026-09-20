@@ -670,6 +670,41 @@ static CFDataRef PXCreateMGUDIDData(NSString *udid) {
         : NULL;
 }
 
+static CFTypeRef PXMGCreateTypedRegistryValue(PXIdentitySurfaceEntry *entry, id value) {
+    if (!entry || !value) return NULL;
+    switch (entry.expectedType) {
+        case PXIdentityExpectedTypeString:
+            if (![value isKindOfClass:[NSString class]]) return NULL;
+            return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
+        case PXIdentityExpectedTypeData:
+            if (![value isKindOfClass:[NSData class]] || [(NSData *)value length] == 0) return NULL;
+            return CFDataCreate(kCFAllocatorDefault, [(NSData *)value bytes], (CFIndex)[(NSData *)value length]);
+        case PXIdentityExpectedTypeNumber: {
+            if (![value isKindOfClass:[NSNumber class]]) return NULL;
+            CFTypeRef number = (__bridge CFTypeRef)value;
+            if (CFGetTypeID(number) == CFBooleanGetTypeID()) return NULL;
+            return CFRetain(number);
+        }
+        case PXIdentityExpectedTypeBoolean: {
+            if (![value isKindOfClass:[NSNumber class]]) return NULL;
+            CFBooleanRef boolean = [(NSNumber *)value boolValue] ? kCFBooleanTrue : kCFBooleanFalse;
+            return CFRetain(boolean);
+        }
+        case PXIdentityExpectedTypeStringOrData:
+            if ([value isKindOfClass:[NSString class]]) {
+                return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
+            }
+            if ([value isKindOfClass:[NSData class]] && [(NSData *)value length] > 0) {
+                return CFDataCreate(kCFAllocatorDefault, [(NSData *)value bytes], (CFIndex)[(NSData *)value length]);
+            }
+            return NULL;
+        case PXIdentityExpectedTypeStringOrDataArray:
+            if (![value isKindOfClass:[NSArray class]]) return NULL;
+            return CFRetain((__bridge CFTypeRef)value);
+    }
+    return NULL;
+}
+
 static NSString *PXStringFromCFType(CFTypeRef v) {
     if (!v) return nil;
     if (CFGetTypeID(v) == CFStringGetTypeID()) {
@@ -1198,17 +1233,18 @@ static int uname_hook(struct utsname *buf) {
     PXIdentitySurfaceEntry *surfaceEntry =
         PXIdentitySurfaceEntryForKey(propertyString, PXIdentitySurfaceMobileGestalt);
     if (surfaceEntry && [manager isIdentifierEnabled:surfaceEntry.toggle]) {
-        NSString *surfaceValue = PXIdentitySurfaceResolveValue(surfaceEntry, deviceIds);
+        id surfaceValue = PXIdentitySurfaceResolveObject(surfaceEntry, deviceIds);
         BOOL sourceReady = surfaceEntry.constantValue.length > 0;
         if (!sourceReady && surfaceEntry.deviceIDKey.length) {
-            sourceReady = PXRequireKeysAll(deviceIds, @[surfaceEntry.deviceIDKey], @"MG",
-                                           propertyString, currentBundleID, profileId, gen);
-        }
-        if (sourceReady && surfaceValue.length) {
-            if (surfaceEntry.expectedType == PXIdentityExpectedTypeData) {
-                return (CFTypeRef)PXCreateCFDataFromNSString(surfaceValue);
+            sourceReady = surfaceValue != nil;
+            if (!sourceReady) {
+                PXRequireKeysAll(deviceIds, @[surfaceEntry.deviceIDKey], @"MG",
+                                 propertyString, currentBundleID, profileId, gen);
             }
-            return (CFTypeRef)PXCreateCFStringFromNSString(surfaceValue);
+        }
+        if (sourceReady && surfaceValue) {
+            CFTypeRef projected = PXMGCreateTypedRegistryValue(surfaceEntry, surfaceValue);
+            if (projected) return projected;
         }
         return %orig;
     }
@@ -1310,16 +1346,17 @@ static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
 
     PXIdentitySurfaceEntry *entry = PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceMobileGestalt);
     if (entry && [manager isIdentifierEnabled:entry.toggle]) {
-        NSString *value = PXIdentitySurfaceResolveValue(entry, deviceIDs);
+        id value = PXIdentitySurfaceResolveObject(entry, deviceIDs);
         BOOL ready = entry.constantValue.length > 0;
         if (!ready && entry.deviceIDKey.length) {
-            ready = PXRequireKeysAll(deviceIDs, @[entry.deviceIDKey], @"MG", key,
-                                     bundleID, profileID, generation);
+            ready = value != nil;
+            if (!ready) {
+                PXRequireKeysAll(deviceIDs, @[entry.deviceIDKey], @"MG", key,
+                                 bundleID, profileID, generation);
+            }
         }
-        if (!ready || !value.length) return NULL;
-        return entry.expectedType == PXIdentityExpectedTypeData
-            ? (CFTypeRef)PXCreateCFDataFromNSString(value)
-            : (CFTypeRef)PXCreateCFStringFromNSString(value);
+        if (!ready || !value) return NULL;
+        return PXMGCreateTypedRegistryValue(entry, value);
     }
 
     NSDictionary *legacy = @{

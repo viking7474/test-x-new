@@ -125,6 +125,11 @@ require("request.options & PXClearOptionICloudData" in app_wipe_body,
         "iCloud cleanup is not gated by the immutable request option")
 require("Clear iCloud Data policy OFF; skipping iCloud/Accounts cleanup" in app_wipe_body,
         "option-OFF iCloud skip path missing")
+require("iCloudAccountsRequested" in app_wipe_body and
+        "iCloudAccountsApplicable" in app_wipe_body and
+        "icloud-accounts: skipped (system target)" in app_wipe_body and
+        "skipping without failure" in app_wipe_body,
+        "system targets must treat iCloud/Accounts policy as not applicable instead of failed")
 require("options:request.options" in aggregate_body,
         "derived ApplicationData request does not preserve immutable Clear options")
 require('PXReadSecurityBool(@"clearICloudDataEnabled", NO)' in mode_body and
@@ -141,6 +146,9 @@ require("PXClearOptionMailSharedStore" in mode_body and
 require('@"wouldClearMailSharedStore"' in cleaner_m and
         'PXReadSecurityBool(@"clearMailSharedStoreEnabled", NO)' in cleaner_m,
         "dry-run does not expose the explicit Mail shared-store policy")
+require('BOOL iCloudAccountsApplicable = ![bundleID hasPrefix:@"com.apple."]' in cleaner_m and
+        '@"wouldClearICloudData": @(iCloudAccountsApplicable &&' in cleaner_m,
+        "dry-run incorrectly plans iCloud/Accounts cleanup for system targets")
 
 # Exact iCloud/Accounts authorization: no bundle-component/name fuzzy matching may
 # cross the destructive boundary. Unsupported entitlement mappings fail closed.
