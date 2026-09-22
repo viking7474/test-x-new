@@ -2587,10 +2587,18 @@ typedef struct {
     BOOL active;   // spoofing enabled AND this bundle is in scope
     double speed;  // lastReportedSpeed (m/s)
     double course; // lastReportedCourse (degrees)
+    TransportationMode transportationMode;
+    NSUInteger generation;
 } PXSensorSnapshot;
 
 static PXSensorSnapshot PXCurrentSensorSnapshot(void) {
-    PXSensorSnapshot snap = (PXSensorSnapshot){ .active = NO, .speed = 0.0, .course = 0.0 };
+    PXSensorSnapshot snap = (PXSensorSnapshot){
+        .active = NO,
+        .speed = 0.0,
+        .course = 0.0,
+        .transportationMode = TransportationModeStationary,
+        .generation = 0,
+    };
     @try {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         if (!manager || ![manager isSpoofingEnabled]) return snap;
@@ -2599,6 +2607,9 @@ static PXSensorSnapshot PXCurrentSensorSnapshot(void) {
         snap.active = YES;
         snap.speed = manager.lastReportedSpeed;
         snap.course = manager.lastReportedCourse;
+        snap.transportationMode = manager.transportationMode;
+        PXLocationSpoofSnapshot *locationSnapshot = [manager currentSpoofSnapshot];
+        snap.generation = locationSnapshot.generation;
     } @catch (__unused NSException *exception) {
         // Intentionally silent: runs at sensor-callback frequency (no log spam).
     }
@@ -2881,6 +2892,334 @@ static CMDeviceMotionHandler PXWrapDeviceMotionHandler(CMDeviceMotionHandler han
     };
 }
 
+#pragma mark - P0-04 pedometer / altitude projection
+
+// CoreMotion owns these data objects. Keep their pointer, timestamp and coding
+// semantics intact; only getter results are projected through attached payloads.
+static const char kPXPedometerOverrideKey;
+static const char kPXAltitudeOverrideKey;
+
+@interface PXPedometerOverride : NSObject
+@property (nonatomic, strong) NSNumber *activeTime;
+@property (nonatomic, strong) NSNumber *numberOfSteps;
+@property (nonatomic, strong) NSNumber *distance;
+@property (nonatomic, strong) NSNumber *averageActivePace;
+@property (nonatomic, strong) NSNumber *distanceSource;
+@property (nonatomic, strong) NSNumber *elevationAscended;
+@property (nonatomic, strong) NSNumber *elevationDescended;
+@property (nonatomic, strong) NSNumber *currentPace;
+@property (nonatomic, strong) NSNumber *floorsAscended;
+@property (nonatomic, strong) NSNumber *floorsDescended;
+@property (nonatomic, strong) NSNumber *numberOfPushes;
+@property (nonatomic, strong) NSNumber *currentCadence;
+@property (nonatomic, strong) NSNumber *workoutType;
+@end
+
+@implementation PXPedometerOverride
+@end
+
+@interface PXAltitudeOverride : NSObject
+@property (nonatomic, strong) NSNumber *pressure;
+@property (nonatomic, strong) NSNumber *relativeAltitude;
+@end
+
+@implementation PXAltitudeOverride
+@end
+
+static void PXClearPedometerOverride(id data) {
+    if (data) objc_setAssociatedObject(data, &kPXPedometerOverrideKey, nil,
+                                       OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void PXClearAltitudeOverride(id data) {
+    if (data) objc_setAssociatedObject(data, &kPXAltitudeOverrideKey, nil,
+                                       OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static NSString *PXPedometerSessionKey(id data) {
+    @try {
+        NSDate *startDate = [data startDate];
+        if (startDate) {
+            return [NSString stringWithFormat:@"%.3f", startDate.timeIntervalSinceReferenceDate];
+        }
+    } @catch (__unused NSException *exception) {
+    }
+    return @"process-session";
+}
+
+static NSTimeInterval PXPedometerDuration(id data) {
+    @try {
+        NSDate *startDate = [data startDate];
+        NSDate *endDate = [data endDate];
+        if (startDate && endDate) return MAX(0.0, [endDate timeIntervalSinceDate:startDate]);
+    } @catch (__unused NSException *exception) {
+    }
+    return 0.0;
+}
+
+static PXPedometerOverride *PXBuildPedometerOverride(id data, PXSensorSnapshot snap) {
+    if (!data || !snap.active) return nil;
+
+    double speed = (isfinite(snap.speed) && snap.speed > 0.0) ? snap.speed : 0.0;
+    BOOL pedestrian = snap.transportationMode == TransportationModeWalking ||
+                      (speed > 0.0 && speed <= 3.5);
+    double duration = PXPedometerDuration(data);
+    double cadence = pedestrian ? MIN(3.5, MAX(0.5, speed / 0.75)) : 0.0;
+    double activeTime = pedestrian ? duration : 0.0;
+    double steps = floor(activeTime * cadence);
+    double distance = steps * 0.75;
+
+    // CoreMotion live samples normally share a startDate. Clamp cumulative
+    // fields by that session key so reused/out-of-order objects never regress.
+    static NSMutableDictionary<NSString *, NSArray<NSNumber *> *> *sessionMaxima;
+    @synchronized([PXPedometerOverride class]) {
+        if (!sessionMaxima) sessionMaxima = [NSMutableDictionary dictionary];
+        NSString *key = PXPedometerSessionKey(data);
+        NSArray<NSNumber *> *previous = sessionMaxima[key];
+        if (previous.count == 3) {
+            activeTime = MAX(activeTime, previous[0].doubleValue);
+            steps = MAX(steps, previous[1].doubleValue);
+            distance = MAX(distance, previous[2].doubleValue);
+        }
+        sessionMaxima[key] = @[@(activeTime), @(steps), @(distance)];
+        if (sessionMaxima.count > 32) [sessionMaxima removeObjectForKey:sessionMaxima.allKeys.firstObject];
+    }
+
+    double pace = (pedestrian && speed > 0.0) ? (1.0 / speed) : 0.0;
+    PXPedometerOverride *payload = [PXPedometerOverride new];
+    payload.activeTime = @(activeTime);
+    payload.numberOfSteps = @((NSUInteger)steps);
+    payload.distance = @(distance);
+    payload.averageActivePace = @(pace);
+    payload.distanceSource = @0;
+    payload.elevationAscended = @0;
+    payload.elevationDescended = @0;
+    payload.currentPace = @(pace);
+    payload.floorsAscended = @0;
+    payload.floorsDescended = @0;
+    payload.numberOfPushes = @0;
+    payload.currentCadence = @(cadence);
+    payload.workoutType = @(snap.transportationMode);
+    return payload;
+}
+
+static PXAltitudeOverride *PXBuildAltitudeOverride(PXSensorSnapshot snap,
+                                                   NSUInteger baselineGeneration) {
+    if (!snap.active) return nil;
+    NSUInteger delta = snap.generation >= baselineGeneration
+        ? snap.generation - baselineGeneration
+        : 0;
+    double relativeAltitude = 0.0;
+    if (snap.transportationMode == TransportationModeWalking) {
+        relativeAltitude = MIN(30.0, (double)delta * 0.05);
+    } else if (snap.transportationMode == TransportationModeDriving) {
+        relativeAltitude = sin((double)delta * 0.10) * 2.0;
+    }
+
+    // International Standard Atmosphere approximation. CMAltitudeData reports
+    // pressure in kilopascals, not hPa.
+    double ratio = MAX(0.01, 1.0 - (relativeAltitude / 44330.0));
+    double pressureKPa = 101.325 * pow(ratio, 5.255);
+    PXAltitudeOverride *payload = [PXAltitudeOverride new];
+    payload.relativeAltitude = @(relativeAltitude);
+    payload.pressure = @(pressureKPa);
+    return payload;
+}
+
+static id PXTransformPedometerData(id data, PXSensorSnapshot snap) {
+    if (!data) return data;
+    if (!snap.active) { PXClearPedometerOverride(data); return data; }
+    PXPedometerOverride *payload = PXBuildPedometerOverride(data, snap);
+    objc_setAssociatedObject(data, &kPXPedometerOverrideKey, payload,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return data;
+}
+
+static CMAltitudeData *PXTransformAltitudeData(CMAltitudeData *data,
+                                               PXSensorSnapshot snap,
+                                               NSUInteger baselineGeneration) {
+    if (!data) return data;
+    if (!snap.active) { PXClearAltitudeOverride(data); return data; }
+    PXAltitudeOverride *payload = PXBuildAltitudeOverride(snap, baselineGeneration);
+    objc_setAssociatedObject(data, &kPXAltitudeOverrideKey, payload,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return data;
+}
+
+static CMPedometerHandler PXWrapPedometerHandler(CMPedometerHandler handler) {
+    if (!handler) return handler;
+    return ^(CMPedometerData *data, NSError *error) {
+        if (error || !data) {
+            if (data) PXClearPedometerOverride(data);
+            handler(data, error);
+            return;
+        }
+        handler(PXTransformPedometerData(data, PXCurrentSensorSnapshot()), error);
+    };
+}
+
+static CMAltitudeHandler PXWrapAltitudeHandler(CMAltitudeHandler handler) {
+    if (!handler) return handler;
+    __block NSUInteger baselineGeneration = NSUIntegerMax;
+    return ^(CMAltitudeData *data, NSError *error) {
+        if (error || !data) {
+            if (data) PXClearAltitudeOverride(data);
+            handler(data, error);
+            return;
+        }
+        PXSensorSnapshot snap = PXCurrentSensorSnapshot();
+        if (snap.active) {
+            @synchronized(handler) {
+                if (baselineGeneration == NSUIntegerMax) baselineGeneration = snap.generation;
+            }
+        }
+        NSUInteger baseline = baselineGeneration == NSUIntegerMax
+            ? snap.generation
+            : baselineGeneration;
+        handler(PXTransformAltitudeData(data, snap, baseline), error);
+    };
+}
+
+typedef NS_ENUM(NSUInteger, PXCoreMotionNumberField) {
+    PXCoreMotionNumberActiveTime,
+    PXCoreMotionNumberSteps,
+    PXCoreMotionNumberDistance,
+    PXCoreMotionNumberAverageActivePace,
+    PXCoreMotionNumberDistanceSource,
+    PXCoreMotionNumberElevationAscended,
+    PXCoreMotionNumberElevationDescended,
+    PXCoreMotionNumberCurrentPace,
+    PXCoreMotionNumberFloorsAscended,
+    PXCoreMotionNumberFloorsDescended,
+    PXCoreMotionNumberPushes,
+    PXCoreMotionNumberCurrentCadence,
+    PXCoreMotionNumberWorkoutType,
+    PXCoreMotionNumberPressure,
+    PXCoreMotionNumberRelativeAltitude,
+};
+
+typedef struct {
+    const char *className;
+    const char *selectorName;
+    PXCoreMotionNumberField field;
+    IMP original;
+} PXCoreMotionNumberGetterRule;
+
+static PXCoreMotionNumberGetterRule gPXCoreMotionNumberGetterRules[] = {
+    { "CMPedometerData", "activeTime", PXCoreMotionNumberActiveTime, NULL },
+    { "CMPedometerData", "numberOfSteps", PXCoreMotionNumberSteps, NULL },
+    { "CMPedometerData", "distance", PXCoreMotionNumberDistance, NULL },
+    { "CMPedometerData", "averageActivePace", PXCoreMotionNumberAverageActivePace, NULL },
+    { "CMPedometerData", "distanceSource", PXCoreMotionNumberDistanceSource, NULL },
+    { "CMPedometerData", "elevationAscended", PXCoreMotionNumberElevationAscended, NULL },
+    { "CMPedometerData", "elevationDescended", PXCoreMotionNumberElevationDescended, NULL },
+    { "CMPedometerData", "currentPace", PXCoreMotionNumberCurrentPace, NULL },
+    { "CMPedometerData", "floorsAscended", PXCoreMotionNumberFloorsAscended, NULL },
+    { "CMPedometerData", "floorsDescended", PXCoreMotionNumberFloorsDescended, NULL },
+    { "CMPedometerData", "numberOfPushes", PXCoreMotionNumberPushes, NULL },
+    { "CMPedometerData", "currentCadence", PXCoreMotionNumberCurrentCadence, NULL },
+    { "CMPedometerData", "workoutType", PXCoreMotionNumberWorkoutType, NULL },
+    { "CMAltitudeData", "pressure", PXCoreMotionNumberPressure, NULL },
+    { "CMAltitudeData", "relativeAltitude", PXCoreMotionNumberRelativeAltitude, NULL },
+};
+
+static PXCoreMotionNumberGetterRule *PXCoreMotionRuleForSelector(SEL selector) {
+    for (NSUInteger index = 0;
+         index < sizeof(gPXCoreMotionNumberGetterRules) / sizeof(gPXCoreMotionNumberGetterRules[0]);
+         index++) {
+        PXCoreMotionNumberGetterRule *rule = &gPXCoreMotionNumberGetterRules[index];
+        if (sel_isEqual(selector, sel_registerName(rule->selectorName))) return rule;
+    }
+    return NULL;
+}
+
+static NSNumber *PXCoreMotionProjectedNumberGetter(id self, SEL _cmd) {
+    PXCoreMotionNumberGetterRule *rule = PXCoreMotionRuleForSelector(_cmd);
+    NSNumber *originalValue = (rule && rule->original)
+        ? ((NSNumber *(*)(id, SEL))rule->original)(self, _cmd)
+        : nil;
+    if (!rule) return originalValue;
+
+    PXSensorSnapshot snap = PXCurrentSensorSnapshot();
+    if (!snap.active) {
+        if (rule->field <= PXCoreMotionNumberWorkoutType) PXClearPedometerOverride(self);
+        else PXClearAltitudeOverride(self);
+        return originalValue;
+    }
+
+    if (rule->field <= PXCoreMotionNumberWorkoutType) {
+        PXPedometerOverride *payload = objc_getAssociatedObject(self, &kPXPedometerOverrideKey);
+        if (!payload) {
+            payload = PXBuildPedometerOverride(self, snap);
+            objc_setAssociatedObject(self, &kPXPedometerOverrideKey, payload,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (!payload) return originalValue;
+        switch (rule->field) {
+            case PXCoreMotionNumberActiveTime: return payload.activeTime;
+            case PXCoreMotionNumberSteps: return payload.numberOfSteps;
+            case PXCoreMotionNumberDistance: return payload.distance;
+            case PXCoreMotionNumberAverageActivePace: return payload.averageActivePace;
+            case PXCoreMotionNumberDistanceSource: return payload.distanceSource;
+            case PXCoreMotionNumberElevationAscended: return payload.elevationAscended;
+            case PXCoreMotionNumberElevationDescended: return payload.elevationDescended;
+            case PXCoreMotionNumberCurrentPace: return payload.currentPace;
+            case PXCoreMotionNumberFloorsAscended: return payload.floorsAscended;
+            case PXCoreMotionNumberFloorsDescended: return payload.floorsDescended;
+            case PXCoreMotionNumberPushes: return payload.numberOfPushes;
+            case PXCoreMotionNumberCurrentCadence: return payload.currentCadence;
+            case PXCoreMotionNumberWorkoutType: return payload.workoutType;
+            default: return originalValue;
+        }
+    }
+
+    PXAltitudeOverride *payload = objc_getAssociatedObject(self, &kPXAltitudeOverrideKey);
+    if (!payload) {
+        payload = PXBuildAltitudeOverride(snap, snap.generation);
+        objc_setAssociatedObject(self, &kPXAltitudeOverrideKey, payload,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (!payload) return originalValue;
+    return rule->field == PXCoreMotionNumberPressure
+        ? payload.pressure
+        : payload.relativeAltitude;
+}
+
+static BOOL PXCoreMotionObjectGetterEncodingMatches(Method method) {
+    if (!method || method_getNumberOfArguments(method) != 2) return NO;
+    char returnType[32] = {0};
+    char selfType[8] = {0};
+    char commandType[8] = {0};
+    method_getReturnType(method, returnType, sizeof(returnType));
+    method_getArgumentType(method, 0, selfType, sizeof(selfType));
+    method_getArgumentType(method, 1, commandType, sizeof(commandType));
+    return returnType[0] == '@' && selfType[0] == '@' && commandType[0] == ':';
+}
+
+static void PXInstallPedometerAltitudeDirectHooks(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        for (NSUInteger index = 0;
+             index < sizeof(gPXCoreMotionNumberGetterRules) / sizeof(gPXCoreMotionNumberGetterRules[0]);
+             index++) {
+            PXCoreMotionNumberGetterRule *rule = &gPXCoreMotionNumberGetterRules[index];
+            Class cls = objc_getClass(rule->className);
+            SEL selector = sel_registerName(rule->selectorName);
+            Method method = cls ? class_getInstanceMethod(cls, selector) : NULL;
+            const char *imageName = cls ? class_getImageName(cls) : NULL;
+            if (!cls || !selector || !method || !imageName ||
+                strstr(imageName, "/System/Library/Frameworks/CoreMotion.framework/") == NULL ||
+                !PXCoreMotionObjectGetterEncodingMatches(method)) {
+                continue;
+            }
+            MSHookMessageEx(cls,
+                            selector,
+                            (IMP)PXCoreMotionProjectedNumberGetter,
+                            &rule->original);
+        }
+    });
+}
+
 // Add new group for sensor data integration
 %group SensorSpoofing
 
@@ -3043,129 +3382,33 @@ static CMDeviceMotionHandler PXWrapDeviceMotionHandler(CMDeviceMotionHandler han
 
 %end // End CMMotionManager hook
 
-// Add barometer/altitude data spoofing
-// P1 FIX (altimeter key / thread hang): single file-scope associated-object key shared by
-// start/stop. Previously each method declared its OWN local `static char kAltimeterTimerKey;`
-// with a distinct address, so stopRelativeAltitudeUpdates read a different key than
-// startRelativeAltitudeUpdatesToQueue:withHandler: wrote -> the repeating NSTimer was never
-// found or invalidated -> CFRunLoopRun() kept the background thread alive forever (thread hang).
-static char kAltimeterTimerKey;
-%hook CMAltimeter
+%hook CMPedometer
 
-- (void)startRelativeAltitudeUpdatesToQueue:(NSOperationQueue *)queue withHandler:(void (^)(CMAltitudeData *altitudeData, NSError *error))handler {
-    @try {
-        // Check if we should spoof
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        if (!manager || ![manager isSpoofingEnabled]) {
-            %orig;
-            return;
-        }
-        
-        // Get the current bundle ID
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
-            %orig;
-            return;
-        }
-        
-        // Instead of calling original, we'll handle the queue operations ourselves
-        [self stopRelativeAltitudeUpdates]; // Stop any existing updates
-        
-        // Create a strong reference to the handler to prevent it from being deallocated
-        void (^strongHandler)(CMAltitudeData *, NSError *) = [handler copy];
-        
-        // Keep a reference to the timer in an associated object to prevent it from being deallocated
-        // NOTE: uses the file-scope kAltimeterTimerKey (shared with stopRelativeAltitudeUpdates)
-        
-        // Create our own timer to simulate altitude updates
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            // Create a timer for regular updates
-            NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
-                @try {
-                    if (!manager.isSpoofingEnabled) {
-                        [timer invalidate];
-                        objc_setAssociatedObject(self, &kAltimeterTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                        return;
-                    }
-                    
-                    // Create synthetic altitude data
-                    CMAltitudeData *altData = [[objc_getClass("CMAltitudeData") alloc] init];
-                    
-                    // Get current transportation mode and simulate appropriate pressure changes
-                    double relativeAltitude = 0.0;
-                    double pressure = 1013.25; // Standard pressure at sea level in hPa
-                    
-                    // Adjust based on transportation mode
-                    if (manager.transportationMode == TransportationModeDriving) {
-                        // More altitude variations for driving
-                        relativeAltitude = ((arc4random() % 100) - 50) / 10.0; // ±5 meters
-                    } else if (manager.transportationMode == TransportationModeWalking) {
-                        // Slight variations for walking
-                        relativeAltitude = ((arc4random() % 50) - 25) / 10.0; // ±2.5 meters
-                    } else {
-                        // Minimal variations for stationary
-                        relativeAltitude = ((arc4random() % 20) - 10) / 10.0; // ±1 meter
-                    }
-                    
-                    // Calculate pressure from altitude (simplified model)
-                    // Standard formula: P = P0 * exp(-g * M * h / (R * T))
-                    // Simplified for small changes: approximately -0.12 hPa per meter of height
-                    pressure = 1013.25 - (relativeAltitude * 0.12);
-                    
-                    // Set the values using KVC safely
-                    @try {
-                        [altData setValue:@(relativeAltitude) forKey:@"relativeAltitude"];
-                        [altData setValue:@(pressure) forKey:@"pressure"];
-                    } @catch (NSException *exception) {
-                        PXLog(@"[WeaponX] Exception setting altitude data values: %@", exception);
-                    }
-                    
-                    // Queue operation to deliver update
-                    if (queue && strongHandler) {
-                        [queue addOperationWithBlock:^{
-                            strongHandler(altData, nil);
-                        }];
-                    }
-                } @catch (NSException *exception) {
-                    PXLog(@"[WeaponX] Exception in altimeter update timer: %@", exception);
-                }
-            }];
-            
-            // Store the timer as an associated object on self to keep it alive
-            objc_setAssociatedObject(self, &kAltimeterTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            
-            // Run the timer on the current runloop
-            NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
-            [currentRunLoop addTimer:timer forMode:NSDefaultRunLoopMode];
-            
-            // Keep the runloop alive - this will block this thread
-            // We're using a separate dispatch_async so this is okay
-            CFRunLoopRun();
-        });
-        
-        PXLog(@"[WeaponX] Started custom altitude updates");
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in startRelativeAltitudeUpdatesToQueue: %@", exception);
-        %orig; // Fall back to original implementation
-    }
+- (void)startPedometerUpdatesFromDate:(NSDate *)start
+                          withHandler:(CMPedometerHandler)handler {
+    %orig(start, PXWrapPedometerHandler(handler));
 }
 
-// Add a hook for stopRelativeAltitudeUpdates to properly clean up our timer
+- (void)queryPedometerDataFromDate:(NSDate *)start
+                            toDate:(NSDate *)end
+                       withHandler:(CMPedometerHandler)handler {
+    %orig(start, end, PXWrapPedometerHandler(handler));
+}
+
+%end
+
+
+%hook CMAltimeter
+
+- (void)startRelativeAltitudeUpdatesToQueue:(NSOperationQueue *)queue
+                                withHandler:(CMAltitudeHandler)handler {
+    // CoreMotion retains ownership of scheduling, cardinality and object
+    // creation. The wrapper runs on the original queue and returns the same
+    // CMAltitudeData pointer with an immutable getter payload attached.
+    %orig(queue, PXWrapAltitudeHandler(handler));
+}
+
 - (void)stopRelativeAltitudeUpdates {
-    @try {
-        // Clean up our custom timer if it exists
-        // NOTE: uses the file-scope kAltimeterTimerKey (shared with startRelativeAltitudeUpdatesToQueue:withHandler:)
-        NSTimer *timer = objc_getAssociatedObject(self, &kAltimeterTimerKey);
-        if (timer) {
-            [timer invalidate];
-            objc_setAssociatedObject(self, &kAltimeterTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            PXLog(@"[WeaponX] Stopped custom altitude updates");
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in stopRelativeAltitudeUpdates: %@", exception);
-    }
-    
-    // Call original implementation to ensure proper cleanup
     %orig;
 }
 
@@ -4428,6 +4671,7 @@ static char* hook_GSSystemGetSerialNo(void) {
     // Initialize sensor data spoofing hooks
     PXFileDebugAIDA64Log("[Tweak.ctor] before init SensorSpoofing");
     %init(SensorSpoofing);
+    PXInstallPedometerAltitudeDirectHooks();
     PXFileDebugAIDA64Log("[Tweak.ctor] after init SensorSpoofing");
 #if defined(DEBUG) || defined(PX_SENSOR_SELFTEST)
     // Validate the raw-sensor transformer pipeline once at load (OFF preserves pointer,

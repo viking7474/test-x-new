@@ -25,7 +25,8 @@ for token in (
     "%hook NSURLSessionConfiguration",
     "%hook NWPath",
     "%hook NWInterface",
-    'NSClassFromString(@"NEVPNConnection")',
+    "PXInstallVPNManagerRuntimeHooks",
+    "PXInstallDiscoveryRuntimeHooks",
 ):
     require(token in vpn, f"VPN/proxy runtime surface is missing: {token}")
 
@@ -83,7 +84,7 @@ for forbidden in (
             f"alternate MobileGestalt hook must avoid the Logos parser path: {forbidden}")
 
 sensor_start = tweak.index("#pragma mark - Sensor transform pipeline")
-sensor_end = tweak.index("// Add barometer/altitude data spoofing", sensor_start)
+sensor_end = tweak.index("%hook CMPedometer", sensor_start)
 sensor = tweak[sensor_start:sensor_end]
 for token in (
     "PXTransformDeviceMotionData",

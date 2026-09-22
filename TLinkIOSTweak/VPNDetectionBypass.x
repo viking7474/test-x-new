@@ -12,19 +12,32 @@
 #import "PXScope.h"
 #import "PXNativeHookCoordinator.h"
 #import "PXPACProxySanitizer.h"
+#import "PXRuntimeUtilities.h"
 
 static NSString *const kPXVPNSecuritySettingsPath = @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist";
+static NSString *const kPXVPNBypassSettingKey = @"vpnDetectionBypassEnabled";
+static NSString *const kPXDiscoverySuppressionSettingKey = @"discoverySuppressionEnabled";
 
-static BOOL PXVPNBypassActive(void) {
+static BOOL PXNetworkPrivacySettingActive(NSString *key) {
     @try {
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         NSString *processName = NSProcessInfo.processInfo.processName;
         if (!PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack)) return NO;
         NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kPXVPNSecuritySettingsPath];
-        return [settings[@"vpnDetectionBypassEnabled"] boolValue];
+        return [settings[key] boolValue];
     } @catch (__unused NSException *exception) {
         return NO;
     }
+}
+
+static BOOL PXVPNBypassActive(void) {
+    return PXNetworkPrivacySettingActive(kPXVPNBypassSettingKey);
+}
+
+static BOOL PXDiscoverySuppressionActive(void) {
+    // This capability is deliberately independent and defaults to disabled
+    // because a missing preference value evaluates to false.
+    return PXNetworkPrivacySettingActive(kPXDiscoverySuppressionSettingKey);
 }
 
 static BOOL PXVPNInterfaceNameIsSensitive(const char *name) {
@@ -153,10 +166,207 @@ static CFArrayRef PXHookCFNetworkCopyProxiesForAutoConfigurationScript(CFStringR
 
 %end
 
-static NSInteger (*PXOrigNEVPNConnectionStatus)(id, SEL) = NULL;
-static NSInteger PXHookNEVPNConnectionStatus(id self, SEL _cmd) {
-    if (PXVPNBypassActive()) return 1; // NEVPNStatusDisconnected
-    return PXOrigNEVPNConnectionStatus ? PXOrigNEVPNConnectionStatus(self, _cmd) : 0;
+typedef NS_ENUM(NSUInteger, PXVPNRuntimeHookKind) {
+    PXVPNRuntimeHookObject,
+    PXVPNRuntimeHookBool,
+    PXVPNRuntimeHookStatus,
+    PXVPNRuntimeHookLoadManagers,
+};
+
+typedef struct {
+    const char *className;
+    const char *selectorName;
+    const char *imageFragment;
+    BOOL classMethod;
+    PXVPNRuntimeHookKind kind;
+    IMP original;
+} PXVPNRuntimeRule;
+
+static PXVPNRuntimeRule gPXVPNRuntimeRules[] = {
+    { "NEVPNManager", "+sharedManager", "/NetworkExtension.framework/", YES, PXVPNRuntimeHookObject, NULL },
+    { "NEVPNManager", "+loadedManagers", "/NetworkExtension.framework/", YES, PXVPNRuntimeHookObject, NULL },
+    { "NEVPNManager", "connection", "/NetworkExtension.framework/", NO, PXVPNRuntimeHookObject, NULL },
+    { "NEVPNManager", "isEnabled", "/NetworkExtension.framework/", NO, PXVPNRuntimeHookBool, NULL },
+    { "NETunnelProviderManager", "+loadAllFromPreferencesWithCompletionHandler:", "/NetworkExtension.framework/", YES, PXVPNRuntimeHookLoadManagers, NULL },
+    { "NEVPNConnection", "status", "/NetworkExtension.framework/", NO, PXVPNRuntimeHookStatus, NULL },
+};
+
+typedef NS_ENUM(NSUInteger, PXDiscoveryRuntimeHookKind) {
+    PXDiscoveryRuntimeHookVoid0,
+    PXDiscoveryRuntimeHookVoid2,
+};
+
+typedef struct {
+    const char *className;
+    const char *selectorName;
+    const char *imageFragment;
+    PXDiscoveryRuntimeHookKind kind;
+    IMP original;
+} PXDiscoveryRuntimeRule;
+
+static PXDiscoveryRuntimeRule gPXDiscoveryRuntimeRules[] = {
+    { "MCNearbyServiceBrowser", "startBrowsingForPeers", "/MultipeerConnectivity.framework/", PXDiscoveryRuntimeHookVoid0, NULL },
+    { "MCNearbyServiceBrowser", "syncStartBrowsingForPeers", "/MultipeerConnectivity.framework/", PXDiscoveryRuntimeHookVoid0, NULL },
+    { "MCNearbyServiceBrowser", "syncStopBrowsingForPeers", "/MultipeerConnectivity.framework/", PXDiscoveryRuntimeHookVoid0, NULL },
+    { "CBCentralManager", "scanForPeripheralsWithServices:options:", "/CoreBluetooth.framework/", PXDiscoveryRuntimeHookVoid2, NULL },
+    { "NSNetServiceBrowser", "searchForBrowsableDomains", "/Foundation.framework/", PXDiscoveryRuntimeHookVoid0, NULL },
+    { "NSNetServiceBrowser", "searchForRegistrationDomains", "/Foundation.framework/", PXDiscoveryRuntimeHookVoid0, NULL },
+    { "NSNetServiceBrowser", "searchForServicesOfType:inDomain:", "/Foundation.framework/", PXDiscoveryRuntimeHookVoid2, NULL },
+    { "NSNetServiceBrowser", "searchForAllDomains", "/Foundation.framework/", PXDiscoveryRuntimeHookVoid0, NULL },
+};
+
+static const char *PXRuntimeSelectorName(const char *selectorName) {
+    return selectorName && selectorName[0] == '+' ? selectorName + 1 : selectorName;
+}
+
+static BOOL PXRuntimeMethodOwnedByImage(Class cls, const char *imageFragment) {
+    const char *imageName = cls ? class_getImageName(cls) : NULL;
+    return imageName && imageFragment && strstr(imageName, imageFragment) != NULL;
+}
+
+static BOOL PXRuntimeMethodHasShape(Method method, NSUInteger argumentCount, char returnType, BOOL objectArguments) {
+    if (!method || method_getNumberOfArguments(method) != argumentCount) return NO;
+    char result[8] = {0};
+    method_getReturnType(method, result, sizeof(result));
+    if (result[0] != returnType) return NO;
+    if (!objectArguments) return YES;
+    for (NSUInteger index = 2; index < argumentCount; index++) {
+        char argument[8] = {0};
+        method_getArgumentType(method, index, argument, sizeof(argument));
+        if (argument[0] != '@') return NO;
+    }
+    return YES;
+}
+
+static BOOL PXVPNRuleEncodingIsValid(PXVPNRuntimeRule *rule, Method method) {
+    if (!rule || !method) return NO;
+    if (rule->kind == PXVPNRuntimeHookObject) return PXRuntimeMethodHasShape(method, 2, '@', NO);
+    if (rule->kind == PXVPNRuntimeHookLoadManagers) return PXRuntimeMethodHasShape(method, 3, 'v', YES);
+    if (method_getNumberOfArguments(method) != 2) return NO;
+    char result[8] = {0};
+    method_getReturnType(method, result, sizeof(result));
+    if (rule->kind == PXVPNRuntimeHookBool) return result[0] == 'B' || result[0] == 'c';
+    return result[0] == 'q' || result[0] == 'i' || result[0] == 'l';
+}
+
+static PXVPNRuntimeRule *PXVPNRuleForSelector(SEL selector, PXVPNRuntimeHookKind kind) {
+    for (NSUInteger index = 0; index < sizeof(gPXVPNRuntimeRules) / sizeof(gPXVPNRuntimeRules[0]); index++) {
+        PXVPNRuntimeRule *rule = &gPXVPNRuntimeRules[index];
+        if (rule->kind == kind && sel_isEqual(selector, sel_registerName(PXRuntimeSelectorName(rule->selectorName)))) return rule;
+    }
+    return NULL;
+}
+
+static id PXHookVPNObjectGetter(id self, SEL _cmd) {
+    PXVPNRuntimeRule *rule = PXVPNRuleForSelector(_cmd, PXVPNRuntimeHookObject);
+    id original = rule && rule->original ? ((id (*)(id, SEL))rule->original)(self, _cmd) : nil;
+    if (!PXVPNBypassActive()) return original;
+    if (sel_isEqual(_cmd, sel_registerName("loadedManagers"))) return @[];
+    // Preserve the framework-owned singleton/connection identities. Their
+    // observable state is projected by -isEnabled and -status below.
+    return original;
+}
+
+static BOOL PXHookVPNBoolGetter(id self, SEL _cmd) {
+    PXVPNRuntimeRule *rule = PXVPNRuleForSelector(_cmd, PXVPNRuntimeHookBool);
+    BOOL original = rule && rule->original ? ((BOOL (*)(id, SEL))rule->original)(self, _cmd) : NO;
+    return PXVPNBypassActive() ? NO : original;
+}
+
+static NSInteger PXHookVPNStatusGetter(id self, SEL _cmd) {
+    PXVPNRuntimeRule *rule = PXVPNRuleForSelector(_cmd, PXVPNRuntimeHookStatus);
+    NSInteger original = rule && rule->original ? ((NSInteger (*)(id, SEL))rule->original)(self, _cmd) : 0;
+    return PXVPNBypassActive() ? 1 : original; // NEVPNStatusDisconnected
+}
+
+typedef void (^PXVPNManagersCompletion)(NSArray *managers, NSError *error);
+static void PXHookVPNLoadManagers(id self, SEL _cmd, PXVPNManagersCompletion completion) {
+    PXVPNRuntimeRule *rule = PXVPNRuleForSelector(_cmd, PXVPNRuntimeHookLoadManagers);
+    void (*original)(id, SEL, PXVPNManagersCompletion) = rule && rule->original
+        ? (void (*)(id, SEL, PXVPNManagersCompletion))rule->original : NULL;
+    if (!original) return;
+    if (!PXVPNBypassActive() || !completion) {
+        original(self, _cmd, completion);
+        return;
+    }
+
+    // Let NetworkExtension own dispatch queue and callback cardinality. Only
+    // project the manager list, and preserve any framework error unchanged.
+    PXVPNManagersCompletion projected = ^(NSArray *managers, NSError *error) {
+        (void)managers;
+        completion(@[], error);
+    };
+    original(self, _cmd, projected);
+}
+
+static PXDiscoveryRuntimeRule *PXDiscoveryRuleForSelector(SEL selector, PXDiscoveryRuntimeHookKind kind) {
+    for (NSUInteger index = 0; index < sizeof(gPXDiscoveryRuntimeRules) / sizeof(gPXDiscoveryRuntimeRules[0]); index++) {
+        PXDiscoveryRuntimeRule *rule = &gPXDiscoveryRuntimeRules[index];
+        if (rule->kind == kind && sel_isEqual(selector, sel_registerName(rule->selectorName))) return rule;
+    }
+    return NULL;
+}
+
+static void PXHookDiscoveryVoid0(id self, SEL _cmd) {
+    PXDiscoveryRuntimeRule *rule = PXDiscoveryRuleForSelector(_cmd, PXDiscoveryRuntimeHookVoid0);
+    if (!PXDiscoverySuppressionActive()) {
+        if (rule && rule->original) ((void (*)(id, SEL))rule->original)(self, _cmd);
+        return;
+    }
+    if (PXLogOnceClaim(@"VPNDiscovery.suppressed", NSStringFromSelector(_cmd))) {
+        PXLog(@"[VPNBypass] Suppressed discovery selector %@", NSStringFromSelector(_cmd));
+    }
+}
+
+static void PXHookDiscoveryVoid2(id self, SEL _cmd, id first, id second) {
+    PXDiscoveryRuntimeRule *rule = PXDiscoveryRuleForSelector(_cmd, PXDiscoveryRuntimeHookVoid2);
+    if (!PXDiscoverySuppressionActive()) {
+        if (rule && rule->original) ((void (*)(id, SEL, id, id))rule->original)(self, _cmd, first, second);
+        return;
+    }
+    if (PXLogOnceClaim(@"VPNDiscovery.suppressed", NSStringFromSelector(_cmd))) {
+        PXLog(@"[VPNBypass] Suppressed discovery selector %@", NSStringFromSelector(_cmd));
+    }
+}
+
+static NSUInteger PXInstallVPNManagerRuntimeHooks(void) {
+    NSUInteger installed = 0;
+    for (NSUInteger index = 0; index < sizeof(gPXVPNRuntimeRules) / sizeof(gPXVPNRuntimeRules[0]); index++) {
+        PXVPNRuntimeRule *rule = &gPXVPNRuntimeRules[index];
+        Class cls = objc_getClass(rule->className);
+        if (!cls || !PXRuntimeMethodOwnedByImage(cls, rule->imageFragment)) continue;
+        Class target = rule->classMethod ? object_getClass((id)cls) : cls;
+        SEL selector = sel_registerName(PXRuntimeSelectorName(rule->selectorName));
+        Method method = target ? class_getInstanceMethod(target, selector) : NULL;
+        if (!PXVPNRuleEncodingIsValid(rule, method)) continue;
+
+        IMP replacement = NULL;
+        if (rule->kind == PXVPNRuntimeHookObject) replacement = (IMP)PXHookVPNObjectGetter;
+        else if (rule->kind == PXVPNRuntimeHookBool) replacement = (IMP)PXHookVPNBoolGetter;
+        else if (rule->kind == PXVPNRuntimeHookStatus) replacement = (IMP)PXHookVPNStatusGetter;
+        else if (rule->kind == PXVPNRuntimeHookLoadManagers) replacement = (IMP)PXHookVPNLoadManagers;
+        if (!replacement) continue;
+        MSHookMessageEx(target, selector, replacement, &rule->original);
+        installed++;
+    }
+    return installed;
+}
+
+static NSUInteger PXInstallDiscoveryRuntimeHooks(void) {
+    NSUInteger installed = 0;
+    for (NSUInteger index = 0; index < sizeof(gPXDiscoveryRuntimeRules) / sizeof(gPXDiscoveryRuntimeRules[0]); index++) {
+        PXDiscoveryRuntimeRule *rule = &gPXDiscoveryRuntimeRules[index];
+        Class cls = objc_getClass(rule->className);
+        if (!cls || !PXRuntimeMethodOwnedByImage(cls, rule->imageFragment)) continue;
+        SEL selector = sel_registerName(rule->selectorName);
+        Method method = class_getInstanceMethod(cls, selector);
+        NSUInteger argumentCount = rule->kind == PXDiscoveryRuntimeHookVoid0 ? 2 : 4;
+        if (!PXRuntimeMethodHasShape(method, argumentCount, 'v', rule->kind == PXDiscoveryRuntimeHookVoid2)) continue;
+        IMP replacement = rule->kind == PXDiscoveryRuntimeHookVoid0 ? (IMP)PXHookDiscoveryVoid0 : (IMP)PXHookDiscoveryVoid2;
+        MSHookMessageEx(cls, selector, replacement, &rule->original);
+        installed++;
+    }
+    return installed;
 }
 
 static void PXVPNInstallFunctionHook(void *handle, const char *symbol, void *replacement, void **original) {
@@ -194,17 +404,16 @@ static void PXVPNInstallFunctionHook(void *handle, const char *symbol, void *rep
                                  (void *)PXHookSCDynamicStoreCopyProxies,
                                  (void **)&PXOrigSCDynamicStoreCopyProxies);
 
-        void *networkExtension = dlopen("/System/Library/Frameworks/NetworkExtension.framework/NetworkExtension", RTLD_LAZY);
-        (void)networkExtension;
-        Class connectionClass = NSClassFromString(@"NEVPNConnection");
-        Method statusMethod = connectionClass ? class_getInstanceMethod(connectionClass, NSSelectorFromString(@"status")) : NULL;
-        if (statusMethod) {
-            MSHookMessageEx(connectionClass, NSSelectorFromString(@"status"),
-                            (IMP)PXHookNEVPNConnectionStatus,
-                            (IMP *)&PXOrigNEVPNConnectionStatus);
-        }
+        (void)dlopen("/System/Library/Frameworks/NetworkExtension.framework/NetworkExtension", RTLD_LAZY);
+        (void)dlopen("/System/Library/Frameworks/MultipeerConnectivity.framework/MultipeerConnectivity", RTLD_LAZY);
+        (void)dlopen("/System/Library/Frameworks/CoreBluetooth.framework/CoreBluetooth", RTLD_LAZY);
+
+        NSUInteger vpnManagerHooks = PXInstallVPNManagerRuntimeHooks();
+        NSUInteger discoveryHooks = PXInstallDiscoveryRuntimeHooks();
 
         %init(PXVPNObjectiveCHooks);
-        PXLog(@"[VPNBypass] Runtime surfaces installed for %@", bundleID);
+        PXLog(@"[VPNBypass] Runtime surfaces installed for %@; capability audit vpn-manager=%lu/6 discovery=%lu/8 discovery-active=%@",
+              bundleID, (unsigned long)vpnManagerHooks, (unsigned long)discoveryHooks,
+              PXDiscoverySuppressionActive() ? @"YES" : @"NO");
     }
 }

@@ -5,6 +5,7 @@
 @interface VPNDetectionDetailViewController ()
 @property (nonatomic, strong) NSUserDefaults *securitySettings;
 @property (nonatomic, strong) UISwitch *mainSwitch;
+@property (nonatomic, strong) UISwitch *discoverySwitch;
 @end
 
 @implementation VPNDetectionDetailViewController
@@ -60,10 +61,12 @@
     UIView *statusCard = [self cardContainer];
     UIStackView *statusInner = [self innerStackIn:statusCard];
     [statusInner addArrangedSubview:[self mainToggleRow]];
+    [statusInner addArrangedSubview:[self separatorView]];
+    [statusInner addArrangedSubview:[self discoveryToggleRow]];
     [stack addArrangedSubview:statusCard];
 
     // Info note
-    [stack addArrangedSubview:[self noteLabel:@"Enables bypassing VPN/Proxy detection in apps. When enabled, apps will not be able to detect that you are using a VPN or Proxy."]];
+    [stack addArrangedSubview:[self noteLabel:@"VPN/Proxy projection hides tunnel state while preserving framework object identity. Nearby discovery suppression is independent, defaults off, and blocks Multipeer, Bluetooth scanning, and Bonjour search only when explicitly enabled."]];
 }
 
 #pragma mark - Building blocks
@@ -204,6 +207,44 @@
     return row;
 }
 
+- (UIView *)separatorView {
+    UIView *separator = [[UIView alloc] init];
+    separator.translatesAutoresizingMaskIntoConstraints = NO;
+    separator.backgroundColor = PXSeparatorColor();
+    [separator.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale].active = YES;
+    return separator;
+}
+
+- (UIView *)discoveryToggleRow {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *title = [[UILabel alloc] init];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.text = @"Nearby Discovery Suppression";
+    title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    title.textColor = PXLabelColor();
+    title.numberOfLines = 0;
+    [row addSubview:title];
+
+    self.discoverySwitch = [[UISwitch alloc] init];
+    self.discoverySwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    self.discoverySwitch.onTintColor = [UIColor systemBlueColor];
+    [self.discoverySwitch setOn:PXReadSecurityBool(@"discoverySuppressionEnabled", NO) animated:NO];
+    [self.discoverySwitch addTarget:self action:@selector(discoveryToggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [row addSubview:self.discoverySwitch];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:64],
+        [title.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:16],
+        [title.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [self.discoverySwitch.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-16],
+        [self.discoverySwitch.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [title.trailingAnchor constraintLessThanOrEqualToAnchor:self.discoverySwitch.leadingAnchor constant:-12],
+    ]];
+    return row;
+}
+
 #pragma mark - Actions
 
 - (void)mainToggleChanged:(UISwitch *)sender {
@@ -221,6 +262,24 @@
     NSString *message = enabled ? @"VPN/PROXY Detection Bypass Enabled" : @"VPN/PROXY Detection Bypass Disabled";
     [self showToast:message];
 
+    UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [generator prepare];
+    [generator impactOccurred];
+}
+
+- (void)discoveryToggleChanged:(UISwitch *)sender {
+    BOOL enabled = sender.isOn;
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"discoverySuppressionEnabled", enabled, &error)) {
+        [sender setOn:!enabled animated:YES];
+        [self showToast:@"Could not save Nearby Discovery setting"];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"),
+                                         NULL, NULL, YES);
+
+    [self showToast:enabled ? @"Nearby Discovery Suppression Enabled" : @"Nearby Discovery Suppression Disabled"];
     UIImpactFeedbackGenerator *generator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [generator prepare];
     [generator impactOccurred];
