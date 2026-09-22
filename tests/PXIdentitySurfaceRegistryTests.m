@@ -22,6 +22,7 @@ void PXRunIdentitySurfaceRegistryTests(void) {
         @"UDID": @"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
         @"SystemBootUUID": @"12345678-1234-4234-9234-123456789abc",
         @"IDFA": @"A1B2C3D4-E5F6-4789-ABCD-0123456789EF",
+        @"IDFV": @"B2C3D4E5-F607-489A-BCDE-1234567890FA",
         @"IMEI": @"490154203237518",
         @"IMEI2": @"356938035643809",
         @"MEID": @"A00000BEEF1234",
@@ -75,12 +76,18 @@ void PXRunIdentitySurfaceRegistryTests(void) {
     PXIdentitySurfaceEntry *wrapperIMEI2 = PXIdentitySurfaceEntryForKey(@"internationalMobileEquipmentIdentity2", PXIdentitySurfacePrivateWrapper);
     PXIdentitySurfaceEntry *wrapperIDFA = PXIdentitySurfaceEntryForKey(@"sf_uuidString", PXIdentitySurfacePrivateWrapper);
     PXIdentitySurfaceEntry *wrapperDSID = PXIdentitySurfaceEntryForKey(@"applicationDSID", PXIdentitySurfacePrivateWrapper);
+    PXIdentitySurfaceEntry *wrapperLSIDFA = PXIdentitySurfaceEntryForKey(@"deviceIdentifierForAdvertising", PXIdentitySurfacePrivateWrapper);
+    PXIdentitySurfaceEntry *wrapperLSIDFV = PXIdentitySurfaceEntryForKey(@"deviceIdentifierForVendor", PXIdentitySurfacePrivateWrapper);
     NSCAssert([[PXIdentitySurfaceResolveValue(wrapperIMEI2, ids) description] isEqualToString:ids[@"IMEI2"]],
               @"private wrapper IMEI2 source drifted");
     NSCAssert([[PXIdentitySurfaceResolveValue(wrapperIDFA, ids) description] isEqualToString:ids[@"IDFA"]],
               @"private wrapper sf_uuidString must follow advertising identity");
     NSCAssert([[PXIdentitySurfaceResolveValue(wrapperDSID, ids) description] isEqualToString:ids[@"IDFA"]],
               @"private wrapper applicationDSID must follow advertising identity");
+    NSCAssert([[PXIdentitySurfaceResolveValue(wrapperLSIDFA, ids) description] isEqualToString:ids[@"IDFA"]],
+              @"LaunchServices advertising identity must follow canonical IDFA");
+    NSCAssert([[PXIdentitySurfaceResolveValue(wrapperLSIDFV, ids) description] isEqualToString:ids[@"IDFV"]],
+              @"LaunchServices vendor identity must follow canonical IDFV");
     NSCAssert(PXIdentitySurfaceEntryForKey(@"secureElementIdentifier", PXIdentitySurfacePrivateWrapper) == nil,
               @"secure-element evidence must not enter generic private-wrapper parity registry");
 

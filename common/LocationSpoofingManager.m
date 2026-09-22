@@ -1,6 +1,7 @@
 #import "LocationSpoofingManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
+#import <objc/runtime.h>
 
 // Constants
 static NSString *PLIST_NAME = @"com.weaponx.gpsspoofing.plist";
@@ -10,6 +11,75 @@ static NSString *GLOBAL_SCOPE_PLIST = @"com.hydra.tlinkios.global_scope.plist";
 NSMutableDictionary *appSpoofingCache = nil;
 NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refreshAppSpoofingCache methods 
                                      // to fix "set but not used" compiler warning
+
+@interface PXLocationSpoofSnapshot ()
+@property (nonatomic, readwrite, assign) CLLocationCoordinate2D coordinate;
+@property (nonatomic, readwrite, assign) CLLocationDirection heading;
+@property (nonatomic, readwrite, assign) CLLocationSpeed speed;
+@property (nonatomic, readwrite, assign) NSUInteger generation;
+@property (nonatomic, readwrite, strong) NSDate *timestamp;
+@property (nonatomic, assign) CLLocationDegrees sourceLatitude;
+@property (nonatomic, assign) CLLocationDegrees sourceLongitude;
+@property (nonatomic, assign) BOOL sourceJitterEnabled;
+@property (nonatomic, assign) BOOL sourceVariationsEnabled;
+@property (nonatomic, assign) TransportationMode sourceTransportationMode;
+@property (nonatomic, assign) CLLocationDirection sourceHeading;
+@property (nonatomic, assign) CLLocationSpeed sourceSpeed;
+@end
+
+@implementation PXLocationSpoofSnapshot
+@end
+
+static const void *kPXLocationSpoofSnapshotAssociationKey = &kPXLocationSpoofSnapshotAssociationKey;
+static __thread NSUInteger gPXLocationProjectionBypassDepth = 0;
+
+void PXAttachLocationSpoofSnapshot(id object, PXLocationSpoofSnapshot *snapshot) {
+    if (!object || !snapshot) return;
+    objc_setAssociatedObject(object,
+                             kPXLocationSpoofSnapshotAssociationKey,
+                             snapshot,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+PXLocationSpoofSnapshot *PXLocationSpoofSnapshotForObject(id object) {
+    if (!object) return nil;
+    id value = objc_getAssociatedObject(object, kPXLocationSpoofSnapshotAssociationKey);
+    return [value isKindOfClass:[PXLocationSpoofSnapshot class]] ? value : nil;
+}
+
+BOOL PXLocationProjectionBypassActive(void) {
+    return gPXLocationProjectionBypassDepth > 0;
+}
+
+CLLocationCoordinate2D PXLocationOriginalCoordinate(CLLocation *location) {
+    if (!location) return kCLLocationCoordinate2DInvalid;
+    gPXLocationProjectionBypassDepth += 1;
+    @try {
+        return location.coordinate;
+    } @finally {
+        gPXLocationProjectionBypassDepth -= 1;
+    }
+}
+
+CLLocationSpeed PXLocationOriginalSpeed(CLLocation *location) {
+    if (!location) return -1.0;
+    gPXLocationProjectionBypassDepth += 1;
+    @try {
+        return location.speed;
+    } @finally {
+        gPXLocationProjectionBypassDepth -= 1;
+    }
+}
+
+CLLocationDirection PXLocationOriginalCourse(CLLocation *location) {
+    if (!location) return -1.0;
+    gPXLocationProjectionBypassDepth += 1;
+    @try {
+        return location.course;
+    } @finally {
+        gPXLocationProjectionBypassDepth -= 1;
+    }
+}
 
 @interface LocationSpoofingManager ()
 @property (nonatomic, assign) BOOL spoofingEnabled;
@@ -33,6 +103,8 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
 @property (nonatomic, strong) NSArray<CLLocation *> *pathLocations;
 @property (nonatomic, copy) void (^pathCompletionHandler)(BOOL);
 @property (nonatomic, assign) double pathSpeed;
+@property (nonatomic, strong) PXLocationSpoofSnapshot *locationSpoofSnapshot;
+@property (nonatomic, assign) NSUInteger locationSpoofGeneration;
 
 @end
 
@@ -172,6 +244,7 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
         self.spoofingEnabled = YES;
         self.latitude = latitude;
         self.longitude = longitude;
+        self.locationSpoofSnapshot = nil;
         
         // Update cached location in memory
         self.cachedPinnedLocation = @{
@@ -215,6 +288,7 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
         self.longitude = 0.0;
         self.cachedPinnedLocation = nil;
         self.lastPinnedLocationReadTime = 0;
+        self.locationSpoofSnapshot = nil;
     }
     
     @try {
@@ -454,63 +528,94 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
             return originalLocation;
         }
         
-        // Ensure we have valid coordinates
-        double safeLatitude = [self getSpoofedLatitude];
-        double safeLongitude = [self getSpoofedLongitude];
-        
-        // Quick validation check - avoid expensive logging
-        if (isnan(safeLatitude) || isnan(safeLongitude) || 
-            isinf(safeLatitude) || isinf(safeLongitude) ||
-            !CLLocationCoordinate2DIsValid(CLLocationCoordinate2DMake(safeLatitude, safeLongitude))) {
+        PXLocationSpoofSnapshot *snapshot = [self currentSpoofSnapshot];
+        if (!snapshot) {
             return originalLocation;
         }
-        
-        // Create a realistic spoofed location
-        CLLocationCoordinate2D baseCoordinate = CLLocationCoordinate2DMake(safeLatitude, safeLongitude);
-        
-        // Add randomized position variations if enabled
-        if (self.positionVariationsEnabled) {
-            // Generate random angle in radians (0-360 degrees) for true omnidirectional movement
-            double randomAngle = (arc4random_uniform(360) * M_PI) / 180.0;
-            
-            // Determine variation distance based on transportation mode
-            double variationDistance;
-            switch (self.transportationMode) {
-                case TransportationModeDriving:
-                    // Larger variations for driving (2-8 meters)
-                    variationDistance = 2.0 + ((arc4random_uniform(60)) / 10.0);
-                    break;
-                    
-                case TransportationModeWalking:
-                    // Medium variations for walking (1-5 meters)
-                    variationDistance = 1.0 + ((arc4random_uniform(40)) / 10.0);
-                    break;
-                    
-                default: // Stationary
-                    // Small variations for stationary (0.5-2 meters)
-                    variationDistance = 0.5 + ((arc4random_uniform(15)) / 10.0);
-                    break;
-            }
-            
-            // Convert distance and angle to latitude/longitude offsets
-            // This uses the haversine formula approximation for small distances
-            double latOffset = variationDistance * cos(randomAngle) / 111000.0; // Approx meters to degrees lat
-            double lonOffset = variationDistance * sin(randomAngle) / (111000.0 * cos(baseCoordinate.latitude * M_PI / 180.0)); // Adjust for longitude compression
-            
-            // Apply the offsets to create realistic movement in any direction
-            baseCoordinate.latitude += latOffset;
-            baseCoordinate.longitude += lonOffset;
-        }
-        
-        // Create a new location with the spoofed coordinates and additional properties
-        CLLocation *spoofedLocation = [[CLLocation alloc] initWithCoordinate:baseCoordinate
+
+        CLLocation *spoofedLocation = [[CLLocation alloc] initWithCoordinate:snapshot.coordinate
                                                                    altitude:originalLocation.altitude
                                                          horizontalAccuracy:self.accuracyValue
                                                            verticalAccuracy:originalLocation.verticalAccuracy
-                                                                  timestamp:[NSDate date]];
+                                                                     course:snapshot.heading
+                                                                      speed:snapshot.speed
+                                                                  timestamp:originalLocation.timestamp ?: snapshot.timestamp];
+        PXAttachLocationSpoofSnapshot(spoofedLocation, snapshot);
         
         return spoofedLocation;
     }
+}
+
+- (PXLocationSpoofSnapshot *)buildSpoofSnapshotAdvancingGeneration:(BOOL)advance {
+    @synchronized(self) {
+        if (!_spoofingToggleState || !_spoofingEnabled) return nil;
+
+        CLLocationCoordinate2D base = CLLocationCoordinate2DMake(_latitude, _longitude);
+        if (!CLLocationCoordinate2DIsValid(base) || !isfinite(base.latitude) || !isfinite(base.longitude)) {
+            return nil;
+        }
+
+        PXLocationSpoofSnapshot *cached = self.locationSpoofSnapshot;
+        BOOL sourceMatches = cached &&
+            cached.sourceLatitude == base.latitude &&
+            cached.sourceLongitude == base.longitude &&
+            cached.sourceJitterEnabled == _jitterEnabled &&
+            cached.sourceVariationsEnabled == _positionVariationsEnabled &&
+            cached.sourceTransportationMode == _transportationMode &&
+            cached.sourceHeading == _lastReportedCourse &&
+            cached.sourceSpeed == _lastReportedSpeed;
+        if (!advance && sourceMatches) return cached;
+
+        CLLocationCoordinate2D projected = base;
+        if (_jitterEnabled && _positionVariationsEnabled) {
+            double minimumMeters = 0.5;
+            double spanMeters = 1.5;
+            if (_transportationMode == TransportationModeWalking) {
+                minimumMeters = 1.0;
+                spanMeters = 4.0;
+            } else if (_transportationMode == TransportationModeDriving) {
+                minimumMeters = 2.0;
+                spanMeters = 6.0;
+            }
+            double unit = (double)arc4random_uniform(10000) / 9999.0;
+            double distanceMeters = minimumMeters + (spanMeters * unit);
+            double angle = ((double)arc4random_uniform(36000) / 100.0) * M_PI / 180.0;
+            double latitudeRadians = base.latitude * M_PI / 180.0;
+            double longitudeScale = MAX(0.01, fabs(cos(latitudeRadians)));
+            projected.latitude += (distanceMeters * cos(angle)) / 111000.0;
+            projected.longitude += (distanceMeters * sin(angle)) / (111000.0 * longitudeScale);
+        }
+        if (!CLLocationCoordinate2DIsValid(projected)) projected = base;
+
+        double heading = isfinite(_lastReportedCourse) ? _lastReportedCourse : 0.0;
+        heading = fmod(heading, 360.0);
+        if (heading < 0.0) heading += 360.0;
+        double speed = (isfinite(_lastReportedSpeed) && _lastReportedSpeed >= 0.0) ? _lastReportedSpeed : 0.0;
+
+        PXLocationSpoofSnapshot *snapshot = [PXLocationSpoofSnapshot new];
+        snapshot.coordinate = projected;
+        snapshot.heading = heading;
+        snapshot.speed = speed;
+        snapshot.generation = ++self.locationSpoofGeneration;
+        snapshot.timestamp = [NSDate date];
+        snapshot.sourceLatitude = base.latitude;
+        snapshot.sourceLongitude = base.longitude;
+        snapshot.sourceJitterEnabled = _jitterEnabled;
+        snapshot.sourceVariationsEnabled = _positionVariationsEnabled;
+        snapshot.sourceTransportationMode = _transportationMode;
+        snapshot.sourceHeading = _lastReportedCourse;
+        snapshot.sourceSpeed = _lastReportedSpeed;
+        self.locationSpoofSnapshot = snapshot;
+        return snapshot;
+    }
+}
+
+- (PXLocationSpoofSnapshot *)currentSpoofSnapshot {
+    return [self buildSpoofSnapshotAdvancingGeneration:NO];
+}
+
+- (PXLocationSpoofSnapshot *)advanceSpoofSnapshotForUpdate {
+    return [self buildSpoofSnapshotAdvancingGeneration:YES];
 }
 
 - (double)getSpoofedLatitude {
@@ -1269,7 +1374,7 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
             CLLocationCoordinate2D end = CLLocationCoordinate2DMake(0, 0);
             // Extract coordinates from start
             if ([startObj isKindOfClass:[CLLocation class]]) {
-                start = [(CLLocation *)startObj coordinate];
+                start = PXLocationOriginalCoordinate((CLLocation *)startObj);
             } else if ([startObj isKindOfClass:[NSDictionary class]]) {
                 NSDictionary *dict = (NSDictionary *)startObj;
                 start.latitude = [dict[@"latitude"] doubleValue];
@@ -1284,7 +1389,7 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
             // Extract coordinates from the end waypoint object
             if ([endObj isKindOfClass:[CLLocation class]]) {
                 // CLLocation object
-                end = [(CLLocation *)endObj coordinate];
+                end = PXLocationOriginalCoordinate((CLLocation *)endObj);
             } else if ([endObj isKindOfClass:[NSDictionary class]]) {
                 // Dictionary with latitude/longitude keys
                 NSDictionary *dict = (NSDictionary *)endObj;
@@ -1344,7 +1449,7 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
 
             // Extract coordinates from the first waypoint
             if ([firstObj isKindOfClass:[CLLocation class]]) {
-                firstPoint = [(CLLocation *)firstObj coordinate];
+                firstPoint = PXLocationOriginalCoordinate((CLLocation *)firstObj);
             } else if ([firstObj isKindOfClass:[NSDictionary class]]) {
                 NSDictionary *dict = (NSDictionary *)firstObj;
                 firstPoint.latitude = [dict[@"latitude"] doubleValue];
@@ -1374,12 +1479,14 @@ NSDate *lastCacheRefreshTime = nil;  // Shared between shouldSpoofApp and refres
         CLLocation *currentLoc = [self.pathLocations objectAtIndex:_currentPathIndex];
         
         // Update spoofed coordinates
-        _latitude = currentLoc.coordinate.latitude;
-        _longitude = currentLoc.coordinate.longitude;
+        CLLocationCoordinate2D currentCoordinate = PXLocationOriginalCoordinate(currentLoc);
+        _latitude = currentCoordinate.latitude;
+        _longitude = currentCoordinate.longitude;
+        self.locationSpoofSnapshot = nil;
         
         // Store reported speed and course
-        _lastReportedSpeed = currentLoc.speed;
-        _lastReportedCourse = currentLoc.course;
+        _lastReportedSpeed = PXLocationOriginalSpeed(currentLoc);
+        _lastReportedCourse = PXLocationOriginalCourse(currentLoc);
         
         // Notify about location update
         [[NSNotificationCenter defaultCenter] postNotificationName:@"com.weaponx.locationUpdated" 

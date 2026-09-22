@@ -8,6 +8,26 @@ typedef NS_ENUM(NSInteger, TransportationMode) {
     TransportationModeDriving = 2
 };
 
+// Immutable value shared by every Location surface in one logical update.
+// A snapshot is deliberately attached to the original CoreLocation objects so
+// callbacks retain their queue, identity, metadata and collection shape.
+@interface PXLocationSpoofSnapshot : NSObject
+
+@property (nonatomic, readonly, assign) CLLocationCoordinate2D coordinate;
+@property (nonatomic, readonly, assign) CLLocationDirection heading;
+@property (nonatomic, readonly, assign) CLLocationSpeed speed;
+@property (nonatomic, readonly, assign) NSUInteger generation;
+@property (nonatomic, readonly, strong) NSDate *timestamp;
+
+@end
+
+FOUNDATION_EXPORT void PXAttachLocationSpoofSnapshot(id object, PXLocationSpoofSnapshot *snapshot);
+FOUNDATION_EXPORT PXLocationSpoofSnapshot *PXLocationSpoofSnapshotForObject(id object);
+FOUNDATION_EXPORT BOOL PXLocationProjectionBypassActive(void);
+FOUNDATION_EXPORT CLLocationCoordinate2D PXLocationOriginalCoordinate(CLLocation *location);
+FOUNDATION_EXPORT CLLocationSpeed PXLocationOriginalSpeed(CLLocation *location);
+FOUNDATION_EXPORT CLLocationDirection PXLocationOriginalCourse(CLLocation *location);
+
 @interface LocationSpoofingManager : NSObject
 
 @property (nonatomic, strong) NSMutableDictionary *cachedScopedApps;
@@ -46,6 +66,8 @@ typedef NS_ENUM(NSInteger, TransportationMode) {
 
 // GPS data modification
 - (CLLocation *)modifySpoofedLocation:(CLLocation *)originalLocation;
+- (PXLocationSpoofSnapshot *)currentSpoofSnapshot;
+- (PXLocationSpoofSnapshot *)advanceSpoofSnapshotForUpdate;
 - (double)getSpoofedLatitude;
 - (double)getSpoofedLongitude;
 - (BOOL)shouldSpoofApp:(NSString *)bundleID;
@@ -76,4 +98,4 @@ typedef NS_ENUM(NSInteger, TransportationMode) {
 - (BOOL)isCurrentlyMoving;
 - (double)estimatedTimeToCompleteCurrentPath; // Returns time in seconds
 
-@end 
+@end

@@ -150,6 +150,8 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
             // x-new's canonical equivalent is IDFA, not SystemBootUUID.
             PXEntry(@"sf_uuidString", @[], @"IDFA", @"IDFA", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"applicationDSID", @[], @"IDFA", @"IDFA", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"deviceIdentifierForAdvertising", @[], @"IDFA", @"IDFA", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"deviceIdentifierForVendor", @[], @"IDFV", @"IDFV", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"productType", @[], @"DeviceModel", @"DeviceModel", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"productVersion", @[], @"IOSVersion", @"IOSVersion", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"buildVersion", @[], @"IOSVersion", @"IOSBuild", nil, wrapper, PXIdentityExpectedTypeString),
@@ -172,7 +174,10 @@ NSArray<PXIdentitySurfaceEntry *> *PXIdentitySurfaceRegistryEntries(void) {
             PXEntry(@"uniqueDeviceIdentifier", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"deviceUDID", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"deviceSerialNumber", @[], @"SerialNumber", @"SerialNumber", nil, wrapper, PXIdentityExpectedTypeString),
-            PXEntry(@"_iOSComponentHardwarePlatform", @[], @"HwModel", @"HwModel", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"uniqueDeviceId", @[], @"UDID", @"UDID", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"hardwarePlatform", @[], @"DeviceModel", @"HwModel", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"marketingName", @[], @"DeviceModel", @"DeviceModelName", nil, wrapper, PXIdentityExpectedTypeString),
+            PXEntry(@"_iOSComponentHardwarePlatform", @[], @"DeviceModel", @"HwModel", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"_iOSComponentBuildVersion", @[], @"IOSVersion", @"IOSBuild", nil, wrapper, PXIdentityExpectedTypeString),
             PXEntry(@"_iOSComponentDeviceModel", @[], @"DeviceModel", @"DeviceModel", nil, wrapper, PXIdentityExpectedTypeString),
         ];

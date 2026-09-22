@@ -27,6 +27,7 @@
 @property (nonatomic, assign) IMP original;
 @property (nonatomic, assign) BOOL classMethod;
 @property (nonatomic, assign) BOOL keyedGetter;
+@property (nonatomic, assign) BOOL uuidResult;
 @end
 @implementation PXPrivateIdentityInstalledHook
 @end
@@ -119,6 +120,9 @@ static id PXPrivateIdentityGetter(id receiver, SEL selector) {
         PXIdentitySurfaceEntry *entry =
             PXIdentitySurfaceEntryForKey(surfaceKey, PXIdentitySurfacePrivateWrapper);
         if (!entry || ![manager isIdentifierEnabled:entry.toggle]) return original;
+        if (record.uuidResult) {
+            return PXPrivateIdentityWrapperProjectUUID(original, surfaceKey, snapshot.deviceIDs);
+        }
         return PXPrivateIdentityWrapperProjectObject(original, surfaceKey, snapshot.deviceIDs);
     } @catch (__unused NSException *exception) {
         return original;
@@ -183,12 +187,14 @@ static void PXPrivateIdentityPublishInstalled(Class targetClass,
                                               SEL selector,
                                               BOOL classMethod,
                                               BOOL keyedGetter,
+                                              BOOL uuidResult,
                                               IMP original) {
     PXPrivateIdentityInstalledHook *record = [PXPrivateIdentityInstalledHook new];
     record.targetClass = targetClass;
     record.selector = selector;
     record.classMethod = classMethod;
     record.keyedGetter = keyedGetter;
+    record.uuidResult = uuidResult;
     record.original = original;
     os_unfair_lock_lock(&gPXPrivateWrapperLock);
     [gPXPrivateWrapperInstalled addObject:record];
@@ -203,7 +209,9 @@ static void PXPrivateIdentityInstallAvailableRules(void) {
         NSString *selectorName = rule[@"selector"];
         BOOL classMethod = [rule[@"classMethod"] boolValue];
         BOOL keyedGetter = [rule[@"keyedGetter"] boolValue];
+        BOOL uuidResult = [rule[@"uuidResult"] boolValue];
         if (!className.length || !selectorName.length) continue;
+        if (uuidResult && (classMethod || keyedGetter)) continue;
 
         Class cls = objc_getClass(className.UTF8String);
         if (!cls || !PXPrivateIdentityClassIsSystemOwned(cls)) continue;
@@ -233,9 +241,10 @@ static void PXPrivateIdentityInstallAvailableRules(void) {
                                           selector,
                                           classMethod,
                                           keyedGetter,
+                                          uuidResult,
                                           original);
-        PXLog(@"[PrivateIdentityWrapper] installed class=%@ selector=%@ meta=%d keyed=%d",
-              className, selectorName, classMethod, keyedGetter);
+        PXLog(@"[PrivateIdentityWrapper] installed class=%@ selector=%@ meta=%d keyed=%d uuid=%d",
+              className, selectorName, classMethod, keyedGetter, uuidResult);
     }
 }
 

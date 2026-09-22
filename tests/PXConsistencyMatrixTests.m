@@ -27,10 +27,12 @@ static NSDictionary *PXCanonicalDeviceIDs(void) {
         @"UDID": @"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
         @"SystemBootUUID": @"12345678-1234-4234-9234-123456789abc",
         @"IDFA": @"A1B2C3D4-E5F6-4789-ABCD-0123456789EF",
+        @"IDFV": @"B2C3D4E5-F607-489A-BCDE-1234567890FA",
         @"IMEI": @"490154203237518",
         @"IMEI2": @"356938035643809",
         @"MEID": @"A00000BEEF1234",
         @"IMSI": @"310260123456789",
+        @"ICCID": @"8901260123456789012",
     };
 }
 
@@ -67,6 +69,7 @@ void PXRunConsistencyMatrixTests(void) {
         @"KernelVersion": deviceIDs[@"KernelVersion"],
         @"OSType": @"Darwin",
         @"DeviceModel": deviceIDs[@"DeviceModel"],
+        @"DeviceModelName": deviceIDs[@"DeviceModelName"],
         @"HwModel": deviceIDs[@"HwModel"],
         @"BoardID": deviceIDs[@"BoardID"],
         @"ModelNumber": deviceIDs[@"ModelNumber"],
@@ -76,10 +79,12 @@ void PXRunConsistencyMatrixTests(void) {
         @"UDID": deviceIDs[@"UDID"],
         @"SystemBootUUID": deviceIDs[@"SystemBootUUID"],
         @"IDFA": deviceIDs[@"IDFA"],
+        @"IDFV": deviceIDs[@"IDFV"],
         @"IMEI": deviceIDs[@"IMEI"],
         @"IMEI2": deviceIDs[@"IMEI2"],
         @"MEID": deviceIDs[@"MEID"],
         @"IMSI": deviceIDs[@"IMSI"],
+        @"ICCID": deviceIDs[@"ICCID"],
     };
     for (PXConsistencyMatrixEntry *entry in entries) {
         NSString *resolved = PXConsistencyResolveEntryValue(entry, deviceIDs);

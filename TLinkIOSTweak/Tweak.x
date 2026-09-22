@@ -43,12 +43,20 @@
 #import "PXSystemVersionTransformer.h"
 #import "PXRuntimeOSCompatibility.h"
 #import "PXIdentitySurfaceRegistry.h"
+#import "PXIdentifierUUIDProjection.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
 #import "PXFileDebug.h"
 #import "PXP1BFilters.h"
 #import <os/lock.h>
 #import <CoreFoundation/CoreFoundation.h>
+
+// These selectors are implemented by CoreLocation runtime classes even though
+// older public SDK headers expose them only on concrete subclasses.
+@interface CLRegion (PXP0LocationDirectSurface)
+- (CLLocationCoordinate2D)center;
+- (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate;
+@end
 
 __attribute__((constructor(101))) static void PXTLinkIOSTweakEarlyLoadMarker(void) {
     PXFileDebugLoadMarker("TLinkIOSTweak.early");
@@ -1445,8 +1453,6 @@ static void PXInstallAlternateMobileGestaltHooks(void) {
     });
 }
 
-static NSString *const kPXZeroIDFAUUID = @"00000000-0000-0000-0000-000000000000";
-
 static BOOL PXATTSpoofActive(void) {
     if (!%c(IdentifierManager)) return NO;
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
@@ -1459,41 +1465,14 @@ static BOOL PXATTSpoofActive(void) {
     return [manager isIdentifierEnabled:@"IDFA"];
 }
 
-// Returns profile ATT status 0...3. Falls back to device_ids / tracking_info via IdentifierManager.
+// Returns profile ATT status 0...3 from the same immutable snapshot used by
+// IDFA/IDFV/LaunchServices projection. Missing/invalid status is not re-read
+// from disk because doing so could mix identity generations.
 static NSInteger PXProfileATTAuthorizationStatus(void) {
-    IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
-    if (!manager) return 0;
-    if ([manager respondsToSelector:@selector(attAuthorizationStatus)]) {
-        NSInteger status = [manager attAuthorizationStatus];
-        if (status < 0) status = 0;
-        if (status > 3) status = 3;
-        return status;
-    }
-    // Manual fallback if method missing
-    @try {
-        NSString *identityDir = nil;
-        if ([manager respondsToSelector:@selector(profileIdentityPath)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            identityDir = [manager performSelector:@selector(profileIdentityPath)];
-#pragma clang diagnostic pop
-        }
-        if (identityDir.length) {
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:
-                [identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-            if (deviceIds[@"ATTAuthorizationStatus"] != nil) {
-                NSInteger s = [deviceIds[@"ATTAuthorizationStatus"] integerValue];
-                if (s >= 0 && s <= 3) return s;
-            }
-            NSDictionary *tracking = [NSDictionary dictionaryWithContentsOfFile:
-                [identityDir stringByAppendingPathComponent:@"tracking_info.plist"]];
-            if (tracking[@"ATTAuthorizationStatus"] != nil) {
-                NSInteger s = [tracking[@"ATTAuthorizationStatus"] integerValue];
-                if (s >= 0 && s <= 3) return s;
-            }
-        }
-    } @catch (__unused NSException *e) {}
-    return 0;
+    PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+    return snapshot.valid
+        ? PXIdentitySnapshotATTAuthorizationStatus(snapshot.deviceIDs)
+        : 0;
 }
 
 // IDFA + legacy advertisingTrackingEnabled (ATT consistency)
@@ -1508,8 +1487,9 @@ static NSInteger PXProfileATTAuthorizationStatus(void) {
 }
 
 - (NSUUID *)advertisingIdentifier {
+    NSUUID *originalIdentifier = %orig;
     if (!%c(IdentifierManager)) {
-        return %orig;
+        return originalIdentifier;
     }
     
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
@@ -1520,28 +1500,21 @@ static NSInteger PXProfileATTAuthorizationStatus(void) {
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (!PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack)) {
         PXLog(@"App not in scope or disabled, passing through original IDFA");
-        return %orig;
+        return originalIdentifier;
     }
 
     if ([manager isIdentifierEnabled:@"IDFA"]) {
-        NSInteger attStatus = PXProfileATTAuthorizationStatus();
-        // authorized → profile IDFA; restricted/denied/notDetermined → zero UUID
-        if (attStatus != 3) {
-            PXLog(@"ATT status=%ld → returning zero IDFA", (long)attStatus);
-            return [[NSUUID alloc] initWithUUIDString:kPXZeroIDFAUUID];
-        }
-        NSString *idfaString = [manager currentValueForIdentifier:@"IDFA"];
-        if (idfaString.length) {
-            PXLog(@"Spoofing IDFA with: %@", idfaString);
-            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:idfaString];
-            if (uuid) return uuid;
-        }
-        // Authorized but missing value — still zero rather than leaking real IDFA
-        return [[NSUUID alloc] initWithUUIDString:kPXZeroIDFAUUID];
+        PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+        if (!snapshot.valid) return originalIdentifier;
+        NSUUID *projected = PXProjectAdvertisingIdentityUUID(originalIdentifier, snapshot.deviceIDs);
+        PXLog(@"Projecting IDFA from identity generation=%llu ATT=%ld",
+              (unsigned long long)snapshot.generation,
+              (long)PXIdentitySnapshotATTAuthorizationStatus(snapshot.deviceIDs));
+        return projected;
     }
     
     PXLog(@"No IDFA spoofing applied, returning original value");
-    return %orig;
+    return originalIdentifier;
 }
 
 %end
@@ -1639,30 +1612,12 @@ static void PXInstallATTHooksIfAvailable(void) {
         
         // In iOS 15+, this is the preferred identifier checked by many apps
         if ([manager isIdentifierEnabled:@"IDFV"]) {
-            NSString *idfvString = [manager currentValueForIdentifier:@"IDFV"];
-            if (idfvString) {
-                // Create a static cache keyed by bundle ID to ensure consistent values
-                static NSMutableDictionary *idfvCache = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    idfvCache = [NSMutableDictionary dictionary];
-                });
-                
-                // Thread-safe access to the cache
-                @synchronized(idfvCache) {
-                    NSUUID *cachedValue = idfvCache[currentBundleID];
-                    if (cachedValue) {
-                        return cachedValue;
-                    }
-                    
-                    NSUUID *spoofedIdentifier = [[NSUUID alloc] initWithUUIDString:idfvString];
-                    if (spoofedIdentifier) {
-                        PXLog(@"[WeaponX] Spoofing identifierForVendor with: %@", idfvString);
-                        idfvCache[currentBundleID] = spoofedIdentifier;
-                        return spoofedIdentifier;
-                    }
-                }
-            }
+            PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+            if (!snapshot.valid) return originalIdentifier;
+            NSUUID *projected = PXProjectIdentityUUID(originalIdentifier, snapshot.deviceIDs[@"IDFV"]);
+            PXLog(@"[WeaponX] Projecting identifierForVendor from identity generation=%llu",
+                  (unsigned long long)snapshot.generation);
+            return projected;
         }
     } @catch (NSException *exception) {
         PXLog(@"[WeaponX] Exception in identifierForVendor: %@", exception);
@@ -2061,6 +2016,18 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
 }
 
+static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration) {
+    @try {
+        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (!PXLocationManagerShouldSpoof(manager, bundleID)) return nil;
+        return advanceGeneration ? [manager advanceSpoofSnapshotForUpdate]
+                                 : [manager currentSpoofSnapshot];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
 %group LocationSpoofing
 
 // Hook CLLocationManager to intercept location updates
@@ -2093,6 +2060,28 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
     } @catch (NSException *exception) {
         PXLog(@"[WeaponX] Exception in CLLocationManager.setDelegate: %@", exception);
     }
+}
+
+- (id)delegate {
+    // Original-first and identity-preserving. NSObject delegate callbacks are
+    // already hooked below; reading this property must never replace/proxy it.
+    return %orig;
+}
+
+- (CLLocation *)location {
+    CLLocation *originalLocation = %orig;
+    if (!originalLocation) return nil;
+    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
+    if (snapshot) PXAttachLocationSpoofSnapshot(originalLocation, snapshot);
+    return originalLocation;
+}
+
+- (CLHeading *)heading {
+    CLHeading *originalHeading = %orig;
+    if (!originalHeading) return nil;
+    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
+    if (snapshot) PXAttachLocationSpoofSnapshot(originalHeading, snapshot);
+    return originalHeading;
 }
 
 // Hook location accuracy settings
@@ -2154,113 +2143,12 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 %hook CLLocation
 
 - (CLLocationCoordinate2D)coordinate {
-    // Get the original coordinate
     CLLocationCoordinate2D originalCoordinate = %orig;
-    
-    // Use thread-local storage to prevent recursive calls
-    static NSString * const kRecursionGuardKey = @"CLLocationCoordinateRecursionGuard";
-    NSMutableDictionary *threadDictionary = [[NSThread currentThread] threadDictionary];
-    if ([threadDictionary[kRecursionGuardKey] boolValue]) {
-        return originalCoordinate;
-    }
-    
-    // Set recursion guard
-    threadDictionary[kRecursionGuardKey] = @YES;
-    
-    @try {
-        // Performance optimization: throttle location checks
-        static NSTimeInterval lastProcessTime = 0;
-        static CLLocationCoordinate2D lastReturnedCoordinate = {0, 0};
-        
-        // Thread-safe time check
-        NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-        BOOL shouldThrottle = NO;
-        
-        @synchronized([self class]) {
-            shouldThrottle = (currentTime - lastProcessTime < 0.2);
-            
-            if (!shouldThrottle) {
-                lastProcessTime = currentTime;
-            }
-        }
-        
-        if (shouldThrottle) {
-            // Return the last spoofed coordinates if they were set and valid
-            if (CLLocationCoordinate2DIsValid(lastReturnedCoordinate) && 
-                (lastReturnedCoordinate.latitude != 0.0 || lastReturnedCoordinate.longitude != 0.0)) {
-                threadDictionary[kRecursionGuardKey] = nil;
-                return lastReturnedCoordinate;
-            }
-            threadDictionary[kRecursionGuardKey] = nil;
-            return originalCoordinate;
-        }
-        
-        // Get the LocationSpoofingManager and check if spoofing is enabled
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        if (!manager) {
-            threadDictionary[kRecursionGuardKey] = nil;
-            return originalCoordinate;
-        }
-        
-        // Check if spoofing is enabled - this verifies pinned location exists
-        if (![manager isSpoofingEnabled]) {
-            // Not enabled, return original coordinate
-            threadDictionary[kRecursionGuardKey] = nil;
-            return originalCoordinate;
-        }
-        
-        // Get the current bundle ID
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID) {
-            threadDictionary[kRecursionGuardKey] = nil;
-            return originalCoordinate;
-        }
-        
-        // Check if we should spoof this app
-        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
-            threadDictionary[kRecursionGuardKey] = nil;
-            return originalCoordinate;
-        }
-        
-        // Use modifySpoofedLocation method which properly handles position variations
-        // Create a temporary CLLocation with the original coordinates to modify
-        CLLocation *tempLocation = [[CLLocation alloc] initWithLatitude:originalCoordinate.latitude
-                                                             longitude:originalCoordinate.longitude];
-        
-        // Get a properly spoofed location with all variations applied
-        CLLocation *spoofedLocation = [manager modifySpoofedLocation:tempLocation];
-        if (!spoofedLocation) {
-            threadDictionary[kRecursionGuardKey] = nil;
-            return originalCoordinate;
-        }
-        
-        // Get the spoofed coordinates with variations applied
-        CLLocationCoordinate2D spoofedCoordinate = spoofedLocation.coordinate;
-        
-        // Store the spoofed coordinate for throttled requests in thread-safe way
-        @synchronized([self class]) {
-            lastReturnedCoordinate = spoofedCoordinate;
-        }
-        
-        // Only log occasionally to reduce spam
-        static NSTimeInterval lastLogTime = 0;
-        if (currentTime - lastLogTime > 30.0) {
-            @synchronized([self class]) {
-                if (currentTime - lastLogTime > 30.0) {
-                    PXLog(@"[WeaponX] Using spoofed location for %@: (%.6f, %.6f) with variations", 
-                        bundleID, spoofedCoordinate.latitude, spoofedCoordinate.longitude);
-                    lastLogTime = currentTime;
-                }
-            }
-        }
-        
-        threadDictionary[kRecursionGuardKey] = nil;
-        return spoofedCoordinate;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception while spoofing location: %@", exception);
-        threadDictionary[kRecursionGuardKey] = nil;
-        return originalCoordinate;
-    }
+    if (PXLocationProjectionBypassActive()) return originalCoordinate;
+    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
+    if (!currentSnapshot) return originalCoordinate;
+    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
+    return (snapshot ?: currentSnapshot).coordinate;
 }
 
 %end
@@ -2269,127 +2157,29 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 %hook NSObject
 
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
-    // First check if this is actually a CLLocationManagerDelegate
-    if (![self respondsToSelector:@selector(locationManager:didUpdateLocations:)]) {
-        %orig;
-        return;
-    }
-    
-    if (!manager || !locations || locations.count == 0) {
-        %orig;
-        return;
-    }
-    
-    // Get the LocationSpoofingManager
-    LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
-    
-    // If spoofing is disabled (no pinned location) or manager is not available, use original location
-    if (!spoofManager || ![spoofManager isSpoofingEnabled]) {
-        %orig;
-        return;
-    }
-    
-    // Get the current bundle ID
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
-        %orig;
-        return;
-    }
-    
-    @try {
-        // Create array of spoofed locations
-        NSMutableArray *spoofedLocations = [NSMutableArray arrayWithCapacity:locations.count];
-        
-        // Apply proper position variations to each location using modifySpoofedLocation
-        for (CLLocation *originalLocation in locations) {
-            // Get a properly spoofed location with all variations applied
-            CLLocation *spoofedLocation = [spoofManager modifySpoofedLocation:originalLocation];
-            
-            if (spoofedLocation) {
-                [spoofedLocations addObject:spoofedLocation];
-            } else {
-                // If spoofing fails, use original location
-                [spoofedLocations addObject:originalLocation];
+    if (manager && locations.count > 0) {
+        PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(YES);
+        if (snapshot) {
+            // One generation for the whole batch. Keep the original NSArray,
+            // object identities, ordering, metadata and current callback queue.
+            for (CLLocation *location in locations) {
+                PXAttachLocationSpoofSnapshot(location, snapshot);
             }
         }
-        
-        // Replace original locations with spoofed ones
-        if (spoofedLocations.count > 0) {
-            %orig(manager, spoofedLocations);
-            return;
-        }
-        
-        // If no spoofed locations were created, use original
-        %orig;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in locationManager:didUpdateLocations: %@", exception);
-        %orig; // Pass through original on exception
     }
+    %orig;
 }
 
 // Add hook for the legacy location update method
 - (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation {
-    // First check if this is actually a CLLocationManagerDelegate
-    if (![self respondsToSelector:@selector(locationManager:didUpdateToLocation:fromLocation:)]) {
-        %orig;
-        return;
-    }
-    
-    if (!manager || !newLocation) {
-        %orig;
-        return;
-    }
-    
-    // Get the LocationSpoofingManager
-    LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
-    
-    // If spoofing is disabled (no pinned location) or manager is not available, use original location
-    if (!spoofManager || ![spoofManager isSpoofingEnabled]) {
-        %orig;
-        return;
-    }
-    
-        // Get the current bundle ID
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
-            %orig;
-            return;
+    if (manager && (newLocation || oldLocation)) {
+        PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(YES);
+        if (snapshot) {
+            PXAttachLocationSpoofSnapshot(newLocation, snapshot);
+            PXAttachLocationSpoofSnapshot(oldLocation, snapshot);
         }
-        
-    @try {
-        // Performance optimization: throttle excessive legacy updates
-        static NSTimeInterval lastLegacyUpdateTime = 0;
-        NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-        if (currentTime - lastLegacyUpdateTime < 0.3) { // Max ~3 updates per second
-            static int legacySkipCounter = 0;
-            if (++legacySkipCounter % 3 != 0) { // Process only every 3rd rapid update
-                %orig;
-                return;
-            }
-        }
-        lastLegacyUpdateTime = currentTime;
-        
-        // Get spoofed location with position variations applied
-        CLLocation *spoofedLocation = [spoofManager modifySpoofedLocation:newLocation];
-        
-        if (spoofedLocation) {
-            // Only log occasionally
-            static NSTimeInterval lastLogTime = 0;
-            if (currentTime - lastLogTime > 30.0) {
-                PXLog(@"[WeaponX] Using pinned location with variations for %@ (legacy method)", bundleID);
-                lastLogTime = currentTime;
-            }
-            
-            // Call original with spoofed location
-            %orig(manager, spoofedLocation, oldLocation);
-        } else {
-            // If spoofing fails, use original
-            %orig;
-        }
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in legacy location method: %@", exception);
-        %orig; // Pass through original on exception
     }
+    %orig;
 }
 
 %end
@@ -2566,27 +2356,82 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 %hook CLLocation
 
 - (CLLocationSpeed)speed {
-    LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    if (PXLocationManagerShouldSpoof(manager, bundleID)) {
-        // Return a reasonable speed value (walking pace)
-        return 1.5;
-    }
-    
-    return %orig;
+    CLLocationSpeed originalSpeed = %orig;
+    if (PXLocationProjectionBypassActive()) return originalSpeed;
+    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
+    if (!currentSnapshot) return originalSpeed;
+    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
+    return (snapshot ?: currentSnapshot).speed;
 }
 
 - (CLLocationDirection)course {
-    LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    if (PXLocationManagerShouldSpoof(manager, bundleID)) {
-        // Return a fixed direction (North = 0 degrees)
-        return 0.0;
-    }
-    
-    return %orig;
+    CLLocationDirection originalCourse = %orig;
+    if (PXLocationProjectionBypassActive()) return originalCourse;
+    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
+    if (!currentSnapshot) return originalCourse;
+    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
+    return (snapshot ?: currentSnapshot).heading;
+}
+
+%end
+
+%hook CLLocationSourceInformation
+
+- (BOOL)isSimulatedBySoftware {
+    BOOL originalValue = %orig;
+    return PXActiveLocationSnapshot(NO) ? NO : originalValue;
+}
+
+- (BOOL)isProducedByAccessory {
+    BOOL originalValue = %orig;
+    return PXActiveLocationSnapshot(NO) ? NO : originalValue;
+}
+
+%end
+
+
+%hook CLHeading
+
+- (CLLocationDirection)magneticHeading {
+    CLLocationDirection originalHeading = %orig;
+    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
+    if (!currentSnapshot) return originalHeading;
+    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
+    return (snapshot ?: currentSnapshot).heading;
+}
+
+- (CLLocationDirection)headingAccuracy {
+    CLLocationDirection originalAccuracy = %orig;
+    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
+    if (!currentSnapshot) return originalAccuracy;
+    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
+    return (snapshot ?: currentSnapshot).heading;
+}
+
+- (CLLocationDirection)trueHeading {
+    CLLocationDirection originalHeading = %orig;
+    PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
+    if (!currentSnapshot) return originalHeading;
+    PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
+    return (snapshot ?: currentSnapshot).heading;
+}
+
+%end
+
+
+%hook CLRegion
+
+- (CLLocationCoordinate2D)center {
+    CLLocationCoordinate2D originalCenter = %orig;
+    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
+    return snapshot ? snapshot.coordinate : originalCenter;
+}
+
+- (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate {
+    BOOL originalContains = %orig;
+    // Preserve the caller's argument and evaluate the real implementation
+    // first. In active mode, containment follows the projected region center.
+    return PXActiveLocationSnapshot(NO) ? YES : originalContains;
 }
 
 %end
@@ -2596,87 +2441,22 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 
 // Regional monitoring delegate methods
 - (void)locationManager:(CLLocationManager *)manager didEnterRegion:(CLRegion *)region {
-    // First check if this is actually a CLLocationManagerDelegate
-    if (![self respondsToSelector:@selector(locationManager:didEnterRegion:)]) {
-        %orig;
-        return;
-    }
-    
-    LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
-        %orig;
-        return;
-    }
-    
-    @try {
-        // Log the interception
-        PXLog(@"[WeaponX] Intercepted region entry for app %@, region: %@", bundleID, region.identifier);
-        
-        // We suppress region events when spoofing is active since our location isn't actually moving
-        // This prevents apps from getting confusing region notifications
-        
-        // Do not call %orig to suppress the notification
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in locationManager:didEnterRegion: %@", exception);
-        %orig;
-    }
+    // Refresh/read the same generation but never suppress or redispatch the
+    // system callback. Manager and region arguments remain byte-for-byte same.
+    (void)PXActiveLocationSnapshot(NO);
+    %orig;
 }
 
 - (void)locationManager:(CLLocationManager *)manager didExitRegion:(CLRegion *)region {
-    // First check if this is actually a CLLocationManagerDelegate
-    if (![self respondsToSelector:@selector(locationManager:didExitRegion:)]) {
-        %orig;
-        return;
-    }
-    
-    LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
-        %orig;
-        return;
-    }
-    
-    @try {
-        // Log the interception
-        PXLog(@"[WeaponX] Intercepted region exit for app %@, region: %@", bundleID, region.identifier);
-        
-        // Suppress region exit events when spoofing is active
-        // Do not call %orig to suppress the notification
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in locationManager:didExitRegion: %@", exception);
-        %orig;
-    }
+    (void)PXActiveLocationSnapshot(NO);
+    %orig;
 }
 
 // Heading update delegate method
 - (void)locationManager:(CLLocationManager *)manager didUpdateHeading:(CLHeading *)newHeading {
-    // First check if this is actually a CLLocationManagerDelegate
-    if (![self respondsToSelector:@selector(locationManager:didUpdateHeading:)]) {
-        %orig;
-        return;
-    }
-    
-    LocationSpoofingManager *spoofManager = [LocationSpoofingManager sharedManager];
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    
-    if (!PXLocationManagerShouldSpoof(spoofManager, bundleID)) {
-        %orig;
-        return;
-    }
-    
-    @try {
-        // Create a spoofed heading pointing north
-        // This would require creating a custom CLHeading, which is complex
-        // For now, we'll just pass through the original heading
-        PXLog(@"[WeaponX] Passing through heading update for app %@", bundleID);
-        %orig;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in locationManager:didUpdateHeading: %@", exception);
-        %orig;
-    }
+    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
+    if (snapshot) PXAttachLocationSpoofSnapshot(newHeading, snapshot);
+    %orig;
 }
 
 %end
@@ -2720,41 +2500,8 @@ static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSStr
 
 - (CLLocationCoordinate2D)coordinate {
     CLLocationCoordinate2D originalCoordinate = %orig;
-    
-    @try {
-        LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        
-        if (!PXLocationManagerShouldSpoof(manager, bundleID)) {
-            return originalCoordinate;
-        }
-        
-        // Get spoofed coordinates
-        double latitude = [manager getSpoofedLatitude];
-        double longitude = [manager getSpoofedLongitude];
-        
-        // Validation
-        if (latitude == 0.0 && longitude == 0.0) {
-            return originalCoordinate;
-        }
-        
-        // Create and return spoofed coordinate
-        CLLocationCoordinate2D spoofedCoordinate = CLLocationCoordinate2DMake(latitude, longitude);
-        
-        // Log occasionally
-        static NSTimeInterval lastLogTime = 0;
-        NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
-        if (currentTime - lastLogTime > 30.0) {
-            PXLog(@"[WeaponX] Using spoofed coordinate for map display: (%.6f, %.6f)", 
-                  spoofedCoordinate.latitude, spoofedCoordinate.longitude);
-            lastLogTime = currentTime;
-        }
-        
-        return spoofedCoordinate;
-    } @catch (NSException *exception) {
-        PXLog(@"[WeaponX] Exception in MKUserLocation coordinate: %@", exception);
-        return originalCoordinate;
-    }
+    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
+    return snapshot ? snapshot.coordinate : originalCoordinate;
 }
 
 %end

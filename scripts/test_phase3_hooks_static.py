@@ -32,6 +32,8 @@ require("common/PXIdentitySurfaceRegistry.m", [
     '@"kCTPostponementInfoIMEI"', '@"kCTPostponementInfoMEID"',
     '@"sf_productType"', '@"sf_serialNumber"', '@"sf_udidString"', '@"sf_uuidString"',
     '@"applicationDSID"', '@"internationalMobileEquipmentIdentity2"', '@"_iOSComponentBuildVersion"',
+    '@"deviceIdentifierForAdvertising"', '@"deviceIdentifierForVendor"', '@"uniqueDeviceId"',
+    '@"hardwarePlatform"', '@"marketingName"',
     'bit <= PXIdentitySurfacePrivateWrapper',
 ])
 require("TLinkIOSTweak/ManagedConfigurationIdentityHooks.x", [
@@ -84,7 +86,8 @@ require("tests/PXLocaleRuntimeProjectionTests.m", [
 require("common/PXPrivateIdentityWrapperProjection.m", [
     'PXPrivateIdentityWrapperRuleDescriptors', 'PXPrivateIdentityWrapperMethodEncodingIsSupported',
     '@"UIDevice"', '@"deviceInfoForKey:"', '@"AMSDevice"', '@"AADeviceInfo"',
-    '@"AKDevice"', '@"AMSUserAgent"', 'PXIdentitySurfacePrivateWrapper',
+    '@"AKDevice"', '@"AMSUserAgent"', '@"LSApplicationWorkspace"', '@"LSApplicationProxy"',
+    'PXPrivateIdentityWrapperProjectUUID', 'PXIdentitySurfacePrivateWrapper',
 ])
 require("TLinkIOSTweak/PrivateIdentityWrapperHooks.x", [
     'PXPrivateIdentityClassIsSystemOwned', '/System/Library/', '/usr/lib/',
@@ -93,11 +96,14 @@ require("TLinkIOSTweak/PrivateIdentityWrapperHooks.x", [
     'MSHookMessageEx(targetClass, selector, replacement, &original)',
     'PXPrivateIdentityAlreadyInstalled', '_dyld_register_func_for_add_image',
     'PXPrivateIdentityWrapperMethodEncodingIsSupported', 'PXCurrentIdentitySnapshot()',
-    'isIdentifierEnabled:entry.toggle',
+    'isIdentifierEnabled:entry.toggle', 'record.uuidResult', 'PXPrivateIdentityWrapperProjectUUID',
 ])
 require("tests/PXPrivateIdentityWrapperProjectionTests.m", [
     'generic Device class must stay excluded', 'Secure Element / PassKit evidence class entered A-05 allowlist',
     'vendor anti-fraud class entered A-05 allowlist', 'sf_uuidString must project canonical IDFA',
+    'LaunchServices UUID rule inventory drifted',
+    'LaunchServices advertising identifier must match canonical IDFA as NSUUID',
+    'LaunchServices vendor identifier must match canonical IDFV as NSUUID',
     'unknown keyed lookup did not fail open', 'unexpected object class must fail open',
 ])
 require("common/PXCoreTelephonyServerIdentity.m", [
@@ -118,6 +124,8 @@ require("TLinkIOSTweak/Tweak.x", [
     'PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceIORegistry)',
     'PXIOKitCreateRegistryReplacement', '@"IOKitBulk"', '@"IOKitSearch"',
     'PXIdentityExpectedTypeData',
+    'PXProjectAdvertisingIdentityUUID(originalIdentifier, snapshot.deviceIDs)',
+    'PXProjectIdentityUUID(originalIdentifier, snapshot.deviceIDs[@"IDFV"])',
 ])
 require("tests/PXIdentitySurfaceRegistryTests.m", [
     'registry malformed', 'MG alias did not canonicalize',
@@ -130,16 +138,16 @@ require("tests/PXIdentitySurfaceRegistryTests.m", [
     'secure-element evidence must not enter generic private-wrapper parity registry',
 ])
 require("common/PXConsistencyMatrix.m", [
-    '@"ManagedConfiguration"', '@"CoreTelephonyServer"', '@"PrivateWrapper"',
+    '@"ManagedConfiguration"', '@"CoreTelephonyServer"', '@"PrivateWrapper"', '@"LaunchServices"',
     '@"sysctlnametomib+sysctl"',
-    '@"SerialNumber"', '@"MLBSerialNumber"', '@"UDID"', '@"SystemBootUUID"', '@"IDFA"',
+    '@"SerialNumber"', '@"MLBSerialNumber"', '@"UDID"', '@"SystemBootUUID"', '@"IDFA"', '@"IDFV"',
     '@"IMEI"', '@"IMEI2"', '@"MEID"', '@"IMSI"',
 ])
 require("tests/PXPhaseAConsistencyGateTests.m", [
     'PXPhaseAAssertMatrixScenario', 'PXPhaseAAssertManagedConfiguration',
     'PXPhaseAAssertPrivateWrappers', 'PXPhaseAAssertCTServer',
     'PXPhaseAAssertIndirectSysctlRows',
-    '@"whole-group blank"', '@"missing UDID"', '@"malformed IMEI"',
+    '@"whole-group blank"', '@"missing UDID"', '@"missing IDFV"', '@"malformed IMEI"',
     '@"DeviceModel toggle off"', '@"scope off"', '@"generation swap"',
     'sf_uuidString', 'MCIOSerialString', 'MCGestaltGetProductName',
 ])

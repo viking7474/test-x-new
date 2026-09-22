@@ -98,6 +98,9 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"PrivateWrapper", @"_iOSComponentDeviceModel", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
             PXKeyEntry(@"ManagedConfiguration", @"MCGestaltGetProductName", @"DeviceModel", @"DeviceModel", @"DeviceModel"),
 
+            // --- DeviceModelName (marketing name) ---
+            PXKeyEntry(@"PrivateWrapper", @"marketingName", @"DeviceModelName", @"DeviceModel", @"DeviceModelName"),
+
             // --- HwModel (board/marketing hw string, e.g. D74AP) ---
             PXKeyEntry(@"sysctl", @"CTL_HW/HW_MODEL", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"sysctlbyname", @"hw.model", @"HwModel", @"DeviceModel", @"HwModel"),
@@ -105,6 +108,7 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"MG", @"HWModel", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"MG", @"HWModelStr", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"IOKit", @"model", @"HwModel", @"DeviceModel", @"HwModel"),
+            PXKeyEntry(@"PrivateWrapper", @"hardwarePlatform", @"HwModel", @"DeviceModel", @"HwModel"),
             PXKeyEntry(@"PrivateWrapper", @"_iOSComponentHardwarePlatform", @"HwModel", @"DeviceModel", @"HwModel"),
 
             // --- BoardID ---
@@ -142,6 +146,7 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"PrivateWrapper", @"udid", @"UDID", @"UDID", @"UDID"),
             PXKeyEntry(@"PrivateWrapper", @"uniqueDeviceIdentifier", @"UDID", @"UDID", @"UDID"),
             PXKeyEntry(@"PrivateWrapper", @"deviceUDID", @"UDID", @"UDID", @"UDID"),
+            PXKeyEntry(@"PrivateWrapper", @"uniqueDeviceId", @"UDID", @"UDID", @"UDID"),
 
             // --- SystemBootUUID ---
             PXKeyEntry(@"IOKit", @"IOPlatformUUID", @"SystemBootUUID", @"SystemBootUUID", @"SystemBootUUID"),
@@ -153,6 +158,13 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"AdSupport", @"advertisingIdentifier", @"IDFA", @"IDFA", @"IDFA"),
             PXKeyEntry(@"PrivateWrapper", @"sf_uuidString", @"IDFA", @"IDFA", @"IDFA"),
             PXKeyEntry(@"PrivateWrapper", @"applicationDSID", @"IDFA", @"IDFA", @"IDFA"),
+            PXKeyEntry(@"LaunchServices", @"LSApplicationWorkspace.deviceIdentifierForAdvertising", @"IDFA", @"IDFA", @"IDFA"),
+            PXKeyEntry(@"LaunchServices", @"LSApplicationProxy.deviceIdentifierForAdvertising", @"IDFA", @"IDFA", @"IDFA"),
+
+            // --- IDFV / vendor identity ---
+            PXKeyEntry(@"UIDevice", @"identifierForVendor", @"IDFV", @"IDFV", @"IDFV"),
+            PXKeyEntry(@"LaunchServices", @"LSApplicationWorkspace.deviceIdentifierForVendor", @"IDFV", @"IDFV", @"IDFV"),
+            PXKeyEntry(@"LaunchServices", @"LSApplicationProxy.deviceIdentifierForVendor", @"IDFV", @"IDFV", @"IDFV"),
 
             // --- IMEI ---
             PXKeyEntry(@"IOKit", @"kIMEIKey", @"IMEI", @"IMEI", @"IMEI"),
@@ -176,6 +188,10 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
 
             // --- IMSI ---
             PXKeyEntry(@"CoreTelephonyServer", @"kCTMobileEquipmentInfoIMSI", @"IMSI", @"IMSI", @"IMSI"),
+            PXKeyEntry(@"PrivateWrapper", @"IMSI", @"IMSI", @"IMSI", @"IMSI"),
+
+            // --- ICCID ---
+            PXKeyEntry(@"PrivateWrapper", @"ICCID", @"ICCID", @"ICCID", @"ICCID"),
         ];
     });
     return entries;

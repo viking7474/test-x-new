@@ -13,6 +13,7 @@ static NSDictionary *PXPhaseACanonicalDeviceIDs(NSString *generationSuffix) {
         @"Darwin": next ? @"24.0.0" : @"23.5.0",
         @"KernelVersion": next ? @"Darwin Kernel Version 24.0.0" : @"Darwin Kernel Version 23.5.0",
         @"DeviceModel": next ? @"iPhone16,2" : @"iPhone15,3",
+        @"DeviceModelName": next ? @"iPhone 15 Pro Max" : @"iPhone 14 Pro Max",
         @"HwModel": next ? @"D84AP" : @"D74AP",
         @"BoardID": next ? @"0x0E" : @"0x2C",
         @"ModelNumber": next ? @"MU456" : @"MU123",
@@ -22,10 +23,13 @@ static NSDictionary *PXPhaseACanonicalDeviceIDs(NSString *generationSuffix) {
         @"UDID": next ? @"00112233445566778899aabbccddeeff00112233" : @"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
         @"SystemBootUUID": next ? @"87654321-4321-4432-A234-ABCDEF123456" : @"12345678-1234-4234-9234-123456789ABC",
         @"IDFA": next ? @"0F1E2D3C-4B5A-4678-9ABC-DEF012345678" : @"A1B2C3D4-E5F6-4789-ABCD-0123456789EF",
+        @"IDFV": next ? @"10203040-5060-4780-90A0-B0C0D0E0F001" : @"B2C3D4E5-F607-489A-BCDE-1234567890FA",
+        @"ATTAuthorizationStatus": @3,
         @"IMEI": next ? @"356938035643809" : @"490154203237518",
         @"IMEI2": next ? @"352099001761481" : @"356938035643809",
         @"MEID": next ? @"A00000C0FFEE12" : @"A00000BEEF1234",
         @"IMSI": next ? @"310260987654321" : @"310260123456789",
+        @"ICCID": next ? @"8901260123456789020" : @"8901260123456789012",
     };
 }
 
@@ -122,7 +126,17 @@ static void PXPhaseAAssertManagedConfiguration(NSDictionary *deviceIDs) {
 static void PXPhaseAAssertPrivateWrappers(NSDictionary *deviceIDs) {
     for (NSDictionary<NSString *, id> *rule in PXPrivateIdentityWrapperRuleDescriptors()) {
         if ([rule[@"keyedGetter"] boolValue]) continue;
+        NSString *className = rule[@"class"];
         NSString *selector = rule[@"selector"];
+        if ([rule[@"uuidResult"] boolValue]) {
+            NSString *matrixKey = [NSString stringWithFormat:@"%@.%@", className, selector];
+            NSString *expected = PXPhaseAExpected(@"LaunchServices", matrixKey, deviceIDs);
+            NSUUID *original = [[NSUUID alloc] initWithUUIDString:@"11111111-2222-4333-8444-555555555555"];
+            NSUUID *actual = PXPrivateIdentityWrapperProjectUUID(original, selector, deviceIDs);
+            NSCAssert([actual isKindOfClass:[NSUUID class]] && [actual.UUIDString isEqualToString:expected],
+                      @"A-06 LaunchServices %@ diverged: %@ != %@", matrixKey, actual, expected);
+            continue;
+        }
         NSString *expected = PXPhaseAExpected(@"PrivateWrapper", selector, deviceIDs);
         id actual = PXPrivateIdentityWrapperProjectObject(@"original", selector, deviceIDs);
         NSCAssert([actual isEqual:expected], @"A-06 private wrapper %@ diverged: %@ != %@", selector, actual, expected);
@@ -206,6 +220,16 @@ void PXRunPhaseAConsistencyGateTests(void) {
               @"A-06 missing UDID did not fail open in ManagedConfiguration");
     NSCAssert([PXPrivateIdentityWrapperProjectObject(@"original", @"sf_udidString", missing) isEqual:@"original"],
               @"A-06 missing UDID did not fail open in private wrapper");
+    NSMutableDictionary *missingVendor = [ids mutableCopy];
+    [missingVendor removeObjectForKey:@"IDFV"];
+    PXPhaseAAssertMatrixScenario(missingVendor, allOn, YES, @"missing IDFV");
+    NSCAssert(PXValidateConsistencyMatrix(missingVendor, &failures),
+              @"A-06 missing-IDFV matrix became partial: %@", failures);
+    NSUUID *originalVendorUUID = [[NSUUID alloc] initWithUUIDString:@"11111111-2222-4333-8444-555555555555"];
+    NSCAssert(PXPrivateIdentityWrapperProjectUUID(originalVendorUUID,
+                                                  @"deviceIdentifierForVendor",
+                                                  missingVendor) == originalVendorUUID,
+              @"A-06 missing IDFV did not fail open in LaunchServices");
 
     // Malformed field: all IMEI surfaces fail open rather than partially projecting.
     NSMutableDictionary *malformed = [ids mutableCopy];

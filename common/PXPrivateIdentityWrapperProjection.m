@@ -1,4 +1,5 @@
 #import "PXPrivateIdentityWrapperProjection.h"
+#import "PXIdentifierUUIDProjection.h"
 #import <string.h>
 
 static NSDictionary *PXPrivateWrapperRule(NSString *className,
@@ -10,6 +11,18 @@ static NSDictionary *PXPrivateWrapperRule(NSString *className,
         @"selector": selector,
         @"classMethod": @(classMethod),
         @"keyedGetter": @(keyedGetter),
+        @"uuidResult": @NO,
+    };
+}
+
+static NSDictionary *PXPrivateWrapperUUIDRule(NSString *className,
+                                               NSString *selector) {
+    return @{
+        @"class": className,
+        @"selector": selector,
+        @"classMethod": @NO,
+        @"keyedGetter": @NO,
+        @"uuidResult": @YES,
     };
 }
 
@@ -28,13 +41,25 @@ NSArray<NSDictionary<NSString *, id> *> *PXPrivateIdentityWrapperRuleDescriptors
             PXPrivateWrapperRule(@"UIDevice", @"_deviceInfoForKey:", NO, YES),
             PXPrivateWrapperRule(@"LSApplicationProxy", @"applicationDSID", NO, NO),
 
+            // P0-02: LaunchServices exposes the same vendor/advertising UUIDs
+            // as UIDevice and AdSupport.  These rules are installed only when
+            // the physical runtime already exports the selector and its ABI is
+            // object-returning; projection additionally requires an NSUUID
+            // original so a different runtime shape always fails open.
+            PXPrivateWrapperUUIDRule(@"LSApplicationWorkspace", @"deviceIdentifierForVendor"),
+            PXPrivateWrapperUUIDRule(@"LSApplicationWorkspace", @"deviceIdentifierForAdvertising"),
+            PXPrivateWrapperUUIDRule(@"LSApplicationProxy", @"deviceIdentifierForVendor"),
+            PXPrivateWrapperUUIDRule(@"LSApplicationProxy", @"deviceIdentifierForAdvertising"),
+
             // AppleMediaServices / Accounts / CoreTelephony private wrappers.
             PXPrivateWrapperRule(@"AMSDevice", @"productType", YES, NO),
+            PXPrivateWrapperRule(@"AMSDevice", @"uniqueDeviceId", YES, NO),
             PXPrivateWrapperRule(@"AMSDevice", @"serialNumber", YES, NO),
             PXPrivateWrapperRule(@"AMSDevice", @"MLBSerialNumber", YES, NO),
             PXPrivateWrapperRule(@"AMSDevice", @"productVersion", YES, NO),
             PXPrivateWrapperRule(@"AMSDevice", @"buildVersion", YES, NO),
             PXPrivateWrapperRule(@"AMSDevice", @"deviceName", YES, NO),
+            PXPrivateWrapperRule(@"AMSDevice", @"hardwarePlatform", YES, NO),
 
             PXPrivateWrapperRule(@"AADeviceInfo", @"productType", NO, NO),
             PXPrivateWrapperRule(@"AADeviceInfo", @"internationalMobileEquipmentIdentity", NO, NO),
@@ -56,6 +81,8 @@ NSArray<NSDictionary<NSString *, id> *> *PXPrivateIdentityWrapperRuleDescriptors
             PXPrivateWrapperRule(@"CTDeviceIdentifier", @"IMEI", YES, NO),
             PXPrivateWrapperRule(@"CTMobileEquipmentInfo", @"IMEI", NO, NO),
             PXPrivateWrapperRule(@"CTMobileEquipmentInfo", @"MEID", NO, NO),
+            PXPrivateWrapperRule(@"CTMobileEquipmentInfo", @"ICCID", NO, NO),
+            PXPrivateWrapperRule(@"CTMobileEquipmentInfo", @"IMSI", NO, NO),
 
             PXPrivateWrapperRule(@"AKDevice", @"internationalMobileEquipmentIdentity", NO, NO),
             PXPrivateWrapperRule(@"AKDevice", @"internationalMobileEquipmentIdentity2", NO, NO),
@@ -88,6 +115,8 @@ NSArray<NSDictionary<NSString *, id> *> *PXPrivateIdentityWrapperRuleDescriptors
             PXPrivateWrapperRule(@"DMFDevice", @"localHostName", NO, NO),
             PXPrivateWrapperRule(@"DMFDevice", @"osVersion", NO, NO),
             PXPrivateWrapperRule(@"DMFDevice", @"buildVersion", NO, NO),
+            PXPrivateWrapperRule(@"DMFDevice", @"ICCID", NO, NO),
+            PXPrivateWrapperRule(@"DMFDevice", @"marketingName", NO, NO),
 
             PXPrivateWrapperRule(@"AMSUserAgent", @"_iOSComponentHardwarePlatform", NO, NO),
             PXPrivateWrapperRule(@"AMSUserAgent", @"_iOSComponentBuildVersion", NO, NO),
@@ -143,6 +172,24 @@ id PXPrivateIdentityWrapperProjectObject(id original,
     if (!entry) return original;
     NSString *value = PXIdentitySurfaceResolveValue(entry, deviceIDs);
     return PXPrivateWrapperProjectResolvedValue(original, value, entry.expectedType);
+}
+
+id PXPrivateIdentityWrapperProjectUUID(id original,
+                                       NSString *surfaceKey,
+                                       NSDictionary *deviceIDs) {
+    // Calling the original first is part of the contract. A nil or differently
+    // shaped runtime result is evidence that this OS does not expose the API in
+    // the expected form, so do not synthesize a value.
+    if (![original isKindOfClass:[NSUUID class]]) return original;
+    PXIdentitySurfaceEntry *entry =
+        PXIdentitySurfaceEntryForKey(surfaceKey, PXIdentitySurfacePrivateWrapper);
+    if (!entry) return original;
+    if ([surfaceKey isEqualToString:@"deviceIdentifierForAdvertising"]) {
+        return PXProjectAdvertisingIdentityUUID(original, deviceIDs);
+    }
+    NSString *value = PXIdentitySurfaceResolveValue(entry, deviceIDs);
+    if (!value.length) return original;
+    return PXProjectIdentityUUID(original, value);
 }
 
 id PXPrivateIdentityWrapperProjectKeyedObject(id original,

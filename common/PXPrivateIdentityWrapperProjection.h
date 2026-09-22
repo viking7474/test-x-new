@@ -9,6 +9,12 @@ FOUNDATION_EXPORT BOOL PXPrivateIdentityWrapperMethodEncodingIsSupported(const c
 FOUNDATION_EXPORT id _Nullable PXPrivateIdentityWrapperProjectObject(id _Nullable original,
                                                                       NSString *surfaceKey,
                                                                       NSDictionary *deviceIDs);
+/// LaunchServices identity accessors are object-typed at the ABI level but are
+/// expected to return NSUUID. Preserve the original unless both its runtime
+/// shape and the canonical profile UUID are valid.
+FOUNDATION_EXPORT id _Nullable PXPrivateIdentityWrapperProjectUUID(id _Nullable original,
+                                                                    NSString *surfaceKey,
+                                                                    NSDictionary *deviceIDs);
 FOUNDATION_EXPORT id _Nullable PXPrivateIdentityWrapperProjectKeyedObject(id _Nullable original,
                                                                            NSString *queriedKey,
                                                                            NSDictionary *deviceIDs,
