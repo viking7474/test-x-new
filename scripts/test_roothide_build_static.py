@@ -24,6 +24,7 @@ keychain = read("scripts/keychain_backup.sh")
 workflow = read(".github/workflows/build-ios-arm.yml")
 bottom_buttons = read("BottomButtons.m")
 view_controller = read("TLinkIOSViewController.m")
+daemon = read("WeaponXMountDaemon/WeaponXDaemon.m")
 entitlements = read("ent.plist")
 
 for token in (
@@ -65,9 +66,13 @@ require('PXJailbreakRootPath(@"/bin/bash")' in command_runner, "RootHide shell s
 
 require('ROOTFS_PREFIX="/rootfs"' in postinst, "postinst does not route user data to RootHide rootfs")
 require('${ROOTFS_PREFIX}/var/mobile/Library' in postinst, "postinst still treats jbroot /var/mobile as user data")
-require('IS_ROOTHIDE=1' in postinst and
-        'RootHide: deferring WeaponXDaemon launch during package installation' in postinst,
-        "RootHide postinst still starts the KeepAlive daemon during dpkg installation")
+require('Loading filter-sync daemon using launchctl' in postinst and
+        'launchctl load "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"' in postinst,
+        "RootHide postinst does not register the privileged filter-sync daemon")
+require('arrayWithObjects:@"TLinkIOS"' not in daemon and
+        '- (void)startProcess:' not in daemon and
+        'Synchronizing tweak filters...' in daemon,
+        "WeaponXDaemon must never respawn the TLinkIOS GUI")
 require('HELPER_TOOL_PATH="${PX_SCRIPT_DIR}/backup_helper"' in keychain, "Keychain helper is not package-relative")
 require("PX_JBROOT_PREFIX" in keychain, "Keychain dependencies do not support randomized jbroot")
 require('"/rootfs/var/containers/Bundle/Application"' in keychain, "Keychain app discovery does not inspect RootHide rootfs")
@@ -84,6 +89,15 @@ require("PXJailbreakPathCandidates" in bottom_buttons and
 require("static BOOL PXWriteSubstrateFilterPlists(void)" in view_controller and
         "return [syncStatus isEqualToString:@\"in_sync\"];" in view_controller,
         "Filter synchronization does not report whether the installed RootHide filters match")
+require('NSString *canonicalDir = PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries")' in view_controller and
+        '@"daemon_sync_timeout"' in view_controller and
+        '[NSThread sleepForTimeInterval:0.05]' in view_controller,
+        "RootHide filter writer does not wait for the privileged daemon on the canonical jbroot path")
+require(view_controller.index('CFSTR("com.hydra.tlinkios.filterPlistChanged")') <
+        view_controller.index('NSString *syncStatus = nil;'),
+        "Filter writer still decides failure before notifying the root daemon")
+require('return PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");' in daemon,
+        "RootHide daemon does not use the canonical randomized jbroot DynamicLibraries path")
 require("if (![self syncHookScopeToResetApps])" in view_controller and
         "Không thể bật hook" in view_controller,
         "Reset Data does not stop safely when the injection filter cannot be installed")

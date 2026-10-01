@@ -15,18 +15,10 @@
 // Constants
 static const int kCheckInterval = 5; // Check every 5 seconds
 static NSString *kGuardianDir = nil; // Will be initialized in init
-static NSString *kTLinkIOSPath = nil; // Will be initialized in init
 static NSString *ROOT_PREFIX = nil; // Will be set based on environment
 static os_log_t weaponx_log = NULL;
 static BOOL debugMode = NO;
 static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkios.filterPlistChanged";
-
-// Forward declarations
-extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
-extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
-
-#define PROC_ALL_PIDS 1
-#define PROC_PIDPATHINFO_MAXSIZE 4096
 
 @interface WeaponXDaemon : NSObject
 @property (nonatomic, strong) NSTimer *monitorTimer;
@@ -59,13 +51,14 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
         ROOT_PREFIX = @"";
 #endif
         kGuardianDir = PXJailbreakRootPath(@"/Library/WeaponX/Guardian");
-        kTLinkIOSPath = PXJailbreakRootPath(@"/Applications/TLinkIOS.app/TLinkIOS");
         
         _processInfo = [NSMutableDictionary dictionary];
-        _protectedProcesses = [NSMutableArray arrayWithObjects:@"TLinkIOS", nil];
+        // The guardian must never respawn the GUI application. On RootHide this
+        // daemon is loaded as root/KeepAlive; launching TLinkIOS headlessly from
+        // here can create a crash/restart loop during package installation.
+        _protectedProcesses = [NSMutableArray array];
         
         NSLog(@"Using Guardian dir: %@", kGuardianDir);
-        NSLog(@"Using TLinkIOS path: %@", kTLinkIOSPath);
         
         // Create guardian directory if needed
         [self ensureGuardianDirectoryExists];
@@ -110,72 +103,11 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 }
 
 - (void)checkProcesses {
-    [self log:@"Checking processes..." withType:OS_LOG_TYPE_DEBUG];
+    // Historical versions also scanned processes and relaunched TLinkIOS when the
+    // GUI was not running. A root KeepAlive daemon must not own GUI lifecycle.
+    // Its only periodic responsibility is privileged filter synchronization.
+    [self log:@"Synchronizing tweak filters..." withType:OS_LOG_TYPE_DEBUG];
     [self syncTLinkIOSFilterPlists];
-    
-    // Get all running processes
-    int numberOfProcesses = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-    
-    if (numberOfProcesses <= 0) {
-        [self log:@"Failed to get process list" withType:OS_LOG_TYPE_ERROR];
-        return;
-    }
-    
-    pid_t *pids = (pid_t *)malloc(sizeof(pid_t) * numberOfProcesses);
-    if (!pids) {
-        [self log:@"Failed to allocate memory for process IDs" withType:OS_LOG_TYPE_ERROR];
-        return;
-    }
-    
-    numberOfProcesses = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pid_t) * numberOfProcesses);
-    
-    // Check for each protected process
-    NSMutableSet *foundProcesses = [NSMutableSet set];
-    
-    for (int i = 0; i < numberOfProcesses; i++) {
-        if (pids[i] == 0) continue;
-        
-        char pathBuffer[PROC_PIDPATHINFO_MAXSIZE];
-        int result = proc_pidpath(pids[i], pathBuffer, sizeof(pathBuffer));
-        
-        if (result > 0) {
-            NSString *processPath = [NSString stringWithUTF8String:pathBuffer];
-            NSString *processName = [processPath lastPathComponent];
-            
-            for (NSString *protectedName in self.protectedProcesses) {
-                if ([processName hasPrefix:protectedName]) {
-                    [self log:[NSString stringWithFormat:@"Found protected process: %@ (PID: %d)", processName, pids[i]] withType:OS_LOG_TYPE_INFO];
-                    [foundProcesses addObject:protectedName];
-                    
-                    // Update process info
-                    self.processInfo[protectedName] = @{
-                        @"pid": @(pids[i]),
-                        @"path": processPath,
-                        @"lastSeen": [NSDate date]
-                    };
-                }
-            }
-        }
-    }
-    
-    free(pids);
-    
-    // Determine which processes need to be started
-    NSMutableArray *missingProcesses = [NSMutableArray array];
-    
-    for (NSString *processName in self.protectedProcesses) {
-        if (![foundProcesses containsObject:processName]) {
-            [missingProcesses addObject:processName];
-            [self log:[NSString stringWithFormat:@"Protected process missing: %@", processName] withType:OS_LOG_TYPE_INFO];
-        }
-    }
-    
-    // Start missing processes
-    for (NSString *processName in missingProcesses) {
-        [self startProcess:processName];
-    }
-    
-    // Update state file
     [self updateStateFile];
 }
 
@@ -253,12 +185,18 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 }
 
 - (NSString *)substrateDynamicLibrariesDir {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    // RootHide's jbroot() is the source of truth for jailbreak-owned files.
+    // Never prefer a fixed /var/jb path left by another jailbreak/layout.
+    return PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");
+#else
     NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *path in PXJailbreakPathCandidates(@[@"/Library/MobileSubstrate/DynamicLibraries", @"/var/jb/Library/MobileSubstrate/DynamicLibraries"])) {
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:path isDirectory:&isDir] && isDir) return path;
     }
     return PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");
+#endif
 }
 
 - (BOOL)filterPlistIsValid:(NSDictionary *)plist bundles:(NSArray **)outBundles reason:(NSString **)reason {
@@ -319,51 +257,6 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
         @"bundles": bundles ?: @[],
         @"checksum": checksum ?: @""
     };
-}
-
-- (void)startProcess:(NSString *)processName {
-    [self log:[NSString stringWithFormat:@"Starting process: %@", processName] withType:OS_LOG_TYPE_INFO];
-    
-    NSString *executablePath = nil;
-    
-    if ([processName isEqualToString:@"TLinkIOS"]) {
-        executablePath = kTLinkIOSPath;
-    }
-    
-    if (!executablePath) {
-        [self log:[NSString stringWithFormat:@"No executable path for process: %@", processName] withType:OS_LOG_TYPE_ERROR];
-        return;
-    }
-    
-    // Check if file exists
-    if (![[NSFileManager defaultManager] fileExistsAtPath:executablePath]) {
-        [self log:[NSString stringWithFormat:@"Executable not found: %@", executablePath] withType:OS_LOG_TYPE_ERROR];
-        return;
-    }
-    
-    // Launch process
-    pid_t pid;
-    const char *path = [executablePath UTF8String];
-    const char *args[] = {path, NULL};
-    posix_spawn_file_actions_t actions;
-    
-    posix_spawn_file_actions_init(&actions);
-    int status = posix_spawn(&pid, path, &actions, NULL, (char *const *)args, NULL);
-    posix_spawn_file_actions_destroy(&actions);
-    
-    if (status == 0) {
-        [self log:[NSString stringWithFormat:@"Successfully started process %@ (PID: %d)", processName, pid] withType:OS_LOG_TYPE_INFO];
-        
-        // Update process info
-        self.processInfo[processName] = @{
-            @"pid": @(pid),
-            @"path": executablePath,
-            @"lastSeen": [NSDate date],
-            @"startedBy": @"daemon"
-        };
-    } else {
-        [self log:[NSString stringWithFormat:@"Failed to start process %@ (Error: %d)", processName, status] withType:OS_LOG_TYPE_ERROR];
-    }
 }
 
 #pragma mark - Utility Methods

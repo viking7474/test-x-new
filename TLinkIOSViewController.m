@@ -300,10 +300,20 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
     NSDictionary *tweakPlist = PXInjectionFilterPlistDictionary(validBundles);
     NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridgeBundles);
-    NSArray<NSString *> *dirs = PXJailbreakPathCandidates(@[
+    NSArray<NSString *> *dirs = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    // RootHide has one randomized jbroot. Do not mix that canonical directory
+    // with stale/fixed rootless candidates such as /var/jb: requiring every
+    // existing candidate to match can turn a successful RootHide sync into a
+    // false installed_mismatch.
+    NSString *canonicalDir = PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");
+    dirs = canonicalDir.length ? @[canonicalDir] : @[];
+#else
+    dirs = PXJailbreakPathCandidates(@[
         @"/Library/MobileSubstrate/DynamicLibraries",
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries"
     ]);
+#endif
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     [fm createDirectoryAtPath:stagingDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
@@ -330,18 +340,23 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         @"wroteTmpTweak": @(wroteTmpTweak),
         @"wroteTmpBridge": @(wroteTmpBridge),
         @"stagingTweakBundles": stagingTweakBundles,
-        @"stagingBridgeBundles": stagingBridgeBundles
+        @"stagingBridgeBundles": stagingBridgeBundles,
+        @"targetDirs": dirs ?: @[]
     } mutableCopy];
 
-    BOOL anyInstalledDir = NO;
-    BOOL allInstalledMatch = YES;
+    // Direct writes are only an optimization. Package-owned filter files are
+    // normally root:wheel, while the GUI runs as mobile, so RootHide expects the
+    // root daemon to publish the staged policy into DynamicLibraries.
+    BOOL directAnyInstalledDir = NO;
+    BOOL directAllInstalledMatch = YES;
     for (NSString *dir in dirs) {
         BOOL isDir = NO;
         if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
+            directAllInstalledMatch = NO;
             debug[[NSString stringWithFormat:@"%@ exists", dir]] = @NO;
             continue;
         }
-        anyInstalledDir = YES;
+        directAnyInstalledDir = YES;
         NSString *tweakPath = [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
         NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
         BOOL wroteTweak = [tweakPlist writeToFile:tweakPath atomically:YES];
@@ -352,8 +367,6 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
                                              PXShellQuote(PXBootstrapPathArgument(tweakPath)),
                                              PXShellQuote(PXBootstrapPathArgument(tweakPath))]);
             debug[[tweakPath stringByAppendingString:@" shellStatus"]] = @(status);
-            NSArray *installedBundles = PXBundlesFromFilterPlistAtPath(tweakPath);
-            wroteTweak = [installedBundles isEqualToArray:validBundles];
         }
         if (!wroteBridge && wroteTmpBridge) {
             int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@",
@@ -361,45 +374,85 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
                                              PXShellQuote(PXBootstrapPathArgument(bridgePath)),
                                              PXShellQuote(PXBootstrapPathArgument(bridgePath))]);
             debug[[bridgePath stringByAppendingString:@" shellStatus"]] = @(status);
-            NSArray *installedBundles = PXBundlesFromFilterPlistAtPath(bridgePath);
-            wroteBridge = [installedBundles isEqualToArray:bridgeBundles];
         }
-        [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:tweakPath error:nil];
-        [fm setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:bridgePath error:nil];
 
         NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(tweakPath);
         NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(bridgePath);
         BOOL tweakOK = [installedTweak isEqualToArray:validBundles];
         BOOL bridgeOK = [installedBridge isEqualToArray:bridgeBundles];
-        if (!tweakOK || !bridgeOK) {
-            allInstalledMatch = NO;
+        if (!tweakOK || !bridgeOK) directAllInstalledMatch = NO;
+        debug[[tweakPath stringByAppendingString:@" directMatch"]] = @(tweakOK);
+        debug[[bridgePath stringByAppendingString:@" directMatch"]] = @(bridgeOK);
+    }
+    debug[@"directAnyInstalledDir"] = @(directAnyInstalledDir);
+    debug[@"directAllInstalledMatch"] = @(directAllInstalledMatch);
+
+    // Publish only after the mobile-owned staging files are complete. The daemon
+    // receives this Darwin notification as root and atomically installs them.
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.filterPlistChanged"),
+                                         NULL,
+                                         NULL,
+                                         true);
+
+    BOOL anyInstalledDir = NO;
+    BOOL allInstalledMatch = NO;
+    NSUInteger syncPollCount = 0;
+    if (stagingMatches) {
+        for (NSUInteger attempt = 0; attempt < 20; attempt++) {
+            syncPollCount = attempt + 1;
+            anyInstalledDir = NO;
+            allInstalledMatch = YES;
+            for (NSString *dir in dirs) {
+                BOOL isDir = NO;
+                if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
+                    allInstalledMatch = NO;
+                    continue;
+                }
+                anyInstalledDir = YES;
+                NSString *tweakPath = [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
+                NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
+                NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(tweakPath);
+                NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(bridgePath);
+                BOOL tweakOK = [installedTweak isEqualToArray:validBundles];
+                BOOL bridgeOK = [installedBridge isEqualToArray:bridgeBundles];
+                if (!tweakOK || !bridgeOK) allInstalledMatch = NO;
+                debug[[tweakPath stringByAppendingString:@" finalMatch"]] = @(tweakOK);
+                debug[[bridgePath stringByAppendingString:@" finalMatch"]] = @(bridgeOK);
+                debug[[tweakPath stringByAppendingString:@" bundles"]] = installedTweak;
+                debug[[bridgePath stringByAppendingString:@" bundles"]] = installedBridge;
+            }
+            if (anyInstalledDir && allInstalledMatch) break;
+            [NSThread sleepForTimeInterval:0.05];
         }
-        debug[tweakPath] = @(wroteTweak && tweakOK);
-        debug[bridgePath] = @(wroteBridge && bridgeOK);
-        debug[[tweakPath stringByAppendingString:@" bundles"]] = installedTweak;
-        debug[[bridgePath stringByAppendingString:@" bundles"]] = installedBridge;
     }
 
     NSString *syncStatus = nil;
     if (!stagingMatches) {
         syncStatus = @"staging_mismatch";
     } else if (!anyInstalledDir || !allInstalledMatch) {
-        syncStatus = @"installed_mismatch";
+        syncStatus = @"daemon_sync_timeout";
     } else {
         syncStatus = @"in_sync";
     }
+    debug[@"syncPollCount"] = @(syncPollCount);
+    debug[@"finalAnyInstalledDir"] = @(anyInstalledDir);
+    debug[@"finalAllInstalledMatch"] = @(allInstalledMatch);
     debug[@"syncStatus"] = syncStatus;
-    NSLog(@"[TLinkIOS] filter plists syncStatus=%@ tweakCount=%lu bridgeCount=%lu",
-          syncStatus, (unsigned long)validBundles.count, (unsigned long)bridgeBundles.count);
+    NSString *daemonDebugPath = @"/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist";
+    NSDictionary *daemonDebug = [NSDictionary dictionaryWithContentsOfFile:daemonDebugPath];
+    debug[@"daemonDebugPath"] = daemonDebugPath;
+    debug[@"daemonDebugPresent"] = @(daemonDebug != nil);
+    if (daemonDebug) debug[@"daemonDebug"] = daemonDebug;
+    NSLog(@"[TLinkIOS] filter plists syncStatus=%@ polls=%lu tweakCount=%lu bridgeCount=%lu",
+          syncStatus,
+          (unsigned long)syncPollCount,
+          (unsigned long)validBundles.count,
+          (unsigned long)bridgeBundles.count);
 
     NSString *debugDir = @"/var/mobile/Library/TLinkIOS";
     [fm createDirectoryAtPath:debugDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
     [debug writeToFile:[debugDir stringByAppendingPathComponent:@"filter_sync_debug.plist"] atomically:YES];
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         CFSTR("com.hydra.tlinkios.filterPlistChanged"),
-                                         NULL,
-                                         NULL,
-                                         true);
     return [syncStatus isEqualToString:@"in_sync"];
 }
 
@@ -7474,8 +7527,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     // from the spoof scope before AppDataCleaner kills/relaunches the target process.
     if (![self syncHookScopeToResetApps]) {
         [self hideProgressHUD];
-        [self showDashboardMessage:@"Không thể bật hook"
-                           message:@"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại. Hãy cài lại gói TLinkIOS dành cho roothide rồi thử lại."];
+        NSDictionary *syncDebug = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/filter_sync_debug.plist"];
+        NSString *status = [syncDebug[@"syncStatus"] isKindOfClass:[NSString class]] ? syncDebug[@"syncStatus"] : @"unknown";
+        BOOL daemonSeen = [syncDebug[@"daemonDebugPresent"] boolValue];
+        NSString *detail = [NSString stringWithFormat:
+            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@\n\nHãy cài lại gói TLinkIOS dành cho roothide rồi thử lại.",
+            status,
+            daemonSeen ? @"seen" : @"not-seen"];
+        [self showDashboardMessage:@"Không thể bật hook" message:detail];
         return;
     }
 

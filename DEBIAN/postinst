@@ -141,17 +141,17 @@ if [ -f "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" ]; then
     chmod 644 "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
     chown root:wheel "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
     
-    # RootHide uses a randomized jbroot and launchd integration owned by the
-    # jailbreak bootstrap. Starting a KeepAlive daemon from dpkg postinst makes
-    # package installation part of the boot-critical path, so defer activation
-    # until the next normal bootstrap/session. Rootful keeps the legacy behavior.
-    if [ "$IS_ROOTHIDE" -eq 1 ]; then
-        echo "RootHide: deferring WeaponXDaemon launch during package installation"
-    elif command -v launchctl >/dev/null 2>&1; then
-        echo "🚀 Loading daemon using launchctl..."
-        # First, unload it if it's already loaded
-        launchctl unload "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" 2>/dev/null
-        launchctl load "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
+    # WeaponXDaemon now owns only privileged filter synchronization; it no
+    # longer launches the TLinkIOS GUI. It is therefore safe and required to
+    # register it immediately so the mobile app can publish filter updates.
+    if command -v launchctl >/dev/null 2>&1; then
+        echo "🚀 Loading filter-sync daemon using launchctl..."
+        launchctl unload "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" 2>/dev/null || true
+        if launchctl load "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"; then
+            echo "✅ WeaponXDaemon filter-sync service loaded"
+        else
+            echo "⚠️ WeaponXDaemon could not be loaded; filter updates will fail until the service is loaded"
+        fi
     fi
 else
     echo "⚠️ LaunchDaemon plist not found"
