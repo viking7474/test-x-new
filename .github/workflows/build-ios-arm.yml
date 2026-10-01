@@ -267,11 +267,17 @@ jobs:
             _THEOS_DEB_PACKAGE_CONTROL_PATH="$GITHUB_WORKSPACE/control.roothide" \
             FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0 \
             SDKVERSION="$SDKVERSION"
-          PACKAGE_FILE="$(ls -t packages/*_iphoneos-arm64e.deb | head -1)"
-          test -n "$PACKAGE_FILE"
+          PACKAGE_FILES=(packages/*_iphoneos-arm64e.deb)
+          test -f "${PACKAGE_FILES[0]}"
+          PACKAGE_FILE="${PACKAGE_FILES[0]}"
           test "$(dpkg-deb -f "$PACKAGE_FILE" Architecture)" = "iphoneos-arm64e"
-          dpkg-deb -c "$PACKAGE_FILE" | grep -q './Applications/TLinkIOS.app/'
-          dpkg-deb -c "$PACKAGE_FILE" | grep -q './Library/WeaponX/WeaponXDaemon'
+          VERIFY_DIR="$(mktemp -d "$RUNNER_TEMP/tlinkios-roothide-package.XXXXXX")"
+          dpkg-deb -x "$PACKAGE_FILE" "$VERIFY_DIR"
+          test -x "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS"
+          test -x "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon"
+          test -x "$VERIFY_DIR/Library/WeaponX/backup_helper"
+          test -f "$VERIFY_DIR/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
+          echo "Verified RootHide package: $PACKAGE_FILE"
 
       - name: Upload RootHide build artifacts
         uses: actions/upload-artifact@v4

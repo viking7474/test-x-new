@@ -73,5 +73,14 @@ require("make release-package-roothide" not in workflow,
 require(workflow.index("make clean THEOS_PACKAGE_SCHEME=roothide") <
         workflow.index("make package THEOS_PACKAGE_SCHEME=roothide"),
         "RootHide CI must clean before starting the independent package invocation")
+require('dpkg-deb -c "$PACKAGE_FILE" | grep -q' not in workflow,
+        "RootHide package verification must not use a SIGPIPE-prone grep pipeline")
+for token in (
+    'dpkg-deb -x "$PACKAGE_FILE" "$VERIFY_DIR"',
+    'test -x "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS"',
+    'test -x "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon"',
+    'test -x "$VERIFY_DIR/Library/WeaponX/backup_helper"',
+):
+    require(token in workflow, f"RootHide extracted-package verification missing: {token}")
 
 print("RootHide build static contracts: PASS")
