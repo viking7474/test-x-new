@@ -3060,6 +3060,7 @@ static CMPedometerHandler PXWrapPedometerHandler(CMPedometerHandler handler) {
 
 static CMAltitudeHandler PXWrapAltitudeHandler(CMAltitudeHandler handler) {
     if (!handler) return handler;
+    NSObject *baselineLock = [NSObject new];
     __block NSUInteger baselineGeneration = NSUIntegerMax;
     return ^(CMAltitudeData *data, NSError *error) {
         if (error || !data) {
@@ -3068,14 +3069,13 @@ static CMAltitudeHandler PXWrapAltitudeHandler(CMAltitudeHandler handler) {
             return;
         }
         PXSensorSnapshot snap = PXCurrentSensorSnapshot();
+        NSUInteger baseline = snap.generation;
         if (snap.active) {
-            @synchronized(handler) {
+            @synchronized(baselineLock) {
                 if (baselineGeneration == NSUIntegerMax) baselineGeneration = snap.generation;
+                baseline = baselineGeneration;
             }
         }
-        NSUInteger baseline = baselineGeneration == NSUIntegerMax
-            ? snap.generation
-            : baselineGeneration;
         handler(PXTransformAltitudeData(data, snap, baseline), error);
     };
 }

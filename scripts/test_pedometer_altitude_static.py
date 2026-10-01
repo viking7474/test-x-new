@@ -96,6 +96,11 @@ require("101.325 * pow(ratio, 5.255)" in projection,
 require("baselineGeneration == NSUIntegerMax" in projection and
         "if (snap.active)" in projection,
         "altitude baseline is not anchored to the first active callback")
+require("NSObject *baselineLock = [NSObject new];" in projection and
+        "@synchronized(baselineLock)" in projection and
+        "baseline = baselineGeneration;" in projection and
+        "@synchronized(handler)" not in projection,
+        "altitude callback state must synchronize on an Objective-C lock object")
 
 for token in (
     "handler(PXTransformPedometerData(data, PXCurrentSensorSnapshot()), error);",
