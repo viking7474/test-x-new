@@ -29,6 +29,8 @@ for token in (
     "TARGET=iphone:clang:16.5:15.0",
     "_THEOS_DEB_PACKAGE_CONTROL_PATH=$(CURDIR)/control.roothide",
     "release-package-roothide",
+    "env -u _THEOS_TOP_INVOCATION_DONE",
+    "-u THEOS_SCHEMA -u _THEOS_CLEANED_SCHEMA_SET",
 ):
     require(token in makefile, f"Makefile missing RootHide contract: {token}")
 
@@ -60,9 +62,16 @@ require('"/rootfs/var/containers/Bundle/Application"' in keychain, "Keychain app
 for token in (
     "build-roothide:",
     "https://github.com/roothide/theos.git",
-    "make release-package-roothide",
+    "make clean THEOS_PACKAGE_SCHEME=roothide",
+    "make package THEOS_PACKAGE_SCHEME=roothide",
     "tlinkios-roothide-build",
 ):
     require(token in workflow, f"GitHub Actions missing RootHide lane token: {token}")
+
+require("make release-package-roothide" not in workflow,
+        "RootHide CI must not nest a top-level Theos build inside an initialized make")
+require(workflow.index("make clean THEOS_PACKAGE_SCHEME=roothide") <
+        workflow.index("make package THEOS_PACKAGE_SCHEME=roothide"),
+        "RootHide CI must clean before starting the independent package invocation")
 
 print("RootHide build static contracts: PASS")

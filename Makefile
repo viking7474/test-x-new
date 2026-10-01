@@ -214,24 +214,34 @@ after-package::
 
 .PHONY: release-hardening release-package release-package-roothide package-roothide
 
+# Theos exports invocation/schema state after its makefiles are included. Any
+# project-level wrapper that starts a new top-level make must remove that state;
+# otherwise the child skips `all`/`before-stage` and tries to stage stale
+# `.theos/obj/debug` products into a staging directory that was never created.
+THEOS_FRESH_MAKE = /usr/bin/env -u _THEOS_TOP_INVOCATION_DONE \
+	-u THEOS_SCHEMA -u _THEOS_CLEANED_SCHEMA_SET $(MAKE)
+
 release-hardening:
 	python3 scripts/release_hardening.py regression --iterations 2 --report release-hardening-report.json
 
 release-package:
-	$(MAKE) clean
-	$(MAKE) package FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
+	$(THEOS_FRESH_MAKE) clean FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
+	$(THEOS_FRESH_MAKE) package FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
 
 # Requires the official RootHide Theos fork:
 # https://github.com/roothide/theos
 package-roothide:
-	$(MAKE) clean
-	$(MAKE) package THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
+	$(THEOS_FRESH_MAKE) clean THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
+		TARGET=iphone:clang:16.5:15.0 DEB_ARCH=iphoneos-arm64e DEBUG=1 FINALPACKAGE=0
+	$(THEOS_FRESH_MAKE) package THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
 		TARGET=iphone:clang:16.5:15.0 DEB_ARCH=iphoneos-arm64e \
 		_THEOS_DEB_PACKAGE_CONTROL_PATH=$(CURDIR)/control.roothide
 
 release-package-roothide:
-	$(MAKE) clean
-	$(MAKE) package THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
+	$(THEOS_FRESH_MAKE) clean THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
+		TARGET=iphone:clang:16.5:15.0 DEB_ARCH=iphoneos-arm64e \
+		FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
+	$(THEOS_FRESH_MAKE) package THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
 		TARGET=iphone:clang:16.5:15.0 DEB_ARCH=iphoneos-arm64e \
 		_THEOS_DEB_PACKAGE_CONTROL_PATH=$(CURDIR)/control.roothide \
 		FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
