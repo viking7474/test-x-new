@@ -245,65 +245,6 @@ static NSArray<NSString *> *PXResetBundlesForSpoofScope(NSArray<NSString *> *res
     return filtered;
 }
 
-/// RootHide's substrate filter only decides which tweak dylib may load. Third-party
-/// apps must also be enabled in Bootstrap > App List, which installs a `.jbroot`
-/// link into the app bundle. Do not mutate app bundles here; only verify Bootstrap's
-/// marker and fail safely before Reset Data clears anything.
-static BOOL PXRootHideInjectionEnabledForBundleID(NSString *bundleID) {
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    id proxy = PXApplicationProxyForBundleID(bundleID);
-    NSString *bundlePath = PXProxyBundleURL(proxy).path;
-    if (!bundlePath.length) return NO;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![bundlePath.pathExtension.lowercaseString isEqualToString:@"app"]) {
-        for (NSString *child in [fm contentsOfDirectoryAtPath:bundlePath error:nil]) {
-            if ([child.pathExtension.lowercaseString isEqualToString:@"app"]) {
-                bundlePath = [bundlePath stringByAppendingPathComponent:child];
-                break;
-            }
-        }
-    }
-
-    NSString *currentJBRoot = [PXJailbreakRootPath(@"/") stringByStandardizingPath];
-    NSString *jbrootApplications = [PXJailbreakRootPath(@"/Applications/") stringByStandardizingPath];
-    NSString *standardBundlePath = [bundlePath stringByStandardizingPath];
-
-    // Bootstrap enables /Applications system apps by publishing a copy in jbroot.
-    if ([standardBundlePath hasPrefix:jbrootApplications]) return YES;
-    if ([standardBundlePath hasPrefix:@"/Applications/"]) {
-        NSString *enabledCopy = PXJailbreakRootPath(standardBundlePath);
-        BOOL isDirectory = NO;
-        return [fm fileExistsAtPath:enabledCopy isDirectory:&isDirectory] && isDirectory;
-    }
-
-    // User apps are enabled in place. Validate that the link resolves to this
-    // jailbreak session, not a stale randomized jbroot left by an earlier boot.
-    NSString *markerPath = [standardBundlePath stringByAppendingPathComponent:@".jbroot"];
-    NSError *linkError = nil;
-    NSString *destination = [fm destinationOfSymbolicLinkAtPath:markerPath error:&linkError];
-    if (!destination.length || linkError) return NO;
-    NSString *resolvedMarker = [[markerPath stringByResolvingSymlinksInPath] stringByStandardizingPath];
-    return [resolvedMarker isEqualToString:currentJBRoot];
-#else
-    (void)bundleID;
-    return YES;
-#endif
-}
-
-static NSArray<NSString *> *PXRootHideBundlesMissingInjection(NSArray<NSString *> *bundleIDs) {
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSMutableArray<NSString *> *missing = [NSMutableArray array];
-    for (NSString *bundleID in bundleIDs ?: @[]) {
-        if (!PXRootHideInjectionEnabledForBundleID(bundleID)) [missing addObject:bundleID];
-    }
-    return missing;
-#else
-    (void)bundleIDs;
-    return @[];
-#endif
-}
-
 static NSString *PXShellQuote(NSString *s) {
     if (![s isKindOfClass:[NSString class]]) return @"''";
     return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
@@ -3099,7 +3040,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     [buttons killEnabledApps];
     if (![buttons performRespring]) {
         NSLog(@"[TLinkIOS] Reset completed, but every respring mechanism failed");
-        NSString *message = @"Reset Data đã hoàn tất nhưng không chạy được sbreload/killall/ldrestart trong bootstrap. Hãy mở RootHide Bootstrap, xác nhận Tweak Injection đang bật và chọn Respring thủ công.";
+        NSString *message = @"Reset Data đã hoàn tất nhưng không chạy được sbreload/killall/ldrestart trong jbroot của Dopamine. Hãy mở Dopamine và chọn Restart SpringBoard thủ công.";
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *presented = self.presentedViewController;
             if ([presented isKindOfClass:[UIAlertController class]]) {
@@ -7528,28 +7469,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         return;
     }
 
-    NSArray<NSString *> *spoofEligibleApps = PXResetBundlesForSpoofScope(self.selectedResetAppIDs);
-    NSArray<NSString *> *missingInjection = PXRootHideBundlesMissingInjection(spoofEligibleApps);
-    if (missingInjection.count) {
-        [self hideProgressHUD];
-        NSMutableArray<NSString *> *appLabels = [NSMutableArray arrayWithCapacity:missingInjection.count];
-        for (NSString *bundleID in missingInjection) {
-            [appLabels addObject:[NSString stringWithFormat:@"• %@ (%@)", [self displayNameForBundleID:bundleID], bundleID]];
-        }
-        NSString *message = [NSString stringWithFormat:
-            @"Các app sau chưa được bật injection cho phiên jailbreak hiện tại:\n\n%@\n\nMở RootHide Bootstrap > App List, bật các app trên rồi quay lại Reset Data.",
-            [appLabels componentsJoinedByString:@"\n"]];
-        [self showDashboardMessage:@"Chưa bật Tweak Injection" message:message];
-        return;
-    }
-
     // Reconcile the injection filter immediately before destructive reset. This also
     // removes previously persisted clear-only system targets (notably MobileMail)
     // from the spoof scope before AppDataCleaner kills/relaunches the target process.
     if (![self syncHookScopeToResetApps]) {
         [self hideProgressHUD];
         [self showDashboardMessage:@"Không thể bật hook"
-                           message:@"Không thể ghi hoặc xác minh filter của tweak. Hãy bật Tweak Injection trong RootHide Bootstrap, sau đó thử Reset Data lại."];
+                           message:@"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại. Hãy cài lại gói TLinkIOS dành cho roothide rồi thử lại."];
         return;
     }
 

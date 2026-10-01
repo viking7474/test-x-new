@@ -135,8 +135,16 @@ internal-stage::
 	@chmod 755 $(THEOS_STAGING_DIR)/usr/bin/tlinkios-setup
 	@echo "Creating MobileSubstrate directories for compatibility..."
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
-	@cp -a $(THEOS_OBJ_DIR)/TLinkIOSTweak.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
-	@cp -a $(THEOS_OBJ_DIR)/WeaponXKeychainBridge.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
+	@if [ "$(THEOS_PACKAGE_SCHEME)" = "roothide" ]; then \
+		echo "RootHide: preserving Theos-staged tweak binaries and filters"; \
+		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib; \
+		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist; \
+		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib; \
+		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist; \
+	else \
+		cp -a $(THEOS_OBJ_DIR)/TLinkIOSTweak.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
+		cp -a $(THEOS_OBJ_DIR)/WeaponXKeychainBridge.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
+	fi
 	@echo "Ensuring LaunchScreen.storyboard is properly compiled..."
 	@if [ -f "LaunchScreen.storyboard" ]; then \
 		mkdir -p $(THEOS_STAGING_DIR)/Applications/TLinkIOS.app/; \
@@ -156,10 +164,20 @@ internal-stage::
 	@touch $(THEOS_STAGING_DIR)/Library/WeaponX/Guardian/guardian-stderr.log
 	@chmod 664 $(THEOS_STAGING_DIR)/Library/WeaponX/Guardian/*.log
 	@echo "Installing WeaponXDaemon..."
-	@cp -a $(THEOS_OBJ_DIR)/WeaponXDaemon $(THEOS_STAGING_DIR)/Library/WeaponX/
+	@if [ "$(THEOS_PACKAGE_SCHEME)" = "roothide" ]; then \
+		echo "RootHide: preserving Theos-staged WeaponXDaemon"; \
+		test -x $(THEOS_STAGING_DIR)/Library/WeaponX/WeaponXDaemon; \
+	else \
+		cp -a $(THEOS_OBJ_DIR)/WeaponXDaemon $(THEOS_STAGING_DIR)/Library/WeaponX/; \
+	fi
 	@chmod 755 $(THEOS_STAGING_DIR)/Library/WeaponX/WeaponXDaemon
 	@echo "Installing backup_helper tool..."
-	@cp -a $(THEOS_OBJ_DIR)/backup_helper $(THEOS_STAGING_DIR)/Library/WeaponX/
+	@if [ "$(THEOS_PACKAGE_SCHEME)" = "roothide" ]; then \
+		echo "RootHide: preserving Theos-staged backup_helper"; \
+		test -x $(THEOS_STAGING_DIR)/Library/WeaponX/backup_helper; \
+	else \
+		cp -a $(THEOS_OBJ_DIR)/backup_helper $(THEOS_STAGING_DIR)/Library/WeaponX/; \
+	fi
 	@chmod 755 $(THEOS_STAGING_DIR)/Library/WeaponX/backup_helper
 	@echo "Installing keychain backup script..."
 	@cp -a scripts/keychain_backup.sh $(THEOS_STAGING_DIR)/Library/WeaponX/

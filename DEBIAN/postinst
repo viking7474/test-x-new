@@ -6,10 +6,12 @@
 # filesystem through `/rootfs`. Keep user data on rootfs while package-owned
 # paths (/Applications, /Library, /usr) remain relative to the bootstrap root.
 ROOTFS_PREFIX=""
+IS_ROOTHIDE=0
 if [ -d "/rootfs/var/mobile" ]; then
     ROOTFS_PREFIX="/rootfs"
+    IS_ROOTHIDE=1
 fi
-readonly ROOTFS_PREFIX
+readonly ROOTFS_PREFIX IS_ROOTHIDE
 
 # Mark script execution
 echo "Running WeaponX post-installation script..."
@@ -139,8 +141,13 @@ if [ -f "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" ]; then
     chmod 644 "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
     chown root:wheel "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
     
-    # Try to load daemon using launchctl
-    if command -v launchctl >/dev/null 2>&1; then
+    # RootHide uses a randomized jbroot and launchd integration owned by the
+    # jailbreak bootstrap. Starting a KeepAlive daemon from dpkg postinst makes
+    # package installation part of the boot-critical path, so defer activation
+    # until the next normal bootstrap/session. Rootful keeps the legacy behavior.
+    if [ "$IS_ROOTHIDE" -eq 1 ]; then
+        echo "RootHide: deferring WeaponXDaemon launch during package installation"
+    elif command -v launchctl >/dev/null 2>&1; then
         echo "🚀 Loading daemon using launchctl..."
         # First, unload it if it's already loaded
         launchctl unload "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" 2>/dev/null
