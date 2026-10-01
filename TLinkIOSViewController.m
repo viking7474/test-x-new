@@ -245,6 +245,65 @@ static NSArray<NSString *> *PXResetBundlesForSpoofScope(NSArray<NSString *> *res
     return filtered;
 }
 
+/// RootHide's substrate filter only decides which tweak dylib may load. Third-party
+/// apps must also be enabled in Bootstrap > App List, which installs a `.jbroot`
+/// link into the app bundle. Do not mutate app bundles here; only verify Bootstrap's
+/// marker and fail safely before Reset Data clears anything.
+static BOOL PXRootHideInjectionEnabledForBundleID(NSString *bundleID) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    id proxy = PXApplicationProxyForBundleID(bundleID);
+    NSString *bundlePath = PXProxyBundleURL(proxy).path;
+    if (!bundlePath.length) return NO;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![bundlePath.pathExtension.lowercaseString isEqualToString:@"app"]) {
+        for (NSString *child in [fm contentsOfDirectoryAtPath:bundlePath error:nil]) {
+            if ([child.pathExtension.lowercaseString isEqualToString:@"app"]) {
+                bundlePath = [bundlePath stringByAppendingPathComponent:child];
+                break;
+            }
+        }
+    }
+
+    NSString *currentJBRoot = [PXJailbreakRootPath(@"/") stringByStandardizingPath];
+    NSString *jbrootApplications = [PXJailbreakRootPath(@"/Applications/") stringByStandardizingPath];
+    NSString *standardBundlePath = [bundlePath stringByStandardizingPath];
+
+    // Bootstrap enables /Applications system apps by publishing a copy in jbroot.
+    if ([standardBundlePath hasPrefix:jbrootApplications]) return YES;
+    if ([standardBundlePath hasPrefix:@"/Applications/"]) {
+        NSString *enabledCopy = PXJailbreakRootPath(standardBundlePath);
+        BOOL isDirectory = NO;
+        return [fm fileExistsAtPath:enabledCopy isDirectory:&isDirectory] && isDirectory;
+    }
+
+    // User apps are enabled in place. Validate that the link resolves to this
+    // jailbreak session, not a stale randomized jbroot left by an earlier boot.
+    NSString *markerPath = [standardBundlePath stringByAppendingPathComponent:@".jbroot"];
+    NSError *linkError = nil;
+    NSString *destination = [fm destinationOfSymbolicLinkAtPath:markerPath error:&linkError];
+    if (!destination.length || linkError) return NO;
+    NSString *resolvedMarker = [[markerPath stringByResolvingSymlinksInPath] stringByStandardizingPath];
+    return [resolvedMarker isEqualToString:currentJBRoot];
+#else
+    (void)bundleID;
+    return YES;
+#endif
+}
+
+static NSArray<NSString *> *PXRootHideBundlesMissingInjection(NSArray<NSString *> *bundleIDs) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (NSString *bundleID in bundleIDs ?: @[]) {
+        if (!PXRootHideInjectionEnabledForBundleID(bundleID)) [missing addObject:bundleID];
+    }
+    return missing;
+#else
+    (void)bundleIDs;
+    return @[];
+#endif
+}
+
 static NSString *PXShellQuote(NSString *s) {
     if (![s isKindOfClass:[NSString class]]) return @"''";
     return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
@@ -288,7 +347,7 @@ static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
 /// (never Bundles=[]), and the keychain bridge collapses to the no-injection placeholder.
 /// Always includes SpringBoard so Profile Indicator (and other SB-hosted UI) can load.
 /// Canonical union/empty-state rules live in PXInjectionFilter (shared with the daemon).
-static void PXWriteSubstrateFilterPlists(void) {
+static BOOL PXWriteSubstrateFilterPlists(void) {
     // 1–5. Canonical filter computation lives in PXInjectionFilter (single source of
     // truth shared with the mount daemon): enabled mains from global_scope → expand
     // extensions; shared WebKit helpers excluded from monolithic filter → tweak list (+SpringBoard, never empty, never the
@@ -400,6 +459,7 @@ static void PXWriteSubstrateFilterPlists(void) {
                                          NULL,
                                          NULL,
                                          true);
+    return [syncStatus isEqualToString:@"in_sync"];
 }
 
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
@@ -442,6 +502,7 @@ static void PXWriteSubstrateFilterPlists(void) {
 // Method declarations
 - (void)showError:(NSError *)error;
 - (void)killEnabledAppsAndRespring;
+- (BOOL)syncHookScopeToResetApps;
 - (void)loadSettings;
 - (void)setupUI;
 - (void)addIdentifierSection:(NSString *)type title:(NSString *)title;
@@ -3034,27 +3095,22 @@ static void PXWriteSubstrateFilterPlists(void) {
 #pragma mark - Process Management
 
 - (void)killEnabledAppsAndRespring {
-    // Get all enabled apps
-    NSDictionary *allApps = [self.manager getApplicationInfo:nil];
-    for (NSString *bundleID in allApps) {
-        if ([self.manager isApplicationEnabled:bundleID]) {
-            // Use posix_spawn to kill apps
-            pid_t pid;
-            const char *killall = "/usr/bin/killall";
-            const char *bundleIDStr = [bundleID UTF8String];
-            char *const argv[] = {(char *)"killall", (char *)bundleIDStr, NULL};
-            posix_spawn(&pid, killall, NULL, NULL, argv, NULL);
-            int status;
-            waitpid(pid, &status, WEXITED);
-        }
+    BottomButtons *buttons = [BottomButtons sharedInstance];
+    [buttons killEnabledApps];
+    if (![buttons performRespring]) {
+        NSLog(@"[TLinkIOS] Reset completed, but every respring mechanism failed");
+        NSString *message = @"Reset Data đã hoàn tất nhưng không chạy được sbreload/killall/ldrestart trong bootstrap. Hãy mở RootHide Bootstrap, xác nhận Tweak Injection đang bật và chọn Respring thủ công.";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *presented = self.presentedViewController;
+            if ([presented isKindOfClass:[UIAlertController class]]) {
+                UIAlertController *alert = (UIAlertController *)presented;
+                alert.title = @"Không thể respring";
+                alert.message = message;
+            } else {
+                [self showDashboardMessage:@"Không thể respring" message:message];
+            }
+        });
     }
-    
-    // Respring using sbreload
-    pid_t pid;
-    const char *sbreload = "/usr/bin/sbreload";
-    char *const argv[] = {(char *)"sbreload", NULL};
-    posix_spawn(&pid, sbreload, NULL, NULL, argv, NULL);
-    waitpid(pid, NULL, WEXITED);
 }
 
 #pragma mark - Error Handling
@@ -7305,7 +7361,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
-- (void)syncHookScopeToResetApps {
+- (BOOL)syncHookScopeToResetApps {
     NSArray<NSString *> *spoofEligibleResetApps = PXResetBundlesForSpoofScope(self.selectedResetAppIDs ?: @[]);
     NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(spoofEligibleResetApps);
     NSSet<NSString *> *resetSet = [NSSet setWithArray:expandedBundles];
@@ -7321,7 +7377,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }
     [self.manager saveScopedApps];
     // Scope was just rewritten; rebuild filter from full enabled global_scope.
-    PXWriteSubstrateFilterPlists();
+    return PXWriteSubstrateFilterPlists();
 }
 
 - (void)selectFakeTapped {
@@ -7472,10 +7528,30 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         return;
     }
 
+    NSArray<NSString *> *spoofEligibleApps = PXResetBundlesForSpoofScope(self.selectedResetAppIDs);
+    NSArray<NSString *> *missingInjection = PXRootHideBundlesMissingInjection(spoofEligibleApps);
+    if (missingInjection.count) {
+        [self hideProgressHUD];
+        NSMutableArray<NSString *> *appLabels = [NSMutableArray arrayWithCapacity:missingInjection.count];
+        for (NSString *bundleID in missingInjection) {
+            [appLabels addObject:[NSString stringWithFormat:@"• %@ (%@)", [self displayNameForBundleID:bundleID], bundleID]];
+        }
+        NSString *message = [NSString stringWithFormat:
+            @"Các app sau chưa được bật injection cho phiên jailbreak hiện tại:\n\n%@\n\nMở RootHide Bootstrap > App List, bật các app trên rồi quay lại Reset Data.",
+            [appLabels componentsJoinedByString:@"\n"]];
+        [self showDashboardMessage:@"Chưa bật Tweak Injection" message:message];
+        return;
+    }
+
     // Reconcile the injection filter immediately before destructive reset. This also
     // removes previously persisted clear-only system targets (notably MobileMail)
     // from the spoof scope before AppDataCleaner kills/relaunches the target process.
-    [self syncHookScopeToResetApps];
+    if (![self syncHookScopeToResetApps]) {
+        [self hideProgressHUD];
+        [self showDashboardMessage:@"Không thể bật hook"
+                           message:@"Không thể ghi hoặc xác minh filter của tweak. Hãy bật Tweak Injection trong RootHide Bootstrap, sau đó thử Reset Data lại."];
+        return;
+    }
 
     [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] completion:^(NSArray<NSString *> *allWarnings) {
         [self createNextProfileAndRandomizeWithWarnings:allWarnings];

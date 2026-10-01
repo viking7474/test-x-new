@@ -29,5 +29,10 @@
 
 // App Termination
 - (void)terminateApplicationWithBundleID:(NSString *)bundleID;
+- (void)killEnabledApps;
+
+/// Attempts a real userspace respring and returns YES only when a supported
+/// mechanism was successfully dispatched.
+- (BOOL)performRespring;
 
 @end

@@ -22,6 +22,8 @@ compat = read("common/PXJailbreakCompat.h")
 postinst = read("DEBIAN/postinst")
 keychain = read("scripts/keychain_backup.sh")
 workflow = read(".github/workflows/build-ios-arm.yml")
+bottom_buttons = read("BottomButtons.m")
+view_controller = read("TLinkIOSViewController.m")
 
 for token in (
     "THEOS_PACKAGE_SCHEME=roothide",
@@ -58,6 +60,26 @@ require('${ROOTFS_PREFIX}/var/mobile/Library' in postinst, "postinst still treat
 require('HELPER_TOOL_PATH="${PX_SCRIPT_DIR}/backup_helper"' in keychain, "Keychain helper is not package-relative")
 require("PX_JBROOT_PREFIX" in keychain, "Keychain dependencies do not support randomized jbroot")
 require('"/rootfs/var/containers/Bundle/Application"' in keychain, "Keychain app discovery does not inspect RootHide rootfs")
+require('const char *sbreload = "/usr/bin/sbreload"' not in view_controller,
+        "Dashboard reset still bypasses RootHide-aware respring resolution")
+require("[buttons killEnabledApps];" in view_controller and
+        "[buttons performRespring]" in view_controller,
+        "Dashboard reset does not route through the shared RootHide-aware process controller")
+require("Không thể respring" in view_controller and "Respring thủ công" in view_controller,
+        "Dashboard does not surface a RootHide respring failure to the user")
+require("PXJailbreakPathCandidates" in bottom_buttons and
+        "WIFEXITED(status) && WEXITSTATUS(status) == 0" in bottom_buttons,
+        "RootHide respring does not validate resolved CLI execution")
+require("static BOOL PXWriteSubstrateFilterPlists(void)" in view_controller and
+        "return [syncStatus isEqualToString:@\"in_sync\"];" in view_controller,
+        "Filter synchronization does not report whether the installed RootHide filters match")
+require("if (![self syncHookScopeToResetApps])" in view_controller and
+        "Không thể bật hook" in view_controller,
+        "Reset Data does not stop safely when the injection filter cannot be installed")
+require("PXRootHideBundlesMissingInjection" in view_controller and
+        "destinationOfSymbolicLinkAtPath" in view_controller and
+        "RootHide Bootstrap > App List" in view_controller,
+        "Reset Data does not guard RootHide's independent per-app injection state")
 
 for token in (
     "build-roothide:",

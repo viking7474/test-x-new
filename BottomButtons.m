@@ -19,6 +19,10 @@
 
 @interface BottomButtons ()
 @property (nonatomic, strong) IdentifierManager *manager;
+- (BOOL)respringUsingKillall;
+- (BOOL)respringUsingSbreload;
+- (BOOL)respringUsingFBSystemService;
+- (BOOL)respringUsingLdrestart;
 @end
 
 @implementation BottomButtons
@@ -314,39 +318,21 @@
     [topController presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)performRespring {
+- (BOOL)performRespring {
     NSLog(@"[BottomButtons] 🔄 Attempting to respring device");
-    
-    // Define all possible methods to try for respringing
-    NSMutableArray *respringMethods = [NSMutableArray array];
-    [respringMethods addObject:^{
-        [self respringUsingKillall];
-    }];
-    [respringMethods addObject:^{
-        [self respringUsingSbreload];
-    }];
-    [respringMethods addObject:^{
-        [self respringUsingFBSystemService];
-    }];
-    [respringMethods addObject:^{
-        [self respringUsingLdrestart];
-    }];
-    
-    // Try each method in sequence
-    for (void (^respringMethod)(void) in respringMethods) {
-        @try {
-            respringMethod();
-            return;
-        } @catch (NSException *exception) {
-            NSLog(@"[BottomButtons] Respring method failed: %@", exception);
-            // Continue to next method
-        }
-    }
-    
+
+    // Prefer the bootstrap-native respring helper. Every CLI method validates
+    // both posix_spawn and the child exit status before reporting success.
+    if ([self respringUsingSbreload]) return YES;
+    if ([self respringUsingKillall]) return YES;
+    if ([self respringUsingLdrestart]) return YES;
+    if ([self respringUsingFBSystemService]) return YES;
+
     NSLog(@"[BottomButtons] ⚠️ All respring methods failed");
+    return NO;
 }
 
-- (void)respringUsingKillall {
+- (BOOL)respringUsingKillall {
     NSLog(@"[BottomButtons] 🔄 Attempting respring using killall");
     
     // Check for different killall paths based on jailbreak type
@@ -379,20 +365,24 @@
             char *const argv[] = {(char *)"killall", (char *)processStr, NULL};
             
             NSLog(@"[BottomButtons] 🔄 Trying to kill %@ using %@", process, killallPath);
-            if (posix_spawn(&pid, killallPathStr, NULL, NULL, argv, NULL) == 0) {
-                int status;
-                waitpid(pid, &status, WEXITED);
-                NSLog(@"[BottomButtons] ✅ Successfully killed %@ with status %d", process, WEXITSTATUS(status));
-                return;
+            int spawnStatus = posix_spawn(&pid, killallPathStr, NULL, NULL, argv, NULL);
+            if (spawnStatus == 0) {
+                int status = 0;
+                pid_t waited = waitpid(pid, &status, 0);
+                BOOL succeeded = waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+                NSLog(@"[BottomButtons] killall %@ completed=%d status=%d", process, succeeded, status);
+                if (succeeded) return YES;
+            } else {
+                NSLog(@"[BottomButtons] killall spawn failed for %@: %d", process, spawnStatus);
             }
         }
     } else {
         NSLog(@"[BottomButtons] ⚠️ Could not find a valid killall binary path");
-        @throw [NSException exceptionWithName:@"RespringFailure" reason:@"No killall binary found" userInfo:nil];
     }
+    return NO;
 }
 
-- (void)respringUsingSbreload {
+- (BOOL)respringUsingSbreload {
     NSLog(@"[BottomButtons] 🔄 Attempting respring using sbreload");
     
     // Check for different sbreload paths based on jailbreak type
@@ -420,32 +410,37 @@
         char *const argv[] = {(char *)"sbreload", NULL};
         
         NSLog(@"[BottomButtons] 🔄 Using sbreload: %@", sbreloadPath);
-        if (posix_spawn(&pid, sbreloadPathStr, NULL, NULL, argv, NULL) == 0) {
-            int status;
-            waitpid(pid, &status, WEXITED);
-            NSLog(@"[BottomButtons] ✅ Successfully ran sbreload with status %d", WEXITSTATUS(status));
-            return;
+        int spawnStatus = posix_spawn(&pid, sbreloadPathStr, NULL, NULL, argv, NULL);
+        if (spawnStatus != 0) {
+            NSLog(@"[BottomButtons] sbreload spawn failed: %d", spawnStatus);
+            return NO;
         }
+        int status = 0;
+        pid_t waited = waitpid(pid, &status, 0);
+        BOOL succeeded = waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        NSLog(@"[BottomButtons] sbreload completed=%d status=%d", succeeded, status);
+        return succeeded;
     } else {
         NSLog(@"[BottomButtons] ⚠️ Could not find a valid sbreload binary path");
-        @throw [NSException exceptionWithName:@"RespringFailure" reason:@"No sbreload binary found" userInfo:nil];
     }
+    return NO;
 }
 
-- (void)respringUsingFBSystemService {
+- (BOOL)respringUsingFBSystemService {
     NSLog(@"[BottomButtons] 🔄 Attempting respring using FBSystemService");
     
     @try {
         SBSRelaunchAction *action = [SBSRelaunchAction actionWithReason:@"respring" options:1 targetURL:nil];
         [[FBSSystemService sharedService] sendActions:[NSSet setWithObject:action] withResult:nil];
         NSLog(@"[BottomButtons] ✅ Successfully sent respring action via FBSystemService");
+        return YES;
     } @catch (NSException *exception) {
         NSLog(@"[BottomButtons] ⚠️ FBSystemService respring failed: %@", exception);
-        @throw;
+        return NO;
     }
 }
 
-- (void)respringUsingLdrestart {
+- (BOOL)respringUsingLdrestart {
     NSLog(@"[BottomButtons] 🔄 Attempting respring using ldrestart");
     
     // Check for different ldrestart paths based on jailbreak type
@@ -473,16 +468,20 @@
         char *const argv[] = {(char *)"ldrestart", NULL};
         
         NSLog(@"[BottomButtons] 🔄 Using ldrestart: %@", ldrestartPath);
-        if (posix_spawn(&pid, ldrestartPathStr, NULL, NULL, argv, NULL) == 0) {
-            int status;
-            waitpid(pid, &status, WEXITED);
-            NSLog(@"[BottomButtons] ✅ Successfully ran ldrestart with status %d", WEXITSTATUS(status));
-            return;
+        int spawnStatus = posix_spawn(&pid, ldrestartPathStr, NULL, NULL, argv, NULL);
+        if (spawnStatus != 0) {
+            NSLog(@"[BottomButtons] ldrestart spawn failed: %d", spawnStatus);
+            return NO;
         }
+        int status = 0;
+        pid_t waited = waitpid(pid, &status, 0);
+        BOOL succeeded = waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        NSLog(@"[BottomButtons] ldrestart completed=%d status=%d", succeeded, status);
+        return succeeded;
     } else {
         NSLog(@"[BottomButtons] ⚠️ Could not find a valid ldrestart binary path");
-        @throw [NSException exceptionWithName:@"RespringFailure" reason:@"No ldrestart binary found" userInfo:nil];
     }
+    return NO;
 }
 
 // Replace the deprecated keyWindow usage with proper scene-aware window handling
