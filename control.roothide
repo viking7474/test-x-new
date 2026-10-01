@@ -1,0 +1,14 @@
+Package: com.hydra.tlinkios
+Name: TLinkIOS (RootHide)
+Version: 3.0.0
+Architecture: iphoneos-arm64e
+Description: Spoof device identifiers and manage application profiles on RootHide iOS 15+ devices.
+Depends: firmware (>= 15.0), mobilesubstrate (>= 0.9.5000)
+Maintainer: HYDRA
+Author: HYDRA
+Section: System
+Conflicts: com.hydra.projectx
+Replaces: com.hydra.projectx
+Provides: com.hydra.projectx
+Icon: file:///Applications/TLinkIOS.app/Icon.png
+Tag: role::enduser, purpose::extension

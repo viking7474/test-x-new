@@ -10,6 +10,7 @@
 #import <notify.h>
 #import <string.h>
 #import "PXInjectionFilter.h"
+#import "PXJailbreakCompat.h"
 
 // Constants
 static const int kCheckInterval = 5; // Check every 5 seconds
@@ -52,13 +53,13 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // Rootful jailbreak - no prefix needed
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        ROOT_PREFIX = PXJailbreakRootPath(@"/");
+#else
         ROOT_PREFIX = @"";
-        NSLog(@"Rootful jailbreak mode");
-        
-        // Set paths directly for rootful
-        kGuardianDir = @"/Library/WeaponX/Guardian";
-        kTLinkIOSPath = @"/Applications/TLinkIOS.app/TLinkIOS";
+#endif
+        kGuardianDir = PXJailbreakRootPath(@"/Library/WeaponX/Guardian");
+        kTLinkIOSPath = PXJailbreakRootPath(@"/Applications/TLinkIOS.app/TLinkIOS");
         
         _processInfo = [NSMutableDictionary dictionary];
         _protectedProcesses = [NSMutableArray arrayWithObjects:@"TLinkIOS", nil];
@@ -253,11 +254,11 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 
 - (NSString *)substrateDynamicLibrariesDir {
     NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *path in @[@"/Library/MobileSubstrate/DynamicLibraries", @"/var/jb/Library/MobileSubstrate/DynamicLibraries"]) {
+    for (NSString *path in PXJailbreakPathCandidates(@[@"/Library/MobileSubstrate/DynamicLibraries", @"/var/jb/Library/MobileSubstrate/DynamicLibraries"])) {
         BOOL isDir = NO;
         if ([fm fileExistsAtPath:path isDirectory:&isDir] && isDir) return path;
     }
-    return @"/Library/MobileSubstrate/DynamicLibraries";
+    return PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");
 }
 
 - (BOOL)filterPlistIsValid:(NSDictionary *)plist bundles:(NSArray **)outBundles reason:(NSString **)reason {

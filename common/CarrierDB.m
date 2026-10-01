@@ -1,5 +1,6 @@
 #import "CarrierDB.h"
 #import "TLinkIOSLogging.h"
+#import "PXJailbreakCompat.h"
 #import <Security/Security.h>
 
 static NSString *const kCarrierDBErrorDomain = @"com.hydra.tlinkios.carrier_db";
@@ -166,7 +167,7 @@ static NSString *PXNormMNC(NSString *mnc) {
 - (BOOL)loadIfNeeded:(NSError **)error {
     if (self.db) return YES;
 
-    NSArray<NSString *> *paths = @[
+    NSArray<NSString *> *paths = PXJailbreakPathCandidates(@[
         @"/var/mobile/Library/WeaponX/Data/carrier_db.json",
         @"/private/var/mobile/Library/WeaponX/Data/carrier_db.json",
         // Bundled copy inside app (optional)
@@ -174,7 +175,7 @@ static NSString *PXNormMNC(NSString *mnc) {
         // Package path under /Library/WeaponX
         @"/Library/WeaponX/Data/carrier_db.json",
         @"/var/jb/Library/WeaponX/Data/carrier_db.json"
-    ];
+    ]);
 
     NSError *lastErr = nil;
     NSDictionary *root = nil;

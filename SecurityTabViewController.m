@@ -1,6 +1,7 @@
 #import "SecurityTabViewController.h"
 #import "common/PXUIKitCompat.h"
 #import "common/PXSecuritySettingsStore.h"
+#import "common/PXJailbreakCompat.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
 #import "TLinkIOSLogging.h"
@@ -2135,11 +2136,11 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 
     // 3) Ensure SpringBoard is listed in TLinkIOSTweak filter (Profile Indicator hosts in SB).
     // Spoof hooks remain scope-gated; SB injection is required for the floating bubble.
-    NSArray<NSString *> *filterDirs = @[
+    NSArray<NSString *> *filterDirs = PXJailbreakPathCandidates(@[
         @"/Library/MobileSubstrate/DynamicLibraries",
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries",
         @"/var/mobile/Library/TLinkIOS/filter_plists"
-    ];
+    ]);
     for (NSString *dir in filterDirs) {
         NSString *tweakPath = [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
         NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:tweakPath];

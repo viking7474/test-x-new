@@ -19,8 +19,17 @@
 
 # Removed 'set -e' for better error handling - we handle errors explicitly
 
+# Resolve the package-owned directory from this script rather than assuming a
+# fixed jailbreak prefix. RootHide randomizes jbroot on every bootstrap install.
+PX_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
+case "$PX_SCRIPT_DIR" in
+    */Library/WeaponX) PX_JBROOT_PREFIX="${PX_SCRIPT_DIR%/Library/WeaponX}" ;;
+    *) PX_JBROOT_PREFIX="" ;;
+esac
+readonly PX_SCRIPT_DIR PX_JBROOT_PREFIX
+
 # === Fixed shell environment ===
-PATH="/usr/bin:/bin:/usr/sbin:/sbin:/var/jb/usr/bin:/var/jb/bin:/private/preboot/jb/usr/bin:/private/preboot/jb/bin"
+PATH="${PX_JBROOT_PREFIX}/usr/bin:${PX_JBROOT_PREFIX}/bin:${PX_JBROOT_PREFIX}/usr/sbin:${PX_JBROOT_PREFIX}/sbin:/usr/bin:/bin:/usr/sbin:/sbin:/var/jb/usr/bin:/var/jb/bin:/private/preboot/jb/usr/bin:/private/preboot/jb/bin"
 export PATH
 IFS=$' \t\n'
 export -n IFS 2>/dev/null || true
@@ -31,7 +40,7 @@ export LC_ALL LANG
 umask 077
 
 # === Configuration ===
-readonly HELPER_TOOL_PATH="/Library/WeaponX/backup_helper"
+readonly HELPER_TOOL_PATH="${PX_SCRIPT_DIR}/backup_helper"
 readonly PX_WORKSPACE_PARENT="/private/var/tmp"
 readonly PX_WORKSPACE_PREFIX=".weaponx-keychain-helper."
 VERBOSE=0
@@ -263,6 +272,8 @@ px_try_bootstrap_stat_candidate() {
 
 px_bootstrap_portable_metadata() {
     local candidates=(
+        "${PX_JBROOT_PREFIX}/bin/ls"
+        "${PX_JBROOT_PREFIX}/usr/bin/ls"
         "/bin/ls"
         "/usr/bin/ls"
         "/var/jb/bin/ls"
@@ -299,6 +310,8 @@ px_bootstrap_portable_metadata() {
 
 px_bootstrap_stat() {
     local candidates=(
+        "${PX_JBROOT_PREFIX}/usr/bin/stat"
+        "${PX_JBROOT_PREFIX}/bin/stat"
         "/usr/bin/stat"
         "/bin/stat"
         "/var/jb/usr/bin/stat"
@@ -454,6 +467,9 @@ px_resolve_trusted_utility() {
 
 px_resolve_trusted_ldid() {
     local candidates=(
+        "${PX_JBROOT_PREFIX}/usr/bin/ldid"
+        "${PX_JBROOT_PREFIX}/bin/ldid"
+        "${PX_JBROOT_PREFIX}/usr/local/bin/ldid"
         "/usr/bin/ldid"
         "/bin/ldid"
         "/usr/local/bin/ldid"
@@ -527,10 +543,12 @@ px_resolve_trusted_dependencies() {
     [ "$PX_DEPENDENCIES_READY" -eq 0 ] || return 0
     PX_DEPENDENCY_FAILURE=""
     if ! px_resolve_trusted_utility PX_MKTEMP_PATH \
+        "${PX_JBROOT_PREFIX}/usr/bin/mktemp" "${PX_JBROOT_PREFIX}/bin/mktemp" \
         /usr/bin/mktemp /bin/mktemp /var/jb/usr/bin/mktemp /private/preboot/jb/usr/bin/mktemp; then
         PX_DEPENDENCY_FAILURE="mktemp"; return 1
     fi
     if ! px_resolve_trusted_utility PX_CP_PATH \
+        "${PX_JBROOT_PREFIX}/bin/cp" "${PX_JBROOT_PREFIX}/usr/bin/cp" \
         /bin/cp /usr/bin/cp /var/jb/bin/cp /var/jb/usr/bin/cp /private/preboot/jb/bin/cp; then
         PX_DEPENDENCY_FAILURE="cp"; return 1
     fi
@@ -538,22 +556,27 @@ px_resolve_trusted_dependencies() {
     # rootful/rootless images do not ship it, so retain a bounded stat-size
     # fallback instead of failing the whole Keychain pipeline.
     if ! px_resolve_trusted_utility PX_CMP_PATH \
+        "${PX_JBROOT_PREFIX}/usr/bin/cmp" "${PX_JBROOT_PREFIX}/bin/cmp" \
         /usr/bin/cmp /bin/cmp /var/jb/usr/bin/cmp /private/preboot/jb/usr/bin/cmp; then
         PX_CMP_PATH=""
     fi
     if ! px_resolve_trusted_utility PX_CHMOD_PATH \
+        "${PX_JBROOT_PREFIX}/bin/chmod" "${PX_JBROOT_PREFIX}/usr/bin/chmod" \
         /bin/chmod /usr/bin/chmod /var/jb/bin/chmod /private/preboot/jb/bin/chmod; then
         PX_DEPENDENCY_FAILURE="chmod"; return 1
     fi
     if ! px_resolve_trusted_utility PX_RM_PATH \
+        "${PX_JBROOT_PREFIX}/bin/rm" "${PX_JBROOT_PREFIX}/usr/bin/rm" \
         /bin/rm /usr/bin/rm /var/jb/bin/rm /var/jb/usr/bin/rm /private/preboot/jb/bin/rm; then
         PX_DEPENDENCY_FAILURE="rm"; return 1
     fi
     if ! px_resolve_trusted_utility PX_RMDIR_PATH \
+        "${PX_JBROOT_PREFIX}/bin/rmdir" "${PX_JBROOT_PREFIX}/usr/bin/rmdir" \
         /bin/rmdir /usr/bin/rmdir /var/jb/bin/rmdir /private/preboot/jb/bin/rmdir; then
         PX_DEPENDENCY_FAILURE="rmdir"; return 1
     fi
     if ! px_resolve_trusted_utility PX_PLUTIL_PATH \
+        "${PX_JBROOT_PREFIX}/usr/bin/plutil" "${PX_JBROOT_PREFIX}/bin/plutil" \
         /usr/bin/plutil /var/jb/usr/bin/plutil /private/preboot/jb/usr/bin/plutil /bin/plutil; then
         PX_DEPENDENCY_FAILURE="plutil"; return 1
     fi
@@ -561,10 +584,12 @@ px_resolve_trusted_dependencies() {
         PX_DEPENDENCY_FAILURE="ldid"; return 1
     fi
     if ! px_resolve_trusted_utility PX_GREP_PATH \
+        "${PX_JBROOT_PREFIX}/usr/bin/grep" "${PX_JBROOT_PREFIX}/bin/grep" \
         /usr/bin/grep /bin/grep /var/jb/usr/bin/grep /private/preboot/jb/usr/bin/grep; then
         PX_DEPENDENCY_FAILURE="grep"; return 1
     fi
     if ! px_resolve_trusted_utility PX_SED_PATH \
+        "${PX_JBROOT_PREFIX}/usr/bin/sed" "${PX_JBROOT_PREFIX}/bin/sed" \
         /usr/bin/sed /bin/sed /var/jb/usr/bin/sed /private/preboot/jb/usr/bin/sed; then
         PX_DEPENDENCY_FAILURE="sed"; return 1
     fi
@@ -1329,6 +1354,10 @@ find_app_executable() {
     PX_TARGET_BUNDLE_UID=""
     local raw_root root app_dir uuid_dir
     local system_roots=(
+        "/rootfs/Applications"
+        "/rootfs/System/Applications"
+        "${PX_JBROOT_PREFIX}/Applications"
+        "${PX_JBROOT_PREFIX}/System/Applications"
         "/Applications"
         "/System/Applications"
         "/var/jb/Applications"
@@ -1349,6 +1378,9 @@ find_app_executable() {
     done
 
     local bundle_roots=(
+        "/rootfs/var/containers/Bundle/Application"
+        "/rootfs/var/mobile/Containers/Bundle/Application"
+        "/rootfs/private/var/containers/Bundle/Application"
         "/var/containers/Bundle/Application"
         "/var/mobile/Containers/Bundle/Application"
         "/private/var/containers/Bundle/Application"

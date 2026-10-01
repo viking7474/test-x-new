@@ -33,6 +33,7 @@
 #import "PXFileProtection.h"
 #import "CommandRunner.h"
 #import "PXKeychainHelperInvocationResult.h"
+#import "common/PXJailbreakCompat.h"
 #import "common/PXProcessKiller.h"
 #import "common/PXPaths.h"
 
@@ -1164,7 +1165,7 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
                                          @"Could not create private archive-source materialization directory");
         }
 
-        NSString *cpPath = [runner firstExistingPath:@[@"/bin/cp", @"/usr/bin/cp"]];
+        NSString *cpPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[@"/bin/cp", @"/usr/bin/cp"])];
         if (cpPath.length == 0) {
             [fm removeItemAtPath:materializationRoot error:nil];
             return PXTarSyntheticFailure(ENOENT,
@@ -1172,9 +1173,9 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
         }
 
         NSString *copyCommand = [NSString stringWithFormat:@"%@ -R -P -p %@ %@",
-                                 PXShellQuote(cpPath),
-                                 PXShellQuote(sourceDir),
-                                 PXShellQuote(materializationRoot)];
+                                 PXShellQuote(PXBootstrapPathArgument(cpPath)),
+                                 PXShellQuote(PXBootstrapPathArgument(sourceDir)),
+                                 PXShellQuote(PXBootstrapPathArgument(materializationRoot))];
         CommandResult *copyResult =
             [runner runAndCapture:copyCommand
                        timeoutSec:PXTarCreateTimeoutSeconds
@@ -1232,7 +1233,7 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
         @"."
     ]];
     CommandResult *res = [runner runExecutableAndCapture:tarPath
-                                                arguments:preferredArguments
+                                                arguments:PXBootstrapArguments(preferredArguments)
                                                timeoutSec:PXTarCreateTimeoutSeconds
                                            maxOutputBytes:PXTarCommandOutputLimitBytes];
     CommandResult *finalResult = res;
@@ -1253,7 +1254,7 @@ static NSString *PXTarCreatePrivateMaterializationDirectory(int *errorOut) {
             @"."
         ]];
         finalResult = [runner runExecutableAndCapture:tarPath
-                                             arguments:fallbackArguments
+                                             arguments:PXBootstrapArguments(fallbackArguments)
                                             timeoutSec:PXTarCreateTimeoutSeconds
                                         maxOutputBytes:PXTarCommandOutputLimitBytes];
     }
@@ -1386,7 +1387,7 @@ static NSString *PXCleanSubdirName(NSString *s) {
         @"-C", destDir
     ];
     CommandResult *res = [runner runExecutableAndCapture:tarPath
-                                                arguments:preferredArguments
+                                                arguments:PXBootstrapArguments(preferredArguments)
                                                timeoutSec:PXTarExtractTimeoutSeconds
                                            maxOutputBytes:PXTarCommandOutputLimitBytes];
     if (res.succeeded) {
@@ -1402,7 +1403,7 @@ static NSString *PXCleanSubdirName(NSString *s) {
         @"-C", destDir
     ];
     return [runner runExecutableAndCapture:tarPath
-                                  arguments:fallbackArguments
+                                  arguments:PXBootstrapArguments(fallbackArguments)
                                  timeoutSec:PXTarExtractTimeoutSeconds
                              maxOutputBytes:PXTarCommandOutputLimitBytes];
 }
@@ -1425,7 +1426,7 @@ static NSString *PXCleanSubdirName(NSString *s) {
         @"-C", destDir
     ]];
     CommandResult *res = [runner runExecutableAndCapture:tarPath
-                                                arguments:preferredArguments
+                                                arguments:PXBootstrapArguments(preferredArguments)
                                                timeoutSec:PXTarExtractTimeoutSeconds
                                            maxOutputBytes:PXTarCommandOutputLimitBytes];
     if (res.succeeded) {
@@ -1442,7 +1443,7 @@ static NSString *PXCleanSubdirName(NSString *s) {
         @"-C", destDir
     ]];
     return [runner runExecutableAndCapture:tarPath
-                                  arguments:fallbackArguments
+                                  arguments:PXBootstrapArguments(fallbackArguments)
                                  timeoutSec:PXTarExtractTimeoutSeconds
                              maxOutputBytes:PXTarCommandOutputLimitBytes];
 }
@@ -1490,11 +1491,11 @@ static NSString *PXCleanSubdirName(NSString *s) {
 
 - (NSString *)_keychainBackupScriptPath {
     CommandRunner *runner = [CommandRunner shared];
-    return [runner firstExistingPath:@[
+    return [runner firstExistingPath:PXJailbreakPathCandidates(@[
         @"/Library/WeaponX/keychain_backup.sh",
         @"/var/jb/Library/WeaponX/keychain_backup.sh",
         @"/private/var/jb/Library/WeaponX/keychain_backup.sh"
-    ]];
+    ])];
 }
 
 static BOOL PXGroupsContainPlatformFamily(NSArray<NSString *> *groups) {
@@ -1657,7 +1658,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
     }
     CommandResult *commandResult = [[CommandRunner shared]
         runExecutableAndCapture:scriptPath
-                      arguments:arguments
+                      arguments:PXBootstrapArguments(arguments)
                      timeoutSec:PXKeychainHelperInvocationTimeoutSeconds
                  maxOutputBytes:PXKeychainHelperInvocationOutputLimitBytes];
     NSError *invocationError = nil;
@@ -1888,7 +1889,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
         }
 
         // Prefer jailbreak/Procursus tar first (often has xattrs/acl support); /usr/bin/tar on iOS may not.
-        NSString *tarPath = [runner firstExistingPath:@[
+        NSString *tarPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[
             @"/var/jb/usr/bin/gtar",
             @"/private/preboot/jb/usr/bin/gtar",
             @"/usr/local/bin/gtar",
@@ -1901,7 +1902,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
             @"/private/preboot/jb/usr/bin/tar",
             @"/usr/bin/tar",
             @"/bin/tar"
-        ]];
+        ])];
         if (!tarPath) {
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:101
@@ -2415,7 +2416,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
             [NSString stringWithFormat:@"preferences/%@.plist", bundleID];
         NSString *prefSourcePath = [self _preferencesPlistPathForBundleID:bundleID];
         NSString *backupCopyExecutablePath =
-            [runner firstExistingPath:@[@"/bin/cp", @"/usr/bin/cp"]];
+            [runner firstExistingPath:PXJailbreakPathCandidates(@[@"/bin/cp", @"/usr/bin/cp"])];
         if (preferencesRequested) {
             if ([fm fileExistsAtPath:prefSourcePath]) {
                 NSError *preferencesArtifactError = nil;
@@ -2428,7 +2429,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
                         }
                         CommandResult *copyResult =
                             [runner runExecutableAndCapture:backupCopyExecutablePath
-                                                  arguments:@[@"-f", prefSourcePath, temporaryOutputPath]
+                                                  arguments:PXBootstrapArguments(@[@"-f", prefSourcePath, temporaryOutputPath])
                                                  timeoutSec:PXBackupFileCopyTimeoutSeconds
                                              maxOutputBytes:PXPermissionCommandOutputLimitBytes];
                         return copyResult.succeeded;
@@ -2715,7 +2716,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
                         }
                         CommandResult *copyResult =
                             [runner runExecutableAndCapture:backupCopyExecutablePath
-                                                  arguments:@[@"-a", src, temporaryOutputPath]
+                                                  arguments:PXBootstrapArguments(@[@"-a", src, temporaryOutputPath])
                                                  timeoutSec:PXBackupFileCopyTimeoutSeconds
                                              maxOutputBytes:PXPermissionCommandOutputLimitBytes];
                         return copyResult.succeeded;
@@ -3223,7 +3224,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
         }
 
         // Prefer jailbreak/Procursus tar first (often has xattrs/acl support); /usr/bin/tar on iOS may not.
-        NSString *tarPath = [runner firstExistingPath:@[
+        NSString *tarPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[
             @"/var/jb/usr/bin/gtar",
             @"/private/preboot/jb/usr/bin/gtar",
             @"/usr/local/bin/gtar",
@@ -3236,7 +3237,7 @@ static NSString *PXKeychainPartialSummary(NSString *operation,
             @"/private/preboot/jb/usr/bin/tar",
             @"/usr/bin/tar",
             @"/bin/tar"
-        ]];
+        ])];
         if (!tarPath) {
             NSError *err = [NSError errorWithDomain:PXBackupErrorDomain
                                                code:301

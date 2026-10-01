@@ -1,5 +1,6 @@
 #import "ContainerManager.h"
 #import "common/PXPaths.h"
+#import "common/PXJailbreakCompat.h"
 #import <Foundation/Foundation.h>
 
 @interface ContainerManager ()
@@ -118,7 +119,10 @@
     }
     
     NSString *appPath = [NSString stringWithFormat:@"/Applications/%@.app", bundleID];
-    return [self.fileManager fileExistsAtPath:appPath];
+    for (NSString *candidate in PXJailbreakPathCandidates(@[appPath])) {
+        if ([self.fileManager fileExistsAtPath:candidate]) return YES;
+    }
+    return NO;
 }
 
 + (NSString *)translatePathForEnvironment:(NSString *)path {

@@ -1,4 +1,5 @@
 #import "CommandRunner.h"
+#import "common/PXJailbreakCompat.h"
 
 #import <spawn.h>
 #import <sys/wait.h>
@@ -1346,7 +1347,9 @@ static CommandResult *PXRunCaptureExecutable(id executablePathObject,
     }
 
     pid_t pid;
-    const char *argv[] = {"/bin/sh", "-c", commandUTF8, NULL};
+    NSString *shellPath = PXJailbreakRootPath(@"/bin/sh");
+    const char *shellPathUTF8 = shellPath.fileSystemRepresentation;
+    const char *argv[] = {shellPathUTF8, "-c", commandUTF8, NULL};
     int spawnStatus = posix_spawn(&pid,
                                   argv[0],
                                   NULL,
@@ -1377,7 +1380,7 @@ static CommandResult *PXRunCaptureExecutable(id executablePathObject,
     options.maxOutputBytes = 0;
     options.processGroupEnabled = NO;
     NSArray *arguments = command ? @[@"-c", command] : nil;
-    return PXRunCaptureExecutable(@"/bin/sh",
+    return PXRunCaptureExecutable(PXJailbreakRootPath(@"/bin/sh"),
                                   arguments,
                                   NULL,
                                   NO,
@@ -1394,7 +1397,7 @@ static CommandResult *PXRunCaptureExecutable(id executablePathObject,
     options.maxOutputBytes = maxOutputBytes;
     options.processGroupEnabled = YES;
     NSArray *arguments = command ? @[@"-c", command] : nil;
-    return PXRunCaptureExecutable(@"/bin/sh",
+    return PXRunCaptureExecutable(PXJailbreakRootPath(@"/bin/sh"),
                                   arguments,
                                   NULL,
                                   NO,
@@ -1411,6 +1414,21 @@ static CommandResult *PXRunCaptureExecutable(id executablePathObject,
     options.outputCapEnabled = YES;
     options.maxOutputBytes = maxOutputBytes;
     options.processGroupEnabled = YES;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    // Do not rely on an absolute shebang being resolved from the iOS rootfs.
+    // RootHide's bootstrap shell lives in randomized jbroot, so invoke it
+    // explicitly and pass the script in bootstrap-path form.
+    if ([[executablePath pathExtension].lowercaseString isEqualToString:@"sh"]) {
+        NSMutableArray<NSString *> *shellArguments = [NSMutableArray arrayWithObject:
+            PXBootstrapPathArgument(executablePath)];
+        [shellArguments addObjectsFromArray:arguments ?: @[]];
+        return PXRunCaptureExecutable(PXJailbreakRootPath(@"/bin/bash"),
+                                      shellArguments,
+                                      environ,
+                                      YES,
+                                      options);
+    }
+#endif
     return PXRunCaptureExecutable(executablePath,
                                   arguments,
                                   environ,

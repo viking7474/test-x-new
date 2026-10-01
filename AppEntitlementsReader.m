@@ -2,6 +2,7 @@
 
 #import "AppDataCleaner.h"
 #import "CommandRunner.h"
+#import "common/PXJailbreakCompat.h"
 
 #import <objc/message.h>
 
@@ -23,12 +24,12 @@ static NSString *PXShellQuote(NSString *s) {
     }
 
     CommandRunner *runner = [CommandRunner shared];
-    NSString *ldidPath = [runner firstExistingPath:@[
+    NSString *ldidPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[
         @"/usr/bin/ldid",
         @"/var/jb/usr/bin/ldid",
         @"/private/preboot/jb/usr/bin/ldid",
         @"/bin/ldid"
-    ]];
+    ])];
 
     if (!ldidPath) {
         if (error) {

@@ -1,4 +1,5 @@
 #import "common/PXUIKitCompat.h"
+#import "common/PXJailbreakCompat.h"
 #import "TLinkIOS.h"
 #import "WeaponXTheme.h"
 #import "PXRRSManagerViewController.h"
@@ -252,7 +253,7 @@ static NSString *PXShellQuote(NSString *s) {
 static int PXRunShellCommand(NSString *command) {
     if (!command.length) return -1;
     NSTask *task = [[NSTask alloc] init];
-    task.launchPath = @"/bin/sh";
+    task.launchPath = PXJailbreakRootPath(@"/bin/sh");
     task.arguments = @[@"-c", command];
     @try {
         [task launch];
@@ -299,10 +300,10 @@ static void PXWriteSubstrateFilterPlists(void) {
 
     NSDictionary *tweakPlist = PXInjectionFilterPlistDictionary(validBundles);
     NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridgeBundles);
-    NSArray<NSString *> *dirs = @[
+    NSArray<NSString *> *dirs = PXJailbreakPathCandidates(@[
         @"/Library/MobileSubstrate/DynamicLibraries",
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries"
-    ];
+    ]);
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     [fm createDirectoryAtPath:stagingDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
@@ -346,13 +347,19 @@ static void PXWriteSubstrateFilterPlists(void) {
         BOOL wroteTweak = [tweakPlist writeToFile:tweakPath atomically:YES];
         BOOL wroteBridge = [bridgePlist writeToFile:bridgePath atomically:YES];
         if (!wroteTweak && wroteTmpTweak) {
-            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpTweakPath), PXShellQuote(tweakPath), PXShellQuote(tweakPath)]);
+            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@",
+                                             PXShellQuote(PXBootstrapPathArgument(tmpTweakPath)),
+                                             PXShellQuote(PXBootstrapPathArgument(tweakPath)),
+                                             PXShellQuote(PXBootstrapPathArgument(tweakPath))]);
             debug[[tweakPath stringByAppendingString:@" shellStatus"]] = @(status);
             NSArray *installedBundles = PXBundlesFromFilterPlistAtPath(tweakPath);
             wroteTweak = [installedBundles isEqualToArray:validBundles];
         }
         if (!wroteBridge && wroteTmpBridge) {
-            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@", PXShellQuote(tmpBridgePath), PXShellQuote(bridgePath), PXShellQuote(bridgePath)]);
+            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@",
+                                             PXShellQuote(PXBootstrapPathArgument(tmpBridgePath)),
+                                             PXShellQuote(PXBootstrapPathArgument(bridgePath)),
+                                             PXShellQuote(PXBootstrapPathArgument(bridgePath))]);
             debug[[bridgePath stringByAppendingString:@" shellStatus"]] = @(status);
             NSArray *installedBundles = PXBundlesFromFilterPlistAtPath(bridgePath);
             wroteBridge = [installedBundles isEqualToArray:bridgeBundles];

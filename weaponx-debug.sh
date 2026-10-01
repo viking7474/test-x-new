@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# WeaponX Debug Script for rootful/rootless layouts
+# WeaponX Debug Script for rootful/rootless/RootHide layouts
 
 first_existing_dir() {
     for p in "$@"; do
@@ -23,7 +23,7 @@ first_existing_file() {
     echo "$fallback"
 }
 
-MOBILE_LIBRARY="$(first_existing_dir "/var/mobile/Library" "/private/var/mobile/Library" "/var/jb/var/mobile/Library" "/private/var/jb/var/mobile/Library")"
+MOBILE_LIBRARY="$(first_existing_dir "/rootfs/var/mobile/Library" "/var/mobile/Library" "/private/var/mobile/Library" "/var/jb/var/mobile/Library" "/private/var/jb/var/mobile/Library")"
 WEAPONX_BASE="$MOBILE_LIBRARY/WeaponX"
 PROFILES_DIR="$WEAPONX_BASE/Profiles"
 PREFS_DIR="$MOBILE_LIBRARY/Preferences"

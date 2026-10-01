@@ -1,6 +1,7 @@
 // PXProcessKiller.m
 
 #import "PXProcessKiller.h"
+#import "PXJailbreakCompat.h"
 
 #import <spawn.h>
 #import <sys/wait.h>
@@ -15,13 +16,13 @@ static NSString *PXKillallPath(void) {
     static NSString *cached = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSArray<NSString *> *candidates = @[
+        NSArray<NSString *> *candidates = PXJailbreakPathCandidates(@[
             @"/usr/bin/killall",
             @"/bin/killall",
             @"/var/jb/usr/bin/killall",
             @"/private/preboot/jb/usr/bin/killall",
             @"/private/var/jb/usr/bin/killall"
-        ];
+        ]);
         NSFileManager *fm = [NSFileManager defaultManager];
         for (NSString *p in candidates) {
             if ([fm fileExistsAtPath:p]) {

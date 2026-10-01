@@ -27,6 +27,7 @@
 #import "FreezeManager.h"
 #import "common/PXProcessKiller.h"
 #import "common/PXSecuritySettingsStore.h"
+#import "common/PXJailbreakCompat.h"
 
 static const NSUInteger PXPrivilegedCommandMaxOutputBytes = 1024 * 1024;
 
@@ -748,7 +749,7 @@ static void PXKillAppProcessBestEffort(AppDataCleaner *selfRef, NSString *bundle
 static void PXStopMailDaemonsBestEffort(AppDataCleaner *selfRef) {
     if (!selfRef) return;
     CommandRunner *runner = [CommandRunner shared];
-    NSString *launchctlPath = [runner firstExistingPath:@[@"/bin/launchctl", @"/usr/bin/launchctl"]];
+    NSString *launchctlPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[@"/bin/launchctl", @"/usr/bin/launchctl"])];
     NSArray<NSString *> *labels = @[
         @"gui/501/com.apple.maild", @"gui/501/com.apple.mobilemail.maild",
         @"system/com.apple.maild", @"system/com.apple.mobilemail.maild"
@@ -833,7 +834,7 @@ static BOOL PXWaitForProcessExit(AppDataCleaner *selfRef, NSString *procName, NS
         return NO;
     }
     CommandRunner *runner = [CommandRunner shared];
-    NSString *pgrepPath = [runner firstExistingPath:@[@"/usr/bin/pgrep", @"/bin/pgrep"]];
+    NSString *pgrepPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[@"/usr/bin/pgrep", @"/bin/pgrep"])];
     if (!pgrepPath.length) return NO;
 
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
@@ -1829,11 +1830,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     }
 
     CommandRunner *runner = [CommandRunner shared];
-    NSString *scriptPath = [runner firstExistingPath:@[
+    NSString *scriptPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[
         @"/Library/WeaponX/keychain_backup.sh",
         @"/var/jb/Library/WeaponX/keychain_backup.sh",
         @"/private/var/jb/Library/WeaponX/keychain_backup.sh"
-    ]];
+    ])];
     if (!scriptPath.length || ![scriptPath hasPrefix:@"/"]) return nil;
 
     NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithObjects:@"list", bundleIdentifier, nil];
@@ -1851,7 +1852,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     if (operationContext && timeout <= 0.0) return nil;
 
     CommandResult *commandResult = [runner runExecutableAndCapture:scriptPath
-                                                          arguments:arguments
+                                                          arguments:PXBootstrapArguments(arguments)
                                                          timeoutSec:timeout
                                                      maxOutputBytes:1024 * 1024];
     if (!PXBoundedCommandSucceeded(commandResult)) return nil;
@@ -2188,11 +2189,11 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     (void)systemApplication;
 
     CommandRunner *runner = [CommandRunner shared];
-    NSString *scriptPath = [runner firstExistingPath:@[
+    NSString *scriptPath = [runner firstExistingPath:PXJailbreakPathCandidates(@[
         @"/Library/WeaponX/keychain_backup.sh",
         @"/var/jb/Library/WeaponX/keychain_backup.sh",
         @"/private/var/jb/Library/WeaponX/keychain_backup.sh"
-    ]];
+    ])];
     if (!scriptPath.length || ![scriptPath hasPrefix:@"/"]) {
         PXAssignKeychainNSError(error,
                                 PXKeychainClearFailureCodeConfigurationFailed,
@@ -2218,6 +2219,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
     [wipeArguments addObjectsFromArray:@[
         @"--groups", groupsCSV,
     ]];
+    wipeArguments = [PXBootstrapArguments(wipeArguments) mutableCopy];
 
     [self logMessage:@"[AppDataCleaner] Keychain wipe method=resigned_helper noLaunch=1 bundle=%@ groups=%lu nativeTarget=%d",
                      bundleIdentifier,

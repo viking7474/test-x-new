@@ -1,4 +1,5 @@
 #import "common/PXUIKitCompat.h"
+#import "common/PXJailbreakCompat.h"
 #import <UIKit/UIKit.h>
 #import "TLinkIOS.h"
 #import "TabBarController.h"
@@ -221,7 +222,7 @@ extern void StartWeaponXGuardian(void);
 // Basic jailbreak detection method
 - (BOOL)isDeviceJailbroken {
     // Check for common jailbreak files
-    NSArray *jailbreakFiles = @[
+    NSArray *jailbreakFiles = PXJailbreakPathCandidates(@[
         @"/Applications/Cydia.app",
         @"/Library/MobileSubstrate/MobileSubstrate.dylib",
         @"/bin/bash",
@@ -229,7 +230,7 @@ extern void StartWeaponXGuardian(void);
         @"/etc/apt",
         @"/usr/bin/ssh",
         @"/private/var/lib/apt"
-    ];
+    ]);
     
     for (NSString *path in jailbreakFiles) {
         if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {

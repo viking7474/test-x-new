@@ -209,3 +209,69 @@ jobs:
             release-hardening-report.json
             package-hardening-report.json
           if-no-files-found: warn
+
+  build-roothide:
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos-roothide
+      ARCHS: arm64
+      THEOS_PLATFORM: iphoneos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate RootHide build contracts
+        run: python3 scripts/test_roothide_build_static.py
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install ldid dpkg
+          echo "DPKG_BIN=$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_ENV"
+          echo "$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_PATH"
+
+      - name: Set up RootHide Theos
+        run: |
+          git clone --recursive --depth=1 https://github.com/roothide/theos.git "$THEOS"
+          "$THEOS/bin/update-theos"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Install Theos SDKs
+        run: |
+          TMP_DIR="$(mktemp -d)"
+          git clone --depth=1 https://github.com/theos/sdks.git "$TMP_DIR/sdks"
+          mkdir -p "$THEOS/sdks"
+          cp -R "$TMP_DIR/sdks/"* "$THEOS/sdks/"
+          SDK_NAME="$(ls "$THEOS/sdks" | grep -E '^iPhoneOS[0-9]+\.[0-9]+\.sdk$' | sort -V | tail -n 1)"
+          SDK_VERSION="${SDK_NAME#iPhoneOS}"
+          SDK_VERSION="${SDK_VERSION%.sdk}"
+          echo "SDKVERSION=$SDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Ensure dm.pl is available
+        run: |
+          if ! command -v dm.pl >/dev/null; then
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/dm.pl -o "$HOME/.local/bin/dm.pl"
+            chmod +x "$HOME/.local/bin/dm.pl"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Build RootHide release package
+        run: |
+          make release-package-roothide SDKVERSION="$SDKVERSION"
+          PACKAGE_FILE="$(ls -t packages/*_iphoneos-arm64e.deb | head -1)"
+          test -n "$PACKAGE_FILE"
+          test "$(dpkg-deb -f "$PACKAGE_FILE" Architecture)" = "iphoneos-arm64e"
+          dpkg-deb -c "$PACKAGE_FILE" | grep -q './Applications/TLinkIOS.app/'
+          dpkg-deb -c "$PACKAGE_FILE" | grep -q './Library/WeaponX/WeaponXDaemon'
+
+      - name: Upload RootHide build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlinkios-roothide-build
+          path: |
+            packages/*_iphoneos-arm64e.deb
+            .theos/obj/**/TLinkIOS.app
+            .theos/obj/**/TLinkIOSTweak.dylib
+            .theos/obj/**/WeaponXDaemon
+          if-no-files-found: error

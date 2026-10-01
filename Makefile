@@ -1,5 +1,13 @@
-TARGET := iphone:clang:16.5:12.0
-ARCHS = arm64 arm64e
+TARGET ?= iphone:clang:16.5:12.0
+ARCHS ?= arm64 arm64e
+
+# RootHide uses a randomized jbroot and the iphoneos-arm64e package lane. The
+# official RootHide Theos fork supplies this package scheme and linker rewriting.
+ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
+TARGET := iphone:clang:16.5:15.0
+ARCHS := arm64
+DEB_ARCH := iphoneos-arm64e
+endif
 LOGOS_DEFAULT_GENERATOR = internal
 INSTALL_TARGET_PROCESSES = SpringBoard TLinkIOS
 DEBUG=1
@@ -138,7 +146,7 @@ internal-stage::
 	@echo "Adding LaunchDaemon for persistent operation..."
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/LaunchDaemons
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/WeaponX/Guardian
-	@mkdir -p $(THEOS_STAGING_DIR)/var/mobile/Library/Preferences
+	@if [ "$(THEOS_PACKAGE_SCHEME)" != "roothide" ]; then mkdir -p $(THEOS_STAGING_DIR)/var/mobile/Library/Preferences; fi
 	@cp -a com.hydra.weaponx.guardian.plist $(THEOS_STAGING_DIR)/Library/LaunchDaemons/
 	@chmod 644 $(THEOS_STAGING_DIR)/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist
 	@chmod 755 $(THEOS_STAGING_DIR)/Library/WeaponX
@@ -162,20 +170,18 @@ internal-stage::
 	@chmod 755 $(THEOS_STAGING_DIR)/usr/bin/weaponx-debug
 	@echo "Installing carrier database..."
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/WeaponX/Data
-	@mkdir -p $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data
+	@if [ "$(THEOS_PACKAGE_SCHEME)" != "roothide" ]; then mkdir -p $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data; fi
 	@if [ -f "data/carrier_db.json" ]; then \
 		cp -a data/carrier_db.json $(THEOS_STAGING_DIR)/Library/WeaponX/Data/; \
-		cp -a data/carrier_db.json $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/; \
 		chmod 644 $(THEOS_STAGING_DIR)/Library/WeaponX/Data/carrier_db.json; \
-		chmod 644 $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/carrier_db.json; \
+		if [ "$(THEOS_PACKAGE_SCHEME)" != "roothide" ]; then cp -a data/carrier_db.json $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/; chmod 644 $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/carrier_db.json; fi; \
 	fi
 	@echo "Installing versioned iOS database..."
 	@for f in ios_build_db.json iphone_model_db.json; do \
 		if [ -f "data/$$f" ]; then \
 			cp -a "data/$$f" $(THEOS_STAGING_DIR)/Library/WeaponX/Data/; \
-			cp -a "data/$$f" $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/; \
 			chmod 644 "$(THEOS_STAGING_DIR)/Library/WeaponX/Data/$$f"; \
-			chmod 644 "$(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/$$f"; \
+			if [ "$(THEOS_PACKAGE_SCHEME)" != "roothide" ]; then cp -a "data/$$f" $(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/; chmod 644 "$(THEOS_STAGING_DIR)/var/mobile/Library/WeaponX/Data/$$f"; fi; \
 		fi; \
 	done
 
@@ -190,7 +196,7 @@ TLinkIOSCLI_LDFLAGS = -L$(THEOS_VENDOR_LIBRARY_PATH)
 after-package::
 	@echo "🔍 Checking package contents..."
 	@mkdir -p $(THEOS_STAGING_DIR)/../debug
-	@PACKAGE_FILE="$$(ls -t ./packages/com.hydra.tlinkios_*_iphoneos-arm.deb | head -1)" && \
+	@PACKAGE_FILE="$$(ls -t ./packages/com.hydra.tlinkios_*.deb | head -1)" && \
 	if [ -f "$$PACKAGE_FILE" ]; then \
 		echo "Extracting $$PACKAGE_FILE"; \
 		(cd $(THEOS_STAGING_DIR)/../debug && ar -x "../../$$PACKAGE_FILE" && tar -xf data.tar.*); \
@@ -206,7 +212,7 @@ after-package::
 	@ls -la $(THEOS_STAGING_DIR)/../debug/Library/WeaponX/Guardian/ || echo "❌ Guardian directory not found!"
 	@echo "Package check completed!"
 
-.PHONY: release-hardening release-package
+.PHONY: release-hardening release-package release-package-roothide package-roothide
 
 release-hardening:
 	python3 scripts/release_hardening.py regression --iterations 2 --report release-hardening-report.json
@@ -214,6 +220,21 @@ release-hardening:
 release-package:
 	$(MAKE) clean
 	$(MAKE) package FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
+
+# Requires the official RootHide Theos fork:
+# https://github.com/roothide/theos
+package-roothide:
+	$(MAKE) clean
+	$(MAKE) package THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
+		TARGET=iphone:clang:16.5:15.0 DEB_ARCH=iphoneos-arm64e \
+		_THEOS_DEB_PACKAGE_CONTROL_PATH=$(CURDIR)/control.roothide
+
+release-package-roothide:
+	$(MAKE) clean
+	$(MAKE) package THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64 \
+		TARGET=iphone:clang:16.5:15.0 DEB_ARCH=iphoneos-arm64e \
+		_THEOS_DEB_PACKAGE_CONTROL_PATH=$(CURDIR)/control.roothide \
+		FINALPACKAGE=1 DEBUG=0 INTERNAL_SECURITY_RESEARCH=0
 
 # SUBPROJECTS += TLinkIOSTweak
 # include $(THEOS_MAKE_PATH)/aggregate.mk

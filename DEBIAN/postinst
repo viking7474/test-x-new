@@ -1,15 +1,24 @@
 #!/bin/sh
 
-# Post-installation script for TLinkIOS (Rootful iOS 12+)
+# Post-installation script for TLinkIOS (rootful and RootHide).
+
+# RootHide bootstrap commands see jbroot as `/` and expose the original iOS
+# filesystem through `/rootfs`. Keep user data on rootfs while package-owned
+# paths (/Applications, /Library, /usr) remain relative to the bootstrap root.
+ROOTFS_PREFIX=""
+if [ -d "/rootfs/var/mobile" ]; then
+    ROOTFS_PREFIX="/rootfs"
+fi
+readonly ROOTFS_PREFIX
 
 # Mark script execution
 echo "Running WeaponX post-installation script..."
 echo "===================================="
 
 # Migrate persistent ProjectX state without removing the legacy copy.
-PREFS_DIR="/var/mobile/Library/Preferences"
-LEGACY_DATA_DIR="/var/mobile/Library/ProjectX"
-TLINKIOS_DATA_DIR="/var/mobile/Library/TLinkIOS"
+PREFS_DIR="${ROOTFS_PREFIX}/var/mobile/Library/Preferences"
+LEGACY_DATA_DIR="${ROOTFS_PREFIX}/var/mobile/Library/ProjectX"
+TLINKIOS_DATA_DIR="${ROOTFS_PREFIX}/var/mobile/Library/TLinkIOS"
 if [ -d "$LEGACY_DATA_DIR" ] && [ ! -e "$TLINKIOS_DATA_DIR" ]; then
     echo "Migrating ProjectX application data to TLinkIOS..."
     cp -Rp "$LEGACY_DATA_DIR" "$TLINKIOS_DATA_DIR"
@@ -43,17 +52,30 @@ rm -f /usr/bin/projectx-setup
 echo "📂 Creating required directories..."
 
 # Create WeaponX directory
-mkdir -p "/var/mobile/Library/WeaponX"
-chmod 755 "/var/mobile/Library/WeaponX"
-chown mobile:mobile "/var/mobile/Library/WeaponX"
+WEAPONX_MOBILE_DIR="${ROOTFS_PREFIX}/var/mobile/Library/WeaponX"
+mkdir -p "$WEAPONX_MOBILE_DIR"
+chmod 755 "$WEAPONX_MOBILE_DIR"
+chown mobile:mobile "$WEAPONX_MOBILE_DIR"
+
+# Publish packaged databases to the persistent rootfs location used by app and
+# injected processes. The package copy remains the immutable fallback.
+mkdir -p "$WEAPONX_MOBILE_DIR/Data"
+for DB_FILE in /Library/WeaponX/Data/*.json; do
+    [ -f "$DB_FILE" ] || continue
+    cp -f "$DB_FILE" "$WEAPONX_MOBILE_DIR/Data/"
+done
+chmod 755 "$WEAPONX_MOBILE_DIR/Data"
+chmod 644 "$WEAPONX_MOBILE_DIR/Data/"*.json 2>/dev/null || true
+chown -R mobile:mobile "$WEAPONX_MOBILE_DIR/Data"
 
 # Create Log directory for TLinkIOS
-if [ -d "/var/mobile/Library/Logs/ProjectX" ] && [ ! -e "/var/mobile/Library/Logs/TLinkIOS" ]; then
-    cp -Rp "/var/mobile/Library/Logs/ProjectX" "/var/mobile/Library/Logs/TLinkIOS"
+MOBILE_LOGS_DIR="${ROOTFS_PREFIX}/var/mobile/Library/Logs"
+if [ -d "$MOBILE_LOGS_DIR/ProjectX" ] && [ ! -e "$MOBILE_LOGS_DIR/TLinkIOS" ]; then
+    cp -Rp "$MOBILE_LOGS_DIR/ProjectX" "$MOBILE_LOGS_DIR/TLinkIOS"
 fi
-mkdir -p "/var/mobile/Library/Logs/TLinkIOS"
-chmod 777 "/var/mobile/Library/Logs/TLinkIOS"
-chown mobile:mobile "/var/mobile/Library/Logs/TLinkIOS"
+mkdir -p "$MOBILE_LOGS_DIR/TLinkIOS"
+chmod 777 "$MOBILE_LOGS_DIR/TLinkIOS"
+chown mobile:mobile "$MOBILE_LOGS_DIR/TLinkIOS"
 
 # Create Sandbox/Profile directory (for LibSandy)
 mkdir -p "/Library/Sandbox/Profile"

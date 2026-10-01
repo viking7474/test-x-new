@@ -2,9 +2,11 @@
 
 echo "Setting up TLinkIOS app..."
 
-# Rootful jailbreak - no prefix needed
-JBPREFIX=""
-echo "Detected rootful jailbreak"
+if [ -d /rootfs/var/mobile ]; then
+    echo "Detected RootHide bootstrap"
+else
+    echo "Detected rootful/rootless-compatible bootstrap"
+fi
 
 # For backwards compatibility with MobileSubstrate
 echo "Setting up MobileSubstrate directories (for compatibility)..."
