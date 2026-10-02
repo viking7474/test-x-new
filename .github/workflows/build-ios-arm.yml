@@ -104,11 +104,35 @@ jobs:
             --report release-hardening-report.json
 
       - name: Install build dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_UPGRADE: "1"
         run: |
-          brew update
+          set -euo pipefail
+
+          # macos-14 runners can retain an openssl@1.1 link while ldid pulls
+          # openssl@3. Remove only that known link conflict before installation.
+          if brew list --versions openssl@1.1 >/dev/null 2>&1; then
+            brew unlink openssl@1.1 || true
+          fi
+
           brew install ldid dpkg
-          echo "DPKG_BIN=$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_ENV"
-          echo "$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_PATH"
+
+          LDID_DIR="$(brew --prefix ldid)/bin"
+          DPKG_DIR="$(brew --prefix dpkg)/bin"
+          export PATH="$LDID_DIR:$DPKG_DIR:$PATH"
+
+          # Fail here with a clear diagnostic instead of executing an empty
+          # variable path later in the build.
+          command -v ldid
+          command -v dpkg
+          command -v dpkg-deb
+          ldid -h >/dev/null 2>&1 || true
+          dpkg-deb --version
+
+          echo "DPKG_BIN=$(command -v dpkg)" >> "$GITHUB_ENV"
+          echo "$LDID_DIR" >> "$GITHUB_PATH"
+          echo "$DPKG_DIR" >> "$GITHUB_PATH"
 
       - name: Set up Theos
         run: |
@@ -224,11 +248,35 @@ jobs:
         run: python3 scripts/test_roothide_build_static.py
 
       - name: Install build dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_UPGRADE: "1"
         run: |
-          brew update
+          set -euo pipefail
+
+          # macos-14 runners can retain an openssl@1.1 link while ldid pulls
+          # openssl@3. Remove only that known link conflict before installation.
+          if brew list --versions openssl@1.1 >/dev/null 2>&1; then
+            brew unlink openssl@1.1 || true
+          fi
+
           brew install ldid dpkg
-          echo "DPKG_BIN=$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_ENV"
-          echo "$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_PATH"
+
+          LDID_DIR="$(brew --prefix ldid)/bin"
+          DPKG_DIR="$(brew --prefix dpkg)/bin"
+          export PATH="$LDID_DIR:$DPKG_DIR:$PATH"
+
+          # Fail here with a clear diagnostic instead of executing an empty
+          # variable path later in the build.
+          command -v ldid
+          command -v dpkg
+          command -v dpkg-deb
+          ldid -h >/dev/null 2>&1 || true
+          dpkg-deb --version
+
+          echo "DPKG_BIN=$(command -v dpkg)" >> "$GITHUB_ENV"
+          echo "$LDID_DIR" >> "$GITHUB_PATH"
+          echo "$DPKG_DIR" >> "$GITHUB_PATH"
 
       - name: Set up RootHide Theos
         run: |

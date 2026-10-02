@@ -154,6 +154,14 @@ require(workflow.index("make clean THEOS_PACKAGE_SCHEME=roothide") <
         "RootHide CI must clean before starting the independent package invocation")
 require('dpkg-deb -c "$PACKAGE_FILE" | grep -q' not in workflow,
         "RootHide package verification must not use a SIGPIPE-prone grep pipeline")
+require('brew update' not in workflow and
+        workflow.count('HOMEBREW_NO_INSTALL_UPGRADE: "1"') == 2 and
+        workflow.count('brew unlink openssl@1.1 || true') == 2 and
+        'find "$LDID_PREFIX"' not in workflow and
+        workflow.count('LDID_DIR="$(brew --prefix ldid)/bin"') == 2 and
+        workflow.count('DPKG_DIR="$(brew --prefix dpkg)/bin"') == 2 and
+        workflow.count('command -v dpkg-deb') == 2,
+        "GitHub Actions dependency setup is not protected from Homebrew OpenSSL/link-path regressions")
 for token in (
     'dpkg-deb -x "$PACKAGE_FILE" "$VERIFY_DIR"',
     'test -x "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS"',
