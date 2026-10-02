@@ -12,6 +12,7 @@
 #import <string.h>
 #import "PXInjectionFilter.h"
 #import "PXJailbreakCompat.h"
+#import "PXRuntimeSnapshot.h"
 
 // Constants
 static const NSTimeInterval kCheckInterval = 0.5; // Cheap staging-change poll; sync itself is change-gated.
@@ -22,6 +23,8 @@ static BOOL debugMode = NO;
 static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkios.filterPlistChanged";
 static NSString * const kTLinkIOSTweakLoadedNotification = @"com.hydra.tlinkios.tweakLoaded";
 static const char *kTLinkIOSTweakLoadedNotifyName = "com.hydra.tlinkios.tweakLoaded";
+static NSString * const kTLinkIOSBootstrapDecisionNotification = @"com.hydra.tlinkios.bootstrapDecision";
+static const char *kTLinkIOSBootstrapDecisionNotifyName = "com.hydra.tlinkios.bootstrapDecision";
 
 @interface WeaponXDaemon : NSObject
 @property (nonatomic, strong) NSTimer *monitorTimer;
@@ -30,8 +33,11 @@ static const char *kTLinkIOSTweakLoadedNotifyName = "com.hydra.tlinkios.tweakLoa
 @property (nonatomic, copy) NSString *lastStagingFingerprint;
 @property (nonatomic, assign) NSUInteger syncSequence;
 @property (nonatomic, assign) int tweakLoadNotifyToken;
+@property (nonatomic, assign) int bootstrapDecisionNotifyToken;
 - (void)syncTLinkIOSFilterPlists;
 - (void)recordTweakLoadSignal;
+- (void)recordBootstrapDecisionSignal;
+- (void)publishRuntimeSnapshotWithReason:(NSString *)reason;
 - (NSString *)stagingFingerprint;
 - (void)writeRuntimeStatus:(NSString *)event;
 - (void)runOneShotSelfTest;
@@ -41,12 +47,26 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     (void)center; (void)name; (void)object; (void)userInfo;
     WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
     [daemon syncTLinkIOSFilterPlists];
+    [daemon publishRuntimeSnapshotWithReason:@"filter-plist-changed"];
 }
 
 static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     (void)center; (void)name; (void)object; (void)userInfo;
     WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
     [daemon recordTweakLoadSignal];
+}
+
+static void PXRuntimeStateChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)object; (void)userInfo;
+    WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
+    NSString *reason = name ? (__bridge NSString *)name : @"darwin-state-change";
+    [daemon publishRuntimeSnapshotWithReason:reason];
+}
+
+static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)name; (void)object; (void)userInfo;
+    WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
+    [daemon recordBootstrapDecisionSignal];
 }
 
 @implementation WeaponXDaemon
@@ -74,6 +94,7 @@ static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer
         // here can create a crash/restart loop during package installation.
         _protectedProcesses = [NSMutableArray array];
         _tweakLoadNotifyToken = -1;
+        _bootstrapDecisionNotifyToken = -1;
         
         NSLog(@"Using Guardian dir: %@", kGuardianDir);
         
@@ -94,6 +115,7 @@ static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer
 
 - (void)dealloc {
     if (_tweakLoadNotifyToken >= 0) notify_cancel(_tweakLoadNotifyToken);
+    if (_bootstrapDecisionNotifyToken >= 0) notify_cancel(_bootstrapDecisionNotifyToken);
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)(self));
 }
@@ -101,6 +123,7 @@ static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer
 - (void)startDaemon {
     [self log:@"WeaponXDaemon starting..." withType:OS_LOG_TYPE_INFO];
     [self writeRuntimeStatus:@"start"];
+    [self publishRuntimeSnapshotWithReason:@"daemon-start"];
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterAddObserver(darwinCenter,
@@ -109,6 +132,16 @@ static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer
                                     (__bridge CFStringRef)kTLinkIOSFilterChangedNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+    for (NSString *notificationName in @[@"com.hydra.tlinkios.settings.changed",
+                                         @"com.hydra.tlinkios.profileChanged",
+                                         @"com.hydra.tlinkios.scopedAppsChanged"]) {
+        CFNotificationCenterAddObserver(darwinCenter,
+                                        (__bridge const void *)(self),
+                                        PXRuntimeStateChangedCallback,
+                                        (__bridge CFStringRef)notificationName,
+                                        NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
 
     uint32_t notifyStatus = notify_register_check(kTLinkIOSTweakLoadedNotifyName, &_tweakLoadNotifyToken);
     if (notifyStatus != NOTIFY_STATUS_OK) {
@@ -124,6 +157,21 @@ static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer
                                     (__bridge const void *)(self),
                                     PXTweakLoadedCallback,
                                     (__bridge CFStringRef)kTLinkIOSTweakLoadedNotification,
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    uint32_t decisionNotifyStatus = notify_register_check(kTLinkIOSBootstrapDecisionNotifyName, &_bootstrapDecisionNotifyToken);
+    if (decisionNotifyStatus != NOTIFY_STATUS_OK) {
+        _bootstrapDecisionNotifyToken = -1;
+        [self log:[NSString stringWithFormat:@"Bootstrap probe notify_register_check failed: %u", decisionNotifyStatus]
+             withType:OS_LOG_TYPE_ERROR];
+    } else {
+        notify_set_state(_bootstrapDecisionNotifyToken, 0);
+    }
+    CFNotificationCenterAddObserver(darwinCenter,
+                                    (__bridge const void *)(self),
+                                    PXBootstrapDecisionCallback,
+                                    (__bridge CFStringRef)kTLinkIOSBootstrapDecisionNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
     
@@ -142,6 +190,128 @@ static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer
     
     // Keep runloop running
     [[NSRunLoop currentRunLoop] run];
+}
+
+- (void)publishRuntimeSnapshotWithReason:(NSString *)reason {
+    NSError *publishError = nil;
+    BOOL success = PXPublishRuntimeSnapshot(&publishError);
+    NSDictionary *snapshot = success ? PXLoadRuntimeSnapshot() : @{};
+    NSDictionary *scope = [snapshot[@"globalScope"] isKindOfClass:NSDictionary.class] ? snapshot[@"globalScope"] : @{};
+    NSDictionary *scopedApps = [scope[@"ScopedApps"] isKindOfClass:NSDictionary.class] ? scope[@"ScopedApps"] : @{};
+    NSDictionary *deviceIDs = [snapshot[@"deviceIDs"] isKindOfClass:NSDictionary.class] ? snapshot[@"deviceIDs"] : @{};
+    NSString *profileID = [snapshot[@"profileID"] isKindOfClass:NSString.class] ? snapshot[@"profileID"] : @"";
+
+    NSString *debugDir = @"/var/mobile/Library/TLinkIOS";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:debugDir
+  withIntermediateDirectories:YES
+                   attributes:@{NSFilePosixPermissions: @0755}
+                        error:nil];
+    NSString *debugPath = [debugDir stringByAppendingPathComponent:@"runtime_snapshot_debug.plist"];
+    NSDictionary *publishStats = PXRuntimeSnapshotLastPublishStats();
+    NSDictionary *debug = @{
+        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"success": @(success),
+        @"reason": reason ?: @"unknown",
+        @"snapshotPath": PXRuntimeSnapshotPath() ?: @"",
+        @"profileID": profileID ?: @"",
+        @"scopedAppCount": @(scopedApps.count),
+        @"deviceIDCount": @(deviceIDs.count),
+        @"publishStats": publishStats ?: @{},
+        @"error": publishError.localizedDescription ?: @""
+    };
+    [debug writeToFile:debugPath atomically:YES];
+    chmod(debugPath.fileSystemRepresentation, 0644);
+    chown(debugPath.fileSystemRepresentation, 501, 501);
+
+    if (success) {
+        [self log:[NSString stringWithFormat:@"Published RootHide runtime snapshot reason=%@ profile=%@ scope=%lu deviceIDs=%lu",
+                   reason ?: @"unknown", profileID ?: @"",
+                   (unsigned long)scopedApps.count, (unsigned long)deviceIDs.count]
+             withType:OS_LOG_TYPE_INFO];
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged"),
+                                             NULL, NULL, true);
+    } else {
+        [self log:[NSString stringWithFormat:@"Runtime snapshot publish failed reason=%@ error=%@",
+                   reason ?: @"unknown", publishError.localizedDescription ?: @"unknown"]
+             withType:OS_LOG_TYPE_ERROR];
+    }
+}
+
+- (void)recordBootstrapDecisionSignal {
+    uint64_t state = 0;
+    uint32_t stateStatus = (uint32_t)-1;
+    if (self.bootstrapDecisionNotifyToken >= 0) {
+        stateStatus = notify_get_state(self.bootstrapDecisionNotifyToken, &state);
+        if (stateStatus == NOTIFY_STATUS_OK) notify_set_state(self.bootstrapDecisionNotifyToken, 0);
+    }
+
+    uint32_t pid = (uint32_t)(state & 0xFFFFFFFFu);
+    uint32_t role = (uint32_t)((state >> 32) & 0xFFu);
+    uint32_t reason = (uint32_t)((state >> 40) & 0xFFu);
+    uint32_t capabilities = (uint32_t)((state >> 48) & 0xFFFFu);
+    NSArray<NSString *> *roleNames = @[@"unknown", @"main-app", @"extension", @"web-content",
+                                       @"web-networking", @"web-gpu", @"safari-view-service",
+                                       @"springboard", @"system-daemon"];
+    NSArray<NSString *> *reasonNames = @[@"denied-unknown", @"denied-system", @"denied-scope",
+                                         @"denied-master", @"denied-web-stack", @"allowed"];
+    NSString *roleName = role < roleNames.count ? roleNames[role] : @"invalid-role";
+    NSString *reasonName = reason < reasonNames.count ? reasonNames[reason] : @"invalid-reason";
+    NSString *processPath = @"";
+    NSString *processName = @"";
+    NSString *bundleID = @"";
+    if (pid > 0) {
+        typedef int (*PXProcPidPathFn)(int, void *, uint32_t);
+        PXProcPidPathFn procPidPath = (PXProcPidPathFn)dlsym(RTLD_DEFAULT, "proc_pidpath");
+        void *libprocHandle = NULL;
+        if (!procPidPath) {
+            libprocHandle = dlopen("/usr/lib/libproc.dylib", RTLD_LAZY | RTLD_LOCAL);
+            if (libprocHandle) procPidPath = (PXProcPidPathFn)dlsym(libprocHandle, "proc_pidpath");
+        }
+        if (procPidPath) {
+            char pathBuffer[4096] = {0};
+            if (procPidPath((int)pid, pathBuffer, (uint32_t)sizeof(pathBuffer)) > 0) {
+                processPath = [NSString stringWithUTF8String:pathBuffer] ?: @"";
+                processName = processPath.lastPathComponent ?: @"";
+                NSRange appMarker = [processPath rangeOfString:@".app/" options:NSBackwardsSearch];
+                if (appMarker.location != NSNotFound) {
+                    NSUInteger appEnd = appMarker.location + @".app".length;
+                    NSString *bundlePath = [processPath substringToIndex:MIN(appEnd, processPath.length)];
+                    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                        [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+                    id identifier = [info isKindOfClass:NSDictionary.class] ? info[@"CFBundleIdentifier"] : nil;
+                    if ([identifier isKindOfClass:NSString.class]) bundleID = identifier;
+                }
+            }
+        }
+        if (libprocHandle) dlclose(libprocHandle);
+    }
+
+    NSString *dir = @"/var/mobile/Library/TLinkIOS";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
+    NSString *path = [dir stringByAppendingPathComponent:@"tweak_bootstrap_probe.plist"];
+    NSMutableArray *events = [[NSArray arrayWithContentsOfFile:path] mutableCopy];
+    if (![events isKindOfClass:NSMutableArray.class]) events = [NSMutableArray array];
+    NSDictionary *record = @{
+        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"pid": @(pid),
+        @"role": @(role),
+        @"roleName": roleName,
+        @"reason": @(reason),
+        @"reasonName": reasonName,
+        @"capabilities": @(capabilities),
+        @"bundleID": bundleID ?: @"",
+        @"processName": processName ?: @"",
+        @"processPath": processPath ?: @"",
+        @"notifyStateStatus": @(stateStatus)
+    };
+    [events addObject:record];
+    if (events.count > 64) [events removeObjectsInRange:NSMakeRange(0, events.count - 64)];
+    [events writeToFile:path atomically:YES];
+    chmod(path.fileSystemRepresentation, 0644);
+    chown(path.fileSystemRepresentation, 501, 501);
 }
 
 - (void)recordTweakLoadSignal {
@@ -504,6 +674,7 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
     [self log:@"WeaponXDaemon one-shot self-test" withType:OS_LOG_TYPE_INFO];
     [self writeRuntimeStatus:@"self-test"];
     [self syncTLinkIOSFilterPlists];
+    [self publishRuntimeSnapshotWithReason:@"self-test"];
 }
 
 #pragma mark - Utility Methods

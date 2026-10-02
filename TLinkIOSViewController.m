@@ -7642,6 +7642,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             [self applyFakePreviewToCurrentProfile:preview];
             self.nextFakePreview = nil;
             [self persistDashboardSelections];
+
+            // Reset Data just cleared the target app container. Notify the root
+            // daemon only after the new profile/device_ids are fully written so
+            // it can republish both the global RootHide snapshot and each scoped
+            // app's local-container mirror before the app is relaunched.
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 CFSTR("com.hydra.tlinkios.profileChanged"),
+                                                 NULL, NULL, true);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self hideProgressHUD];
                 [self refreshDashboardSelectionLabels];

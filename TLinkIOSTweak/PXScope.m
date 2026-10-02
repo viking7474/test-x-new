@@ -1,5 +1,7 @@
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
+#import "PXRuntimeSnapshot.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <fcntl.h>
 #import <os/lock.h>
@@ -92,6 +94,11 @@ BOOL PXScopeIsReadingSecuritySettings(void) {
 
 static id PXReadSecuritySettingObject(NSString *key) {
     if (!key.length) return nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeSecurity = PXRuntimeSnapshotSecuritySettings();
+    id runtimeValue = runtimeSecurity[key];
+    if (runtimeValue != nil) return runtimeValue;
+#endif
     gPXReadingSecuritySettings = YES;
     id result = nil;
 
@@ -125,6 +132,11 @@ static BOOL PXReadSecuritySettingBool(NSString *key) {
 }
 
 static void PXSynchronizeSecuritySettings(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    // RootHide-injected App Store processes consume the daemon-published jbroot
+    // snapshot. Avoid depending on cfprefsd access to another app's domain.
+    if (PXRuntimeSnapshotSecuritySettings().count) return;
+#endif
     gPXReadingSecuritySettings = YES;
     CFPreferencesAppSynchronize(CFSTR("com.weaponx.securitySettings"));
     gPXReadingSecuritySettings = NO;
@@ -256,6 +268,12 @@ static void PXScopeFileLog(NSString *format, ...) {
 }
 
 static NSDictionary *PXLoadScopedAppsFromDisk(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeScope = PXRuntimeSnapshotGlobalScope();
+    NSDictionary *runtimeScoped = [runtimeScope[@"ScopedApps"] isKindOfClass:NSDictionary.class]
+        ? runtimeScope[@"ScopedApps"] : nil;
+    if (runtimeScoped) return [runtimeScoped copy];
+#endif
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
     NSDictionary *scoped = [dict isKindOfClass:[NSDictionary class]] ? dict[@"ScopedApps"] : nil;
     return [scoped isKindOfClass:[NSDictionary class]] ? [scoped copy] : @{};
@@ -451,6 +469,7 @@ static void PXScopeStartObserving(void) {
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.profileChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.scopedAppsChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     });
 }

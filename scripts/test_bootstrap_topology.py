@@ -27,7 +27,12 @@ for folder in ("TLinkIOSTweak", "common"):
                 continue  # explicit load telemetry only; no hook installation before bootstrap gate
             body = src[match.end():].lstrip()
             body = re.sub(r"^@autoreleasepool\s*\{\s*", "", body)
-            assert body.startswith("if (!PXBootstrapAllows("), f"Work before bootstrap gate: {path}"
+            if path.name == "Tweak.x" and body.startswith("PXBootstrapDecision bootstrapDecision = PXBootstrapDecisionForCurrentProcess();"):
+                prefix = body[:700]
+                assert "PXFileDebugSignalBootstrapDecision" in prefix
+                assert "if (!PXBootstrapDecisionAllows(bootstrapDecision," in prefix
+            else:
+                assert body.startswith("if (!PXBootstrapAllows("), f"Work before bootstrap gate: {path}"
             entries += 1
 
 assert entries >= 27, f"Startup inventory unexpectedly shrank: {entries}"

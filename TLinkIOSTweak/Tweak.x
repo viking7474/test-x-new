@@ -46,6 +46,7 @@
 #import "PXIdentifierUUIDProjection.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXFileDebug.h"
 #import "PXP1BFilters.h"
 #import <os/lock.h>
@@ -523,6 +524,11 @@ static BOOL sPXUnameHookInstalled = NO;
 // Security settings helpers
 static id PXReadSecuritySettingObject(NSString *key) {
     if (!key.length) return nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeSecurity = PXRuntimeSnapshotSecuritySettings();
+    id runtimeValue = runtimeSecurity[key];
+    if (runtimeValue != nil) return runtimeValue;
+#endif
     CFPropertyListRef pref = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.weaponx.securitySettings"));
     if (pref) return CFBridgingRelease(pref);
 
@@ -542,6 +548,16 @@ static id PXReadSecuritySettingObject(NSString *key) {
 static BOOL PXReadSecuritySettingBool(NSString *key) {
     id v = PXReadSecuritySettingObject(key);
     return v ? [v boolValue] : NO;
+}
+
+static NSDictionary *PXReadSecuritySettingsDictionary(void) {
+    NSDictionary *runtimeSecurity = PXRuntimeSnapshotSecuritySettings();
+    if (runtimeSecurity.count) return runtimeSecurity;
+    for (NSString *path in @[@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist", @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"]) {
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+        if ([dict isKindOfClass:NSDictionary.class]) return dict;
+    }
+    return @{};
 }
 
 static NSString *PXHookMissingLogPath(void) {
@@ -1219,7 +1235,7 @@ static int uname_hook(struct utsname *buf) {
         return %orig;
     }
 
-    NSDictionary *securitySettings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+    NSDictionary *securitySettings = PXReadSecuritySettingsDictionary();
     BOOL targetRegionFollowsIP = [securitySettings[@"targetRegionFollowsIPEnabled"] boolValue];
     NSString *pinnedCountryCode = [securitySettings[@"targetRegionPinnedCountryCode"] isKindOfClass:[NSString class]] ? securitySettings[@"targetRegionPinnedCountryCode"] : nil;
     NSString *pinnedMCC = [securitySettings[@"targetRegionPinnedCarrierMCC"] isKindOfClass:[NSString class]] ? securitySettings[@"targetRegionPinnedCarrierMCC"] : nil;
@@ -1337,7 +1353,7 @@ static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
     NSString *profileID = nil;
     NSNumber *generation = nil;
     NSDictionary *deviceIDs = PXGetDeviceIdsSnapshot(&profileID, &generation);
-    NSDictionary *security = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+    NSDictionary *security = PXReadSecuritySettingsDictionary();
     if ([security[@"targetRegionFollowsIPEnabled"] boolValue]) {
         NSDictionary *mapping = @{
             @"RegionCode": @"targetRegionPinnedCountryCode",
@@ -3949,7 +3965,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
                 props = (__bridge NSMutableDictionary *)mutable;
             }
 
-            NSDictionary *securitySettings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"];
+            NSDictionary *securitySettings = PXReadSecuritySettingsDictionary();
             BOOL targetRegionFollowsIP = [securitySettings[@"targetRegionFollowsIPEnabled"] boolValue];
             NSString *pinnedCountryCode = [securitySettings[@"targetRegionPinnedCountryCode"] isKindOfClass:[NSString class]] ? securitySettings[@"targetRegionPinnedCountryCode"] : nil;
             NSString *pinnedMCC = [securitySettings[@"targetRegionPinnedCarrierMCC"] isKindOfClass:[NSString class]] ? securitySettings[@"targetRegionPinnedCarrierMCC"] : nil;
@@ -4275,7 +4291,12 @@ static char* hook_GSSystemGetSerialNo(void) {
 
 // Constructor
 %ctor {
-    if (!PXBootstrapAllows(PXHookCapabilityNative | PXHookCapabilitySpringBoard)) return;
+    PXBootstrapDecision bootstrapDecision = PXBootstrapDecisionForCurrentProcess();
+    PXFileDebugSignalBootstrapDecision((uint32_t)bootstrapDecision.role,
+                                       bootstrapDecision.capabilities,
+                                       (uint32_t)bootstrapDecision.reason);
+    if (!PXBootstrapDecisionAllows(bootstrapDecision,
+                                   PXHookCapabilityNative | PXHookCapabilitySpringBoard)) return;
     NSString *currentProcessName = [NSProcessInfo processInfo].processName;
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     // SpringBoard hosts Profile Indicator only. Loading the full spoof stack + debug I/O

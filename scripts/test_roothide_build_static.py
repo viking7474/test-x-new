@@ -30,6 +30,10 @@ entitlements = read("ent.plist")
 daemon_entitlements = read("daemon_ent.plist")
 file_debug = read("TLinkIOSTweak/PXFileDebug.h")
 tweak_main = read("TLinkIOSTweak/Tweak.x")
+scope = read("TLinkIOSTweak/PXScope.m")
+runtime_snapshot = read("common/PXRuntimeSnapshot.m")
+identity_snapshot = read("common/PXIdentitySnapshot.m")
+identifier_manager = read("common/IdentifierManager.m")
 
 for token in (
     "THEOS_PACKAGE_SCHEME=roothide",
@@ -106,6 +110,44 @@ require('PX_TWEAK_LOAD_NOTIFY' in file_debug and
         'proc_pidpath' in daemon and
         'notify_get_state(self.tweakLoadNotifyToken, &state)' in daemon,
         "RootHide tweak-load diagnostics still depend on sandbox-local /tmp state")
+require('PX_BOOTSTRAP_DECISION_NOTIFY' in file_debug and
+        'PXFileDebugSignalBootstrapDecision' in tweak_main and
+        'tweak_bootstrap_probe.plist' in daemon and
+        '@"reasonName"' in daemon and '@"roleName"' in daemon and
+        '@"bundleID"' in daemon and
+        'notify_get_state(self.bootstrapDecisionNotifyToken, &state)' in daemon,
+        "RootHide bootstrap diagnostics do not identify the denied/allowed target process")
+require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
+        'PXJailbreakRootPath(@"/Library/WeaponX/Runtime/runtime_snapshot.plist")' in runtime_snapshot and
+        'PXRuntimeSnapshotLocalContainerPath' in runtime_snapshot and
+        'Library/Caches/com.hydra.tlinkios/runtime_snapshot.plist' in runtime_snapshot and
+        '/var/mobile/Containers/Data/Application' in runtime_snapshot and
+        'MCMMetadataIdentifier' in runtime_snapshot and
+        'PXPublishRuntimeSnapshot' in runtime_snapshot and
+        'rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)' in runtime_snapshot and
+        '@"globalScope"' in runtime_snapshot and '@"securitySettings"' in runtime_snapshot and
+        '@"tlinkSettings"' in runtime_snapshot and '@"profileSettings"' in runtime_snapshot and
+        '@"deviceIDs"' in runtime_snapshot,
+        "RootHide runtime mirror is missing, incomplete, non-atomic, or not mirrored into scoped app containers")
+require('publishRuntimeSnapshotWithReason' in daemon and
+        'runtime_snapshot_debug.plist' in daemon and
+        'PXRuntimeSnapshotLastPublishStats()' in daemon and
+        '@"publishStats"' in daemon and
+        'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in daemon and
+        'com.hydra.tlinkios.scopedAppsChanged' in daemon,
+        "WeaponXDaemon does not publish/invalidate/diagnose the RootHide runtime mirror")
+require('PXRuntimeSnapshotSecuritySettings()' in scope and
+        'PXRuntimeSnapshotGlobalScope()' in scope and
+        'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in scope,
+        "PXScope still depends on sandbox-inaccessible rootfs settings on RootHide")
+require('PXLoadRuntimeSnapshot()' in identity_snapshot and
+        'roothide-runtime-mirror' in identity_snapshot and
+        'com.hydra.tlinkios.runtimeSnapshotChanged' in identity_snapshot,
+        "PXIdentitySnapshot does not consume/invalidate the RootHide runtime mirror")
+require('PXRuntimeSnapshotTLinkSettings()' in identifier_manager and
+        'PXRuntimeSnapshotGlobalScope()' in identifier_manager and
+        'PXCurrentIdentitySnapshot()' in identifier_manager,
+        "IdentifierManager still depends on direct /var/mobile/Library runtime reads on RootHide")
 require('<key>UserName</key>' not in launchd_plist and
         '<key>GroupName</key>' not in launchd_plist and
         '<key>POSIXSpawnType</key>' not in launchd_plist and
@@ -154,6 +196,10 @@ require('return PXJailbreakRootPath(@"/usr/lib/TweakInject");' in daemon and
 require("if (![self syncHookScopeToResetApps])" in view_controller and
         "Không thể bật hook" in view_controller,
         "Reset Data does not stop safely when the injection filter cannot be installed")
+reset_profile_tail = view_controller.split('[self applyFakePreviewToCurrentProfile:preview];', 1)[1][:1200]
+require('CFSTR("com.hydra.tlinkios.profileChanged")' in reset_profile_tail and
+        'CFNotificationCenterPostNotification' in reset_profile_tail,
+        "Reset Data does not republish RootHide runtime mirrors after clearing app containers")
 require("RootHide Bootstrap > App List" not in view_controller and
         "PXRootHideBundlesMissingInjection" not in view_controller,
         "Dopamine2-roothide must not be treated like the separate Bootstrap/AppEnabler product")

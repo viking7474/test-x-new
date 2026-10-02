@@ -1,4 +1,5 @@
 #import "PXIdentitySnapshot.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
 #import "PXIdentityDependencyValidator.h"
@@ -108,16 +109,38 @@ static id PXIdentityDeepImmutableCopy(id object) {
 }
 
 static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
-    NSString *profileID = PXActiveProfileID();
-    NSString *rootPath = PXProfileRootPath(profileID);
-    NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileID);
+    NSString *profileID = nil;
+    NSDictionary *diskDeviceIDs = nil;
+    NSDictionary *diskSettings = nil;
+    BOOL usedRuntimeMirror = NO;
 
-    NSDictionary *diskDeviceIDs = deviceIDsPath.length
-        ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
-        : nil;
-    NSDictionary *diskSettings = rootPath.length
-        ? [NSDictionary dictionaryWithContentsOfFile:[rootPath stringByAppendingPathComponent:@"settings.plist"]]
-        : nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeSnapshot = PXLoadRuntimeSnapshot();
+    NSString *runtimeProfileID = [runtimeSnapshot[@"profileID"] isKindOfClass:NSString.class]
+        ? runtimeSnapshot[@"profileID"] : nil;
+    NSDictionary *runtimeDeviceIDs = [runtimeSnapshot[@"deviceIDs"] isKindOfClass:NSDictionary.class]
+        ? runtimeSnapshot[@"deviceIDs"] : nil;
+    NSDictionary *runtimeSettings = [runtimeSnapshot[@"profileSettings"] isKindOfClass:NSDictionary.class]
+        ? runtimeSnapshot[@"profileSettings"] : nil;
+    if (runtimeProfileID.length && runtimeDeviceIDs.count) {
+        profileID = runtimeProfileID;
+        diskDeviceIDs = runtimeDeviceIDs;
+        diskSettings = runtimeSettings ?: @{};
+        usedRuntimeMirror = YES;
+    }
+#endif
+
+    if (!usedRuntimeMirror) {
+        profileID = PXActiveProfileID();
+        NSString *rootPath = PXProfileRootPath(profileID);
+        NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileID);
+        diskDeviceIDs = deviceIDsPath.length
+            ? [NSDictionary dictionaryWithContentsOfFile:deviceIDsPath]
+            : nil;
+        diskSettings = rootPath.length
+            ? [NSDictionary dictionaryWithContentsOfFile:[rootPath stringByAppendingPathComponent:@"settings.plist"]]
+            : nil;
+    }
 
     NSDictionary *rawDeviceIDs = [diskDeviceIDs isKindOfClass:[NSDictionary class]]
         ? PXIdentityDeepImmutableCopy(diskDeviceIDs)
@@ -162,10 +185,15 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
     // to the real device values. We keep validating and recording issues below for
     // diagnostics, but a dependency mismatch must NOT disable identity spoofing.
     BOOL valid = profileID.length > 0 && validation.inputValid && deviceIDs.count > 0;
-    NSString *source = valid ? (validation.issues.count ? @"device_ids-validated-with-rejections" :
-                                (generation > 0 ? @"device_ids" : @"device_ids-legacy-generation"))
-                             : (!profileID.length ? @"missing-profile" :
-                                (dependencies.valid ? @"device_ids-unavailable" : @"dependency-validation-failed"));
+    NSString *source = nil;
+    if (valid && usedRuntimeMirror) {
+        source = validation.issues.count ? @"roothide-runtime-mirror-with-rejections" : @"roothide-runtime-mirror";
+    } else {
+        source = valid ? (validation.issues.count ? @"device_ids-validated-with-rejections" :
+                          (generation > 0 ? @"device_ids" : @"device_ids-legacy-generation"))
+                       : (!profileID.length ? @"missing-profile" :
+                          (dependencies.valid ? @"device_ids-unavailable" : @"dependency-validation-failed"));
+    }
 
     return [[PXIdentitySnapshot alloc] initWithProfileID:profileID
                                               generation:generation
@@ -207,7 +235,7 @@ PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
             candidate = PXBuildIdentitySnapshot();
         }
     } @catch (__unused NSException *exception) {
-        candidate = [[PXIdentitySnapshot alloc] initWithProfileID:PXActiveProfileID()
+        candidate = [[PXIdentitySnapshot alloc] initWithProfileID:(PXRuntimeSnapshotProfileID() ?: PXActiveProfileID())
                                                        generation:0
                                                         deviceIDs:@{}
                                                          settings:@{}
@@ -277,7 +305,8 @@ void PXIdentitySnapshotStartObserving(void) {
         CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
         if (center) {
             for (NSString *name in @[@"com.hydra.tlinkios.settings.changed",
-                                     @"com.hydra.tlinkios.profileChanged"]) {
+                                     @"com.hydra.tlinkios.profileChanged",
+                                     @"com.hydra.tlinkios.runtimeSnapshotChanged"]) {
                 CFNotificationCenterAddObserver(center,
                                                 NULL,
                                                 PXIdentitySnapshotNotification,

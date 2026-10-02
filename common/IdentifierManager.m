@@ -27,6 +27,8 @@
 #import "PXSecuritySettingsStore.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
+#import "PXIdentitySnapshot.h"
+#import "PXRuntimeSnapshot.h"
 #import <Security/Security.h>
 
 @interface LSApplicationWorkspace
@@ -476,7 +478,12 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
 #pragma mark - Profile Integration
 
 - (NSString *)getActiveProfileId {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSString *profileID = PXRuntimeSnapshotProfileID();
+    if (!profileID.length) profileID = PXActiveProfileID();
+#else
     NSString *profileID = PXActiveProfileID();
+#endif
     if (!profileID.length) {
         NSLog(@"[WeaponX] Error: Could not resolve active profile ID");
     }
@@ -1457,6 +1464,24 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 #pragma mark - Current Values
 
 - (NSString *)currentValueForIdentifier:(NSString *)type {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    // Injected App Store processes cannot rely on direct rootfs access to
+    // /var/mobile/Library. Consume the daemon-published jbroot snapshot first.
+    PXIdentitySnapshot *runtimeSnapshot = PXCurrentIdentitySnapshot();
+    if (runtimeSnapshot.valid) {
+        id runtimeRawValue = runtimeSnapshot.deviceIDs[type];
+        if ([runtimeRawValue isKindOfClass:NSString.class] && [(NSString *)runtimeRawValue length]) {
+            return runtimeRawValue;
+        }
+        if ([runtimeRawValue isKindOfClass:NSNumber.class]) {
+            return [(NSNumber *)runtimeRawValue stringValue];
+        }
+        if ([type isEqualToString:@"SystemBootUUID"]) {
+            id legacy = runtimeSnapshot.deviceIDs[@"HardwareUUID"];
+            if ([legacy isKindOfClass:NSString.class] && [(NSString *)legacy length]) return legacy;
+        }
+    }
+#endif
     // First try to get from profile-specific storage
     NSString *identityDir = [self profileIdentityPath];
     if (identityDir) {
@@ -2332,8 +2357,14 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     PXLog(@"[WeaponX] Final settings file path: %@", prefsFile);
     PXLog(@"[WeaponX] Final scoped apps file path: %@", scopedAppsFile);
 
-    // Load dictionary from main settings file
-    NSDictionary *loadedDict = [NSDictionary dictionaryWithContentsOfFile:prefsFile];
+    // Load dictionary from the RootHide runtime mirror first. Sandboxed
+    // injected apps may not be able to read /var/mobile/Library directly.
+    NSDictionary *loadedDict = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeTLinkSettings = PXRuntimeSnapshotTLinkSettings();
+    if (runtimeTLinkSettings.count) loadedDict = runtimeTLinkSettings;
+#endif
+    if (!loadedDict) loadedDict = [NSDictionary dictionaryWithContentsOfFile:prefsFile];
     if (loadedDict) {
         PXLog(@"[WeaponX] Successfully loaded settings dictionary.");
     } else {
@@ -2404,8 +2435,14 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         }
     }
     
-    // Load scoped apps
-    NSDictionary *scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
+    // Load scoped apps from the same RootHide runtime publication when
+    // available so scope and identity belong to one daemon-owned generation.
+    NSDictionary *scopedAppsDict = nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeScope = PXRuntimeSnapshotGlobalScope();
+    if (runtimeScope.count) scopedAppsDict = runtimeScope;
+#endif
+    if (!scopedAppsDict) scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
     if (scopedAppsDict && scopedAppsDict[@"ScopedApps"]) {
         self.scopedApps = [scopedAppsDict[@"ScopedApps"] mutableCopy];
         PXLog(@"[WeaponX] Loaded Scoped Apps: %lu apps found.", (unsigned long)self.scopedApps.count);

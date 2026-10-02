@@ -118,6 +118,7 @@ static inline void PXFileDebugWebKitTrace(NSString *component) {
 }
 
 #define PX_TWEAK_LOAD_NOTIFY "com.hydra.tlinkios.tweakLoaded"
+#define PX_BOOTSTRAP_DECISION_NOTIFY "com.hydra.tlinkios.bootstrapDecision"
 
 // Cross-sandbox load probe. RootHide's bootstrap shell and sandboxed app
 // processes do not share a reliable /tmp debug namespace, so the earliest
@@ -135,6 +136,18 @@ static inline void PXFileDebugSignalTweakLoaded(void) {
     // Still emit the event if state registration is unavailable; the daemon will
     // record an unresolved signal rather than silently losing the diagnostic.
     notify_post(PX_TWEAK_LOAD_NOTIFY);
+}
+
+static inline void PXFileDebugSignalBootstrapDecision(uint32_t role, uint32_t capabilities, uint32_t reason) {
+    int token = 0;
+    if (notify_register_check(PX_BOOTSTRAP_DECISION_NOTIFY, &token) != NOTIFY_STATUS_OK) return;
+    uint64_t state = (uint64_t)(uint32_t)getpid() |
+        (((uint64_t)role & 0xFFu) << 32) |
+        (((uint64_t)reason & 0xFFu) << 40) |
+        (((uint64_t)capabilities & 0xFFFFu) << 48);
+    notify_set_state(token, state);
+    notify_post(PX_BOOTSTRAP_DECISION_NOTIFY);
+    notify_cancel(token);
 }
 
 static inline void PXFileDebugLoadMarker(const char *component) {
