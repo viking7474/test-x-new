@@ -26,7 +26,7 @@ canonicalizes staging plists before atomically installing them.
 
 - Scope: `/var/mobile/Library/Preferences/com.hydra.tlinkios.global_scope.plist` (via `PXGlobalScopePath`).
 - Staging: `/var/mobile/Library/TLinkIOS/filter_plists`.
-- Installed: `/Library/MobileSubstrate/DynamicLibraries`, or its `/var/jb` counterpart.
+- Installed: RootHide/ElleKit uses `jbroot("/usr/lib/TweakInject")` as the canonical injector directory. Legacy rootful/rootless builds retain `/Library/MobileSubstrate/DynamicLibraries` (or `/var/jb/...`).
 - Plists: `TLinkIOSTweak.plist`, `WeaponXKeychainBridge.plist`.
 - Daemon diagnostics: `/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist`.
 

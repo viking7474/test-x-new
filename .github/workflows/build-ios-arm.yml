@@ -325,12 +325,14 @@ jobs:
           test -x "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon"
           test -x "$VERIFY_DIR/Library/WeaponX/backup_helper"
           test -f "$VERIFY_DIR/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
-          test -f "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"
-          test -f "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist"
-          test -f "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib"
-          test -f "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist"
+          test -f "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.dylib"
+          test -f "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.plist"
+          test -f "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.dylib"
+          test -f "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.plist"
+          test ! -e "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"
+          test ! -e "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib"
           otool -L "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null
-          otool -L "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null
+          otool -L "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.dylib" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null
           otool -L "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null
           strings "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon" | grep -F -- '--sync-once' >/dev/null
           plutil -lint "$VERIFY_DIR/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"

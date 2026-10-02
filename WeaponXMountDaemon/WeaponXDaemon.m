@@ -145,7 +145,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 - (void)syncTLinkIOSFilterPlists {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
-    NSString *targetDir = [self substrateDynamicLibrariesDir];
+    NSString *targetDir = [self tweakInjectionDir];
     NSString *observedFingerprint = [self stagingFingerprint];
     NSUInteger sequence = ++self.syncSequence;
     BOOL isDir = NO;
@@ -166,6 +166,25 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
         return;
     }
     if (![fm fileExistsAtPath:targetDir isDirectory:&isDir] || !isDir) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        // Do not manufacture a dead injector directory on RootHide. ElleKit must
+        // provide its canonical /usr/lib/TweakInject inside the active jbroot.
+        NSString *debugPath = @"/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist";
+        NSDictionary *failed = @{
+            @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+            @"syncSequence": @(sequence),
+            @"status": @"target-dir-missing",
+            @"reason": @"ElleKit canonical /usr/lib/TweakInject is missing",
+            @"stagingDir": stagingDir,
+            @"stagingFingerprint": observedFingerprint ?: @"",
+            @"targetDir": targetDir ?: @""
+        };
+        [failed writeToFile:debugPath atomically:YES];
+        chmod([debugPath fileSystemRepresentation], 0644);
+        chown([debugPath fileSystemRepresentation], 501, 501);
+        self.lastStagingFingerprint = observedFingerprint;
+        return;
+#else
         NSError *mkErr = nil;
         [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:&mkErr];
         if (mkErr) {
@@ -186,6 +205,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
             self.lastStagingFingerprint = observedFingerprint;
             return;
         }
+#endif
     }
 
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -265,11 +285,13 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     self.lastStagingFingerprint = [self stagingFingerprint];
 }
 
-- (NSString *)substrateDynamicLibrariesDir {
+- (NSString *)tweakInjectionDir {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    // RootHide's jbroot() is the source of truth for jailbreak-owned files.
-    // Never prefer a fixed /var/jb path left by another jailbreak/layout.
-    return PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");
+    // ElleKit's canonical injector directory is /usr/lib/TweakInject. Upstream
+    // ElleKit may expose /Library/MobileSubstrate/DynamicLibraries as a
+    // compatibility symlink, but RootHide devices are not required to expose
+    // that alias. Always resolve the canonical directory through jbroot().
+    return PXJailbreakRootPath(@"/usr/lib/TweakInject");
 #else
     NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *path in PXJailbreakPathCandidates(@[@"/Library/MobileSubstrate/DynamicLibraries", @"/var/jb/Library/MobileSubstrate/DynamicLibraries"])) {
@@ -355,7 +377,7 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
         @"uid": @(getuid()),
         @"euid": @(geteuid()),
         @"jbroot": PXJailbreakRootPath(@"/") ?: @"",
-        @"targetDir": [self substrateDynamicLibrariesDir] ?: @""
+        @"targetDir": [self tweakInjectionDir] ?: @""
     };
     [status writeToFile:path atomically:YES];
     chmod([path fileSystemRepresentation], 0644);

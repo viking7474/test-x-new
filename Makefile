@@ -133,15 +133,22 @@ internal-stage::
 	@mkdir -p $(THEOS_STAGING_DIR)/usr/bin
 	@cp -a setup_app.sh $(THEOS_STAGING_DIR)/usr/bin/tlinkios-setup
 	@chmod 755 $(THEOS_STAGING_DIR)/usr/bin/tlinkios-setup
-	@echo "Creating MobileSubstrate directories for compatibility..."
-	@mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/
+	@echo "Preparing tweak injection directory..."
 	@if [ "$(THEOS_PACKAGE_SCHEME)" = "roothide" ]; then \
-		echo "RootHide: preserving Theos-staged tweak binaries and filters"; \
+		echo "RootHide: moving Theos-staged tweaks to ElleKit /usr/lib/TweakInject"; \
 		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib; \
 		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist; \
 		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib; \
 		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist; \
+		mkdir -p $(THEOS_STAGING_DIR)/usr/lib/TweakInject; \
+		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
+		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
+		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
+		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
+		rmdir $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries 2>/dev/null || true; \
+		rmdir $(THEOS_STAGING_DIR)/Library/MobileSubstrate 2>/dev/null || true; \
 	else \
+		mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
 		cp -a $(THEOS_OBJ_DIR)/TLinkIOSTweak.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
 		cp -a $(THEOS_OBJ_DIR)/WeaponXKeychainBridge.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
 	fi

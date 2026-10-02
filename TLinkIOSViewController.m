@@ -302,11 +302,10 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridgeBundles);
     NSArray<NSString *> *dirs = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    // RootHide has one randomized jbroot. Do not mix that canonical directory
-    // with stale/fixed rootless candidates such as /var/jb: requiring every
-    // existing candidate to match can turn a successful RootHide sync into a
-    // false installed_mismatch.
-    NSString *canonicalDir = PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries");
+    // RootHide + ElleKit uses /usr/lib/TweakInject as the canonical injector
+    // directory. /Library/MobileSubstrate/DynamicLibraries is only a legacy
+    // compatibility alias and may not exist on the device.
+    NSString *canonicalDir = PXJailbreakRootPath(@"/usr/lib/TweakInject");
     dirs = canonicalDir.length ? @[canonicalDir] : @[];
 #else
     dirs = PXJailbreakPathCandidates(@[
