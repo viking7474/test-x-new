@@ -83,7 +83,7 @@ require('launchd_postinst_debug.log' in postinst and
         "RootHide postinst does not self-test/bootstrap/verify the privileged filter-sync daemon")
 require('arrayWithObjects:@"TLinkIOS"' not in daemon and
         '- (void)startProcess:' not in daemon and
-        'Synchronizing tweak filters...' in daemon,
+        '_protectedProcesses = [NSMutableArray array];' in daemon,
         "WeaponXDaemon must never respawn the TLinkIOS GUI")
 require('--sync-once' in daemon and
         'daemon_runtime_status.plist' in daemon and
