@@ -59,6 +59,7 @@
 @end
 
 __attribute__((constructor(101))) static void PXTLinkIOSTweakEarlyLoadMarker(void) {
+    PXFileDebugSignalTweakLoaded();
     PXFileDebugLoadMarker("TLinkIOSTweak.early");
 }
 

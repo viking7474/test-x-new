@@ -29,6 +29,7 @@ canonicalizes staging plists before atomically installing them.
 - Installed: RootHide/ElleKit uses `jbroot("/usr/lib/TweakInject")` as the canonical injector directory. Legacy rootful/rootless builds retain `/Library/MobileSubstrate/DynamicLibraries` (or `/var/jb/...`).
 - Plists: `TLinkIOSTweak.plist`, `WeaponXKeychainBridge.plist`.
 - Daemon diagnostics: `/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist`.
+- Cross-sandbox tweak-load probe: `/var/mobile/Library/TLinkIOS/tweak_load_probe.plist`. On a RootHide bootstrap shell, rootfs user-data paths are addressed as `/rootfs/var/mobile/...`; the injected app never needs a `/tmp` flag for this probe.
 
 ## Tests
 

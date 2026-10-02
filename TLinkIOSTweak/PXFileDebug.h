@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
+#include <notify.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -114,6 +115,26 @@ static inline void PXFileDebugWebKitTrace(NSString *component) {
         write(fd, data.bytes, data.length);
         close(fd);
     }
+}
+
+#define PX_TWEAK_LOAD_NOTIFY "com.hydra.tlinkios.tweakLoaded"
+
+// Cross-sandbox load probe. RootHide's bootstrap shell and sandboxed app
+// processes do not share a reliable /tmp debug namespace, so the earliest
+// constructor publishes only its PID through Darwin notify state. The root
+// daemon resolves the process identity and owns persistent logging.
+static inline void PXFileDebugSignalTweakLoaded(void) {
+    int token = 0;
+    uint32_t status = notify_register_check(PX_TWEAK_LOAD_NOTIFY, &token);
+    if (status == NOTIFY_STATUS_OK) {
+        notify_set_state(token, (uint64_t)(uint32_t)getpid());
+        notify_post(PX_TWEAK_LOAD_NOTIFY);
+        notify_cancel(token);
+        return;
+    }
+    // Still emit the event if state registration is unavailable; the daemon will
+    // record an unresolved signal rather than silently losing the diagnostic.
+    notify_post(PX_TWEAK_LOAD_NOTIFY);
 }
 
 static inline void PXFileDebugLoadMarker(const char *component) {

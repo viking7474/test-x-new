@@ -21,8 +21,10 @@ for folder in ("TLinkIOSTweak", "common"):
             assert matches, f"Implicit Logos constructor is not gated: {path}"
         for match in matches:
             if match.group(1) == "PXTLinkIOSTweakEarlyLoadMarker":
-                assert 'PXFileDebugLoadMarker("TLinkIOSTweak.early");' in src[match.end():match.end()+100]
-                continue  # explicit debug-only load telemetry, no hooks/observers
+                early = src[match.end():match.end()+180]
+                assert "PXFileDebugSignalTweakLoaded();" in early
+                assert 'PXFileDebugLoadMarker("TLinkIOSTweak.early");' in early
+                continue  # explicit load telemetry only; no hook installation before bootstrap gate
             body = src[match.end():].lstrip()
             body = re.sub(r"^@autoreleasepool\s*\{\s*", "", body)
             assert body.startswith("if (!PXBootstrapAllows("), f"Work before bootstrap gate: {path}"

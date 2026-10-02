@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <dlfcn.h>
 #import <spawn.h>
 #import <sys/sysctl.h>
 #import <sys/stat.h>
@@ -19,6 +20,8 @@ static NSString *ROOT_PREFIX = nil; // Will be set based on environment
 static os_log_t weaponx_log = NULL;
 static BOOL debugMode = NO;
 static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkios.filterPlistChanged";
+static NSString * const kTLinkIOSTweakLoadedNotification = @"com.hydra.tlinkios.tweakLoaded";
+static const char *kTLinkIOSTweakLoadedNotifyName = "com.hydra.tlinkios.tweakLoaded";
 
 @interface WeaponXDaemon : NSObject
 @property (nonatomic, strong) NSTimer *monitorTimer;
@@ -26,7 +29,9 @@ static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkio
 @property (nonatomic, strong) NSMutableArray *protectedProcesses;
 @property (nonatomic, copy) NSString *lastStagingFingerprint;
 @property (nonatomic, assign) NSUInteger syncSequence;
+@property (nonatomic, assign) int tweakLoadNotifyToken;
 - (void)syncTLinkIOSFilterPlists;
+- (void)recordTweakLoadSignal;
 - (NSString *)stagingFingerprint;
 - (void)writeRuntimeStatus:(NSString *)event;
 - (void)runOneShotSelfTest;
@@ -36,6 +41,12 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     (void)center; (void)name; (void)object; (void)userInfo;
     WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
     [daemon syncTLinkIOSFilterPlists];
+}
+
+static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)name; (void)object; (void)userInfo;
+    WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
+    [daemon recordTweakLoadSignal];
 }
 
 @implementation WeaponXDaemon
@@ -62,6 +73,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
         // daemon is loaded as root/KeepAlive; launching TLinkIOS headlessly from
         // here can create a crash/restart loop during package installation.
         _protectedProcesses = [NSMutableArray array];
+        _tweakLoadNotifyToken = -1;
         
         NSLog(@"Using Guardian dir: %@", kGuardianDir);
         
@@ -80,14 +92,38 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     return self;
 }
 
+- (void)dealloc {
+    if (_tweakLoadNotifyToken >= 0) notify_cancel(_tweakLoadNotifyToken);
+    CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                            (__bridge const void *)(self));
+}
+
 - (void)startDaemon {
     [self log:@"WeaponXDaemon starting..." withType:OS_LOG_TYPE_INFO];
     [self writeRuntimeStatus:@"start"];
 
-    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+    CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterAddObserver(darwinCenter,
                                     (__bridge const void *)(self),
                                     PXFilterChangedCallback,
                                     (__bridge CFStringRef)kTLinkIOSFilterChangedNotification,
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    uint32_t notifyStatus = notify_register_check(kTLinkIOSTweakLoadedNotifyName, &_tweakLoadNotifyToken);
+    if (notifyStatus != NOTIFY_STATUS_OK) {
+        _tweakLoadNotifyToken = -1;
+        [self log:[NSString stringWithFormat:@"Tweak-load probe notify_register_check failed: %u", notifyStatus]
+             withType:OS_LOG_TYPE_ERROR];
+    } else {
+        // Clear any persisted notify state from a previous daemon instance so an
+        // unresolved sender can never be mistaken for an old PID.
+        notify_set_state(_tweakLoadNotifyToken, 0);
+    }
+    CFNotificationCenterAddObserver(darwinCenter,
+                                    (__bridge const void *)(self),
+                                    PXTweakLoadedCallback,
+                                    (__bridge CFStringRef)kTLinkIOSTweakLoadedNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
     
@@ -106,6 +142,86 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     
     // Keep runloop running
     [[NSRunLoop currentRunLoop] run];
+}
+
+- (void)recordTweakLoadSignal {
+    uint64_t state = 0;
+    uint32_t stateStatus = (uint32_t)-1;
+    if (self.tweakLoadNotifyToken >= 0) {
+        stateStatus = notify_get_state(self.tweakLoadNotifyToken, &state);
+        if (stateStatus == NOTIFY_STATUS_OK) {
+            notify_set_state(self.tweakLoadNotifyToken, 0);
+        }
+    }
+
+    pid_t pid = (stateStatus == NOTIFY_STATUS_OK && state > 0) ? (pid_t)(uint32_t)state : 0;
+    NSString *processPath = @"";
+    NSString *processName = @"";
+    NSString *bundleID = @"";
+    NSString *bundlePath = @"";
+
+    if (pid > 0) {
+        typedef int (*PXProcPidPathFn)(int, void *, uint32_t);
+        PXProcPidPathFn procPidPath = (PXProcPidPathFn)dlsym(RTLD_DEFAULT, "proc_pidpath");
+        void *libprocHandle = NULL;
+        if (!procPidPath) {
+            libprocHandle = dlopen("/usr/lib/libproc.dylib", RTLD_LAZY | RTLD_LOCAL);
+            if (libprocHandle) procPidPath = (PXProcPidPathFn)dlsym(libprocHandle, "proc_pidpath");
+        }
+
+        if (procPidPath) {
+            char pathBuffer[4096] = {0};
+            int length = procPidPath(pid, pathBuffer, (uint32_t)sizeof(pathBuffer));
+            if (length > 0) {
+                processPath = [NSString stringWithUTF8String:pathBuffer] ?: @"";
+                processName = processPath.lastPathComponent ?: @"";
+                NSRange appMarker = [processPath rangeOfString:@".app/" options:NSBackwardsSearch];
+                if (appMarker.location != NSNotFound) {
+                    NSUInteger appEnd = appMarker.location + @".app".length;
+                    if (appEnd <= processPath.length) {
+                        bundlePath = [processPath substringToIndex:appEnd];
+                        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                            [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+                        id identifier = [info isKindOfClass:NSDictionary.class] ? info[@"CFBundleIdentifier"] : nil;
+                        if ([identifier isKindOfClass:NSString.class]) bundleID = identifier;
+                    }
+                }
+            }
+        }
+        if (libprocHandle) dlclose(libprocHandle);
+    }
+
+    NSString *dir = @"/var/mobile/Library/TLinkIOS";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dir
+  withIntermediateDirectories:YES
+                   attributes:@{NSFilePosixPermissions: @0755}
+                        error:nil];
+    NSString *path = [dir stringByAppendingPathComponent:@"tweak_load_probe.plist"];
+    NSMutableArray *events = [[NSArray arrayWithContentsOfFile:path] mutableCopy];
+    if (![events isKindOfClass:NSMutableArray.class]) events = [NSMutableArray array];
+    NSDictionary *record = @{
+        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"pid": @(pid),
+        @"notifyStateStatus": @(stateStatus),
+        @"processPath": processPath ?: @"",
+        @"processName": processName ?: @"",
+        @"bundlePath": bundlePath ?: @"",
+        @"bundleID": bundleID ?: @""
+    };
+    [events addObject:record];
+    if (events.count > 64) {
+        [events removeObjectsInRange:NSMakeRange(0, events.count - 64)];
+    }
+    [events writeToFile:path atomically:YES];
+    chmod(path.fileSystemRepresentation, 0644);
+    chown(path.fileSystemRepresentation, 501, 501);
+
+    [self log:[NSString stringWithFormat:@"Tweak-load probe pid=%d bundle=%@ process=%@ path=%@",
+               pid, bundleID.length ? bundleID : @"<unknown>",
+               processName.length ? processName : @"<unknown>",
+               processPath.length ? processPath : @"<unknown>"]
+         withType:OS_LOG_TYPE_INFO];
 }
 
 - (void)checkProcesses {

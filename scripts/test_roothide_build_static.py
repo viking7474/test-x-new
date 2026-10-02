@@ -28,6 +28,8 @@ daemon = read("WeaponXMountDaemon/WeaponXDaemon.m")
 launchd_plist = read("com.hydra.weaponx.guardian.plist")
 entitlements = read("ent.plist")
 daemon_entitlements = read("daemon_ent.plist")
+file_debug = read("TLinkIOSTweak/PXFileDebug.h")
+tweak_main = read("TLinkIOSTweak/Tweak.x")
 
 for token in (
     "THEOS_PACKAGE_SCHEME=roothide",
@@ -96,6 +98,14 @@ require('--sync-once' in daemon and
         'daemon_runtime_status.plist' in daemon and
         'runOneShotSelfTest' in daemon,
         "WeaponXDaemon is missing the install-time executable self-test contract")
+require('PX_TWEAK_LOAD_NOTIFY' in file_debug and
+        'notify_set_state(token, (uint64_t)(uint32_t)getpid())' in file_debug and
+        'PXFileDebugSignalTweakLoaded();' in tweak_main and
+        'tweak_load_probe.plist' in daemon and
+        'recordTweakLoadSignal' in daemon and
+        'proc_pidpath' in daemon and
+        'notify_get_state(self.tweakLoadNotifyToken, &state)' in daemon,
+        "RootHide tweak-load diagnostics still depend on sandbox-local /tmp state")
 require('<key>UserName</key>' not in launchd_plist and
         '<key>GroupName</key>' not in launchd_plist and
         '<key>POSIXSpawnType</key>' not in launchd_plist and
