@@ -137,21 +137,60 @@ chown mobile:mobile "/Library/WeaponX/Guardian"
 # Set up LaunchDaemon
 echo "🚀 Setting up LaunchDaemon..."
 
+LAUNCHD_DEBUG_LOG="${ROOTFS_PREFIX}/var/mobile/Library/TLinkIOS/launchd_postinst_debug.log"
+: > "$LAUNCHD_DEBUG_LOG"
+chmod 644 "$LAUNCHD_DEBUG_LOG"
+chown mobile:mobile "$LAUNCHD_DEBUG_LOG"
+log_launchd() {
+    echo "$*" | tee -a "$LAUNCHD_DEBUG_LOG"
+}
+
 if [ -f "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" ]; then
     chmod 644 "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
     chown root:wheel "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
-    
-    # WeaponXDaemon now owns only privileged filter synchronization; it no
-    # longer launches the TLinkIOS GUI. It is therefore safe and required to
-    # register it immediately so the mobile app can publish filter updates.
-    if command -v launchctl >/dev/null 2>&1; then
-        echo "🚀 Loading filter-sync daemon using launchctl..."
-        launchctl unload "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist" 2>/dev/null || true
-        if launchctl load "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"; then
-            echo "✅ WeaponXDaemon filter-sync service loaded"
+
+    # Prove the RootHide-rewritten daemon binary can execute before involving
+    # launchd. This writes daemon_runtime_status.plist on success.
+    if [ -x "/Library/WeaponX/WeaponXDaemon" ]; then
+        log_launchd "selftest: starting /Library/WeaponX/WeaponXDaemon --sync-once"
+        if "/Library/WeaponX/WeaponXDaemon" --sync-once >>"$LAUNCHD_DEBUG_LOG" 2>&1; then
+            log_launchd "selftest: ok"
         else
-            echo "⚠️ WeaponXDaemon could not be loaded; filter updates will fail until the service is loaded"
+            SELFTEST_STATUS=$?
+            log_launchd "selftest: failed status=$SELFTEST_STATUS"
         fi
+    else
+        log_launchd "selftest: daemon executable missing"
+    fi
+
+    if command -v launchctl >/dev/null 2>&1; then
+        LABEL="com.hydra.weaponx.guardian"
+        PLIST="/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
+
+        # Remove any stale registration from an older package, then register in
+        # the system bootstrap domain. Modern launchctl prefers bootstrap;
+        # legacy load is retained as a compatibility fallback.
+        launchctl bootout "system/$LABEL" >>"$LAUNCHD_DEBUG_LOG" 2>&1 || true
+        launchctl enable "system/$LABEL" >>"$LAUNCHD_DEBUG_LOG" 2>&1 || true
+
+        if launchctl bootstrap system "$PLIST" >>"$LAUNCHD_DEBUG_LOG" 2>&1; then
+            log_launchd "launchd: bootstrap system ok"
+        elif launchctl load "$PLIST" >>"$LAUNCHD_DEBUG_LOG" 2>&1; then
+            log_launchd "launchd: legacy load ok"
+        else
+            log_launchd "launchd: bootstrap/load failed"
+        fi
+
+        launchctl kickstart -k "system/$LABEL" >>"$LAUNCHD_DEBUG_LOG" 2>&1 || true
+        if launchctl print "system/$LABEL" >>"$LAUNCHD_DEBUG_LOG" 2>&1; then
+            log_launchd "launchd: job visible in system domain"
+        elif launchctl list "$LABEL" >>"$LAUNCHD_DEBUG_LOG" 2>&1; then
+            log_launchd "launchd: job visible via legacy list"
+        else
+            log_launchd "launchd: job NOT visible after registration"
+        fi
+    else
+        log_launchd "launchd: launchctl unavailable"
     fi
 else
     echo "⚠️ LaunchDaemon plist not found"

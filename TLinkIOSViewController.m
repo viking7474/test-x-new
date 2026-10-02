@@ -7530,10 +7530,20 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         NSDictionary *syncDebug = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/filter_sync_debug.plist"];
         NSString *status = [syncDebug[@"syncStatus"] isKindOfClass:[NSString class]] ? syncDebug[@"syncStatus"] : @"unknown";
         BOOL daemonSeen = [syncDebug[@"daemonDebugPresent"] boolValue];
+        NSDictionary *runtimeStatus = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/daemon_runtime_status.plist"];
+        NSString *runtimeEvent = [runtimeStatus[@"event"] isKindOfClass:[NSString class]] ? runtimeStatus[@"event"] : @"not-seen";
+        NSNumber *runtimeEUID = [runtimeStatus[@"euid"] isKindOfClass:[NSNumber class]] ? runtimeStatus[@"euid"] : nil;
+        NSString *launchdLog = [NSString stringWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/launchd_postinst_debug.log"
+                                                        encoding:NSUTF8StringEncoding
+                                                           error:nil] ?: @"";
+        if (launchdLog.length > 700) launchdLog = [launchdLog substringFromIndex:launchdLog.length - 700];
         NSString *detail = [NSString stringWithFormat:
-            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@\n\nHãy cài lại gói TLinkIOS dành cho roothide rồi thử lại.",
+            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@\nruntime=%@ euid=%@\n\nlaunchd:\n%@",
             status,
-            daemonSeen ? @"seen" : @"not-seen"];
+            daemonSeen ? @"seen" : @"not-seen",
+            runtimeEvent,
+            runtimeEUID ?: @"?",
+            launchdLog.length ? launchdLog : @"no-install-log"];
         [self showDashboardMessage:@"Không thể bật hook" message:detail];
         return;
     }

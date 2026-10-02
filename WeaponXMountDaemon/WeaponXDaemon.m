@@ -25,6 +25,8 @@ static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkio
 @property (nonatomic, strong) NSMutableDictionary *processInfo;
 @property (nonatomic, strong) NSMutableArray *protectedProcesses;
 - (void)syncTLinkIOSFilterPlists;
+- (void)writeRuntimeStatus:(NSString *)event;
+- (void)runOneShotSelfTest;
 @end
 
 static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -77,6 +79,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 
 - (void)startDaemon {
     [self log:@"WeaponXDaemon starting..." withType:OS_LOG_TYPE_INFO];
+    [self writeRuntimeStatus:@"start"];
 
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                     (__bridge const void *)(self),
@@ -259,6 +262,34 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
     };
 }
 
+- (void)writeRuntimeStatus:(NSString *)event {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = @"/var/mobile/Library/TLinkIOS";
+    [fm createDirectoryAtPath:dir
+  withIntermediateDirectories:YES
+                   attributes:@{NSFilePosixPermissions: @0755}
+                        error:nil];
+    NSString *path = [dir stringByAppendingPathComponent:@"daemon_runtime_status.plist"];
+    NSDictionary *status = @{
+        @"event": event ?: @"unknown",
+        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"pid": @(getpid()),
+        @"uid": @(getuid()),
+        @"euid": @(geteuid()),
+        @"jbroot": PXJailbreakRootPath(@"/") ?: @"",
+        @"targetDir": [self substrateDynamicLibrariesDir] ?: @""
+    };
+    [status writeToFile:path atomically:YES];
+    chmod([path fileSystemRepresentation], 0644);
+    chown([path fileSystemRepresentation], 501, 501);
+}
+
+- (void)runOneShotSelfTest {
+    [self log:@"WeaponXDaemon one-shot self-test" withType:OS_LOG_TYPE_INFO];
+    [self writeRuntimeStatus:@"self-test"];
+    [self syncTLinkIOSFilterPlists];
+}
+
 #pragma mark - Utility Methods
 
 - (void)ensureGuardianDirectoryExists {
@@ -344,21 +375,29 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        BOOL syncOnce = NO;
         // Parse command line arguments
         for (int i = 1; i < argc; i++) {
             NSString *arg = @(argv[i]);
             if ([arg isEqualToString:@"--debug"] || [arg isEqualToString:@"-d"]) {
                 debugMode = YES;
+            } else if ([arg isEqualToString:@"--sync-once"]) {
+                syncOnce = YES;
             }
         }
         
-        NSLog(@"WeaponXDaemon starting (debug mode: %@)", debugMode ? @"ON" : @"OFF");
+        NSLog(@"WeaponXDaemon starting (debug mode: %@, syncOnce: %@)",
+              debugMode ? @"ON" : @"OFF",
+              syncOnce ? @"YES" : @"NO");
+        fprintf(stderr, "WeaponXDaemon starting (debug mode: %s, syncOnce: %s)\n",
+                debugMode ? "ON" : "OFF",
+                syncOnce ? "YES" : "NO");
         
-        // Write directly to stderr for visibility
-        fprintf(stderr, "WeaponXDaemon starting (debug mode: %s)\n", debugMode ? "ON" : "OFF");
-        
-        // Start the daemon
         WeaponXDaemon *daemon = [[WeaponXDaemon alloc] init];
+        if (syncOnce) {
+            [daemon runOneShotSelfTest];
+            return 0;
+        }
         [daemon startDaemon];
     }
     return 0;

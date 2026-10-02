@@ -15,24 +15,8 @@
     <dict>
         <key>SuccessfulExit</key>
         <false/>
-        <key>Crashed</key>
-        <true/>
     </dict>
     <key>ThrottleInterval</key>
     <integer>5</integer>
-    <key>ProcessType</key>
-    <string>Interactive</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/WeaponX/Guardian/guardian-stderr.log</string>
-    <key>StandardOutPath</key>
-    <string>/Library/WeaponX/Guardian/guardian-stdout.log</string>
-    <key>UserName</key>
-    <string>root</string>
-    <key>GroupName</key>
-    <string>wheel</string>
-    <key>POSIXSpawnType</key>
-    <string>Interactive</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
 </dict>
 </plist>

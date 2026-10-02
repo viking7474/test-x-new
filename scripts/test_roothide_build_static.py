@@ -25,7 +25,9 @@ workflow = read(".github/workflows/build-ios-arm.yml")
 bottom_buttons = read("BottomButtons.m")
 view_controller = read("TLinkIOSViewController.m")
 daemon = read("WeaponXMountDaemon/WeaponXDaemon.m")
+launchd_plist = read("com.hydra.weaponx.guardian.plist")
 entitlements = read("ent.plist")
+daemon_entitlements = read("daemon_ent.plist")
 
 for token in (
     "THEOS_PACKAGE_SCHEME=roothide",
@@ -42,7 +44,14 @@ require("Architecture: iphoneos-arm64e" in control, "RootHide control architectu
 require("firmware (>= 15.0)" in control, "RootHide minimum firmware is missing")
 require("com.apple.private.security.storage.AppBundles" in entitlements and
         "com.apple.private.security.storage.AppDataContainers" in entitlements,
-        "RootHide app/daemon entitlements are missing documented container access")
+        "RootHide app entitlements are missing documented container access")
+require("WeaponXDaemon_CODESIGN_FLAGS = -Sdaemon_ent.plist" in makefile,
+        "WeaponXDaemon still uses GUI application entitlements")
+require("platform-application" in daemon_entitlements and
+        "com.apple.private.security.no-sandbox" in daemon_entitlements and
+        "aps-environment" not in daemon_entitlements and
+        "com.apple.security.application-groups" not in daemon_entitlements,
+        "WeaponXDaemon entitlements are not minimal launchd-service entitlements")
 require("RootHide: preserving Theos-staged tweak binaries and filters" in makefile and
         "RootHide: preserving Theos-staged WeaponXDaemon" in makefile and
         "RootHide: preserving Theos-staged backup_helper" in makefile,
@@ -66,13 +75,26 @@ require('PXJailbreakRootPath(@"/bin/bash")' in command_runner, "RootHide shell s
 
 require('ROOTFS_PREFIX="/rootfs"' in postinst, "postinst does not route user data to RootHide rootfs")
 require('${ROOTFS_PREFIX}/var/mobile/Library' in postinst, "postinst still treats jbroot /var/mobile as user data")
-require('Loading filter-sync daemon using launchctl' in postinst and
-        'launchctl load "/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"' in postinst,
-        "RootHide postinst does not register the privileged filter-sync daemon")
+require('launchd_postinst_debug.log' in postinst and
+        'WeaponXDaemon" --sync-once' in postinst and
+        'launchctl bootstrap system "$PLIST"' in postinst and
+        'launchctl kickstart -k "system/$LABEL"' in postinst and
+        'launchctl print "system/$LABEL"' in postinst,
+        "RootHide postinst does not self-test/bootstrap/verify the privileged filter-sync daemon")
 require('arrayWithObjects:@"TLinkIOS"' not in daemon and
         '- (void)startProcess:' not in daemon and
         'Synchronizing tweak filters...' in daemon,
         "WeaponXDaemon must never respawn the TLinkIOS GUI")
+require('--sync-once' in daemon and
+        'daemon_runtime_status.plist' in daemon and
+        'runOneShotSelfTest' in daemon,
+        "WeaponXDaemon is missing the install-time executable self-test contract")
+require('<key>UserName</key>' not in launchd_plist and
+        '<key>GroupName</key>' not in launchd_plist and
+        '<key>POSIXSpawnType</key>' not in launchd_plist and
+        '<key>ProcessType</key>' not in launchd_plist and
+        '<string>/Library/WeaponX/WeaponXDaemon</string>' in launchd_plist,
+        "RootHide LaunchDaemon plist is not minimal/bootstrap-safe")
 require('HELPER_TOOL_PATH="${PX_SCRIPT_DIR}/backup_helper"' in keychain, "Keychain helper is not package-relative")
 require("PX_JBROOT_PREFIX" in keychain, "Keychain dependencies do not support randomized jbroot")
 require('"/rootfs/var/containers/Bundle/Application"' in keychain, "Keychain app discovery does not inspect RootHide rootfs")

@@ -52,7 +52,7 @@ WeaponXDaemon_FILES = WeaponXMountDaemon/WeaponXDaemon.m common/PXInjectionFilte
 WeaponXDaemon_CFLAGS = -fobjc-arc -I./common
 WeaponXDaemon_FRAMEWORKS = Foundation IOKit
 WeaponXDaemon_INSTALL_PATH = /Library/WeaponX
-WeaponXDaemon_CODESIGN_FLAGS = -Sent.plist
+WeaponXDaemon_CODESIGN_FLAGS = -Sdaemon_ent.plist
 WeaponXDaemon_LDFLAGS = -framework IOKit
 
 # Keychain Helper Tool - CLI for backup/restore/wipe keychain items
