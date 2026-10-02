@@ -113,8 +113,19 @@ require("static BOOL PXWriteSubstrateFilterPlists(void)" in view_controller and
         "Filter synchronization does not report whether the installed RootHide filters match")
 require('NSString *canonicalDir = PXJailbreakRootPath(@"/Library/MobileSubstrate/DynamicLibraries")' in view_controller and
         '@"daemon_sync_timeout"' in view_controller and
+        'attempt < 60' in view_controller and
         '[NSThread sleepForTimeInterval:0.05]' in view_controller,
-        "RootHide filter writer does not wait for the privileged daemon on the canonical jbroot path")
+        "RootHide filter writer does not wait long enough for the privileged daemon fallback")
+require('kCheckInterval = 0.5' in daemon and
+        '- (NSString *)stagingFingerprint' in daemon and
+        'lastStagingFingerprint' in daemon and
+        '@"stagingFingerprint"' in daemon and
+        '@"syncSequence"' in daemon,
+        "WeaponXDaemon is missing change-gated fast fallback synchronization")
+require('TLinkIOSTweak=%@%@' in view_controller and
+        'KeychainBridge=%@%@' in view_controller and
+        'daemonSync=%@ seq=%@ ts=%@' in view_controller,
+        "Reset Data error does not surface per-filter daemon diagnostics")
 require(view_controller.index('CFSTR("com.hydra.tlinkios.filterPlistChanged")') <
         view_controller.index('NSString *syncStatus = nil;'),
         "Filter writer still decides failure before notifying the root daemon")

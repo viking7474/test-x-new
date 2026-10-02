@@ -399,7 +399,10 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     BOOL allInstalledMatch = NO;
     NSUInteger syncPollCount = 0;
     if (stagingMatches) {
-        for (NSUInteger attempt = 0; attempt < 20; attempt++) {
+        // Normal Darwin-notification sync completes almost immediately. Allow
+        // up to 3s so the daemon's 0.5s staging-fingerprint fallback can recover
+        // when RootHide delays or drops the cross-bootstrap notification.
+        for (NSUInteger attempt = 0; attempt < 60; attempt++) {
             syncPollCount = attempt + 1;
             anyInstalledDir = NO;
             allInstalledMatch = YES;
@@ -7530,6 +7533,16 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         NSDictionary *syncDebug = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/filter_sync_debug.plist"];
         NSString *status = [syncDebug[@"syncStatus"] isKindOfClass:[NSString class]] ? syncDebug[@"syncStatus"] : @"unknown";
         BOOL daemonSeen = [syncDebug[@"daemonDebugPresent"] boolValue];
+        NSDictionary *daemonDebug = [syncDebug[@"daemonDebug"] isKindOfClass:[NSDictionary class]] ? syncDebug[@"daemonDebug"] : @{};
+        NSDictionary *daemonTweak = [daemonDebug[@"TLinkIOSTweak.plist"] isKindOfClass:[NSDictionary class]] ? daemonDebug[@"TLinkIOSTweak.plist"] : @{};
+        NSDictionary *daemonBridge = [daemonDebug[@"WeaponXKeychainBridge.plist"] isKindOfClass:[NSDictionary class]] ? daemonDebug[@"WeaponXKeychainBridge.plist"] : @{};
+        NSString *daemonTopStatus = [daemonDebug[@"status"] isKindOfClass:[NSString class]] ? daemonDebug[@"status"] : @"ok-or-unknown";
+        NSString *tweakStatus = [daemonTweak[@"status"] isKindOfClass:[NSString class]] ? daemonTweak[@"status"] : @"missing";
+        NSString *bridgeStatus = [daemonBridge[@"status"] isKindOfClass:[NSString class]] ? daemonBridge[@"status"] : @"missing";
+        NSString *tweakReason = [daemonTweak[@"reason"] isKindOfClass:[NSString class]] ? daemonTweak[@"reason"] : @"";
+        NSString *bridgeReason = [daemonBridge[@"reason"] isKindOfClass:[NSString class]] ? daemonBridge[@"reason"] : @"";
+        NSNumber *daemonSequence = [daemonDebug[@"syncSequence"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"syncSequence"] : nil;
+        NSNumber *daemonTimestamp = [daemonDebug[@"completedTimestamp"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"completedTimestamp"] : daemonDebug[@"timestamp"];
         NSDictionary *runtimeStatus = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/daemon_runtime_status.plist"];
         NSString *runtimeEvent = [runtimeStatus[@"event"] isKindOfClass:[NSString class]] ? runtimeStatus[@"event"] : @"not-seen";
         NSNumber *runtimeEUID = [runtimeStatus[@"euid"] isKindOfClass:[NSNumber class]] ? runtimeStatus[@"euid"] : nil;
@@ -7538,11 +7551,18 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                                                            error:nil] ?: @"";
         if (launchdLog.length > 700) launchdLog = [launchdLog substringFromIndex:launchdLog.length - 700];
         NSString *detail = [NSString stringWithFormat:
-            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@\nruntime=%@ euid=%@\n\nlaunchd:\n%@",
+            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@ runtime=%@ euid=%@\ndaemonSync=%@ seq=%@ ts=%@\nTLinkIOSTweak=%@%@\nKeychainBridge=%@%@\n\nlaunchd:\n%@",
             status,
             daemonSeen ? @"seen" : @"not-seen",
             runtimeEvent,
             runtimeEUID ?: @"?",
+            daemonTopStatus,
+            daemonSequence ?: @"?",
+            daemonTimestamp ?: @"?",
+            tweakStatus,
+            tweakReason.length ? [NSString stringWithFormat:@" (%@)", tweakReason] : @"",
+            bridgeStatus,
+            bridgeReason.length ? [NSString stringWithFormat:@" (%@)", bridgeReason] : @"",
             launchdLog.length ? launchdLog : @"no-install-log"];
         [self showDashboardMessage:@"Không thể bật hook" message:detail];
         return;

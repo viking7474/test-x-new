@@ -13,7 +13,7 @@
 #import "PXJailbreakCompat.h"
 
 // Constants
-static const int kCheckInterval = 5; // Check every 5 seconds
+static const NSTimeInterval kCheckInterval = 0.5; // Cheap staging-change poll; sync itself is change-gated.
 static NSString *kGuardianDir = nil; // Will be initialized in init
 static NSString *ROOT_PREFIX = nil; // Will be set based on environment
 static os_log_t weaponx_log = NULL;
@@ -24,7 +24,10 @@ static NSString * const kTLinkIOSFilterChangedNotification = @"com.hydra.tlinkio
 @property (nonatomic, strong) NSTimer *monitorTimer;
 @property (nonatomic, strong) NSMutableDictionary *processInfo;
 @property (nonatomic, strong) NSMutableArray *protectedProcesses;
+@property (nonatomic, copy) NSString *lastStagingFingerprint;
+@property (nonatomic, assign) NSUInteger syncSequence;
 - (void)syncTLinkIOSFilterPlists;
+- (NSString *)stagingFingerprint;
 - (void)writeRuntimeStatus:(NSString *)event;
 - (void)runOneShotSelfTest;
 @end
@@ -106,32 +109,92 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
 }
 
 - (void)checkProcesses {
-    // Historical versions also scanned processes and relaunched TLinkIOS when the
-    // GUI was not running. A root KeepAlive daemon must not own GUI lifecycle.
-    // Its only periodic responsibility is privileged filter synchronization.
-    [self log:@"Synchronizing tweak filters..." withType:OS_LOG_TYPE_DEBUG];
-    [self syncTLinkIOSFilterPlists];
-    [self updateStateFile];
+    // Darwin notification is the fast path. This timer is a RootHide-safe
+    // fallback in case the notification is delayed/lost across bootstrap
+    // boundaries. Fingerprinting keeps the 0.5s poll effectively read-only.
+    NSString *fingerprint = [self stagingFingerprint];
+    if (!self.lastStagingFingerprint || ![fingerprint isEqualToString:self.lastStagingFingerprint]) {
+        [self log:[NSString stringWithFormat:@"Staging changed; synchronizing filters (%@)", fingerprint]
+             withType:OS_LOG_TYPE_DEBUG];
+        [self syncTLinkIOSFilterPlists];
+        [self updateStateFile];
+    }
+}
+
+- (NSString *)stagingFingerprint {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *name in @[@"TLinkIOSTweak.plist", @"WeaponXKeychainBridge.plist"]) {
+        NSString *path = [stagingDir stringByAppendingPathComponent:name];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        NSNumber *size = attrs[NSFileSize];
+        NSDate *mtime = attrs[NSFileModificationDate];
+        if (!attrs) {
+            [parts addObject:[NSString stringWithFormat:@"%@=missing", name]];
+        } else {
+            [parts addObject:[NSString stringWithFormat:@"%@=%llu:%.6f",
+                              name,
+                              size.unsignedLongLongValue,
+                              mtime.timeIntervalSince1970]];
+        }
+    }
+    return [parts componentsJoinedByString:@"|"];
 }
 
 - (void)syncTLinkIOSFilterPlists {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     NSString *targetDir = [self substrateDynamicLibrariesDir];
+    NSString *observedFingerprint = [self stagingFingerprint];
+    NSUInteger sequence = ++self.syncSequence;
     BOOL isDir = NO;
-    if (![fm fileExistsAtPath:stagingDir isDirectory:&isDir] || !isDir) return;
+    if (![fm fileExistsAtPath:stagingDir isDirectory:&isDir] || !isDir) {
+        NSString *debugPath = @"/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist";
+        NSDictionary *missing = @{
+            @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+            @"syncSequence": @(sequence),
+            @"status": @"staging-dir-missing",
+            @"stagingDir": stagingDir,
+            @"stagingFingerprint": observedFingerprint ?: @"",
+            @"targetDir": targetDir ?: @""
+        };
+        [missing writeToFile:debugPath atomically:YES];
+        chmod([debugPath fileSystemRepresentation], 0644);
+        chown([debugPath fileSystemRepresentation], 501, 501);
+        self.lastStagingFingerprint = observedFingerprint;
+        return;
+    }
     if (![fm fileExistsAtPath:targetDir isDirectory:&isDir] || !isDir) {
         NSError *mkErr = nil;
         [fm createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:&mkErr];
         if (mkErr) {
             [self log:[NSString stringWithFormat:@"Filter sync failed to create target dir: %@", mkErr.localizedDescription] withType:OS_LOG_TYPE_ERROR];
+            NSString *debugPath = @"/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist";
+            NSDictionary *failed = @{
+                @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+                @"syncSequence": @(sequence),
+                @"status": @"target-dir-create-failed",
+                @"reason": mkErr.localizedDescription ?: @"unknown",
+                @"stagingDir": stagingDir,
+                @"stagingFingerprint": observedFingerprint ?: @"",
+                @"targetDir": targetDir ?: @""
+            };
+            [failed writeToFile:debugPath atomically:YES];
+            chmod([debugPath fileSystemRepresentation], 0644);
+            chown([debugPath fileSystemRepresentation], 501, 501);
+            self.lastStagingFingerprint = observedFingerprint;
             return;
         }
     }
 
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     result[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+    result[@"syncSequence"] = @(sequence);
+    result[@"stagingDir"] = stagingDir;
+    result[@"stagingFingerprint"] = observedFingerprint ?: @"";
     result[@"targetDir"] = targetDir ?: @"";
+    BOOL allFiltersInstalled = YES;
     for (NSString *name in @[@"TLinkIOSTweak.plist", @"WeaponXKeychainBridge.plist"]) {
         NSString *src = [stagingDir stringByAppendingPathComponent:name];
         NSString *dst = [targetDir stringByAppendingPathComponent:name];
@@ -145,6 +208,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
                 @"src": src,
                 @"dst": dst
             };
+            allFiltersInstalled = NO;
             continue;
         }
 
@@ -163,6 +227,7 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
                     @"status": @"sanitize-staging-failed", @"src": src, @"dst": dst,
                     @"bundles": bundles ?: @[], @"sanitizedBundles": sanitizedBundles ?: @[]
                 };
+                allFiltersInstalled = NO;
                 continue;
             }
             chmod([src fileSystemRepresentation], 0644);
@@ -178,13 +243,18 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
         if ([syncResult[@"status"] isEqualToString:@"renamed"]) {
             [self log:[NSString stringWithFormat:@"Synced filter plist %@ (%lu bundles)", name, (unsigned long)bundles.count] withType:OS_LOG_TYPE_INFO];
         } else {
+            allFiltersInstalled = NO;
             [self log:[NSString stringWithFormat:@"Filter sync failed for %@: %@", name, syncResult[@"status"] ?: @"unknown"] withType:OS_LOG_TYPE_ERROR];
         }
     }
+    result[@"status"] = allFiltersInstalled ? @"in_sync" : @"partial_failure";
     NSString *debugPath = @"/var/mobile/Library/TLinkIOS/filter_daemon_debug.plist";
+    result[@"completedTimestamp"] = @([[NSDate date] timeIntervalSince1970]);
+    result[@"finalStagingFingerprint"] = [self stagingFingerprint] ?: @"";
     [result writeToFile:debugPath atomically:YES];
     chmod([debugPath fileSystemRepresentation], 0644);
     chown([debugPath fileSystemRepresentation], 501, 501);
+    self.lastStagingFingerprint = [self stagingFingerprint];
 }
 
 - (NSString *)substrateDynamicLibrariesDir {
