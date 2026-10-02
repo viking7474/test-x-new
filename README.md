@@ -1,4 +1,4 @@
-IF you a Devloper contribute in this tweak project
+IF you a Devloper contribute in this project
 
 ## RootHide build
 
