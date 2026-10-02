@@ -104,42 +104,11 @@ jobs:
             --report release-hardening-report.json
 
       - name: Install build dependencies
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_UPGRADE: "1"
         run: |
-          set -euo pipefail
-
-          # GitHub macOS images can retain an openssl@1.1 link while Homebrew
-          # installs openssl@3 as an ldid dependency. Unlink only that known keg
-          # so Homebrew can link openssl@3 without overwriting arbitrary files.
-          if brew list --versions openssl@1.1 >/dev/null 2>&1; then
-            brew unlink openssl@1.1 || true
-          fi
-
-          for formula in ldid dpkg; do
-            if ! brew list --versions "$formula" >/dev/null 2>&1; then
-              brew install "$formula"
-            fi
-          done
-
-          LDID_PREFIX="$(brew --prefix ldid)"
-          DPKG_PREFIX="$(brew --prefix dpkg)"
-          LDID_BIN="$(find "$LDID_PREFIX" -type f -name ldid -perm -111 -print -quit)"
-          DPKG_BIN="$(find "$DPKG_PREFIX" -type f -name dpkg -perm -111 -print -quit)"
-          DPKG_DEB_BIN="$(find "$DPKG_PREFIX" -type f -name dpkg-deb -perm -111 -print -quit)"
-
-          test -n "$LDID_BIN" && test -x "$LDID_BIN"
-          test -n "$DPKG_BIN" && test -x "$DPKG_BIN"
-          test -n "$DPKG_DEB_BIN" && test -x "$DPKG_DEB_BIN"
-
-          echo "LDID_BIN=$LDID_BIN" >> "$GITHUB_ENV"
-          echo "DPKG_BIN=$DPKG_BIN" >> "$GITHUB_ENV"
-          echo "$(dirname "$LDID_BIN")" >> "$GITHUB_PATH"
-          echo "$(dirname "$DPKG_DEB_BIN")" >> "$GITHUB_PATH"
-
-          "$LDID_BIN" -h >/dev/null 2>&1 || true
-          "$DPKG_DEB_BIN" --version
+          brew update
+          brew install ldid dpkg
+          echo "DPKG_BIN=$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_ENV"
+          echo "$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_PATH"
 
       - name: Set up Theos
         run: |
@@ -255,42 +224,11 @@ jobs:
         run: python3 scripts/test_roothide_build_static.py
 
       - name: Install build dependencies
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_UPGRADE: "1"
         run: |
-          set -euo pipefail
-
-          # GitHub macOS images can retain an openssl@1.1 link while Homebrew
-          # installs openssl@3 as an ldid dependency. Unlink only that known keg
-          # so Homebrew can link openssl@3 without overwriting arbitrary files.
-          if brew list --versions openssl@1.1 >/dev/null 2>&1; then
-            brew unlink openssl@1.1 || true
-          fi
-
-          for formula in ldid dpkg; do
-            if ! brew list --versions "$formula" >/dev/null 2>&1; then
-              brew install "$formula"
-            fi
-          done
-
-          LDID_PREFIX="$(brew --prefix ldid)"
-          DPKG_PREFIX="$(brew --prefix dpkg)"
-          LDID_BIN="$(find "$LDID_PREFIX" -type f -name ldid -perm -111 -print -quit)"
-          DPKG_BIN="$(find "$DPKG_PREFIX" -type f -name dpkg -perm -111 -print -quit)"
-          DPKG_DEB_BIN="$(find "$DPKG_PREFIX" -type f -name dpkg-deb -perm -111 -print -quit)"
-
-          test -n "$LDID_BIN" && test -x "$LDID_BIN"
-          test -n "$DPKG_BIN" && test -x "$DPKG_BIN"
-          test -n "$DPKG_DEB_BIN" && test -x "$DPKG_DEB_BIN"
-
-          echo "LDID_BIN=$LDID_BIN" >> "$GITHUB_ENV"
-          echo "DPKG_BIN=$DPKG_BIN" >> "$GITHUB_ENV"
-          echo "$(dirname "$LDID_BIN")" >> "$GITHUB_PATH"
-          echo "$(dirname "$DPKG_DEB_BIN")" >> "$GITHUB_PATH"
-
-          "$LDID_BIN" -h >/dev/null 2>&1 || true
-          "$DPKG_DEB_BIN" --version
+          brew update
+          brew install ldid dpkg
+          echo "DPKG_BIN=$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_ENV"
+          echo "$(brew --prefix dpkg)/libexec/dpkg" >> "$GITHUB_PATH"
 
       - name: Set up RootHide Theos
         run: |
