@@ -49,9 +49,13 @@ require("WeaponXDaemon_CODESIGN_FLAGS = -Sdaemon_ent.plist" in makefile,
         "WeaponXDaemon still uses GUI application entitlements")
 require("platform-application" in daemon_entitlements and
         "com.apple.private.security.no-sandbox" in daemon_entitlements and
+        "com.apple.private.security.storage.AppBundles" in daemon_entitlements and
+        "com.apple.private.security.storage.AppDataContainers" in daemon_entitlements and
+        "com.apple.private.security.container-required" not in daemon_entitlements and
+        "com.apple.private.security.no-container" not in daemon_entitlements and
         "aps-environment" not in daemon_entitlements and
         "com.apple.security.application-groups" not in daemon_entitlements,
-        "WeaponXDaemon entitlements are not minimal launchd-service entitlements")
+        "WeaponXDaemon entitlements do not match RootHide's documented jailbreak-executable requirements")
 require("RootHide: preserving Theos-staged tweak binaries and filters" in makefile and
         "RootHide: preserving Theos-staged WeaponXDaemon" in makefile and
         "RootHide: preserving Theos-staged backup_helper" in makefile,
@@ -124,8 +128,9 @@ require('kCheckInterval = 0.5' in daemon and
         "WeaponXDaemon is missing change-gated fast fallback synchronization")
 require('TLinkIOSTweak=%@%@' in view_controller and
         'KeychainBridge=%@%@' in view_controller and
-        'daemonSync=%@ seq=%@ ts=%@' in view_controller,
-        "Reset Data error does not surface per-filter daemon diagnostics")
+        'daemonSync=%@ seq=%@ ts=%@' in view_controller and
+        'targetWrite=%@ (%@)' in view_controller,
+        "Reset Data error does not surface daemon target-access/per-filter diagnostics")
 require(view_controller.index('CFSTR("com.hydra.tlinkios.filterPlistChanged")') <
         view_controller.index('NSString *syncStatus = nil;'),
         "Filter writer still decides failure before notifying the root daemon")
@@ -170,6 +175,8 @@ for token in (
     'test -f "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"',
     'test -f "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist"',
     "@loader_path/.jbroot/usr/lib/libroothide.dylib",
+    "DAEMON_ENTITLEMENTS=\"$(ldid -e \"$VERIFY_DIR/Library/WeaponX/WeaponXDaemon\")\"",
+    "com.apple.private.security.storage.AppBundles",
     "com.apple.private.security.storage.AppDataContainers",
 ):
     require(token in workflow, f"RootHide extracted-package verification missing: {token}")

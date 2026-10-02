@@ -194,6 +194,14 @@ static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observ
     result[@"stagingDir"] = stagingDir;
     result[@"stagingFingerprint"] = observedFingerprint ?: @"";
     result[@"targetDir"] = targetDir ?: @"";
+    errno = 0;
+    int targetWriteAccess = access([targetDir fileSystemRepresentation], W_OK);
+    int targetAccessErrno = errno;
+    result[@"targetWriteAccess"] = @(targetWriteAccess == 0);
+    result[@"targetAccessErrno"] = @(targetAccessErrno);
+    result[@"targetAccessReason"] = targetWriteAccess == 0 ? @"ok" : ([NSString stringWithUTF8String:strerror(targetAccessErrno)] ?: @"unknown");
+    result[@"uid"] = @(getuid());
+    result[@"euid"] = @(geteuid());
     BOOL allFiltersInstalled = YES;
     for (NSString *name in @[@"TLinkIOSTweak.plist", @"WeaponXKeychainBridge.plist"]) {
         NSString *src = [stagingDir stringByAppendingPathComponent:name];

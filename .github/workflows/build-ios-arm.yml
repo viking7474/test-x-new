@@ -335,8 +335,12 @@ jobs:
           strings "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon" | grep -F -- '--sync-once' >/dev/null
           plutil -lint "$VERIFY_DIR/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
           ldid -e "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS" | grep -F '<key>com.apple.private.security.storage.AppDataContainers</key>' >/dev/null
-          ldid -e "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon" | grep -F '<key>platform-application</key>' >/dev/null
-          if ldid -e "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon" | grep -F '<key>aps-environment</key>' >/dev/null; then
+          DAEMON_ENTITLEMENTS="$(ldid -e "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon")"
+          printf '%s\n' "$DAEMON_ENTITLEMENTS" | grep -F '<key>platform-application</key>' >/dev/null
+          printf '%s\n' "$DAEMON_ENTITLEMENTS" | grep -F '<key>com.apple.private.security.no-sandbox</key>' >/dev/null
+          printf '%s\n' "$DAEMON_ENTITLEMENTS" | grep -F '<key>com.apple.private.security.storage.AppBundles</key>' >/dev/null
+          printf '%s\n' "$DAEMON_ENTITLEMENTS" | grep -F '<key>com.apple.private.security.storage.AppDataContainers</key>' >/dev/null
+          if printf '%s\n' "$DAEMON_ENTITLEMENTS" | grep -F '<key>aps-environment</key>' >/dev/null; then
             echo "WeaponXDaemon unexpectedly contains GUI/push entitlements"
             exit 1
           fi

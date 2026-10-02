@@ -7543,6 +7543,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         NSString *bridgeReason = [daemonBridge[@"reason"] isKindOfClass:[NSString class]] ? daemonBridge[@"reason"] : @"";
         NSNumber *daemonSequence = [daemonDebug[@"syncSequence"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"syncSequence"] : nil;
         NSNumber *daemonTimestamp = [daemonDebug[@"completedTimestamp"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"completedTimestamp"] : daemonDebug[@"timestamp"];
+        NSNumber *targetWriteAccess = [daemonDebug[@"targetWriteAccess"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"targetWriteAccess"] : nil;
+        NSString *targetAccessReason = [daemonDebug[@"targetAccessReason"] isKindOfClass:[NSString class]] ? daemonDebug[@"targetAccessReason"] : @"unknown";
         NSDictionary *runtimeStatus = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/daemon_runtime_status.plist"];
         NSString *runtimeEvent = [runtimeStatus[@"event"] isKindOfClass:[NSString class]] ? runtimeStatus[@"event"] : @"not-seen";
         NSNumber *runtimeEUID = [runtimeStatus[@"euid"] isKindOfClass:[NSNumber class]] ? runtimeStatus[@"euid"] : nil;
@@ -7551,7 +7553,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                                                            error:nil] ?: @"";
         if (launchdLog.length > 700) launchdLog = [launchdLog substringFromIndex:launchdLog.length - 700];
         NSString *detail = [NSString stringWithFormat:
-            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@ runtime=%@ euid=%@\ndaemonSync=%@ seq=%@ ts=%@\nTLinkIOSTweak=%@%@\nKeychainBridge=%@%@\n\nlaunchd:\n%@",
+            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@ runtime=%@ euid=%@\ndaemonSync=%@ seq=%@ ts=%@\ntargetWrite=%@ (%@)\nTLinkIOSTweak=%@%@\nKeychainBridge=%@%@\n\nlaunchd:\n%@",
             status,
             daemonSeen ? @"seen" : @"not-seen",
             runtimeEvent,
@@ -7559,6 +7561,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             daemonTopStatus,
             daemonSequence ?: @"?",
             daemonTimestamp ?: @"?",
+            targetWriteAccess ? ([targetWriteAccess boolValue] ? @"yes" : @"no") : @"?",
+            targetAccessReason,
             tweakStatus,
             tweakReason.length ? [NSString stringWithFormat:@" (%@)", tweakReason] : @"",
             bridgeStatus,
