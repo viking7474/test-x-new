@@ -5,6 +5,7 @@
 #import "IdentifierManager.h"
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
 
@@ -161,6 +162,20 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
 
     PXBatterySnapshot snap = {0};
     snap.loadedAt = now;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeBattery = PXRuntimeSnapshotProfileArtifact(@"batteryInfo");
+    NSDictionary *runtimeIDs = PXRuntimeSnapshotDeviceIDs();
+    id runtimeLevel = runtimeBattery[@"BatteryLevel"] ?: runtimeIDs[@"BatteryLevel"];
+    id runtimeLPM = runtimeBattery[@"LowPowerMode"] ?: runtimeIDs[@"LowPowerMode"];
+    if ([runtimeLevel isKindOfClass:NSString.class] || [runtimeLevel isKindOfClass:NSNumber.class]) {
+        float v = [runtimeLevel floatValue];
+        if (v >= 0.01f && v <= 1.0f) { snap.level = v; snap.hasLevel = YES; }
+    }
+    if (runtimeLPM != nil) { snap.lowPowerMode = [runtimeLPM boolValue]; snap.hasLPM = YES; }
+    PXPublishBatterySnapshot(snap);
+    gPXBatterySnapshotDepth--;
+    return snap;
+#endif
 
     @try {
         // 1) Profile battery_info.plist (no ObjC singleton / no UIDevice)

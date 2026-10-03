@@ -88,6 +88,13 @@ NSDictionary *PXRuntimeSnapshotDeviceIDs(void) {
     return PXRuntimeSnapshotDictionary(@"deviceIDs");
 }
 
+NSDictionary *PXRuntimeSnapshotProfileArtifact(NSString *key) {
+    if (![key isKindOfClass:NSString.class] || !key.length) return @{};
+    NSDictionary *artifacts = PXRuntimeSnapshotDictionary(@"profileArtifacts");
+    id value = artifacts[key];
+    return [value isKindOfClass:NSDictionary.class] ? value : @{};
+}
+
 static BOOL PXWriteRuntimeSnapshotAtomically(NSDictionary *snapshot,
                                                NSString *path,
                                                uid_t owner,
@@ -226,6 +233,29 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
         ? PXRuntimeDictionaryAtPath(deviceIDsPath)
         : @{};
 
+    NSString *identityRoot = PXProfileIdentityPath(profileID);
+    NSMutableDictionary *profileArtifacts = [NSMutableDictionary dictionary];
+    NSDictionary<NSString *, NSString *> *artifactPaths = @{
+        @"storage": profileRoot.length ? [profileRoot stringByAppendingPathComponent:@"storage.plist"] : @"",
+        @"batteryInfo": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"battery_info.plist"] : @"",
+        @"networkSettings": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"network_settings.plist"] : @"",
+        @"wifiInfo": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"wifi_info.plist"] : @"",
+        @"carrierDetails": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"carrier_details.plist"] : @"",
+        @"deviceTheme": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"device_theme.plist"] : @"",
+        @"bootTime": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"boot_time.plist"] : @"",
+        @"systemUptime": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"system_uptime.plist"] : @"",
+        @"systemBootUUID": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"system_boot_uuid.plist"] : @"",
+        @"dyldCacheUUID": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"dyld_cache_uuid.plist"] : @"",
+        @"pasteboardUUID": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"pasteboard_uuid.plist"] : @"",
+        @"userDefaultsUUID": identityRoot.length ? [identityRoot stringByAppendingPathComponent:@"userdefaults_uuid.plist"] : @""
+    };
+    [artifactPaths enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *path, BOOL *stop) {
+        (void)stop;
+        if (!path.length) return;
+        NSDictionary *artifact = PXRuntimeDictionaryAtPath(path);
+        if (artifact.count) profileArtifacts[key] = artifact;
+    }];
+
     NSDictionary *snapshot = @{
         @"schemaVersion": @(kPXRuntimeSnapshotSchemaVersion),
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
@@ -234,7 +264,8 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
         @"securitySettings": securitySettings ?: @{},
         @"tlinkSettings": tlinkSettings ?: @{},
         @"profileSettings": profileSettings ?: @{},
-        @"deviceIDs": deviceIDs ?: @{}
+        @"deviceIDs": deviceIDs ?: @{},
+        @"profileArtifacts": profileArtifacts ?: @{}
     };
 
     NSError *globalError = nil;
@@ -248,10 +279,47 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
         mirrorStats = PXMirrorRuntimeSnapshotIntoScopedContainers(snapshot, globalScope);
     }
 #endif
+    NSDictionary *enabledIdentifiers = [tlinkSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class]
+        ? tlinkSettings[@"EnabledIdentifiers"] : @{};
+    NSMutableArray<NSString *> *enabledIdentifierKeys = [NSMutableArray array];
+    [enabledIdentifiers enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+        (void)stop;
+        if ([key isKindOfClass:NSString.class] && [value respondsToSelector:@selector(boolValue)] && [value boolValue]) {
+            [enabledIdentifierKeys addObject:key];
+        }
+    }];
+    [enabledIdentifierKeys sortUsingSelector:@selector(compare:)];
+
+    NSDictionary<NSString *, NSString *> *artifactForIdentifier = @{
+        @"StorageSystem": @"storage",
+        @"Battery": @"batteryInfo",
+        @"BootTime": @"bootTime",
+        @"SystemUptime": @"systemUptime",
+        @"DeviceTheme": @"deviceTheme",
+        @"UserDefaultsUUID": @"userDefaultsUUID",
+        @"SystemBootUUID": @"systemBootUUID",
+        @"DyldCacheUUID": @"dyldCacheUUID",
+        @"PasteboardUUID": @"pasteboardUUID",
+        @"WiFi": @"wifiInfo"
+    };
+    NSMutableDictionary<NSString *, NSString *> *missingEnabledArtifacts = [NSMutableDictionary dictionary];
+    [artifactForIdentifier enumerateKeysAndObjectsUsingBlock:^(NSString *identifier, NSString *artifactKey, BOOL *stop) {
+        (void)stop;
+        id enabledValue = enabledIdentifiers[identifier];
+        if ([enabledValue respondsToSelector:@selector(boolValue)] && [enabledValue boolValue] &&
+            ![profileArtifacts[artifactKey] isKindOfClass:NSDictionary.class]) {
+            missingEnabledArtifacts[identifier] = artifactKey;
+        }
+    }];
+
     @synchronized ([NSObject class]) {
         gPXRuntimeSnapshotLastPublishStats = @{
             @"globalSuccess": @(globalSuccess),
             @"globalPath": PXRuntimeSnapshotPath() ?: @"",
+            @"deviceIDCount": @(deviceIDs.count),
+            @"enabledIdentifierKeys": enabledIdentifierKeys,
+            @"profileArtifactKeys": [[profileArtifacts allKeys] sortedArrayUsingSelector:@selector(compare:)],
+            @"missingEnabledArtifacts": missingEnabledArtifacts,
             @"mirror": mirrorStats ?: @{}
         };
     }

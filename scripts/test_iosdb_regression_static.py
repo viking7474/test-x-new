@@ -182,6 +182,24 @@ for b in dtb.get(PT, []):
 check(BUILD in cands, f"{BUILD} is a selectable candidate for {PT} within [13.0..{model.get('maxIOS')}]")
 print(f"  candidate builds for {PT}: {len(cands)}")
 
+# ---- Dashboard Reset Data must preserve the same atomic software tuple ----
+print("== dashboard iOS tuple publication ==")
+view_controller = open(os.path.join(ROOT, "TLinkIOSViewController.m"), encoding="utf-8").read()
+check('#import "IOSBuildDB.h"' in view_controller,
+      "dashboard uses IOSBuildDB instead of a standalone IOSVersion string")
+check('randomMetaForDevice:iosProductType' in view_controller and
+      'preview[@"IOSBuild"] = build;' in view_controller and
+      'preview[@"Darwin"] = darwin;' in view_controller and
+      'preview[@"XNU"] = xnu;' in view_controller and
+      'preview[@"KernelVersion"] = kernel;' in view_controller,
+      "fake preview publishes version/build/darwin/xnu/kernel as one tuple")
+apply_tail = view_controller.split('- (void)applyFakePreviewToCurrentProfile:', 1)[1]
+check('@"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"' in apply_tail,
+      "Reset Data writes the complete iOS tuple into device_ids.plist")
+check('Refusing partial iOS override' in apply_tail and
+      'GenerationCounter' in apply_tail,
+      "Reset Data rejects partial/mismatched tuple overrides and advances identity generation")
+
 print()
 if failures:
     print(f"RESULT: FAILED ({len(failures)} check(s))")

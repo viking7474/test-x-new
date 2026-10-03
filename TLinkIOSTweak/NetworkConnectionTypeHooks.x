@@ -16,6 +16,7 @@
 
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXNativeHookCoordinator.h"
 #import <os/lock.h>
 
@@ -138,6 +139,15 @@ static NSString *getCurrentBundleID() {
     return bundleID;
 }
 
+static NSDictionary *PXNetworkSecuritySettings(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXRuntimeSnapshotSecuritySettings();
+#else
+    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
+    return [settings isKindOfClass:NSDictionary.class] ? settings : @{};
+#endif
+}
+
 // Get the current ISO country code from security settings
 static NSString *getCurrentISOCountryCode() {
     NSDate *now = [NSDate date];
@@ -148,7 +158,7 @@ static NSString *getCurrentISOCountryCode() {
     os_unfair_lock_unlock(&gNetworkCacheLock);
     if (cached) return cached;
 
-    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
+    NSDictionary *settings = PXNetworkSecuritySettings();
     NSString *isoCode = nil;
     if ([settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
         NSString *pinnedISO = [settings[@"targetRegionPinnedCarrierISO"] isKindOfClass:[NSString class]]
@@ -180,7 +190,7 @@ static NSDictionary *getTargetRegionPinnedOverrides(void) {
     os_unfair_lock_unlock(&gNetworkCacheLock);
     if (valid) return cached;
 
-    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
+    NSDictionary *settings = PXNetworkSecuritySettings();
     NSDictionary *resolved = nil;
     if ([settings isKindOfClass:[NSDictionary class]] && [settings[@"targetRegionFollowsIPEnabled"] boolValue]) {
         NSString *mcc = [settings[@"targetRegionPinnedCarrierMCC"] isKindOfClass:[NSString class]] ? settings[@"targetRegionPinnedCarrierMCC"] : nil;
@@ -210,7 +220,7 @@ static NSDictionary *getTargetRegionPinnedOverrides(void) {
 }
 
 static BOOL shouldForceCarrierSpoof(void) {
-    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
+    NSDictionary *settings = PXNetworkSecuritySettings();
     if (![settings isKindOfClass:[NSDictionary class]]) return NO;
     if ([settings[@"targetRegionFollowsIPEnabled"] boolValue]) return YES;
     if ([settings[@"fullSpoofTestModeEnabled"] boolValue]) return YES;
@@ -224,6 +234,14 @@ static NSString *getProfileIdentityPath() {
 
 // Read persisted profile IP values without generating or writing from inside native hooks.
 static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *deviceIDsKey) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *networkDict = PXRuntimeSnapshotProfileArtifact(@"networkSettings");
+    id networkValue = networkDict[networkKey];
+    if ([networkValue isKindOfClass:NSString.class] && [(NSString *)networkValue length] > 0) return networkValue;
+    NSDictionary *deviceIds = PXRuntimeSnapshotDeviceIDs();
+    id deviceValue = deviceIds[deviceIDsKey];
+    return [deviceValue isKindOfClass:NSString.class] && [(NSString *)deviceValue length] > 0 ? deviceValue : nil;
+#else
     NSString *identityDir = getProfileIdentityPath();
     if (!identityDir.length) return nil;
 
@@ -242,6 +260,7 @@ static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *devic
     }
 
     return nil;
+#endif
 }
 
 static NSString *getProfileLocalIPAddress() {
@@ -310,7 +329,7 @@ static NetworkConnectionType getNetworkConnectionType() {
     os_unfair_lock_unlock(&gNetworkCacheLock);
     if (valid) return cachedType;
 
-    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
+    NSDictionary *settings = PXNetworkSecuritySettings();
     BOOL enabled = [settings[@"networkDataSpoofEnabled"] boolValue];
     NSInteger rawType = [settings[@"networkConnectionType"] respondsToSelector:@selector(integerValue)]
         ? [settings[@"networkConnectionType"] integerValue]
@@ -422,6 +441,18 @@ static NSDictionary *getCarrierDetailsFromProfile() {
     NSString *carrierName = kFakeCarrierName;
     NSString *mcc = kFakeMobileCountryCode;
     NSString *mnc = kFakeMobileNetworkCode;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *carrier = PXRuntimeSnapshotProfileArtifact(@"carrierDetails");
+    NSDictionary *network = PXRuntimeSnapshotProfileArtifact(@"networkSettings");
+    NSDictionary *deviceIDs = PXRuntimeSnapshotDeviceIDs();
+    NSDictionary *source = carrier.count ? carrier : (network.count ? network : deviceIDs);
+    NSString *sourceName = [source[@"carrierName"] isKindOfClass:NSString.class] ? source[@"carrierName"] : source[@"CarrierName"];
+    NSString *sourceMCC = [source[@"mcc"] isKindOfClass:NSString.class] ? source[@"mcc"] : source[@"CarrierMCC"];
+    NSString *sourceMNC = [source[@"mnc"] isKindOfClass:NSString.class] ? source[@"mnc"] : source[@"CarrierMNC"];
+    if (sourceName.length) carrierName = sourceName;
+    if (sourceMCC.length) mcc = sourceMCC;
+    if (sourceMNC.length) mnc = sourceMNC;
+#else
     NSString *identityDir = getProfileIdentityPath();
     if (identityDir.length) {
         NSDictionary *carrier = [NSDictionary dictionaryWithContentsOfFile:
@@ -437,6 +468,7 @@ static NSDictionary *getCarrierDetailsFromProfile() {
         if (sourceMCC.length) mcc = sourceMCC;
         if (sourceMNC.length) mnc = sourceMNC;
     }
+#endif
     if (!carrierName.length || [carrierName isEqualToString:@"TLinkIOS"] || [carrierName hasPrefix:@"TLinkIOS"]) {
         carrierName = PXCarrierNameForMCCMNC(mcc, mnc);
     }

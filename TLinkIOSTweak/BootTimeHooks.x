@@ -16,6 +16,7 @@
 #import "PXScope.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import <os/lock.h>
 #import "PXFileDebug.h"
 
@@ -162,6 +163,24 @@ static NSString *getCurrentProfilePath(void) {
 
 // Update cached boot time values from profile data
 static void updateCachedBootTimeValues(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    @try {
+        NSDictionary *boot = PXRuntimeSnapshotProfileArtifact(@"bootTime");
+        NSDictionary *uptimeInfo = PXRuntimeSnapshotProfileArtifact(@"systemUptime");
+        NSDate *bootTime = [boot[@"value"] isKindOfClass:NSDate.class] ? boot[@"value"] : nil;
+        NSTimeInterval uptime = [uptimeInfo[@"value"] doubleValue];
+        if (bootTime && uptime > 0) {
+            NSString *profileKey = [NSString stringWithFormat:@"runtime:%@", PXRuntimeSnapshotProfileID() ?: @"unknown"];
+            os_unfair_lock_lock(&gBootTimeCacheLock);
+            cachedBootTime = [bootTime copy];
+            cachedUptime = uptime;
+            cachedProfilePath = profileKey;
+            cacheTimestamp = [NSDate date];
+            os_unfair_lock_unlock(&gBootTimeCacheLock);
+        }
+    } @catch (__unused NSException *e) {}
+    return;
+#endif
     @try {
         NSString *profilePath = getCurrentProfilePath();
         if (!profilePath.length) {

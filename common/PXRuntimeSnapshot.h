@@ -13,6 +13,7 @@ FOUNDATION_EXPORT NSDictionary *PXRuntimeSnapshotTLinkSettings(void);
 FOUNDATION_EXPORT NSString * _Nullable PXRuntimeSnapshotProfileID(void);
 FOUNDATION_EXPORT NSDictionary *PXRuntimeSnapshotProfileSettings(void);
 FOUNDATION_EXPORT NSDictionary *PXRuntimeSnapshotDeviceIDs(void);
+FOUNDATION_EXPORT NSDictionary *PXRuntimeSnapshotProfileArtifact(NSString *key);
 
 /// Publish a read-only runtime snapshot into jailbreak-owned storage. This is
 /// intended for privileged manager/daemon processes; injected sandboxed apps

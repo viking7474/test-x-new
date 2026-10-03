@@ -1458,6 +1458,23 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (BOOL)isIdentifierEnabled:(NSString *)type {
+    if (![type isKindOfClass:NSString.class] || !type.length) return NO;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+    BOOL isManagerProcess = [bundleID isEqualToString:@"com.hydra.tlinkios"];
+    if (!isManagerProcess) {
+        // Injected host processes cannot reliably hydrate self.settings from
+        // /var/mobile/Library/Preferences. The daemon-published runtime snapshot
+        // is their authoritative read-only identifier-toggle source.
+        NSDictionary *runtimeSettings = PXRuntimeSnapshotTLinkSettings();
+        NSDictionary *runtimeEnabled = [runtimeSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class]
+            ? runtimeSettings[@"EnabledIdentifiers"] : nil;
+        id runtimeValue = runtimeEnabled[type];
+        if (runtimeValue != nil) return [runtimeValue boolValue];
+    }
+#endif
+    // The TLinkIOS manager/UI process must use its live in-memory settings so a
+    // just-toggled value cannot be masked by a not-yet-republished snapshot.
     return [self.settings[type] boolValue];
 }
 
@@ -2357,12 +2374,17 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     PXLog(@"[WeaponX] Final settings file path: %@", prefsFile);
     PXLog(@"[WeaponX] Final scoped apps file path: %@", scopedAppsFile);
 
-    // Load dictionary from the RootHide runtime mirror first. Sandboxed
-    // injected apps may not be able to read /var/mobile/Library directly.
+    // Sandboxed injected apps consume the RootHide runtime mirror. The manager
+    // app itself must read the live settings file so a freshly toggled value is
+    // never masked by a not-yet-republished snapshot.
     NSDictionary *loadedDict = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeTLinkSettings = PXRuntimeSnapshotTLinkSettings();
-    if (runtimeTLinkSettings.count) loadedDict = runtimeTLinkSettings;
+    NSString *currentBundleID = NSBundle.mainBundle.bundleIdentifier;
+    BOOL isManagerProcess = [currentBundleID isEqualToString:@"com.hydra.tlinkios"];
+    if (!isManagerProcess) {
+        NSDictionary *runtimeTLinkSettings = PXRuntimeSnapshotTLinkSettings();
+        if (runtimeTLinkSettings.count) loadedDict = runtimeTLinkSettings;
+    }
 #endif
     if (!loadedDict) loadedDict = [NSDictionary dictionaryWithContentsOfFile:prefsFile];
     if (loadedDict) {

@@ -8,6 +8,7 @@
 
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXDeviceProfileSchema.h"
 #import "PXP1AFilters.h"
 
@@ -37,7 +38,16 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 
 // Add function to get spoofed UserDefaults UUID from manager
 static NSString *getSpoofedUserDefaultsUUID(void) {
-    // Use the UserDefaultsUUIDManager for consistent values across the app and hooks
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeIDs = PXRuntimeSnapshotDeviceIDs();
+    NSString *runtimeUUID = PXProfileString(runtimeIDs[@"UserDefaultsUUID"]);
+    if (!runtimeUUID.length) {
+        NSDictionary *runtimeArtifact = PXRuntimeSnapshotProfileArtifact(@"userDefaultsUUID");
+        runtimeUUID = PXProfileString(runtimeArtifact[@"value"]);
+    }
+    if (runtimeUUID.length) return runtimeUUID;
+#endif
+    // Rootful / manager fallback: use the historical manager-backed storage.
     UserDefaultsUUIDManager *manager = [UserDefaultsUUIDManager sharedManager];
     NSString *uuid = [manager currentUserDefaultsUUID];
     

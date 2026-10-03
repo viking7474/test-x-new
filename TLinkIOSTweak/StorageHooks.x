@@ -14,6 +14,7 @@
 
 #import "PXScope.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXFileDebug.h"
 #import <os/lock.h>
 #import <stdatomic.h>
@@ -161,6 +162,17 @@ static NSDictionary *getStorageValues() {
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     NSDictionary *cached = PXStorageCachedValues(now);
     if (cached) return cached;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeSettings = PXRuntimeSnapshotTLinkSettings();
+    NSDictionary *runtimeEnabled = [runtimeSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class] ? runtimeSettings[@"EnabledIdentifiers"] : @{};
+    BOOL runtimeStorageEnabled = [runtimeEnabled[@"StorageSystem"] boolValue] || [runtimeSettings[@"StorageSystemEnabled"] boolValue];
+    if (!runtimeStorageEnabled) return nil;
+    NSDictionary *runtimeStorage = PXRuntimeSnapshotProfileArtifact(@"storage");
+    if (runtimeStorage[@"TotalStorage"] && runtimeStorage[@"FreeStorage"]) {
+        return PXStoragePublishValues(runtimeStorage, now);
+    }
+    return nil;
+#endif
     
     // First check if the feature is globally enabled
     BOOL storageSystemEnabled = NO;

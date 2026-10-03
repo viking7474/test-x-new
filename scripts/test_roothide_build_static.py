@@ -33,6 +33,13 @@ tweak_main = read("TLinkIOSTweak/Tweak.x")
 scope = read("TLinkIOSTweak/PXScope.m")
 runtime_snapshot = read("common/PXRuntimeSnapshot.m")
 identity_snapshot = read("common/PXIdentitySnapshot.m")
+storage_hooks = read("TLinkIOSTweak/StorageHooks.x")
+battery_hooks = read("TLinkIOSTweak/BatteryHooks.x")
+boot_time_hooks = read("TLinkIOSTweak/BootTimeHooks.x")
+network_hooks = read("TLinkIOSTweak/NetworkConnectionTypeHooks.x")
+theme_hooks = read("TLinkIOSTweak/ThemeHooks.x")
+user_defaults_hooks = read("TLinkIOSTweak/UserDefaultsHooks.x")
+pasteboard_hooks = read("TLinkIOSTweak/PasteboardHooks.x")
 identifier_manager = read("common/IdentifierManager.m")
 
 for token in (
@@ -127,8 +134,22 @@ require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
         'rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)' in runtime_snapshot and
         '@"globalScope"' in runtime_snapshot and '@"securitySettings"' in runtime_snapshot and
         '@"tlinkSettings"' in runtime_snapshot and '@"profileSettings"' in runtime_snapshot and
-        '@"deviceIDs"' in runtime_snapshot,
-        "RootHide runtime mirror is missing, incomplete, non-atomic, or not mirrored into scoped app containers")
+        '@"deviceIDs"' in runtime_snapshot and '@"profileArtifacts"' in runtime_snapshot and
+        '@"storage"' in runtime_snapshot and '@"batteryInfo"' in runtime_snapshot and
+        '@"bootTime"' in runtime_snapshot and '@"systemUptime"' in runtime_snapshot,
+        "RootHide runtime mirror is missing profile artifacts or is not mirrored atomically into scoped app containers")
+require('PXRuntimeSnapshotProfileArtifact(@"storage")' in storage_hooks and
+        'PXRuntimeSnapshotTLinkSettings()' in storage_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"batteryInfo")' in battery_hooks and
+        'PXRuntimeSnapshotDeviceIDs()' in battery_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"bootTime")' in boot_time_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"systemUptime")' in boot_time_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"networkSettings")' in network_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"carrierDetails")' in network_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"deviceTheme")' in theme_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"userDefaultsUUID")' in user_defaults_hooks and
+        'PXRuntimeSnapshotProfileArtifact(@"pasteboardUUID")' in pasteboard_hooks,
+        "RootHide runtime hooks still depend on sandbox-inaccessible profile plist paths")
 require('publishRuntimeSnapshotWithReason' in daemon and
         'runtime_snapshot_debug.plist' in daemon and
         'PXRuntimeSnapshotLastPublishStats()' in daemon and
@@ -145,9 +166,18 @@ require('PXLoadRuntimeSnapshot()' in identity_snapshot and
         'com.hydra.tlinkios.runtimeSnapshotChanged' in identity_snapshot,
         "PXIdentitySnapshot does not consume/invalidate the RootHide runtime mirror")
 require('PXRuntimeSnapshotTLinkSettings()' in identifier_manager and
+        'runtimeSettings[@"EnabledIdentifiers"]' in identifier_manager and
+        'runtimeEnabled[type]' in identifier_manager and
+        'isManagerProcess = [bundleID isEqualToString:@"com.hydra.tlinkios"]' in identifier_manager and
+        'isManagerProcess = [currentBundleID isEqualToString:@"com.hydra.tlinkios"]' in identifier_manager and
         'PXRuntimeSnapshotGlobalScope()' in identifier_manager and
         'PXCurrentIdentitySnapshot()' in identifier_manager,
-        "IdentifierManager still depends on direct /var/mobile/Library runtime reads on RootHide")
+        "IdentifierManager does not separate live manager settings from RootHide injected-host snapshot settings")
+require('@"enabledIdentifierKeys"' in runtime_snapshot and
+        '@"missingEnabledArtifacts"' in runtime_snapshot and
+        '@"StorageSystem": @"storage"' in runtime_snapshot and
+        '@"Battery": @"batteryInfo"' in runtime_snapshot,
+        "RootHide runtime snapshot diagnostics do not expose enabled identifiers/missing profile artifacts")
 require('<key>UserName</key>' not in launchd_plist and
         '<key>GroupName</key>' not in launchd_plist and
         '<key>POSIXSpawnType</key>' not in launchd_plist and

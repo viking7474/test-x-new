@@ -7,6 +7,7 @@
 #import "PXScope.h"
 #import "PXRuntimeUtilities.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import <os/lock.h>
 
 
@@ -103,6 +104,15 @@ static WeaponXThemeStyle getThemeStyleFromProfile(void) {
         if ([cachedValue isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
     }
 
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *deviceIDs = PXRuntimeSnapshotDeviceIDs();
+    NSString *themeValue = [deviceIDs[@"DeviceTheme"] isKindOfClass:NSString.class]
+        ? deviceIDs[@"DeviceTheme"] : nil;
+    if (!themeValue.length) {
+        NSDictionary *themeInfo = PXRuntimeSnapshotProfileArtifact(@"deviceTheme");
+        themeValue = [themeInfo[@"value"] isKindOfClass:NSString.class] ? themeInfo[@"value"] : nil;
+    }
+#else
     NSString *identityPath = PXActiveProfileIdentityPath();
     NSString *deviceIDsPath = PXActiveProfileDeviceIDsPath();
     NSDictionary *deviceIDs = deviceIDsPath.length
@@ -116,6 +126,7 @@ static WeaponXThemeStyle getThemeStyleFromProfile(void) {
             [identityPath stringByAppendingPathComponent:@"device_theme.plist"]];
         themeValue = [themeInfo[@"value"] isKindOfClass:[NSString class]] ? themeInfo[@"value"] : nil;
     }
+#endif
     if (!themeValue.length) themeValue = @"Light";
 
     os_unfair_lock_lock(&gThemeCacheLock);

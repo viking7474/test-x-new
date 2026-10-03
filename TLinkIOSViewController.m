@@ -23,6 +23,7 @@
 #import "AppDataBackupManager.h"
 #import "ToolViewController.h"
 #import "NetworkManager.h"
+#import "IOSBuildDB.h"
 #import "PXPaths.h"
 #import <UIKit/UIKit.h>
 #import "ProgressHUDView.h"
@@ -7404,16 +7405,29 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
     NSInteger picked = minIdx - 1 + arc4random_uniform((uint32_t)(maxIdx - minIdx + 1));
     NSDictionary *model = models[(NSUInteger)picked];
-    NSArray *allIOSVersions = [self pxSupportedIOSVersions];
-    NSMutableArray *iosVersions = [NSMutableArray array];
-    NSString *iosMin = options[@"iosMin"];
-    NSString *iosMax = options[@"iosMax"];
-    for (NSString *version in allIOSVersions) {
-        BOOL aboveMin = !iosMin.length || [version compare:iosMin options:NSNumericSearch] != NSOrderedAscending;
-        BOOL belowMax = !iosMax.length || [version compare:iosMax options:NSNumericSearch] != NSOrderedDescending;
-        if (aboveMin && belowMax) [iosVersions addObject:version];
+    NSString *iosMin = [options[@"iosMin"] isKindOfClass:NSString.class] ? options[@"iosMin"] : nil;
+    NSString *iosMax = [options[@"iosMax"] isKindOfClass:NSString.class] ? options[@"iosMax"] : nil;
+    NSDictionary *iosMeta = nil;
+    NSString *iosProductType = nil;
+    if (fakeIOS) {
+        iosProductType = fakeModel && [model[@"id"] isKindOfClass:NSString.class]
+            ? model[@"id"]
+            : [self.manager currentValueForIdentifier:@"DeviceModel"];
+        if (!iosProductType.length && [model[@"id"] isKindOfClass:NSString.class]) {
+            iosProductType = model[@"id"];
+        }
+
+        NSError *iosError = nil;
+        iosMeta = [[IOSBuildDB sharedManager] randomMetaForDevice:iosProductType ?: @""
+                                                         min:iosMin.length ? iosMin : @"13.0"
+                                                         max:iosMax.length ? iosMax : @"99.0"
+                                                       error:&iosError];
+        if (!iosMeta) {
+            NSLog(@"[Dashboard] Could not build coherent iOS tuple for model=%@ range=[%@..%@]: %@",
+                  iosProductType ?: @"<nil>", iosMin ?: @"<default>", iosMax ?: @"<default>",
+                  iosError.localizedDescription ?: @"unknown");
+        }
     }
-    if (!iosVersions.count) [iosVersions addObjectsFromArray:allIOSVersions];
     NSArray *countries = @[
         @{ @"name": @"United States", @"code": @"us" },
         @{ @"name": @"Việt Nam", @"code": @"vn" },
@@ -7430,7 +7444,21 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         preview[@"DeviceModelName"] = model[@"name"] ?: @"";
         preview[@"ModelNumber"] = model[@"modelNumber"] ?: @"";
     }
-    if (fakeIOS) preview[@"IOSVersion"] = iosVersions[arc4random_uniform((uint32_t)iosVersions.count)] ?: @"";
+    if (fakeIOS && iosMeta) {
+        NSString *version = [iosMeta[@"version"] isKindOfClass:NSString.class] ? iosMeta[@"version"] : nil;
+        NSString *build = [iosMeta[@"build"] isKindOfClass:NSString.class] ? iosMeta[@"build"] : nil;
+        NSString *darwin = [iosMeta[@"darwin"] isKindOfClass:NSString.class] ? iosMeta[@"darwin"] : nil;
+        NSString *xnu = [iosMeta[@"xnu"] isKindOfClass:NSString.class] ? iosMeta[@"xnu"] : nil;
+        NSString *kernel = [iosMeta[@"kernel_version"] isKindOfClass:NSString.class] ? iosMeta[@"kernel_version"] : nil;
+        if (version.length && build.length && darwin.length && xnu.length && kernel.length) {
+            preview[@"IOSVersion"] = version;
+            preview[@"IOSBuild"] = build;
+            preview[@"Darwin"] = darwin;
+            preview[@"XNU"] = xnu;
+            preview[@"KernelVersion"] = kernel;
+            preview[@"IOSProductType"] = iosProductType ?: @""; // internal coherence marker; never written to device_ids.
+        }
+    }
     preview[@"CountryName"] = country[@"name"] ?: @"";
     preview[@"CountryCode"] = country[@"code"] ?: @"";
     preview[@"CarrierName"] = carrier[@"name"] ?: @"";
@@ -7483,13 +7511,61 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (!identityDir.length) return;
     NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
     NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-    NSArray *keys = @[ @"DeviceName", @"DeviceModel", @"DeviceModelName", @"IOSVersion", @"IOSBuild", @"CountryCode", @"CountryName", @"CarrierName", @"CarrierMCC", @"CarrierMNC", @"ModelNumber", @"SerialNumber", @"MACAddress" ];
+    NSMutableDictionary *resolvedPreview = [preview mutableCopy];
+
+    // iOS identity is an atomic tuple. Never overwrite IOSVersion alone: doing
+    // so makes IOSVersionHooks reject the incomplete/mismatched tuple and fall
+    // back to the physical runtime (e.g. iOS 15.0 on the current device).
+    NSString *requestedVersion = [resolvedPreview[@"IOSVersion"] isKindOfClass:NSString.class]
+        ? resolvedPreview[@"IOSVersion"] : nil;
+    NSString *targetProductType = [resolvedPreview[@"DeviceModel"] isKindOfClass:NSString.class]
+        ? resolvedPreview[@"DeviceModel"] : deviceIds[@"DeviceModel"];
+    NSString *tupleProductType = [resolvedPreview[@"IOSProductType"] isKindOfClass:NSString.class]
+        ? resolvedPreview[@"IOSProductType"] : nil;
+    BOOL tupleComplete = requestedVersion.length &&
+        [resolvedPreview[@"IOSBuild"] isKindOfClass:NSString.class] && [resolvedPreview[@"IOSBuild"] length] &&
+        [resolvedPreview[@"Darwin"] isKindOfClass:NSString.class] && [resolvedPreview[@"Darwin"] length] &&
+        [resolvedPreview[@"XNU"] isKindOfClass:NSString.class] && [resolvedPreview[@"XNU"] length] &&
+        [resolvedPreview[@"KernelVersion"] isKindOfClass:NSString.class] && [resolvedPreview[@"KernelVersion"] length];
+
+    if (requestedVersion.length && targetProductType.length &&
+        (!tupleComplete || ![tupleProductType isEqualToString:targetProductType])) {
+        NSError *tupleError = nil;
+        NSDictionary *meta = [[IOSBuildDB sharedManager] randomMetaForDevice:targetProductType
+                                                                        min:requestedVersion
+                                                                        max:requestedVersion
+                                                                      error:&tupleError];
+        if (meta) {
+            resolvedPreview[@"IOSVersion"] = meta[@"version"] ?: requestedVersion;
+            resolvedPreview[@"IOSBuild"] = meta[@"build"] ?: @"";
+            resolvedPreview[@"Darwin"] = meta[@"darwin"] ?: @"";
+            resolvedPreview[@"XNU"] = meta[@"xnu"] ?: @"";
+            resolvedPreview[@"KernelVersion"] = meta[@"kernel_version"] ?: @"";
+            resolvedPreview[@"IOSProductType"] = targetProductType;
+            tupleComplete = YES;
+        } else {
+            NSLog(@"[Dashboard] Refusing partial iOS override version=%@ model=%@: %@",
+                  requestedVersion, targetProductType, tupleError.localizedDescription ?: @"no compatible build");
+            for (NSString *key in @[@"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion", @"IOSProductType"]) {
+                [resolvedPreview removeObjectForKey:key];
+            }
+        }
+    }
+
+    NSArray *keys = @[ @"DeviceName", @"DeviceModel", @"DeviceModelName",
+                       @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion",
+                       @"CountryCode", @"CountryName", @"CarrierName", @"CarrierMCC", @"CarrierMNC",
+                       @"ModelNumber", @"SerialNumber", @"MACAddress" ];
     for (NSString *key in keys) {
-        NSString *value = preview[key];
+        NSString *value = resolvedPreview[key];
         if ([value isKindOfClass:[NSString class]] && value.length) deviceIds[key] = value;
     }
-    NSString *mac = preview[@"MACAddress"];
+    NSString *mac = resolvedPreview[@"MACAddress"];
     if (mac.length) deviceIds[@"WiFiAddress"] = mac;
+    NSInteger generation = [deviceIds[@"GenerationCounter"] respondsToSelector:@selector(integerValue)]
+        ? [deviceIds[@"GenerationCounter"] integerValue] : 0;
+    deviceIds[@"GenerationCounter"] = @(generation + 1);
+    deviceIds[@"CommittedAt"] = [NSDate date];
     [deviceIds writeToFile:deviceIdsPath atomically:YES];
 }
 

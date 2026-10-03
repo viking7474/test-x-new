@@ -9,6 +9,7 @@
 
 #import "PXScope.h"
 #import "PXRuntimeUtilities.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXPaths.h"
 #import "PXP1AFilters.h"
 #import <os/lock.h>
@@ -108,6 +109,17 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 }
 
 static NSString *getSpoofedPasteboardUUID(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtimeIDs = PXRuntimeSnapshotDeviceIDs();
+    NSString *runtimeUUID = [runtimeIDs[@"PasteboardUUID"] isKindOfClass:NSString.class]
+        ? runtimeIDs[@"PasteboardUUID"] : nil;
+    if (!runtimeUUID.length) {
+        NSDictionary *runtimeArtifact = PXRuntimeSnapshotProfileArtifact(@"pasteboardUUID");
+        runtimeUUID = [runtimeArtifact[@"value"] isKindOfClass:NSString.class]
+            ? runtimeArtifact[@"value"] : nil;
+    }
+    if (runtimeUUID.length) return runtimeUUID;
+#endif
     PasteboardUUIDManager *manager = [PasteboardUUIDManager sharedManager];
     NSString *uuid = [manager currentPasteboardUUID];
     
