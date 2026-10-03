@@ -13,6 +13,7 @@
 #import "PXInjectionFilter.h"
 #import "PXJailbreakCompat.h"
 #import "PXRuntimeSnapshot.h"
+#import "PXPaths.h"
 
 // Constants
 static const NSTimeInterval kCheckInterval = 0.5; // Cheap staging-change poll; sync itself is change-gated.
@@ -31,6 +32,7 @@ static const char *kTLinkIOSBootstrapDecisionNotifyName = "com.hydra.tlinkios.bo
 @property (nonatomic, strong) NSMutableDictionary *processInfo;
 @property (nonatomic, strong) NSMutableArray *protectedProcesses;
 @property (nonatomic, copy) NSString *lastStagingFingerprint;
+@property (nonatomic, copy) NSString *lastRuntimeFingerprint;
 @property (nonatomic, assign) NSUInteger syncSequence;
 @property (nonatomic, assign) int tweakLoadNotifyToken;
 @property (nonatomic, assign) int bootstrapDecisionNotifyToken;
@@ -39,6 +41,7 @@ static const char *kTLinkIOSBootstrapDecisionNotifyName = "com.hydra.tlinkios.bo
 - (void)recordBootstrapDecisionSignal;
 - (void)publishRuntimeSnapshotWithReason:(NSString *)reason;
 - (NSString *)stagingFingerprint;
+- (NSString *)runtimeStateFingerprint;
 - (void)writeRuntimeStatus:(NSString *)event;
 - (void)runOneShotSelfTest;
 @end
@@ -218,6 +221,7 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
         @"scopedAppCount": @(scopedApps.count),
         @"deviceIDCount": @(deviceIDs.count),
         @"publishStats": publishStats ?: @{},
+        @"runtimeFingerprint": [self runtimeStateFingerprint] ?: @"",
         @"error": publishError.localizedDescription ?: @""
     };
     [debug writeToFile:debugPath atomically:YES];
@@ -395,8 +399,8 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
 }
 
 - (void)checkProcesses {
-    // Darwin notification is the fast path. This timer is a RootHide-safe
-    // fallback in case the notification is delayed/lost across bootstrap
+    // Darwin notifications are the fast path. This timer is a RootHide-safe
+    // fallback in case a notification is delayed/lost across bootstrap
     // boundaries. Fingerprinting keeps the 0.5s poll effectively read-only.
     NSString *fingerprint = [self stagingFingerprint];
     if (!self.lastStagingFingerprint || ![fingerprint isEqualToString:self.lastStagingFingerprint]) {
@@ -405,6 +409,50 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
         [self syncTLinkIOSFilterPlists];
         [self updateStateFile];
     }
+
+    NSString *runtimeFingerprint = [self runtimeStateFingerprint];
+    if (!self.lastRuntimeFingerprint || ![runtimeFingerprint isEqualToString:self.lastRuntimeFingerprint]) {
+        self.lastRuntimeFingerprint = runtimeFingerprint;
+        [self log:[NSString stringWithFormat:@"Runtime state changed; republishing snapshot (%@)", runtimeFingerprint]
+             withType:OS_LOG_TYPE_DEBUG];
+        [self publishRuntimeSnapshotWithReason:@"runtime-fingerprint-changed"];
+    }
+}
+
+- (NSString *)runtimeStateFingerprint {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *profileID = PXActiveProfileID();
+    NSString *profileRoot = PXProfileRootPath(profileID);
+    NSString *identityRoot = PXProfileIdentityPath(profileID);
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObjects:
+        PXTLinkIOSSettingsPath(), PXGlobalScopePath(), PXSecuritySettingsPath(),
+        PXCurrentProfileInfoPath(), nil];
+    if (profileRoot.length) [paths addObject:[profileRoot stringByAppendingPathComponent:@"storage.plist"]];
+    if (identityRoot.length) {
+        for (NSString *name in @[@"device_ids.plist", @"battery_info.plist", @"network_settings.plist",
+                                 @"wifi_info.plist", @"carrier_details.plist", @"device_theme.plist",
+                                 @"boot_time.plist", @"system_uptime.plist", @"system_boot_uuid.plist",
+                                 @"dyld_cache_uuid.plist", @"pasteboard_uuid.plist", @"userdefaults_uuid.plist"]) {
+            [paths addObject:[identityRoot stringByAppendingPathComponent:name]];
+        }
+    }
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:paths.count + 1];
+    [parts addObject:[NSString stringWithFormat:@"profile=%@", profileID ?: @""]];
+    for (NSString *path in paths) {
+        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+        if (!attrs) {
+            [parts addObject:[NSString stringWithFormat:@"%@=missing", path.lastPathComponent ?: path]];
+            continue;
+        }
+        NSNumber *size = attrs[NSFileSize];
+        NSDate *mtime = attrs[NSFileModificationDate];
+        [parts addObject:[NSString stringWithFormat:@"%@=%llu:%.6f",
+                          path.lastPathComponent ?: path,
+                          size.unsignedLongLongValue,
+                          mtime.timeIntervalSince1970]];
+    }
+    return [parts componentsJoinedByString:@"|"];
 }
 
 - (NSString *)stagingFingerprint {

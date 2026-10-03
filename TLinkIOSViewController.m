@@ -578,6 +578,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
 // Handle toggle of advanced identifiers
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
+- (void)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options;
 @end
 
 @interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
@@ -7697,6 +7698,28 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }];
 }
 
+- (void)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options {
+    NSDictionary *resolved = [options isKindOfClass:NSDictionary.class] ? options : @{};
+    BOOL fakeIOS = resolved[@"fakeIOSVersionEnabled"] ? [resolved[@"fakeIOSVersionEnabled"] boolValue] : YES;
+    BOOL fakeModel = resolved[@"fakeModelEnabled"] ? [resolved[@"fakeModelEnabled"] boolValue] : YES;
+    BOOL fakeName = resolved[@"fakeNameEnabled"] ? [resolved[@"fakeNameEnabled"] boolValue] : NO;
+
+    NSDictionary<NSString *, NSNumber *> *required = @{
+        @"IOSVersion": @(fakeIOS),
+        @"DeviceModel": @(fakeModel),
+        @"DeviceName": @(fakeName)
+    };
+    [required enumerateKeysAndObjectsUsingBlock:^(NSString *identifier, NSNumber *needed, BOOL *stop) {
+        (void)stop;
+        if (![needed boolValue] || [self.manager isIdentifierEnabled:identifier]) return;
+        if (![self.manager setIdentifierEnabledAndPersist:YES forType:identifier]) {
+            NSError *error = [self.manager lastError];
+            NSLog(@"[Dashboard] Failed to enable required identifier %@ before Reset Data profile generation: %@",
+                  identifier, error.localizedDescription ?: @"unknown");
+        }
+    }];
+}
+
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
     ProfileManager *pm = [ProfileManager sharedManager];
     NSString *profileName = [NSString stringWithFormat:@"Auto %@", [pm generateProfileID]];
@@ -7713,8 +7736,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self showError:switchError];
                 return;
             }
+            NSDictionary *fakeOptions = self.nextFakeOptions ?: @{};
+            [self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];
             [self.manager regenerateAllEnabledIdentifiers];
-            NSDictionary *preview = self.nextFakePreview ?: [self generateFakePreviewFromOptions:self.nextFakeOptions ?: @{}];
+            NSDictionary *preview = self.nextFakePreview ?: [self generateFakePreviewFromOptions:fakeOptions];
             [self applyFakePreviewToCurrentProfile:preview];
             self.nextFakePreview = nil;
             [self persistDashboardSelections];

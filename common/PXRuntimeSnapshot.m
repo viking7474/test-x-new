@@ -160,6 +160,7 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
     NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:containerRoot error:nil] ?: @[];
     NSMutableDictionary<NSString *, NSString *> *failures = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *matchedBundles = [NSMutableSet set];
+    NSMutableSet<NSString *> *mirroredBundles = [NSMutableSet set];
     NSUInteger mirroredContainers = 0;
     NSUInteger removedStaleMirrors = 0;
 
@@ -199,6 +200,7 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
         NSError *mirrorError = nil;
         if (PXWriteRuntimeSnapshotAtomically(snapshot, mirrorPath, 501, 501, &mirrorError)) {
             mirroredContainers++;
+            [mirroredBundles addObject:bundleID];
         } else {
             failures[bundleID] = mirrorError.localizedDescription ?: @"mirror-write-failed";
         }
@@ -207,10 +209,14 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
     NSMutableArray<NSString *> *missing = [enabledBundles.allObjects mutableCopy];
     [missing removeObjectsInArray:matchedBundles.allObjects];
     [missing sortUsingSelector:@selector(compare:)];
+    NSArray<NSString *> *matched = [matchedBundles.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    NSArray<NSString *> *mirrored = [mirroredBundles.allObjects sortedArrayUsingSelector:@selector(compare:)];
     return @{
         @"enabledBundleCount": @(enabledBundles.count),
         @"matchedBundleCount": @(matchedBundles.count),
         @"mirroredContainerCount": @(mirroredContainers),
+        @"matchedBundles": matched ?: @[],
+        @"mirroredBundles": mirrored ?: @[],
         @"removedStaleMirrorCount": @(removedStaleMirrors),
         @"missingBundles": missing ?: @[],
         @"failures": failures ?: @{}
@@ -317,6 +323,8 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
             @"globalSuccess": @(globalSuccess),
             @"globalPath": PXRuntimeSnapshotPath() ?: @"",
             @"deviceIDCount": @(deviceIDs.count),
+            @"tlinkSettingsKeys": [[tlinkSettings allKeys] sortedArrayUsingSelector:@selector(compare:)],
+            @"enabledIdentifierMap": enabledIdentifiers ?: @{},
             @"enabledIdentifierKeys": enabledIdentifierKeys,
             @"profileArtifactKeys": [[profileArtifacts allKeys] sortedArrayUsingSelector:@selector(compare:)],
             @"missingEnabledArtifacts": missingEnabledArtifacts,

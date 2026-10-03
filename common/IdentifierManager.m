@@ -59,6 +59,90 @@
 
 @implementation IdentifierManager
 
+static NSSet<NSString *> *PXCanonicalIdentifierToggleKeys(void) {
+    static NSSet<NSString *> *keys = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        keys = [NSSet setWithArray:@[
+            @"IDFA", @"IDFV", @"DeviceName", @"DeviceModel", @"SerialNumber",
+            @"UDID", @"IMEI", @"MEID", @"IOSVersion", @"WiFi",
+            @"StorageSystem", @"Battery", @"SystemBootUUID", @"DyldCacheUUID",
+            @"PasteboardUUID", @"KeychainUUID", @"UserDefaultsUUID", @"AppGroupUUID",
+            @"CoreDataUUID", @"AppInstallUUID", @"AppContainerUUID", @"SystemUptime",
+            @"BootTime", @"DeviceTheme"
+        ]];
+    });
+    return keys;
+}
+
+static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
+    if (![settings isKindOfClass:NSDictionary.class]) return @{};
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    NSSet<NSString *> *allowed = PXCanonicalIdentifierToggleKeys();
+    [settings enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+        (void)stop;
+        if (![key isKindOfClass:NSString.class] || ![allowed containsObject:key]) return;
+        if ([value respondsToSelector:@selector(boolValue)]) result[key] = @([value boolValue]);
+    }];
+    return result;
+}
+
+static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (![type isKindOfClass:NSString.class] || !type.length) return NO;
+    NSDictionary *ids = PXRuntimeSnapshotDeviceIDs();
+    NSDictionary *security = PXRuntimeSnapshotSecuritySettings();
+    NSDictionary *tlink = PXRuntimeSnapshotTLinkSettings();
+
+    if ([type isEqualToString:@"StorageSystem"]) {
+        id explicitStorage = tlink[@"StorageSystemEnabled"];
+        if ([explicitStorage respondsToSelector:@selector(boolValue)] && [explicitStorage boolValue]) return YES;
+        NSDictionary *storage = PXRuntimeSnapshotProfileArtifact(@"storage");
+        return storage[@"TotalStorage"] != nil && storage[@"FreeStorage"] != nil;
+    }
+    if ([type isEqualToString:@"Battery"]) {
+        id secondary = security[@"batterySpoofEnabled"];
+        if ([secondary respondsToSelector:@selector(boolValue)] && [secondary boolValue]) return YES;
+        return PXRuntimeSnapshotProfileArtifact(@"batteryInfo").count > 0;
+    }
+    if ([type isEqualToString:@"WiFi"] || [type isEqualToString:@"WiFiAddress"]) {
+        id secondary = security[@"wifiSpoofEnabled"];
+        return [secondary respondsToSelector:@selector(boolValue)] && [secondary boolValue];
+    }
+    if ([type isEqualToString:@"DeviceTheme"]) {
+        id secondary = security[@"deviceThemeSpoofEnabled"];
+        return [secondary respondsToSelector:@selector(boolValue)] && [secondary boolValue];
+    }
+
+    // DeviceModel and IOSVersion are generated as a coherent baseline even
+    // when only one dashboard option is requested, so mere value presence is
+    // not proof of enablement. Dashboard Reset Data persists those toggles.
+    NSDictionary<NSString *, NSArray<NSString *> *> *requiredKeys = @{
+        @"IDFA": @[@"IDFA"], @"IDFV": @[@"IDFV"], @"DeviceName": @[@"DeviceName"],
+        @"SerialNumber": @[@"SerialNumber"],
+        @"UDID": @[@"UDID"], @"IMEI": @[@"IMEI"], @"MEID": @[@"MEID"],
+        @"SystemBootUUID": @[@"SystemBootUUID"], @"DyldCacheUUID": @[@"DyldCacheUUID"],
+        @"PasteboardUUID": @[@"PasteboardUUID"], @"KeychainUUID": @[@"KeychainUUID"],
+        @"UserDefaultsUUID": @[@"UserDefaultsUUID"], @"AppGroupUUID": @[@"AppGroupUUID"],
+        @"CoreDataUUID": @[@"CoreDataUUID"], @"AppInstallUUID": @[@"AppInstallUUID"],
+        @"AppContainerUUID": @[@"AppContainerUUID"], @"SystemUptime": @[@"SystemUptime"],
+        @"BootTime": @[@"BootTime"]
+    };
+    NSArray<NSString *> *required = requiredKeys[type];
+    if (!required.count) return NO;
+    for (NSString *key in required) {
+        id value = ids[key];
+        if ([value isKindOfClass:NSString.class] && [(NSString *)value length]) continue;
+        if ([value isKindOfClass:NSNumber.class]) continue;
+        return NO;
+    }
+    return YES;
+#else
+    (void)type;
+    return NO;
+#endif
+}
+
 static BOOL PXWebCompatIOSRangeEnabled(void) {
     NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
     return [securitySettings boolForKey:@"webCompatIOSRangeEnabled"];
@@ -1463,19 +1547,23 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
     BOOL isManagerProcess = [bundleID isEqualToString:@"com.hydra.tlinkios"];
     if (!isManagerProcess) {
-        // Injected host processes cannot reliably hydrate self.settings from
-        // /var/mobile/Library/Preferences. The daemon-published runtime snapshot
-        // is their authoritative read-only identifier-toggle source.
+        // Injected host processes consume the daemon-published toggle map. A
+        // persisted false remains authoritative. Only a genuinely missing key
+        // may fall back to secondary flags/profile evidence to repair older
+        // sparse/corrupted RootHide settings files.
         NSDictionary *runtimeSettings = PXRuntimeSnapshotTLinkSettings();
         NSDictionary *runtimeEnabled = [runtimeSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class]
             ? runtimeSettings[@"EnabledIdentifiers"] : nil;
-        id runtimeValue = runtimeEnabled[type];
+        NSString *lookupType = [type isEqualToString:@"WiFiAddress"] ? @"WiFi" : type;
+        id runtimeValue = runtimeEnabled[lookupType];
         if (runtimeValue != nil) return [runtimeValue boolValue];
+        return PXRuntimeSnapshotImpliesIdentifierEnabled(type);
     }
 #endif
     // The TLinkIOS manager/UI process must use its live in-memory settings so a
     // just-toggled value cannot be masked by a not-yet-republished snapshot.
-    return [self.settings[type] boolValue];
+    NSString *lookupType = [type isEqualToString:@"WiFiAddress"] ? @"WiFi" : type;
+    return [self.settings[lookupType] boolValue];
 }
 
 #pragma mark - Current Values
@@ -2317,13 +2405,11 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         }
     }
     
-    // Create dictionary to save for main settings
-    NSMutableDictionary *saveDict = [NSMutableDictionary dictionary];
-    
-    // Save enabled states - these are still global settings
-    saveDict[@"EnabledIdentifiers"] = [self.settings copy];
-    
-    // Mark settings as initialized
+    // Preserve top-level NSUserDefaults-backed feature flags (for example
+    // StorageSystemEnabled) instead of replacing the whole suite plist. Only
+    // the canonical identifier toggles belong under EnabledIdentifiers.
+    NSMutableDictionary *saveDict = [NSMutableDictionary dictionaryWithContentsOfFile:prefsFile] ?: [NSMutableDictionary dictionary];
+    saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings);
     saveDict[@"SettingsInitialized"] = @YES;
     
     // Save main settings
@@ -2415,33 +2501,50 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
             @"AppGroupUUID": @NO,
             @"CoreDataUUID": @NO,
             @"AppInstallUUID": @NO,
-            @"AppContainerUUID": @NO,
-            @"SettingsInitialized": @YES
+            @"AppContainerUUID": @NO
         }];
     } else {
         // ✅ FIX: Load from the EnabledIdentifiers key, not the entire dictionary
         NSDictionary *enabledIdentifiers = loadedDict[@"EnabledIdentifiers"];
-        if (enabledIdentifiers) {
-            self.settings = [enabledIdentifiers mutableCopy];
-            if (self.settings[@"IOSVersion"] == nil) {
-                id migrated = self.settings[@"SystemVersion"] ?: self.settings[@"BuildVersion"];
-                if (migrated) {
-                    self.settings[@"IOSVersion"] = migrated;
+        if ([enabledIdentifiers isKindOfClass:NSDictionary.class]) {
+            NSMutableDictionary *normalized = [PXSanitizedIdentifierSettings(enabledIdentifiers) mutableCopy];
+            if (!normalized) normalized = [NSMutableDictionary dictionary];
+            if (normalized[@"IOSVersion"] == nil) {
+                id legacyIOS = enabledIdentifiers[@"SystemVersion"] ?: enabledIdentifiers[@"BuildVersion"];
+                if ([legacyIOS respondsToSelector:@selector(boolValue)]) {
+                    normalized[@"IOSVersion"] = @([legacyIOS boolValue]);
                 }
             }
-            [self.settings removeObjectForKey:@"SystemVersion"];
-            [self.settings removeObjectForKey:@"BuildVersion"];
-            // Ensure UDID / MEID keys exist when missing from older settings
-            if (self.settings[@"UDID"] == nil) {
-                self.settings[@"UDID"] = @NO;
+
+            // One-way compatibility repair for settings written by older builds.
+            // Only fill a missing primary key from an existing secondary flag;
+            // never override an explicit false in EnabledIdentifiers.
+            if (normalized[@"StorageSystem"] == nil) {
+                id storageEnabled = loadedDict[@"StorageSystemEnabled"];
+                if (storageEnabled == nil) {
+                    NSUserDefaults *suite = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.settings"];
+                    storageEnabled = [suite objectForKey:@"StorageSystemEnabled"];
+                }
+                if ([storageEnabled respondsToSelector:@selector(boolValue)]) {
+                    normalized[@"StorageSystem"] = @([storageEnabled boolValue]);
+                }
             }
-            if (self.settings[@"MEID"] == nil) {
-                self.settings[@"MEID"] = @NO;
-            }
-            if (self.settings[@"IMEI"] == nil) {
-                self.settings[@"IMEI"] = @NO;
-            }
-            PXLog(@"[WeaponX] ✅ Loaded %lu identifier settings from EnabledIdentifiers", (unsigned long)self.settings.count);
+            NSDictionary<NSString *, NSString *> *secondaryKeys = @{
+                @"WiFi": @"wifiSpoofEnabled",
+                @"Battery": @"batterySpoofEnabled",
+                @"DeviceTheme": @"deviceThemeSpoofEnabled"
+            };
+            [secondaryKeys enumerateKeysAndObjectsUsingBlock:^(NSString *primaryKey, NSString *secondaryKey, BOOL *stop) {
+                (void)stop;
+                if (normalized[primaryKey] != nil) return;
+                id secondaryValue = PXReadSecuritySetting(secondaryKey);
+                if ([secondaryValue respondsToSelector:@selector(boolValue)]) {
+                    normalized[primaryKey] = @([secondaryValue boolValue]);
+                }
+            }];
+
+            self.settings = normalized;
+            PXLog(@"[WeaponX] ✅ Loaded %lu canonical identifier settings from EnabledIdentifiers", (unsigned long)self.settings.count);
         } else {
             PXLog(@"[WeaponX] ⚠️ EnabledIdentifiers key not found, using defaults");
             self.settings = [NSMutableDictionary dictionaryWithDictionary:@{
@@ -3388,11 +3491,6 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
         return NO;
     }
 
-    NSMutableDictionary *updatedSettings = [self.settings mutableCopy] ?: [NSMutableDictionary dictionary];
-    updatedSettings[@"canvasFingerprintingEnabled"] = @(enabled);
-    updatedSettings[@"CanvasFingerprint"] = @(enabled);
-    self.settings = updatedSettings;
-
     NSUserDefaults *securityDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
     [securityDefaults setBool:enabled forKey:@"canvasFingerprintingEnabled"];
     [securityDefaults setBool:enabled forKey:@"CanvasFingerprint"];
@@ -3420,10 +3518,6 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
         PXLog(@"[WeaponX] ❌ Failed to persist Canvas noise reset nonce at %@", securitySettingsPath);
         return NO;
     }
-
-    NSMutableDictionary *updatedSettings = [self.settings mutableCopy] ?: [NSMutableDictionary dictionary];
-    updatedSettings[@"canvasNoiseSeedNonce"] = @(nonce);
-    self.settings = updatedSettings;
 
     NSUserDefaults *securityDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
     [securityDefaults setInteger:(NSInteger)nonce forKey:@"canvasNoiseSeedNonce"];

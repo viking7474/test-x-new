@@ -165,13 +165,32 @@ static NSDictionary *getStorageValues() {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     NSDictionary *runtimeSettings = PXRuntimeSnapshotTLinkSettings();
     NSDictionary *runtimeEnabled = [runtimeSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class] ? runtimeSettings[@"EnabledIdentifiers"] : @{};
-    BOOL runtimeStorageEnabled = [runtimeEnabled[@"StorageSystem"] boolValue] || [runtimeSettings[@"StorageSystemEnabled"] boolValue];
-    if (!runtimeStorageEnabled) return nil;
     NSDictionary *runtimeStorage = PXRuntimeSnapshotProfileArtifact(@"storage");
+    id primaryStorageEnabled = runtimeEnabled[@"StorageSystem"];
+    BOOL runtimeStorageEnabled = NO;
+    if (primaryStorageEnabled != nil) {
+        runtimeStorageEnabled = [primaryStorageEnabled boolValue];
+    } else {
+        id secondaryStorageEnabled = runtimeSettings[@"StorageSystemEnabled"];
+        if (secondaryStorageEnabled != nil) {
+            runtimeStorageEnabled = [secondaryStorageEnabled boolValue];
+        } else {
+            // Compatibility with older sparse settings: storage.plist is only
+            // generated for an enabled StorageSystem, so a complete artifact is
+            // sufficient evidence when the primary toggle key was lost.
+            runtimeStorageEnabled = runtimeStorage[@"TotalStorage"] != nil && runtimeStorage[@"FreeStorage"] != nil;
+        }
+    }
+    if (!runtimeStorageEnabled) return nil;
     if (runtimeStorage[@"TotalStorage"] && runtimeStorage[@"FreeStorage"]) {
         return PXStoragePublishValues(runtimeStorage, now);
     }
-    return nil;
+    // Match the rootful behavior: once StorageSystem is explicitly/effectively
+    // enabled, an unavailable profile artifact must not leak the physical disk.
+    return PXStoragePublishValues(@{
+        @"TotalStorage": @"128",
+        @"FreeStorage": @"38.4"
+    }, now);
 #endif
     
     // First check if the feature is globally enabled

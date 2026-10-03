@@ -128,6 +128,8 @@ require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
         'PXJailbreakRootPath(@"/Library/WeaponX/Runtime/runtime_snapshot.plist")' in runtime_snapshot and
         'PXRuntimeSnapshotLocalContainerPath' in runtime_snapshot and
         'Library/Caches/com.hydra.tlinkios/runtime_snapshot.plist' in runtime_snapshot and
+        '@"mirroredBundles"' in runtime_snapshot and
+        '@"matchedBundles"' in runtime_snapshot and
         '/var/mobile/Containers/Data/Application' in runtime_snapshot and
         'MCMMetadataIdentifier' in runtime_snapshot and
         'PXPublishRuntimeSnapshot' in runtime_snapshot and
@@ -154,9 +156,12 @@ require('publishRuntimeSnapshotWithReason' in daemon and
         'runtime_snapshot_debug.plist' in daemon and
         'PXRuntimeSnapshotLastPublishStats()' in daemon and
         '@"publishStats"' in daemon and
+        'runtimeStateFingerprint' in daemon and
+        'runtime-fingerprint-changed' in daemon and
+        'PXCurrentProfileInfoPath()' in daemon and
         'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in daemon and
         'com.hydra.tlinkios.scopedAppsChanged' in daemon,
-        "WeaponXDaemon does not publish/invalidate/diagnose the RootHide runtime mirror")
+        "WeaponXDaemon does not publish/invalidate/diagnose/poll-fallback the RootHide runtime mirror")
 require('PXRuntimeSnapshotSecuritySettings()' in scope and
         'PXRuntimeSnapshotGlobalScope()' in scope and
         'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in scope,
@@ -167,17 +172,37 @@ require('PXLoadRuntimeSnapshot()' in identity_snapshot and
         "PXIdentitySnapshot does not consume/invalidate the RootHide runtime mirror")
 require('PXRuntimeSnapshotTLinkSettings()' in identifier_manager and
         'runtimeSettings[@"EnabledIdentifiers"]' in identifier_manager and
-        'runtimeEnabled[type]' in identifier_manager and
+        'runtimeEnabled[lookupType]' in identifier_manager and
+        'PXRuntimeSnapshotImpliesIdentifierEnabled(type)' in identifier_manager and
         'isManagerProcess = [bundleID isEqualToString:@"com.hydra.tlinkios"]' in identifier_manager and
         'isManagerProcess = [currentBundleID isEqualToString:@"com.hydra.tlinkios"]' in identifier_manager and
         'PXRuntimeSnapshotGlobalScope()' in identifier_manager and
         'PXCurrentIdentitySnapshot()' in identifier_manager,
         "IdentifierManager does not separate live manager settings from RootHide injected-host snapshot settings")
-require('@"enabledIdentifierKeys"' in runtime_snapshot and
+require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
+        'PXSanitizedIdentifierSettings(self.settings)' in identifier_manager and
+        'dictionaryWithContentsOfFile:prefsFile' in identifier_manager and
+        'saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings)' in identifier_manager and
+        'updatedSettings[@"canvasNoiseSeedNonce"]' not in identifier_manager and
+        'updatedSettings[@"canvasFingerprintingEnabled"]' not in identifier_manager,
+        "Identifier settings persistence can still corrupt EnabledIdentifiers or clobber suite-level feature flags")
+require('ensureDashboardFakeOptionsEnableRequiredIdentifiers' in view_controller and
+        '[self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];' in view_controller and
+        view_controller.index('[self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];') <
+        view_controller.index('[self.manager regenerateAllEnabledIdentifiers];', view_controller.index('- (void)createNextProfileAndRandomizeWithWarnings:')),
+        "Dashboard Reset Data does not persist fake-option identifier gates before profile regeneration")
+require('primaryStorageEnabled != nil' in storage_hooks and
+        'secondaryStorageEnabled != nil' in storage_hooks and
+        'runtimeStorage[@"TotalStorage"] != nil && runtimeStorage[@"FreeStorage"] != nil' in storage_hooks and
+        '@"TotalStorage": @"128"' in storage_hooks and '@"FreeStorage": @"38.4"' in storage_hooks,
+        "RootHide storage still treats a missing sparse toggle/artifact differently from rootful fallback semantics")
+require('@"enabledIdentifierMap"' in runtime_snapshot and
+        '@"tlinkSettingsKeys"' in runtime_snapshot and
+        '@"enabledIdentifierKeys"' in runtime_snapshot and
         '@"missingEnabledArtifacts"' in runtime_snapshot and
         '@"StorageSystem": @"storage"' in runtime_snapshot and
         '@"Battery": @"batteryInfo"' in runtime_snapshot,
-        "RootHide runtime snapshot diagnostics do not expose enabled identifiers/missing profile artifacts")
+        "RootHide runtime snapshot diagnostics do not expose raw/effective identifier settings and artifacts")
 require('<key>UserName</key>' not in launchd_plist and
         '<key>GroupName</key>' not in launchd_plist and
         '<key>POSIXSpawnType</key>' not in launchd_plist and
