@@ -313,17 +313,22 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         return nil;
     }
 
+    // iphone_model_db intentionally contains release/variant information only.
+    // Merge it with the built-in canonical hardware table so RAM, camera and
+    // storage never disappear when this DB-driven generation path is used.
+    NSDictionary *builtinSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:productType] ?: @{};
     NSDictionary *screen = PXScreenDictFromModelSpec(modelSpec);
-    NSString *screenResolution = [screen[@"resolution"] isKindOfClass:[NSString class]] ? screen[@"resolution"] : @"";
-    NSString *viewportResolution = [screen[@"viewport"] isKindOfClass:[NSString class]] ? screen[@"viewport"] : screenResolution;
-    NSNumber *scale = [screen[@"scale"] isKindOfClass:[NSNumber class]] ? screen[@"scale"] : nil;
-    NSNumber *ppi = [screen[@"ppi"] isKindOfClass:[NSNumber class]] ? screen[@"ppi"] : nil;
+    NSString *screenResolution = [screen[@"resolution"] isKindOfClass:[NSString class]] ? screen[@"resolution"] : PXProfileString(builtinSpecs[@"screenResolution"]);
+    NSString *viewportResolution = [screen[@"viewport"] isKindOfClass:[NSString class]] ? screen[@"viewport"] : PXProfileString(builtinSpecs[@"viewportResolution"]);
+    if (!viewportResolution.length) viewportResolution = screenResolution;
+    NSNumber *scale = [screen[@"scale"] isKindOfClass:[NSNumber class]] ? screen[@"scale"] : PXProfilePositiveNumber(builtinSpecs[@"devicePixelRatio"]);
+    NSNumber *ppi = [screen[@"ppi"] isKindOfClass:[NSNumber class]] ? screen[@"ppi"] : PXProfilePositiveNumber(builtinSpecs[@"screenDensity"]);
 
-    NSString *cpuArchitecture = [modelSpec[@"cpuArchitecture"] isKindOfClass:[NSString class]] ? modelSpec[@"cpuArchitecture"] : @"";
-    NSNumber *deviceMemoryGB = [modelSpec[@"deviceMemoryGB"] isKindOfClass:[NSNumber class]] ? modelSpec[@"deviceMemoryGB"] : nil;
-    NSString *gpuFamily = [modelSpec[@"gpuFamily"] isKindOfClass:[NSString class]] ? modelSpec[@"gpuFamily"] : @"";
-    NSNumber *cpuCores = [modelSpec[@"cpuCores"] isKindOfClass:[NSNumber class]] ? modelSpec[@"cpuCores"] : nil;
-    NSString *metalFeatureSet = PXProfileString(modelSpec[@"metalFeatureSet"]);
+    NSString *cpuArchitecture = PXProfileString(modelSpec[@"cpuArchitecture"]) ?: PXProfileString(builtinSpecs[@"cpuArchitecture"]);
+    NSNumber *deviceMemoryGB = [modelSpec[@"deviceMemoryGB"] isKindOfClass:[NSNumber class]] ? modelSpec[@"deviceMemoryGB"] : PXProfilePositiveNumber(builtinSpecs[@"deviceMemory"]);
+    NSString *gpuFamily = PXProfileString(modelSpec[@"gpuFamily"]) ?: PXProfileString(builtinSpecs[@"gpuFamily"]);
+    NSNumber *cpuCores = [modelSpec[@"cpuCores"] isKindOfClass:[NSNumber class]] ? modelSpec[@"cpuCores"] : PXProfilePositiveNumber(builtinSpecs[@"cpuCoreCount"]);
+    NSString *metalFeatureSet = PXProfileString(modelSpec[@"metalFeatureSet"]) ?: PXProfileString(builtinSpecs[@"metalFeatureSet"]);
 
     // Hardware variant selection. BoardID and HwModel are independent fields.
     NSDictionary *pickedVariant = PXPickHardwareVariantFromModelSpec(modelSpec);
@@ -331,11 +336,14 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     NSString *hwModel = PXProfileString(pickedVariant[@"hwModel"]);
     if (!boardID.length) boardID = PXProfileString(modelSpec[@"boardID"]);
     if (!hwModel.length) hwModel = PXProfileString(modelSpec[@"hwModel"]);
+    if (!boardID.length) boardID = PXProfileString(builtinSpecs[@"boardID"]);
+    if (!hwModel.length) hwModel = PXProfileString(builtinSpecs[@"hwModel"]);
 
     // Optional model number (Axxxx)
     NSString *modelNumber = PXPickModelNumberFromModelSpec(modelSpec);
 
     NSDictionary *webGLInfo = PXWebGLInfoFromModelSpec(modelSpec);
+    if (!webGLInfo.count) webGLInfo = PXWebGLInfoFromModelSpec(builtinSpecs);
 
     NSDate *now = [NSDate date];
 
@@ -354,6 +362,10 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         @"WebGLUnmaskedVendor", @"WebGLUnmaskedRenderer",
         @"WebGLMaxTextureSize", @"WebGLMaxRenderbufferSize", @"WebGLMaxRenderBufferSize",
         @"BoardID", @"HwModel", @"ModelNumber",
+        @"FrontCameraMegapixels", @"RearCameraMegapixels", @"RearCameraCount",
+        @"HasFrontCamera", @"HasRearCamera", @"HasPanoramaCamera",
+        @"HasUltraWideCamera", @"HasTelephotoCamera", @"HasLiDARScanner",
+        @"Supports4KVideo", @"StorageCapacitiesGB",
         @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"
     ];
     for (NSString *k in managedKeys) {
@@ -372,6 +384,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     if (metalFeatureSet.length) deviceIds[@"MetalFeatureSet"] = metalFeatureSet;
     if (gpuFamily.length) deviceIds[@"GPUFamily"] = gpuFamily;
     PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
+    PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, builtinSpecs);
     if (boardID.length) deviceIds[@"BoardID"] = boardID;
     if (hwModel.length) deviceIds[@"HwModel"] = hwModel;
 
@@ -438,6 +451,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     NSInteger deviceMemory = [deviceManager deviceMemoryForModel:deviceModel];
     NSString *gpuFamily = [deviceManager gpuFamilyForModel:deviceModel];
     NSDictionary *webGLInfo = [deviceManager webGLInfoForModel:deviceModel];
+    NSDictionary *hardwareSpecs = [deviceManager deviceSpecificationsForModel:deviceModel];
     NSInteger cpuCoreCount = [deviceManager cpuCoreCountForModel:deviceModel];
     NSString *metalFeatureSet = [deviceManager metalFeatureSetForModel:deviceModel];
     
@@ -470,6 +484,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         if (normalizedMetal) deviceIds[@"MetalFeatureSet"] = normalizedMetal;
         if (normalizedGPU) deviceIds[@"GPUFamily"] = normalizedGPU;
         PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
+        PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, hardwareSpecs);
         if (normalizedBoardID) deviceIds[@"BoardID"] = normalizedBoardID;
         if (normalizedHwModel) deviceIds[@"HwModel"] = normalizedHwModel;
         
@@ -504,6 +519,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     NSInteger deviceMemory = [deviceManager deviceMemoryForModel:value];
     NSString *gpuFamily = [deviceManager gpuFamilyForModel:value];
     NSDictionary *webGLInfo = [deviceManager webGLInfoForModel:value];
+    NSDictionary *hardwareSpecs = [deviceManager deviceSpecificationsForModel:value];
     NSInteger cpuCoreCount = [deviceManager cpuCoreCountForModel:value];
     NSString *metalFeatureSet = [deviceManager metalFeatureSetForModel:value];
     
@@ -534,6 +550,7 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         if (normalizedMetal) deviceIds[@"MetalFeatureSet"] = normalizedMetal;
         if (normalizedGPU) deviceIds[@"GPUFamily"] = normalizedGPU;
         PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
+        PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, hardwareSpecs);
         if (normalizedBoardID) deviceIds[@"BoardID"] = normalizedBoardID;
         if (normalizedHwModel) deviceIds[@"HwModel"] = normalizedHwModel;
         
@@ -2467,6 +2484,12 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // the canonical identifier toggles belong under EnabledIdentifiers.
     NSMutableDictionary *saveDict = [NSMutableDictionary dictionaryWithContentsOfFile:prefsFile] ?: [NSMutableDictionary dictionary];
     saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings);
+    // Keep the legacy top-level storage flag synchronized in the same atomic
+    // write. Rootful StorageManager and older RootHide snapshots still consult
+    // this key, while current hooks prefer EnabledIdentifiers.StorageSystem.
+    if (self.settings[@"StorageSystem"] != nil) {
+        saveDict[@"StorageSystemEnabled"] = @([self.settings[@"StorageSystem"] boolValue]);
+    }
     saveDict[@"SettingsInitialized"] = @YES;
     
     // Save main settings

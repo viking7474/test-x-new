@@ -155,6 +155,44 @@ static void PXCopyNumberField(NSMutableDictionary *target,
     if (value) target[targetKey] = value;
 }
 
+static NSArray *PXPositiveNumberArray(id value) {
+    if (![value isKindOfClass:[NSArray class]]) return nil;
+    NSMutableArray *result = [NSMutableArray array];
+    for (id item in (NSArray *)value) {
+        NSNumber *number = PXProfilePositiveNumber(item);
+        if (number) [result addObject:number];
+    }
+    return result.count ? [result copy] : nil;
+}
+
+void PXWriteHardwareCapabilitiesToDeviceIDs(NSMutableDictionary *deviceIDs,
+                                             NSDictionary *modelSpecs) {
+    if (![deviceIDs isKindOfClass:[NSMutableDictionary class]]) return;
+    NSDictionary<NSString *, NSString *> *mapping = @{
+        @"frontCameraMegapixels": @"FrontCameraMegapixels",
+        @"rearCameraMegapixels": @"RearCameraMegapixels",
+        @"rearCameraCount": @"RearCameraCount",
+        @"hasFrontCamera": @"HasFrontCamera",
+        @"hasRearCamera": @"HasRearCamera",
+        @"hasPanoramaCamera": @"HasPanoramaCamera",
+        @"hasUltraWideCamera": @"HasUltraWideCamera",
+        @"hasTelephotoCamera": @"HasTelephotoCamera",
+        @"hasLiDARScanner": @"HasLiDARScanner",
+        @"supports4KVideo": @"Supports4KVideo"
+    };
+    NSMutableArray *managedKeys = [[mapping allValues] mutableCopy];
+    [managedKeys addObject:@"StorageCapacitiesGB"];
+    [deviceIDs removeObjectsForKeys:managedKeys];
+
+    [mapping enumerateKeysAndObjectsUsingBlock:^(NSString *sourceKey, NSString *targetKey, BOOL *stop) {
+        (void)stop;
+        id value = modelSpecs[sourceKey];
+        if ([value isKindOfClass:[NSNumber class]]) deviceIDs[targetKey] = value;
+    }];
+    NSArray *capacities = PXPositiveNumberArray(modelSpecs[@"storageCapacitiesGB"]);
+    if (capacities.count) deviceIDs[@"StorageCapacitiesGB"] = capacities;
+}
+
 NSDictionary *PXDeviceSpecificationsFromDeviceIDs(NSDictionary *deviceIDs) {
     if (![deviceIDs isKindOfClass:[NSDictionary class]]) return nil;
     NSString *model = PXProfileString(deviceIDs[@"DeviceModel"]);
@@ -175,6 +213,25 @@ NSDictionary *PXDeviceSpecificationsFromDeviceIDs(NSDictionary *deviceIDs) {
     PXCopyStringField(specs, deviceIDs, @"boardID", @"BoardID");
     PXCopyStringField(specs, deviceIDs, @"hwModel", @"HwModel");
     PXCopyStringField(specs, deviceIDs, @"modelNumber", @"ModelNumber");
+    NSDictionary<NSString *, NSString *> *hardwareMapping = @{
+        @"frontCameraMegapixels": @"FrontCameraMegapixels",
+        @"rearCameraMegapixels": @"RearCameraMegapixels",
+        @"rearCameraCount": @"RearCameraCount",
+        @"hasFrontCamera": @"HasFrontCamera",
+        @"hasRearCamera": @"HasRearCamera",
+        @"hasPanoramaCamera": @"HasPanoramaCamera",
+        @"hasUltraWideCamera": @"HasUltraWideCamera",
+        @"hasTelephotoCamera": @"HasTelephotoCamera",
+        @"hasLiDARScanner": @"HasLiDARScanner",
+        @"supports4KVideo": @"Supports4KVideo"
+    };
+    [hardwareMapping enumerateKeysAndObjectsUsingBlock:^(NSString *targetKey, NSString *sourceKey, BOOL *stop) {
+        (void)stop;
+        id value = deviceIDs[sourceKey];
+        if ([value isKindOfClass:[NSNumber class]]) specs[targetKey] = value;
+    }];
+    NSArray *capacities = PXPositiveNumberArray(deviceIDs[@"StorageCapacitiesGB"]);
+    if (capacities.count) specs[@"storageCapacitiesGB"] = capacities;
 
     NSNumber *freeMemory = PXProfilePositiveNumber(deviceIDs[@"FreeMemoryPercentage"]);
     if (freeMemory) specs[@"freeMemoryPercentage"] = freeMemory;
@@ -198,10 +255,19 @@ NSDictionary *PXCanonicalDeviceSpecifications(NSDictionary *source, NSString *mo
         if (value) specs[key] = value;
     }
     for (NSString *key in @[@"devicePixelRatio", @"screenDensity", @"deviceMemory",
-                             @"cpuCoreCount", @"freeMemoryPercentage"]) {
+                             @"cpuCoreCount", @"freeMemoryPercentage",
+                             @"frontCameraMegapixels", @"rearCameraMegapixels", @"rearCameraCount"]) {
         NSNumber *value = PXProfilePositiveNumber(source[key]);
         if (value) specs[key] = value;
     }
+    for (NSString *key in @[@"hasFrontCamera", @"hasRearCamera", @"hasPanoramaCamera",
+                             @"hasUltraWideCamera", @"hasTelephotoCamera", @"hasLiDARScanner",
+                             @"supports4KVideo"]) {
+        id value = source[key];
+        if ([value isKindOfClass:[NSNumber class]]) specs[key] = value;
+    }
+    NSArray *capacities = PXPositiveNumberArray(source[@"storageCapacitiesGB"]);
+    if (capacities.count) specs[@"storageCapacitiesGB"] = capacities;
 
     NSDictionary *webGLInfo = PXCanonicalWebGLInfo(source);
     if (webGLInfo.count) specs[PXDeviceSpecWebGLInfoKey] = webGLInfo;

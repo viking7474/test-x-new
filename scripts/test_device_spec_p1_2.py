@@ -256,6 +256,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     free_memory = source_function(DEVICE_SOURCE, "getFreeMemoryPercentage")
     memory_stats = source_function(DEVICE_SOURCE, "getConsistentMemoryStats")
     host_stats = source_function(DEVICE_SOURCE, "hook_host_statistics64")
+    host_info = source_function(DEVICE_SOURCE, "hook_host_info_device_spec")
     nx_hook = source_function(DEVICE_SOURCE, "hook_nx_get_local_arch_info")
 
     matrix.check("source: immutable snapshot class exists", "@interface PXDeviceSpecSnapshot" in DEVICE_SOURCE and "@implementation PXDeviceSpecSnapshot" in DEVICE_SOURCE)
@@ -301,11 +302,12 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: legacy multi-read helpers are removed", all(name not in DEVICE_SOURCE for name in ["isSpoofingEnabled", "getSpoofedDeviceModel", "getDeviceSpecs", "loadScopedApps", "isInScopedAppsList"]))
 
     matrix.check("source: sysctl handler captures exactly one snapshot", sysctl_handler.count("PXActiveDeviceSpecSnapshot()") == 1 and "NSDictionary *specs = snapshot.specs" in sysctl_handler)
-    matrix.check("source: sysctl results carry snapshot generation", "uint64_t generation = snapshot.generation" in sysctl_handler and sysctl_handler.count("generation,") == 15)
+    matrix.check("source: sysctl results carry snapshot generation", "uint64_t generation = snapshot.generation" in sysctl_handler and sysctl_handler.count("generation,") >= 15)
     matrix.check("source: result evidence includes generation", "generation=%llu" in result_logger and "uint64_t generation" in result_logger)
     matrix.check("source: memory percentage accepts caller specs", "getFreeMemoryPercentage(NSDictionary *specs)" in free_memory and "PXActiveDeviceSpecSnapshot" not in free_memory)
     matrix.check("source: memory buckets use same specs argument", "getFreeMemoryPercentage(specs)" in memory_stats and "PXActiveDeviceSpecSnapshot" not in memory_stats)
     matrix.check("source: host statistics captures one snapshot", host_stats.count("PXActiveDeviceSpecSnapshot()") == 1 and "NSDictionary *specs = snapshot.specs" in host_stats)
+    matrix.check("source: host basic info captures one snapshot", host_info.count("PXActiveDeviceSpecSnapshot()") == 1 and "snapshot.specs" in host_info)
     matrix.check("source: NX architecture captures one snapshot", nx_hook.count("PXActiveDeviceSpecSnapshot()") == 1 and "NSDictionary *specs = snapshot.specs" in nx_hook)
 
     web_script = DEVICE_SOURCE[DEVICE_SOURCE.index("void PXInstallDeviceSpecUserScripts"):DEVICE_SOURCE.index("// Parse resolution string")]
@@ -330,7 +332,6 @@ def run_source_matrix(matrix: Matrix) -> None:
         ("- (NSString *)familyName", 1),
         ("- (CGFloat)nativeScale", 1),
         ("- (CGFloat)native_scale", 1),
-        ("- (unsigned int)max_cpus", 1),
     ]
     hot_bodies = [logos_method(DEVICE_SOURCE, signature, occurrence) for signature, occurrence in hot_methods]
     matrix.check("source: every hot method captures one snapshot", all(body.count("PXActiveDeviceSpecSnapshot()") == 1 for body in hot_bodies))

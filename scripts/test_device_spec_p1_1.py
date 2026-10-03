@@ -320,6 +320,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     core_resolver = source_function(DEVICE_SOURCE, "PXCPUCoreCountFromSpecs")
     nx_hook = source_function(DEVICE_SOURCE, "hook_nx_get_local_arch_info")
     memory_hook = source_function(DEVICE_SOURCE, "hook_host_statistics64")
+    basic_info_hook = source_function(DEVICE_SOURCE, "hook_host_info_device_spec")
     memory_log = source_function(DEVICE_SOURCE, "logMemoryHook")
     result_logger = source_function(DEVICE_SOURCE, "PXCompleteDeviceSpecSysctlResult")
     device_provider = source_function(DEVICE_SOURCE, "handleDeviceSpecSysctlByname")
@@ -349,7 +350,10 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: handled sysctl paths emit result evidence", device_provider.count("PXCompleteDeviceSpecSysctlResult") >= 15)
     matrix.check("source: VM64 write is count-gated", "*count >= HOST_VM_INFO64_COUNT" in memory_hook)
     matrix.check("source: VM32 write is count-gated", "*count >= HOST_VM_INFO_COUNT" in memory_hook)
-    matrix.check("source: HOST_BASIC_INFO write is count-gated", "*count >= HOST_BASIC_INFO_COUNT" in memory_hook)
+    matrix.check("source: HOST_BASIC_INFO uses the correct host_info API", 'dlsym(RTLD_DEFAULT, "host_info")' in DEVICE_SOURCE and "flavor != HOST_BASIC_INFO" in basic_info_hook)
+    matrix.check("source: HOST_BASIC_INFO write is count-gated", "*count < HOST_BASIC_INFO_COUNT" in basic_info_hook and "basicInfo->max_mem = totalMemory" in basic_info_hook)
+    matrix.check("source: legacy hw.usermem follows canonical total memory", 'strcmp(name, "hw.usermem") == 0' in device_provider and "PXWriteSysctlBytes(&totalMemory, sizeof(totalMemory)" in device_provider)
+    matrix.check("source: host_basic_info is not treated as an Objective-C class", "%hook host_basic_info" not in DEVICE_SOURCE)
     matrix.check("source: CPU feature strings contain no x86 ISA tokens", all(
         not re.search(r"\b(?:SSE|AVX|MMX|X86)\b", profile.feature_string, re.I)
         for profile in PROFILES

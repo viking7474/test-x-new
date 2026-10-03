@@ -18,6 +18,7 @@
 #import "ProfileCreationViewController.h"
 #import "ProfileManager.h"
 #import "StorageManager.h"
+#import "DeviceModelManager.h"
 #import "BatteryManager.h"
 #import "AppDataBackupRestoreViewController.h"
 #import "AppDataBackupManager.h"
@@ -7457,8 +7458,30 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (minIdx <= 0) minIdx = 1;
     if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
-    NSInteger picked = minIdx - 1 + arc4random_uniform((uint32_t)(maxIdx - minIdx + 1));
-    NSDictionary *model = models[(NSUInteger)picked];
+    NSRange allowedRange = NSMakeRange((NSUInteger)(minIdx - 1), (NSUInteger)(maxIdx - minIdx + 1));
+    NSArray *allowedModels = [models subarrayWithRange:allowedRange];
+    NSString *currentModelID = [self.manager currentValueForIdentifier:@"DeviceModel"];
+    NSDictionary *currentSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:currentModelID];
+    NSMutableArray *differentModels = [NSMutableArray array];
+    NSMutableArray *differentHardware = [NSMutableArray array];
+    NSArray *signatureKeys = @[@"deviceMemory", @"frontCameraMegapixels", @"rearCameraMegapixels",
+                               @"rearCameraCount", @"hasUltraWideCamera", @"hasTelephotoCamera", @"hasLiDARScanner"];
+    for (NSDictionary *candidate in allowedModels) {
+        NSString *candidateID = [candidate[@"id"] isKindOfClass:NSString.class] ? candidate[@"id"] : nil;
+        if (!candidateID.length || [candidateID isEqualToString:currentModelID]) continue;
+        [differentModels addObject:candidate];
+        NSDictionary *candidateSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:candidateID];
+        BOOL hardwareChanged = NO;
+        for (NSString *key in signatureKeys) {
+            if (![(currentSpecs[key] ?: NSNull.null) isEqual:(candidateSpecs[key] ?: NSNull.null)]) {
+                hardwareChanged = YES;
+                break;
+            }
+        }
+        if (hardwareChanged) [differentHardware addObject:candidate];
+    }
+    NSArray *selectionPool = differentHardware.count ? differentHardware : (differentModels.count ? differentModels : allowedModels);
+    NSDictionary *model = selectionPool[arc4random_uniform((uint32_t)selectionPool.count)];
     NSString *iosMin = [options[@"iosMin"] isKindOfClass:NSString.class] ? options[@"iosMin"] : nil;
     NSString *iosMax = [options[@"iosMax"] isKindOfClass:NSString.class] ? options[@"iosMax"] : nil;
     NSDictionary *iosMeta = nil;
@@ -7760,6 +7783,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSDictionary<NSString *, NSNumber *> *required = @{
         @"IOSVersion": @(fakeIOS),
         @"DeviceModel": @(fakeModel),
+        // Storage is a hardware characteristic. Keep it in the same generated
+        // profile generation as model/RAM/camera without adding a new UI switch.
+        @"StorageSystem": @(fakeModel),
         @"DeviceName": @(fakeName)
     };
     [required enumerateKeysAndObjectsUsingBlock:^(NSString *identifier, NSNumber *needed, BOOL *stop) {

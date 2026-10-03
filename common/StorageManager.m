@@ -2,6 +2,7 @@
 #import "ProfileManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
+#import "DeviceModelManager.h"
 
 // Constants for proper size calculations
 // Use only marketing units (1000-based) as used by Apple
@@ -68,15 +69,28 @@
 }
 
 - (NSString *)randomizeStorageCapacity {
-    // 50% chance for 64GB, 50% for 128GB
-    int randomValue = arc4random_uniform(100);
-    NSString *capacity;
-    if (randomValue < 50) {
-        capacity = @"64";
-    } else {
-        capacity = @"128";
+    NSString *profileID = PXActiveProfileID();
+    NSDictionary *deviceIDs = profileID.length ?
+        [NSDictionary dictionaryWithContentsOfFile:[PXProfileIdentityPath(profileID) stringByAppendingPathComponent:@"device_ids.plist"]] : nil;
+    return [self randomizeStorageCapacityForDeviceModel:deviceIDs[@"DeviceModel"]];
+}
+
+- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel {
+    NSDictionary *specs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
+    NSArray *rawCapacities = [specs[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]]
+        ? specs[@"storageCapacitiesGB"] : @[@64, @128, @256, @512];
+    NSMutableArray<NSString *> *capacities = [NSMutableArray array];
+    for (id raw in rawCapacities) {
+        NSInteger value = [raw respondsToSelector:@selector(integerValue)] ? [raw integerValue] : 0;
+        if (value > 0) [capacities addObject:[NSString stringWithFormat:@"%ld", (long)value]];
     }
-    return capacity;
+    if (!capacities.count) [capacities addObjectsFromArray:@[@"64", @"128", @"256", @"512"]];
+
+    NSString *previous = _storageSettings[@"TotalStorage"];
+    NSMutableArray<NSString *> *candidates = [capacities mutableCopy];
+    if (candidates.count > 1 && previous.length) [candidates removeObject:previous];
+    if (!candidates.count) candidates = [capacities mutableCopy];
+    return candidates[arc4random_uniform((uint32_t)candidates.count)];
 }
 
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity {
@@ -86,7 +100,7 @@
     double freePercent;
     
     // Calculate realistic free space based on capacity
-    if (totalGB <= 32) {
+    if (totalGB <= 64) {
         // 64GB devices typically have less free space (15-30%)
         freePercent = (arc4random_uniform(15) + 15) / 100.0;
     } else {

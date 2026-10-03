@@ -27,6 +27,11 @@ FOUNDATION_EXPORT NSDictionary *PXWebGLInfoFromDeviceIDs(NSDictionary * _Nullabl
 FOUNDATION_EXPORT void PXWriteWebGLInfoToDeviceIDs(NSMutableDictionary *deviceIDs,
                                                    NSDictionary * _Nullable webGLInfo);
 
+/// Replace camera and supported-capacity fields with values from one model
+/// specification. False boolean capabilities are deliberately preserved.
+FOUNDATION_EXPORT void PXWriteHardwareCapabilitiesToDeviceIDs(NSMutableDictionary *deviceIDs,
+                                                               NSDictionary * _Nullable modelSpecs);
+
 /// Canonical runtime schema shared by IdentifierManager, DeviceModelManager and
 /// DeviceSpecHooks. Unknown strings are omitted and HwModel never falls back to BoardID.
 FOUNDATION_EXPORT NSDictionary * _Nullable PXDeviceSpecificationsFromDeviceIDs(NSDictionary * _Nullable deviceIDs);

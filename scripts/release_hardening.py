@@ -40,6 +40,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_device_spec_p1_2.py",
     "scripts/test_device_spec_p1_3.py",
     "scripts/test_device_profile_webgl_p2.py",
+    "scripts/test_hardware_profile_sync_static.py",
     "scripts/test_thread_safety_cleanup_p3.py",
     "scripts/test_jailbreak_bypass_cleanup_lifecycle.py",
     "scripts/test_jailbreak_bypass_dyld_compatibility.py",

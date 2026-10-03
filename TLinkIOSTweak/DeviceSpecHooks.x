@@ -119,6 +119,7 @@ static const PXDeviceCPUOptionalKey kPXDeviceCPUOptionalKeys[] = {
 // only borrows the coordinator's original pointer for existence-gated keys.
 static int (*orig_sysctlbyname_device_spec)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 static kern_return_t (*orig_host_statistics64)(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
+static kern_return_t (*orig_host_info_device_spec)(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_number_t *count);
 static const NXArchInfo *(*orig_nx_get_local_arch_info)(void);
 static __thread NXArchInfo g_deviceSpecThreadArchInfo;
 
@@ -214,6 +215,7 @@ static void getConsistentMemoryStats(NSDictionary *specs,
                                      unsigned long long *activeMemory,
                                      unsigned long long *inactiveMemory);
 static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count);
+static kern_return_t hook_host_info_device_spec(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_number_t *count);
 static BOOL handleDeviceSpecSysctlByname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult);
 static const NXArchInfo *hook_nx_get_local_arch_info(void);
 static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
@@ -1290,34 +1292,6 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
 // JavaScript hardwareConcurrency is installed through the shared document-start
 // WKUserScript path. Keep only lower-level native CPU detection hooks here.
 
-// Hook lower-level CPU detection APIs for native apps
-%hook host_basic_info
-
-- (unsigned int)max_cpus {
-    unsigned int original = %orig;
-    
-    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
-    if (!snapshot) {
-        return original;
-    }
-    NSDictionary *specs = snapshot.specs;
-    
-    NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
-    if (cpuCoreCount == 0 || cpuCoreCount > UINT_MAX) {
-        return original;
-    }
-    
-    static BOOL loggedCoreAPI = NO;
-    if (!loggedCoreAPI) {
-        PXLog(@"[DeviceSpec] Spoofing low-level CPU API from %u to %lu", original, (unsigned long)cpuCoreCount);
-        loggedCoreAPI = YES;
-    }
-    
-    return (unsigned int)cpuCoreCount;
-}
-
-%end
-
 #pragma mark - Constructor
 
 %ctor {
@@ -1415,6 +1389,17 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                 MSHookFunction(orig_host_statistics64, (void *)hook_host_statistics64, (void **)&orig_host_statistics64);
                 PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook host_statistics64");
                 PXLog(@"[DeviceSpec] Successfully hooked host_statistics64 for memory stats spoofing");
+            }
+
+            // HOST_BASIC_INFO belongs to host_info(), not host_statistics64().
+            orig_host_info_device_spec = dlsym(RTLD_DEFAULT, "host_info");
+            if (orig_host_info_device_spec) {
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] before hook host_info");
+                MSHookFunction((void *)orig_host_info_device_spec,
+                               (void *)hook_host_info_device_spec,
+                               (void **)&orig_host_info_device_spec);
+                PXFileDebugAIDA64Log("[DeviceSpec.ctor] after hook host_info");
+                PXLog(@"[DeviceSpec] Successfully hooked host_info for basic memory/CPU spoofing");
             }
 
             orig_nx_get_local_arch_info = dlsym(RTLD_DEFAULT, "NXGetLocalArchInfo");
@@ -1543,8 +1528,6 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
     if (!PXDeviceMemoryBytesFromSpecs(specs, &totalMemory)) {
         return result;
     }
-    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
-    
     // Handle specific host info types
     if (flavor == HOST_VM_INFO64 || flavor == HOST_VM_INFO) {
         // VM statistics (free memory, etc.)
@@ -1609,24 +1592,35 @@ static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, h
                 loggedVMStats32 = YES;
             }
         }
-    } else if (flavor == HOST_BASIC_INFO) {
-        // Basic host info including memory size
-        if (*count >= HOST_BASIC_INFO_COUNT) {
-            host_basic_info_t basicInfo = (host_basic_info_t)info;
-            
-            // Spoof max memory to match our deviceMemory value
-            basicInfo->max_mem = totalMemory;
-            
-            // Log the change the first time
-            static BOOL loggedBasicInfo = NO;
-            if (!loggedBasicInfo) {
-                PXLog(@"[DeviceSpec] Spoofed host_basic_info max_mem to %llu bytes (%ld GB)",
-                    totalMemory, (long)deviceMemoryGB);
-                loggedBasicInfo = YES;
-            }
-        }
     }
     
+    return result;
+}
+
+// host_info() is the actual owner of HOST_BASIC_INFO. Diagnostic applications
+// commonly read max_mem here instead of using NSProcessInfo or hw.memsize.
+static kern_return_t hook_host_info_device_spec(host_t host,
+                                                host_flavor_t flavor,
+                                                host_info_t info,
+                                                mach_msg_type_number_t *count) {
+    if (!orig_host_info_device_spec) return KERN_FAILURE;
+    kern_return_t result = orig_host_info_device_spec(host, flavor, info, count);
+    if (result != KERN_SUCCESS || !info || !count || flavor != HOST_BASIC_INFO ||
+        *count < HOST_BASIC_INFO_COUNT) return result;
+
+    PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
+    if (!snapshot) return result;
+    host_basic_info_t basicInfo = (host_basic_info_t)info;
+
+    uint64_t totalMemory = 0;
+    if (PXDeviceMemoryBytesFromSpecs(snapshot.specs, &totalMemory)) {
+        basicInfo->max_mem = totalMemory;
+    }
+    NSUInteger coreCount = PXCPUCoreCountFromSpecs(snapshot.specs);
+    if (coreCount > 0 && coreCount <= UINT_MAX) {
+        basicInfo->max_cpus = (natural_t)coreCount;
+        basicInfo->avail_cpus = (natural_t)coreCount;
+    }
     return result;
 }
 
@@ -1739,6 +1733,15 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
     BOOL hasMemory = PXDeviceMemoryBytesFromSpecs(specs, &totalMemory);
 
     if (hasMemory && strcmp(name, "hw.memsize") == 0) {
+        return PXCompleteDeviceSpecSysctlResult(name,
+                                                  profile,
+                                                  generation,
+                                                  PXWriteSysctlBytes(&totalMemory, sizeof(totalMemory), oldp, oldlenp, outResult),
+                                                  oldlenp,
+                                                  outResult);
+    }
+
+    if (hasMemory && strcmp(name, "hw.usermem") == 0) {
         return PXCompleteDeviceSpecSysctlResult(name,
                                                   profile,
                                                   generation,

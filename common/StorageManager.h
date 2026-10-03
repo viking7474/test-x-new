@@ -22,6 +22,10 @@
  */
 - (NSString *)randomizeStorageCapacity;
 
+/// Pick a capacity supported by the selected model and avoid the immediately
+/// previous value when more than one tier is available.
+- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString * _Nullable)deviceModel;
+
 #pragma mark - Basic Storage Values
 
 /**
