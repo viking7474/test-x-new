@@ -766,6 +766,11 @@ static int PXWriteSysctlCStringLocal(const char *value, void *outBuf, size_t *ou
 
 // Hook for sysctl array - handles both Kernel and Hardware queries
 static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    static dispatch_once_t diagnosticOnce;
+    dispatch_once(&diagnosticOnce, ^{
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageSysctlObserved,
+                                        PXHookDiagnosticResultSuccess);
+    });
     static BOOL logged = NO;
     if (!logged) {
         logged = YES;
@@ -894,6 +899,11 @@ static int PXWriteSysctlInt64(const char *name, int64_t v, void *oldp, size_t *o
 static CFDictionaryRef (*CFCopySystemVersionDictionary_orig)(void);
 
 static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
+    static dispatch_once_t diagnosticOnce;
+    dispatch_once(&diagnosticOnce, ^{
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageSystemVersionObserved,
+                                        PXHookDiagnosticResultSuccess);
+    });
     CFDictionaryRef original = CFCopySystemVersionDictionary_orig ? CFCopySystemVersionDictionary_orig() : NULL;
     @autoreleasepool {
         @try {
@@ -932,6 +942,11 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, BOOL *outHandled) {
+    static dispatch_once_t diagnosticOnce;
+    dispatch_once(&diagnosticOnce, ^{
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageSysctlByNameObserved,
+                                        PXHookDiagnosticResultSuccess);
+    });
     if (outHandled) *outHandled = NO;
     static int loggedCount = 0;
     if (name && loggedCount < 20) {
@@ -1114,6 +1129,11 @@ static BOOL PXUnameWriteField(char *destination, size_t capacity, NSString *valu
 }
 
 static int uname_hook(struct utsname *buf) {
+    static dispatch_once_t diagnosticOnce;
+    dispatch_once(&diagnosticOnce, ^{
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageUnameObserved,
+                                        PXHookDiagnosticResultSuccess);
+    });
     if (!uname_orig) {
         errno = ENOSYS;
         return -1;
@@ -1211,6 +1231,11 @@ static int uname_hook(struct utsname *buf) {
 
 // MGCopyAnswer hook for various system identifiers
 %hookf(CFTypeRef, MGCopyAnswer, CFStringRef property, CFDictionaryRef options) {
+    static dispatch_once_t diagnosticOnce;
+    dispatch_once(&diagnosticOnce, ^{
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageMobileGestaltObserved,
+                                        PXHookDiagnosticResultSuccess);
+    });
     static int loggedCount = 0;
     if (property && loggedCount < 30) {
         loggedCount++;
@@ -3688,6 +3713,11 @@ static CFTypeRef PXIOKitPatchCompatibleValue(CFTypeRef original, NSString *hwMod
 }
 
 static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    static dispatch_once_t diagnosticOnce;
+    dispatch_once(&diagnosticOnce, ^{
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOKitObserved,
+                                        PXHookDiagnosticResultSuccess);
+    });
     static int loggedCount = 0;
     if (key && loggedCount < 30) {
         loggedCount++;
@@ -4340,7 +4370,13 @@ static char* hook_GSSystemGetSerialNo(void) {
         return;
     }
 
+    PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageNativeCtorAllowed,
+                                    PXHookDiagnosticResultSuccess);
+
     PXIdentitySnapshotStartObserving();
+    PXIdentitySnapshot *diagnosticIdentitySnapshot = PXCurrentIdentitySnapshot();
+    PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIdentitySnapshot,
+        diagnosticIdentitySnapshot.valid ? PXHookDiagnosticResultSuccess : PXHookDiagnosticResultMissingData);
 
     CFNotificationCenterRef identityCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (identityCenter) {
@@ -4454,6 +4490,10 @@ static char* hook_GSSystemGetSerialNo(void) {
         orig_IORegistryEntryCreateCFProperties = [coord originalForSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperties];
         orig_IORegistryEntrySearchCFProperty = [coord originalForSymbol:kPXNativeSymbolIORegistryEntrySearchCFProperty];
         CFCopySystemVersionDictionary_orig = [coord originalForSymbol:kPXNativeSymbolCFCopySystemVersionDictionary];
+        BOOL coreNativeSymbolsReady = sysctl_orig && sysctlbyname_orig &&
+            orig_IORegistryEntryCreateCFProperty;
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageNativeCoordinator,
+            coreNativeSymbolsReady ? PXHookDiagnosticResultSuccess : PXHookDiagnosticResultSymbolMissing);
 
         static dispatch_once_t tweakProvOnce;
         dispatch_once(&tweakProvOnce, ^{
@@ -4550,6 +4590,8 @@ static char* hook_GSSystemGetSerialNo(void) {
         PXFileDebugAIDA64Log("[Tweak.ctor] before init Identifiers");
         %init(Identifiers);
         PXInstallAlternateMobileGestaltHooks();
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIdentifiersGroup,
+                                        PXHookDiagnosticResultSuccess);
         PXFileDebugAIDA64Log("[Tweak.ctor] after init Identifiers");
 
         // ATT (iOS 14+): install only if class/selectors exist. Active when IDFA identifier enabled.
@@ -4702,5 +4744,7 @@ static char* hook_GSSystemGetSerialNo(void) {
 #endif
     
     PXLog(@"[WeaponX] Location and sensor spoofing hooks initialized");
+    PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageNativeCtorCompleted,
+                                    PXHookDiagnosticResultSuccess);
     PXFileDebugAIDA64Log("[Tweak.ctor] exit");
 }

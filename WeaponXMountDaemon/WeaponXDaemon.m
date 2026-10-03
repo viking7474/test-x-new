@@ -26,6 +26,8 @@ static NSString * const kTLinkIOSTweakLoadedNotification = @"com.hydra.tlinkios.
 static const char *kTLinkIOSTweakLoadedNotifyName = "com.hydra.tlinkios.tweakLoaded";
 static NSString * const kTLinkIOSBootstrapDecisionNotification = @"com.hydra.tlinkios.bootstrapDecision";
 static const char *kTLinkIOSBootstrapDecisionNotifyName = "com.hydra.tlinkios.bootstrapDecision";
+static NSString * const kTLinkIOSHookDiagnosticNotification = @"com.hydra.tlinkios.hookDiagnostic";
+static const char *kTLinkIOSHookDiagnosticNotifyName = "com.hydra.tlinkios.hookDiagnostic";
 
 @interface WeaponXDaemon : NSObject
 @property (nonatomic, strong) NSTimer *monitorTimer;
@@ -36,9 +38,11 @@ static const char *kTLinkIOSBootstrapDecisionNotifyName = "com.hydra.tlinkios.bo
 @property (nonatomic, assign) NSUInteger syncSequence;
 @property (nonatomic, assign) int tweakLoadNotifyToken;
 @property (nonatomic, assign) int bootstrapDecisionNotifyToken;
+@property (nonatomic, assign) int hookDiagnosticNotifyToken;
 - (void)syncTLinkIOSFilterPlists;
 - (void)recordTweakLoadSignal;
 - (void)recordBootstrapDecisionSignal;
+- (void)recordHookDiagnosticSignal;
 - (void)publishRuntimeSnapshotWithReason:(NSString *)reason;
 - (NSString *)stagingFingerprint;
 - (NSString *)runtimeStateFingerprint;
@@ -72,6 +76,12 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
     [daemon recordBootstrapDecisionSignal];
 }
 
+static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)name; (void)object; (void)userInfo;
+    WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
+    [daemon recordHookDiagnosticSignal];
+}
+
 @implementation WeaponXDaemon
 
 + (void)initialize {
@@ -98,6 +108,7 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
         _protectedProcesses = [NSMutableArray array];
         _tweakLoadNotifyToken = -1;
         _bootstrapDecisionNotifyToken = -1;
+        _hookDiagnosticNotifyToken = -1;
         
         NSLog(@"Using Guardian dir: %@", kGuardianDir);
         
@@ -119,6 +130,7 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
 - (void)dealloc {
     if (_tweakLoadNotifyToken >= 0) notify_cancel(_tweakLoadNotifyToken);
     if (_bootstrapDecisionNotifyToken >= 0) notify_cancel(_bootstrapDecisionNotifyToken);
+    if (_hookDiagnosticNotifyToken >= 0) notify_cancel(_hookDiagnosticNotifyToken);
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)(self));
 }
@@ -175,6 +187,21 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
                                     (__bridge const void *)(self),
                                     PXBootstrapDecisionCallback,
                                     (__bridge CFStringRef)kTLinkIOSBootstrapDecisionNotification,
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    uint32_t hookDiagnosticStatus = notify_register_check(kTLinkIOSHookDiagnosticNotifyName, &_hookDiagnosticNotifyToken);
+    if (hookDiagnosticStatus != NOTIFY_STATUS_OK) {
+        _hookDiagnosticNotifyToken = -1;
+        [self log:[NSString stringWithFormat:@"Hook diagnostic notify_register_check failed: %u", hookDiagnosticStatus]
+             withType:OS_LOG_TYPE_ERROR];
+    } else {
+        notify_set_state(_hookDiagnosticNotifyToken, 0);
+    }
+    CFNotificationCenterAddObserver(darwinCenter,
+                                    (__bridge const void *)(self),
+                                    PXHookDiagnosticCallback,
+                                    (__bridge CFStringRef)kTLinkIOSHookDiagnosticNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
     
@@ -313,6 +340,108 @@ static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *ob
     };
     [events addObject:record];
     if (events.count > 64) [events removeObjectsInRange:NSMakeRange(0, events.count - 64)];
+    [events writeToFile:path atomically:YES];
+    chmod(path.fileSystemRepresentation, 0644);
+    chown(path.fileSystemRepresentation, 501, 501);
+}
+
+- (void)recordHookDiagnosticSignal {
+    uint64_t state = 0;
+    uint32_t stateStatus = (uint32_t)-1;
+    if (self.hookDiagnosticNotifyToken >= 0) {
+        // Do not clear this state. Tweak translation units merge their reached
+        // masks through the shared notify state so coalesced notifications still
+        // leave one useful, cumulative diagnostic record.
+        stateStatus = notify_get_state(self.hookDiagnosticNotifyToken, &state);
+    }
+
+    uint32_t pid = (uint32_t)(state & 0xFFFFFFFFu);
+    uint16_t reachedMask = (uint16_t)((state >> 32) & 0xFFFFu);
+    uint8_t stage = (uint8_t)((state >> 48) & 0xFFu);
+    uint8_t result = (uint8_t)((state >> 56) & 0xFFu);
+    NSArray<NSString *> *stageNames = @[
+        @"invalid",
+        @"native-ctor-allowed",
+        @"identity-snapshot",
+        @"native-coordinator",
+        @"identifiers-group",
+        @"device-model-profile",
+        @"device-model-hooks",
+        @"ios-version-profile",
+        @"ios-version-hooks",
+        @"sysctl-observed",
+        @"sysctlbyname-observed",
+        @"mobilegestalt-observed",
+        @"iokit-observed",
+        @"uname-observed",
+        @"system-version-observed",
+        @"ios-version-cfbundle-hook",
+        @"native-ctor-completed"
+    ];
+    NSArray<NSString *> *resultNames = @[
+        @"checkpoint", @"success", @"skipped", @"disabled",
+        @"missing-data", @"scope-denied", @"symbol-missing", @"failed"
+    ];
+    NSString *stageName = stage < stageNames.count ? stageNames[stage] : @"invalid-stage";
+    NSString *resultName = result < resultNames.count ? resultNames[result] : @"invalid-result";
+    NSMutableArray<NSString *> *reachedStages = [NSMutableArray array];
+    for (NSUInteger index = 1; index < stageNames.count; index++) {
+        if ((reachedMask & (1u << (index - 1u))) != 0) [reachedStages addObject:stageNames[index]];
+    }
+
+    NSString *processPath = @"";
+    NSString *processName = @"";
+    NSString *bundleID = @"";
+    if (pid > 0) {
+        typedef int (*PXProcPidPathFn)(int, void *, uint32_t);
+        PXProcPidPathFn procPidPath = (PXProcPidPathFn)dlsym(RTLD_DEFAULT, "proc_pidpath");
+        void *libprocHandle = NULL;
+        if (!procPidPath) {
+            libprocHandle = dlopen("/usr/lib/libproc.dylib", RTLD_LAZY | RTLD_LOCAL);
+            if (libprocHandle) procPidPath = (PXProcPidPathFn)dlsym(libprocHandle, "proc_pidpath");
+        }
+        if (procPidPath) {
+            char pathBuffer[4096] = {0};
+            if (procPidPath((int)pid, pathBuffer, (uint32_t)sizeof(pathBuffer)) > 0) {
+                processPath = [NSString stringWithUTF8String:pathBuffer] ?: @"";
+                processName = processPath.lastPathComponent ?: @"";
+                NSRange appMarker = [processPath rangeOfString:@".app/" options:NSBackwardsSearch];
+                if (appMarker.location != NSNotFound) {
+                    NSUInteger appEnd = appMarker.location + @".app".length;
+                    NSString *bundlePath = [processPath substringToIndex:MIN(appEnd, processPath.length)];
+                    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                        [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+                    id identifier = [info isKindOfClass:NSDictionary.class] ? info[@"CFBundleIdentifier"] : nil;
+                    if ([identifier isKindOfClass:NSString.class]) bundleID = identifier;
+                }
+            }
+        }
+        if (libprocHandle) dlclose(libprocHandle);
+    }
+
+    NSString *dir = @"/var/mobile/Library/TLinkIOS";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
+    NSString *path = [dir stringByAppendingPathComponent:@"hook_install_probe.plist"];
+    NSMutableArray *events = [[NSArray arrayWithContentsOfFile:path] mutableCopy];
+    if (![events isKindOfClass:NSMutableArray.class]) events = [NSMutableArray array];
+    NSDictionary *record = @{
+        @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        @"pid": @(pid),
+        @"bundleID": bundleID ?: @"",
+        @"processName": processName ?: @"",
+        @"processPath": processPath ?: @"",
+        @"stage": @(stage),
+        @"stageName": stageName,
+        @"result": @(result),
+        @"resultName": resultName,
+        @"reachedMask": @(reachedMask),
+        @"reachedMaskHex": [NSString stringWithFormat:@"0x%04x", reachedMask],
+        @"reachedStages": reachedStages,
+        @"notifyStateStatus": @(stateStatus)
+    };
+    [events addObject:record];
+    if (events.count > 128) [events removeObjectsInRange:NSMakeRange(0, events.count - 128)];
     [events writeToFile:path atomically:YES];
     chmod(path.fileSystemRepresentation, 0644);
     chown(path.fileSystemRepresentation, 501, 501);

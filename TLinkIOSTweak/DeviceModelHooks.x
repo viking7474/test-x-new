@@ -179,12 +179,16 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
 %ctor {
     @autoreleasepool {
         if (!PXBootstrapAllows(PXHookCapabilityNative)) return;
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelProfile,
+                                        PXHookDiagnosticResultCheckpoint);
         PXFileDebugAIDA64Log("[DeviceModel.ctor] enter");
         PXLog(@"[model] Initializing device model foundation hooks");
         
         // CRITICAL SAFETY CHECK: Only initialize hooks if we can get a valid bundle ID
         NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (!currentBundleID) {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelProfile,
+                                            PXHookDiagnosticResultFailed);
             PXLog(@"[model] No bundle ID available, not initializing device model hooks");
             return;
         }
@@ -194,12 +198,16 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
         BOOL allowed = PXProcessIsAllowedForSpoofing(currentBundleID, proc, PXScopeOptionAllowSafariAuthStack);
         PXFileDebugAIDA64Log("[DeviceModel.ctor] scope allowed=%d bundle=%s", allowed, currentBundleID.UTF8String ?: "<nil>");
         if (!manager || !allowed) {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelProfile,
+                allowed ? PXHookDiagnosticResultFailed : PXHookDiagnosticResultScopeDenied);
             PXLog(@"[model] App %@ is not enabled for spoofing, not initializing hooks", currentBundleID);
             return;
         }
         
         // Toggle: DeviceModel identifier must be enabled
         if (!isDeviceModelSpoofingEnabled()) {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelProfile,
+                                            PXHookDiagnosticResultDisabled);
             PXLog(@"[model] Device model spoofing not enabled for app %@, not initializing hooks", currentBundleID);
             return;
         }
@@ -207,9 +215,13 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
         // Profile value must be available before installing hooks
         NSString *testModel = getSpoofedDeviceModel();
         if (!testModel.length) {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelProfile,
+                                            PXHookDiagnosticResultMissingData);
             PXLog(@"[model] WARNING: Could not retrieve spoofed model, not initializing hooks");
             return;
         }
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelProfile,
+                                        PXHookDiagnosticResultSuccess);
         
         PXLog(@"[model] Successfully retrieved spoofed model: %@ — installing DeviceModelFoundation (UIDevice.model/localizedModel only)", testModel);
         CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
@@ -225,6 +237,8 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
 
         PXFileDebugAIDA64Log("[DeviceModel.ctor] before %%init DeviceModelFoundation");
         %init(DeviceModelFoundation);
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageDeviceModelHooks,
+                                        PXHookDiagnosticResultSuccess);
         PXFileDebugAIDA64Log("[DeviceModel.ctor] after %%init DeviceModelFoundation exit");
     }
 }

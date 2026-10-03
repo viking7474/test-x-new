@@ -1717,6 +1717,8 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
 %ctor {
     @autoreleasepool {
         if (!PXBootstrapAllows(PXHookCapabilityWebContent | PXHookCapabilityWebNetworking)) return;
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionProfile,
+                                        PXHookDiagnosticResultCheckpoint);
         PXFileDebugAIDA64Log("[IOSVersion.ctor] enter");
         // Capture the main bundle identity before this file installs any NSBundle hooks.
         // Hook bodies below must use this immutable value rather than re-entering
@@ -1726,6 +1728,8 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         
         // Skip for system processes to avoid potential issues
         if (isCriticalSystemProcess(bundleID)) {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionProfile,
+                                            PXHookDiagnosticResultSkipped);
             return;
         }
         
@@ -1735,10 +1739,21 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         BOOL allowed = PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
         PXFileDebugAIDA64Log("[IOSVersion.ctor] scope allowed=%d bundle=%s", allowed, bundleID.UTF8String ?: "<nil>");
         if (!allowed) {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionProfile,
+                                            PXHookDiagnosticResultScopeDenied);
             // App is NOT scoped - no hooks, no interference, no crashes
             IOSVERSION_LOG(@"App %@ is not scoped, skipping iOS version hook installation", bundleID);
             return;
         }
+
+        IdentifierManager *diagnosticManager = [IdentifierManager sharedManager];
+        BOOL diagnosticEnabled = [diagnosticManager isIdentifierEnabled:@"IOSVersion"];
+        NSDictionary *diagnosticVersionInfo = diagnosticEnabled ? getIOSVersionInfo() : nil;
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionProfile,
+            !diagnosticEnabled ? PXHookDiagnosticResultDisabled :
+            ([diagnosticVersionInfo[@"version"] isKindOfClass:NSString.class] &&
+             [diagnosticVersionInfo[@"version"] length] ? PXHookDiagnosticResultSuccess :
+             PXHookDiagnosticResultMissingData));
         
         IOSVERSION_LOG(@"App %@ is scoped, installing iOS version hooks", bundleID);
         
@@ -1839,9 +1854,14 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
             if (cfBundleGetValueForInfoDictionaryKeyPtr) {
                 PXFileDebugAIDA64Log("[IOSVersion.ctor] before hook CFBundleGetValueForInfoDictionaryKey");
                 MSHookFunction(cfBundleGetValueForInfoDictionaryKeyPtr, (void *)replaced_CFBundleGetValueForInfoDictionaryKey, (void **)&original_CFBundleGetValueForInfoDictionaryKey);
+                PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionCFBundleHook,
+                    original_CFBundleGetValueForInfoDictionaryKey ? PXHookDiagnosticResultSuccess :
+                    PXHookDiagnosticResultFailed);
                 PXFileDebugAIDA64Log("[IOSVersion.ctor] after hook CFBundleGetValueForInfoDictionaryKey");
                 IOSVERSION_LOG(@"Successfully hooked CFBundleGetValueForInfoDictionaryKey");
             } else {
+                PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionCFBundleHook,
+                                                PXHookDiagnosticResultSymbolMissing);
                 // If we can't find the symbol, create a stub implementation
                 IOSVERSION_LOG(@"⚠️ Failed to find CFBundleGetValueForInfoDictionaryKey symbols, using fallback");
                 
@@ -1850,6 +1870,8 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
                 IOSVERSION_LOG(@"Set original_CFBundleGetValueForInfoDictionaryKey to NULL, will use fallback in replacement function");
             }
         } else {
+            PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionCFBundleHook,
+                                            PXHookDiagnosticResultSymbolMissing);
             IOSVERSION_LOG(@"⚠️ Failed to open CoreFoundation framework");
         }
         
@@ -1898,6 +1920,8 @@ static BOOL isCriticalSystemProcess(NSString *bundleID) {
         // Initialize Objective-C hooks for scoped apps only
         PXFileDebugAIDA64Log("[IOSVersion.ctor] before %%init");
         %init;
+        PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOSVersionHooks,
+                                        PXHookDiagnosticResultSuccess);
         PXFileDebugAIDA64Log("[IOSVersion.ctor] after %%init");
         
         IOSVERSION_LOG(@"iOS Version Hooks successfully initialized for scoped app: %@", bundleID);

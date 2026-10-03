@@ -30,6 +30,8 @@ entitlements = read("ent.plist")
 daemon_entitlements = read("daemon_ent.plist")
 file_debug = read("TLinkIOSTweak/PXFileDebug.h")
 tweak_main = read("TLinkIOSTweak/Tweak.x")
+device_model_hooks = read("TLinkIOSTweak/DeviceModelHooks.x")
+ios_version_hooks = read("TLinkIOSTweak/IOSVersionHooks.x")
 scope = read("TLinkIOSTweak/PXScope.m")
 runtime_snapshot = read("common/PXRuntimeSnapshot.m")
 identity_snapshot = read("common/PXIdentitySnapshot.m")
@@ -124,6 +126,30 @@ require('PX_BOOTSTRAP_DECISION_NOTIFY' in file_debug and
         '@"bundleID"' in daemon and
         'notify_get_state(self.bootstrapDecisionNotifyToken, &state)' in daemon,
         "RootHide bootstrap diagnostics do not identify the denied/allowed target process")
+require('PX_HOOK_DIAGNOSTIC_NOTIFY' in file_debug and
+        'PXFileDebugSignalHookDiagnostic' in file_debug and
+        'reachedMask |= (uint16_t)(1u << ((uint8_t)stage - 1u))' in file_debug and
+        'notify_get_state(token, &previous)' in file_debug and
+        'hook_install_probe.plist' in daemon and
+        'recordHookDiagnosticSignal' in daemon and
+        'notify_get_state(self.hookDiagnosticNotifyToken, &state)' in daemon and
+        'notify_set_state(_hookDiagnosticNotifyToken, 0)' in daemon and
+        'notify_set_state(self.hookDiagnosticNotifyToken, 0)' not in
+            daemon.split('- (void)recordHookDiagnosticSignal', 1)[1].split('- (void)recordTweakLoadSignal', 1)[0] and
+        '@"reachedStages"' in daemon and
+        'PXHookDiagnosticStageIdentitySnapshot' in tweak_main and
+        'PXHookDiagnosticStageNativeCoordinator' in tweak_main and
+        'PXHookDiagnosticStageIdentifiersGroup' in tweak_main and
+        'PXHookDiagnosticStageSysctlObserved' in tweak_main and
+        'PXHookDiagnosticStageSysctlByNameObserved' in tweak_main and
+        'PXHookDiagnosticStageMobileGestaltObserved' in tweak_main and
+        'PXHookDiagnosticStageIOKitObserved' in tweak_main and
+        'PXHookDiagnosticStageUnameObserved' in tweak_main and
+        'PXHookDiagnosticStageSystemVersionObserved' in tweak_main and
+        'PXHookDiagnosticStageDeviceModelHooks' in device_model_hooks and
+        'PXHookDiagnosticStageIOSVersionHooks' in ios_version_hooks and
+        'PXHookDiagnosticStageIOSVersionCFBundleHook' in ios_version_hooks,
+        "RootHide hook-install telemetry must be cross-sandbox, cumulative, and cover native/profile surfaces")
 require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
         'PXJailbreakRootPath(@"/Library/WeaponX/Runtime/runtime_snapshot.plist")' in runtime_snapshot and
         'PXRuntimeSnapshotLocalContainerPath' in runtime_snapshot and

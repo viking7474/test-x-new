@@ -119,6 +119,41 @@ static inline void PXFileDebugWebKitTrace(NSString *component) {
 
 #define PX_TWEAK_LOAD_NOTIFY "com.hydra.tlinkios.tweakLoaded"
 #define PX_BOOTSTRAP_DECISION_NOTIFY "com.hydra.tlinkios.bootstrapDecision"
+#define PX_HOOK_DIAGNOSTIC_NOTIFY "com.hydra.tlinkios.hookDiagnostic"
+
+// RootHide-safe hook telemetry. Unlike the optional /tmp trace, this channel
+// does not require a writable rootfs path and works across app sandboxes. Keep
+// this list at 16 entries or fewer: the reached-stage mask is encoded in the
+// upper half of notify state together with the last stage/result.
+typedef NS_ENUM(uint8_t, PXHookDiagnosticStage) {
+    PXHookDiagnosticStageNativeCtorAllowed = 1,
+    PXHookDiagnosticStageIdentitySnapshot,
+    PXHookDiagnosticStageNativeCoordinator,
+    PXHookDiagnosticStageIdentifiersGroup,
+    PXHookDiagnosticStageDeviceModelProfile,
+    PXHookDiagnosticStageDeviceModelHooks,
+    PXHookDiagnosticStageIOSVersionProfile,
+    PXHookDiagnosticStageIOSVersionHooks,
+    PXHookDiagnosticStageSysctlObserved,
+    PXHookDiagnosticStageSysctlByNameObserved,
+    PXHookDiagnosticStageMobileGestaltObserved,
+    PXHookDiagnosticStageIOKitObserved,
+    PXHookDiagnosticStageUnameObserved,
+    PXHookDiagnosticStageSystemVersionObserved,
+    PXHookDiagnosticStageIOSVersionCFBundleHook,
+    PXHookDiagnosticStageNativeCtorCompleted,
+};
+
+typedef NS_ENUM(uint8_t, PXHookDiagnosticResult) {
+    PXHookDiagnosticResultCheckpoint = 0,
+    PXHookDiagnosticResultSuccess,
+    PXHookDiagnosticResultSkipped,
+    PXHookDiagnosticResultDisabled,
+    PXHookDiagnosticResultMissingData,
+    PXHookDiagnosticResultScopeDenied,
+    PXHookDiagnosticResultSymbolMissing,
+    PXHookDiagnosticResultFailed,
+};
 
 // Cross-sandbox load probe. RootHide's bootstrap shell and sandboxed app
 // processes do not share a reliable /tmp debug namespace, so the earliest
@@ -147,6 +182,30 @@ static inline void PXFileDebugSignalBootstrapDecision(uint32_t role, uint32_t ca
         (((uint64_t)capabilities & 0xFFFFu) << 48);
     notify_set_state(token, state);
     notify_post(PX_BOOTSTRAP_DECISION_NOTIFY);
+    notify_cancel(token);
+}
+
+static inline void PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStage stage,
+                                                   PXHookDiagnosticResult result) {
+    if (stage < PXHookDiagnosticStageNativeCtorAllowed ||
+        stage > PXHookDiagnosticStageNativeCtorCompleted) return;
+    int token = 0;
+    if (notify_register_check(PX_HOOK_DIAGNOSTIC_NOTIFY, &token) != NOTIFY_STATUS_OK) return;
+
+    uint32_t pid = (uint32_t)getpid();
+    uint64_t previous = 0;
+    uint16_t reachedMask = 0;
+    if (notify_get_state(token, &previous) == NOTIFY_STATUS_OK &&
+        (uint32_t)(previous & 0xFFFFFFFFu) == pid) {
+        reachedMask = (uint16_t)((previous >> 32) & 0xFFFFu);
+    }
+    reachedMask |= (uint16_t)(1u << ((uint8_t)stage - 1u));
+    uint64_t state = (uint64_t)pid |
+        (((uint64_t)reachedMask & 0xFFFFu) << 32) |
+        (((uint64_t)stage & 0xFFu) << 48) |
+        (((uint64_t)result & 0xFFu) << 56);
+    notify_set_state(token, state);
+    notify_post(PX_HOOK_DIAGNOSTIC_NOTIFY);
     notify_cancel(token);
 }
 
