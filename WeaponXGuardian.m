@@ -506,5 +506,13 @@ static NSString *PXWeaponXLaunchDaemonPath(void) {
 
 // Entry point initializer - call this when you want to start the guardian
 void StartWeaponXGuardian(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    // RootHide installs WeaponXDaemon as a persistent LaunchDaemon. Starting a
+    // second GUI-owned guardian here synchronously invokes launchctl and scans
+    // every PID before the first frame, while providing no extra persistence
+    // once the GUI process exits.
+    return;
+#else
     [[WeaponXGuardian sharedInstance] startGuardian];
+#endif
 }

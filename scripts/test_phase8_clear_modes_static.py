@@ -737,11 +737,14 @@ for mutation in ("DELETE FROM ", "UPDATE ", "INSERT INTO ", "REPLACE INTO "):
 # the full spoof stack into Mail when AppDataCleaner kills/relaunches the process.
 require('if ([bundleID isEqualToString:@"com.apple.mobilemail"]) return NO;' in tlink_ui,
         "MobileMail reset target is not excluded from spoof/injection scope")
-sync_start = tlink_ui.index("- (void)syncHookScopeToResetApps")
+sync_start = tlink_ui.index("- (BOOL)syncHookScopeToResetApps")
 sync_end = tlink_ui.index("- (void)selectFakeTapped", sync_start)
 sync_body = tlink_ui[sync_start:sync_end]
 require("PXResetBundlesForSpoofScope" in sync_body,
         "reset-scope synchronization bypasses the clear-only system-app filter")
+require("replaceApplicationScopeWithBundleIDs" in sync_body and
+        "PXWriteSubstrateFilterPlistsInternal(NO)" in sync_body,
+        "reset-scope synchronization is not batch-persisted with a nonblocking startup path")
 reset_start = tlink_ui.index("- (void)performResetAndPrepareNextProfileWithWarnings:")
 reset_end = tlink_ui.index("- (void)backupApps:", reset_start)
 reset_body = tlink_ui[reset_start:reset_end]
@@ -752,8 +755,16 @@ require("[self clearApps:self.selectedResetAppIDs" in reset_body,
 setup_start = tlink_ui.index("- (void)setupDashboardUI")
 setup_end = tlink_ui.index("- (UIView *)dashboardGroupCard", setup_start)
 setup_body = tlink_ui[setup_start:setup_end]
-require("[self syncHookScopeToResetApps]" in setup_body,
-        "dashboard startup must repair stale persisted MobileMail injection scope from older builds")
+require("syncHookScopeToResetApps" not in setup_body and
+        "PXWriteSubstrateFilterPlists" not in setup_body,
+        "dashboard construction must not block first-frame rendering on RootHide filter synchronization")
+appearance_start = tlink_ui.index("- (void)viewDidAppear:(BOOL)animated",
+                                  tlink_ui.index("@implementation TLinkIOSViewController"))
+appearance_end = tlink_ui.index("- (void)viewWillAppear:(BOOL)animated", appearance_start)
+appearance_body = tlink_ui[appearance_start:appearance_end]
+require("scheduleStartupHookScopeRepair" in appearance_body and
+        "syncHookScopeToResetAppsWaitingForDaemon:NO" in sync_body,
+        "stale MobileMail scope repair must remain deferred and nonblocking after first appearance")
 
 # Dormant generic database/system-reference helpers remain source-compatible but fail closed.
 legacy_db_start = cleaner_m.index("- (void)cleanDatabaseFile:(NSString *)dbPath bundleID:")

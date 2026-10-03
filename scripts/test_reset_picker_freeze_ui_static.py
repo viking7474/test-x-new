@@ -32,7 +32,7 @@ require('@"Search apps..."' in controller and '@"%lu selected"' in controller, "
 
 # Selection/Done remains the only owner of selectedResetAppIDs and must not mutate FrozenApps.
 done_start = controller.index('- (void)doneDashboardAppPicker')
-done_end = controller.index('- (void)syncHookScopeToResetApps', done_start)
+done_end = controller.index('- (BOOL)syncHookScopeToResetApps', done_start)
 done_body = controller[done_start:done_end]
 require('self.selectedResetAppIDs = [selected mutableCopy];' in done_body, "Reset picker Done must still commit reset selection")
 require('FreezeManager' not in done_body and 'FrozenApps' not in done_body, "Reset selection commit must not change freeze state")
@@ -43,5 +43,4 @@ require('selectionDraftAppIDs' in select_tail, "row tap must still toggle draft 
 require('freezeApplication:' not in select_tail and 'unfreezeApplication:' not in select_tail, "row tap must never Freeze/Unfreeze")
 
 print('PASS: Reset picker freeze/unfreeze UI is explicit and independent from Reset selection')
-
 

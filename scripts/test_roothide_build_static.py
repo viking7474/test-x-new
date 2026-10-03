@@ -43,6 +43,7 @@ theme_hooks = read("TLinkIOSTweak/ThemeHooks.x")
 user_defaults_hooks = read("TLinkIOSTweak/UserDefaultsHooks.x")
 pasteboard_hooks = read("TLinkIOSTweak/PasteboardHooks.x")
 identifier_manager = read("common/IdentifierManager.m")
+guardian = read("WeaponXGuardian.m")
 
 for token in (
     "THEOS_PACKAGE_SCHEME=roothide",
@@ -270,6 +271,26 @@ require("PXJailbreakPathCandidates" in bottom_buttons and
 require("static BOOL PXWriteSubstrateFilterPlists(void)" in view_controller and
         "return [syncStatus isEqualToString:@\"in_sync\"];" in view_controller,
         "Filter synchronization does not report whether the installed RootHide filters match")
+require("PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters)" in view_controller and
+        "if (installedAnyBefore && installedAllBefore) return YES;" in view_controller and
+        "if (!waitForInstalledFilters)" in view_controller and
+        '@"staged_async"' in view_controller and
+        "scheduleStartupHookScopeRepair" in view_controller and
+        "syncHookScopeToResetAppsWaitingForDaemon:NO" in view_controller and
+        "replaceApplicationScopeWithBundleIDs" in view_controller,
+        "RootHide dashboard startup can still block first-frame rendering on filter synchronization")
+primary_controller_start = view_controller.index("@implementation TLinkIOSViewController")
+primary_view_did_load_start = view_controller.index("- (void)viewDidLoad", primary_controller_start)
+primary_view_did_load_end = view_controller.index("- (void)viewDidLayoutSubviews", primary_view_did_load_start)
+primary_view_did_load = view_controller[primary_view_did_load_start:primary_view_did_load_end]
+require("[self setupUI];" in primary_view_did_load and
+        "[self loadSettings];" not in primary_view_did_load and
+        "[self setupProfileManagement];" not in primary_view_did_load,
+        "Dashboard startup still builds hidden legacy app/profile UI before the first frame")
+require("#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)" in guardian and
+        "void StartWeaponXGuardian(void)" in guardian and
+        "RootHide installs WeaponXDaemon as a persistent LaunchDaemon" in guardian,
+        "RootHide still starts the redundant GUI guardian during application launch")
 require('NSString *canonicalDir = PXJailbreakRootPath(@"/usr/lib/TweakInject")' in view_controller and
         '@"daemon_sync_timeout"' in view_controller and
         'attempt < 60' in view_controller and

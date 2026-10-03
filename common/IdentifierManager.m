@@ -2201,6 +2201,55 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     }
 }
 
+- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs {
+    self.error = nil;
+    NSMutableOrderedSet<NSString *> *normalized = [NSMutableOrderedSet orderedSet];
+    for (id value in bundleIDs ?: @[]) {
+        if (![value isKindOfClass:NSString.class] || ![(NSString *)value length]) continue;
+        NSString *bundleID = (NSString *)value;
+        if ([bundleID isEqualToString:@"com.hydra.tlinkios"] ||
+            [bundleID isEqualToString:@"com.hydra.weaponx"] ||
+            [bundleID isEqualToString:@"com.hydra.projectx"]) continue;
+        [normalized addObject:bundleID];
+    }
+
+    NSMutableDictionary *replacement = [NSMutableDictionary dictionaryWithCapacity:normalized.count];
+    for (NSString *bundleID in normalized) {
+        NSMutableDictionary *appInfo = [self.scopedApps[bundleID] mutableCopy];
+        if (!appInfo) {
+            LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
+            NSString *buildVersion = nil;
+            if (proxy) {
+                if ([proxy respondsToSelector:@selector(bundleVersion)]) {
+                    buildVersion = [proxy performSelector:@selector(bundleVersion)];
+                } else {
+                    @try {
+                        buildVersion = [proxy valueForKey:@"bundleVersion"] ?: [proxy valueForKey:@"CFBundleVersion"];
+                    } @catch (__unused NSException *exception) {
+                    }
+                }
+            }
+            appInfo = [@{
+                @"name": proxy.localizedName ?: bundleID,
+                @"version": proxy.shortVersionString ?: (proxy ? @"Unknown" : @"Helper/Extension"),
+                @"build": buildVersion ?: @"Unknown",
+                @"installed": @YES,
+                @"bundleID": bundleID,
+                @"originalBundleID": bundleID
+            } mutableCopy];
+        }
+        appInfo[@"enabled"] = @YES;
+        appInfo[@"bundleID"] = bundleID;
+        appInfo[@"originalBundleID"] = bundleID;
+        replacement[bundleID] = appInfo;
+    }
+
+    if ([self.scopedApps isEqualToDictionary:replacement]) return YES;
+    self.scopedApps = replacement;
+    [self saveScopedApps];
+    return self.error == nil;
+}
+
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID {
     if (bundleID) {
         NSDictionary *appInfo = self.scopedApps[bundleID];

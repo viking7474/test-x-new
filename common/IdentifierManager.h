@@ -14,6 +14,7 @@
 - (void)addApplicationToScope:(NSString *)bundleID;
 - (void)removeApplicationFromScope:(NSString *)bundleID;
 - (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled;
+- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs;
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID;
 - (BOOL)isApplicationEnabled:(NSString *)bundleID;
 - (void)refreshScopedAppsInfoIfNeeded;

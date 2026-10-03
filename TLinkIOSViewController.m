@@ -289,7 +289,7 @@ static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
 /// (never Bundles=[]), and the keychain bridge collapses to the no-injection placeholder.
 /// Always includes SpringBoard so Profile Indicator (and other SB-hosted UI) can load.
 /// Canonical union/empty-state rules live in PXInjectionFilter (shared with the daemon).
-static BOOL PXWriteSubstrateFilterPlists(void) {
+static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
     // 1–5. Canonical filter computation lives in PXInjectionFilter (single source of
     // truth shared with the mount daemon): enabled mains from global_scope → expand
     // extensions; shared WebKit helpers excluded from monolithic filter → tweak list (+SpringBoard, never empty, never the
@@ -315,6 +315,30 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     ]);
 #endif
     NSFileManager *fm = [NSFileManager defaultManager];
+
+    // The normal launch path should be read-only. When the daemon-installed
+    // filters already match the desired scope, avoid staging writes, shell
+    // fallbacks, Darwin notifications and the verification polling loop.
+    BOOL installedAnyBefore = NO;
+    BOOL installedAllBefore = dirs.count > 0;
+    for (NSString *dir in dirs) {
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
+            installedAllBefore = NO;
+            continue;
+        }
+        installedAnyBefore = YES;
+        NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(
+            [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"]);
+        NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(
+            [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"]);
+        if (![installedTweak isEqualToArray:validBundles] ||
+            ![installedBridge isEqualToArray:bridgeBundles]) {
+            installedAllBefore = NO;
+        }
+    }
+    if (installedAnyBefore && installedAllBefore) return YES;
+
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     [fm createDirectoryAtPath:stagingDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
     NSString *tmpTweakPath = [stagingDir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
@@ -343,6 +367,23 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         @"stagingBridgeBundles": stagingBridgeBundles,
         @"targetDirs": dirs ?: @[]
     } mutableCopy];
+
+    if (!waitForInstalledFilters) {
+        // Startup repair is best-effort and must never hold the first frame for
+        // RootHide daemon acknowledgement. Reset Data continues to use the
+        // synchronous wrapper below and therefore retains fail-closed checks.
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFSTR("com.hydra.tlinkios.filterPlistChanged"),
+                                             NULL,
+                                             NULL,
+                                             true);
+        debug[@"syncPollCount"] = @0;
+        debug[@"syncStatus"] = stagingMatches ? @"staged_async" : @"staging_mismatch";
+        NSString *debugDir = @"/var/mobile/Library/TLinkIOS";
+        [fm createDirectoryAtPath:debugDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
+        [debug writeToFile:[debugDir stringByAppendingPathComponent:@"filter_sync_debug.plist"] atomically:YES];
+        return stagingMatches;
+    }
 
     // Direct writes are only an optimization. Package-owned filter files are
     // normally root:wheel, while the GUI runs as mobile, so RootHide expects the
@@ -459,6 +500,10 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     return [syncStatus isEqualToString:@"in_sync"];
 }
 
+static BOOL PXWriteSubstrateFilterPlists(void) {
+    return PXWriteSubstrateFilterPlistsInternal(YES);
+}
+
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
 @property (nonatomic, strong) ProgressHUDView *progressHUD;
 @property (nonatomic, strong) UIScrollView *scrollView;
@@ -488,6 +533,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 @property (nonatomic, copy) NSString *pendingClearDataDetailsStr;
 @property (nonatomic, strong) NSArray *scopedApps;
 @property (nonatomic, strong) UIButton *scrollToBottomButton;
+@property (nonatomic, assign) BOOL startupScopeRepairScheduled;
 
 // Trial offer banner properties
 @property (nonatomic, strong) UIView *trialOfferBannerView;
@@ -500,6 +546,8 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (void)showError:(NSError *)error;
 - (void)killEnabledAppsAndRespring;
 - (BOOL)syncHookScopeToResetApps;
+- (BOOL)syncHookScopeToResetAppsWaitingForDaemon:(BOOL)waitForDaemon;
+- (void)scheduleStartupHookScopeRepair;
 - (void)loadSettings;
 - (void)setupUI;
 - (void)addIdentifierSection:(NSString *)type title:(NSString *)title;
@@ -2570,10 +2618,11 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
                                               object:nil];
     
     [self setupUI];
-    [self loadSettings];
-    // Remove duplicate call to setupProfileButtons since it's already called in setupUI
-    [self setupProfileManagement];
-    
+
+    // The active Dashboard does not render the legacy identifier/app-switch tree.
+    // Building that hidden tree here fetched icons and created a full card hierarchy
+    // for every scoped bundle before the first frame. Profile/RRS entry points load
+    // ProfileManager lazily when the user opens those flows.
 
 }
 
@@ -2593,6 +2642,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self scheduleStartupHookScopeRepair];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -6490,11 +6540,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.selectedResetAppIDs = [[defaults objectForKey:PXDashboardResetAppsKey] mutableCopy] ?: [NSMutableArray array];
     self.selectedRRSAppIDs = [[defaults objectForKey:PXDashboardRRSAppsKey] mutableCopy] ?: [NSMutableArray array];
 
-    // Repair persisted scope from older builds where reset selection and injection
-    // scope were coupled. In particular, keep MobileMail selectable for clear while
-    // removing it from the tweak filter before the user can relaunch Mail.
-    [self syncHookScopeToResetApps];
-
     self.nextFakeOptions = [defaults objectForKey:PXDashboardFakeOptionsKey] ?: @{};
     self.nextFakePreview = [defaults objectForKey:PXDashboardFakePreviewKey];
     self.rrsRestoreOrder = [defaults stringForKey:PXDashboardRestoreOrderKey] ?: @"oldestFirst";
@@ -6575,8 +6620,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     [self.mainStackView addArrangedSubview:self.rrsNoteTextField];
 
     [self refreshDashboardSelectionLabels];
-    // Always rebuild filter from full enabled global_scope.
-    PXWriteSubstrateFilterPlists();
 }
 
 - (UIView *)dashboardStatusCard {
@@ -7360,22 +7403,32 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (BOOL)syncHookScopeToResetApps {
+    return [self syncHookScopeToResetAppsWaitingForDaemon:YES];
+}
+
+- (BOOL)syncHookScopeToResetAppsWaitingForDaemon:(BOOL)waitForDaemon {
     NSArray<NSString *> *spoofEligibleResetApps = PXResetBundlesForSpoofScope(self.selectedResetAppIDs ?: @[]);
     NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(spoofEligibleResetApps);
-    NSSet<NSString *> *resetSet = [NSSet setWithArray:expandedBundles];
-    NSDictionary *scopedApps = [self.manager getApplicationInfo:nil] ?: @{};
-    for (NSString *bundleID in scopedApps.allKeys) {
-        if (![resetSet containsObject:bundleID]) {
-            [self.manager removeApplicationFromScope:bundleID];
+    @synchronized (self.manager) {
+        if (![self.manager replaceApplicationScopeWithBundleIDs:expandedBundles]) return NO;
+        // Scope was just rewritten; rebuild filter from full enabled global_scope.
+        return waitForDaemon ? PXWriteSubstrateFilterPlists()
+                             : PXWriteSubstrateFilterPlistsInternal(NO);
+    }
+}
+
+- (void)scheduleStartupHookScopeRepair {
+    if (self.startupScopeRepairScheduled) return;
+    self.startupScopeRepairScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (![self syncHookScopeToResetAppsWaitingForDaemon:NO]) {
+            NSLog(@"[TLinkIOS] Deferred startup filter repair could not be staged; Reset Data will retry synchronously");
         }
-    }
-    for (NSString *bundleID in resetSet) {
-        [self.manager addApplicationToScope:bundleID];
-        [self.manager setApplication:bundleID enabled:YES];
-    }
-    [self.manager saveScopedApps];
-    // Scope was just rewritten; rebuild filter from full enabled global_scope.
-    return PXWriteSubstrateFilterPlists();
+    });
 }
 
 - (void)selectFakeTapped {
