@@ -2218,17 +2218,11 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         NSMutableDictionary *appInfo = [self.scopedApps[bundleID] mutableCopy];
         if (!appInfo) {
             LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-            NSString *buildVersion = nil;
-            if (proxy) {
-                if ([proxy respondsToSelector:@selector(bundleVersion)]) {
-                    buildVersion = [proxy performSelector:@selector(bundleVersion)];
-                } else {
-                    @try {
-                        buildVersion = [proxy valueForKey:@"bundleVersion"] ?: [proxy valueForKey:@"CFBundleVersion"];
-                    } @catch (__unused NSException *exception) {
-                    }
-                }
-            }
+            // bundleVersion is part of the local private-framework declaration
+            // above and is already used by refreshScopedAppsInfoIfNeeded. Calling
+            // that typed property keeps RootHide's stricter compiler from trying
+            // to resolve NSObject runtime/KVC selectors on a forward-only class.
+            NSString *buildVersion = proxy.bundleVersion;
             appInfo = [@{
                 @"name": proxy.localizedName ?: bundleID,
                 @"version": proxy.shortVersionString ?: (proxy ? @"Unknown" : @"Helper/Extension"),

@@ -279,6 +279,14 @@ require("PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters)" in 
         "syncHookScopeToResetAppsWaitingForDaemon:NO" in view_controller and
         "replaceApplicationScopeWithBundleIDs" in view_controller,
         "RootHide dashboard startup can still block first-frame rendering on filter synchronization")
+batch_scope_start = identifier_manager.index("- (BOOL)replaceApplicationScopeWithBundleIDs:")
+batch_scope_end = identifier_manager.index("- (NSDictionary *)getApplicationInfo:", batch_scope_start)
+batch_scope_body = identifier_manager[batch_scope_start:batch_scope_end]
+require("NSString *buildVersion = proxy.bundleVersion;" in batch_scope_body and
+        "respondsToSelector:" not in batch_scope_body and
+        "performSelector:" not in batch_scope_body and
+        "valueForKey:" not in batch_scope_body,
+        "RootHide batch scope metadata still invokes undeclared NSObject selectors on LSApplicationProxy")
 primary_controller_start = view_controller.index("@implementation TLinkIOSViewController")
 primary_view_did_load_start = view_controller.index("- (void)viewDidLoad", primary_controller_start)
 primary_view_did_load_end = view_controller.index("- (void)viewDidLayoutSubviews", primary_view_did_load_start)
