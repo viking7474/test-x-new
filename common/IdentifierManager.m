@@ -87,6 +87,12 @@ static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
     return result;
 }
 
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+static BOOL PXIdentifierManagerIsManagerProcess(void) {
+    return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.hydra.tlinkios"];
+}
+#endif
+
 static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;
@@ -563,7 +569,14 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
 
 - (NSString *)getActiveProfileId {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSString *profileID = PXRuntimeSnapshotProfileID();
+    // The manager mutates the live active profile before the daemon has had a
+    // chance to republish its runtime snapshot. Reading the snapshot here can
+    // therefore redirect a reset/regeneration into the previously active
+    // profile. Only injected hosts should prefer the sandbox-safe mirror.
+    NSString *profileID = nil;
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        profileID = PXRuntimeSnapshotProfileID();
+    }
     if (!profileID.length) profileID = PXActiveProfileID();
 #else
     NSString *profileID = PXActiveProfileID();
@@ -1544,9 +1557,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 - (BOOL)isIdentifierEnabled:(NSString *)type {
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
-    BOOL isManagerProcess = [bundleID isEqualToString:@"com.hydra.tlinkios"];
-    if (!isManagerProcess) {
+    if (!PXIdentifierManagerIsManagerProcess()) {
         // Injected host processes consume the daemon-published toggle map. A
         // persisted false remains authoritative. Only a genuinely missing key
         // may fall back to secondary flags/profile evidence to repair older
@@ -1572,18 +1583,21 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     // Injected App Store processes cannot rely on direct rootfs access to
     // /var/mobile/Library. Consume the daemon-published jbroot snapshot first.
-    PXIdentitySnapshot *runtimeSnapshot = PXCurrentIdentitySnapshot();
-    if (runtimeSnapshot.valid) {
-        id runtimeRawValue = runtimeSnapshot.deviceIDs[type];
-        if ([runtimeRawValue isKindOfClass:NSString.class] && [(NSString *)runtimeRawValue length]) {
-            return runtimeRawValue;
-        }
-        if ([runtimeRawValue isKindOfClass:NSNumber.class]) {
-            return [(NSNumber *)runtimeRawValue stringValue];
-        }
-        if ([type isEqualToString:@"SystemBootUUID"]) {
-            id legacy = runtimeSnapshot.deviceIDs[@"HardwareUUID"];
-            if ([legacy isKindOfClass:NSString.class] && [(NSString *)legacy length]) return legacy;
+    // The manager must instead read the live profile being edited.
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        PXIdentitySnapshot *runtimeSnapshot = PXCurrentIdentitySnapshot();
+        if (runtimeSnapshot.valid) {
+            id runtimeRawValue = runtimeSnapshot.deviceIDs[type];
+            if ([runtimeRawValue isKindOfClass:NSString.class] && [(NSString *)runtimeRawValue length]) {
+                return runtimeRawValue;
+            }
+            if ([runtimeRawValue isKindOfClass:NSNumber.class]) {
+                return [(NSNumber *)runtimeRawValue stringValue];
+            }
+            if ([type isEqualToString:@"SystemBootUUID"]) {
+                id legacy = runtimeSnapshot.deviceIDs[@"HardwareUUID"];
+                if ([legacy isKindOfClass:NSString.class] && [(NSString *)legacy length]) return legacy;
+            }
         }
     }
 #endif
@@ -2465,9 +2479,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // never masked by a not-yet-republished snapshot.
     NSDictionary *loadedDict = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSString *currentBundleID = NSBundle.mainBundle.bundleIdentifier;
-    BOOL isManagerProcess = [currentBundleID isEqualToString:@"com.hydra.tlinkios"];
-    if (!isManagerProcess) {
+    if (!PXIdentifierManagerIsManagerProcess()) {
         NSDictionary *runtimeTLinkSettings = PXRuntimeSnapshotTLinkSettings();
         if (runtimeTLinkSettings.count) loadedDict = runtimeTLinkSettings;
     }
@@ -2564,8 +2576,10 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // available so scope and identity belong to one daemon-owned generation.
     NSDictionary *scopedAppsDict = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeScope = PXRuntimeSnapshotGlobalScope();
-    if (runtimeScope.count) scopedAppsDict = runtimeScope;
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        NSDictionary *runtimeScope = PXRuntimeSnapshotGlobalScope();
+        if (runtimeScope.count) scopedAppsDict = runtimeScope;
+    }
 #endif
     if (!scopedAppsDict) scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
     if (scopedAppsDict && scopedAppsDict[@"ScopedApps"]) {

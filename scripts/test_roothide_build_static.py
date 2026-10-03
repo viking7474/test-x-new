@@ -200,11 +200,30 @@ require('PXRuntimeSnapshotTLinkSettings()' in identifier_manager and
         'runtimeSettings[@"EnabledIdentifiers"]' in identifier_manager and
         'runtimeEnabled[lookupType]' in identifier_manager and
         'PXRuntimeSnapshotImpliesIdentifierEnabled(type)' in identifier_manager and
-        'isManagerProcess = [bundleID isEqualToString:@"com.hydra.tlinkios"]' in identifier_manager and
-        'isManagerProcess = [currentBundleID isEqualToString:@"com.hydra.tlinkios"]' in identifier_manager and
+        'PXIdentifierManagerIsManagerProcess' in identifier_manager and
+        'if (!PXIdentifierManagerIsManagerProcess())' in identifier_manager and
         'PXRuntimeSnapshotGlobalScope()' in identifier_manager and
         'PXCurrentIdentitySnapshot()' in identifier_manager,
         "IdentifierManager does not separate live manager settings from RootHide injected-host snapshot settings")
+active_profile_method = identifier_manager[
+    identifier_manager.index('- (NSString *)getActiveProfileId'):
+    identifier_manager.index('- (NSString *)profileIdentityPath')
+]
+require('if (!PXIdentifierManagerIsManagerProcess())' in active_profile_method and
+        'profileID = PXRuntimeSnapshotProfileID();' in active_profile_method and
+        'if (!profileID.length) profileID = PXActiveProfileID();' in active_profile_method and
+        active_profile_method.index('if (!PXIdentifierManagerIsManagerProcess())') <
+        active_profile_method.index('profileID = PXRuntimeSnapshotProfileID();') <
+        active_profile_method.index('if (!profileID.length) profileID = PXActiveProfileID();'),
+        "RootHide manager can still regenerate identifiers into the stale runtime-snapshot profile")
+current_value_method = identifier_manager[
+    identifier_manager.index('- (NSString *)currentValueForIdentifier'):
+    identifier_manager.index('#pragma mark - App Management')
+]
+require('if (!PXIdentifierManagerIsManagerProcess())' in current_value_method and
+        current_value_method.index('if (!PXIdentifierManagerIsManagerProcess())') <
+        current_value_method.index('PXIdentitySnapshot *runtimeSnapshot = PXCurrentIdentitySnapshot();'),
+        "RootHide manager can still read identifier values from a stale runtime snapshot")
 require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
         'PXSanitizedIdentifierSettings(self.settings)' in identifier_manager and
         'dictionaryWithContentsOfFile:prefsFile' in identifier_manager and
