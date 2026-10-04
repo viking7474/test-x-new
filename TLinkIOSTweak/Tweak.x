@@ -79,7 +79,7 @@ __attribute__((constructor(101))) static void PXTLinkIOSTweakEarlyLoadMarker(voi
 static NSMutableDictionary *valueCache;
 
 static NSString *PXValidatedTelephonySnapshotString(NSString *key) {
-\n    if (![key isKindOfClass:NSString.class] || !key.length) return nil;
+    if (![key isKindOfClass:NSString.class] || !key.length) return nil;
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     if (!snapshot.valid) return nil;
 

@@ -325,9 +325,16 @@ require('return PXJailbreakRootPath(@"/usr/lib/TweakInject");' in daemon and
 require("if (![self syncHookScopeToResetApps])" in view_controller and
         "Không thể bật hook" in view_controller,
         "Reset Data does not stop safely when the injection filter cannot be installed")
-reset_profile_tail = view_controller.split('[self applyFakePreviewToCurrentProfile:preview];', 1)[1][:1200]
-require('CFSTR("com.hydra.tlinkios.profileChanged")' in reset_profile_tail and
-        'CFNotificationCenterPostNotification' in reset_profile_tail,
+reset_profile_start = view_controller.index("- (void)createNextProfileAndRandomizeWithWarnings:")
+reset_profile_end = view_controller.index("- (NSString *)currentProfileRestoreIndexKey", reset_profile_start)
+reset_profile_method = view_controller[reset_profile_start:reset_profile_end]
+apply_profile_marker = "[self applyFakePreviewToCurrentProfile:"
+profile_notification_marker = 'CFSTR("com.hydra.tlinkios.profileChanged")'
+require(apply_profile_marker in reset_profile_method and
+        profile_notification_marker in reset_profile_method and
+        "CFNotificationCenterPostNotification" in reset_profile_method and
+        reset_profile_method.index(apply_profile_marker) <
+        reset_profile_method.index(profile_notification_marker),
         "Reset Data does not republish RootHide runtime mirrors after clearing app containers")
 require("RootHide Bootstrap > App List" not in view_controller and
         "PXRootHideBundlesMissingInjection" not in view_controller,
