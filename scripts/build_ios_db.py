@@ -41,6 +41,18 @@ for regulatory_number, spec in cellular_records.items():
         for key in ("enabled", "physicalSIM", "eSIM", "dualSIM", "cdma"):
             if not isinstance(spec.get(key), bool):
                 raise RuntimeError(f"iphone_cellular_db.json: {regulatory_number} known=true requires {key}")
+        if spec["enabled"] and not (spec["physicalSIM"] or spec["eSIM"]):
+            raise RuntimeError(
+                f"iphone_cellular_db.json: {regulatory_number} enabled cellular requires "
+                "physicalSIM=true or eSIM=true"
+            )
+        if not spec["enabled"] and any(
+            spec[key] for key in ("physicalSIM", "eSIM", "dualSIM", "cdma")
+        ):
+            raise RuntimeError(
+                f"iphone_cellular_db.json: {regulatory_number} disabled cellular cannot "
+                "advertise SIM/CDMA capabilities"
+            )
         if spec["enabled"]:
             tacs = spec.get("imeiTACs")
             if not isinstance(tacs, list) or not tacs:

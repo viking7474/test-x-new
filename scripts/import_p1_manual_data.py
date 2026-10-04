@@ -6,7 +6,7 @@ With --apply it updates only:
   data/iphone_cellular_db.json
   data/iphone_baseband_db.json
 
-The exact ProductType/A-number ownership and required IOSBuild set are verified
+The exact ProductType/A-number ownership, catalog versions, and required IOSBuild set are verified
 against the currently generated canonical databases before any write.
 """
 from __future__ import annotations
@@ -99,10 +99,52 @@ def canonical_ownership(model_root: dict[str, Any]) -> dict[str, str]:
     return owners
 
 
+def validate_database_versions(
+    worksheet: dict[str, Any],
+    model_root: dict[str, Any],
+    cellular_root: dict[str, Any],
+    baseband_root: dict[str, Any],
+    allow_stale: bool,
+) -> None:
+    worksheet_versions = worksheet.get("databaseVersions")
+    if not isinstance(worksheet_versions, dict):
+        raise RuntimeError("worksheet: databaseVersions object is required")
+
+    current_versions = {
+        "model": model_root.get("databaseVersion"),
+        "hardware": model_root.get("hardwareCatalogVersion"),
+        "cellular": cellular_root.get("databaseVersion"),
+        "baseband": baseband_root.get("databaseVersion"),
+    }
+    mismatches = {
+        key: (worksheet_versions.get(key), current)
+        for key, current in current_versions.items()
+        if worksheet_versions.get(key) != current
+    }
+    if not mismatches:
+        return
+
+    details = "; ".join(
+        f"{key}: worksheet={old!r} current={current!r}"
+        for key, (old, current) in sorted(mismatches.items())
+    )
+    if not allow_stale:
+        raise RuntimeError(
+            "worksheet databaseVersions do not match the current catalogs; "
+            f"export a new worksheet ({details})"
+        )
+    print(f"WARNING: accepting stale worksheet due to --allow-stale ({details})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("worksheet", help="worksheet JSON produced by export_p1_manual_template.py")
     parser.add_argument("--apply", action="store_true", help="write validated source catalogs")
+    parser.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="accept mismatched catalog versions (expert recovery only)",
+    )
     args = parser.parse_args()
 
     worksheet_path = Path(args.worksheet)
@@ -117,6 +159,14 @@ def main() -> None:
     build_root = load(BUILD_PATH)
     cellular_root = load(CELLULAR_PATH)
     baseband_root = load(BASEBAND_PATH)
+
+    validate_database_versions(
+        worksheet,
+        model_root,
+        cellular_root,
+        baseband_root,
+        args.allow_stale,
+    )
 
     owners = canonical_ownership(model_root)
     device_to_builds = build_root.get("deviceToBuilds", {})
@@ -171,6 +221,14 @@ def main() -> None:
             esim = require_bool(cell, "eSIM", context + " cellular")
             dual = require_bool(cell, "dualSIM", context + " cellular")
             cdma = require_bool(cell, "cdma", context + " cellular")
+            if enabled and not (physical or esim):
+                raise RuntimeError(
+                    f"{context}: enabled cellular requires physicalSIM=true or eSIM=true"
+                )
+            if not enabled and (physical or esim or dual or cdma):
+                raise RuntimeError(
+                    f"{context}: disabled cellular cannot advertise SIM/CDMA capabilities"
+                )
             new_cell = {
                 "known": True,
                 "enabled": enabled,

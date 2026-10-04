@@ -94,6 +94,10 @@ def main() -> None:
 
     for token in (
         "DRY RUN PASS",
+        "validate_database_versions",
+        "--allow-stale",
+        "enabled cellular requires physicalSIM=true or eSIM=true",
+        "disabled cellular cannot advertise SIM/CDMA capabilities",
         "requiredBuilds must exactly match canonical IOSBuild set",
         "baseband known=true requires cellular known=true enabled=true",
         "atomic_write_json",
@@ -152,6 +156,13 @@ def main() -> None:
           "does-not-match-canonical-baseband-build" in cellular and
           "does-not-match-canonical-baseband-family" in cellular,
           "cellular validator enforces exact build-specific baseband tuple")
+    check("if (regionalValue)" in cellular and
+          "requiresRegionalCellular" in cellular and
+          "authoritative-cellular-required-for-regulatory-model" in cellular and
+          "authoritative-sim-capability-required" in cellular and
+          cellular.index("if (hasCellular && !physical && !esim) physical = YES;") >
+          cellular.index("Backward-compatible schema used by older database generations"),
+          "regional cellular lookup and authoritative SIM capabilities fail closed")
     check("authoritative-baseband-required-for-regulatory-model" in cellular,
           "known cellular fails closed when regional baseband is still unknown")
 

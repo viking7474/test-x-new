@@ -37,13 +37,18 @@ static BOOL PXCellHasAllowedPrefix(NSString *value, NSArray *prefixes) {
 }
 
 static NSDictionary *PXResolvedCellularSpec(NSDictionary *model, NSDictionary *deviceIDs) {
-    NSDictionary *regional = [model[@"cellularByRegulatoryModelNumber"] isKindOfClass:[NSDictionary class]]
-        ? model[@"cellularByRegulatoryModelNumber"] : nil;
+    id regionalValue = model[@"cellularByRegulatoryModelNumber"];
+    NSDictionary *regional = [regionalValue isKindOfClass:[NSDictionary class]]
+        ? regionalValue : nil;
     NSString *regulatoryModelNumber = PXCellString(deviceIDs[@"RegulatoryModelNumber"]);
-    NSDictionary *regionalSpec = regulatoryModelNumber.length &&
-        [regional[regulatoryModelNumber] isKindOfClass:[NSDictionary class]]
-        ? regional[regulatoryModelNumber] : nil;
-    if (regionalSpec) return regionalSpec;
+    // Once a model publishes a regional map, an exact A-number match is
+    // mandatory. Falling back to a generic record here could leak another
+    // region's SIM/eSIM capabilities into an unknown regulatory variant.
+    if (regionalValue) {
+        return regulatoryModelNumber.length &&
+            [regional[regulatoryModelNumber] isKindOfClass:[NSDictionary class]]
+            ? regional[regulatoryModelNumber] : nil;
+    }
     return [model[@"cellular"] isKindOfClass:[NSDictionary class]] ? model[@"cellular"] : nil;
 }
 
@@ -61,6 +66,7 @@ PXCellularIdentityValidationResult *PXValidateCellularIdentitySchema(NSDictionar
     NSMutableDictionary<NSString *, NSString *> *issues = [NSMutableDictionary dictionary];
     NSDictionary *model = [modelRecord isKindOfClass:[NSDictionary class]] ? modelRecord : @{};
     NSDictionary *caps = [model[@"capabilities"] isKindOfClass:[NSDictionary class]] ? model[@"capabilities"] : @{};
+    BOOL requiresRegionalCellular = model[@"cellularByRegulatoryModelNumber"] != nil;
     // Regulatory A-number overrides take precedence because SIM/eSIM behavior can
     // vary by region even when ProductType/board are otherwise identical.
     NSDictionary *cellularSpec = PXResolvedCellularSpec(model, canonical);
@@ -85,15 +91,21 @@ PXCellularIdentityValidationResult *PXValidateCellularIdentitySchema(NSDictionar
             dual = PXCellBoolean(cellularSpec[@"dualSIM"], NULL);
             cdma = PXCellBoolean(cellularSpec[@"cdma"], NULL);
         }
-    } else {
+    } else if (!requiresRegionalCellular) {
         // Backward-compatible schema used by older database generations.
         hasCellular = PXCellBoolean(model[@"hasCellular"] ?: model[@"cellular"] ?: caps[@"cellular"], &cellularPresent);
         physical = PXCellBoolean(caps[@"physicalSIM"], NULL);
         esim = PXCellBoolean(caps[@"eSIM"], NULL);
         dual = PXCellBoolean(caps[@"dualSIM"], NULL);
         cdma = PXCellBoolean(caps[@"cdma"], NULL);
+        if (hasCellular && !physical && !esim) physical = YES;
     }
-    if (hasCellular && !physical && !esim) physical = YES;
+    if (requiresRegionalCellular && !cellularSpec) {
+        issues[@"cellularCapability"] = @"authoritative-cellular-required-for-regulatory-model";
+    }
+    if (cellularKnown && hasCellular && !physical && !esim) {
+        issues[@"cellularCapability"] = @"authoritative-sim-capability-required";
+    }
     PXCellularCapability capability = PXCellularCapabilityNone;
     if (hasCellular && physical) capability |= PXCellularCapabilityPhysicalSIM;
     if (hasCellular && esim) capability |= PXCellularCapabilityESIM;
