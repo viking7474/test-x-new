@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Static regression checks for the P0 canonical iPhone hardware profile."""
+
+from pathlib import Path
+import json
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def check(condition: bool, message: str) -> None:
+    print(("PASS" if condition else "FAIL") + ": " + message)
+    if not condition:
+        raise AssertionError(message)
+
+
+def main() -> None:
+    model_root = json.loads(read("data/iphone_model_db.json"))
+    hardware_root = json.loads(read("data/iphone_hardware_db.json"))
+    cellular_root = json.loads(read("data/iphone_cellular_db.json"))
+    models = {row["productType"]: row for row in model_root["models"]}
+
+    check(bool(model_root.get("hardwareCatalogVersion")), "generated model DB declares P0 hardware catalog")
+    check(bool(model_root.get("cellularCatalogVersion")), "generated model DB declares regional cellular catalog")
+    check(len(models) > 0, "generated model DB contains iPhone models")
+
+    required_model_fields = [
+        "screen", "cpuArchitecture", "cpuProfileKey", "deviceMemoryGB", "cpuCores",
+        "frontCameraMegapixels", "rearCameraMegapixels", "rearCameraCount",
+        "hasFrontCamera", "hasRearCamera", "hasPanoramaCamera", "hasUltraWideCamera",
+        "hasTelephotoCamera", "hasLiDARScanner", "supports4KVideo", "storageCapacitiesGB",
+        "cellular", "variants",
+    ]
+    for product_type, row in models.items():
+        missing = [key for key in required_model_fields if key not in row]
+        check(not missing, f"{product_type} has all P0 model fields")
+        screen = row["screen"]
+        check(all(key in screen for key in ["resolution", "viewport", "scale", "nativeScale", "ppi"]),
+              f"{product_type} has explicit display geometry")
+        check(bool(row["variants"]), f"{product_type} has at least one hardware variant")
+        aggregate = set(row.get("regulatoryModelNumbers", []))
+        for variant in row["variants"]:
+            nums = set(variant.get("regulatoryModelNumbers", []))
+            check(bool(variant.get("boardID")) and bool(variant.get("hwModel")) and bool(nums),
+                  f"{product_type} variant keeps board/hwModel/regulatory A-number relation")
+            check(nums.issubset(aggregate), f"{product_type} variant A-numbers are contained in aggregate compatibility list")
+
+    check(models["iPhone10,3"]["variants"] == [{
+        "boardID": "D22AP", "hwModel": "D22AP", "regulatoryModelNumbers": ["A1865", "A1902"]
+    }], "iPhone10,3 uses D22AP and preserves its exact A-numbers")
+    check(models["iPhone10,6"]["variants"] == [{
+        "boardID": "D221AP", "hwModel": "D221AP", "regulatoryModelNumbers": ["A1901"]
+    }], "iPhone10,6 keeps D221AP separate from iPhone10,3")
+    check(hardware_root["models"]["iPhone14,7"]["deviceMemoryGB"] == 6 and
+          hardware_root["models"]["iPhone14,8"]["deviceMemoryGB"] == 6,
+          "iPhone 14 and 14 Plus RAM is explicit 6 GB rather than prefix-derived 4 GB")
+    check(hardware_root["models"]["iPhone16,2"]["storageCapacitiesGB"] == [256, 512, 1024],
+          "iPhone 15 Pro Max storage starts at 256 GB")
+
+    iphone13_mini = models.get("iPhone14,4", {})
+    iphone13 = models.get("iPhone14,5", {})
+    check("A2626" in set(iphone13_mini.get("regulatoryModelNumbers", [])),
+          "iPhone 13 mini owns regulatory model A2626")
+    check("A2631" in set(iphone13.get("regulatoryModelNumbers", [])) and
+          "A2626" not in set(iphone13.get("regulatoryModelNumbers", [])),
+          "iPhone 13 owns A2631 and does not reuse iPhone 13 mini A2626")
+
+    iphone15_expectations = {
+        "iPhone15,4": ("D37AP", {"A2846", "A3089", "A3090", "A3092"}),
+        "iPhone15,5": ("D38AP", {"A2847", "A3093", "A3094", "A3096"}),
+        "iPhone16,1": ("D83AP", {"A2848", "A3101", "A3102", "A3104"}),
+        "iPhone16,2": ("D84AP", {"A2849", "A3105", "A3106", "A3108"}),
+    }
+    for product_type, (board, regulatory_numbers) in iphone15_expectations.items():
+        row = models.get(product_type)
+        check(bool(row), f"{product_type} is published by generated canonical model DB")
+        check(row.get("minIOS") == "17.0.0", f"{product_type} minimum iOS is 17.0.0")
+        check(row.get("variants") == [{
+            "boardID": board,
+            "hwModel": board,
+            "regulatoryModelNumbers": sorted(regulatory_numbers),
+        }], f"{product_type} preserves exact board/regulatory A-number tuple")
+        regional = row.get("cellularByRegulatoryModelNumber", {})
+        check(set(regional) == regulatory_numbers,
+              f"{product_type} publishes regional cellular slots for every A-number")
+        check(all(spec == {"known": False} for spec in regional.values()),
+              f"{product_type} regional cellular stays explicit unknown until verified")
+
+    builder = read("scripts/build_ios_db.py")
+    manager = read("common/IdentifierManager.m")
+    validator = read("common/PXIdentityDependencyValidator.m")
+    storage = read("common/StorageManager.m")
+    device_spec = read("TLinkIOSTweak/DeviceSpecHooks.x")
+    dashboard = read("TLinkIOSViewController.m")
+    versioned = read("common/PXVersionedIOSDatabase.m")
+    surfaces = read("common/PXIdentitySurfaceRegistry.m")
+    cellular_schema = read("common/PXCellularIdentitySchema.m")
+
+    check('"regulatoryModelNumbers": variant_numbers' in builder,
+          "DB builder publishes A-numbers inside exact hardware variants")
+    check("Duplicate KMOS OSBuild" in builder,
+          "DB builder fails closed on duplicate OSBuild rows")
+    check("canonicalHardwareSpecForProductType:productType" in manager,
+          "profile generation reads model-level P0 hardware from canonical DB")
+    check("PXPickRegulatoryModelNumberFromModelSpec(modelSpec, pickedVariant)" in manager,
+          "profile generation selects regulatory A-number from selected variant")
+    check("board-hwmodel-regulatory-model-variant-mismatch" in validator,
+          "dependency validator checks BoardID/HwModel/A-number as one tuple")
+    check("PXValidateCanonicalModelHardware" in validator,
+          "dependency validator checks RAM/display/camera/storage/CPU model fields")
+    check("canonicalHardwareSpecForProductType:deviceModel" in storage,
+          "storage tier resolution uses canonical model DB")
+    check('source = @"iphone_model_db"' in device_spec,
+          "DeviceSpec fallback prefers canonical model DB")
+    check('specs[@"cpuProfileKey"]' in device_spec,
+          "CPU hooks consume exact CPUProfileKey")
+    check('specs[@"nativeScale"]' in device_spec and "screenDensity / 163.0" not in device_spec,
+          "display hooks consume exact NativeScale instead of deriving from PPI")
+    check('@"partNumber":' in dashboard and 'preview[@"ModelNumber"]' not in dashboard,
+          "Dashboard part number metadata never writes hardware/retail ModelNumber")
+    check("No canonical hardware model is available in the selected range" in dashboard,
+          "Dashboard rejects models that lack canonical hardware DB records")
+    check("P0 hardware catalog contains an incomplete model record" in versioned,
+          "database publisher validates P0 hardware payload before publishing")
+    check("cellularByRegulatoryModelNumber" in versioned and "regionalCellularValid" in versioned,
+          "database publisher validates regional cellular A-number overrides")
+    check('@"RegulatoryModelNumber"' in surfaces and '@"regulatory-model-number"' in surfaces,
+          "regulatory A-number has dedicated MG and IORegistry surfaces")
+    check('deviceIds[@"RegulatoryModelNumber"]' in manager and
+          'deviceIds[@"ModelNumber"] = regulatoryModelNumber' not in manager,
+          "A-number is never published as retail ModelNumber")
+    check('known=false is an explicit' in cellular_schema and
+          'cellularSpec[@"known"]' in cellular_schema,
+          "unknown cellular capability is explicit and is not guessed")
+    check('cellularByRegulatoryModelNumber' in cellular_schema and
+          'RegulatoryModelNumber' in cellular_schema and
+          'PXResolvedCellularSpec' in cellular_schema,
+          "cellular resolver prefers the exact regulatory A-number override")
+    check(set(cellular_root.get("regulatoryModels", {})) == set().union(
+              *(numbers for _, numbers in iphone15_expectations.values())),
+          "manual cellular catalog exposes exactly the iPhone 15 regional A-number slots")
+    check("Fallback to legacy generation paths if DB-based generation is unavailable" not in manager,
+          "grouped generation no longer falls back to independent legacy model/iOS randomization")
+
+    print("P0 canonical hardware static test: PASS")
+
+
+if __name__ == "__main__":
+    main()

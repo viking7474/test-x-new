@@ -25,13 +25,16 @@ def main() -> None:
         "Reset Data enables storage with Fake Model": '@"StorageSystem": @(fakeModel)' in dashboard,
         "Reset prefers a changed hardware signature": "differentHardware.count ? differentHardware" in dashboard and "signatureKeys" in dashboard,
         "legacy storage enable stays atomic with primary toggle": 'saveDict[@"StorageSystemEnabled"]' in manager,
-        "DB generation merges canonical model hardware": "deviceSpecificationsForModel:productType" in manager,
-        "all model writers persist hardware capabilities": manager.count("PXWriteHardwareCapabilitiesToDeviceIDs") >= 3,
+        "DB generation resolves canonical model hardware": "canonicalHardwareSpecForProductType:productType" in manager,
+        "all model writers persist hardware capabilities": manager.count("PXWriteHardwareCapabilitiesToDeviceIDs") >= 2,
         "schema preserves camera booleans including false": all(k in schema for k in [
             'hasFrontCamera', 'hasRearCamera', 'hasUltraWideCamera', 'hasTelephotoCamera',
             'hasLiDARScanner', 'supports4KVideo']),
         "schema carries supported storage tiers": 'storageCapacitiesGB' in schema and 'StorageCapacitiesGB' in schema,
         "storage selection is model-aware": "randomizeStorageCapacityForDeviceModel" in storage and 'storageCapacitiesGB' in storage,
+        "Reset reapplies storage from the final fake model": "randomizeStorageCapacityForDeviceModel:model" in dashboard,
+        "fake iOS only preserves current hardware identity": "Fake iOS without Fake Model must preserve the current hardware identity" in dashboard and '@"BoardID", @"HwModel"' in dashboard,
+        "iPhone 15 Pro Max storage tiers exclude 128GB": '[model isEqualToString:@"iPhone16,2"]) capacities = @[@256, @512, @1024]' in model,
         "storage selection avoids immediate repeat": "[candidates removeObject:previous]" in storage,
         "camera MobileGestalt capabilities are typed": all(k in registry for k in [
             'ForwardCameraCapability', 'RearCameraCapability', 'PanoramaCameraCapability',

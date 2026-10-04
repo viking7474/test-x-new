@@ -73,6 +73,26 @@ for b, meta in btm.items():
     if f"Darwin Kernel Version {darwin}" not in kern or f"xnu-{xnu}" not in kern:
         bad_kernel.append(b)
 check(not bad_kernel, "every meta.kernel_version contains darwin+xnu needles")
+check(btm.get("22D72", {}).get("version") == "18.3.1",
+      "iOS 18.3.1 resolves to unique build 22D72")
+
+iphone15_expectations = {
+    "iPhone15,4": "D37AP",
+    "iPhone15,5": "D38AP",
+    "iPhone16,1": "D83AP",
+    "iPhone16,2": "D84AP",
+}
+for product_type, board in iphone15_expectations.items():
+    row = next((m for m in models if m.get("productType") == product_type), {})
+    builds = dtb.get(product_type, [])
+    check(bool(row), f"{product_type} present in canonical model DB")
+    check(row.get("minIOS") == "17.0.0", f"{product_type} minIOS == 17.0.0")
+    check(row.get("variants") and row["variants"][0].get("boardID") == board,
+          f"{product_type} uses board {board}")
+    check("21A329" in builds, f"{product_type} includes iOS 17.0 build 21A329")
+    check("22D72" in builds, f"{product_type} includes iOS 18.3.1 build 22D72")
+    check(all(int(re.match(r"\d+", btm[b]["version"]).group(0)) >= 17 for b in builds),
+          f"{product_type} has no pre-iOS-17 builds")
 
 # ---- Simulate IdentifierManager filling profile D06 from the DB ----
 print("== dependency validation for profile D06 (iPhone10,3) ==")
@@ -110,7 +130,8 @@ check(profile["IOSVersion"] == "15.4.1", "IOSVersion resolves to 15.4.1")
 check(profile["Darwin"] == "21.4.0", "Darwin resolves to 21.4.0")
 check(profile["XNU"] == "8020.102.3~1", "XNU resolves to 8020.102.3~1")
 check(profile["BoardID"] == "D22AP" and profile["HwModel"] == "D22AP", "Board/HwModel == D22AP")
-check(isinstance(model.get("modelNumbers"), list) and model.get("modelNumbers"), "iPhone10,3 has modelNumbers")
+check(isinstance(model.get("regulatoryModelNumbers"), list) and model.get("regulatoryModelNumbers"),
+      "iPhone10,3 has regulatory A-number data")
 
 
 def variant_matches(model, boardID, hwModel):
@@ -193,12 +214,30 @@ check('randomMetaForDevice:iosProductType' in view_controller and
       'preview[@"XNU"] = xnu;' in view_controller and
       'preview[@"KernelVersion"] = kernel;' in view_controller,
       "fake preview publishes version/build/darwin/xnu/kernel as one tuple")
-apply_tail = view_controller.split('- (void)applyFakePreviewToCurrentProfile:', 1)[1]
+apply_tail = view_controller.split('applyFakePreviewToCurrentProfile:', 1)[1]
 check('@"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"' in apply_tail,
       "Reset Data writes the complete iOS tuple into device_ids.plist")
 check('Refusing partial iOS override' in apply_tail and
+      'return NO;' in apply_tail and
       'GenerationCounter' in apply_tail,
-      "Reset Data rejects partial/mismatched tuple overrides and advances identity generation")
+      "Reset Data fails closed on partial/mismatched tuple overrides")
+check('coherentChoices' in view_controller and
+      'Excluding incompatible fake model' in view_controller and
+      'No coherent model/iOS candidates' in view_controller,
+      "Dashboard filters random models by actual IOSBuildDB compatibility")
+check('randomizeStorageCapacityForDeviceModel:model' in apply_tail,
+      "final storage capacity is regenerated from the committed model")
+check('availableVersions' in view_controller,
+      "Dashboard iOS range UI is sourced from IOSBuildDB instead of a stale hard-coded list")
+
+builder = open(os.path.join(ROOT, "scripts", "build_ios_db.py"), encoding="utf-8").read()
+versioned_db = open(os.path.join(ROOT, "common", "PXVersionedIOSDatabase.m"), encoding="utf-8").read()
+check('model["minIOS"] = sortver_to_ios(dosv)' in builder and
+      'os.path.dirname(os.path.dirname(os.path.abspath(__file__)))' in builder,
+      "iOS DB generator publishes minIOS and is workspace-relative")
+check('modelsByProductType' in versioned_db and
+      'model/version mapping outside the model iOS range' in versioned_db,
+      "versioned DB rejects deviceToBuilds entries outside model min/max iOS")
 
 print()
 if failures:

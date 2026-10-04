@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "databaseVersion": "p1-baseband-v1",
+  "families": {},
+  "regulatoryModels": {
+    "A2846": {
+      "known": false,
+      "productType": "iPhone15,4"
+    },
+    "A3089": {
+      "known": false,
+      "productType": "iPhone15,4"
+    },
+    "A3090": {
+      "known": false,
+      "productType": "iPhone15,4"
+    },
+    "A3092": {
+      "known": false,
+      "productType": "iPhone15,4"
+    },
+    "A2847": {
+      "known": false,
+      "productType": "iPhone15,5"
+    },
+    "A3093": {
+      "known": false,
+      "productType": "iPhone15,5"
+    },
+    "A3094": {
+      "known": false,
+      "productType": "iPhone15,5"
+    },
+    "A3096": {
+      "known": false,
+      "productType": "iPhone15,5"
+    },
+    "A2848": {
+      "known": false,
+      "productType": "iPhone16,1"
+    },
+    "A3101": {
+      "known": false,
+      "productType": "iPhone16,1"
+    },
+    "A3102": {
+      "known": false,
+      "productType": "iPhone16,1"
+    },
+    "A3104": {
+      "known": false,
+      "productType": "iPhone16,1"
+    },
+    "A2849": {
+      "known": false,
+      "productType": "iPhone16,2"
+    },
+    "A3105": {
+      "known": false,
+      "productType": "iPhone16,2"
+    },
+    "A3106": {
+      "known": false,
+      "productType": "iPhone16,2"
+    },
+    "A3108": {
+      "known": false,
+      "productType": "iPhone16,2"
+    }
+  }
+}

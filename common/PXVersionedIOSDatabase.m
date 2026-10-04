@@ -1,4 +1,5 @@
 #import "PXVersionedIOSDatabase.h"
+#import "VersionCompare.h"
 #import "DBDebugLogger.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -75,19 +76,169 @@ static BOOL PXIOSDBValidateCoherentRoots(NSDictionary<NSString *, NSDictionary *
         return NO;
     }
 
+    BOOL requiresP0Hardware = [modelRoot[@"hardwareCatalogVersion"] isKindOfClass:[NSString class]] &&
+                              [modelRoot[@"hardwareCatalogVersion"] length] > 0;
+    BOOL requiresP1Baseband = [modelRoot[@"basebandCatalogVersion"] isKindOfClass:[NSString class]] &&
+                              [modelRoot[@"basebandCatalogVersion"] length] > 0;
     NSMutableSet<NSString *> *productTypes = [NSMutableSet set];
+    NSMutableDictionary<NSString *, NSDictionary *> *modelsByProductType = [NSMutableDictionary dictionary];
     for (id item in models) {
         if (![item isKindOfClass:[NSDictionary class]]) {
             if (error) *error = PXIOSDBError(13, @"iPhone model database contains a non-dictionary row");
             return NO;
         }
         NSString *productType = item[@"productType"];
+        NSString *minIOS = [item[@"minIOS"] isKindOfClass:[NSString class]] ? item[@"minIOS"] : nil;
+        NSString *maxIOS = [item[@"maxIOS"] isKindOfClass:[NSString class]] ? item[@"maxIOS"] : nil;
         if (![productType isKindOfClass:[NSString class]] || ![productType hasPrefix:@"iPhone"] ||
+            !maxIOS.length || (item[@"minIOS"] && !minIOS.length) ||
+            (minIOS.length && PXCompareVersions(minIOS, maxIOS) == NSOrderedDescending) ||
             [productTypes containsObject:productType]) {
-            if (error) *error = PXIOSDBError(14, @"iPhone model database contains an invalid or duplicate productType");
+            if (error) *error = PXIOSDBError(14, @"iPhone model database contains an invalid productType or iOS range");
             return NO;
         }
+
+        if (requiresP0Hardware) {
+            NSDictionary *screen = [item[@"screen"] isKindOfClass:[NSDictionary class]] ? item[@"screen"] : nil;
+            NSArray *capacities = [item[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]] ? item[@"storageCapacitiesGB"] : nil;
+            NSArray *variants = [item[@"variants"] isKindOfClass:[NSArray class]] ? item[@"variants"] : nil;
+            NSDictionary *cellular = [item[@"cellular"] isKindOfClass:[NSDictionary class]] ? item[@"cellular"] : nil;
+            BOOL cellularKnownPresent = [cellular[@"known"] isKindOfClass:[NSNumber class]];
+            BOOL cellularKnown = cellularKnownPresent ? [cellular[@"known"] boolValue] : NO;
+            BOOL cellularValid = cellularKnownPresent;
+            if (cellularKnown) {
+                for (NSString *key in @[@"enabled", @"physicalSIM", @"eSIM", @"dualSIM", @"cdma"]) {
+                    if (![cellular[key] isKindOfClass:[NSNumber class]]) { cellularValid = NO; break; }
+                }
+            }
+            NSDictionary *regionalCellular = [item[@"cellularByRegulatoryModelNumber"] isKindOfClass:[NSDictionary class]]
+                ? item[@"cellularByRegulatoryModelNumber"] : nil;
+            BOOL regionalCellularValid = YES;
+            if (regionalCellular) {
+                NSArray *aggregateNumbers = [item[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+                    ? item[@"regulatoryModelNumbers"] : @[];
+                for (id key in regionalCellular) {
+                    NSDictionary *spec = [key isKindOfClass:[NSString class]] &&
+                        [regionalCellular[key] isKindOfClass:[NSDictionary class]]
+                        ? regionalCellular[key] : nil;
+                    BOOL knownPresent = [spec[@"known"] isKindOfClass:[NSNumber class]];
+                    BOOL known = knownPresent ? [spec[@"known"] boolValue] : NO;
+                    if (!spec || ![aggregateNumbers containsObject:key] || !knownPresent) {
+                        regionalCellularValid = NO;
+                        break;
+                    }
+                    if (known) {
+                        for (NSString *field in @[@"enabled", @"physicalSIM", @"eSIM", @"dualSIM", @"cdma"]) {
+                            if (![spec[field] isKindOfClass:[NSNumber class]]) {
+                                regionalCellularValid = NO;
+                                break;
+                            }
+                        }
+                        if (!regionalCellularValid) break;
+                    }
+                }
+            }
+            BOOL cameraValid = YES;
+            for (NSString *key in @[@"frontCameraMegapixels", @"rearCameraMegapixels", @"rearCameraCount",
+                                      @"hasFrontCamera", @"hasRearCamera", @"hasPanoramaCamera",
+                                      @"hasUltraWideCamera", @"hasTelephotoCamera", @"hasLiDARScanner", @"supports4KVideo"]) {
+                if (![item[key] isKindOfClass:[NSNumber class]]) { cameraValid = NO; break; }
+            }
+            BOOL storageValid = capacities.count > 0;
+            for (id capacity in capacities) {
+                if (![capacity isKindOfClass:[NSNumber class]] || [capacity doubleValue] <= 0.0) { storageValid = NO; break; }
+            }
+            BOOL hardwareValid = screen &&
+                [screen[@"resolution"] isKindOfClass:[NSString class]] && [screen[@"resolution"] length] > 0 &&
+                [screen[@"viewport"] isKindOfClass:[NSString class]] && [screen[@"viewport"] length] > 0 &&
+                [screen[@"scale"] isKindOfClass:[NSNumber class]] && [screen[@"scale"] doubleValue] > 0.0 &&
+                [screen[@"nativeScale"] isKindOfClass:[NSNumber class]] && [screen[@"nativeScale"] doubleValue] > 0.0 &&
+                [screen[@"ppi"] isKindOfClass:[NSNumber class]] && [screen[@"ppi"] doubleValue] > 0.0 &&
+                [item[@"cpuArchitecture"] isKindOfClass:[NSString class]] && [item[@"cpuArchitecture"] length] > 0 &&
+                [item[@"cpuProfileKey"] isKindOfClass:[NSString class]] && [item[@"cpuProfileKey"] length] > 0 &&
+                [item[@"deviceMemoryGB"] isKindOfClass:[NSNumber class]] && [item[@"deviceMemoryGB"] doubleValue] > 0.0 &&
+                [item[@"cpuCores"] isKindOfClass:[NSNumber class]] && [item[@"cpuCores"] doubleValue] > 0.0 &&
+                cameraValid && storageValid && variants.count > 0 && cellularValid && regionalCellularValid;
+            if (!hardwareValid) {
+                if (error) *error = PXIOSDBError(21, @"P0 hardware catalog contains an incomplete model record");
+                return NO;
+            }
+            for (id variantObject in variants) {
+                NSDictionary *variant = [variantObject isKindOfClass:[NSDictionary class]] ? variantObject : nil;
+                NSArray *variantNumbers = [variant[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+                    ? variant[@"regulatoryModelNumbers"] : nil;
+                if (![variant[@"boardID"] isKindOfClass:[NSString class]] || ![variant[@"boardID"] length] ||
+                    ![variant[@"hwModel"] isKindOfClass:[NSString class]] || ![variant[@"hwModel"] length] ||
+                    !variantNumbers.count) {
+                    if (error) *error = PXIOSDBError(22, @"P0 hardware variant is missing board/hwModel/regulatoryModelNumbers relation");
+                    return NO;
+                }
+                for (id regulatoryModelNumber in variantNumbers) {
+                    if (![regulatoryModelNumber isKindOfClass:[NSString class]] || ![regulatoryModelNumber length]) {
+                        if (error) *error = PXIOSDBError(22, @"P0 hardware variant contains an invalid regulatory model number");
+                        return NO;
+                    }
+                }
+            }
+        }
+
+        if (requiresP1Baseband) {
+            NSDictionary *regionalBaseband = [item[@"basebandByRegulatoryModelNumber"] isKindOfClass:[NSDictionary class]]
+                ? item[@"basebandByRegulatoryModelNumber"] : nil;
+            if (regionalBaseband.count) {
+                NSArray *aggregateNumbers = [item[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+                    ? item[@"regulatoryModelNumbers"] : @[];
+                NSDictionary *regionalCellular = [item[@"cellularByRegulatoryModelNumber"] isKindOfClass:[NSDictionary class]]
+                    ? item[@"cellularByRegulatoryModelNumber"] : @{};
+                NSArray *allowedBuilds = [deviceToBuilds[productType] isKindOfClass:[NSArray class]]
+                    ? deviceToBuilds[productType] : @[];
+                NSSet *allowedBuildSet = [NSSet setWithArray:allowedBuilds];
+
+                for (id key in regionalBaseband) {
+                    NSDictionary *spec = [key isKindOfClass:[NSString class]] &&
+                        [regionalBaseband[key] isKindOfClass:[NSDictionary class]]
+                        ? regionalBaseband[key] : nil;
+                    BOOL knownPresent = [spec[@"known"] isKindOfClass:[NSNumber class]];
+                    BOOL known = knownPresent ? [spec[@"known"] boolValue] : NO;
+                    if (!spec || ![aggregateNumbers containsObject:key] || !knownPresent) {
+                        if (error) *error = PXIOSDBError(23, @"P1 baseband catalog contains an invalid regulatory override");
+                        return NO;
+                    }
+                    if (!known) continue;
+
+                    NSString *family = [spec[@"basebandFamily"] isKindOfClass:[NSString class]]
+                        ? spec[@"basebandFamily"] : nil;
+                    NSDictionary *firmwareByBuild = [spec[@"builds"] isKindOfClass:[NSDictionary class]]
+                        ? spec[@"builds"] : nil;
+                    NSDictionary *cellularSpec = [regionalCellular[key] isKindOfClass:[NSDictionary class]]
+                        ? regionalCellular[key] : nil;
+                    if (!family.length || !firmwareByBuild.count ||
+                        ![cellularSpec[@"known"] isKindOfClass:[NSNumber class]] ||
+                        ![cellularSpec[@"known"] boolValue] ||
+                        ![cellularSpec[@"enabled"] isKindOfClass:[NSNumber class]] ||
+                        ![cellularSpec[@"enabled"] boolValue]) {
+                        if (error) *error = PXIOSDBError(24, @"Known P1 baseband requires known enabled regional cellular capability");
+                        return NO;
+                    }
+
+                    NSSet *publishedBuildSet = [NSSet setWithArray:firmwareByBuild.allKeys];
+                    if (![publishedBuildSet isEqualToSet:allowedBuildSet]) {
+                        if (error) *error = PXIOSDBError(25, @"Known P1 baseband must cover every supported IOSBuild for the model");
+                        return NO;
+                    }
+                    for (id build in firmwareByBuild) {
+                        id version = firmwareByBuild[build];
+                        if (![build isKindOfClass:[NSString class]] || !buildToMeta[build] ||
+                            ![version isKindOfClass:[NSString class]] || ![version length]) {
+                            if (error) *error = PXIOSDBError(26, @"P1 baseband contains an unknown build or invalid firmware version");
+                            return NO;
+                        }
+                    }
+                }
+            }
+        }
         [productTypes addObject:productType];
+        modelsByProductType[productType] = item;
     }
 
     for (id productType in deviceToBuilds) {
@@ -103,6 +254,16 @@ static BOOL PXIOSDBValidateCoherentRoots(NSDictionary<NSString *, NSDictionary *
                 ![meta[@"xnu"] isKindOfClass:[NSString class]] ||
                 ![meta[@"kernel_version"] isKindOfClass:[NSString class]]) {
                 if (error) *error = PXIOSDBError(16, @"Build database contains a dangling or malformed build reference");
+                return NO;
+            }
+
+            NSDictionary *modelSpec = modelsByProductType[productType];
+            NSString *version = meta[@"version"];
+            NSString *minIOS = [modelSpec[@"minIOS"] isKindOfClass:[NSString class]] ? modelSpec[@"minIOS"] : nil;
+            NSString *maxIOS = [modelSpec[@"maxIOS"] isKindOfClass:[NSString class]] ? modelSpec[@"maxIOS"] : nil;
+            if ((minIOS.length && PXCompareVersions(version, minIOS) == NSOrderedAscending) ||
+                (maxIOS.length && PXCompareVersions(version, maxIOS) == NSOrderedDescending)) {
+                if (error) *error = PXIOSDBError(20, @"Build database contains a model/version mapping outside the model iOS range");
                 return NO;
             }
         }
@@ -249,6 +410,10 @@ static BOOL PXIOSDBValidateCoherentRoots(NSDictionary<NSString *, NSDictionary *
         return NO;
     }
     NSDictionary *legacyRoots = @{ @"iosBuildDB": buildRoot, @"iphoneModelDB": modelRoot };
+    if (!PXIOSDBValidateCoherentRoots(legacyRoots, &localError)) {
+        if (error) *error = localError;
+        return NO;
+    }
     self.roots = legacyRoots;
     self.databaseVersion = @"legacy-v1";
     self.sourcePath = dataPath;

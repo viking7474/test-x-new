@@ -126,6 +126,19 @@ BOOL PXLockdownBasebandFamilyMatchesProductType(NSString *productType, NSString 
     return expected != nil && [expected isEqualToString:family];
 }
 
+static BOOL PXBasebandFamilyMatchesValidatedSpecs(NSDictionary *specs) {
+    NSDictionary *safe = [specs isKindOfClass:[NSDictionary class]] ? specs : @{};
+    NSString *productType = [safe[@"ProductType"] isKindOfClass:[NSString class]] ? safe[@"ProductType"] : nil;
+    NSString *family = [safe[@"BasebandFamily"] isKindOfClass:[NSString class]] ? safe[@"BasebandFamily"] : nil;
+    if (!productType.length || !family.length || !PXStrictBool(safe[@"CellularCapable"])) return NO;
+
+    // Fixture-known models remain pinned to the fixture table. New canonical
+    // models are accepted only after LockdownIdentityHooks has passed the
+    // snapshot dependency gate, so this path never infers a family by ProductType.
+    NSString *fixtureFamily = PXProductTypeBasebandFamilyMap()[productType];
+    return fixtureFamily.length ? [fixtureFamily isEqualToString:family] : YES;
+}
+
 static BOOL PXIsAllDigits(NSString *value) {
     if (![value isKindOfClass:[NSString class]] || value.length == 0) return NO;
     NSCharacterSet *digits = [NSCharacterSet characterSetWithCharactersInString:@"0123456789"];
@@ -351,8 +364,7 @@ id PXLockdownSoCCellularResolve(NSString *lockdownKey,
         }
         case PXLockdownSoCCellularKindBasebandVersion: {
             candidate = [rawCandidate isKindOfClass:[NSString class]] ? rawCandidate : nil;
-            NSString *family = [sp[@"BasebandFamily"] isKindOfClass:[NSString class]] ? sp[@"BasebandFamily"] : nil;
-            consistent = PXIsValidBaseband(candidate) && PXLockdownBasebandFamilyMatchesProductType(productType, family);
+            consistent = PXIsValidBaseband(candidate) && PXBasebandFamilyMatchesValidatedSpecs(sp);
             break;
         }
     }

@@ -10,7 +10,7 @@
     "DeviceModelName": "iPhone 14 Pro Max",
     "HwModel": "D74AP",
     "BoardID": "0x2C",
-    "ModelNumber": "A2894",
+    "ModelNumber": "MQ9D3",
     "CPUArchitecture": "arm64e",
     "ScreenResolution": "1290x2796",
     "ViewportResolution": "430x932",
@@ -36,6 +36,7 @@
     "BatteryLevel": "0.73",
     "LocaleIdentifier": "en_US",
     "Language": "en",
-    "TimeZone": "America/Los_Angeles"
+    "TimeZone": "America/Los_Angeles",
+    "RegulatoryModelNumber": "A2894"
   }
 }

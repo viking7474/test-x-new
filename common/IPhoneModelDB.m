@@ -2,6 +2,7 @@
 #import "PXVersionedIOSDatabase.h"
 #import "VersionCompare.h"
 #import "DBDebugLogger.h"
+#import "PXDeviceProfileSchema.h"
 #import <Security/Security.h>
 
 static NSString *const kIPhoneModelDBErrorDomain = @"com.hydra.tlinkios.iphone_model_db";
@@ -52,9 +53,13 @@ static NSUInteger PXRandomIndex2(NSUInteger upperBoundExclusive) {
         if (![item isKindOfClass:[NSDictionary class]]) { invalid += 1; continue; }
         NSDictionary *model = item;
         NSString *productType = model[@"productType"];
+        NSString *minIOS = [model[@"minIOS"] isKindOfClass:[NSString class]] ? model[@"minIOS"] : nil;
         NSString *maxIOS = model[@"maxIOS"];
         if (![productType isKindOfClass:[NSString class]] || ![productType hasPrefix:@"iPhone"] ||
-            ![maxIOS isKindOfClass:[NSString class]] || maxIOS.length == 0 || byType[productType]) {
+            ![maxIOS isKindOfClass:[NSString class]] || maxIOS.length == 0 ||
+            (model[@"minIOS"] && !minIOS.length) ||
+            (minIOS.length && PXCompareVersions(minIOS, maxIOS) == NSOrderedDescending) ||
+            byType[productType]) {
             invalid += 1;
             continue;
         }
@@ -130,6 +135,125 @@ static NSUInteger PXRandomIndex2(NSUInteger upperBoundExclusive) {
     // Best-effort load.
     [self loadIfNeeded:nil];
     return self.byProductType[productType];
+}
+
+- (NSDictionary *)canonicalHardwareSpecForProductType:(NSString *)productType {
+    NSDictionary *model = [self specForProductType:productType];
+    if (!model) return nil;
+
+    // A model row from an older DB generation is not a P0 hardware record just
+    // because ProductType/name exist. Require the complete model-level contract
+    // before exposing it to runtime hooks/generators.
+    NSDictionary *screenRecord = [model[@"screen"] isKindOfClass:[NSDictionary class]] ? model[@"screen"] : nil;
+    NSArray *storageTiers = [model[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]] ? model[@"storageCapacitiesGB"] : nil;
+    NSArray<NSString *> *requiredNumeric = @[@"deviceMemoryGB", @"cpuCores",
+                                              @"frontCameraMegapixels", @"rearCameraMegapixels", @"rearCameraCount"];
+    NSArray<NSString *> *requiredBoolean = @[@"hasFrontCamera", @"hasRearCamera", @"hasPanoramaCamera",
+                                              @"hasUltraWideCamera", @"hasTelephotoCamera", @"hasLiDARScanner", @"supports4KVideo"];
+    BOOL complete = screenRecord != nil &&
+        PXProfileString(screenRecord[@"resolution"]).length > 0 &&
+        PXProfileString(screenRecord[@"viewport"]).length > 0 &&
+        PXProfilePositiveNumber(screenRecord[@"scale"]) != nil &&
+        PXProfilePositiveNumber(screenRecord[@"nativeScale"]) != nil &&
+        PXProfilePositiveNumber(screenRecord[@"ppi"]) != nil &&
+        PXProfileString(model[@"cpuArchitecture"]).length > 0 &&
+        PXProfileString(model[@"cpuProfileKey"]).length > 0 &&
+        storageTiers.count > 0;
+    for (NSString *key in requiredNumeric) {
+        if (!PXProfilePositiveNumber(model[key])) { complete = NO; break; }
+    }
+    if (complete) {
+        for (NSString *key in requiredBoolean) {
+            if (![model[key] isKindOfClass:[NSNumber class]]) { complete = NO; break; }
+        }
+    }
+    if (!complete) return nil;
+
+    NSMutableDictionary *source = [NSMutableDictionary dictionary];
+    source[@"value"] = productType;
+    NSString *name = PXProfileString(model[@"name"]);
+    if (name) source[@"name"] = name;
+
+    NSDictionary *screen = [model[@"screen"] isKindOfClass:[NSDictionary class]] ? model[@"screen"] : nil;
+    NSString *resolution = PXProfileString(screen[@"resolution"]);
+    NSString *viewport = PXProfileString(screen[@"viewport"]);
+    NSNumber *scale = PXProfilePositiveNumber(screen[@"scale"]);
+    NSNumber *nativeScale = PXProfilePositiveNumber(screen[@"nativeScale"]);
+    NSNumber *ppi = PXProfilePositiveNumber(screen[@"ppi"]);
+    if (resolution) source[@"screenResolution"] = resolution;
+    if (viewport) source[@"viewportResolution"] = viewport;
+    if (scale) source[@"devicePixelRatio"] = scale;
+    if (nativeScale) source[@"nativeScale"] = nativeScale;
+    if (ppi) source[@"screenDensity"] = ppi;
+
+    NSString *cpuArchitecture = PXProfileString(model[@"cpuArchitecture"]);
+    NSString *cpuProfileKey = PXProfileString(model[@"cpuProfileKey"]);
+    NSNumber *deviceMemoryGB = PXProfilePositiveNumber(model[@"deviceMemoryGB"]);
+    NSNumber *cpuCores = PXProfilePositiveNumber(model[@"cpuCores"]);
+    if (cpuArchitecture) source[@"cpuArchitecture"] = cpuArchitecture;
+    if (cpuProfileKey) source[@"cpuProfileKey"] = cpuProfileKey;
+    if (deviceMemoryGB) source[@"deviceMemory"] = deviceMemoryGB;
+    if (cpuCores) source[@"cpuCoreCount"] = cpuCores;
+
+    for (NSString *key in @[@"frontCameraMegapixels", @"rearCameraMegapixels", @"rearCameraCount",
+                             @"hasFrontCamera", @"hasRearCamera", @"hasPanoramaCamera",
+                             @"hasUltraWideCamera", @"hasTelephotoCamera", @"hasLiDARScanner",
+                             @"supports4KVideo", @"storageCapacitiesGB"]) {
+        id value = model[key];
+        if (value) source[key] = value;
+    }
+
+    return PXCanonicalDeviceSpecifications(source, productType);
+}
+
+- (NSDictionary *)cellularSpecForProductType:(NSString *)productType
+                       regulatoryModelNumber:(NSString *)regulatoryModelNumber {
+    if (!productType.length || !regulatoryModelNumber.length) return nil;
+    NSDictionary *model = [self specForProductType:productType];
+    if (!model) return nil;
+
+    NSArray *allowed = [model[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+        ? model[@"regulatoryModelNumbers"] : nil;
+    if (allowed.count && ![allowed containsObject:regulatoryModelNumber]) return nil;
+
+    NSDictionary *regional = [model[@"cellularByRegulatoryModelNumber"] isKindOfClass:[NSDictionary class]]
+        ? model[@"cellularByRegulatoryModelNumber"] : nil;
+    NSDictionary *spec = [regional[regulatoryModelNumber] isKindOfClass:[NSDictionary class]]
+        ? regional[regulatoryModelNumber] : nil;
+    if (![spec[@"known"] isKindOfClass:[NSNumber class]]) return nil;
+    return [spec copy];
+}
+
+- (NSDictionary *)basebandMetaForProductType:(NSString *)productType
+                        regulatoryModelNumber:(NSString *)regulatoryModelNumber
+                                    iosBuild:(NSString *)iosBuild {
+    if (!productType.length || !regulatoryModelNumber.length || !iosBuild.length) return nil;
+    NSDictionary *model = [self specForProductType:productType];
+    if (!model) return nil;
+
+    NSArray *allowed = [model[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+        ? model[@"regulatoryModelNumbers"] : nil;
+    if (allowed.count && ![allowed containsObject:regulatoryModelNumber]) return nil;
+
+    NSDictionary *regional = [model[@"basebandByRegulatoryModelNumber"] isKindOfClass:[NSDictionary class]]
+        ? model[@"basebandByRegulatoryModelNumber"] : nil;
+    NSDictionary *spec = [regional[regulatoryModelNumber] isKindOfClass:[NSDictionary class]]
+        ? regional[regulatoryModelNumber] : nil;
+    if (![spec[@"known"] isKindOfClass:[NSNumber class]] || ![spec[@"known"] boolValue]) return nil;
+
+    NSString *family = PXProfileString(spec[@"basebandFamily"]);
+    NSDictionary *builds = [spec[@"builds"] isKindOfClass:[NSDictionary class]] ? spec[@"builds"] : nil;
+    NSString *version = PXProfileString(builds[iosBuild]);
+    if (!family.length || !version.length) return nil;
+
+    return @{
+        @"known": @YES,
+        @"productType": productType,
+        @"regulatoryModelNumber": regulatoryModelNumber,
+        @"iosBuild": iosBuild,
+        @"basebandFamily": family,
+        @"basebandVersion": version
+    };
 }
 
 - (BOOL)containsProductType:(NSString *)productType {

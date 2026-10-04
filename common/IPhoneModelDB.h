@@ -25,6 +25,21 @@ NS_ASSUME_NONNULL_BEGIN
 /// Returns the model spec for the exact productType.
 - (NSDictionary * _Nullable)specForProductType:(NSString *)productType;
 
+/// Resolves model-level P0 hardware metadata into the canonical DeviceSpec schema.
+/// Variant-specific BoardID/HwModel/RegulatoryModelNumber is intentionally not selected here.
+- (NSDictionary * _Nullable)canonicalHardwareSpecForProductType:(NSString *)productType;
+
+/// Exact regional cellular capability for one regulatory A-number. Returns nil
+/// when the model/A-number relation is unknown or the row is malformed.
+- (NSDictionary * _Nullable)cellularSpecForProductType:(NSString *)productType
+                                 regulatoryModelNumber:(NSString *)regulatoryModelNumber;
+
+/// Exact build-specific baseband metadata for one ProductType/A-number/build tuple.
+/// A known=false row or a build without authoritative firmware returns nil.
+- (NSDictionary * _Nullable)basebandMetaForProductType:(NSString *)productType
+                                  regulatoryModelNumber:(NSString *)regulatoryModelNumber
+                                              iosBuild:(NSString *)iosBuild;
+
 /// Returns YES if a productType exists in the DB.
 - (BOOL)containsProductType:(NSString *)productType;
 

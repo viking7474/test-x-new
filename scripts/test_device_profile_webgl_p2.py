@@ -354,7 +354,7 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: IdentifierManager never falls back HwModel to BoardID", 'modelSpec[@"hwModel"] : boardID' not in identifier_code_without_logs and not re.search(r'(?m)^\s*hwModel\s*=.*\bboardID\b', identifier_code_without_logs))
     matrix.check("source: native identity hooks never fall back HwModel to BoardID", 'PXRequireKeysAny' not in TWEAK and '@[@"HwModel", @"BoardID"]' not in TWEAK and not re.search(r'if \(!\w+\.length\) \w+ = deviceIds\[@"BoardID"\]', TWEAK))
     matrix.check("source: native required-key gate treats Unknown as missing", '#import "PXDeviceProfileSchema.h"' in TWEAK and "if (!PXProfileString(v))" in TWEAK)
-    matrix.check("source: IdentifierManager writes shared WebGL schema in all profile writers", IDENTIFIER.count("PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo)") == 3)
+    matrix.check("source: IdentifierManager writes shared WebGL schema in all profile writers", IDENTIFIER.count("PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo)") == 2)
     matrix.check("source: IdentifierManager reads shared device ID schema", "PXDeviceSpecificationsFromDeviceIDs(deviceIds)" in identifier_specs_method)
     matrix.check("source: DeviceModelManager returns canonical specs", "PXCanonicalDeviceSpecifications(rawSpecs, model)" in DEVICE_MODEL)
     matrix.check("source: DeviceModelManager returns canonical WebGL info", "PXCanonicalWebGLInfo(specs)" in device_webgl_method)

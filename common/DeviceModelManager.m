@@ -53,6 +53,7 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     else if ([model isEqualToString:@"iPhone14,6"]) capacities = @[@64, @128, @256];
     else if ([model hasPrefix:@"iPhone14"] && isPro) capacities = @[@128, @256, @512, @1024];
     else if ([model hasPrefix:@"iPhone14"]) capacities = @[@128, @256, @512];
+    else if ([model isEqualToString:@"iPhone16,2"]) capacities = @[@256, @512, @1024];
     else if (([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"]) && isPro) capacities = @[@128, @256, @512, @1024];
     else capacities = @[@128, @256, @512];
 

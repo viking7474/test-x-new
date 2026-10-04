@@ -77,26 +77,15 @@
                 // Use the convenience method to add a profile (does not set custom profileId)
                 [[ProfileManager sharedManager] addProfileWithName:profileName shortDescription:profileDesc];
 
-                // Generate IMEI/MEID if missing for the new profile
                 IdentifierManager *manager = [IdentifierManager sharedManager];
-                if (![manager currentValueForIdentifier:@"IMEI"]) {
-                    NSString *imei = [manager generateIMEI];
-                    if (imei) [manager setCustomIMEI:imei];
-                }
-                if (![manager currentValueForIdentifier:@"MEID"]) {
-                    NSString *meid = [manager generateMEID];
-                    if (meid) [manager setCustomMEID:meid];
-                }
 
+                // Generate the canonical DeviceModel/iOS/hardware dependency group first.
+                // IMEI/IMEI2/MEID/baseband, when enabled and authoritative, are
+                // populated atomically by the same group from the selected A-number.
+                // Never seed generic telephony identifiers before model selection.
                 // Generate Device Model if missing for the new profile
                 if (![manager currentValueForIdentifier:@"DeviceModel"]) {
                     NSString *deviceModel = [manager regenerateDeviceProfileGroup];
-                    if (!deviceModel) {
-                        deviceModel = [manager generateDeviceModel];
-                        if (deviceModel) {
-                            [manager setCustomDeviceModel:deviceModel];
-                        }
-                    }
                     if (deviceModel) {
                         NSLog(@"[DeviceSpecificSpoofingVC] Generated device model for new profile: %@", deviceModel);
                     }
@@ -675,10 +664,6 @@
         @"iPhone15,5": @"iPhone 15 Plus",
         @"iPhone16,1": @"iPhone 15 Pro",
         @"iPhone16,2": @"iPhone 15 Pro Max",
-        @"iPhone16,3": @"iPhone 16",
-        @"iPhone16,4": @"iPhone 16 Plus",
-        @"iPhone16,5": @"iPhone 16 Pro",
-        @"iPhone16,6": @"iPhone 16 Pro Max",
         @"iPad7,5": @"iPad (6th Gen)",
         @"iPad7,11": @"iPad (7th Gen)",
         @"iPad11,6": @"iPad (8th Gen)",
@@ -827,12 +812,18 @@
     [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
         NSString *newValue = alert.textFields.firstObject.text;
         if (newValue.length > 0 && ![newValue isEqualToString:currentValue]) {
+            BOOL success = NO;
             if ([key isEqualToString:@"IMEI"]) {
-                [[IdentifierManager sharedManager] setCustomIMEI:newValue];
+                success = [[IdentifierManager sharedManager] setCustomIMEI:newValue];
             } else if ([key isEqualToString:@"MEID"]) {
-                [[IdentifierManager sharedManager] setCustomMEID:newValue];
+                success = [[IdentifierManager sharedManager] setCustomMEID:newValue];
             }
-            // Find the card and update the value label
+            if (!success) {
+                NSLog(@"[DeviceSpecific] Rejected %@ edit: value does not match canonical regional cellular data", key);
+                return;
+            }
+
+            // Update the UI only after the canonical writer accepted the value.
             UIView *targetCard = (sender.tag == 1) ? weakSelf.imeiCard : weakSelf.meidCard;
             for (UIView *sub in targetCard.subviews) {
                 if ([sub isKindOfClass:[UILabel class]]) {

@@ -338,7 +338,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: successful existence transform restores incoming errno", "int incomingErrno = errno;" in serializer and "errno = incomingErrno;" in serializer)
     matrix.check("source: direct serializer reports required size", "*oldlenp = valueSize;" in source_function(DEVICE_SOURCE, "PXWriteSysctlBytes"))
     matrix.check("source: direct serializer returns ENOMEM for short buffer", "errno = ENOMEM;" in source_function(DEVICE_SOURCE, "PXWriteSysctlBytes"))
-    matrix.check("source: unknown CPU architecture fails open as one unit", "return profile ? profile->defaultCoreCount : 0;" in core_resolver)
+    matrix.check("source: unknown CPU architecture fails open as one unit",
+                 "if (!profile) return 0;" in core_resolver and
+                 "explicitCount != profile->defaultCoreCount" in core_resolver)
     matrix.check("source: Tweak no longer claims physical CPU keys", all(key not in tweak_provider for key in ["hw.physicalcpu", "hw.logicalcpu", "hw.ncpu", "hw.activecpu"]))
     matrix.check("source: DeviceSpec owns all topology keys", all(key in device_provider for key in ["hw.physicalcpu", "hw.physicalcpu_max", "hw.logicalcpu", "hw.logicalcpu_max", "hw.ncpu", "hw.activecpu"]))
     matrix.check("source: CPU qualifier uses boundary matcher", "PXCPUArchitectureHasToken(architecture, qualifier)" in DEVICE_SOURCE)

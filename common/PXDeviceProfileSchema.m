@@ -200,12 +200,15 @@ NSDictionary *PXDeviceSpecificationsFromDeviceIDs(NSDictionary *deviceIDs) {
 
     NSMutableDictionary *specs = [NSMutableDictionary dictionary];
     specs[@"value"] = model;
+    specs[@"ProductType"] = model;
     PXCopyStringField(specs, deviceIDs, @"name", @"DeviceModelName");
     PXCopyStringField(specs, deviceIDs, @"screenResolution", @"ScreenResolution");
     PXCopyStringField(specs, deviceIDs, @"viewportResolution", @"ViewportResolution");
     PXCopyNumberField(specs, deviceIDs, @"devicePixelRatio", @"DevicePixelRatio");
+    PXCopyNumberField(specs, deviceIDs, @"nativeScale", @"NativeScale");
     PXCopyNumberField(specs, deviceIDs, @"screenDensity", @"ScreenDensityPPI");
     PXCopyStringField(specs, deviceIDs, @"cpuArchitecture", @"CPUArchitecture");
+    PXCopyStringField(specs, deviceIDs, @"cpuProfileKey", @"CPUProfileKey");
     PXCopyNumberField(specs, deviceIDs, @"deviceMemory", @"DeviceMemory");
     PXCopyStringField(specs, deviceIDs, @"gpuFamily", @"GPUFamily");
     PXCopyNumberField(specs, deviceIDs, @"cpuCoreCount", @"CPUCoreCount");
@@ -213,6 +216,12 @@ NSDictionary *PXDeviceSpecificationsFromDeviceIDs(NSDictionary *deviceIDs) {
     PXCopyStringField(specs, deviceIDs, @"boardID", @"BoardID");
     PXCopyStringField(specs, deviceIDs, @"hwModel", @"HwModel");
     PXCopyStringField(specs, deviceIDs, @"modelNumber", @"ModelNumber");
+    PXCopyStringField(specs, deviceIDs, @"regulatoryModelNumber", @"RegulatoryModelNumber");
+    PXCopyStringField(specs, deviceIDs, @"BasebandFamily", @"BasebandFamily");
+    for (NSString *key in @[@"CellularCapable", @"AdvertisedSIMCount"]) {
+        id value = deviceIDs[key];
+        if ([value isKindOfClass:[NSNumber class]]) specs[key] = value;
+    }
     NSDictionary<NSString *, NSString *> *hardwareMapping = @{
         @"frontCameraMegapixels": @"FrontCameraMegapixels",
         @"rearCameraMegapixels": @"RearCameraMegapixels",
@@ -249,12 +258,12 @@ NSDictionary *PXCanonicalDeviceSpecifications(NSDictionary *source, NSString *mo
     NSMutableDictionary *specs = [NSMutableDictionary dictionary];
     specs[@"value"] = model;
     for (NSString *key in @[@"name", @"screenResolution", @"viewportResolution",
-                             @"cpuArchitecture", @"gpuFamily", @"metalFeatureSet",
-                             @"boardID", @"hwModel", @"modelNumber"]) {
+                             @"cpuArchitecture", @"cpuProfileKey", @"gpuFamily", @"metalFeatureSet",
+                             @"boardID", @"hwModel", @"modelNumber", @"regulatoryModelNumber"]) {
         NSString *value = PXProfileString(source[key]);
         if (value) specs[key] = value;
     }
-    for (NSString *key in @[@"devicePixelRatio", @"screenDensity", @"deviceMemory",
+    for (NSString *key in @[@"devicePixelRatio", @"nativeScale", @"screenDensity", @"deviceMemory",
                              @"cpuCoreCount", @"freeMemoryPercentage",
                              @"frontCameraMegapixels", @"rearCameraMegapixels", @"rearCameraCount"]) {
         NSNumber *value = PXProfilePositiveNumber(source[key]);

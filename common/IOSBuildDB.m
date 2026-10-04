@@ -66,6 +66,44 @@ static NSUInteger PXRandomIndex(NSUInteger upperBoundExclusive) {
     return [PXVersionedIOSDatabase sharedDatabase].metadata;
 }
 
+- (NSArray<NSString *> *)availableVersions {
+    NSError *error = nil;
+    if (![self loadIfNeeded:&error]) {
+        PXDBLog(@"IOSBuildDB: availableVersions unavailable err=%@", error.localizedDescription ?: @"nil");
+        return @[];
+    }
+
+    NSMutableSet<NSString *> *versions = [NSMutableSet set];
+    for (id metaObject in self.buildToMeta.allValues) {
+        if (![metaObject isKindOfClass:[NSDictionary class]]) continue;
+        NSString *version = [metaObject[@"version"] isKindOfClass:[NSString class]] ? metaObject[@"version"] : nil;
+        if (version.length) [versions addObject:version];
+    }
+
+    return [[versions allObjects] sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return PXCompareVersions(a, b);
+    }];
+}
+
+- (BOOL)productType:(NSString *)productType supportsBuild:(NSString *)build {
+    if (!productType.length || !build.length || ![self loadIfNeeded:nil]) return NO;
+    NSArray *builds = [self.deviceToBuilds[productType] isKindOfClass:[NSArray class]] ? self.deviceToBuilds[productType] : nil;
+    return [builds containsObject:build];
+}
+
+- (NSDictionary *)metaForBuild:(NSString *)build {
+    if (!build.length || ![self loadIfNeeded:nil]) return nil;
+    NSDictionary *meta = [self.buildToMeta[build] isKindOfClass:[NSDictionary class]] ? self.buildToMeta[build] : nil;
+    NSString *version = [meta[@"version"] isKindOfClass:[NSString class]] ? meta[@"version"] : nil;
+    NSString *darwin = [meta[@"darwin"] isKindOfClass:[NSString class]] ? meta[@"darwin"] : nil;
+    NSString *xnu = [meta[@"xnu"] isKindOfClass:[NSString class]] ? meta[@"xnu"] : nil;
+    NSString *kernel = [meta[@"kernel_version"] isKindOfClass:[NSString class]] ? meta[@"kernel_version"] : nil;
+    if (!version.length || !darwin.length || !xnu.length || !kernel.length) return nil;
+    NSMutableDictionary *full = [meta mutableCopy];
+    full[@"build"] = build;
+    return [full copy];
+}
+
 - (BOOL)reload:(NSError **)error {
     if (![[PXVersionedIOSDatabase sharedDatabase] reload:error]) return NO;
     self.db = nil;

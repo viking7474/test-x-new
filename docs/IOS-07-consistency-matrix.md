@@ -42,7 +42,8 @@ Mỗi hàng (`PXConsistencyMatrixEntry`) mô tả một bề mặt:
 | DeviceModel | `DeviceModel` | `HW_MACHINE`, `hw.machine`, `hw.product`, MG ProductType, IOKit device-model, `uname.machine` |
 | HwModel | `HwModel` | `HW_MODEL`, `hw.model`, MG HWModel/HWModelStr, IOKit model |
 | BoardID | `BoardID` | MG BoardId, IOKit board-id |
-| ModelNumber | `ModelNumber` | MG ModelNumber, IOKit model-number |
+| ModelNumber (retail SKU base, ví dụ MQAG2) | `ModelNumber` | MG ModelNumber, IOKit model-number |
+| RegulatoryModelNumber (Axxxx) | `RegulatoryModelNumber` | MG RegulatoryModelNumber, IOKit regulatory-model-number |
 | DeviceName | `DeviceName` | `kern.hostname`, `gethostname`, `uname.nodename` |
 
 ## Bài test kiểm tra gì

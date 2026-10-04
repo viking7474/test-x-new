@@ -10,7 +10,8 @@ void PXRunIdentitySurfaceRegistryTests(void) {
         @"DeviceModelName": @"iPhone 14 Pro Max",
         @"HwModel": @"D74AP",
         @"BoardID": @"0x2C",
-        @"ModelNumber": @"A2894",
+        @"ModelNumber": @"MQ9D3",
+        @"RegulatoryModelNumber": @"A2894",
         @"CPUArchitecture": @"arm64e",
         @"ScreenResolution": @"1290x2796",
         @"DevicePixelRatio": @3,
@@ -41,6 +42,12 @@ void PXRunIdentitySurfaceRegistryTests(void) {
     PXIdentitySurfaceEntry *ioData = PXIdentitySurfaceEntryForKey(@"device-model", PXIdentitySurfaceIORegistry);
     NSCAssert(ioData.expectedType == PXIdentityExpectedTypeData, @"device-tree ABI type must be CFData");
     NSCAssert([ioData.toggle isEqualToString:@"DeviceModel"], @"IORegistry alias has wrong toggle");
+    PXIdentitySurfaceEntry *mgRegulatory = PXIdentitySurfaceEntryForKey(@"RegulatoryModelNumber", PXIdentitySurfaceMobileGestalt);
+    PXIdentitySurfaceEntry *ioRegulatory = PXIdentitySurfaceEntryForKey(@"regulatory-model-number", PXIdentitySurfaceIORegistry);
+    NSCAssert([[PXIdentitySurfaceResolveValue(mgRegulatory, ids) description] isEqualToString:@"A2894"],
+              @"MG RegulatoryModelNumber must use A-number");
+    NSCAssert([ioRegulatory.deviceIDKey isEqualToString:@"RegulatoryModelNumber"],
+              @"IORegistry regulatory-model-number source drifted");
 
     PXIdentitySurfaceEntry *buildAlias = PXIdentitySurfaceEntryForKey(@"BuildVersion", PXIdentitySurfaceMobileGestalt);
     NSCAssert([[PXIdentitySurfaceResolveValue(buildAlias, ids) description] isEqualToString:@"21F90"], @"build alias drifted");

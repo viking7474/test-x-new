@@ -55,6 +55,7 @@
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
+- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
 @end
 
 @implementation IdentifierManager
@@ -204,6 +205,185 @@ static NSUInteger PXRandomIndex3(NSUInteger upperBoundExclusive) {
     return (NSUInteger)arc4random_uniform((uint32_t)upperBoundExclusive);
 }
 
+static NSInteger PXMEIDLuhnCheckDigit(NSString *body);
+
+static NSString *PXGenerateIMEIFromAuthoritativeTACs(NSArray *tacs) {
+    if (![tacs isKindOfClass:[NSArray class]] || !tacs.count) return nil;
+    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+    NSMutableArray<NSString *> *validTACs = [NSMutableArray array];
+    for (id item in tacs) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        NSString *tac = (NSString *)item;
+        if (tac.length == 8 && [tac rangeOfCharacterFromSet:nonDigits].location == NSNotFound) {
+            [validTACs addObject:tac];
+        }
+    }
+    if (!validTACs.count) return nil;
+
+    NSString *tac = validTACs[PXRandomIndex3(validTACs.count)];
+    NSMutableString *imei = [NSMutableString stringWithString:tac];
+    // IMEI is 8-digit TAC + 6-digit serial + 1 Luhn check digit.
+    for (NSUInteger i = 0; i < 6; i++) {
+        [imei appendFormat:@"%u", arc4random_uniform(10)];
+    }
+    NSInteger sum = 0;
+    for (NSUInteger i = 0; i < 14; i++) {
+        NSInteger digit = [imei characterAtIndex:i] - '0';
+        if (i % 2 == 1) digit *= 2;
+        if (digit > 9) digit -= 9;
+        sum += digit;
+    }
+    [imei appendFormat:@"%ld", (long)((10 - (sum % 10)) % 10)];
+    return imei;
+}
+
+static NSString *PXGenerateMEIDFromAuthoritativePrefixes(NSArray *prefixes) {
+    if (![prefixes isKindOfClass:[NSArray class]] || !prefixes.count) return nil;
+    NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEFabcdef"];
+    NSMutableArray<NSString *> *validPrefixes = [NSMutableArray array];
+    for (id item in prefixes) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        NSString *prefix = [(NSString *)item uppercaseString];
+        if (prefix.length == 6 &&
+            [prefix rangeOfCharacterFromSet:[hex invertedSet]].location == NSNotFound) {
+            [validPrefixes addObject:prefix];
+        }
+    }
+    if (!validPrefixes.count) return nil;
+
+    NSMutableString *body = [NSMutableString stringWithString:validPrefixes[PXRandomIndex3(validPrefixes.count)]];
+    for (NSUInteger i = 0; i < 8; i++) {
+        [body appendFormat:@"%X", arc4random_uniform(16)];
+    }
+    NSInteger checkDigit = PXMEIDLuhnCheckDigit(body);
+    if (checkDigit < 0 || checkDigit > 15) return nil;
+    [body appendFormat:@"%X", (unsigned int)checkDigit];
+    return body;
+}
+
+static BOOL PXIdentityHasAllowedPrefix(NSString *value, NSArray *prefixes) {
+    if (!value.length || ![prefixes isKindOfClass:[NSArray class]]) return NO;
+    for (id item in prefixes) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        NSString *prefix = [(NSString *)item uppercaseString];
+        if (prefix.length && [[value uppercaseString] hasPrefix:prefix]) return YES;
+    }
+    return NO;
+}
+
+static BOOL PXPopulateCanonicalCellularIdentity(NSMutableDictionary *deviceIds,
+                                               NSDictionary *cellularSpec,
+                                               NSDictionary *basebandMeta,
+                                               BOOL wantsIMEI,
+                                               BOOL wantsMEID,
+                                               NSError **error) {
+    if (![deviceIds isKindOfClass:[NSMutableDictionary class]]) return NO;
+
+    NSString *existingIMEI = PXCanonicalIdentityValue(deviceIds[@"IMEI"], PXIdentityValueKindIMEI, NO);
+    NSString *existingIMEI2 = PXCanonicalIdentityValue(deviceIds[@"IMEI2"], PXIdentityValueKindIMEI, NO);
+    NSString *existingMEID = PXCanonicalIdentityValue(deviceIds[@"MEID"], PXIdentityValueKindMEID, NO);
+
+    [deviceIds removeObjectsForKeys:@[
+        @"CellularCapable", @"AdvertisedSIMCount", @"BasebandFamily", @"BasebandVersion",
+        @"IMEI", @"IMEI2", @"MEID", @"ICCID", @"IMSI"
+    ]];
+
+    BOOL knownPresent = [cellularSpec[@"known"] isKindOfClass:[NSNumber class]];
+    BOOL known = knownPresent && [cellularSpec[@"known"] boolValue];
+    if (!known) return YES; // explicit unknown is a valid fail-closed state.
+
+    BOOL enabled = [cellularSpec[@"enabled"] isKindOfClass:[NSNumber class]] &&
+                   [cellularSpec[@"enabled"] boolValue];
+    BOOL dualSIM = [cellularSpec[@"dualSIM"] isKindOfClass:[NSNumber class]] &&
+                   [cellularSpec[@"dualSIM"] boolValue];
+    BOOL cdma = [cellularSpec[@"cdma"] isKindOfClass:[NSNumber class]] &&
+                [cellularSpec[@"cdma"] boolValue];
+
+    deviceIds[@"CellularCapable"] = @(enabled);
+    deviceIds[@"AdvertisedSIMCount"] = @(enabled ? (dualSIM ? 2 : 1) : 0);
+    if (!enabled) return YES;
+
+    NSString *basebandFamily = PXProfileString(basebandMeta[@"basebandFamily"]);
+    NSString *basebandVersion = PXProfileString(basebandMeta[@"basebandVersion"]);
+    if (!basebandFamily.length || !basebandVersion.length) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6010
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                    @"Known cellular variant requires authoritative baseband family/version"}];
+        }
+        return NO;
+    }
+    deviceIds[@"BasebandFamily"] = basebandFamily;
+    deviceIds[@"BasebandVersion"] = basebandVersion;
+
+    if (wantsIMEI) {
+        NSArray *tacs = [cellularSpec[@"imeiTACs"] isKindOfClass:[NSArray class]]
+            ? cellularSpec[@"imeiTACs"] : nil;
+        NSString *imei = PXIdentityHasAllowedPrefix(existingIMEI, tacs)
+            ? existingIMEI : PXGenerateIMEIFromAuthoritativeTACs(tacs);
+        if (!imei.length) {
+            if (error) {
+                *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                             code:6011
+                                         userInfo:@{NSLocalizedDescriptionKey:
+                                                        @"Canonical cellular variant is missing authoritative IMEI TAC data"}];
+            }
+            return NO;
+        }
+        deviceIds[@"IMEI"] = imei;
+
+        if (dualSIM) {
+            NSString *imei2 = (PXIdentityHasAllowedPrefix(existingIMEI2, tacs) &&
+                               ![existingIMEI2 isEqualToString:imei]) ? existingIMEI2 : nil;
+            for (NSUInteger attempt = 0; !imei2.length && attempt < 8; attempt++) {
+                NSString *candidate = PXGenerateIMEIFromAuthoritativeTACs(tacs);
+                if (candidate.length && ![candidate isEqualToString:imei]) {
+                    imei2 = candidate;
+                    break;
+                }
+            }
+            if (!imei2.length) {
+                if (error) {
+                    *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                                 code:6012
+                                             userInfo:@{NSLocalizedDescriptionKey:
+                                                            @"Could not generate distinct canonical secondary IMEI"}];
+                }
+                return NO;
+            }
+            deviceIds[@"IMEI2"] = imei2;
+        }
+    }
+
+    if (wantsMEID && cdma) {
+        NSArray *prefixes = [cellularSpec[@"meidPrefixes"] isKindOfClass:[NSArray class]]
+            ? cellularSpec[@"meidPrefixes"] : nil;
+        NSString *meid = PXIdentityHasAllowedPrefix(existingMEID, prefixes)
+            ? existingMEID : PXGenerateMEIDFromAuthoritativePrefixes(prefixes);
+        if (!meid.length) {
+            if (error) {
+                *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                             code:6013
+                                         userInfo:@{NSLocalizedDescriptionKey:
+                                                        @"Canonical CDMA variant is missing authoritative MEID prefix data"}];
+            }
+            return NO;
+        }
+        deviceIds[@"MEID"] = meid;
+    }
+    return YES;
+}
+
+static void PXRemoveLegacyCellularFiles(NSString *identityDir) {
+    if (!identityDir.length) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *fileName in @[@"imei.plist", @"meid.plist"]) {
+        NSString *path = [identityDir stringByAppendingPathComponent:fileName];
+        if ([fm fileExistsAtPath:path]) [fm removeItemAtPath:path error:nil];
+    }
+}
+
 static NSDictionary *PXPickHardwareVariantFromModelSpec(NSDictionary *modelSpec) {
     // Schema: variants: [ { boardID: "N71AP", hwModel: "N71AP" }, ... ]
     NSArray *variants = [modelSpec[@"variants"] isKindOfClass:[NSArray class]] ? modelSpec[@"variants"] : nil;
@@ -222,9 +402,15 @@ static NSDictionary *PXPickHardwareVariantFromModelSpec(NSDictionary *modelSpec)
     return candidates[PXRandomIndex3(candidates.count)];
 }
 
-static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
-    // Optional schema: modelNumbers: ["A1633", ...]
-    NSArray *nums = [modelSpec[@"modelNumbers"] isKindOfClass:[NSArray class]] ? modelSpec[@"modelNumbers"] : nil;
+static NSString *PXPickRegulatoryModelNumberFromModelSpec(NSDictionary *modelSpec, NSDictionary *pickedVariant) {
+    // KMDevices.anumber is the regulatory A-number (for example A1901), not
+    // MobileGestalt ModelNumber / IODeviceTree model-number (retail SKU).
+    NSArray *nums = [pickedVariant[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+        ? pickedVariant[@"regulatoryModelNumbers"] : nil;
+    if (!nums.count) {
+        nums = [modelSpec[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]]
+            ? modelSpec[@"regulatoryModelNumbers"] : nil;
+    }
     if (!nums.count) return nil;
 
     NSMutableArray<NSString *> *candidates = [NSMutableArray array];
@@ -313,37 +499,79 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         return nil;
     }
 
-    // iphone_model_db intentionally contains release/variant information only.
-    // Merge it with the built-in canonical hardware table so RAM, camera and
-    // storage never disappear when this DB-driven generation path is used.
-    NSDictionary *builtinSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:productType] ?: @{};
-    NSDictionary *screen = PXScreenDictFromModelSpec(modelSpec);
-    NSString *screenResolution = [screen[@"resolution"] isKindOfClass:[NSString class]] ? screen[@"resolution"] : PXProfileString(builtinSpecs[@"screenResolution"]);
-    NSString *viewportResolution = [screen[@"viewport"] isKindOfClass:[NSString class]] ? screen[@"viewport"] : PXProfileString(builtinSpecs[@"viewportResolution"]);
-    if (!viewportResolution.length) viewportResolution = screenResolution;
-    NSNumber *scale = [screen[@"scale"] isKindOfClass:[NSNumber class]] ? screen[@"scale"] : PXProfilePositiveNumber(builtinSpecs[@"devicePixelRatio"]);
-    NSNumber *ppi = [screen[@"ppi"] isKindOfClass:[NSNumber class]] ? screen[@"ppi"] : PXProfilePositiveNumber(builtinSpecs[@"screenDensity"]);
+    // P0: versioned model data is authoritative for model-dependent hardware.
+    // Do not reconstruct RAM/display/camera/storage from ProductType prefixes here.
+    NSDictionary *hardwareSpecs = [modelDB canonicalHardwareSpecForProductType:productType];
+    if (!hardwareSpecs.count) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6006 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware metadata missing for model"}];
+        PXDBLog(@"DeviceProfileGroup: missing canonical hardware metadata device=%@", productType);
+        return nil;
+    }
+    NSString *screenResolution = PXProfileString(hardwareSpecs[@"screenResolution"]);
+    NSString *viewportResolution = PXProfileString(hardwareSpecs[@"viewportResolution"]);
+    NSNumber *scale = PXProfilePositiveNumber(hardwareSpecs[@"devicePixelRatio"]);
+    NSNumber *nativeScale = PXProfilePositiveNumber(hardwareSpecs[@"nativeScale"]);
+    NSNumber *ppi = PXProfilePositiveNumber(hardwareSpecs[@"screenDensity"]);
+    NSString *cpuArchitecture = PXProfileString(hardwareSpecs[@"cpuArchitecture"]);
+    NSString *cpuProfileKey = PXProfileString(hardwareSpecs[@"cpuProfileKey"]);
+    NSNumber *deviceMemoryGB = PXProfilePositiveNumber(hardwareSpecs[@"deviceMemory"]);
+    NSNumber *cpuCores = PXProfilePositiveNumber(hardwareSpecs[@"cpuCoreCount"]);
 
-    NSString *cpuArchitecture = PXProfileString(modelSpec[@"cpuArchitecture"]) ?: PXProfileString(builtinSpecs[@"cpuArchitecture"]);
-    NSNumber *deviceMemoryGB = [modelSpec[@"deviceMemoryGB"] isKindOfClass:[NSNumber class]] ? modelSpec[@"deviceMemoryGB"] : PXProfilePositiveNumber(builtinSpecs[@"deviceMemory"]);
-    NSString *gpuFamily = PXProfileString(modelSpec[@"gpuFamily"]) ?: PXProfileString(builtinSpecs[@"gpuFamily"]);
-    NSNumber *cpuCores = [modelSpec[@"cpuCores"] isKindOfClass:[NSNumber class]] ? modelSpec[@"cpuCores"] : PXProfilePositiveNumber(builtinSpecs[@"cpuCoreCount"]);
-    NSString *metalFeatureSet = PXProfileString(modelSpec[@"metalFeatureSet"]) ?: PXProfileString(builtinSpecs[@"metalFeatureSet"]);
+    // GPU/Metal/WebGL remain compatibility-only until the P1 GPU catalog is
+    // authoritative. They must never overwrite P0 hardware fields above.
+    NSDictionary *legacySpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:productType] ?: @{};
+    NSString *gpuFamily = PXProfileString(legacySpecs[@"gpuFamily"]);
+    NSString *metalFeatureSet = PXProfileString(legacySpecs[@"metalFeatureSet"]);
 
-    // Hardware variant selection. BoardID and HwModel are independent fields.
+    // Hardware variant selection. BoardID/HwModel and A-number are one tuple.
     NSDictionary *pickedVariant = PXPickHardwareVariantFromModelSpec(modelSpec);
     NSString *boardID = PXProfileString(pickedVariant[@"boardID"]);
     NSString *hwModel = PXProfileString(pickedVariant[@"hwModel"]);
-    if (!boardID.length) boardID = PXProfileString(modelSpec[@"boardID"]);
-    if (!hwModel.length) hwModel = PXProfileString(modelSpec[@"hwModel"]);
-    if (!boardID.length) boardID = PXProfileString(builtinSpecs[@"boardID"]);
-    if (!hwModel.length) hwModel = PXProfileString(builtinSpecs[@"hwModel"]);
+    if (!boardID.length || !hwModel.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6007 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware variant missing for model"}];
+        PXDBLog(@"DeviceProfileGroup: missing variant device=%@ spec=%@", productType, modelSpec);
+        return nil;
+    }
 
-    // Optional model number (Axxxx)
-    NSString *modelNumber = PXPickModelNumberFromModelSpec(modelSpec);
+    // Regulatory A-number is selected from the exact same hardware variant.
+    // Retail ModelNumber is a separate SKU identity and remains unset until
+    // authoritative SKU data is available.
+    NSString *regulatoryModelNumber = PXPickRegulatoryModelNumberFromModelSpec(modelSpec, pickedVariant);
+    if ([pickedVariant[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]] &&
+        [pickedVariant[@"regulatoryModelNumbers"] count] > 0 && !regulatoryModelNumber.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6008 userInfo:@{NSLocalizedDescriptionKey: @"Canonical regulatory model number missing for selected variant"}];
+        return nil;
+    }
+
+    // P1: cellular/baseband is resolved from the exact ProductType + regulatory
+    // A-number + IOSBuild tuple. Unknown regional data remains absent/fail-closed.
+    NSDictionary *cellularSpec = [modelDB cellularSpecForProductType:productType
+                                               regulatoryModelNumber:regulatoryModelNumber ?: @""];
+    BOOL cellularKnown = [cellularSpec[@"known"] isKindOfClass:[NSNumber class]] &&
+                          [cellularSpec[@"known"] boolValue];
+    BOOL cellularEnabled = cellularKnown &&
+                           [cellularSpec[@"enabled"] isKindOfClass:[NSNumber class]] &&
+                           [cellularSpec[@"enabled"] boolValue];
+    NSDictionary *basebandMeta = nil;
+    if (cellularKnown) {
+        if (cellularEnabled) {
+            basebandMeta = [modelDB basebandMetaForProductType:productType
+                                         regulatoryModelNumber:regulatoryModelNumber ?: @""
+                                                      iosBuild:iosBuild];
+            if (!basebandMeta.count) {
+                self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                                 code:6009
+                                             userInfo:@{NSLocalizedDescriptionKey:
+                                                            @"Known cellular variant is missing authoritative baseband metadata for selected iOS build"}];
+                PXDBLog(@"DeviceProfileGroup: missing baseband device=%@ regulatory=%@ build=%@",
+                        productType, regulatoryModelNumber ?: @"<nil>", iosBuild ?: @"<nil>");
+                return nil;
+            }
+        }
+    }
 
     NSDictionary *webGLInfo = PXWebGLInfoFromModelSpec(modelSpec);
-    if (!webGLInfo.count) webGLInfo = PXWebGLInfoFromModelSpec(builtinSpecs);
+    if (!webGLInfo.count) webGLInfo = PXWebGLInfoFromModelSpec(legacySpecs);
 
     NSDate *now = [NSDate date];
 
@@ -356,16 +584,18 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     // Clear fields managed by the Device Profile group to avoid stale values.
     NSArray<NSString *> *managedKeys = @[
         @"DeviceModel", @"DeviceModelName",
-        @"ScreenResolution", @"ViewportResolution", @"DevicePixelRatio", @"ScreenDensityPPI",
-        @"CPUArchitecture", @"DeviceMemory", @"CPUCoreCount", @"MetalFeatureSet", @"GPUFamily",
+        @"ScreenResolution", @"ViewportResolution", @"DevicePixelRatio", @"NativeScale", @"ScreenDensityPPI",
+        @"CPUArchitecture", @"CPUProfileKey", @"DeviceMemory", @"CPUCoreCount", @"MetalFeatureSet", @"GPUFamily",
         @"WebGLVendor", @"WebGLRenderer", @"WebGLVersion",
         @"WebGLUnmaskedVendor", @"WebGLUnmaskedRenderer",
         @"WebGLMaxTextureSize", @"WebGLMaxRenderbufferSize", @"WebGLMaxRenderBufferSize",
-        @"BoardID", @"HwModel", @"ModelNumber",
+        @"BoardID", @"HwModel", @"ModelNumber", @"RegulatoryModelNumber",
         @"FrontCameraMegapixels", @"RearCameraMegapixels", @"RearCameraCount",
         @"HasFrontCamera", @"HasRearCamera", @"HasPanoramaCamera",
         @"HasUltraWideCamera", @"HasTelephotoCamera", @"HasLiDARScanner",
         @"Supports4KVideo", @"StorageCapacitiesGB",
+        @"CellularCapable", @"AdvertisedSIMCount", @"BasebandFamily", @"BasebandVersion",
+        @"IMEI", @"IMEI2", @"MEID", @"ICCID", @"IMSI",
         @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"
     ];
     for (NSString *k in managedKeys) {
@@ -377,18 +607,33 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     deviceIds[@"ScreenResolution"] = screenResolution ?: @"";
     deviceIds[@"ViewportResolution"] = viewportResolution ?: @"";
     if (scale) deviceIds[@"DevicePixelRatio"] = scale;
+    if (nativeScale) deviceIds[@"NativeScale"] = nativeScale;
     if (ppi) deviceIds[@"ScreenDensityPPI"] = ppi;
     deviceIds[@"CPUArchitecture"] = cpuArchitecture ?: @"";
+    if (cpuProfileKey.length) deviceIds[@"CPUProfileKey"] = cpuProfileKey;
     if (deviceMemoryGB) deviceIds[@"DeviceMemory"] = deviceMemoryGB;
     if (cpuCores) deviceIds[@"CPUCoreCount"] = cpuCores;
     if (metalFeatureSet.length) deviceIds[@"MetalFeatureSet"] = metalFeatureSet;
     if (gpuFamily.length) deviceIds[@"GPUFamily"] = gpuFamily;
     PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
-    PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, builtinSpecs);
+    PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, hardwareSpecs);
     if (boardID.length) deviceIds[@"BoardID"] = boardID;
     if (hwModel.length) deviceIds[@"HwModel"] = hwModel;
+    if (regulatoryModelNumber.length) deviceIds[@"RegulatoryModelNumber"] = regulatoryModelNumber;
 
-    if (modelNumber.length) deviceIds[@"ModelNumber"] = modelNumber;
+    NSError *cellularError = nil;
+    if (!PXPopulateCanonicalCellularIdentity(deviceIds,
+                                             cellularSpec,
+                                             basebandMeta,
+                                             [self isIdentifierEnabled:@"IMEI"],
+                                             [self isIdentifierEnabled:@"MEID"],
+                                             &cellularError)) {
+        self.error = cellularError ?: [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                                           code:6014
+                                                       userInfo:@{NSLocalizedDescriptionKey:
+                                                                      @"Failed to populate canonical cellular identity"}];
+        return nil;
+    }
 
     // iOS fields (store normalized components)
     deviceIds[@"IOSVersion"] = iosVersion;
@@ -404,6 +649,15 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     if (!wrote) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6004 userInfo:@{NSLocalizedDescriptionKey: @"Failed to write device_ids.plist"}];
         return nil;
+    }
+
+    // The model/iOS/baseband dependency group owns telephony compatibility.
+    // Remove legacy per-identifier files after the new generation commits so
+    // currentValueForIdentifier cannot resurrect IMEI/MEID from an old model.
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *fileName in @[@"imei.plist", @"meid.plist"]) {
+        NSString *path = [identityDir stringByAppendingPathComponent:fileName];
+        if ([fm fileExistsAtPath:path]) [fm removeItemAtPath:path error:nil];
     }
 
     // Keep IOSVersionInfo in sync for processes that fall back to it.
@@ -427,78 +681,22 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     }
 
     PXLog(@"[WeaponX] ✅ DeviceProfileGroup: %@ (%@) iOS %@ (%@)", productType, modelName ?: @"", iosVersion, iosBuild);
-    PXDBLog(@"DeviceProfileGroup: picked device=%@ modelNumber=%@ boardID=%@ hwModel=%@", productType, modelNumber ?: @"<nil>", boardID ?: @"<nil>", hwModel ?: @"<nil>");
+    PXDBLog(@"DeviceProfileGroup: picked device=%@ regulatoryModelNumber=%@ boardID=%@ hwModel=%@", productType, regulatoryModelNumber ?: @"<nil>", boardID ?: @"<nil>", hwModel ?: @"<nil>");
     return productType;
 }
 
 - (NSString *)generateDeviceModel {
-    NSString *deviceModel = [[DeviceModelManager sharedManager] generateDeviceModel];
-    if (!deviceModel) {
-        self.error = [[DeviceModelManager sharedManager] lastError];
-        return nil;
-    }
-    
-    // Get all device specifications from DeviceModelManager
-    DeviceModelManager *deviceManager = [DeviceModelManager sharedManager];
-    NSString *deviceModelName = [deviceManager deviceModelNameForString:deviceModel];
-    NSString *screenResolution = [deviceManager screenResolutionForModel:deviceModel];
-    NSString *viewportResolution = [deviceManager viewportResolutionForModel:deviceModel];
-    CGFloat devicePixelRatio = [deviceManager devicePixelRatioForModel:deviceModel];
-    NSInteger screenDensity = [deviceManager screenDensityForModel:deviceModel];
-    NSString *cpuArchitecture = [deviceManager cpuArchitectureForModel:deviceModel];
-    
-    // New device specifications
-    NSInteger deviceMemory = [deviceManager deviceMemoryForModel:deviceModel];
-    NSString *gpuFamily = [deviceManager gpuFamilyForModel:deviceModel];
-    NSDictionary *webGLInfo = [deviceManager webGLInfoForModel:deviceModel];
-    NSDictionary *hardwareSpecs = [deviceManager deviceSpecificationsForModel:deviceModel];
-    NSInteger cpuCoreCount = [deviceManager cpuCoreCountForModel:deviceModel];
-    NSString *metalFeatureSet = [deviceManager metalFeatureSetForModel:deviceModel];
-    
-    // Get Board ID and hw.model
-    NSString *boardID = [deviceManager boardIDForModel:deviceModel];
-    NSString *hwModel = [deviceManager hwModelForModel:deviceModel];
-    
-    // Save to profile-specific path (device_ids.plist only)
-    NSString *identityDir = [self profileIdentityPath];
-    if (identityDir) {
-        // Also update the combined device_ids.plist
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-        
-        // Add all device specs to the device_ids.plist file
-        deviceIds[@"DeviceModel"] = deviceModel ?: @"";
-        deviceIds[@"DeviceModelName"] = deviceModelName ?: @"";
-        deviceIds[@"ScreenResolution"] = screenResolution ?: @"";
-        deviceIds[@"ViewportResolution"] = viewportResolution ?: @"";
-        deviceIds[@"DevicePixelRatio"] = @(devicePixelRatio);
-        deviceIds[@"ScreenDensityPPI"] = @(screenDensity);
-        deviceIds[@"CPUArchitecture"] = cpuArchitecture ?: @"";
-        deviceIds[@"DeviceMemory"] = @(deviceMemory);
-        deviceIds[@"CPUCoreCount"] = @(cpuCoreCount);
-        [deviceIds removeObjectsForKeys:@[@"MetalFeatureSet", @"GPUFamily", @"BoardID", @"HwModel"]];
-        NSString *normalizedMetal = PXProfileString(metalFeatureSet);
-        NSString *normalizedGPU = PXProfileString(gpuFamily);
-        NSString *normalizedBoardID = PXProfileString(boardID);
-        NSString *normalizedHwModel = PXProfileString(hwModel);
-        if (normalizedMetal) deviceIds[@"MetalFeatureSet"] = normalizedMetal;
-        if (normalizedGPU) deviceIds[@"GPUFamily"] = normalizedGPU;
-        PXWriteWebGLInfoToDeviceIDs(deviceIds, webGLInfo);
-        PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, hardwareSpecs);
-        if (normalizedBoardID) deviceIds[@"BoardID"] = normalizedBoardID;
-        if (normalizedHwModel) deviceIds[@"HwModel"] = normalizedHwModel;
-        
-        [deviceIds writeToFile:deviceIdsPath atomically:YES];
-    }
-    return deviceModel;
+    // Compatibility API: DeviceModel is a dependency group, not an independent
+    // random value. Route every caller through the canonical atomic generator.
+    return [self regenerateDeviceProfileGroup];
 }
 
 - (BOOL)setCustomDeviceModel:(NSString *)value {
-    BOOL valid = [[DeviceModelManager sharedManager] isValidDeviceModel:value];
-    if (!valid) {
-        // Allow models present in external DB (device profile group)
-        valid = [[IPhoneModelDB sharedManager] containsProductType:value];
-    }
+    BOOL isIPhone = [value isKindOfClass:[NSString class]] && [value hasPrefix:@"iPhone"];
+    // P0 ownership rule: every iPhone must exist in the canonical model DB.
+    // DeviceModelManager remains a compatibility source only for non-iPhone models.
+    BOOL valid = isIPhone ? [[IPhoneModelDB sharedManager] containsProductType:value]
+                          : [[DeviceModelManager sharedManager] isValidDeviceModel:value];
     if (!valid) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Model"}];
         return NO;
@@ -506,26 +704,48 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
     NSString *identityDir = [self profileIdentityPath];
     BOOL success = NO;
     
-    // Get all device specifications
     DeviceModelManager *deviceManager = [DeviceModelManager sharedManager];
-    NSString *deviceModelName = [deviceManager deviceModelNameForString:value];
-    NSString *screenResolution = [deviceManager screenResolutionForModel:value];
-    NSString *viewportResolution = [deviceManager viewportResolutionForModel:value];
-    CGFloat devicePixelRatio = [deviceManager devicePixelRatioForModel:value];
-    NSInteger screenDensity = [deviceManager screenDensityForModel:value];
-    NSString *cpuArchitecture = [deviceManager cpuArchitectureForModel:value];
-    
-    // New device specifications
-    NSInteger deviceMemory = [deviceManager deviceMemoryForModel:value];
-    NSString *gpuFamily = [deviceManager gpuFamilyForModel:value];
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    NSDictionary *modelSpec = [modelDB specForProductType:value];
+    NSDictionary *dbHardwareSpecs = modelSpec ? [modelDB canonicalHardwareSpecForProductType:value] : nil;
+    NSDictionary *legacySpecs = [deviceManager deviceSpecificationsForModel:value] ?: @{};
+    NSDictionary *hardwareSpecs = dbHardwareSpecs.count ? dbHardwareSpecs : legacySpecs;
+
+    // DB-backed iPhone models must resolve P0 hardware from canonical data. The
+    // legacy manager is retained only for models not yet present in the DB.
+    if (modelSpec && !dbHardwareSpecs.count) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2004 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware metadata missing for Device Model"}];
+        return NO;
+    }
+
+    NSString *deviceModelName = PXProfileString(hardwareSpecs[@"name"]) ?: [deviceManager deviceModelNameForString:value];
+    NSString *screenResolution = PXProfileString(hardwareSpecs[@"screenResolution"]);
+    NSString *viewportResolution = PXProfileString(hardwareSpecs[@"viewportResolution"]);
+    CGFloat devicePixelRatio = [hardwareSpecs[@"devicePixelRatio"] doubleValue];
+    CGFloat nativeScale = [hardwareSpecs[@"nativeScale"] doubleValue];
+    NSInteger screenDensity = [hardwareSpecs[@"screenDensity"] integerValue];
+    NSString *cpuArchitecture = PXProfileString(hardwareSpecs[@"cpuArchitecture"]);
+    NSString *cpuProfileKey = PXProfileString(hardwareSpecs[@"cpuProfileKey"]);
+    NSInteger deviceMemory = [hardwareSpecs[@"deviceMemory"] integerValue];
+    NSInteger cpuCoreCount = [hardwareSpecs[@"cpuCoreCount"] integerValue];
+
+    // P1 GPU/Metal/WebGL still uses the compatibility table for now.
+    NSString *gpuFamily = PXProfileString(legacySpecs[@"gpuFamily"]);
     NSDictionary *webGLInfo = [deviceManager webGLInfoForModel:value];
-    NSDictionary *hardwareSpecs = [deviceManager deviceSpecificationsForModel:value];
-    NSInteger cpuCoreCount = [deviceManager cpuCoreCountForModel:value];
-    NSString *metalFeatureSet = [deviceManager metalFeatureSetForModel:value];
-    
-    // Get Board ID and hw.model
-    NSString *boardID = [deviceManager boardIDForModel:value];
-    NSString *hwModel = [deviceManager hwModelForModel:value];
+    NSString *metalFeatureSet = PXProfileString(legacySpecs[@"metalFeatureSet"]);
+
+    NSDictionary *pickedVariant = modelSpec ? PXPickHardwareVariantFromModelSpec(modelSpec) : @{};
+    NSString *boardID = PXProfileString(pickedVariant[@"boardID"]);
+    NSString *hwModel = PXProfileString(pickedVariant[@"hwModel"]);
+    NSString *regulatoryModelNumber = modelSpec ? PXPickRegulatoryModelNumberFromModelSpec(modelSpec, pickedVariant) : nil;
+    if (modelSpec && (!boardID.length || !hwModel.length)) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2005 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware variant missing for Device Model"}];
+        return NO;
+    }
+    if (!modelSpec) {
+        boardID = PXProfileString(hardwareSpecs[@"boardID"]);
+        hwModel = PXProfileString(hardwareSpecs[@"hwModel"]);
+    }
     
     if (identityDir) {
         // Update the combined device_ids.plist
@@ -538,11 +758,18 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         deviceIds[@"ScreenResolution"] = screenResolution ?: @"";
         deviceIds[@"ViewportResolution"] = viewportResolution ?: @"";
         deviceIds[@"DevicePixelRatio"] = @(devicePixelRatio);
+        if (nativeScale > 0.0) deviceIds[@"NativeScale"] = @(nativeScale); else [deviceIds removeObjectForKey:@"NativeScale"];
         deviceIds[@"ScreenDensityPPI"] = @(screenDensity);
         deviceIds[@"CPUArchitecture"] = cpuArchitecture ?: @"";
+        if (cpuProfileKey.length) deviceIds[@"CPUProfileKey"] = cpuProfileKey; else [deviceIds removeObjectForKey:@"CPUProfileKey"];
         deviceIds[@"DeviceMemory"] = @(deviceMemory);
         deviceIds[@"CPUCoreCount"] = @(cpuCoreCount);
-        [deviceIds removeObjectsForKeys:@[@"MetalFeatureSet", @"GPUFamily", @"BoardID", @"HwModel"]];
+        [deviceIds removeObjectsForKeys:@[
+            @"MetalFeatureSet", @"GPUFamily", @"BoardID", @"HwModel", @"ModelNumber", @"RegulatoryModelNumber",
+            @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion",
+            @"CellularCapable", @"AdvertisedSIMCount", @"BasebandFamily", @"BasebandVersion",
+            @"IMEI", @"IMEI2", @"MEID", @"ICCID", @"IMSI"
+        ]];
         NSString *normalizedMetal = PXProfileString(metalFeatureSet);
         NSString *normalizedGPU = PXProfileString(gpuFamily);
         NSString *normalizedBoardID = PXProfileString(boardID);
@@ -553,10 +780,15 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
         PXWriteHardwareCapabilitiesToDeviceIDs(deviceIds, hardwareSpecs);
         if (normalizedBoardID) deviceIds[@"BoardID"] = normalizedBoardID;
         if (normalizedHwModel) deviceIds[@"HwModel"] = normalizedHwModel;
+        if (regulatoryModelNumber.length) deviceIds[@"RegulatoryModelNumber"] = regulatoryModelNumber;
         
         success = [deviceIds writeToFile:deviceIdsPath atomically:YES];
     }
     if (success) {
+        // Model changes invalidate every old cellular identity file as well as
+        // the in-plist tuple cleared above. A later coherent profile apply will
+        // repopulate them from the selected A-number/build if authoritative.
+        PXRemoveLegacyCellularFiles(identityDir);
         [[DeviceModelManager sharedManager] setCurrentDeviceModel:value];
     }
     return success;
@@ -750,101 +982,103 @@ static NSString *PXPickModelNumberFromModelSpec(NSDictionary *modelSpec) {
 - (NSDictionary *)generateIOSVersion {
     self.error = nil;
 
-    BOOL webCompat = PXWebCompatIOSRangeEnabled();
-    NSString *webCompatMax = @"16.3.1";
-
-    // Prefer external DB if available and current device model is known.
-    @try {
-        NSString *identityDir = [self profileIdentityPath];
-        NSString *deviceModel = [self currentValueForIdentifier:@"DeviceModel"];
-        if (identityDir.length && deviceModel.length) {
-            NSError *dbErr = nil;
-            IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
-            IOSBuildDB *buildDB = [IOSBuildDB sharedManager];
-            if ([modelDB loadIfNeeded:&dbErr] && [buildDB loadIfNeeded:&dbErr]) {
-                NSDictionary *spec = [modelDB specForProductType:deviceModel];
-                NSString *maxIOS = [spec[@"maxIOS"] isKindOfClass:[NSString class]] ? spec[@"maxIOS"] : nil;
-                NSString *effectiveMaxIOS = (webCompat ? PXWebCompatMaxIOSForDeviceMaxIOS(maxIOS) : maxIOS);
-                if (effectiveMaxIOS.length) {
-                    NSDictionary *meta = [buildDB randomMetaForDevice:deviceModel min:@"13.0" max:effectiveMaxIOS error:&dbErr];
-                    if (meta) {
-                        NSString *iosVersion = meta[@"version"];
-                        NSString *iosBuild = meta[@"build"];
-                        NSString *darwin = meta[@"darwin"];
-                        NSString *xnu = meta[@"xnu"];
-                        NSString *kernel = meta[@"kernel_version"];
-
-                        NSMutableDictionary *versionDict = [@{
-                            @"version": iosVersion ?: @"",
-                            @"build": iosBuild ?: @"",
-                            @"darwin": darwin ?: @"",
-                            @"xnu": xnu ?: @"",
-                            @"kernel_version": kernel ?: @"",
-                            @"lastUpdated": [NSDate date]
-                        } mutableCopy];
-
-                        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-                        deviceIds[@"IOSVersion"] = iosVersion;
-                        deviceIds[@"IOSBuild"] = iosBuild;
-                        deviceIds[@"Darwin"] = darwin;
-                        deviceIds[@"XNU"] = xnu;
-                        deviceIds[@"KernelVersion"] = kernel;
-                        [deviceIds writeToFile:deviceIdsPath atomically:YES];
-
-                        [[IOSVersionInfo sharedManager] setCurrentIOSVersionInfo:versionDict];
-                        PXLog(@"[WeaponX] ✅ Generated iOS version from DB: %@ (%@)", iosVersion, iosBuild);
-                        return versionDict;
-                    }
-                }
-            }
-        }
-    } @catch (__unused NSException *e) {
+    NSString *identityDir = [self profileIdentityPath];
+    NSString *deviceModel = PXProfileString([self currentValueForIdentifier:@"DeviceModel"]);
+    if (!identityDir.length || !deviceModel.length) {
+        // Compatibility API: when no model exists, seed the complete dependency
+        // group instead of generating an orphan software identity.
+        NSString *generatedModel = [self regenerateDeviceProfileGroup];
+        if (!generatedModel.length) return nil;
+        NSString *deviceIdsPath = [[self profileIdentityPath] stringByAppendingPathComponent:@"device_ids.plist"];
+        NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
+        if (![deviceIds isKindOfClass:[NSDictionary class]]) return nil;
+        return @{
+            @"version": deviceIds[@"IOSVersion"] ?: @"",
+            @"build": deviceIds[@"IOSBuild"] ?: @"",
+            @"darwin": deviceIds[@"Darwin"] ?: @"",
+            @"xnu": deviceIds[@"XNU"] ?: @"",
+            @"kernel_version": deviceIds[@"KernelVersion"] ?: @"",
+            @"lastUpdated": [NSDate date]
+        };
     }
 
-    NSDictionary *versionInfo = nil;
-    if (webCompat) {
-        NSDictionary *picked = PXPickFallbackIOSVersionInfoMax(webCompatMax);
-        if (picked) {
-            versionInfo = @{
-                @"version": picked[@"version"] ?: @"",
-                @"build": picked[@"build"] ?: @"",
-                @"darwin": picked[@"darwin"] ?: @"",
-                @"xnu": picked[@"xnu"] ?: @"",
-                @"kernel_version": picked[@"kernel_version"] ?: @"",
-                @"lastUpdated": [NSDate date]
-            };
-        }
-    }
-
-    if (!versionInfo) {
-        versionInfo = [[IOSVersionInfo sharedManager] generateIOSVersionInfo];
-    }
-    if (!versionInfo) {
-        self.error = [[IOSVersionInfo sharedManager] lastError];
+    NSError *dbErr = nil;
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    IOSBuildDB *buildDB = [IOSBuildDB sharedManager];
+    if (![modelDB loadIfNeeded:&dbErr] || ![buildDB loadIfNeeded:&dbErr]) {
+        self.error = dbErr ?: [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                                  code:6009
+                                              userInfo:@{NSLocalizedDescriptionKey: @"Canonical iOS database unavailable"}];
         return nil;
     }
-    
-    // Save to profile-specific path (device_ids.plist only)
-    NSString *identityDir = [self profileIdentityPath];
-    if (identityDir) {
-        // Also update the combined device_ids.plist
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: 
-                                         [NSMutableDictionary dictionary];
-        
-        // Store normalized components in device_ids.plist
-        deviceIds[@"IOSVersion"] = versionInfo[@"version"];
-        deviceIds[@"IOSBuild"] = versionInfo[@"build"];  // Keep this for compatibility
-        if (versionInfo[@"darwin"]) deviceIds[@"Darwin"] = versionInfo[@"darwin"];
-        if (versionInfo[@"xnu"]) deviceIds[@"XNU"] = versionInfo[@"xnu"];
-        if (versionInfo[@"kernel_version"]) deviceIds[@"KernelVersion"] = versionInfo[@"kernel_version"];
-        [deviceIds writeToFile:deviceIdsPath atomically:YES];
-        
-        PXLog(@"[WeaponX] Stored iOS version: %@ with build: %@", versionInfo[@"version"], versionInfo[@"build"]);
+
+    NSDictionary *spec = [modelDB specForProductType:deviceModel];
+    if (!spec) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6010
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Current Device Model is not in the canonical iOS database"}];
+        return nil;
     }
-    
-    return versionInfo;
+
+    NSString *minIOS = [spec[@"minIOS"] isKindOfClass:[NSString class]] ? spec[@"minIOS"] : @"13.0";
+    if (PXCompareVersions(minIOS, @"13.0") == NSOrderedAscending) minIOS = @"13.0";
+    NSString *maxIOS = [spec[@"maxIOS"] isKindOfClass:[NSString class]] ? spec[@"maxIOS"] : nil;
+    if (PXWebCompatIOSRangeEnabled()) {
+        maxIOS = PXWebCompatMaxIOSForDeviceMaxIOS(maxIOS);
+    }
+    if (!maxIOS.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6011
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Canonical iOS range missing for current Device Model"}];
+        return nil;
+    }
+
+    NSDictionary *meta = [buildDB randomMetaForDevice:deviceModel min:(minIOS ?: @"13.0") max:maxIOS error:&dbErr];
+    if (!meta) {
+        self.error = dbErr ?: [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                                  code:6012
+                                              userInfo:@{NSLocalizedDescriptionKey: @"No compatible canonical iOS build for current Device Model"}];
+        return nil;
+    }
+
+    NSString *iosVersion = PXProfileString(meta[@"version"]);
+    NSString *iosBuild = PXProfileString(meta[@"build"]);
+    NSString *darwin = PXProfileString(meta[@"darwin"]);
+    NSString *xnu = PXProfileString(meta[@"xnu"]);
+    NSString *kernel = PXProfileString(meta[@"kernel_version"]);
+    if (!iosVersion.length || !iosBuild.length || !darwin.length || !xnu.length || !kernel.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6013
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Canonical iOS tuple is incomplete"}];
+        return nil;
+    }
+
+    NSMutableDictionary *versionDict = [@{
+        @"version": iosVersion,
+        @"build": iosBuild,
+        @"darwin": darwin,
+        @"xnu": xnu,
+        @"kernel_version": kernel,
+        @"lastUpdated": [NSDate date]
+    } mutableCopy];
+
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
+    deviceIds[@"IOSVersion"] = iosVersion;
+    deviceIds[@"IOSBuild"] = iosBuild;
+    deviceIds[@"Darwin"] = darwin;
+    deviceIds[@"XNU"] = xnu;
+    deviceIds[@"KernelVersion"] = kernel;
+    if (![deviceIds writeToFile:deviceIdsPath atomically:YES]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6014
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to persist canonical iOS tuple"}];
+        return nil;
+    }
+
+    [[IOSVersionInfo sharedManager] setCurrentIOSVersionInfo:versionDict];
+    PXLog(@"[WeaponX] ✅ Generated canonical iOS version for %@: %@ (%@)", deviceModel, iosVersion, iosBuild);
+    return versionDict;
 }
 
 - (NSDictionary *)generateiOSVersion {
@@ -1160,6 +1394,85 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     return appContainerUUID;
 }
 
+
+- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile {
+    NSString *identityDir = [self profileIdentityPath];
+    if (!identityDir.length) return NO;
+
+    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?:
+                                     [NSMutableDictionary dictionary];
+    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
+    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
+    NSString *iosBuild = PXProfileString(deviceIds[@"IOSBuild"]);
+
+    // If no coherent baseline exists yet, seed the complete group once. That
+    // path also populates/clears cellular identity according to the current
+    // IMEI/MEID toggles.
+    if (!productType.length || !regulatoryModelNumber.length || !iosBuild.length) {
+        return [self regenerateDeviceProfileGroup].length > 0;
+    }
+
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    NSDictionary *modelSpec = [modelDB specForProductType:productType];
+    if ([productType hasPrefix:@"iPhone"] && !modelSpec) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6015
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                    @"Canonical model data is required before cellular identity can be refreshed"}];
+        return NO;
+    }
+
+    NSDictionary *cellularSpec = modelSpec
+        ? [modelDB cellularSpecForProductType:productType
+                       regulatoryModelNumber:regulatoryModelNumber]
+        : nil;
+    BOOL cellularKnown = [cellularSpec[@"known"] isKindOfClass:[NSNumber class]] &&
+                          [cellularSpec[@"known"] boolValue];
+    BOOL cellularEnabled = cellularKnown &&
+                           [cellularSpec[@"enabled"] isKindOfClass:[NSNumber class]] &&
+                           [cellularSpec[@"enabled"] boolValue];
+    NSDictionary *basebandMeta = nil;
+    if (cellularEnabled) {
+        basebandMeta = [modelDB basebandMetaForProductType:productType
+                                     regulatoryModelNumber:regulatoryModelNumber
+                                                  iosBuild:iosBuild];
+        if (!basebandMeta.count) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                             code:6016
+                                         userInfo:@{NSLocalizedDescriptionKey:
+                                                        @"Authoritative baseband metadata is unavailable for the current cellular tuple"}];
+            return NO;
+        }
+    }
+
+    NSError *cellularError = nil;
+    if (!PXPopulateCanonicalCellularIdentity(deviceIds,
+                                             cellularSpec,
+                                             basebandMeta,
+                                             [self isIdentifierEnabled:@"IMEI"],
+                                             [self isIdentifierEnabled:@"MEID"],
+                                             &cellularError)) {
+        self.error = cellularError;
+        return NO;
+    }
+
+    NSInteger gen = [deviceIds[@"GenerationCounter"] respondsToSelector:@selector(integerValue)]
+        ? [deviceIds[@"GenerationCounter"] integerValue] : 0;
+    deviceIds[@"GenerationCounter"] = @(gen + 1);
+    deviceIds[@"CommittedAt"] = [NSDate date];
+    if (![deviceIds writeToFile:deviceIdsPath atomically:YES]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                                         code:6017
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                    @"Failed to persist canonical cellular identity"}];
+        return NO;
+    }
+
+    PXRemoveLegacyCellularFiles(identityDir);
+    return YES;
+}
+
 - (void)regenerateAllEnabledIdentifiers {
         // For WiFi info: Use the WiFiManager to generate
     Class wifiManagerClass = NSClassFromString(@"WiFiManager");
@@ -1185,14 +1498,6 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     if ([self isIdentifierEnabled:@"SerialNumber"]) {
         [self generateSerialNumber];
     }
-    if ([self isIdentifierEnabled:@"IMEI"]) {
-        NSString *imei = [self generateIMEI];
-        if (imei) [self setCustomIMEI:imei];
-    }
-    if ([self isIdentifierEnabled:@"MEID"]) {
-        NSString *meid = [self generateMEID];
-        if (meid) [self setCustomMEID:meid];
-    }
     if ([self isIdentifierEnabled:@"UDID"]) {
         [self generateUDID];
     }
@@ -1200,27 +1505,29 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     // Device profile group: DeviceModel + dependent specs + iOS version/build.
     // Only regenerate when at least one of the dependent identifiers is enabled.
     BOOL wantsDeviceProfileGroup = [self isIdentifierEnabled:@"DeviceModel"] || [self isIdentifierEnabled:@"IOSVersion"];
+    BOOL regeneratedProfileGroup = NO;
     if (wantsDeviceProfileGroup) {
         NSString *newModel = [self regenerateDeviceProfileGroup];
+        regeneratedProfileGroup = newModel.length > 0;
         if (!newModel) {
-            // Fallback to legacy generation paths if DB-based generation is unavailable.
-            NSString *deviceModel = [self generateDeviceModel];
-            if (deviceModel) {
-                // Use legacy setter for existing model DB.
-                [self setCustomDeviceModel:deviceModel];
-            }
-            if ([self isIdentifierEnabled:@"IOSVersion"]) {
-                [self generateIOSVersion];
-            }
+            // P0 is fail-closed: never replace a failed canonical model/build
+            // resolution with independently randomized legacy model + iOS values.
+            PXLog(@"[WeaponX] ❌ Device profile group generation failed; preserving the previous coherent generation");
         }
     } else {
-        // Ensure we still have a model stored for spec-dependent UI.
+        // Spec-dependent features (for example StorageSystem) still need a
+        // coherent baseline. Seed it from the same canonical model/build group;
+        // never create a hardware-only legacy model with no compatible iOS tuple.
         if (![self currentValueForIdentifier:@"DeviceModel"]) {
-            NSString *deviceModel = [self generateDeviceModel];
-            if (deviceModel) {
-                [self setCustomDeviceModel:deviceModel];
-            }
+            regeneratedProfileGroup = [self regenerateDeviceProfileGroup].length > 0;
         }
+    }
+
+    // IMEI/MEID may be enabled even when DeviceModel/IOSVersion toggles are off.
+    // Refresh against the existing tuple without selecting a new model/build.
+    if (!wantsDeviceProfileGroup && !regeneratedProfileGroup &&
+        ([self isIdentifierEnabled:@"IMEI"] || [self isIdentifierEnabled:@"MEID"])) {
+        [self refreshCanonicalCellularIdentityForCurrentProfile];
     }
     
     // Always generate device theme if it doesn't exist
@@ -1338,6 +1645,14 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type {
     // Set the enabled state in settings
     self.settings[type] = @(enabled);
+
+    // IMEI/MEID are members of the canonical cellular/baseband dependency
+    // group. Refresh them against the current ProductType/A-number/IOSBuild
+    // even when a legacy value already exists.
+    BOOL canonicalCellularToggle = [type isEqualToString:@"IMEI"] || [type isEqualToString:@"MEID"];
+    if (canonicalCellularToggle) {
+        [self refreshCanonicalCellularIdentityForCurrentProfile];
+    }
     
     // If enabling an identifier, check if we need to generate a value
     if (enabled) {
@@ -1359,19 +1674,17 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
             else if ([type isEqualToString:@"SerialNumber"]) {
                 [self generateSerialNumber];
             }
-            else if ([type isEqualToString:@"IMEI"]) {
-                NSString *imei = [self generateIMEI];
-                if (imei) [self setCustomIMEI:imei];
-            }
-            else if ([type isEqualToString:@"MEID"]) {
-                NSString *meid = [self generateMEID];
-                if (meid) [self setCustomMEID:meid];
+            else if ([type isEqualToString:@"IMEI"] || [type isEqualToString:@"MEID"]) {
+                // Canonical cellular refresh above is the only production
+                // generation path. Never fall back to generic TAC/MEID data.
+                [self refreshCanonicalCellularIdentityForCurrentProfile];
             }
             else if ([type isEqualToString:@"UDID"]) {
                 [self generateUDID];
             }
             else if ([type isEqualToString:@"IOSVersion"]) {
-                [self generateIOSVersion];
+                // iOS version is part of the model/build/kernel dependency group.
+                [self regenerateDeviceProfileGroup];
             }
             else if ([type isEqualToString:@"SystemBootUUID"]) {
                 [self generateSystemBootUUID];
@@ -1462,15 +1775,10 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         }
     }
     
-    // Always ensure device model exists (prefer DB-based device profile if available)
+    // Always ensure a coherent canonical device profile exists. P0 must not
+    // fall back to a hardware-only DeviceModel when model/build resolution fails.
     if (![self currentValueForIdentifier:@"DeviceModel"]) {
-        NSString *m = [self regenerateDeviceProfileGroup];
-        if (!m) {
-            NSString *deviceModel = [self generateDeviceModel];
-            if (deviceModel) {
-                [self setCustomDeviceModel:deviceModel];
-            }
-        }
+        [self regenerateDeviceProfileGroup];
     }
     
     // Persist the identifier state first. Secondary runtime settings are written only after
@@ -2951,14 +3259,47 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 #pragma mark - IMEI/MEID Spoofing (kept strictly separate)
 
 - (BOOL)setCustomIMEI:(NSString *)value {
-    // Validate IMEI: must be 15 digits, Luhn valid, and start with a US TAC (e.g., 353918, 356938, 359254, etc.)
     if (![self isValidIMEI:value]) return NO;
+
+    // Once an exact regional cellular slot exists, manual IMEI writes are
+    // governed by that slot too. known=false deliberately rejects a guessed TAC.
+    NSString *identityDir = [self profileIdentityPath];
+    NSDictionary *deviceIds = identityDir.length
+        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
+        : nil;
+    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
+    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
+    if ([productType hasPrefix:@"iPhone"]) {
+        if (!regulatoryModelNumber.length) return NO;
+        NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
+                                                                 regulatoryModelNumber:regulatoryModelNumber];
+        BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
+        BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
+        NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:[NSArray class]] ? spec[@"imeiTACs"] : nil;
+        if (!enabled || !PXIdentityHasAllowedPrefix(value, tacs)) return NO;
+    }
     return [self saveCustomValue:value forType:@"IMEI"];
 }
 
 - (BOOL)setCustomMEID:(NSString *)value {
-    // Validate MEID: 14 hex body + Luhn base-16 check digit.
     if (![self isValidMEID:value]) return NO;
+
+    NSString *identityDir = [self profileIdentityPath];
+    NSDictionary *deviceIds = identityDir.length
+        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
+        : nil;
+    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
+    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
+    if ([productType hasPrefix:@"iPhone"]) {
+        if (!regulatoryModelNumber.length) return NO;
+        NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
+                                                                 regulatoryModelNumber:regulatoryModelNumber];
+        BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
+        BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
+        BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:[NSNumber class]] && [spec[@"cdma"] boolValue];
+        NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:[NSArray class]] ? spec[@"meidPrefixes"] : nil;
+        if (!cdma || !PXIdentityHasAllowedPrefix(value, prefixes)) return NO;
+    }
     return [self saveCustomValue:value forType:@"MEID"];
 }
 
@@ -3261,40 +3602,49 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 }
 
 - (NSString *)generateIMEI {
-    // Use a realistic US iPhone TAC (Type Allocation Code)
-    NSArray *usTACs = @[ @"353918", @"356938", @"359254", @"353915", @"353920", @"353929", @"353997", @"354994" ];
-    NSString *tac = usTACs[arc4random_uniform((uint32_t)usTACs.count)];
-    NSMutableString *imei = [NSMutableString stringWithString:tac];
-    // 8 digits for SNR
-    for (int i = 0; i < 8; i++) {
-        [imei appendFormat:@"%d", arc4random_uniform(10)];
-    }
-    // Luhn check digit
-    int sum = 0;
-    for (int i = 0; i < 14; i++) {
-        int digit = [imei characterAtIndex:i] - '0';
-        if (i % 2 == 1) digit *= 2;
-        if (digit > 9) digit -= 9;
-        sum += digit;
-    }
-    int checkDigit = (10 - (sum % 10)) % 10;
-    [imei appendFormat:@"%d", checkDigit];
+    // Compatibility API, but generation is now canonical-only. Never fall back
+    // to a generic TAC pool that can contradict ProductType/A-number.
+    NSString *identityDir = [self profileIdentityPath];
+    NSDictionary *deviceIds = identityDir.length
+        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
+        : nil;
+    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
+    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
+    if (!productType.length || !regulatoryModelNumber.length) return nil;
+
+    NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
+                                                             regulatoryModelNumber:regulatoryModelNumber];
+    BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
+    BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
+    NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:[NSArray class]] ? spec[@"imeiTACs"] : nil;
+    if (!enabled) return nil;
+
+    NSString *imei = PXGenerateIMEIFromAuthoritativeTACs(tacs);
+    if (!imei.length || ![self setCustomIMEI:imei]) return nil;
     return imei;
 }
 
 - (NSString *)generateMEID {
-    // Use a realistic US MEID prefix (A00000, A10000, 990000)
-    NSArray *usMEIDPrefixes = @[ @"A00000", @"A10000", @"990000" ];
-    NSString *prefix = usMEIDPrefixes[arc4random_uniform((uint32_t)usMEIDPrefixes.count)];
-    NSMutableString *meid = [NSMutableString stringWithString:prefix];
-    // 8 hex digits plus Luhn base-16 check digit.
-    for (int i = 0; i < 8; i++) {
-        [meid appendFormat:@"%X", arc4random_uniform(16)];
-    }
-    NSInteger checkDigit = PXMEIDLuhnCheckDigit(meid);
-    if (checkDigit >= 0) {
-        [meid appendFormat:@"%C", PXHexChar(checkDigit)];
-    }
+    // MEID is available only when the exact regional capability is verified as
+    // CDMA-capable and carries an authoritative prefix list.
+    NSString *identityDir = [self profileIdentityPath];
+    NSDictionary *deviceIds = identityDir.length
+        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
+        : nil;
+    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
+    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
+    if (!productType.length || !regulatoryModelNumber.length) return nil;
+
+    NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
+                                                             regulatoryModelNumber:regulatoryModelNumber];
+    BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
+    BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
+    BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:[NSNumber class]] && [spec[@"cdma"] boolValue];
+    NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:[NSArray class]] ? spec[@"meidPrefixes"] : nil;
+    if (!cdma) return nil;
+
+    NSString *meid = PXGenerateMEIDFromAuthoritativePrefixes(prefixes);
+    if (!meid.length || ![self setCustomMEID:meid]) return nil;
     return meid;
 }
 
@@ -3401,6 +3751,11 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 
     NSString *currentDeviceModel = PXProfileString([self currentValueForIdentifier:@"DeviceModel"]);
     if (!currentDeviceModel.length) return nil;
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    NSDictionary *modelSpec = [modelDB specForProductType:currentDeviceModel];
+    NSDictionary *canonical = modelSpec ? [modelDB canonicalHardwareSpecForProductType:currentDeviceModel] : nil;
+    if (canonical.count) return canonical;
+    if ([currentDeviceModel hasPrefix:@"iPhone"]) return nil;
     return [[DeviceModelManager sharedManager] deviceSpecificationsForModel:currentDeviceModel];
 }
 

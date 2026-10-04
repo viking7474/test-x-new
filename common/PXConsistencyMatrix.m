@@ -115,9 +115,13 @@ NSArray<PXConsistencyMatrixEntry *> *PXConsistencyMatrixEntries(void) {
             PXKeyEntry(@"MG", @"BoardId", @"BoardID", @"DeviceModel", @"BoardID"),
             PXKeyEntry(@"IOKit", @"board-id", @"BoardID", @"DeviceModel", @"BoardID"),
 
-            // --- ModelNumber (Axxxx) ---
+            // --- Retail ModelNumber (for example MQAG2, without region suffix) ---
             PXKeyEntry(@"MG", @"ModelNumber", @"ModelNumber", @"DeviceModel", @"ModelNumber"),
             PXKeyEntry(@"IOKit", @"model-number", @"ModelNumber", @"DeviceModel", @"ModelNumber"),
+
+            // --- RegulatoryModelNumber (Axxxx) ---
+            PXKeyEntry(@"MG", @"RegulatoryModelNumber", @"RegulatoryModelNumber", @"DeviceModel", @"RegulatoryModelNumber"),
+            PXKeyEntry(@"IOKit", @"regulatory-model-number", @"RegulatoryModelNumber", @"DeviceModel", @"RegulatoryModelNumber"),
 
             // --- DeviceName (user-facing hostname) ---
             PXKeyEntry(@"sysctlbyname", @"kern.hostname", @"DeviceName", @"DeviceName", @"DeviceName"),

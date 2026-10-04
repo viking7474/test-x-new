@@ -1,6 +1,7 @@
 #import "TLinkIOS.h"
 #import "DeviceModelManager.h"
 #import "IdentifierManager.h"
+#import "IPhoneModelDB.h"
 #import "ProfileManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXNativeHookCoordinator.h"
@@ -364,15 +365,43 @@ static const PXDeviceCPUProfile *PXCPUProfileForArchitecture(NSString *architect
 }
 
 static const PXDeviceCPUProfile *PXCPUProfileFromSpecs(NSDictionary *specs) {
+    NSString *profileKey = [specs[@"cpuProfileKey"] isKindOfClass:[NSString class]] ? specs[@"cpuProfileKey"] : nil;
     NSString *architecture = [specs[@"cpuArchitecture"] isKindOfClass:[NSString class]] ? specs[@"cpuArchitecture"] : nil;
+
+    // P0 profiles carry an exact SoC/CPU key. Do not infer A16/A17/etc from the
+    // marketing architecture string when that key is present.
+    if (profileKey.length) {
+        for (NSUInteger i = 0; i < sizeof(kPXDeviceCPUProfiles) / sizeof(kPXDeviceCPUProfiles[0]); i++) {
+            const PXDeviceCPUProfile *profile = &kPXDeviceCPUProfiles[i];
+            NSString *key = [NSString stringWithUTF8String:profile->token];
+            if (profile->qualifier) {
+                key = [key stringByAppendingFormat:@" %@", [NSString stringWithUTF8String:profile->qualifier]];
+            }
+            if ([profileKey caseInsensitiveCompare:key] != NSOrderedSame) continue;
+            if (!PXCPUProfileIsUsable(profile)) return NULL;
+
+            // When both fields are present they must describe the same CPU row.
+            if (architecture.length && profile->brand) {
+                NSString *brand = [NSString stringWithUTF8String:profile->brand];
+                if (![architecture isEqualToString:brand]) return NULL;
+            }
+            return profile;
+        }
+        return NULL;
+    }
+
+    // Legacy profiles created before P0 retain the old compatibility lookup.
     return PXCPUProfileForArchitecture(architecture);
 }
 
 static NSUInteger PXCPUCoreCountFromSpecs(NSDictionary *specs) {
-    // Fail open as one unit. An unknown architecture must not spoof only the core
-    // count while family/subtype/cache/features continue exposing the real device.
+    // Fail open as one unit. An unknown/mismatched profile must not spoof only
+    // the core count while family/subtype/cache/features expose another CPU.
     const PXDeviceCPUProfile *profile = PXCPUProfileFromSpecs(specs);
-    return profile ? profile->defaultCoreCount : 0;
+    if (!profile) return 0;
+    NSUInteger explicitCount = [specs[@"cpuCoreCount"] unsignedIntegerValue];
+    if (explicitCount > 0 && explicitCount != profile->defaultCoreCount) return 0;
+    return explicitCount > 0 ? explicitCount : profile->defaultCoreCount;
 }
 
 static NSInteger PXDeviceMemoryGBFromSpecs(NSDictionary *specs) {
@@ -602,15 +631,26 @@ static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
     }
 
     if (requestedEnabled && !specs.count && deviceModel.length) {
-        Class deviceManagerClass = NSClassFromString(@"DeviceModelManager");
-        DeviceModelManager *deviceManager = nil;
-        if (deviceManagerClass && [deviceManagerClass respondsToSelector:@selector(sharedManager)]) {
-            deviceManager = [deviceManagerClass sharedManager];
-        }
-        NSDictionary *managerSpecs = [deviceManager deviceSpecificationsForModel:deviceModel];
-        if ([managerSpecs isKindOfClass:[NSDictionary class]] && managerSpecs.count) {
-            specs = PXDeviceSpecDeepImmutableCopy(managerSpecs);
-            source = @"device_model_manager";
+        IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+        NSDictionary *modelSpec = [modelDB specForProductType:deviceModel];
+        NSDictionary *canonicalSpecs = modelSpec ? [modelDB canonicalHardwareSpecForProductType:deviceModel] : nil;
+        if (canonicalSpecs.count) {
+            specs = PXDeviceSpecDeepImmutableCopy(canonicalSpecs);
+            source = @"iphone_model_db";
+        } else if (!modelSpec && ![deviceModel hasPrefix:@"iPhone"]) {
+            // Compatibility-only fallback for non-iPhone legacy models. Every
+            // iPhone ProductType is owned by the canonical DB and fails closed
+            // when that record is unavailable.
+            Class deviceManagerClass = NSClassFromString(@"DeviceModelManager");
+            DeviceModelManager *deviceManager = nil;
+            if (deviceManagerClass && [deviceManagerClass respondsToSelector:@selector(sharedManager)]) {
+                deviceManager = [deviceManagerClass sharedManager];
+            }
+            NSDictionary *managerSpecs = [deviceManager deviceSpecificationsForModel:deviceModel];
+            if ([managerSpecs isKindOfClass:[NSDictionary class]] && managerSpecs.count) {
+                specs = PXDeviceSpecDeepImmutableCopy(managerSpecs);
+                source = @"device_model_manager_legacy";
+            }
         }
     }
 
@@ -1223,7 +1263,8 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 %hook UIScreen
 
-// Keep nativeScale aligned with scale when UI scale spoofing is enabled.
+// nativeScale is a model datum, not a PPI-derived estimate. Older Plus models
+// intentionally have nativeScale != scale because their render buffer is downsampled.
 - (CGFloat)nativeScale {
     CGFloat original = %orig;
 
@@ -1233,13 +1274,12 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
     }
     NSDictionary *specs = snapshot.specs;
 
-    CGFloat pixelRatio = [specs[@"devicePixelRatio"] floatValue];
-    if (pixelRatio <= 0) return original;
-
-    return pixelRatio;
+    CGFloat nativeScale = [specs[@"nativeScale"] floatValue];
+    if (nativeScale <= 0) nativeScale = [specs[@"devicePixelRatio"] floatValue]; // legacy profile
+    return nativeScale > 0 ? nativeScale : original;
 }
 
-// For screen density
+// Private spelling used by some callers; project the exact same canonical field.
 - (CGFloat)native_scale {
     CGFloat originalScale = %orig;
     
@@ -1249,21 +1289,13 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
         return originalScale;
     }
     NSDictionary *specs = snapshot.specs;
+    CGFloat spoofedScale = [specs[@"nativeScale"] floatValue];
+    if (spoofedScale <= 0) spoofedScale = [specs[@"devicePixelRatio"] floatValue]; // legacy profile
+    if (spoofedScale <= 0) return originalScale;
     
-    // Calculate from screen density (PPI)
-    NSInteger screenDensity = [specs[@"screenDensity"] integerValue];
-    if (screenDensity <= 0) {
-        return originalScale;
-    }
-    
-    // iPhone reference point is 163 PPI for scale 1.0
-    CGFloat spoofedScale = screenDensity / 163.0;
-    
-    // Log the change the first time
     static BOOL loggedNativeScale = NO;
     if (!loggedNativeScale) {
-        PXLog(@"[DeviceSpec] Spoofing native scale from %.2f to %.2f (density: %ld PPI)",
-             originalScale, spoofedScale, (long)screenDensity);
+        PXLog(@"[DeviceSpec] Spoofing native scale from %.3f to %.3f", originalScale, spoofedScale);
         loggedNativeScale = YES;
     }
     

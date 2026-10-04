@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "databaseVersion": "p0-cellular-regional-v1",
+  "regulatoryModels": {
+    "A2846": {
+      "known": false
+    },
+    "A3089": {
+      "known": false
+    },
+    "A3090": {
+      "known": false
+    },
+    "A3092": {
+      "known": false
+    },
+    "A2847": {
+      "known": false
+    },
+    "A3093": {
+      "known": false
+    },
+    "A3094": {
+      "known": false
+    },
+    "A3096": {
+      "known": false
+    },
+    "A2848": {
+      "known": false
+    },
+    "A3101": {
+      "known": false
+    },
+    "A3102": {
+      "known": false
+    },
+    "A3104": {
+      "known": false
+    },
+    "A2849": {
+      "known": false
+    },
+    "A3105": {
+      "known": false
+    },
+    "A3106": {
+      "known": false
+    },
+    "A3108": {
+      "known": false
+    }
+  }
+}

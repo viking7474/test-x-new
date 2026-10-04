@@ -243,7 +243,9 @@ def run_source_matrix(matrix: Matrix) -> None:
     matrix.check("source: architecture name maps only public subtype classes", all(token in arch_name for token in ["CPU_SUBTYPE_ARM64_ALL", "CPU_SUBTYPE_ARM64_V8", "CPU_SUBTYPE_ARM64E", 'return "arm64"', 'return "arm64e"', "return NULL"]))
     matrix.check("source: matched malformed profile fails open", "return PXCPUProfileIsUsable(profile) ? profile : NULL;" in profile_resolver)
     matrix.check("source: profile validator combines subtype and ARM feature checks", "PXCPUProfileHasSupportedSubtype" in profile_validator and "PXCPUFeatureStringIsARMOnly" in profile_validator)
-    matrix.check("source: unknown core profile returns zero", "return profile ? profile->defaultCoreCount : 0;" in core_count)
+    matrix.check("source: unknown core profile returns zero",
+                 "if (!profile) return 0;" in core_count and
+                 "explicitCount != profile->defaultCoreCount" in core_count)
     matrix.check("source: NX unknown profile preserves original", "if (!profile) return original;" in nx_hook)
     matrix.check("source: NX invalid subtype preserves original", "if (!archName) return original;" in nx_hook)
     matrix.check("source: NX uses canonical subtype name helper", "PXCPUArchNameForSubtype(profile->cpuSubtype)" in nx_hook)

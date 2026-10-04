@@ -78,6 +78,28 @@ __attribute__((constructor(101))) static void PXTLinkIOSTweakEarlyLoadMarker(voi
 // Cache for values
 static NSMutableDictionary *valueCache;
 
+static NSString *PXValidatedTelephonySnapshotString(NSString *key) {
+\n    if (![key isKindOfClass:NSString.class] || !key.length) return nil;
+    PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+    if (!snapshot.valid) return nil;
+
+    NSDictionary *issues = [snapshot.validationIssues isKindOfClass:NSDictionary.class]
+        ? snapshot.validationIssues : @{};
+    NSArray<NSString *> *blocking = @[
+        @"cellularCapability", @"cellular", @"BasebandVersion", @"BasebandFamily",
+        @"hardwareVariant", @"modelBuild", @"DeviceModel", @"IOSBuild"
+    ];
+    for (NSString *issueKey in blocking) {
+        if (issues[issueKey] != nil) return nil;
+    }
+    if (issues[key] != nil) return nil;
+    if ([key isEqualToString:@"IMEI2"] && issues[@"IMEI"] != nil) return nil;
+
+    id value = snapshot.deviceIDs[key];
+    return [value isKindOfClass:NSString.class] && [(NSString *)value length]
+        ? (NSString *)value : nil;
+}
+
 // Compatibility shims for apps calling weakly-linked / newer-iOS selectors
 // when the real OS is older than the spoofed iOS version (common crash pattern).
 static BOOL PXCompatReturnNo(id self, SEL _cmd) {
@@ -1339,7 +1361,7 @@ static int uname_hook(struct utsname *buf) {
     else if ([propertyString isEqualToString:@"InternationalMobileEquipmentIdentity"]) {
         // IMEI only — separate toggle/value from MEID.
         if ([manager isIdentifierEnabled:@"IMEI"]) {
-            NSString *spoofedIMEI = [manager currentValueForIdentifier:@"IMEI"];
+            NSString *spoofedIMEI = PXValidatedTelephonySnapshotString(@"IMEI");
             if (spoofedIMEI.length) {
                 PXLog(@"Spoofing IMEI with: %@", spoofedIMEI);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedIMEI);
@@ -1349,7 +1371,7 @@ static int uname_hook(struct utsname *buf) {
     else if ([propertyString isEqualToString:@"MobileEquipmentIdentifier"]) {
         // MEID only — separate toggle/value from IMEI.
         if ([manager isIdentifierEnabled:@"MEID"]) {
-            NSString *spoofedMEID = [manager currentValueForIdentifier:@"MEID"];
+            NSString *spoofedMEID = PXValidatedTelephonySnapshotString(@"MEID");
             if (spoofedMEID.length) {
                 PXLog(@"Spoofing MEID with: %@", spoofedMEID);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedMEID);
@@ -1417,7 +1439,9 @@ static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
     };
     NSString *toggle = legacy[key];
     if (toggle.length && [manager isIdentifierEnabled:toggle]) {
-        NSString *value = [manager currentValueForIdentifier:toggle];
+        BOOL telephony = [toggle isEqualToString:@"IMEI"] || [toggle isEqualToString:@"MEID"];
+        NSString *value = telephony ? PXValidatedTelephonySnapshotString(toggle)
+                                    : [manager currentValueForIdentifier:toggle];
         if (value.length) return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)value);
     }
     if ([key isEqualToString:@"UniqueDeviceIDData"] && [manager isIdentifierEnabled:@"UDID"]) {
@@ -3815,7 +3839,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
         if (([keyString isEqualToString:@"kIMEIKey"] ||
              [keyString isEqualToString:@"InternationalMobileEquipmentIdentity"]) &&
             [manager isIdentifierEnabled:@"IMEI"]) {
-            NSString *spoofedIMEI = [manager currentValueForIdentifier:@"IMEI"];
+            NSString *spoofedIMEI = PXValidatedTelephonySnapshotString(@"IMEI");
             if (spoofedIMEI.length) {
                 PXLog(@"Spoofing IMEI with: %@", spoofedIMEI);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedIMEI);
@@ -3826,7 +3850,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
              [keyString isEqualToString:@"kMEIDKey"] ||
              [keyString isEqualToString:@"MEID"]) &&
             [manager isIdentifierEnabled:@"MEID"]) {
-            NSString *spoofedMEID = [manager currentValueForIdentifier:@"MEID"];
+            NSString *spoofedMEID = PXValidatedTelephonySnapshotString(@"MEID");
             if (spoofedMEID.length) {
                 PXLog(@"Spoofing MEID with: %@", spoofedMEID);
                 return CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)spoofedMEID);

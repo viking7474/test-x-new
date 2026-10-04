@@ -3,6 +3,7 @@
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 #import "DeviceModelManager.h"
+#import "IPhoneModelDB.h"
 
 // Constants for proper size calculations
 // Use only marketing units (1000-based) as used by Apple
@@ -76,7 +77,16 @@
 }
 
 - (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)deviceModel {
-    NSDictionary *specs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    NSDictionary *modelSpec = [modelDB specForProductType:deviceModel];
+    NSDictionary *specs = modelSpec ? [modelDB canonicalHardwareSpecForProductType:deviceModel] : nil;
+
+    // Every iPhone is owned by the canonical model DB. Unknown/missing iPhone
+    // records fail closed instead of falling back to ProductType-prefix heuristics.
+    BOOL isIPhone = [deviceModel isKindOfClass:[NSString class]] && [deviceModel hasPrefix:@"iPhone"];
+    if (isIPhone && (!modelSpec || !specs.count)) return nil;
+    if (!specs.count) specs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:deviceModel];
+
     NSArray *rawCapacities = [specs[@"storageCapacitiesGB"] isKindOfClass:[NSArray class]]
         ? specs[@"storageCapacitiesGB"] : @[@64, @128, @256, @512];
     NSMutableArray<NSString *> *capacities = [NSMutableArray array];

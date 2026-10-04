@@ -147,6 +147,19 @@ static id PXLockdownResolveInterceptedValue(NSString *runtimeKey, id original, N
         PXLockdownSoftwareModelOptions options = PXLockdownSoftwareModelOptionsFromSettings(settings);
         resolved = PXLockdownSoftwareModelResolve(constName, original, deviceIDs, options, decision, &failures);
     } else if (PXLockdownSoCCellularEntryForKey(constName)) {
+        PXLockdownSoCCellularEntry *entry = PXLockdownSoCCellularEntryForKey(constName);
+        if (entry.requiresCellular) {
+            NSDictionary *issues = [snapshot.validationIssues isKindOfClass:NSDictionary.class]
+                ? snapshot.validationIssues : @{};
+            NSArray<NSString *> *blocking = @[
+                @"cellularCapability", @"cellular", @"BasebandVersion", @"BasebandFamily",
+                @"hardwareVariant", @"modelBuild", @"DeviceModel", @"IOSBuild",
+                @"IMEI", @"IMEI2", @"MEID"
+            ];
+            for (NSString *issueKey in blocking) {
+                if (issues[issueKey] != nil) return original;
+            }
+        }
         PXLockdownSoCCellularOptions options = PXLockdownSoCCellularOptionsFromSettings(settings);
         resolved = PXLockdownSoCCellularResolve(constName, original, deviceIDs, specs, options, decision, &failures);
     } else {

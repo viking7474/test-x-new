@@ -25,6 +25,7 @@
 #import "ToolViewController.h"
 #import "NetworkManager.h"
 #import "IOSBuildDB.h"
+#import "IPhoneModelDB.h"
 #import "PXPaths.h"
 #import <UIKit/UIKit.h>
 #import "ProgressHUDView.h"
@@ -909,25 +910,36 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 }
 
 - (NSArray<NSDictionary *> *)models {
-    return @[
-        @{ @"name": @"iPhone X", @"id": @"iPhone10,3", @"modelNumber": @"MQA52LL/A" },
-        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8", @"modelNumber": @"MRY42LL/A" },
-        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2", @"modelNumber": @"MT9E2LL/A" },
-        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1", @"modelNumber": @"MWKM2LL/A" },
-        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3", @"modelNumber": @"MWC22LL/A" },
-        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2", @"modelNumber": @"MGJ53LL/A" },
-        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3", @"modelNumber": @"MGMK3LL/A" },
-        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5", @"modelNumber": @"MLPF3LL/A" },
-        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2", @"modelNumber": @"MLTP3LL/A" },
-        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7", @"modelNumber": @"MPVN3LL/A" },
-        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"modelNumber": @"MQ0E3LL/A" },
-        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"modelNumber": @"MTP63LL/A" },
-        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"modelNumber": @"MTV13LL/A" },
-        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"modelNumber": @"MU693LL/A" }
+    NSArray<NSDictionary *> *declared = @[
+        @{ @"name": @"iPhone X", @"id": @"iPhone10,3", @"partNumber": @"MQA52LL/A" },
+        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8", @"partNumber": @"MRY42LL/A" },
+        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2", @"partNumber": @"MT9E2LL/A" },
+        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1", @"partNumber": @"MWKM2LL/A" },
+        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3", @"partNumber": @"MWC22LL/A" },
+        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2", @"partNumber": @"MGJ53LL/A" },
+        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3", @"partNumber": @"MGMK3LL/A" },
+        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5", @"partNumber": @"MLPF3LL/A" },
+        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2", @"partNumber": @"MLTP3LL/A" },
+        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7", @"partNumber": @"MPVN3LL/A" },
+        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"partNumber": @"MQ0E3LL/A" },
+        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"partNumber": @"MTP63LL/A" },
+        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"partNumber": @"MTV13LL/A" },
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"partNumber": @"MU693LL/A" }
     ];
+
+    // P0: the legacy picker is no longer an escape hatch around the canonical DB.
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    NSMutableArray<NSDictionary *> *supported = [NSMutableArray array];
+    for (NSDictionary *row in declared) {
+        NSString *productType = [row[@"id"] isKindOfClass:NSString.class] ? row[@"id"] : nil;
+        if (productType.length && [modelDB canonicalHardwareSpecForProductType:productType].count) {
+            [supported addObject:row];
+        }
+    }
+    return [supported copy];
 }
 
-- (NSArray<NSString *> *)iosVersions { return @[ @"13.7", @"14.8", @"15.4.1", @"15.7", @"16.0", @"16.3.1" ]; }
+- (NSArray<NSString *> *)iosVersions { return [[IOSBuildDB sharedManager] availableVersions]; }
 
 - (NSArray<NSDictionary *> *)countries {
     return @[
@@ -1626,7 +1638,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
 - (void)setModel:(NSDictionary *)m {
     NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary];
-    p[@"DeviceModel"] = m[@"id"]; p[@"DeviceModelName"] = m[@"name"]; p[@"ModelNumber"] = m[@"modelNumber"];
+    p[@"DeviceModel"] = m[@"id"]; p[@"DeviceModelName"] = m[@"name"];
     self.preview = p;
     [self.tableView reloadData];
 }
@@ -1645,22 +1657,51 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (void)randomDeviceNameOnly { NSMutableDictionary *p = [self.preview mutableCopy] ?: [NSMutableDictionary dictionary]; p[@"DeviceName"] = [self randomDeviceName]; self.preview = p; [self.tableView reloadData]; }
 
 - (void)randomTapped {
-    NSDictionary *model = [self models][arc4random_uniform((uint32_t)[self models].count)];
+    NSArray<NSDictionary *> *models = [self models];
+    if (!models.count) return;
+
+    NSInteger minIdx = [self.options[@"modelMinIndex"] integerValue];
+    NSInteger maxIdx = [self.options[@"modelMaxIndex"] integerValue];
+    if (minIdx <= 0) minIdx = 1;
+    if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
+    if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
+    NSArray<NSDictionary *> *rangeModels = [models subarrayWithRange:NSMakeRange((NSUInteger)(minIdx - 1), (NSUInteger)(maxIdx - minIdx + 1))];
+
+    NSString *iosMin = [self.options[@"iosMin"] isKindOfClass:NSString.class] ? self.options[@"iosMin"] : @"13.0";
+    NSString *iosMax = [self.options[@"iosMax"] isKindOfClass:NSString.class] ? self.options[@"iosMax"] : @"99.0";
+    NSMutableArray<NSDictionary *> *choices = [NSMutableArray array];
+    for (NSDictionary *candidate in rangeModels) {
+        NSString *productType = candidate[@"id"];
+        NSError *error = nil;
+        NSDictionary *meta = [[IOSBuildDB sharedManager] randomMetaForDevice:productType min:iosMin max:iosMax error:&error];
+        if (meta) [choices addObject:@{ @"model": candidate, @"iosMeta": meta }];
+    }
+    if (!choices.count) {
+        NSLog(@"[FakeSelection] No coherent model/iOS tuple for selected ranges");
+        return;
+    }
+
+    NSDictionary *choice = choices[arc4random_uniform((uint32_t)choices.count)];
+    NSDictionary *model = choice[@"model"];
+    NSDictionary *iosMeta = choice[@"iosMeta"];
     NSDictionary *country = [self countries][arc4random_uniform((uint32_t)[self countries].count)];
     NSArray *carriers = [self carriersForCountry:country[@"code"]];
     NSDictionary *carrier = carriers.count ? carriers[arc4random_uniform((uint32_t)carriers.count)] : @{};
-    NSString *ios = [self iosVersions][arc4random_uniform((uint32_t)[self iosVersions].count)];
     self.preview = @{
         @"DeviceName": [self randomDeviceName],
         @"DeviceModel": model[@"id"] ?: @"",
         @"DeviceModelName": model[@"name"] ?: @"",
-        @"IOSVersion": ios,
+        @"IOSVersion": iosMeta[@"version"] ?: @"",
+        @"IOSBuild": iosMeta[@"build"] ?: @"",
+        @"Darwin": iosMeta[@"darwin"] ?: @"",
+        @"XNU": iosMeta[@"xnu"] ?: @"",
+        @"KernelVersion": iosMeta[@"kernel_version"] ?: @"",
+        @"IOSProductType": model[@"id"] ?: @"",
         @"CountryName": country[@"name"] ?: @"",
         @"CountryCode": country[@"code"] ?: @"",
         @"CarrierName": carrier[@"name"] ?: @"",
         @"CarrierMCC": carrier[@"mcc"] ?: @"",
         @"CarrierMNC": carrier[@"mnc"] ?: @"",
-        @"ModelNumber": model[@"modelNumber"] ?: @"",
         @"SerialNumber": [self randomSerial],
         @"MACAddress": [self randomMAC]
     };
@@ -1721,7 +1762,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         @[ @"iOS Version", @"IOSVersion" ],
         @[ @"Country", @"CountryName" ],
         @[ @"Carrier", @"CarrierName" ],
-        @[ @"Model Number", @"ModelNumber" ],
+        @[ @"Regulatory Model", @"RegulatoryModelNumber" ],
         @[ @"Serial Number", @"SerialNumber" ],
         @[ @"MAC Address", @"MACAddress" ]
     ];
@@ -3816,7 +3857,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
             newValue = [self.manager generateSerialNumber];
         } else if ([identifierType isEqualToString:@"IOSVersion"]) {
             // Generate iOS Version and then get the string representation
-            [self.manager generateIOSVersion];
+            [self.manager regenerateDeviceProfileGroup];
             newValue = [self.manager currentValueForIdentifier:@"IOSVersion"];
         } else if ([identifierType isEqualToString:@"WiFi"]) {
             newValue = [self.manager generateWiFiInformation];
@@ -5191,15 +5232,9 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
                         // Then force regenerate all identifiers
                         [self.manager regenerateAllEnabledIdentifiers];
                         
-                        // Explicitly generate device model if it's not already set
+                        // Explicitly seed a coherent canonical profile if missing.
                         if (![self.manager currentValueForIdentifier:@"DeviceModel"]) {
-                            NSString *deviceModel = [self.manager regenerateDeviceProfileGroup];
-                            if (!deviceModel) {
-                                deviceModel = [self.manager generateDeviceModel];
-                                if (deviceModel) {
-                                    [self.manager setCustomDeviceModel:deviceModel];
-                                }
-                            }
+                            [self.manager regenerateDeviceProfileGroup];
                         }
                         
                         // Explicitly generate device theme if it's not already set
@@ -5540,7 +5575,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     } else if ([identifierType isEqualToString:@"SerialNumber"]) {
         [self.manager generateSerialNumber];
     } else if ([identifierType isEqualToString:@"IOSVersion"]) {
-        [self.manager generateIOSVersion];
+        [self.manager regenerateDeviceProfileGroup];
     } else if ([identifierType isEqualToString:@"WiFi"]) {
         [self.manager generateWiFiInformation];
     } else if ([identifierType isEqualToString:@"StorageSystem"]) {
@@ -6203,7 +6238,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             newValue = [self.manager generateSerialNumber];
         } else if ([identifierType isEqualToString:@"IOSVersion"]) {
             // Generate iOS Version and then get the string representation
-            [self.manager generateIOSVersion];
+            [self.manager regenerateDeviceProfileGroup];
             newValue = [self.manager currentValueForIdentifier:@"IOSVersion"];
         } else if ([identifierType isEqualToString:@"WiFi"]) {
             newValue = [self.manager generateWiFiInformation];
@@ -6514,26 +6549,35 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 #pragma mark - Dashboard UI
 
 - (NSArray<NSDictionary *> *)pxSupportedFakeModels {
-    return @[
-        @{ @"name": @"iPhone X", @"id": @"iPhone10,3", @"modelNumber": @"MQA52LL/A" },
-        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8", @"modelNumber": @"MRY42LL/A" },
-        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2", @"modelNumber": @"MT9E2LL/A" },
-        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1", @"modelNumber": @"MWKM2LL/A" },
-        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3", @"modelNumber": @"MWC22LL/A" },
-        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2", @"modelNumber": @"MGJ53LL/A" },
-        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3", @"modelNumber": @"MGMK3LL/A" },
-        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5", @"modelNumber": @"MLPF3LL/A" },
-        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2", @"modelNumber": @"MLTP3LL/A" },
-        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7", @"modelNumber": @"MPVN3LL/A" },
-        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"modelNumber": @"MQ0E3LL/A" },
-        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"modelNumber": @"MTP63LL/A" },
-        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"modelNumber": @"MTV13LL/A" },
-        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"modelNumber": @"MU693LL/A" }
+    NSArray<NSDictionary *> *declared = @[
+        @{ @"name": @"iPhone X", @"id": @"iPhone10,3", @"partNumber": @"MQA52LL/A" },
+        @{ @"name": @"iPhone XR", @"id": @"iPhone11,8", @"partNumber": @"MRY42LL/A" },
+        @{ @"name": @"iPhone XS", @"id": @"iPhone11,2", @"partNumber": @"MT9E2LL/A" },
+        @{ @"name": @"iPhone 11", @"id": @"iPhone12,1", @"partNumber": @"MWKM2LL/A" },
+        @{ @"name": @"iPhone 11 Pro", @"id": @"iPhone12,3", @"partNumber": @"MWC22LL/A" },
+        @{ @"name": @"iPhone 12", @"id": @"iPhone13,2", @"partNumber": @"MGJ53LL/A" },
+        @{ @"name": @"iPhone 12 Pro", @"id": @"iPhone13,3", @"partNumber": @"MGMK3LL/A" },
+        @{ @"name": @"iPhone 13", @"id": @"iPhone14,5", @"partNumber": @"MLPF3LL/A" },
+        @{ @"name": @"iPhone 13 Pro", @"id": @"iPhone14,2", @"partNumber": @"MLTP3LL/A" },
+        @{ @"name": @"iPhone 14", @"id": @"iPhone14,7", @"partNumber": @"MPVN3LL/A" },
+        @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"partNumber": @"MQ0E3LL/A" },
+        @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"partNumber": @"MTP63LL/A" },
+        @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"partNumber": @"MTV13LL/A" },
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"partNumber": @"MU693LL/A" }
     ];
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    NSMutableArray<NSDictionary *> *supported = [NSMutableArray array];
+    for (NSDictionary *row in declared) {
+        NSString *productType = [row[@"id"] isKindOfClass:NSString.class] ? row[@"id"] : nil;
+        if (productType.length && [modelDB canonicalHardwareSpecForProductType:productType].count) {
+            [supported addObject:row];
+        }
+    }
+    return [supported copy];
 }
 
 - (NSArray<NSString *> *)pxSupportedIOSVersions {
-    return @[ @"13.0", @"13.7", @"14.0", @"14.8", @"15.0", @"15.7", @"16.0", @"16.3.1" ];
+    return [[IOSBuildDB sharedManager] availableVersions];
 }
 
 - (void)setupDashboardUI {
@@ -7453,6 +7497,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     BOOL fakeModel = options[@"fakeModelEnabled"] ? [options[@"fakeModelEnabled"] boolValue] : YES;
     BOOL fakeName = options[@"fakeNameEnabled"] ? [options[@"fakeNameEnabled"] boolValue] : NO;
     NSArray *models = [self pxSupportedFakeModels];
+    if (!models.count) {
+        NSLog(@"[Dashboard] Canonical iPhone model database is unavailable or empty");
+        return nil;
+    }
     NSInteger minIdx = [options[@"modelMinIndex"] integerValue];
     NSInteger maxIdx = [options[@"modelMaxIndex"] integerValue];
     if (minIdx <= 0) minIdx = 1;
@@ -7460,8 +7508,26 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
     NSRange allowedRange = NSMakeRange((NSUInteger)(minIdx - 1), (NSUInteger)(maxIdx - minIdx + 1));
     NSArray *allowedModels = [models subarrayWithRange:allowedRange];
+    IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
+    if (fakeModel) {
+        NSMutableArray *canonicalModels = [NSMutableArray array];
+        for (NSDictionary *candidate in allowedModels) {
+            NSString *candidateID = [candidate[@"id"] isKindOfClass:NSString.class] ? candidate[@"id"] : nil;
+            if (candidateID.length && [modelDB canonicalHardwareSpecForProductType:candidateID].count) {
+                [canonicalModels addObject:candidate];
+            }
+        }
+        if (!canonicalModels.count) {
+            NSLog(@"[Dashboard] No canonical hardware model is available in the selected range");
+            return nil;
+        }
+        allowedModels = [canonicalModels copy];
+    }
     NSString *currentModelID = [self.manager currentValueForIdentifier:@"DeviceModel"];
-    NSDictionary *currentSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:currentModelID];
+    NSDictionary *currentSpecs = [modelDB canonicalHardwareSpecForProductType:currentModelID];
+    if (!currentSpecs.count && ![currentModelID hasPrefix:@"iPhone"]) {
+        currentSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:currentModelID];
+    }
     NSMutableArray *differentModels = [NSMutableArray array];
     NSMutableArray *differentHardware = [NSMutableArray array];
     NSArray *signatureKeys = @[@"deviceMemory", @"frontCameraMegapixels", @"rearCameraMegapixels",
@@ -7470,7 +7536,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         NSString *candidateID = [candidate[@"id"] isKindOfClass:NSString.class] ? candidate[@"id"] : nil;
         if (!candidateID.length || [candidateID isEqualToString:currentModelID]) continue;
         [differentModels addObject:candidate];
-        NSDictionary *candidateSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:candidateID];
+        NSDictionary *candidateSpecs = [modelDB canonicalHardwareSpecForProductType:candidateID];
+        if (!candidateSpecs.count) continue;
         BOOL hardwareChanged = NO;
         for (NSString *key in signatureKeys) {
             if (![(currentSpecs[key] ?: NSNull.null) isEqual:(candidateSpecs[key] ?: NSNull.null)]) {
@@ -7481,28 +7548,74 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         if (hardwareChanged) [differentHardware addObject:candidate];
     }
     NSArray *selectionPool = differentHardware.count ? differentHardware : (differentModels.count ? differentModels : allowedModels);
-    NSDictionary *model = selectionPool[arc4random_uniform((uint32_t)selectionPool.count)];
     NSString *iosMin = [options[@"iosMin"] isKindOfClass:NSString.class] ? options[@"iosMin"] : nil;
     NSString *iosMax = [options[@"iosMax"] isKindOfClass:NSString.class] ? options[@"iosMax"] : nil;
+    NSString *effectiveIOSMin = iosMin.length ? iosMin : @"13.0";
+    NSString *effectiveIOSMax = iosMax.length ? iosMax : @"99.0";
+    NSDictionary *model = nil;
     NSDictionary *iosMeta = nil;
     NSString *iosProductType = nil;
-    if (fakeIOS) {
-        iosProductType = fakeModel && [model[@"id"] isKindOfClass:NSString.class]
-            ? model[@"id"]
-            : [self.manager currentValueForIdentifier:@"DeviceModel"];
-        if (!iosProductType.length && [model[@"id"] isKindOfClass:NSString.class]) {
-            iosProductType = model[@"id"];
+
+    if (fakeIOS && fakeModel) {
+        // Model and iOS are one dependency group. Keep the existing preference
+        // for changed hardware, but fall back to the broader model pools when
+        // that preferred pool has no valid iOS tuple in the requested range.
+        NSMutableArray<NSDictionary *> *coherentChoices = [NSMutableArray array];
+        NSArray<NSArray<NSDictionary *> *> *candidatePools = @[differentHardware, differentModels, allowedModels];
+        for (NSArray<NSDictionary *> *candidatePool in candidatePools) {
+            if (!candidatePool.count) continue;
+            [coherentChoices removeAllObjects];
+
+            for (NSDictionary *candidate in candidatePool) {
+                NSString *candidateID = [candidate[@"id"] isKindOfClass:NSString.class] ? candidate[@"id"] : nil;
+                if (!candidateID.length) continue;
+
+                NSError *candidateError = nil;
+                NSDictionary *candidateMeta = [[IOSBuildDB sharedManager] randomMetaForDevice:candidateID
+                                                                                          min:effectiveIOSMin
+                                                                                          max:effectiveIOSMax
+                                                                                        error:&candidateError];
+                if (candidateMeta) {
+                    [coherentChoices addObject:@{ @"model": candidate, @"iosMeta": candidateMeta }];
+                } else {
+                    NSLog(@"[Dashboard] Excluding incompatible fake model=%@ range=[%@..%@]: %@",
+                          candidateID, effectiveIOSMin, effectiveIOSMax,
+                          candidateError.localizedDescription ?: @"no compatible build");
+                }
+            }
+            if (coherentChoices.count) break;
         }
 
-        NSError *iosError = nil;
-        iosMeta = [[IOSBuildDB sharedManager] randomMetaForDevice:iosProductType ?: @""
-                                                         min:iosMin.length ? iosMin : @"13.0"
-                                                         max:iosMax.length ? iosMax : @"99.0"
-                                                       error:&iosError];
-        if (!iosMeta) {
-            NSLog(@"[Dashboard] Could not build coherent iOS tuple for model=%@ range=[%@..%@]: %@",
-                  iosProductType ?: @"<nil>", iosMin ?: @"<default>", iosMax ?: @"<default>",
-                  iosError.localizedDescription ?: @"unknown");
+        if (!coherentChoices.count) {
+            NSLog(@"[Dashboard] No coherent model/iOS candidates in requested range=[%@..%@]",
+                  effectiveIOSMin, effectiveIOSMax);
+            return nil;
+        }
+
+        NSDictionary *choice = coherentChoices[arc4random_uniform((uint32_t)coherentChoices.count)];
+        model = choice[@"model"];
+        iosMeta = choice[@"iosMeta"];
+        iosProductType = [model[@"id"] isKindOfClass:NSString.class] ? model[@"id"] : nil;
+    } else {
+        model = selectionPool[arc4random_uniform((uint32_t)selectionPool.count)];
+        if (fakeIOS) {
+            iosProductType = [self.manager currentValueForIdentifier:@"DeviceModel"];
+            if (!iosProductType.length) {
+                NSLog(@"[Dashboard] Cannot generate fake iOS without a current DeviceModel");
+                return nil;
+            }
+
+            NSError *iosError = nil;
+            iosMeta = [[IOSBuildDB sharedManager] randomMetaForDevice:iosProductType
+                                                                 min:effectiveIOSMin
+                                                                 max:effectiveIOSMax
+                                                               error:&iosError];
+            if (!iosMeta) {
+                NSLog(@"[Dashboard] Could not build coherent iOS tuple for model=%@ range=[%@..%@]: %@",
+                      iosProductType, effectiveIOSMin, effectiveIOSMax,
+                      iosError.localizedDescription ?: @"unknown");
+                return nil;
+            }
         }
     }
     NSArray *countries = @[
@@ -7519,7 +7632,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (fakeModel) {
         preview[@"DeviceModel"] = model[@"id"] ?: @"";
         preview[@"DeviceModelName"] = model[@"name"] ?: @"";
-        preview[@"ModelNumber"] = model[@"modelNumber"] ?: @"";
     }
     if (fakeIOS && iosMeta) {
         NSString *version = [iosMeta[@"version"] isKindOfClass:NSString.class] ? iosMeta[@"version"] : nil;
@@ -7575,17 +7687,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return [NSString stringWithFormat:@"02:%02X:%02X:%02X:%02X:%02X", arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
 }
 
-- (void)applyFakePreviewToCurrentProfile:(NSDictionary *)preview {
-    if (!preview.count) return;
-    NSString *model = preview[@"DeviceModel"];
-    if (model.length) [self.manager setCustomDeviceModel:model];
-    NSString *deviceName = preview[@"DeviceName"];
-    if (deviceName.length) [self.manager setCustomDeviceName:deviceName];
-    NSString *serial = preview[@"SerialNumber"];
-    if (serial.length) [self.manager setCustomSerialNumber:serial];
+- (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview {
+    if (!preview.count) return NO;
+    NSString *model = [preview[@"DeviceModel"] isKindOfClass:NSString.class] ? preview[@"DeviceModel"] : nil;
 
     NSString *identityDir = [self.manager profileIdentityPath];
-    if (!identityDir.length) return;
+    if (!identityDir.length) return NO;
     NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
     NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
     NSMutableDictionary *resolvedPreview = [preview mutableCopy];
@@ -7599,6 +7706,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         ? resolvedPreview[@"DeviceModel"] : deviceIds[@"DeviceModel"];
     NSString *tupleProductType = [resolvedPreview[@"IOSProductType"] isKindOfClass:NSString.class]
         ? resolvedPreview[@"IOSProductType"] : nil;
+    // When only iOS spoofing is requested, regenerateAllEnabledIdentifiers may
+    // temporarily pick another model as part of its grouped generator. Restore
+    // the model that the prepared iOS tuple was built for instead of letting an
+    // unrelated transient model leak into the final profile.
+    if (!model.length && requestedVersion.length && tupleProductType.length) {
+        model = tupleProductType;
+        targetProductType = tupleProductType;
+    }
     BOOL tupleComplete = requestedVersion.length &&
         [resolvedPreview[@"IOSBuild"] isKindOfClass:NSString.class] && [resolvedPreview[@"IOSBuild"] length] &&
         [resolvedPreview[@"Darwin"] isKindOfClass:NSString.class] && [resolvedPreview[@"Darwin"] length] &&
@@ -7623,16 +7738,41 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         } else {
             NSLog(@"[Dashboard] Refusing partial iOS override version=%@ model=%@: %@",
                   requestedVersion, targetProductType, tupleError.localizedDescription ?: @"no compatible build");
-            for (NSString *key in @[@"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion", @"IOSProductType"]) {
-                [resolvedPreview removeObjectForKey:key];
-            }
+            return NO;
         }
     }
+
+    // Resolve all model-dependent data before mutating the profile. This keeps
+    // DeviceModel, hardware specs, iOS tuple and storage in one coherent commit.
+    NSDictionary *storageInfo = nil;
+    if (model.length && [self.manager isIdentifierEnabled:@"StorageSystem"]) {
+        StorageManager *storageManager = [StorageManager sharedManager];
+        NSString *capacity = [storageManager randomizeStorageCapacityForDeviceModel:model];
+        storageInfo = [storageManager generateStorageForCapacity:capacity];
+        if (![storageInfo[@"TotalStorage"] isKindOfClass:NSString.class] ||
+            ![storageInfo[@"FreeStorage"] isKindOfClass:NSString.class]) {
+            NSLog(@"[Dashboard] Refusing fake profile because storage could not be resolved for model=%@", model);
+            return NO;
+        }
+    }
+
+    if (model.length && ![self.manager setCustomDeviceModel:model]) {
+        NSLog(@"[Dashboard] Refusing fake profile because DeviceModel could not be committed: %@", model);
+        return NO;
+    }
+    NSString *deviceName = [resolvedPreview[@"DeviceName"] isKindOfClass:NSString.class] ? resolvedPreview[@"DeviceName"] : nil;
+    if (deviceName.length) [self.manager setCustomDeviceName:deviceName];
+    NSString *serial = [resolvedPreview[@"SerialNumber"] isKindOfClass:NSString.class] ? resolvedPreview[@"SerialNumber"] : nil;
+    if (serial.length) [self.manager setCustomSerialNumber:serial];
+
+    // The model/name/serial setters may update device_ids.plist themselves.
+    // Reload so the final tuple write cannot overwrite freshly generated hardware fields.
+    deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
 
     NSArray *keys = @[ @"DeviceName", @"DeviceModel", @"DeviceModelName",
                        @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion",
                        @"CountryCode", @"CountryName", @"CarrierName", @"CarrierMCC", @"CarrierMNC",
-                       @"ModelNumber", @"SerialNumber", @"MACAddress" ];
+                       @"RegulatoryModelNumber", @"BoardID", @"HwModel", @"SerialNumber", @"MACAddress" ];
     for (NSString *key in keys) {
         NSString *value = resolvedPreview[key];
         if ([value isKindOfClass:[NSString class]] && value.length) deviceIds[key] = value;
@@ -7643,7 +7783,18 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         ? [deviceIds[@"GenerationCounter"] integerValue] : 0;
     deviceIds[@"GenerationCounter"] = @(generation + 1);
     deviceIds[@"CommittedAt"] = [NSDate date];
-    [deviceIds writeToFile:deviceIdsPath atomically:YES];
+    if (![deviceIds writeToFile:deviceIdsPath atomically:YES]) {
+        NSLog(@"[Dashboard] Failed to commit coherent device_ids.plist");
+        return NO;
+    }
+
+    if (storageInfo) {
+        StorageManager *storageManager = [StorageManager sharedManager];
+        [storageManager setTotalStorageCapacity:storageInfo[@"TotalStorage"]];
+        [storageManager setFreeStorageSpace:storageInfo[@"FreeStorage"]];
+        [storageManager setFilesystemType:storageInfo[@"FilesystemType"] ?: @"0x1A"];
+    }
+    return YES;
 }
 
 - (void)saveRRSThenResetTapped {
@@ -7800,6 +7951,49 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
+    NSDictionary *fakeOptions = self.nextFakeOptions ?: @{};
+    BOOL fakeIOS = fakeOptions[@"fakeIOSVersionEnabled"] ? [fakeOptions[@"fakeIOSVersionEnabled"] boolValue] : YES;
+    BOOL fakeModel = fakeOptions[@"fakeModelEnabled"] ? [fakeOptions[@"fakeModelEnabled"] boolValue] : YES;
+
+    NSDictionary *preparedPreview = self.nextFakePreview;
+    NSString *previewModel = [preparedPreview[@"DeviceModel"] isKindOfClass:NSString.class] ? preparedPreview[@"DeviceModel"] : nil;
+    NSString *previewIOS = [preparedPreview[@"IOSVersion"] isKindOfClass:NSString.class] ? preparedPreview[@"IOSVersion"] : nil;
+    NSString *previewIOSProductType = [preparedPreview[@"IOSProductType"] isKindOfClass:NSString.class] ? preparedPreview[@"IOSProductType"] : nil;
+    NSString *currentModelForIOS = [self.manager currentValueForIdentifier:@"DeviceModel"];
+    NSString *expectedIOSProductType = fakeModel ? previewModel : currentModelForIOS;
+    BOOL previewNeedsRefresh = !preparedPreview.count ||
+        (fakeModel && !previewModel.length) ||
+        (fakeIOS && !previewIOS.length) ||
+        (fakeIOS && (!previewIOSProductType.length ||
+                     (expectedIOSProductType.length && ![previewIOSProductType isEqualToString:expectedIOSProductType])));
+    if (previewNeedsRefresh) {
+        preparedPreview = [self generateFakePreviewFromOptions:fakeOptions];
+    }
+
+    // Fake iOS without Fake Model must preserve the current hardware identity.
+    // regenerateAllEnabledIdentifiers() uses a grouped model+iOS generator, so
+    // capture the current model variant before switching to the new profile and
+    // reapply it together with the prepared iOS tuple.
+    if (!fakeModel && fakeIOS && preparedPreview.count) {
+        NSString *currentIdentityDir = [self.manager profileIdentityPath];
+        NSDictionary *currentDeviceIDs = currentIdentityDir.length
+            ? [NSDictionary dictionaryWithContentsOfFile:[currentIdentityDir stringByAppendingPathComponent:@"device_ids.plist"]]
+            : nil;
+        NSMutableDictionary *preservedPreview = [preparedPreview mutableCopy];
+        for (NSString *key in @[@"DeviceModel", @"DeviceModelName", @"RegulatoryModelNumber", @"BoardID", @"HwModel"]) {
+            NSString *value = [currentDeviceIDs[key] isKindOfClass:NSString.class] ? currentDeviceIDs[key] : nil;
+            if (value.length) preservedPreview[key] = value;
+        }
+        preparedPreview = preservedPreview;
+    }
+
+    if (!preparedPreview.count) {
+        [self hideProgressHUD];
+        [self showDashboardMessage:@"Không thể tạo profile fake"
+                           message:@"Không có tổ hợp model/iOS hợp lệ trong dữ liệu hiện tại cho phạm vi đã chọn. Profile mới chưa được tạo."];
+        return;
+    }
+
     ProfileManager *pm = [ProfileManager sharedManager];
     NSString *profileName = [NSString stringWithFormat:@"Auto %@", [pm generateProfileID]];
     Profile *newProfile = [[Profile alloc] initWithName:profileName shortDescription:@"Auto-created after Reset Data" iconName:@"person.crop.circle.badge.plus"];
@@ -7815,11 +8009,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self showError:switchError];
                 return;
             }
-            NSDictionary *fakeOptions = self.nextFakeOptions ?: @{};
             [self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];
             [self.manager regenerateAllEnabledIdentifiers];
-            NSDictionary *preview = self.nextFakePreview ?: [self generateFakePreviewFromOptions:fakeOptions];
-            [self applyFakePreviewToCurrentProfile:preview];
+            if (![self applyFakePreviewToCurrentProfile:preparedPreview]) {
+                [self hideProgressHUD];
+                [self showDashboardMessage:@"Không thể áp dụng profile fake"
+                                   message:@"Model, iOS hoặc dung lượng không tạo được thành một profile đồng bộ. Không phát hành snapshot mới."];
+                return;
+            }
             self.nextFakePreview = nil;
             [self persistDashboardSelections];
 
