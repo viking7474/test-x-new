@@ -22,6 +22,7 @@ def main() -> None:
     hardware_root = json.loads(read("data/iphone_hardware_db.json"))
     cellular_root = json.loads(read("data/iphone_cellular_db.json"))
     tac_root = json.loads(read("data/iphone_tac_catalog.json"))
+    tac_supplement = json.loads(read("data/iphone_tac_supplement.json"))
     models = {row["productType"]: row for row in model_root["models"]}
 
     check(bool(model_root.get("hardwareCatalogVersion")), "generated model DB declares P0 hardware catalog")
@@ -83,6 +84,7 @@ def main() -> None:
         "iPhone18,2": ("V54AP", {"A3257", "A3525", "A3526", "A3527"}, "26.0.0"),
         "iPhone18,3": ("V57AP", {"A3258", "A3519", "A3520", "A3521"}, "26.0.0"),
         "iPhone18,4": ("D23AP", {"A3260", "A3516", "A3517", "A3518"}, "26.0.0"),
+        "iPhone18,5": ("V159AP", {"A3575", "A3634", "A3635"}, "26.3.0"),
     }
     for product_type, (board, regulatory_numbers, min_ios) in modern_expectations.items():
         row = models.get(product_type)
@@ -97,11 +99,11 @@ def main() -> None:
         regional = row.get("cellularByRegulatoryModelNumber", {})
         check(set(regional) == regulatory_numbers,
               f"{product_type} publishes regional cellular slots for every A-number")
-        check(all(spec.get("known") is False for spec in regional.values()),
-              f"{product_type} regional cellular stays publication-gated until baseband is verified")
+        check(all(spec.get("known") is True for spec in regional.values()),
+              f"{product_type} regional cellular is publication-ready from curated P1 data")
         check(all(isinstance(spec.get("imeiTACs"), list) and spec.get("imeiTACs")
                   for spec in regional.values()),
-              f"{product_type} retains collected TAC evidence while known=false")
+              f"{product_type} has non-empty authoritative TAC evidence")
 
     builder = read("scripts/build_ios_db.py")
     manager = read("common/IdentifierManager.m")
@@ -168,21 +170,36 @@ def main() -> None:
           tac_root.get("sourceFile") == "Apple.csv" and
           tac_root.get("sourceSha256") == "48d0bee4b850bc8666c37852f81c99d557f3939112b8092068b37b3cf357d211",
           "TAC evidence catalog is pinned to the imported Apple.csv SHA-256")
-    check(set(tac_records) == expected_regulatory_numbers,
-          "TAC evidence catalog covers exactly the canonical modern A-number set")
+    supplement_pools = tac_supplement.get("sharedPools", {})
+    pool17e = supplement_pools.get("iPhone18,5", {})
+    shared_17e_numbers = set(pool17e.get("regulatoryModelNumbers", []))
+    shared_17e_tacs = pool17e.get("imeiTACs", [])
+    check(set(tac_records) == expected_regulatory_numbers.difference(shared_17e_numbers),
+          "Apple.csv TAC evidence covers the original regulatory slots and 17e is isolated in a supplement")
+    check(shared_17e_numbers == {"A3575", "A3634", "A3635"} and
+          len(shared_17e_tacs) == 10 and
+          all(isinstance(tac, str) and len(tac) == 8 and tac.isdigit() for tac in shared_17e_tacs),
+          "iPhone 17e supplement declares the exact shared 10-TAC pool for all three A-numbers")
+    check(all(
+        cellular_root["regulatoryModels"][number].get("imeiTACs") == shared_17e_tacs
+        for number in shared_17e_numbers
+    ), "iPhone 17e A3575/A3634/A3635 intentionally share one unclassified TAC pool")
+
     tac_owners = {}
-    for number, spec in tac_records.items():
+    for number, spec in cellular_root.get("regulatoryModels", {}).items():
         for tac in spec.get("imeiTACs", []):
             tac_owners.setdefault(tac, set()).add(number)
-    duplicate_tac_owners = {
-        tac: sorted(owners) for tac, owners in tac_owners.items() if len(owners) > 1
+    unexpected_duplicate_tacs = {
+        tac: sorted(owners)
+        for tac, owners in tac_owners.items()
+        if len(owners) > 1 and not (tac in shared_17e_tacs and owners == shared_17e_numbers)
     }
-    check(not duplicate_tac_owners,
-          "no accepted TAC is assigned to more than one regulatory A-number")
+    check(not unexpected_duplicate_tacs,
+          "TAC sharing is allowed only for the explicitly declared iPhone 17e shared pool")
     check(all(
         cellular_root["regulatoryModels"][number].get("imeiTACs") == spec.get("imeiTACs")
         for number, spec in tac_records.items()
-    ), "cellular TAC arrays stay byte-for-byte synchronized with imported TAC evidence")
+    ), "cellular TAC arrays stay byte-for-byte synchronized with imported Apple.csv evidence")
     excluded_tacs = {
         (str(row.get("Model Info")), str(row.get("TAC")))
         for row in tac_root.get("excluded", []) if isinstance(row, dict)

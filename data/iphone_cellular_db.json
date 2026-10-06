@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p1-cellular-regional-v2-tac",
+  "databaseVersion": "p1-cellular-regional-v4-known-baseband-catalog",
   "regulatoryModels": {
     "A2846": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -65,7 +65,7 @@
       "meidPrefixes": []
     },
     "A2847": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -96,7 +96,7 @@
       "meidPrefixes": []
     },
     "A2848": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -147,7 +147,7 @@
       "meidPrefixes": []
     },
     "A2849": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -208,7 +208,7 @@
       "meidPrefixes": []
     },
     "A3081": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -259,7 +259,7 @@
       "meidPrefixes": []
     },
     "A3082": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -290,7 +290,7 @@
       "meidPrefixes": []
     },
     "A3083": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -351,7 +351,7 @@
       "meidPrefixes": []
     },
     "A3084": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -422,7 +422,7 @@
       "meidPrefixes": []
     },
     "A3089": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -468,7 +468,7 @@
       "meidPrefixes": []
     },
     "A3090": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -553,7 +553,7 @@
       "meidPrefixes": []
     },
     "A3092": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -604,7 +604,7 @@
       "meidPrefixes": []
     },
     "A3093": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -635,7 +635,7 @@
       "meidPrefixes": []
     },
     "A3094": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -666,7 +666,7 @@
       "meidPrefixes": []
     },
     "A3096": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -697,7 +697,7 @@
       "meidPrefixes": []
     },
     "A3101": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -728,7 +728,7 @@
       "meidPrefixes": []
     },
     "A3102": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -779,7 +779,7 @@
       "meidPrefixes": []
     },
     "A3104": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -830,7 +830,7 @@
       "meidPrefixes": []
     },
     "A3105": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -871,7 +871,7 @@
       "meidPrefixes": []
     },
     "A3106": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -952,7 +952,7 @@
       "meidPrefixes": []
     },
     "A3108": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1013,7 +1013,7 @@
       "meidPrefixes": []
     },
     "A3212": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1044,7 +1044,7 @@
       "meidPrefixes": []
     },
     "A3256": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1065,7 +1065,7 @@
       "meidPrefixes": []
     },
     "A3257": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1085,7 +1085,7 @@
       "meidPrefixes": []
     },
     "A3258": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1106,7 +1106,7 @@
       "meidPrefixes": []
     },
     "A3260": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1126,7 +1126,7 @@
       "meidPrefixes": []
     },
     "A3286": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1167,7 +1167,7 @@
       "meidPrefixes": []
     },
     "A3287": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1238,7 +1238,7 @@
       "meidPrefixes": []
     },
     "A3288": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1289,7 +1289,7 @@
       "meidPrefixes": []
     },
     "A3289": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1320,7 +1320,7 @@
       "meidPrefixes": []
     },
     "A3290": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1351,7 +1351,7 @@
       "meidPrefixes": []
     },
     "A3291": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1382,7 +1382,7 @@
       "meidPrefixes": []
     },
     "A3292": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1423,7 +1423,7 @@
       "meidPrefixes": []
     },
     "A3293": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1484,7 +1484,7 @@
       "meidPrefixes": []
     },
     "A3294": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1535,7 +1535,7 @@
       "meidPrefixes": []
     },
     "A3295": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1576,7 +1576,7 @@
       "meidPrefixes": []
     },
     "A3296": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1645,7 +1645,7 @@
       "meidPrefixes": []
     },
     "A3297": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1706,7 +1706,7 @@
       "meidPrefixes": []
     },
     "A3408": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1727,7 +1727,7 @@
       "meidPrefixes": []
     },
     "A3409": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1768,7 +1768,7 @@
       "meidPrefixes": []
     },
     "A3410": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1789,7 +1789,7 @@
       "meidPrefixes": []
     },
     "A3516": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1810,7 +1810,7 @@
       "meidPrefixes": []
     },
     "A3517": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1831,7 +1831,7 @@
       "meidPrefixes": []
     },
     "A3518": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1851,7 +1851,7 @@
       "meidPrefixes": []
     },
     "A3519": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1872,7 +1872,7 @@
       "meidPrefixes": []
     },
     "A3520": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1893,7 +1893,7 @@
       "meidPrefixes": []
     },
     "A3521": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1914,7 +1914,7 @@
       "meidPrefixes": []
     },
     "A3522": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1935,7 +1935,7 @@
       "meidPrefixes": []
     },
     "A3523": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -1956,7 +1956,7 @@
       "meidPrefixes": []
     },
     "A3524": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -1977,7 +1977,7 @@
       "meidPrefixes": []
     },
     "A3525": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": false,
       "eSIM": true,
@@ -1998,7 +1998,7 @@
       "meidPrefixes": []
     },
     "A3526": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": true,
@@ -2019,7 +2019,7 @@
       "meidPrefixes": []
     },
     "A3527": {
-      "known": false,
+      "known": true,
       "enabled": true,
       "physicalSIM": true,
       "eSIM": false,
@@ -2036,6 +2036,69 @@
         "35814933",
         "35945633",
         "35954752"
+      ],
+      "meidPrefixes": []
+    },
+    "A3575": {
+      "known": true,
+      "enabled": true,
+      "physicalSIM": false,
+      "eSIM": true,
+      "dualSIM": true,
+      "cdma": false,
+      "imeiTACs": [
+        "35102251",
+        "35190385",
+        "35507215",
+        "35620125",
+        "35634432",
+        "35670669",
+        "35714522",
+        "35801437",
+        "35880147",
+        "35953827"
+      ],
+      "meidPrefixes": []
+    },
+    "A3634": {
+      "known": true,
+      "enabled": true,
+      "physicalSIM": true,
+      "eSIM": true,
+      "dualSIM": true,
+      "cdma": false,
+      "imeiTACs": [
+        "35102251",
+        "35190385",
+        "35507215",
+        "35620125",
+        "35634432",
+        "35670669",
+        "35714522",
+        "35801437",
+        "35880147",
+        "35953827"
+      ],
+      "meidPrefixes": []
+    },
+    "A3635": {
+      "known": true,
+      "enabled": true,
+      "physicalSIM": true,
+      "eSIM": true,
+      "dualSIM": true,
+      "cdma": false,
+      "imeiTACs": [
+        "35102251",
+        "35190385",
+        "35507215",
+        "35620125",
+        "35634432",
+        "35670669",
+        "35714522",
+        "35801437",
+        "35880147",
+        "35953827"
       ],
       "meidPrefixes": []
     }

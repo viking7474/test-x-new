@@ -13,14 +13,23 @@ reproducible.
   - model-level P0 hardware: RAM, display, storage, camera, CPU profile.
 - `data/iphone_cellular_db.json`
   - regional cellular capability keyed by regulatory `Axxxx`.
-  - iPhone 15/16/16e/17/Air/17 Pro coverage currently has 52 explicit A-number slots.
-  - verified TAC evidence may be retained while `known=false`; runtime publication remains fail-closed until cellular + baseband are authoritative.
+  - iPhone 15/16/16e/17/17e/Air/17 Pro coverage currently has 55 explicit A-number slots.
+  - all 55 rows are now `known=true` because each enabled row has non-empty TAC evidence and a complete build-specific baseband family.
   - generator publishes these as `cellularByRegulatoryModelNumber`; runtime resolves the exact A-number first.
 - `data/iphone_tac_catalog.json`
   - normalized TAC-only evidence imported from the user-provided `Apple.csv`; no full IMEI/IMEI2 is stored.
-  - records the source SHA-256, the 52 exact regulatory A-number buckets, and explicit fail-closed exclusions.
+  - records the source SHA-256, the 52 regulatory A-number buckets present in the supplied file, and explicit fail-closed exclusions.
   - current import contains 1,465 accepted 8-digit TACs; `A3296/35512783` is excluded because the carrier-status rows conflict.
-  - `test_p0_canonical_hardware_static.py` requires the TAC arrays in `iphone_cellular_db.json` to remain exactly synchronized with this evidence catalog.
+- `data/iphone_tac_supplement.json`
+  - stores TAC evidence supplied after `Apple.csv`.
+  - iPhone 17e currently has a 10-TAC pool that is verified for the model but not classified between `A3575`, `A3634`, and `A3635`; the same pool is intentionally exposed to all three regional variants.
+  - tests permit TAC sharing only when it is explicitly declared by such a shared pool; accidental cross-A-number sharing still fails.
+- `data/iphone_baseband_evidence.json`
+  - curated project-authoritative baseband evidence sourced from The Apple Wiki's Baseband Device index and chipset `Known Firmware Versions` tables.
+  - The Apple Wiki is unofficial, so each source is pinned to a concrete revision URL for reproducibility.
+  - real chipset families are used directly: `SDX70M` (iPhone 15 family), `SDX71M` (iPhone 16 family), `C1` (iPhone 16e), `SDX80M` (iPhone 17/Pro/Pro Max), and `C1X` (iPhone Air + iPhone 17e).
+  - only exact IOSBuilds present in each ProductType's curated `supportedBuilds` allow-list are published; unknown builds still fail closed.
+  - `iphone_baseband_db.json` mirrors the validated chipset build maps and all 55 regional rows are `known=true`.
 - `data/iphone_modern_catalog.json`
   - exact ProductType/board/A-number tuples and explicit supported-build allow-lists for modern models.
   - modern builds absent from legacy `IOS.db` may be added here only with verified iOS/Darwin/XNU metadata.
@@ -55,10 +64,14 @@ blindly inheriting every global KMOS build between min/max versions.
 | iPhone18,4 | iPhone Air | D23AP | A3260, A3516, A3517, A3518 |
 | iPhone18,1 | iPhone 17 Pro | V53AP | A3256, A3522, A3523, A3524 |
 | iPhone18,2 | iPhone 17 Pro Max | V54AP | A3257, A3525, A3526, A3527 |
+| iPhone18,5 | iPhone 17e | V159AP | A3575, A3634, A3635 |
 
 The exact build allow-list is authoritative for profile generation. In
 particular, iPhone 15 no longer inherits the unrelated `21A329` build merely
-because both records are labelled iOS 17.0.
+because both records are labelled iOS 17.0. iPhone 17e records its true minimum
+iOS as 26.3, but is currently curated only for the repository's verified iOS 27
+build metadata; 26.3.x-26.7.x builds remain excluded until their Darwin/XNU rows
+are added explicitly.
 
 The source database also had two defects that are now handled by migration:
 
@@ -224,9 +237,11 @@ RegulatoryModelNumber -> basebandFamily
 basebandFamily + IOSBuild -> BasebandVersion
 ```
 
-Keep the A-number row as `known=false` until the modem family and **every iOS
-build currently supported by that ProductType** have verified firmware values.
-The generator intentionally requires complete build coverage so random profile
+Keep an A-number row as `known=false` until its chipset family and **every iOS
+build currently supported by that ProductType** have a verified firmware value.
+The current iPhone 15/16/17/17e catalog satisfies this requirement from the
+pinned The Apple Wiki chipset tables, so those 55 rows are `known=true`.
+The generator still requires complete build coverage so random profile
 generation can never select an iOS build with unknown baseband.
 
 To avoid manually discovering the required build list, export a worksheet:
@@ -235,10 +250,15 @@ To avoid manually discovering the required build list, export a worksheet:
 py scripts\export_p1_manual_template.py --output p1_manual_template.json
 ```
 
-The current modern worksheet contains 52 regional A-number records across the
-iPhone 15, iPhone 16/16e, and iPhone 17/Air families. It derives each
+The current modern worksheet contains 55 regional A-number records across the
+iPhone 15, iPhone 16/16e, and iPhone 17/17e/Air families. It derives each
 ProductType's required IOSBuild allow-list directly from `deviceToBuilds`.
-Fill/verify the worksheet from authoritative observations/source material.
+The exporter prefills `basebandFamily` and `requiredBuilds` from the current
+baseband catalog. For the iPhone 15/16/17/17e set these rows are already
+`known=true` because their exact build mappings are covered by pinned
+`Known Firmware Versions` tables for SDX70M, SDX71M, C1/C1X, and SDX80M.
+A real-device Settings > General > About check remains useful as an independent
+cross-check, but it is no longer required for runtime publication of these rows.
 
 Validate the worksheet without changing source data:
 

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2,
+  "databaseVersion": "p1-baseband-curated-theapplewiki-v1",
+  "status": "curated-authoritative-for-project",
+  "collectedAt": "2026-10-06",
+  "sourcePolicy": [
+    "The Apple Wiki is not an official Apple source; this project treats its Baseband Device chipset mapping plus chipset Known Firmware Versions tables as curated authoritative data.",
+    "Only exact IOSBuild entries present in the project's supportedBuilds allow-list are published at runtime.",
+    "Unknown or future IOSBuilds continue to fail closed."
+  ],
+  "sources": [
+    {
+      "name": "Baseband Device index",
+      "url": "https://theapplewiki.com/wiki/Baseband_Device",
+      "revisionUrl": "https://theapplewiki.com/index.php?title=Baseband_Device&oldid=347998"
+    },
+    {
+      "name": "SDX70M known firmware",
+      "url": "https://theapplewiki.com/wiki/SDX70M",
+      "revisionUrl": "https://theapplewiki.com/index.php?title=SDX70M&oldid=347922"
+    },
+    {
+      "name": "SDX71M known firmware",
+      "url": "https://theapplewiki.com/wiki/SDX71M",
+      "revisionUrl": "https://theapplewiki.com/index.php?title=SDX71M&oldid=348090"
+    },
+    {
+      "name": "C1/C1X (C4000) known firmware",
+      "url": "https://theapplewiki.com/wiki/C4000",
+      "revisionUrl": "https://theapplewiki.com/index.php?title=C4000&oldid=348095"
+    },
+    {
+      "name": "SDX80M known firmware",
+      "url": "https://theapplewiki.com/wiki/SDX80M",
+      "revisionUrl": "https://theapplewiki.com/index.php?title=SDX80M&oldid=348091"
+    }
+  ],
+  "families": {
+    "SDX70M": {
+      "chipset": "Qualcomm Snapdragon X70 5G Modem",
+      "productTypes": [
+        "iPhone15,4",
+        "iPhone15,5",
+        "iPhone16,1",
+        "iPhone16,2"
+      ],
+      "sourceUrl": "https://theapplewiki.com/wiki/SDX70M",
+      "builds": {
+        "21A350": "1.00.03",
+        "21B101": "1.12.02",
+        "21D50": "1.40.01",
+        "21E219": "1.55.04",
+        "21F79": "1.60.02",
+        "21F90": "1.60.02",
+        "21G93": "1.70.02",
+        "21H16": "1.70.02",
+        "22A3354": "2.16.06",
+        "22A3370": "2.16.06",
+        "22B83": "2.20.03",
+        "22B91": "2.20.03",
+        "22C152": "2.31.05",
+        "22D72": "2.40.05",
+        "22E240": "2.52.03",
+        "22E252": "2.52.03",
+        "22F76": "2.60.02",
+        "22G86": "2.70.02",
+        "23A341": "3.02.03",
+        "23A355": "3.02.03",
+        "24A437": "4.02.04",
+        "24A446": "4.02.04"
+      }
+    },
+    "SDX71M": {
+      "chipset": "Qualcomm Snapdragon X71 5G Modem",
+      "productTypes": [
+        "iPhone17,1",
+        "iPhone17,2",
+        "iPhone17,3",
+        "iPhone17,4"
+      ],
+      "sourceUrl": "https://theapplewiki.com/wiki/SDX71M",
+      "builds": {
+        "22A3354": "1.00.00",
+        "22A3370": "1.00.00",
+        "22B83": "1.11.01",
+        "22B91": "1.11.01",
+        "22C152": "1.21.05",
+        "22D72": "1.40.03",
+        "22E240": "1.54.03",
+        "22E252": "1.54.03",
+        "22F76": "1.60.02",
+        "22G86": "1.70.02",
+        "23A341": "2.04.06",
+        "23A355": "2.04.06",
+        "24A437": "3.02.02",
+        "24A446": "3.02.02"
+      }
+    },
+    "C1": {
+      "chipset": "Apple C1",
+      "productTypes": [
+        "iPhone17,5"
+      ],
+      "sourceUrl": "https://theapplewiki.com/wiki/C4000",
+      "builds": {
+        "22E240": "1.02.17",
+        "22E252": "1.02.17",
+        "22F76": "1.03.03",
+        "22G86": "1.04.02",
+        "23A341": "2.00.07",
+        "23A355": "2.00.09",
+        "24A437": "3.01.03",
+        "24A446": "3.01.03"
+      }
+    },
+    "SDX80M": {
+      "chipset": "Qualcomm Snapdragon X80 5G Modem",
+      "productTypes": [
+        "iPhone18,1",
+        "iPhone18,2",
+        "iPhone18,3"
+      ],
+      "sourceUrl": "https://theapplewiki.com/wiki/SDX80M",
+      "builds": {
+        "23A341": "1.00.05",
+        "23A355": "1.00.05",
+        "24A437": "2.10.01",
+        "24A446": "2.10.04"
+      }
+    },
+    "C1X": {
+      "chipset": "Apple C1X",
+      "productTypes": [
+        "iPhone18,4",
+        "iPhone18,5"
+      ],
+      "sourceUrl": "https://theapplewiki.com/wiki/C4000",
+      "builds": {
+        "23A341": "2.00.07",
+        "23A355": "2.00.09",
+        "24A437": "3.01.03",
+        "24A446": "3.01.03"
+      }
+    }
+  }
+}

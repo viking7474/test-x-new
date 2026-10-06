@@ -31,12 +31,22 @@ def main() -> None:
     build_root = load("ios_build_db.json")
     cellular_root = load("iphone_cellular_db.json")
     baseband_root = load("iphone_baseband_db.json")
+    baseband_evidence = load("iphone_baseband_evidence.json")
 
     models = {m["productType"]: m for m in model_root.get("models", [])}
     device_to_builds = build_root.get("deviceToBuilds", {})
     cell_records = cellular_root.get("regulatoryModels", {})
     baseband_records = baseband_root.get("regulatoryModels", {})
     baseband_families = baseband_root.get("families", {})
+    evidence_families = baseband_evidence.get("families", {})
+    staged_family_by_product_type = {}
+    if baseband_evidence.get("status") == "staged-secondary-not-authoritative" and isinstance(evidence_families, dict):
+        for family, spec in evidence_families.items():
+            if not isinstance(family, str) or not isinstance(spec, dict):
+                continue
+            for product_type in spec.get("productTypes", []):
+                if isinstance(product_type, str):
+                    staged_family_by_product_type[product_type] = family
 
     records = {}
     for product_type, model in sorted(models.items()):
@@ -50,10 +60,14 @@ def main() -> None:
             )
             builds = device_to_builds.get(product_type, [])
             existing_family = existing_baseband.get("basebandFamily")
-            family_record = baseband_families.get(existing_family, {}) if isinstance(existing_family, str) else {}
+            staged_family = staged_family_by_product_type.get(product_type)
+            selected_family = existing_family if isinstance(existing_family, str) and existing_family else staged_family
+            family_record = baseband_families.get(selected_family, {}) if isinstance(selected_family, str) else {}
             family_builds = family_record.get("builds", {}) if isinstance(family_record, dict) else {}
             if not isinstance(family_builds, dict):
                 family_builds = {}
+            using_staged_evidence = (not bool(existing_baseband.get("known", False)) and
+                                     isinstance(staged_family, str) and selected_family == staged_family)
             records[number] = {
                 "productType": product_type,
                 "modelName": model.get("name"),
@@ -69,7 +83,8 @@ def main() -> None:
                 },
                 "baseband": {
                     "known": bool(existing_baseband.get("known", False)),
-                    "basebandFamily": existing_baseband.get("basebandFamily", ""),
+                    "basebandFamily": selected_family or "",
+                    "evidenceStatus": ("staged-secondary-not-authoritative" if using_staged_evidence else "authoritative"),
                     "requiredBuilds": {
                         build: family_builds.get(build, "") for build in builds
                     },
@@ -83,7 +98,8 @@ def main() -> None:
             "Do not change known=true until every required field is verified.",
             "IMEI TAC entries must be exact 8-digit TACs for this regulatory A-number.",
             "MEID prefixes are required only for a verified cdma=true row.",
-            "For baseband known=true, fill every requiredBuilds value for the ProductType.",
+            "Prefilled baseband values marked staged-secondary-not-authoritative come from public firmware metadata and must be checked on a real unhooked device.",
+            "For baseband known=true, verify every requiredBuilds value for the ProductType before changing the flag.",
             "Do not edit generated iphone_model_db.json/ios_build_db.json by hand.",
         ],
         "databaseVersions": {

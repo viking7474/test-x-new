@@ -931,6 +931,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         @{ @"name": @"iPhone 16 Pro Max", @"id": @"iPhone17,2" },
         @{ @"name": @"iPhone 16e", @"id": @"iPhone17,5" },
         @{ @"name": @"iPhone 17", @"id": @"iPhone18,3" },
+        @{ @"name": @"iPhone 17e", @"id": @"iPhone18,5" },
         @{ @"name": @"iPhone Air", @"id": @"iPhone18,4" },
         @{ @"name": @"iPhone 17 Pro", @"id": @"iPhone18,1" },
         @{ @"name": @"iPhone 17 Pro Max", @"id": @"iPhone18,2" }
@@ -6583,6 +6584,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         @{ @"name": @"iPhone 16 Pro Max", @"id": @"iPhone17,2" },
         @{ @"name": @"iPhone 16e", @"id": @"iPhone17,5" },
         @{ @"name": @"iPhone 17", @"id": @"iPhone18,3" },
+        @{ @"name": @"iPhone 17e", @"id": @"iPhone18,5" },
         @{ @"name": @"iPhone Air", @"id": @"iPhone18,4" },
         @{ @"name": @"iPhone 17 Pro", @"id": @"iPhone18,1" },
         @{ @"name": @"iPhone 17 Pro Max", @"id": @"iPhone18,2" }

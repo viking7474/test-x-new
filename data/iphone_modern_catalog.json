@@ -1,10 +1,11 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p0-modern-iphone-v1",
+  "databaseVersion": "p0-modern-iphone-v2-iphone17e",
   "notes": [
     "Exact ProductType/board/A-number tuples for iPhone 15/16/17 families.",
     "supportedBuilds is an allow-list, not a min/max range expansion.",
-    "iPhone 16e starts profile publication at 18.4 because launch build 22D8075 kernel metadata is not yet carried by this repository."
+    "iPhone 16e starts profile publication at 18.4 because launch build 22D8075 kernel metadata is not yet carried by this repository.",
+    "iPhone 17e has minIOS 26.3 but is conservatively curated from iOS 27.0 because this repository does not yet carry authoritative Darwin/XNU metadata for its 26.3.x-26.7.x restore builds."
   ],
   "builds": {
     "21A350": {
@@ -355,6 +356,21 @@
       "supportedBuilds": [
         "23A341",
         "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone18,5": {
+      "name": "iPhone 17e",
+      "boardID": "V159AP",
+      "regulatoryModelNumbers": [
+        "A3575",
+        "A3634",
+        "A3635"
+      ],
+      "minIOS": "26.3",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
         "24A437",
         "24A446"
       ]

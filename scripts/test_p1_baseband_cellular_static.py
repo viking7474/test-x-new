@@ -25,6 +25,7 @@ def main() -> None:
     build_root = load("data/ios_build_db.json")
     cell_root = load("data/iphone_cellular_db.json")
     baseband_root = load("data/iphone_baseband_db.json")
+    baseband_evidence = load("data/iphone_baseband_evidence.json")
     models = {row["productType"]: row for row in model_root["models"]}
     dtb = build_root["deviceToBuilds"]
 
@@ -42,8 +43,53 @@ def main() -> None:
         "iPhone18,2": {"A3257", "A3525", "A3526", "A3527"},
         "iPhone18,3": {"A3258", "A3519", "A3520", "A3521"},
         "iPhone18,4": {"A3260", "A3516", "A3517", "A3518"},
+        "iPhone18,5": {"A3575", "A3634", "A3635"},
     }
     all_expected = set().union(*expected.values())
+
+    check(baseband_evidence.get("schemaVersion") == 2 and
+          baseband_evidence.get("status") == "curated-authoritative-for-project",
+          "baseband evidence is promoted from staged data to curated project-authoritative data")
+    evidence_families = baseband_evidence.get("families", {})
+    source_families = baseband_root.get("families", {})
+    check(set(evidence_families) == {"SDX70M", "SDX71M", "C1", "SDX80M", "C1X"},
+          "baseband evidence uses the five real chipset family names from Baseband Device")
+    source_rows = baseband_evidence.get("sources", [])
+    check(len(source_rows) == 5 and all(
+        isinstance(row, dict) and
+        isinstance(row.get("revisionUrl"), str) and "oldid=" in row["revisionUrl"]
+        for row in source_rows
+    ), "baseband web sources are pinned to concrete The Apple Wiki revisions")
+    representative_versions = {
+        ("SDX70M", "21A350"): "1.00.03",
+        ("SDX71M", "22A3354"): "1.00.00",
+        ("C1", "22E240"): "1.02.17",
+        ("SDX80M", "23A341"): "1.00.05",
+        ("C1X", "24A446"): "3.01.03",
+    }
+    check(all(evidence_families[family]["builds"].get(build) == version
+              for (family, build), version in representative_versions.items()),
+          "representative chipset/build Modem Firmware values match pinned source tables")
+    check(set(source_families) == set(evidence_families) and all(
+        source_families[name].get("builds") == spec.get("builds")
+        for name, spec in evidence_families.items()
+    ), "runtime baseband family build maps stay byte-for-byte synchronized with staged evidence")
+    evidence_owner = {}
+    for family, spec in evidence_families.items():
+        product_types = spec.get("productTypes", [])
+        builds = spec.get("builds", {})
+        check(isinstance(product_types, list) and product_types and isinstance(builds, dict) and builds,
+              f"{family} evidence has ProductType membership and firmware builds")
+        for product_type in product_types:
+            check(product_type not in evidence_owner,
+                  f"{product_type} belongs to only one staged baseband family")
+            evidence_owner[product_type] = family
+            check(set(dtb[product_type]).issubset(set(builds)),
+                  f"{family}/{product_type} covers every curated supported IOSBuild")
+    check(set(evidence_owner) == set(expected),
+          "curated baseband evidence covers every modern ProductType exactly once")
+    check(all(spec.get("known") is True for spec in baseband_root.get("regulatoryModels", {}).values()),
+          "all regional baseband rows are publication-ready from complete chipset firmware tables")
 
     check(model_root.get("basebandCatalogVersion") == baseband_root.get("databaseVersion"),
           "generated model DB declares exact P1 baseband catalog version")
@@ -63,10 +109,13 @@ def main() -> None:
     for product_type in ("iPhone18,1", "iPhone18,2", "iPhone18,3", "iPhone18,4"):
         check("23A341" in dtb[product_type],
               f"{product_type} carries the verified iOS 26.0 launch build")
+    check(dtb["iPhone18,5"] == ["24A437", "24A446"],
+          "iPhone18,5 conservatively curates iOS 27 builds until earlier 17e Darwin/XNU metadata is added")
 
     for product_type in expected:
-        check(all(build in dtb[product_type] for build in ("23A355", "24A437", "24A446")),
-              f"{product_type} carries curated iOS 26.0.1 through 27.0.1 builds")
+        required_recent = ("24A437", "24A446") if product_type == "iPhone18,5" else ("23A355", "24A437", "24A446")
+        check(all(build in dtb[product_type] for build in required_recent),
+              f"{product_type} carries its curated recent iOS builds")
         check(models[product_type].get("maxIOS") == "27.0.1",
               f"{product_type} publishes current curated max iOS 27.0.1")
 
@@ -78,12 +127,26 @@ def main() -> None:
               f"{product_type} publishes cellular override for every A-number")
         check(set(regional_baseband) == numbers,
               f"{product_type} publishes baseband override for every A-number")
-        check(all(spec == {"known": False} for spec in regional_baseband.values()),
-              f"{product_type} baseband stays explicit unknown until firmware data is verified")
+        expected_family = {
+            "iPhone15,4": "SDX70M", "iPhone15,5": "SDX70M",
+            "iPhone16,1": "SDX70M", "iPhone16,2": "SDX70M",
+            "iPhone17,1": "SDX71M", "iPhone17,2": "SDX71M",
+            "iPhone17,3": "SDX71M", "iPhone17,4": "SDX71M",
+            "iPhone17,5": "C1",
+            "iPhone18,1": "SDX80M", "iPhone18,2": "SDX80M", "iPhone18,3": "SDX80M",
+            "iPhone18,4": "C1X", "iPhone18,5": "C1X",
+        }[product_type]
+        check(all(spec.get("known") is True and
+                  spec.get("basebandFamily") == expected_family and
+                  set(spec.get("builds", {})) == set(dtb[product_type])
+                  for spec in regional_baseband.values()),
+              f"{product_type} publishes exact {expected_family} firmware for every supported build")
         for number in numbers:
             source = baseband_root["regulatoryModels"][number]
-            check(source.get("productType") == product_type,
-                  f"{number} baseband source is bound to {product_type}")
+            check(source.get("productType") == product_type and
+                  source.get("basebandFamily") == expected_family and
+                  source.get("known") is True,
+                  f"{number} baseband source is bound to {product_type}/{expected_family}")
         minimum_major = 26 if product_type.startswith("iPhone18,") else (
             18 if product_type.startswith("iPhone17,") else 17
         )
@@ -119,6 +182,8 @@ def main() -> None:
         "requiredBuilds",
         "baseband_families",
         'family_builds.get(build, "")',
+        "iphone_baseband_evidence.json",
+        "evidenceStatus",
     ):
         check(token in exporter, f"worksheet exporter preserves P1 data: {token}")
 

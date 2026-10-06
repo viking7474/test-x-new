@@ -1,215 +1,355 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p1-baseband-v2-modern-iphone",
-  "families": {},
+  "databaseVersion": "p1-baseband-v4-known-chipset-families",
+  "families": {
+    "SDX70M": {
+      "builds": {
+        "21A350": "1.00.03",
+        "21B101": "1.12.02",
+        "21D50": "1.40.01",
+        "21E219": "1.55.04",
+        "21F79": "1.60.02",
+        "21F90": "1.60.02",
+        "21G93": "1.70.02",
+        "21H16": "1.70.02",
+        "22A3354": "2.16.06",
+        "22A3370": "2.16.06",
+        "22B83": "2.20.03",
+        "22B91": "2.20.03",
+        "22C152": "2.31.05",
+        "22D72": "2.40.05",
+        "22E240": "2.52.03",
+        "22E252": "2.52.03",
+        "22F76": "2.60.02",
+        "22G86": "2.70.02",
+        "23A341": "3.02.03",
+        "23A355": "3.02.03",
+        "24A437": "4.02.04",
+        "24A446": "4.02.04"
+      }
+    },
+    "SDX71M": {
+      "builds": {
+        "22A3354": "1.00.00",
+        "22A3370": "1.00.00",
+        "22B83": "1.11.01",
+        "22B91": "1.11.01",
+        "22C152": "1.21.05",
+        "22D72": "1.40.03",
+        "22E240": "1.54.03",
+        "22E252": "1.54.03",
+        "22F76": "1.60.02",
+        "22G86": "1.70.02",
+        "23A341": "2.04.06",
+        "23A355": "2.04.06",
+        "24A437": "3.02.02",
+        "24A446": "3.02.02"
+      }
+    },
+    "C1": {
+      "builds": {
+        "22E240": "1.02.17",
+        "22E252": "1.02.17",
+        "22F76": "1.03.03",
+        "22G86": "1.04.02",
+        "23A341": "2.00.07",
+        "23A355": "2.00.09",
+        "24A437": "3.01.03",
+        "24A446": "3.01.03"
+      }
+    },
+    "SDX80M": {
+      "builds": {
+        "23A341": "1.00.05",
+        "23A355": "1.00.05",
+        "24A437": "2.10.01",
+        "24A446": "2.10.04"
+      }
+    },
+    "C1X": {
+      "builds": {
+        "23A341": "2.00.07",
+        "23A355": "2.00.09",
+        "24A437": "3.01.03",
+        "24A446": "3.01.03"
+      }
+    }
+  },
   "regulatoryModels": {
     "A2846": {
-      "known": false,
-      "productType": "iPhone15,4"
+      "known": true,
+      "productType": "iPhone15,4",
+      "basebandFamily": "SDX70M"
     },
     "A2847": {
-      "known": false,
-      "productType": "iPhone15,5"
+      "known": true,
+      "productType": "iPhone15,5",
+      "basebandFamily": "SDX70M"
     },
     "A2848": {
-      "known": false,
-      "productType": "iPhone16,1"
+      "known": true,
+      "productType": "iPhone16,1",
+      "basebandFamily": "SDX70M"
     },
     "A2849": {
-      "known": false,
-      "productType": "iPhone16,2"
+      "known": true,
+      "productType": "iPhone16,2",
+      "basebandFamily": "SDX70M"
     },
     "A3081": {
-      "known": false,
-      "productType": "iPhone17,3"
+      "known": true,
+      "productType": "iPhone17,3",
+      "basebandFamily": "SDX71M"
     },
     "A3082": {
-      "known": false,
-      "productType": "iPhone17,4"
+      "known": true,
+      "productType": "iPhone17,4",
+      "basebandFamily": "SDX71M"
     },
     "A3083": {
-      "known": false,
-      "productType": "iPhone17,1"
+      "known": true,
+      "productType": "iPhone17,1",
+      "basebandFamily": "SDX71M"
     },
     "A3084": {
-      "known": false,
-      "productType": "iPhone17,2"
+      "known": true,
+      "productType": "iPhone17,2",
+      "basebandFamily": "SDX71M"
     },
     "A3089": {
-      "known": false,
-      "productType": "iPhone15,4"
+      "known": true,
+      "productType": "iPhone15,4",
+      "basebandFamily": "SDX70M"
     },
     "A3090": {
-      "known": false,
-      "productType": "iPhone15,4"
+      "known": true,
+      "productType": "iPhone15,4",
+      "basebandFamily": "SDX70M"
     },
     "A3092": {
-      "known": false,
-      "productType": "iPhone15,4"
+      "known": true,
+      "productType": "iPhone15,4",
+      "basebandFamily": "SDX70M"
     },
     "A3093": {
-      "known": false,
-      "productType": "iPhone15,5"
+      "known": true,
+      "productType": "iPhone15,5",
+      "basebandFamily": "SDX70M"
     },
     "A3094": {
-      "known": false,
-      "productType": "iPhone15,5"
+      "known": true,
+      "productType": "iPhone15,5",
+      "basebandFamily": "SDX70M"
     },
     "A3096": {
-      "known": false,
-      "productType": "iPhone15,5"
+      "known": true,
+      "productType": "iPhone15,5",
+      "basebandFamily": "SDX70M"
     },
     "A3101": {
-      "known": false,
-      "productType": "iPhone16,1"
+      "known": true,
+      "productType": "iPhone16,1",
+      "basebandFamily": "SDX70M"
     },
     "A3102": {
-      "known": false,
-      "productType": "iPhone16,1"
+      "known": true,
+      "productType": "iPhone16,1",
+      "basebandFamily": "SDX70M"
     },
     "A3104": {
-      "known": false,
-      "productType": "iPhone16,1"
+      "known": true,
+      "productType": "iPhone16,1",
+      "basebandFamily": "SDX70M"
     },
     "A3105": {
-      "known": false,
-      "productType": "iPhone16,2"
+      "known": true,
+      "productType": "iPhone16,2",
+      "basebandFamily": "SDX70M"
     },
     "A3106": {
-      "known": false,
-      "productType": "iPhone16,2"
+      "known": true,
+      "productType": "iPhone16,2",
+      "basebandFamily": "SDX70M"
     },
     "A3108": {
-      "known": false,
-      "productType": "iPhone16,2"
+      "known": true,
+      "productType": "iPhone16,2",
+      "basebandFamily": "SDX70M"
     },
     "A3212": {
-      "known": false,
-      "productType": "iPhone17,5"
+      "known": true,
+      "productType": "iPhone17,5",
+      "basebandFamily": "C1"
     },
     "A3256": {
-      "known": false,
-      "productType": "iPhone18,1"
+      "known": true,
+      "productType": "iPhone18,1",
+      "basebandFamily": "SDX80M"
     },
     "A3257": {
-      "known": false,
-      "productType": "iPhone18,2"
+      "known": true,
+      "productType": "iPhone18,2",
+      "basebandFamily": "SDX80M"
     },
     "A3258": {
-      "known": false,
-      "productType": "iPhone18,3"
+      "known": true,
+      "productType": "iPhone18,3",
+      "basebandFamily": "SDX80M"
     },
     "A3260": {
-      "known": false,
-      "productType": "iPhone18,4"
+      "known": true,
+      "productType": "iPhone18,4",
+      "basebandFamily": "C1X"
     },
     "A3286": {
-      "known": false,
-      "productType": "iPhone17,3"
+      "known": true,
+      "productType": "iPhone17,3",
+      "basebandFamily": "SDX71M"
     },
     "A3287": {
-      "known": false,
-      "productType": "iPhone17,3"
+      "known": true,
+      "productType": "iPhone17,3",
+      "basebandFamily": "SDX71M"
     },
     "A3288": {
-      "known": false,
-      "productType": "iPhone17,3"
+      "known": true,
+      "productType": "iPhone17,3",
+      "basebandFamily": "SDX71M"
     },
     "A3289": {
-      "known": false,
-      "productType": "iPhone17,4"
+      "known": true,
+      "productType": "iPhone17,4",
+      "basebandFamily": "SDX71M"
     },
     "A3290": {
-      "known": false,
-      "productType": "iPhone17,4"
+      "known": true,
+      "productType": "iPhone17,4",
+      "basebandFamily": "SDX71M"
     },
     "A3291": {
-      "known": false,
-      "productType": "iPhone17,4"
+      "known": true,
+      "productType": "iPhone17,4",
+      "basebandFamily": "SDX71M"
     },
     "A3292": {
-      "known": false,
-      "productType": "iPhone17,1"
+      "known": true,
+      "productType": "iPhone17,1",
+      "basebandFamily": "SDX71M"
     },
     "A3293": {
-      "known": false,
-      "productType": "iPhone17,1"
+      "known": true,
+      "productType": "iPhone17,1",
+      "basebandFamily": "SDX71M"
     },
     "A3294": {
-      "known": false,
-      "productType": "iPhone17,1"
+      "known": true,
+      "productType": "iPhone17,1",
+      "basebandFamily": "SDX71M"
     },
     "A3295": {
-      "known": false,
-      "productType": "iPhone17,2"
+      "known": true,
+      "productType": "iPhone17,2",
+      "basebandFamily": "SDX71M"
     },
     "A3296": {
-      "known": false,
-      "productType": "iPhone17,2"
+      "known": true,
+      "productType": "iPhone17,2",
+      "basebandFamily": "SDX71M"
     },
     "A3297": {
-      "known": false,
-      "productType": "iPhone17,2"
+      "known": true,
+      "productType": "iPhone17,2",
+      "basebandFamily": "SDX71M"
     },
     "A3408": {
-      "known": false,
-      "productType": "iPhone17,5"
+      "known": true,
+      "productType": "iPhone17,5",
+      "basebandFamily": "C1"
     },
     "A3409": {
-      "known": false,
-      "productType": "iPhone17,5"
+      "known": true,
+      "productType": "iPhone17,5",
+      "basebandFamily": "C1"
     },
     "A3410": {
-      "known": false,
-      "productType": "iPhone17,5"
+      "known": true,
+      "productType": "iPhone17,5",
+      "basebandFamily": "C1"
     },
     "A3516": {
-      "known": false,
-      "productType": "iPhone18,4"
+      "known": true,
+      "productType": "iPhone18,4",
+      "basebandFamily": "C1X"
     },
     "A3517": {
-      "known": false,
-      "productType": "iPhone18,4"
+      "known": true,
+      "productType": "iPhone18,4",
+      "basebandFamily": "C1X"
     },
     "A3518": {
-      "known": false,
-      "productType": "iPhone18,4"
+      "known": true,
+      "productType": "iPhone18,4",
+      "basebandFamily": "C1X"
     },
     "A3519": {
-      "known": false,
-      "productType": "iPhone18,3"
+      "known": true,
+      "productType": "iPhone18,3",
+      "basebandFamily": "SDX80M"
     },
     "A3520": {
-      "known": false,
-      "productType": "iPhone18,3"
+      "known": true,
+      "productType": "iPhone18,3",
+      "basebandFamily": "SDX80M"
     },
     "A3521": {
-      "known": false,
-      "productType": "iPhone18,3"
+      "known": true,
+      "productType": "iPhone18,3",
+      "basebandFamily": "SDX80M"
     },
     "A3522": {
-      "known": false,
-      "productType": "iPhone18,1"
+      "known": true,
+      "productType": "iPhone18,1",
+      "basebandFamily": "SDX80M"
     },
     "A3523": {
-      "known": false,
-      "productType": "iPhone18,1"
+      "known": true,
+      "productType": "iPhone18,1",
+      "basebandFamily": "SDX80M"
     },
     "A3524": {
-      "known": false,
-      "productType": "iPhone18,1"
+      "known": true,
+      "productType": "iPhone18,1",
+      "basebandFamily": "SDX80M"
     },
     "A3525": {
-      "known": false,
-      "productType": "iPhone18,2"
+      "known": true,
+      "productType": "iPhone18,2",
+      "basebandFamily": "SDX80M"
     },
     "A3526": {
-      "known": false,
-      "productType": "iPhone18,2"
+      "known": true,
+      "productType": "iPhone18,2",
+      "basebandFamily": "SDX80M"
     },
     "A3527": {
-      "known": false,
-      "productType": "iPhone18,2"
+      "known": true,
+      "productType": "iPhone18,2",
+      "basebandFamily": "SDX80M"
+    },
+    "A3575": {
+      "known": true,
+      "productType": "iPhone18,5",
+      "basebandFamily": "C1X"
+    },
+    "A3634": {
+      "known": true,
+      "productType": "iPhone18,5",
+      "basebandFamily": "C1X"
+    },
+    "A3635": {
+      "known": true,
+      "productType": "iPhone18,5",
+      "basebandFamily": "C1X"
     }
   }
 }

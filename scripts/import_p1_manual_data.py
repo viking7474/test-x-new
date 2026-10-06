@@ -265,10 +265,17 @@ def main() -> None:
                 new_cell["imeiTACs"] = validate_string_list(
                     cell.get("imeiTACs"), TAC_RE, context + " cellular", "imeiTACs"
                 )
+            prefixes = cell.get("meidPrefixes")
             if cdma:
                 new_cell["meidPrefixes"] = validate_string_list(
-                    cell.get("meidPrefixes"), MEID_PREFIX_RE, context + " cellular", "meidPrefixes"
+                    prefixes, MEID_PREFIX_RE, context + " cellular", "meidPrefixes"
                 )
+            elif prefixes is not None:
+                if prefixes != []:
+                    raise RuntimeError(
+                        f"{context}: cdma=false requires meidPrefixes to be empty when present"
+                    )
+                new_cell["meidPrefixes"] = []
 
         bb_known = require_bool(baseband, "known", context + " baseband")
         if not bb_known:

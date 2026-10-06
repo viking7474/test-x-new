@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p0-hardware-catalog-v2-modern-iphone",
+  "databaseVersion": "p0-hardware-catalog-v3-iphone17e",
   "models": {
     "iPhone10,2": {
       "name": "iPhone 8 Plus",
@@ -1380,6 +1380,37 @@
         32,
         128,
         256
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone18,5": {
+      "name": "iPhone 17e",
+      "screen": {
+        "resolution": "2532x1170",
+        "viewport": "2532x1170",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A19",
+      "cpuProfileKey": "A19",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        256,
+        512
       ],
       "cellular": {
         "known": false

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "databaseVersion": "p1-tac-supplement-v1-iphone17e-shared",
+  "source": "user-provided-chat-2026-10-06",
+  "policy": "TACs are verified for iPhone 17e but not classified to an exact regulatory A-number, so the same pool is intentionally shared across A3575/A3634/A3635.",
+  "sharedPools": {
+    "iPhone18,5": {
+      "modelName": "iPhone 17e",
+      "regulatoryModelNumbers": [
+        "A3575",
+        "A3634",
+        "A3635"
+      ],
+      "imeiTACs": [
+        "35102251",
+        "35190385",
+        "35507215",
+        "35620125",
+        "35634432",
+        "35670669",
+        "35714522",
+        "35801437",
+        "35880147",
+        "35953827"
+      ]
+    }
+  }
+}

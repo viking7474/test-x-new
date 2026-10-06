@@ -18,7 +18,7 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     if (![model hasPrefix:@"iPhone"]) return @{};
 
     BOOL isSE = [model isEqualToString:@"iPhone8,4"] || [model isEqualToString:@"iPhone12,8"] || [model isEqualToString:@"iPhone14,6"];
-    BOOL isModernSingleRear = [model isEqualToString:@"iPhone17,5"] || [model isEqualToString:@"iPhone18,4"];
+    BOOL isModernSingleRear = [model isEqualToString:@"iPhone17,5"] || [model isEqualToString:@"iPhone18,4"] || [model isEqualToString:@"iPhone18,5"];
     BOOL isPro = [@[@"iPhone12,3", @"iPhone12,5", @"iPhone13,3", @"iPhone13,4",
                     @"iPhone14,2", @"iPhone14,3", @"iPhone15,2", @"iPhone15,3",
                     @"iPhone16,1", @"iPhone16,2", @"iPhone17,1", @"iPhone17,2",
@@ -41,10 +41,11 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
                        @"iPhone15,2", @"iPhone15,3", @"iPhone16,1", @"iPhone16,2",
                        @"iPhone17,1", @"iPhone17,2", @"iPhone18,1", @"iPhone18,2"] containsObject:model];
     NSInteger rearCount = isSingleRear ? 1 : (isPro ? 3 : 2);
-    double frontMP = [model hasPrefix:@"iPhone18"] ? 18.0 :
+    double frontMP = [model isEqualToString:@"iPhone18,5"] ? 12.0 :
+                     ([model hasPrefix:@"iPhone18"] ? 18.0 :
                      ([model hasPrefix:@"iPhone8"] ? ([model isEqualToString:@"iPhone8,4"] ? 1.2 : 5.0) :
                       (([model hasPrefix:@"iPhone9"] || [model hasPrefix:@"iPhone10"] ||
-                        [model hasPrefix:@"iPhone11"] || isSE) ? 7.0 : 12.0));
+                        [model hasPrefix:@"iPhone11"] || isSE) ? 7.0 : 12.0)));
     NSInteger rearMP = ([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"] ||
                          [model hasPrefix:@"iPhone17"] || [model hasPrefix:@"iPhone18"]) ? 48 : 12;
 
@@ -64,7 +65,7 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     else if ([model isEqualToString:@"iPhone16,2"] || [model isEqualToString:@"iPhone17,2"]) capacities = @[@256, @512, @1024];
     else if ([model isEqualToString:@"iPhone18,2"]) capacities = @[@256, @512, @1024, @2048];
     else if ([model isEqualToString:@"iPhone18,1"] || [model isEqualToString:@"iPhone18,4"]) capacities = @[@256, @512, @1024];
-    else if ([model isEqualToString:@"iPhone18,3"]) capacities = @[@256, @512];
+    else if ([model isEqualToString:@"iPhone18,3"] || [model isEqualToString:@"iPhone18,5"]) capacities = @[@256, @512];
     else if (([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"] ||
               [model hasPrefix:@"iPhone17"]) && isPro) capacities = @[@128, @256, @512, @1024];
     else capacities = @[@128, @256, @512];
@@ -314,6 +315,11 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
                   resolution:@"2736x1260" viewportResolution:@"2736x1260"
               devicePixelRatio:3.0 screenDensity:460
                 cpuArchitecture:@"Apple A19 Pro" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone18,5" name:@"iPhone 17e"
+                  resolution:@"2532x1170" viewportResolution:@"2532x1170"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A19" toDict:specs];
     
     // iPad models
     [self addSpecsForDevice:@"iPad7,5" name:@"iPad (6th Gen)" 
@@ -539,6 +545,9 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     } else if ([modelIdentifier isEqualToString:@"iPhone18,4"]) { // iPhone Air
         boardID = @"D23AP";
         hwModel = @"D23AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone18,5"]) { // iPhone 17e
+        boardID = @"V159AP";
+        hwModel = @"V159AP";
     }
     // iPad Board IDs
     else if ([modelIdentifier isEqualToString:@"iPad7,5"]) { // iPad 6th Gen
@@ -748,8 +757,8 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
             @"maxRenderbufferSize": @(16384)
         };
     }
-    else if ([modelIdentifier hasPrefix:@"iPhone18"]) { // iPhone 17 / Air / Pro family
-        BOOL standard = [modelIdentifier isEqualToString:@"iPhone18,3"];
+    else if ([modelIdentifier hasPrefix:@"iPhone18"]) { // iPhone 17 / 17e / Air / Pro family
+        BOOL standard = [modelIdentifier isEqualToString:@"iPhone18,3"] || [modelIdentifier isEqualToString:@"iPhone18,5"];
         deviceMemory = standard ? 8 : 12;
         cpuCoreCount = 6;
         gpuFamily = standard ? @"Apple A19 GPU" : @"Apple A19 Pro GPU";
