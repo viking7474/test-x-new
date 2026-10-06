@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p0-modern-iphone-v2-iphone17e",
+  "databaseVersion": "p0-modern-iphone-v3-iphone17e-stable26",
   "notes": [
     "Exact ProductType/board/A-number tuples for iPhone 15/16/17 families.",
     "supportedBuilds is an allow-list, not a min/max range expansion.",
     "iPhone 16e starts profile publication at 18.4 because launch build 22D8075 kernel metadata is not yet carried by this repository.",
-    "iPhone 17e has minIOS 26.3 but is conservatively curated from iOS 27.0 because this repository does not yet carry authoritative Darwin/XNU metadata for its 26.3.x-26.7.x restore builds."
+    "iPhone 17e publishes only verified public-release builds; beta and RC builds are excluded. The initial 26.3 device-specific build 23D8128 is enabled from stable T8150 kernel evidence; 26.6.1/26.6.2 are enabled from exact stable-endpoint kernel diffs."
   ],
   "builds": {
     "21A350": {
@@ -43,6 +43,84 @@
       "darwin": "27.0.0",
       "xnu": "13432.2.10~2",
       "kernel_version": "Darwin Kernel Version 27.0.0: Thu Aug 13 21:41:35 PDT 2026; root:xnu-13432.2.10~2"
+    },
+    "23D8128": {
+      "version": "26.3",
+      "darwin": "25.3.0",
+      "xnu": "12377.82.2~13",
+      "kernel_version": "Darwin Kernel Version 25.3.0: Wed Feb 4 23:04:24 PST 2026; root:xnu-12377.82.2~13"
+    },
+    "23D8133": {
+      "version": "26.3.1",
+      "darwin": "25.3.0",
+      "xnu": "12377.82.2~13",
+      "kernel_version": "Darwin Kernel Version 25.3.0: Wed Feb 4 23:04:24 PST 2026; root:xnu-12377.82.2~13"
+    },
+    "23E246": {
+      "version": "26.4",
+      "darwin": "25.4.0",
+      "xnu": "12377.102.10~3",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3"
+    },
+    "23E254": {
+      "version": "26.4.1",
+      "darwin": "25.4.0",
+      "xnu": "12377.102.10~3",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3"
+    },
+    "23E261": {
+      "version": "26.4.2",
+      "darwin": "25.4.0",
+      "xnu": "12377.102.10~3",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3"
+    },
+    "23F77": {
+      "version": "26.5",
+      "darwin": "25.5.0",
+      "xnu": "12377.122.4~1",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Thu Apr 23 20:42:24 PDT 2026; root:xnu-12377.122.4~1"
+    },
+    "23F81": {
+      "version": "26.5.1",
+      "darwin": "25.5.0",
+      "xnu": "12377.122.4~1",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Thu Apr 23 20:42:24 PDT 2026; root:xnu-12377.122.4~1"
+    },
+    "23F84": {
+      "version": "26.5.2",
+      "darwin": "25.5.0",
+      "xnu": "12377.122.8~1",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Tue Jun 9 22:22:07 PDT 2026; root:xnu-12377.122.8~1"
+    },
+    "23G71": {
+      "version": "26.6",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.13~2",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Sat Jul 11 15:47:15 PDT 2026; root:xnu-12377.162.13~2"
+    },
+    "23G83": {
+      "version": "26.6.1",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.14~4",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Thu Jul 30 12:43:49 PDT 2026; root:xnu-12377.162.14~4"
+    },
+    "23G90": {
+      "version": "26.6.2",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.14~4",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Thu Jul 30 12:43:49 PDT 2026; root:xnu-12377.162.14~4"
+    },
+    "23H24": {
+      "version": "26.7",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.13.700.38~2",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Tue Aug 18 18:54:00 PDT 2026; root:xnu-12377.162.13.700.38~2"
+    },
+    "23H30": {
+      "version": "26.7.1",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.13.700.38~2",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Tue Aug 18 18:54:00 PDT 2026; root:xnu-12377.162.13.700.38~2"
     }
   },
   "models": {
@@ -371,6 +449,19 @@
       "minIOS": "26.3",
       "maxIOS": "27.0.1",
       "supportedBuilds": [
+        "23D8128",
+        "23D8133",
+        "23E246",
+        "23E254",
+        "23E261",
+        "23F77",
+        "23F81",
+        "23F84",
+        "23G71",
+        "23G83",
+        "23G90",
+        "23H24",
+        "23H30",
         "24A437",
         "24A446"
       ]

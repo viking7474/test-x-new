@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "databaseVersion": "p0-kernel-evidence-v1-stable-only",
+  "status": "curated-stable-only",
+  "policy": [
+    "Only public iOS/iPadOS releases are eligible. Beta, RC, and RC2 rows are excluded.",
+    "A blank stable row on The Apple Wiki Kernel page is not filled from its neighboring RC by assumption.",
+    "When The Apple Wiki stable row is blank, an exact stable-endpoint firmware diff may supply the kernel tuple.",
+    "iPhone18,5 support is additionally checked against the exact firmware build list; generic 23D127 is not treated as the iPhone 17e launch build."
+  ],
+  "sources": [
+    {
+      "name": "The Apple Wiki Kernel iOS/iPadOS",
+      "url": "https://theapplewiki.com/wiki/Kernel#iOS/iPadOS",
+      "revisionUrl": "https://theapplewiki.com/index.php?title=Kernel&oldid=348251"
+    },
+    {
+      "name": "The Apple Wiki Kernel current stable T8150 evidence",
+      "url": "https://theapplewiki.com/wiki/Kernel#iOS/iPadOS",
+      "retrievedAt": "2026-10-06",
+      "scope": "stable iOS 26.3 RELEASE_ARM64_T8150"
+    },
+    {
+      "name": "The Apple Wiki iPhone 26.x firmware",
+      "url": "https://theapplewiki.com/wiki/Firmware/iPhone/26.x"
+    },
+    {
+      "name": "ipsw-diffs machine-verified stable endpoints",
+      "url": "https://github.com/ipsw-diffs/catalog"
+    },
+    {
+      "name": "blacktop ipsw-diffs stable 23G71 to 23G83 kernel diff",
+      "url": "https://github.com/blacktop/ipsw-diffs/blob/4955032da8337b596698dd854b7a58c88e5faa7d/iOS/26_6_23G71_vs_26_6_1_23G83/README.md"
+    },
+    {
+      "name": "ipsw-diffs stable 23G83 to 23G90 kernel diff",
+      "url": "https://github.com/ipsw-diffs/ios-26/blob/bc67542c81f38b0fe1d1aa93547cc1dc97be11e7/diffs/26_6_1_23G83_vs_26_6_2_23G90/README.md"
+    }
+  ],
+  "excluded": {
+    "23D127": "official generic 26.3 build but not the iPhone18,5 device-specific launch branch"
+  },
+  "builds": {
+    "23D8128": {
+      "version": "26.3",
+      "releaseChannel": "public",
+      "darwin": "25.3.0",
+      "xnu": "12377.82.2~13",
+      "kernel_version": "Darwin Kernel Version 25.3.0: Wed Feb 4 23:04:24 PST 2026; root:xnu-12377.82.2~13",
+      "source": "theapplewiki-kernel-current-t8150"
+    },
+    "23D8133": {
+      "version": "26.3.1",
+      "releaseChannel": "public",
+      "darwin": "25.3.0",
+      "xnu": "12377.82.2~13",
+      "kernel_version": "Darwin Kernel Version 25.3.0: Wed Feb 4 23:04:24 PST 2026; root:xnu-12377.82.2~13",
+      "source": "theapplewiki-kernel"
+    },
+    "23E246": {
+      "version": "26.4",
+      "releaseChannel": "public",
+      "darwin": "25.4.0",
+      "xnu": "12377.102.10~3",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3",
+      "source": "stable-endpoint-diff"
+    },
+    "23E254": {
+      "version": "26.4.1",
+      "releaseChannel": "public",
+      "darwin": "25.4.0",
+      "xnu": "12377.102.10~3",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3",
+      "source": "stable-endpoint-diff"
+    },
+    "23E261": {
+      "version": "26.4.2",
+      "releaseChannel": "public",
+      "darwin": "25.4.0",
+      "xnu": "12377.102.10~3",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3",
+      "source": "stable-endpoint-diff"
+    },
+    "23F77": {
+      "version": "26.5",
+      "releaseChannel": "public",
+      "darwin": "25.5.0",
+      "xnu": "12377.122.4~1",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Thu Apr 23 20:42:24 PDT 2026; root:xnu-12377.122.4~1",
+      "source": "stable-endpoint-diff"
+    },
+    "23F81": {
+      "version": "26.5.1",
+      "releaseChannel": "public",
+      "darwin": "25.5.0",
+      "xnu": "12377.122.4~1",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Thu Apr 23 20:42:24 PDT 2026; root:xnu-12377.122.4~1",
+      "source": "stable-endpoint-diff"
+    },
+    "23F84": {
+      "version": "26.5.2",
+      "releaseChannel": "public",
+      "darwin": "25.5.0",
+      "xnu": "12377.122.8~1",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Tue Jun 9 22:22:07 PDT 2026; root:xnu-12377.122.8~1",
+      "source": "theapplewiki-kernel"
+    },
+    "23G71": {
+      "version": "26.6",
+      "releaseChannel": "public",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.13~2",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Sat Jul 11 15:47:15 PDT 2026; root:xnu-12377.162.13~2",
+      "source": "stable-endpoint-diff"
+    },
+    "23G83": {
+      "version": "26.6.1",
+      "releaseChannel": "public",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.14~4",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Thu Jul 30 12:43:49 PDT 2026; root:xnu-12377.162.14~4",
+      "source": "stable-endpoint-diff"
+    },
+    "23G90": {
+      "version": "26.6.2",
+      "releaseChannel": "public",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.14~4",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Thu Jul 30 12:43:49 PDT 2026; root:xnu-12377.162.14~4",
+      "source": "stable-endpoint-diff"
+    },
+    "23H24": {
+      "version": "26.7",
+      "releaseChannel": "public",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.13.700.38~2",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Tue Aug 18 18:54:00 PDT 2026; root:xnu-12377.162.13.700.38~2",
+      "source": "stable-endpoint-diff"
+    },
+    "23H30": {
+      "version": "26.7.1",
+      "releaseChannel": "public",
+      "darwin": "25.6.0",
+      "xnu": "12377.162.13.700.38~2",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Tue Aug 18 18:54:00 PDT 2026; root:xnu-12377.162.13.700.38~2",
+      "source": "stable-endpoint-diff"
+    }
+  }
+}

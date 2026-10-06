@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "databaseVersion": "p1-baseband-curated-theapplewiki-v1",
+  "databaseVersion": "p1-baseband-curated-theapplewiki-v2-stable26",
   "status": "curated-authoritative-for-project",
   "collectedAt": "2026-10-06",
   "sourcePolicy": [
     "The Apple Wiki is not an official Apple source; this project treats its Baseband Device chipset mapping plus chipset Known Firmware Versions tables as curated authoritative data.",
     "Only exact IOSBuild entries present in the project's supportedBuilds allow-list are published at runtime.",
-    "Unknown or future IOSBuilds continue to fail closed."
+    "Only public-release IOSBuilds with verified stable kernel metadata are eligible for iPhone 17e profile publication; beta/RC builds are excluded and unknown stable kernel tuples remain fail-closed."
   ],
   "sources": [
     {
@@ -27,7 +27,7 @@
     {
       "name": "C1/C1X (C4000) known firmware",
       "url": "https://theapplewiki.com/wiki/C4000",
-      "revisionUrl": "https://theapplewiki.com/index.php?title=C4000&oldid=348095"
+      "revisionUrl": "https://theapplewiki.com/index.php?title=C4000&oldid=347925"
     },
     {
       "name": "SDX80M known firmware",
@@ -139,7 +139,20 @@
         "23A341": "2.00.07",
         "23A355": "2.00.09",
         "24A437": "3.01.03",
-        "24A446": "3.01.03"
+        "24A446": "3.01.03",
+        "23D8128": "2.03.08",
+        "23D8133": "2.03.08",
+        "23E246": "2.04.03",
+        "23E254": "2.04.03",
+        "23E261": "2.04.03",
+        "23F77": "2.05.04",
+        "23F81": "2.05.04",
+        "23F84": "2.05.04",
+        "23G71": "2.06.03",
+        "23G83": "2.06.03",
+        "23G90": "2.06.03",
+        "23H24": "2.06.03",
+        "23H30": "2.06.03"
       }
     }
   }

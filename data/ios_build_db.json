@@ -348,6 +348,84 @@
       "version": "26.0.1",
       "xnu": "12377.2.9~1"
     },
+    "23D8128": {
+      "darwin": "25.3.0",
+      "kernel_version": "Darwin Kernel Version 25.3.0: Wed Feb 4 23:04:24 PST 2026; root:xnu-12377.82.2~13",
+      "version": "26.3",
+      "xnu": "12377.82.2~13"
+    },
+    "23D8133": {
+      "darwin": "25.3.0",
+      "kernel_version": "Darwin Kernel Version 25.3.0: Wed Feb 4 23:04:24 PST 2026; root:xnu-12377.82.2~13",
+      "version": "26.3.1",
+      "xnu": "12377.82.2~13"
+    },
+    "23E246": {
+      "darwin": "25.4.0",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3",
+      "version": "26.4",
+      "xnu": "12377.102.10~3"
+    },
+    "23E254": {
+      "darwin": "25.4.0",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3",
+      "version": "26.4.1",
+      "xnu": "12377.102.10~3"
+    },
+    "23E261": {
+      "darwin": "25.4.0",
+      "kernel_version": "Darwin Kernel Version 25.4.0: Thu Mar 5 23:59:10 PST 2026; root:xnu-12377.102.10~3",
+      "version": "26.4.2",
+      "xnu": "12377.102.10~3"
+    },
+    "23F77": {
+      "darwin": "25.5.0",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Thu Apr 23 20:42:24 PDT 2026; root:xnu-12377.122.4~1",
+      "version": "26.5",
+      "xnu": "12377.122.4~1"
+    },
+    "23F81": {
+      "darwin": "25.5.0",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Thu Apr 23 20:42:24 PDT 2026; root:xnu-12377.122.4~1",
+      "version": "26.5.1",
+      "xnu": "12377.122.4~1"
+    },
+    "23F84": {
+      "darwin": "25.5.0",
+      "kernel_version": "Darwin Kernel Version 25.5.0: Tue Jun 9 22:22:07 PDT 2026; root:xnu-12377.122.8~1",
+      "version": "26.5.2",
+      "xnu": "12377.122.8~1"
+    },
+    "23G71": {
+      "darwin": "25.6.0",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Sat Jul 11 15:47:15 PDT 2026; root:xnu-12377.162.13~2",
+      "version": "26.6",
+      "xnu": "12377.162.13~2"
+    },
+    "23G83": {
+      "darwin": "25.6.0",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Thu Jul 30 12:43:49 PDT 2026; root:xnu-12377.162.14~4",
+      "version": "26.6.1",
+      "xnu": "12377.162.14~4"
+    },
+    "23G90": {
+      "darwin": "25.6.0",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Thu Jul 30 12:43:49 PDT 2026; root:xnu-12377.162.14~4",
+      "version": "26.6.2",
+      "xnu": "12377.162.14~4"
+    },
+    "23H24": {
+      "darwin": "25.6.0",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Tue Aug 18 18:54:00 PDT 2026; root:xnu-12377.162.13.700.38~2",
+      "version": "26.7",
+      "xnu": "12377.162.13.700.38~2"
+    },
+    "23H30": {
+      "darwin": "25.6.0",
+      "kernel_version": "Darwin Kernel Version 25.6.0: Tue Aug 18 18:54:00 PDT 2026; root:xnu-12377.162.13.700.38~2",
+      "version": "26.7.1",
+      "xnu": "12377.162.13.700.38~2"
+    },
     "24A437": {
       "darwin": "27.0.0",
       "kernel_version": "Darwin Kernel Version 27.0.0: Thu Aug 13 21:41:35 PDT 2026; root:xnu-13432.2.10~2",
@@ -1606,6 +1684,19 @@
       "24A446"
     ],
     "iPhone18,5": [
+      "23D8128",
+      "23D8133",
+      "23E246",
+      "23E254",
+      "23E261",
+      "23F77",
+      "23F81",
+      "23F84",
+      "23G71",
+      "23G83",
+      "23G90",
+      "23H24",
+      "23H30",
       "24A437",
       "24A446"
     ],

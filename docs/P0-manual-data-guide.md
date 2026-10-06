@@ -30,6 +30,11 @@ reproducible.
   - real chipset families are used directly: `SDX70M` (iPhone 15 family), `SDX71M` (iPhone 16 family), `C1` (iPhone 16e), `SDX80M` (iPhone 17/Pro/Pro Max), and `C1X` (iPhone Air + iPhone 17e).
   - only exact IOSBuilds present in each ProductType's curated `supportedBuilds` allow-list are published; unknown builds still fail closed.
   - `iphone_baseband_db.json` mirrors the validated chipset build maps and all 55 regional rows are `known=true`.
+- `data/iphone_kernel_evidence.json`
+  - stable-only Darwin/XNU evidence for modern builds that are not already covered by legacy `IOS.db`.
+  - the primary source is The Apple Wiki `Kernel#iOS/iPadOS`, pinned at `oldid=348251`.
+  - beta/RC/RC2 rows are never imported. A blank public-release row is **not** filled by copying the neighboring RC.
+  - an exact stable-endpoint firmware diff may fill a public row when the Kernel table itself is blank.
 - `data/iphone_modern_catalog.json`
   - exact ProductType/board/A-number tuples and explicit supported-build allow-lists for modern models.
   - modern builds absent from legacy `IOS.db` may be added here only with verified iOS/Darwin/XNU metadata.
@@ -69,9 +74,18 @@ blindly inheriting every global KMOS build between min/max versions.
 The exact build allow-list is authoritative for profile generation. In
 particular, iPhone 15 no longer inherits the unrelated `21A329` build merely
 because both records are labelled iOS 17.0. iPhone 17e records its true minimum
-iOS as 26.3, but is currently curated only for the repository's verified iOS 27
-build metadata; 26.3.x-26.7.x builds remain excluded until their Darwin/XNU rows
-are added explicitly.
+iOS as 26.3 and now publishes a stable-only allow-list from 26.3 through
+27.0.1. The current verified public builds are:
+
+`23D8128, 23D8133, 23E246, 23E254, 23E261, 23F77, 23F81, 23F84, 23G71, 23G83, 23G90, 23H24, 23H30, 24A437, 24A446`.
+
+The device-specific initial 26.3 build `23D8128` is enabled from the stable
+`RELEASE_ARM64_T8150` kernel row (`Darwin 25.3.0`, `xnu-12377.82.2~13`) and the
+firmware table that identifies `23D8128` as the iPhone18,5 preinstalled build.
+Public 26.6.1 `23G83` and 26.6.2 `23G90` are enabled from exact stable IPSW
+diffs; both carry `Darwin 25.6.0` / `xnu-12377.162.14~4`, and the 23G83→23G90
+diff reports the kernelcache functionally unchanged. Generic `23D127` is not
+used for iPhone18,5. RC/beta metadata is never substituted.
 
 The source database also had two defects that are now handled by migration:
 

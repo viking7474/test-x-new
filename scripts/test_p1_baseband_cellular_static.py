@@ -26,6 +26,7 @@ def main() -> None:
     cell_root = load("data/iphone_cellular_db.json")
     baseband_root = load("data/iphone_baseband_db.json")
     baseband_evidence = load("data/iphone_baseband_evidence.json")
+    kernel_evidence = load("data/iphone_kernel_evidence.json")
     models = {row["productType"]: row for row in model_root["models"]}
     dtb = build_root["deviceToBuilds"]
 
@@ -109,8 +110,47 @@ def main() -> None:
     for product_type in ("iPhone18,1", "iPhone18,2", "iPhone18,3", "iPhone18,4"):
         check("23A341" in dtb[product_type],
               f"{product_type} carries the verified iOS 26.0 launch build")
-    check(dtb["iPhone18,5"] == ["24A437", "24A446"],
-          "iPhone18,5 conservatively curates iOS 27 builds until earlier 17e Darwin/XNU metadata is added")
+    expected_17e_stable_builds = [
+        "23D8128", "23D8133",
+        "23E246", "23E254", "23E261",
+        "23F77", "23F81", "23F84",
+        "23G71", "23G83", "23G90",
+        "23H24", "23H30",
+        "24A437", "24A446",
+    ]
+    check(dtb["iPhone18,5"] == expected_17e_stable_builds,
+          "iPhone18,5 publishes only the verified public-release iOS 26.3-27.0.1 allow-list")
+    check("23D127" not in dtb["iPhone18,5"],
+          "iPhone18,5 excludes the generic 26.3 branch that is not the device-specific launch build")
+
+    kernel_builds = kernel_evidence.get("builds", {})
+    check(kernel_evidence.get("schemaVersion") == 1 and
+          kernel_evidence.get("status") == "curated-stable-only",
+          "iPhone 17e kernel evidence is explicitly stable-only")
+    check(set(kernel_builds) == set(expected_17e_stable_builds).difference({"24A437", "24A446"}),
+          "stable kernel evidence covers every newly enabled iPhone 17e iOS 26 build")
+    check(all(spec.get("releaseChannel") == "public"
+              for spec in kernel_builds.values()),
+          "kernel evidence contains no beta or RC records")
+    check(any("oldid=348251" in row.get("revisionUrl", "")
+              for row in kernel_evidence.get("sources", []) if isinstance(row, dict)),
+          "The Apple Wiki Kernel source is pinned to the reviewed revision")
+    check(kernel_builds.get("23D8128", {}).get("source") == "theapplewiki-kernel-current-t8150" and any(
+        row.get("scope") == "stable iOS 26.3 RELEASE_ARM64_T8150" and row.get("retrievedAt") == "2026-10-06"
+        for row in kernel_evidence.get("sources", []) if isinstance(row, dict)
+    ), "iPhone17e launch build is backed by current stable T8150 kernel evidence")
+    check(kernel_builds.get("23G83", {}).get("xnu") == "12377.162.14~4" and
+          kernel_builds.get("23G90", {}).get("xnu") == "12377.162.14~4" and any(
+              "26_6_1_23G83_vs_26_6_2_23G90" in row.get("url", "")
+              for row in kernel_evidence.get("sources", []) if isinstance(row, dict)
+          ), "26.6.1/26.6.2 stable endpoints carry the verified unchanged XNU tuple")
+    check(all(
+        build_root["buildToMeta"].get(build, {}).get("version") == spec.get("version") and
+        build_root["buildToMeta"].get(build, {}).get("darwin") == spec.get("darwin") and
+        build_root["buildToMeta"].get(build, {}).get("xnu") == spec.get("xnu") and
+        build_root["buildToMeta"].get(build, {}).get("kernel_version") == spec.get("kernel_version")
+        for build, spec in kernel_builds.items()
+    ), "generated IOSBuild metadata matches stable-only kernel evidence exactly")
 
     for product_type in expected:
         required_recent = ("24A437", "24A446") if product_type == "iPhone18,5" else ("23A355", "24A437", "24A446")
