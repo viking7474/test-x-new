@@ -21,6 +21,7 @@ def main() -> None:
     model_root = json.loads(read("data/iphone_model_db.json"))
     hardware_root = json.loads(read("data/iphone_hardware_db.json"))
     cellular_root = json.loads(read("data/iphone_cellular_db.json"))
+    tac_root = json.loads(read("data/iphone_tac_catalog.json"))
     models = {row["productType"]: row for row in model_root["models"]}
 
     check(bool(model_root.get("hardwareCatalogVersion")), "generated model DB declares P0 hardware catalog")
@@ -68,16 +69,26 @@ def main() -> None:
           "A2626" not in set(iphone13.get("regulatoryModelNumbers", [])),
           "iPhone 13 owns A2631 and does not reuse iPhone 13 mini A2626")
 
-    iphone15_expectations = {
-        "iPhone15,4": ("D37AP", {"A2846", "A3089", "A3090", "A3092"}),
-        "iPhone15,5": ("D38AP", {"A2847", "A3093", "A3094", "A3096"}),
-        "iPhone16,1": ("D83AP", {"A2848", "A3101", "A3102", "A3104"}),
-        "iPhone16,2": ("D84AP", {"A2849", "A3105", "A3106", "A3108"}),
+    modern_expectations = {
+        "iPhone15,4": ("D37AP", {"A2846", "A3089", "A3090", "A3092"}, "17.0.0"),
+        "iPhone15,5": ("D38AP", {"A2847", "A3093", "A3094", "A3096"}, "17.0.0"),
+        "iPhone16,1": ("D83AP", {"A2848", "A3101", "A3102", "A3104"}, "17.0.0"),
+        "iPhone16,2": ("D84AP", {"A2849", "A3105", "A3106", "A3108"}, "17.0.0"),
+        "iPhone17,1": ("D93AP", {"A3083", "A3292", "A3293", "A3294"}, "18.0.0"),
+        "iPhone17,2": ("D94AP", {"A3084", "A3295", "A3296", "A3297"}, "18.0.0"),
+        "iPhone17,3": ("D47AP", {"A3081", "A3286", "A3287", "A3288"}, "18.0.0"),
+        "iPhone17,4": ("D48AP", {"A3082", "A3289", "A3290", "A3291"}, "18.0.0"),
+        "iPhone17,5": ("V59AP", {"A3212", "A3408", "A3409", "A3410"}, "18.3.1"),
+        "iPhone18,1": ("V53AP", {"A3256", "A3522", "A3523", "A3524"}, "26.0.0"),
+        "iPhone18,2": ("V54AP", {"A3257", "A3525", "A3526", "A3527"}, "26.0.0"),
+        "iPhone18,3": ("V57AP", {"A3258", "A3519", "A3520", "A3521"}, "26.0.0"),
+        "iPhone18,4": ("D23AP", {"A3260", "A3516", "A3517", "A3518"}, "26.0.0"),
     }
-    for product_type, (board, regulatory_numbers) in iphone15_expectations.items():
+    for product_type, (board, regulatory_numbers, min_ios) in modern_expectations.items():
         row = models.get(product_type)
         check(bool(row), f"{product_type} is published by generated canonical model DB")
-        check(row.get("minIOS") == "17.0.0", f"{product_type} minimum iOS is 17.0.0")
+        check(row.get("minIOS") == min_ios, f"{product_type} minimum iOS is {min_ios}")
+        check(row.get("maxIOS") == "27.0.1", f"{product_type} maximum curated iOS is 27.0.1")
         check(row.get("variants") == [{
             "boardID": board,
             "hwModel": board,
@@ -86,8 +97,11 @@ def main() -> None:
         regional = row.get("cellularByRegulatoryModelNumber", {})
         check(set(regional) == regulatory_numbers,
               f"{product_type} publishes regional cellular slots for every A-number")
-        check(all(spec == {"known": False} for spec in regional.values()),
-              f"{product_type} regional cellular stays explicit unknown until verified")
+        check(all(spec.get("known") is False for spec in regional.values()),
+              f"{product_type} regional cellular stays publication-gated until baseband is verified")
+        check(all(isinstance(spec.get("imeiTACs"), list) and spec.get("imeiTACs")
+                  for spec in regional.values()),
+              f"{product_type} retains collected TAC evidence while known=false")
 
     builder = read("scripts/build_ios_db.py")
     manager = read("common/IdentifierManager.m")
@@ -139,9 +153,43 @@ def main() -> None:
           'RegulatoryModelNumber' in cellular_schema and
           'PXResolvedCellularSpec' in cellular_schema,
           "cellular resolver prefers the exact regulatory A-number override")
-    check(set(cellular_root.get("regulatoryModels", {})) == set().union(
-              *(numbers for _, numbers in iphone15_expectations.values())),
-          "manual cellular catalog exposes exactly the iPhone 15 regional A-number slots")
+    expected_regulatory_numbers = set().union(
+        *(numbers for _, numbers, _ in modern_expectations.values())
+    )
+    check(set(cellular_root.get("regulatoryModels", {})) == expected_regulatory_numbers,
+          "manual cellular catalog exposes exactly the covered iPhone 15/16/17 regional A-number slots")
+    check(all(
+        isinstance(tac, str) and len(tac) == 8 and tac.isdigit()
+        for spec in cellular_root.get("regulatoryModels", {}).values()
+        for tac in spec.get("imeiTACs", [])
+    ), "all collected IMEI TAC evidence is normalized to exact 8-digit strings")
+    tac_records = tac_root.get("regulatoryModels", {})
+    check(tac_root.get("schemaVersion") == 1 and
+          tac_root.get("sourceFile") == "Apple.csv" and
+          tac_root.get("sourceSha256") == "48d0bee4b850bc8666c37852f81c99d557f3939112b8092068b37b3cf357d211",
+          "TAC evidence catalog is pinned to the imported Apple.csv SHA-256")
+    check(set(tac_records) == expected_regulatory_numbers,
+          "TAC evidence catalog covers exactly the canonical modern A-number set")
+    tac_owners = {}
+    for number, spec in tac_records.items():
+        for tac in spec.get("imeiTACs", []):
+            tac_owners.setdefault(tac, set()).add(number)
+    duplicate_tac_owners = {
+        tac: sorted(owners) for tac, owners in tac_owners.items() if len(owners) > 1
+    }
+    check(not duplicate_tac_owners,
+          "no accepted TAC is assigned to more than one regulatory A-number")
+    check(all(
+        cellular_root["regulatoryModels"][number].get("imeiTACs") == spec.get("imeiTACs")
+        for number, spec in tac_records.items()
+    ), "cellular TAC arrays stay byte-for-byte synchronized with imported TAC evidence")
+    excluded_tacs = {
+        (str(row.get("Model Info")), str(row.get("TAC")))
+        for row in tac_root.get("excluded", []) if isinstance(row, dict)
+    }
+    check(("A3296", "35512783") in excluded_tacs and
+          "35512783" not in cellular_root["regulatoryModels"]["A3296"].get("imeiTACs", []),
+          "conflicting A3296 TAC remains explicitly excluded fail-closed")
     check("Fallback to legacy generation paths if DB-based generation is unavailable" not in manager,
           "grouped generation no longer falls back to independent legacy model/iOS randomization")
 

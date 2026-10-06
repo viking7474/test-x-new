@@ -1,170 +1,7 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p0-hardware-catalog-v1",
+  "databaseVersion": "p0-hardware-catalog-v2-modern-iphone",
   "models": {
-    "iPhone8,1": {
-      "name": "iPhone 6s",
-      "screen": {
-        "resolution": "1334x750",
-        "viewport": "1334x750",
-        "scale": 2,
-        "nativeScale": 2,
-        "ppi": 326
-      },
-      "cpuArchitecture": "Apple A9",
-      "cpuProfileKey": "A9",
-      "deviceMemoryGB": 2,
-      "cpuCores": 2,
-      "frontCameraMegapixels": 5,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 1,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": false,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        16,
-        32,
-        64,
-        128
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
-    "iPhone8,2": {
-      "name": "iPhone 6s Plus",
-      "screen": {
-        "resolution": "1920x1080",
-        "viewport": "2208x1242",
-        "scale": 3,
-        "nativeScale": 2.608696,
-        "ppi": 401
-      },
-      "cpuArchitecture": "Apple A9",
-      "cpuProfileKey": "A9",
-      "deviceMemoryGB": 2,
-      "cpuCores": 2,
-      "frontCameraMegapixels": 5,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 1,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": false,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        16,
-        32,
-        64,
-        128
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
-    "iPhone8,4": {
-      "name": "iPhone SE (1st Gen)",
-      "screen": {
-        "resolution": "1136x640",
-        "viewport": "1136x640",
-        "scale": 2,
-        "nativeScale": 2,
-        "ppi": 326
-      },
-      "cpuArchitecture": "Apple A9",
-      "cpuProfileKey": "A9",
-      "deviceMemoryGB": 2,
-      "cpuCores": 2,
-      "frontCameraMegapixels": 1.2,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 1,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": false,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        16,
-        32,
-        64,
-        128
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
-    "iPhone9,3": {
-      "name": "iPhone 7",
-      "screen": {
-        "resolution": "1334x750",
-        "viewport": "1334x750",
-        "scale": 2,
-        "nativeScale": 2,
-        "ppi": 326
-      },
-      "cpuArchitecture": "Apple A10 Fusion",
-      "cpuProfileKey": "A10",
-      "deviceMemoryGB": 2,
-      "cpuCores": 4,
-      "frontCameraMegapixels": 7,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 1,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": false,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        32,
-        128,
-        256
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
-    "iPhone9,4": {
-      "name": "iPhone 7 Plus",
-      "screen": {
-        "resolution": "1920x1080",
-        "viewport": "2208x1242",
-        "scale": 3,
-        "nativeScale": 2.608696,
-        "ppi": 401
-      },
-      "cpuArchitecture": "Apple A10 Fusion",
-      "cpuProfileKey": "A10",
-      "deviceMemoryGB": 3,
-      "cpuCores": 4,
-      "frontCameraMegapixels": 7,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 2,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": false,
-      "hasTelephotoCamera": true,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        32,
-        128,
-        256
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
     "iPhone10,2": {
       "name": "iPhone 8 Plus",
       "screen": {
@@ -323,38 +160,6 @@
         "known": false
       }
     },
-    "iPhone11,8": {
-      "name": "iPhone XR",
-      "screen": {
-        "resolution": "1792x828",
-        "viewport": "1792x828",
-        "scale": 2,
-        "nativeScale": 2,
-        "ppi": 326
-      },
-      "cpuArchitecture": "Apple A12 Bionic",
-      "cpuProfileKey": "A12",
-      "deviceMemoryGB": 3,
-      "cpuCores": 6,
-      "frontCameraMegapixels": 7,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 1,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": false,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        64,
-        128,
-        256
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
     "iPhone11,2": {
       "name": "iPhone XS",
       "screen": {
@@ -414,6 +219,38 @@
         64,
         256,
         512
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone11,8": {
+      "name": "iPhone XR",
+      "screen": {
+        "resolution": "1792x828",
+        "viewport": "1792x828",
+        "scale": 2,
+        "nativeScale": 2,
+        "ppi": 326
+      },
+      "cpuArchitecture": "Apple A12 Bionic",
+      "cpuProfileKey": "A12",
+      "deviceMemoryGB": 3,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 7,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        64,
+        128,
+        256
       ],
       "cellular": {
         "known": false
@@ -675,70 +512,6 @@
         "known": false
       }
     },
-    "iPhone14,4": {
-      "name": "iPhone 13 mini",
-      "screen": {
-        "resolution": "2340x1080",
-        "viewport": "2340x1080",
-        "scale": 3,
-        "nativeScale": 3,
-        "ppi": 476
-      },
-      "cpuArchitecture": "Apple A15 Bionic",
-      "cpuProfileKey": "A15",
-      "deviceMemoryGB": 4,
-      "cpuCores": 6,
-      "frontCameraMegapixels": 12,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 2,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": true,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        128,
-        256,
-        512
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
-    "iPhone14,5": {
-      "name": "iPhone 13",
-      "screen": {
-        "resolution": "2532x1170",
-        "viewport": "2532x1170",
-        "scale": 3,
-        "nativeScale": 3,
-        "ppi": 460
-      },
-      "cpuArchitecture": "Apple A15 Bionic",
-      "cpuProfileKey": "A15",
-      "deviceMemoryGB": 4,
-      "cpuCores": 6,
-      "frontCameraMegapixels": 12,
-      "rearCameraMegapixels": 12,
-      "rearCameraCount": 2,
-      "hasFrontCamera": true,
-      "hasRearCamera": true,
-      "hasPanoramaCamera": true,
-      "hasUltraWideCamera": true,
-      "hasTelephotoCamera": false,
-      "hasLiDARScanner": false,
-      "supports4KVideo": true,
-      "storageCapacitiesGB": [
-        128,
-        256,
-        512
-      ],
-      "cellular": {
-        "known": false
-      }
-    },
     "iPhone14,2": {
       "name": "iPhone 13 Pro",
       "screen": {
@@ -800,6 +573,70 @@
         256,
         512,
         1024
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone14,4": {
+      "name": "iPhone 13 mini",
+      "screen": {
+        "resolution": "2340x1080",
+        "viewport": "2340x1080",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 476
+      },
+      "cpuArchitecture": "Apple A15 Bionic",
+      "cpuProfileKey": "A15",
+      "deviceMemoryGB": 4,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 2,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        128,
+        256,
+        512
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone14,5": {
+      "name": "iPhone 13",
+      "screen": {
+        "resolution": "2532x1170",
+        "viewport": "2532x1170",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A15 Bionic",
+      "cpuProfileKey": "A15",
+      "deviceMemoryGB": 4,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 2,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        128,
+        256,
+        512
       ],
       "cellular": {
         "known": false
@@ -1091,6 +928,458 @@
         256,
         512,
         1024
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone17,1": {
+      "name": "iPhone 16 Pro",
+      "screen": {
+        "resolution": "2622x1206",
+        "viewport": "2622x1206",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A18 Pro",
+      "cpuProfileKey": "A18 PRO",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 3,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": true,
+      "hasLiDARScanner": true,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        128,
+        256,
+        512,
+        1024
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone17,2": {
+      "name": "iPhone 16 Pro Max",
+      "screen": {
+        "resolution": "2868x1320",
+        "viewport": "2868x1320",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A18 Pro",
+      "cpuProfileKey": "A18 PRO",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 3,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": true,
+      "hasLiDARScanner": true,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        256,
+        512,
+        1024
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone17,3": {
+      "name": "iPhone 16",
+      "screen": {
+        "resolution": "2556x1179",
+        "viewport": "2556x1179",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A18",
+      "cpuProfileKey": "A18",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 2,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        128,
+        256,
+        512
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone17,4": {
+      "name": "iPhone 16 Plus",
+      "screen": {
+        "resolution": "2796x1290",
+        "viewport": "2796x1290",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A18",
+      "cpuProfileKey": "A18",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 2,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        128,
+        256,
+        512
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone17,5": {
+      "name": "iPhone 16e",
+      "screen": {
+        "resolution": "2532x1170",
+        "viewport": "2532x1170",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A18",
+      "cpuProfileKey": "A18",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 12,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        128,
+        256,
+        512
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone18,1": {
+      "name": "iPhone 17 Pro",
+      "screen": {
+        "resolution": "2622x1206",
+        "viewport": "2622x1206",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A19 Pro",
+      "cpuProfileKey": "A19 PRO",
+      "deviceMemoryGB": 12,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 18,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 3,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": true,
+      "hasLiDARScanner": true,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        256,
+        512,
+        1024
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone18,2": {
+      "name": "iPhone 17 Pro Max",
+      "screen": {
+        "resolution": "2868x1320",
+        "viewport": "2868x1320",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A19 Pro",
+      "cpuProfileKey": "A19 PRO",
+      "deviceMemoryGB": 12,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 18,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 3,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": true,
+      "hasLiDARScanner": true,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        256,
+        512,
+        1024,
+        2048
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone18,3": {
+      "name": "iPhone 17",
+      "screen": {
+        "resolution": "2622x1206",
+        "viewport": "2622x1206",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A19",
+      "cpuProfileKey": "A19",
+      "deviceMemoryGB": 8,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 18,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 2,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": true,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        256,
+        512
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone18,4": {
+      "name": "iPhone Air",
+      "screen": {
+        "resolution": "2736x1260",
+        "viewport": "2736x1260",
+        "scale": 3,
+        "nativeScale": 3,
+        "ppi": 460
+      },
+      "cpuArchitecture": "Apple A19 Pro",
+      "cpuProfileKey": "A19 PRO",
+      "deviceMemoryGB": 12,
+      "cpuCores": 6,
+      "frontCameraMegapixels": 18,
+      "rearCameraMegapixels": 48,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        256,
+        512,
+        1024
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone8,1": {
+      "name": "iPhone 6s",
+      "screen": {
+        "resolution": "1334x750",
+        "viewport": "1334x750",
+        "scale": 2,
+        "nativeScale": 2,
+        "ppi": 326
+      },
+      "cpuArchitecture": "Apple A9",
+      "cpuProfileKey": "A9",
+      "deviceMemoryGB": 2,
+      "cpuCores": 2,
+      "frontCameraMegapixels": 5,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        16,
+        32,
+        64,
+        128
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone8,2": {
+      "name": "iPhone 6s Plus",
+      "screen": {
+        "resolution": "1920x1080",
+        "viewport": "2208x1242",
+        "scale": 3,
+        "nativeScale": 2.608696,
+        "ppi": 401
+      },
+      "cpuArchitecture": "Apple A9",
+      "cpuProfileKey": "A9",
+      "deviceMemoryGB": 2,
+      "cpuCores": 2,
+      "frontCameraMegapixels": 5,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        16,
+        32,
+        64,
+        128
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone8,4": {
+      "name": "iPhone SE (1st Gen)",
+      "screen": {
+        "resolution": "1136x640",
+        "viewport": "1136x640",
+        "scale": 2,
+        "nativeScale": 2,
+        "ppi": 326
+      },
+      "cpuArchitecture": "Apple A9",
+      "cpuProfileKey": "A9",
+      "deviceMemoryGB": 2,
+      "cpuCores": 2,
+      "frontCameraMegapixels": 1.2,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        16,
+        32,
+        64,
+        128
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone9,3": {
+      "name": "iPhone 7",
+      "screen": {
+        "resolution": "1334x750",
+        "viewport": "1334x750",
+        "scale": 2,
+        "nativeScale": 2,
+        "ppi": 326
+      },
+      "cpuArchitecture": "Apple A10 Fusion",
+      "cpuProfileKey": "A10",
+      "deviceMemoryGB": 2,
+      "cpuCores": 4,
+      "frontCameraMegapixels": 7,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 1,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": false,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        32,
+        128,
+        256
+      ],
+      "cellular": {
+        "known": false
+      }
+    },
+    "iPhone9,4": {
+      "name": "iPhone 7 Plus",
+      "screen": {
+        "resolution": "1920x1080",
+        "viewport": "2208x1242",
+        "scale": 3,
+        "nativeScale": 2.608696,
+        "ppi": 401
+      },
+      "cpuArchitecture": "Apple A10 Fusion",
+      "cpuProfileKey": "A10",
+      "deviceMemoryGB": 3,
+      "cpuCores": 4,
+      "frontCameraMegapixels": 7,
+      "rearCameraMegapixels": 12,
+      "rearCameraCount": 2,
+      "hasFrontCamera": true,
+      "hasRearCamera": true,
+      "hasPanoramaCamera": true,
+      "hasUltraWideCamera": false,
+      "hasTelephotoCamera": true,
+      "hasLiDARScanner": false,
+      "supports4KVideo": true,
+      "storageCapacitiesGB": [
+        32,
+        128,
+        256
       ],
       "cellular": {
         "known": false

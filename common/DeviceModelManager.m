@@ -18,11 +18,14 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     if (![model hasPrefix:@"iPhone"]) return @{};
 
     BOOL isSE = [model isEqualToString:@"iPhone8,4"] || [model isEqualToString:@"iPhone12,8"] || [model isEqualToString:@"iPhone14,6"];
+    BOOL isModernSingleRear = [model isEqualToString:@"iPhone17,5"] || [model isEqualToString:@"iPhone18,4"];
     BOOL isPro = [@[@"iPhone12,3", @"iPhone12,5", @"iPhone13,3", @"iPhone13,4",
                     @"iPhone14,2", @"iPhone14,3", @"iPhone15,2", @"iPhone15,3",
-                    @"iPhone16,1", @"iPhone16,2"] containsObject:model];
+                    @"iPhone16,1", @"iPhone16,2", @"iPhone17,1", @"iPhone17,2",
+                    @"iPhone18,1", @"iPhone18,2"] containsObject:model];
     BOOL isSingleRear = [model hasPrefix:@"iPhone8"] || [model isEqualToString:@"iPhone9,3"] ||
-                        [model isEqualToString:@"iPhone10,4"] || [model isEqualToString:@"iPhone11,8"] || isSE;
+                        [model isEqualToString:@"iPhone10,4"] || [model isEqualToString:@"iPhone11,8"] ||
+                        isSE || isModernSingleRear;
     BOOL isEarlyDual = [model isEqualToString:@"iPhone9,4"] ||
                        [@[@"iPhone10,2", @"iPhone10,3", @"iPhone10,5", @"iPhone10,6"] containsObject:model] ||
                        [model isEqualToString:@"iPhone11,2"] ||
@@ -30,15 +33,20 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     BOOL hasUltraWide = ([model hasPrefix:@"iPhone12"] && !isSE) ||
                         [model hasPrefix:@"iPhone13"] ||
                         ([model hasPrefix:@"iPhone14"] && !isSE) ||
-                        [model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"];
+                        [model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"] ||
+                        ([@[@"iPhone17,1", @"iPhone17,2", @"iPhone17,3", @"iPhone17,4",
+                            @"iPhone18,1", @"iPhone18,2", @"iPhone18,3"] containsObject:model]);
     BOOL hasTelephoto = isPro || isEarlyDual;
     BOOL hasLiDAR = [@[@"iPhone13,3", @"iPhone13,4", @"iPhone14,2", @"iPhone14,3",
-                       @"iPhone15,2", @"iPhone15,3", @"iPhone16,1", @"iPhone16,2"] containsObject:model];
+                       @"iPhone15,2", @"iPhone15,3", @"iPhone16,1", @"iPhone16,2",
+                       @"iPhone17,1", @"iPhone17,2", @"iPhone18,1", @"iPhone18,2"] containsObject:model];
     NSInteger rearCount = isSingleRear ? 1 : (isPro ? 3 : 2);
-    double frontMP = [model hasPrefix:@"iPhone8"] ? ([model isEqualToString:@"iPhone8,4"] ? 1.2 : 5.0) :
-                     (([model hasPrefix:@"iPhone9"] || [model hasPrefix:@"iPhone10"] ||
-                       [model hasPrefix:@"iPhone11"] || isSE) ? 7.0 : 12.0);
-    NSInteger rearMP = ([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"]) ? 48 : 12;
+    double frontMP = [model hasPrefix:@"iPhone18"] ? 18.0 :
+                     ([model hasPrefix:@"iPhone8"] ? ([model isEqualToString:@"iPhone8,4"] ? 1.2 : 5.0) :
+                      (([model hasPrefix:@"iPhone9"] || [model hasPrefix:@"iPhone10"] ||
+                        [model hasPrefix:@"iPhone11"] || isSE) ? 7.0 : 12.0));
+    NSInteger rearMP = ([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"] ||
+                         [model hasPrefix:@"iPhone17"] || [model hasPrefix:@"iPhone18"]) ? 48 : 12;
 
     NSArray *capacities = nil;
     if ([model hasPrefix:@"iPhone8"]) capacities = @[@16, @32, @64, @128];
@@ -53,8 +61,12 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     else if ([model isEqualToString:@"iPhone14,6"]) capacities = @[@64, @128, @256];
     else if ([model hasPrefix:@"iPhone14"] && isPro) capacities = @[@128, @256, @512, @1024];
     else if ([model hasPrefix:@"iPhone14"]) capacities = @[@128, @256, @512];
-    else if ([model isEqualToString:@"iPhone16,2"]) capacities = @[@256, @512, @1024];
-    else if (([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"]) && isPro) capacities = @[@128, @256, @512, @1024];
+    else if ([model isEqualToString:@"iPhone16,2"] || [model isEqualToString:@"iPhone17,2"]) capacities = @[@256, @512, @1024];
+    else if ([model isEqualToString:@"iPhone18,2"]) capacities = @[@256, @512, @1024, @2048];
+    else if ([model isEqualToString:@"iPhone18,1"] || [model isEqualToString:@"iPhone18,4"]) capacities = @[@256, @512, @1024];
+    else if ([model isEqualToString:@"iPhone18,3"]) capacities = @[@256, @512];
+    else if (([model hasPrefix:@"iPhone15"] || [model hasPrefix:@"iPhone16"] ||
+              [model hasPrefix:@"iPhone17"]) && isPro) capacities = @[@128, @256, @512, @1024];
     else capacities = @[@128, @256, @512];
 
     return @{
@@ -257,6 +269,51 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
                   resolution:@"2796x1290" viewportResolution:@"2796x1290" 
               devicePixelRatio:3.0 screenDensity:460 
                 cpuArchitecture:@"Apple A17 Pro" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone17,1" name:@"iPhone 16 Pro"
+                  resolution:@"2622x1206" viewportResolution:@"2622x1206"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A18 Pro" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone17,2" name:@"iPhone 16 Pro Max"
+                  resolution:@"2868x1320" viewportResolution:@"2868x1320"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A18 Pro" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone17,3" name:@"iPhone 16"
+                  resolution:@"2556x1179" viewportResolution:@"2556x1179"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A18" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone17,4" name:@"iPhone 16 Plus"
+                  resolution:@"2796x1290" viewportResolution:@"2796x1290"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A18" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone17,5" name:@"iPhone 16e"
+                  resolution:@"2532x1170" viewportResolution:@"2532x1170"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A18" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone18,1" name:@"iPhone 17 Pro"
+                  resolution:@"2622x1206" viewportResolution:@"2622x1206"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A19 Pro" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone18,2" name:@"iPhone 17 Pro Max"
+                  resolution:@"2868x1320" viewportResolution:@"2868x1320"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A19 Pro" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone18,3" name:@"iPhone 17"
+                  resolution:@"2622x1206" viewportResolution:@"2622x1206"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A19" toDict:specs];
+
+    [self addSpecsForDevice:@"iPhone18,4" name:@"iPhone Air"
+                  resolution:@"2736x1260" viewportResolution:@"2736x1260"
+              devicePixelRatio:3.0 screenDensity:460
+                cpuArchitecture:@"Apple A19 Pro" toDict:specs];
     
     // iPad models
     [self addSpecsForDevice:@"iPad7,5" name:@"iPad (6th Gen)" 
@@ -455,6 +512,33 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
     } else if ([modelIdentifier isEqualToString:@"iPhone16,2"]) { // iPhone 15 Pro Max
         boardID = @"D84AP";
         hwModel = @"D84AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone17,1"]) { // iPhone 16 Pro
+        boardID = @"D93AP";
+        hwModel = @"D93AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone17,2"]) { // iPhone 16 Pro Max
+        boardID = @"D94AP";
+        hwModel = @"D94AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone17,3"]) { // iPhone 16
+        boardID = @"D47AP";
+        hwModel = @"D47AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone17,4"]) { // iPhone 16 Plus
+        boardID = @"D48AP";
+        hwModel = @"D48AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone17,5"]) { // iPhone 16e
+        boardID = @"V59AP";
+        hwModel = @"V59AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone18,1"]) { // iPhone 17 Pro
+        boardID = @"V53AP";
+        hwModel = @"V53AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone18,2"]) { // iPhone 17 Pro Max
+        boardID = @"V54AP";
+        hwModel = @"V54AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone18,3"]) { // iPhone 17
+        boardID = @"V57AP";
+        hwModel = @"V57AP";
+    } else if ([modelIdentifier isEqualToString:@"iPhone18,4"]) { // iPhone Air
+        boardID = @"D23AP";
+        hwModel = @"D23AP";
     }
     // iPad Board IDs
     else if ([modelIdentifier isEqualToString:@"iPad7,5"]) { // iPad 6th Gen
@@ -637,6 +721,38 @@ static NSDictionary *PXHardwareCapabilitiesForModel(NSString *model) {
         deviceMemory = 8;
         cpuCoreCount = 6; // A17 Pro: 2 performance + 4 efficiency cores
         gpuFamily = @"Apple A17 Pro GPU";
+        metalFeatureSet = @"Metal 3.1";
+        webGLInfo = @{
+            @"unmaskedVendor": @"Apple Inc.",
+            @"unmaskedRenderer": [gpuFamily copy],
+            @"webglVendor": @"Apple",
+            @"webglRenderer": @"Apple GPU",
+            @"webglVersion": @"WebGL 2.0",
+            @"maxTextureSize": @(16384),
+            @"maxRenderbufferSize": @(16384)
+        };
+    }
+    else if ([modelIdentifier hasPrefix:@"iPhone17"]) { // iPhone 16 family
+        deviceMemory = 8;
+        cpuCoreCount = 6;
+        BOOL pro = [modelIdentifier isEqualToString:@"iPhone17,1"] || [modelIdentifier isEqualToString:@"iPhone17,2"];
+        gpuFamily = pro ? @"Apple A18 Pro GPU" : @"Apple A18 GPU";
+        metalFeatureSet = @"Metal 3.1";
+        webGLInfo = @{
+            @"unmaskedVendor": @"Apple Inc.",
+            @"unmaskedRenderer": [gpuFamily copy],
+            @"webglVendor": @"Apple",
+            @"webglRenderer": @"Apple GPU",
+            @"webglVersion": @"WebGL 2.0",
+            @"maxTextureSize": @(16384),
+            @"maxRenderbufferSize": @(16384)
+        };
+    }
+    else if ([modelIdentifier hasPrefix:@"iPhone18"]) { // iPhone 17 / Air / Pro family
+        BOOL standard = [modelIdentifier isEqualToString:@"iPhone18,3"];
+        deviceMemory = standard ? 8 : 12;
+        cpuCoreCount = 6;
+        gpuFamily = standard ? @"Apple A19 GPU" : @"Apple A19 Pro GPU";
         metalFeatureSet = @"Metal 3.1";
         webGLInfo = @{
             @"unmaskedVendor": @"Apple Inc.",

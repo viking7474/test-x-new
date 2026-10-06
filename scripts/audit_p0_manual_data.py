@@ -20,6 +20,7 @@ IOS_DB = os.path.join(ROOT, "layout", "Library", "IOS.db")
 HARDWARE_DB = os.path.join(ROOT, "data", "iphone_hardware_db.json")
 CELLULAR_DB = os.path.join(ROOT, "data", "iphone_cellular_db.json")
 BASEBAND_DB = os.path.join(ROOT, "data", "iphone_baseband_db.json")
+MODERN_DB = os.path.join(ROOT, "data", "iphone_modern_catalog.json")
 
 TARGET_MODELS = ("iPhone15,4", "iPhone15,5", "iPhone16,1", "iPhone16,2")
 REQUIRED_DEVICE_COLUMNS = (
@@ -91,6 +92,13 @@ def main() -> None:
     baseband_records = baseband_root.get("regulatoryModels", {})
     if not isinstance(baseband_families, dict) or not isinstance(baseband_records, dict):
         raise RuntimeError("iphone_baseband_db.json: families/regulatoryModels must be objects")
+    modern_models: dict[str, Any] = {}
+    if os.path.exists(MODERN_DB):
+        with open(MODERN_DB, "r", encoding="utf-8") as f:
+            modern_root = json.load(f)
+        modern_models = modern_root.get("models", {})
+        if modern_root.get("schemaVersion") != 1 or not isinstance(modern_models, dict):
+            raise RuntimeError("iphone_modern_catalog.json: expected schemaVersion=1 with models object")
 
     conn = sqlite3.connect(IOS_DB)
     try:
@@ -183,6 +191,14 @@ def main() -> None:
             for row in all_device_rows
             if row.get("anumber")
         }
+        modern_regulatory_owners: dict[str, set[str]] = {}
+        for product_type, spec in modern_models.items():
+            if not isinstance(spec, dict):
+                continue
+            for number in spec.get("regulatoryModelNumbers", []):
+                if isinstance(number, str) and number:
+                    source_regulatory_numbers.add(number)
+                    modern_regulatory_owners.setdefault(number, set()).add(str(product_type))
         cellular_orphans = sorted(set(cellular_records).difference(source_regulatory_numbers))
         cellular_unknown = sorted(
             key for key, spec in cellular_records.items()
@@ -208,6 +224,8 @@ def main() -> None:
             number = row.get("anumber")
             if number:
                 regulatory_owners.setdefault(str(number), set()).add(str(row["identifier"]))
+        for number, owners in modern_regulatory_owners.items():
+            regulatory_owners.setdefault(number, set()).update(owners)
         duplicate_regulatory_owners = {
             number: sorted(owners)
             for number, owners in sorted(regulatory_owners.items())
@@ -224,7 +242,14 @@ def main() -> None:
             family_builds = family_spec.get("builds", {}) if isinstance(family_spec, dict) else {}
             model_rows_for_type = rows_by_model.get(product_type, [])
             expected_builds: list[str] = []
-            if model_rows_for_type:
+            modern_spec = modern_models.get(product_type)
+            if isinstance(modern_spec, dict) and isinstance(modern_spec.get("supportedBuilds"), list):
+                expected_builds = [
+                    str(build)
+                    for build in modern_spec["supportedBuilds"]
+                    if isinstance(build, str)
+                ]
+            elif model_rows_for_type:
                 default_osv = model_rows_for_type[0].get("defaultOSV")
                 max_osv = model_rows_for_type[0].get("maxOSV")
                 if default_osv and max_osv:
@@ -520,23 +545,22 @@ def main() -> None:
             )
 
         print()
-        print("Manual KMDevices fields required by build_ios_db.py:")
-        print("  identifier       e.g. iPhone16,2")
-        print("  internal_name    exact Apple board/hw model, e.g. DxxAP -- DO NOT GUESS")
-        print("  anumber          regulatory Axxxx for that exact board/region row")
-        print("  generation       marketing name")
-        print("  defaultOSV       zero-padded sortable release version, e.g. 017.000.000")
-        print("  maxOSV           highest supported sortable version represented by your DB")
+        print("Legacy KMDevices fields consumed by build_ios_db.py:")
+        print("  identifier, internal_name, anumber, generation, defaultOSV, maxOSV")
+        print("  Use KMDevices only for models maintained in the legacy IOS.db source.")
         print()
-        print("Manual KMOS fields required for each new OS build:")
-        print("  version, OSBuild, sortVersion, kernelversion, kernelversiontime")
-        print("  kernelversiontime must contain an xnu-... token; the generator derives XNU from it.")
+        print("Modern catalog source:")
+        print(f"  {MODERN_DB}")
+        print("  For newer models, record the exact ProductType/board/A-number tuple and")
+        print("  an explicit supportedBuilds allow-list. Do not infer builds from min/max alone.")
+        print()
+        print("Build metadata required for each curated modern build:")
+        print("  version, darwin, xnu, kernel_version")
         print()
         print("Important:")
-        print("  - Add one KMDevices row per real board/A-number relation.")
-        print("  - Do not place retail MQ... part numbers in anumber; anumber is Axxxx.")
-        print("  - Do not invent kernel/XNU/baseband values.")
-        print("  - Re-run build_ios_db.py and all P0 tests after editing IOS.db.")
+        print("  - Regulatory anumber values are Axxxx; never substitute retail MQ/MT/MU part numbers.")
+        print("  - Do not invent ProductType, board, kernel/XNU, TAC, or baseband values.")
+        print("  - Re-run build_ios_db.py, audit_p0_manual_data.py, and all P0/P1 tests after edits.")
     finally:
         conn.close()
 

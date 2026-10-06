@@ -214,7 +214,31 @@ def main() -> None:
 
         cell_known = require_bool(cell, "known", context + " cellular")
         if not cell_known:
+            # Preserve verified collection evidence (notably TACs) while keeping
+            # runtime publication fail-closed. known=false remains the gate.
             new_cell = {"known": False}
+            for key in ("enabled", "physicalSIM", "eSIM", "dualSIM", "cdma"):
+                value = cell.get(key)
+                if value is not None:
+                    if not isinstance(value, bool):
+                        raise RuntimeError(f"{context} cellular: {key} must be boolean or null")
+                    new_cell[key] = value
+            tacs = cell.get("imeiTACs")
+            if tacs is not None:
+                if not isinstance(tacs, list):
+                    raise RuntimeError(f"{context} cellular: imeiTACs must be a list")
+                new_cell["imeiTACs"] = (
+                    validate_string_list(tacs, TAC_RE, context + " cellular", "imeiTACs")
+                    if tacs else []
+                )
+            prefixes = cell.get("meidPrefixes")
+            if prefixes is not None:
+                if not isinstance(prefixes, list):
+                    raise RuntimeError(f"{context} cellular: meidPrefixes must be a list")
+                new_cell["meidPrefixes"] = (
+                    validate_string_list(prefixes, MEID_PREFIX_RE, context + " cellular", "meidPrefixes")
+                    if prefixes else []
+                )
         else:
             enabled = require_bool(cell, "enabled", context + " cellular")
             physical = require_bool(cell, "physicalSIM", context + " cellular")

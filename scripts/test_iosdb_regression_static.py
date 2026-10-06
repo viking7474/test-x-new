@@ -89,7 +89,8 @@ for product_type, board in iphone15_expectations.items():
     check(row.get("minIOS") == "17.0.0", f"{product_type} minIOS == 17.0.0")
     check(row.get("variants") and row["variants"][0].get("boardID") == board,
           f"{product_type} uses board {board}")
-    check("21A329" in builds, f"{product_type} includes iOS 17.0 build 21A329")
+    check("21A329" not in builds and "21A350" in builds,
+          f"{product_type} excludes unrelated 21A329 and includes verified iPhone-15 build 21A350")
     check("22D72" in builds, f"{product_type} includes iOS 18.3.1 build 22D72")
     check(all(int(re.match(r"\d+", btm[b]["version"]).group(0)) >= 17 for b in builds),
           f"{product_type} has no pre-iOS-17 builds")

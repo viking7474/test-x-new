@@ -13,8 +13,17 @@ reproducible.
   - model-level P0 hardware: RAM, display, storage, camera, CPU profile.
 - `data/iphone_cellular_db.json`
   - regional cellular capability keyed by regulatory `Axxxx`.
-  - the iPhone 15 family currently has 16 explicit slots, all `known=false`.
+  - iPhone 15/16/16e/17/Air/17 Pro coverage currently has 52 explicit A-number slots.
+  - verified TAC evidence may be retained while `known=false`; runtime publication remains fail-closed until cellular + baseband are authoritative.
   - generator publishes these as `cellularByRegulatoryModelNumber`; runtime resolves the exact A-number first.
+- `data/iphone_tac_catalog.json`
+  - normalized TAC-only evidence imported from the user-provided `Apple.csv`; no full IMEI/IMEI2 is stored.
+  - records the source SHA-256, the 52 exact regulatory A-number buckets, and explicit fail-closed exclusions.
+  - current import contains 1,465 accepted 8-digit TACs; `A3296/35512783` is excluded because the carrier-status rows conflict.
+  - `test_p0_canonical_hardware_static.py` requires the TAC arrays in `iphone_cellular_db.json` to remain exactly synchronized with this evidence catalog.
+- `data/iphone_modern_catalog.json`
+  - exact ProductType/board/A-number tuples and explicit supported-build allow-lists for modern models.
+  - modern builds absent from legacy `IOS.db` may be added here only with verified iOS/Darwin/XNU metadata.
 
 `KMDevices` also contains legacy CPU/RAM/storage/screen columns. Treat those as
 **audit evidence, not the P0 hardware source of truth**. The historical DB has
@@ -24,9 +33,12 @@ Do not bulk-copy those fields into the hardware catalog.
 - `data/iphone_model_db.json` and `data/ios_build_db.json`
   - generated outputs. Do not edit these by hand.
 
-## iPhone 15 family status
+## Modern iPhone status
 
-The repository migration scripts now repair/populate these rows in `IOS.db`:
+The repository migration scripts repair/populate the iPhone 15-family rows in
+`IOS.db`. Newer models are layered through `data/iphone_modern_catalog.json`
+so a ProductType can carry an exact supported-build allow-list instead of
+blindly inheriting every global KMOS build between min/max versions.
 
 | ProductType | Name | Board | Regulatory A-numbers |
 |---|---|---|---|
@@ -34,10 +46,19 @@ The repository migration scripts now repair/populate these rows in `IOS.db`:
 | iPhone15,5 | iPhone 15 Plus | D38AP | A2847, A3093, A3094, A3096 |
 | iPhone16,1 | iPhone 15 Pro | D83AP | A2848, A3101, A3102, A3104 |
 | iPhone16,2 | iPhone 15 Pro Max | D84AP | A2849, A3105, A3106, A3108 |
+| iPhone17,3 | iPhone 16 | D47AP | A3081, A3286, A3287, A3288 |
+| iPhone17,4 | iPhone 16 Plus | D48AP | A3082, A3289, A3290, A3291 |
+| iPhone17,1 | iPhone 16 Pro | D93AP | A3083, A3292, A3293, A3294 |
+| iPhone17,2 | iPhone 16 Pro Max | D94AP | A3084, A3295, A3296, A3297 |
+| iPhone17,5 | iPhone 16e | V59AP | A3212, A3408, A3409, A3410 |
+| iPhone18,3 | iPhone 17 | V57AP | A3258, A3519, A3520, A3521 |
+| iPhone18,4 | iPhone Air | D23AP | A3260, A3516, A3517, A3518 |
+| iPhone18,1 | iPhone 17 Pro | V53AP | A3256, A3522, A3523, A3524 |
+| iPhone18,2 | iPhone 17 Pro Max | V54AP | A3257, A3525, A3526, A3527 |
 
-All four start at iOS 17.0 in this database generation. The current `KMOS`
-already covers iOS 17.0 through 18.6, so no manual KMOS rows are required merely
-to enable these four models.
+The exact build allow-list is authoritative for profile generation. In
+particular, iPhone 15 no longer inherits the unrelated `21A329` build merely
+because both records are labelled iOS 17.0.
 
 The source database also had two defects that are now handled by migration:
 
@@ -214,9 +235,10 @@ To avoid manually discovering the required build list, export a worksheet:
 py scripts\export_p1_manual_template.py --output p1_manual_template.json
 ```
 
-The current iPhone 15-family worksheet contains 16 regional A-number records and
-derives the required IOSBuild list directly from `deviceToBuilds`. Fill the
-worksheet from authoritative observations/source material.
+The current modern worksheet contains 52 regional A-number records across the
+iPhone 15, iPhone 16/16e, and iPhone 17/Air families. It derives each
+ProductType's required IOSBuild allow-list directly from `deviceToBuilds`.
+Fill/verify the worksheet from authoritative observations/source material.
 
 Validate the worksheet without changing source data:
 

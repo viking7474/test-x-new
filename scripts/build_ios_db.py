@@ -20,6 +20,7 @@ DATA = os.path.join(ROOT, "data")
 HARDWARE_DB = os.path.join(DATA, "iphone_hardware_db.json")
 CELLULAR_DB = os.path.join(DATA, "iphone_cellular_db.json")
 BASEBAND_DB = os.path.join(DATA, "iphone_baseband_db.json")
+MODERN_DB = os.path.join(DATA, "iphone_modern_catalog.json")
 
 with open(HARDWARE_DB, "r", encoding="utf-8") as f:
     hardware_root = json.load(f)
@@ -91,6 +92,13 @@ for family, spec in baseband_families.items():
     for build, version in builds.items():
         if not isinstance(build, str) or not build.strip() or not isinstance(version, str) or not version.strip():
             raise RuntimeError(f"iphone_baseband_db.json: invalid {family!r} build/version entry")
+with open(MODERN_DB, "r", encoding="utf-8") as f:
+    modern_root = json.load(f)
+modern_builds = modern_root.get("builds", {})
+modern_models = modern_root.get("models", {})
+if modern_root.get("schemaVersion") != 1 or not isinstance(modern_builds, dict) or not isinstance(modern_models, dict):
+    raise RuntimeError("iphone_modern_catalog.json: expected schemaVersion=1 with builds/models objects")
+
 for regulatory_number, spec in baseband_records.items():
     if not isinstance(regulatory_number, str) or not re.fullmatch(r"A\d{4}", regulatory_number):
         raise RuntimeError(f"iphone_baseband_db.json: invalid regulatory key {regulatory_number!r}")
@@ -108,6 +116,15 @@ for regulatory_number, spec in baseband_records.items():
 def sortver_to_ios(s):
     # '016.007.009' -> '16.7.9'
     return ".".join(str(int(x)) for x in s.split("."))
+
+
+def ios_to_sortver(version):
+    parts = [int(x) for x in str(version).split(".")]
+    while len(parts) < 3:
+        parts.append(0)
+    if len(parts) != 3:
+        raise RuntimeError(f"invalid iOS version {version!r}")
+    return ".".join(f"{part:03d}" for part in parts)
 
 
 con = sqlite3.connect(DB)
@@ -147,6 +164,20 @@ for version, build, sortv, kver, ktime in cur.execute(
     }
     kmos.append((sortv, build))
 
+# Curated modern builds are explicit additions that are not present in the
+# legacy IOS.db. They are never inferred from a version range.
+for build, meta in modern_builds.items():
+    if not isinstance(build, str) or not isinstance(meta, dict):
+        raise RuntimeError(f"iphone_modern_catalog.json: invalid build record {build!r}")
+    required = ("version", "darwin", "xnu", "kernel_version")
+    if any(not isinstance(meta.get(key), str) or not meta[key].strip() for key in required):
+        raise RuntimeError(f"iphone_modern_catalog.json: build {build} is incomplete")
+    normalized = {key: meta[key].strip() for key in required}
+    previous = buildToMeta.get(build)
+    if previous is not None and previous != normalized:
+        raise RuntimeError(f"iphone_modern_catalog.json: build {build} conflicts with IOS.db")
+    buildToMeta[build] = normalized
+
 for family, spec in baseband_families.items():
     for build in spec["builds"]:
         if build not in buildToMeta:
@@ -178,6 +209,55 @@ for ident, board, anum, gen, dosv, mosv in cur.execute(
             variant_numbers.add(a)
     if a:
         e["nums"].add(a)
+
+# Overlay exact modern ProductType/board/A-number tuples. Existing legacy rows
+# (currently the iPhone 15 family) may supply only an explicit build allow-list.
+for ident, spec in modern_models.items():
+    if not isinstance(ident, str) or not ident.startswith("iPhone") or not isinstance(spec, dict):
+        raise RuntimeError(f"iphone_modern_catalog.json: invalid model {ident!r}")
+    supported = spec.get("supportedBuilds")
+    if not isinstance(supported, list) or not supported or any(not isinstance(b, str) for b in supported):
+        raise RuntimeError(f"iphone_modern_catalog.json: {ident} requires supportedBuilds")
+    if len(set(supported)) != len(supported):
+        raise RuntimeError(f"iphone_modern_catalog.json: {ident} has duplicate supportedBuilds")
+    unknown_builds = [b for b in supported if b not in buildToMeta]
+    if unknown_builds:
+        raise RuntimeError(f"iphone_modern_catalog.json: {ident} references unknown builds: {unknown_builds}")
+
+    if ident in agg:
+        agg[ident]["supportedBuilds"] = list(supported)
+        min_ios_override = spec.get("minIOS")
+        max_ios_override = spec.get("maxIOS")
+        if min_ios_override is not None:
+            if not isinstance(min_ios_override, str):
+                raise RuntimeError(f"iphone_modern_catalog.json: {ident} minIOS override must be a string")
+            agg[ident]["dosv"] = ios_to_sortver(min_ios_override)
+        if max_ios_override is not None:
+            if not isinstance(max_ios_override, str):
+                raise RuntimeError(f"iphone_modern_catalog.json: {ident} maxIOS override must be a string")
+            agg[ident]["mosv"] = ios_to_sortver(max_ios_override)
+        continue
+
+    name = spec.get("name")
+    board = spec.get("boardID")
+    nums = spec.get("regulatoryModelNumbers")
+    min_ios = spec.get("minIOS")
+    max_ios = spec.get("maxIOS")
+    if (not isinstance(name, str) or not name.strip() or not isinstance(board, str) or not board.strip() or
+            not isinstance(nums, list) or not nums or any(not isinstance(n, str) or not re.fullmatch(r"A\d{4}", n) for n in nums) or
+            not isinstance(min_ios, str) or not isinstance(max_ios, str)):
+        raise RuntimeError(f"iphone_modern_catalog.json: {ident} has incomplete identity metadata")
+    if len(set(nums)) != len(nums):
+        raise RuntimeError(f"iphone_modern_catalog.json: {ident} has duplicate A-numbers")
+    agg[ident] = {
+        "name": name.strip(),
+        "dosv": ios_to_sortver(min_ios),
+        "mosv": ios_to_sortver(max_ios),
+        "variants": {board.strip(): set(nums)},
+        "nums": set(nums),
+        "supportedBuilds": list(supported),
+        "modern": True,
+    }
 
 deviceToBuilds = {}
 models = []
@@ -226,7 +306,10 @@ for number, spec in baseband_records.items():
 for ident in sorted(agg):
     e = agg[ident]
     dosv, mosv = e["dosv"], e["mosv"]
-    builds = sorted({b for (sv, b) in kmos if (not dosv or sv >= dosv) and sv <= mosv})
+    if isinstance(e.get("supportedBuilds"), list):
+        builds = list(e["supportedBuilds"])
+    else:
+        builds = sorted({b for (sv, b) in kmos if (not dosv or sv >= dosv) and sv <= mosv})
     name = re.sub(r"\s+", " ", e["name"]).strip()
     model = {"productType": ident, "name": name, "maxIOS": sortver_to_ios(mosv)}
     if dosv:

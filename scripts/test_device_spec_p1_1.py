@@ -124,6 +124,8 @@ EXPECTED_FAMILIES = {
     ("A17", None): 0x2876F5B5,
     ("A18", None): 0x204526D0,
     ("A18", "PRO"): 0x75D4ACB9,
+    ("A19", None): 0x01D7A72B,
+    ("A19", "PRO"): 0xAB345F09,
     ("M1", None): 0x1B588BB3,
     ("M2", None): 0xDA33D83D,
 }
@@ -366,7 +368,7 @@ def run_source_matrix(matrix: Matrix) -> None:
 
 
 def run_profile_matrix(matrix: Matrix) -> None:
-    matrix.check("profile: expected canonical row count", len(PROFILES) == 15)
+    matrix.check("profile: expected canonical row count", len(PROFILES) == 17)
     matrix.check("profile: every row has a nonzero family", all(profile.family > 0 for profile in PROFILES))
     matrix.check("profile: every row has a sane core count", all(1 <= profile.cores <= 16 for profile in PROFILES))
     matrix.check("profile: every row has ordered frequencies", all(0 < profile.min_hz <= profile.max_hz for profile in PROFILES))
@@ -384,26 +386,34 @@ def run_profile_matrix(matrix: Matrix) -> None:
              - EXPECTED_FLAG_TOKENS[profile.flags])
         for profile in PROFILES
     ))
-    matrix.check("profile: row tokens are intentionally unique except A18", [profile.token for profile in PROFILES].count("A18") == 2 and all([profile.token for profile in PROFILES].count(token) == 1 for token in {p.token for p in PROFILES if p.token != "A18"}))
+    duplicate_tokens = {"A18", "A19"}
+    matrix.check("profile: row tokens are intentionally unique except A18/A19 Pro pairs", all([profile.token for profile in PROFILES].count(token) == 2 for token in duplicate_tokens) and all([profile.token for profile in PROFILES].count(token) == 1 for token in {p.token for p in PROFILES if p.token not in duplicate_tokens}))
     matrix.check("profile: A18 Pro row precedes generic A18", [(p.token, p.qualifier) for p in PROFILES].index(("A18", "PRO")) < [(p.token, p.qualifier) for p in PROFILES].index(("A18", None)))
+    matrix.check("profile: A19 Pro row precedes generic A19", [(p.token, p.qualifier) for p in PROFILES].index(("A19", "PRO")) < [(p.token, p.qualifier) for p in PROFILES].index(("A19", None)))
     matrix.check("profile: A12X/A12Z rows precede generic A12", max([p.token for p in PROFILES].index("A12X"), [p.token for p in PROFILES].index("A12Z")) < [p.token for p in PROFILES].index("A12"))
 
     a18_pro = resolve_profile("Apple A18 Pro")
     a18 = resolve_profile("Apple A18")
     a18_professional = resolve_profile("Apple A18 Professional")
+    a19_pro = resolve_profile("Apple A19 Pro")
+    a19 = resolve_profile("Apple A19")
+    a19_professional = resolve_profile("Apple A19 Professional")
     a12x = resolve_profile("Apple A12X Bionic")
     a12z = resolve_profile("Apple A12Z Bionic")
 
     matrix.check("profile: exact A18 Pro qualifier selects Pro row", a18_pro is not None and a18_pro.brand == "Apple A18 Pro")
     matrix.check("profile: generic A18 selects non-Pro row", a18 is not None and a18.brand == "Apple A18")
-    matrix.check("profile: qualifier is not a substring match", a18_professional is not None and a18_professional.brand == "Apple A18")
+    matrix.check("profile: A18 qualifier is not a substring match", a18_professional is not None and a18_professional.brand == "Apple A18")
+    matrix.check("profile: exact A19 Pro qualifier selects Pro row", a19_pro is not None and a19_pro.brand == "Apple A19 Pro")
+    matrix.check("profile: generic A19 selects non-Pro row", a19 is not None and a19.brand == "Apple A19")
+    matrix.check("profile: A19 qualifier is not a substring match", a19_professional is not None and a19_professional.brand == "Apple A19")
     matrix.check("profile: A12X resolves before A12 family fallback", a12x is not None and a12x.token == "A12X")
     matrix.check("profile: A12Z resolves before A12 family fallback", a12z is not None and a12z.token == "A12Z")
     matrix.check("profile: A180 does not alias A18", resolve_profile("Apple A180") is None)
     matrix.check("profile: M10 does not alias M1", resolve_profile("Apple M10") is None)
     matrix.check("profile: unknown architecture fails open", resolve_profile("Unknown Custom SoC") is None)
     matrix.check("profile: legacy A9-A11 expose ARM64 V8 subtype", all(resolve_profile(f"Apple {token}").subtype == "CPU_SUBTYPE_ARM64_V8" for token in ["A9", "A10", "A11"]))
-    matrix.check("profile: A12+ and M-series expose ARM64E subtype", all(resolve_profile(f"Apple {token}").subtype == "CPU_SUBTYPE_ARM64E" for token in ["A12", "A13", "A14", "A15", "A16", "A17", "A18", "M1", "M2"]))
+    matrix.check("profile: A12+ and M-series expose ARM64E subtype", all(resolve_profile(f"Apple {token}").subtype == "CPU_SUBTYPE_ARM64E" for token in ["A12", "A13", "A14", "A15", "A16", "A17", "A18", "A19", "M1", "M2"]))
 
 
 def run_serializer_matrix(matrix: Matrix) -> None:

@@ -34,7 +34,7 @@ def main() -> None:
         "storage selection is model-aware": "randomizeStorageCapacityForDeviceModel" in storage and 'storageCapacitiesGB' in storage,
         "Reset reapplies storage from the final fake model": "randomizeStorageCapacityForDeviceModel:model" in dashboard,
         "fake iOS only preserves current hardware identity": "Fake iOS without Fake Model must preserve the current hardware identity" in dashboard and '@"BoardID", @"HwModel"' in dashboard,
-        "iPhone 15 Pro Max storage tiers exclude 128GB": '[model isEqualToString:@"iPhone16,2"]) capacities = @[@256, @512, @1024]' in model,
+        "iPhone 15 Pro Max storage tiers exclude 128GB": '[model isEqualToString:@"iPhone16,2"] || [model isEqualToString:@"iPhone17,2"]) capacities = @[@256, @512, @1024]' in model,
         "storage selection avoids immediate repeat": "[candidates removeObject:previous]" in storage,
         "camera MobileGestalt capabilities are typed": all(k in registry for k in [
             'ForwardCameraCapability', 'RearCameraCapability', 'PanoramaCameraCapability',

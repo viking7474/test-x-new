@@ -1,0 +1,363 @@
+{
+  "schemaVersion": 1,
+  "databaseVersion": "p0-modern-iphone-v1",
+  "notes": [
+    "Exact ProductType/board/A-number tuples for iPhone 15/16/17 families.",
+    "supportedBuilds is an allow-list, not a min/max range expansion.",
+    "iPhone 16e starts profile publication at 18.4 because launch build 22D8075 kernel metadata is not yet carried by this repository."
+  ],
+  "builds": {
+    "21A350": {
+      "version": "17.0.2",
+      "darwin": "23.0.0",
+      "xnu": "10002.2.12~1",
+      "kernel_version": "Darwin Kernel Version 23.0.0: Fri Sep 15 13:42:21 PDT 2023; root:xnu-10002.2.12~1"
+    },
+    "22A3354": {
+      "version": "18.0",
+      "darwin": "24.0.0",
+      "xnu": "11215.2.5~62",
+      "kernel_version": "Darwin Kernel Version 24.0.0: Thu Aug 8 01:17:15 PDT 2024; root:xnu-11215.2.5~62"
+    },
+    "23A341": {
+      "version": "26.0",
+      "darwin": "25.0.0",
+      "xnu": "12377.2.8~1",
+      "kernel_version": "Darwin Kernel Version 25.0.0: Tue Aug 26 20:30:59 PDT 2025; root:xnu-12377.2.8~1"
+    },
+    "23A355": {
+      "version": "26.0.1",
+      "darwin": "25.0.0",
+      "xnu": "12377.2.9~1",
+      "kernel_version": "Darwin Kernel Version 25.0.0: Thu Sep 25 15:05:36 PDT 2025; root:xnu-12377.2.9~1"
+    },
+    "24A437": {
+      "version": "27.0",
+      "darwin": "27.0.0",
+      "xnu": "13432.2.10~2",
+      "kernel_version": "Darwin Kernel Version 27.0.0: Thu Aug 13 21:41:35 PDT 2026; root:xnu-13432.2.10~2"
+    },
+    "24A446": {
+      "version": "27.0.1",
+      "darwin": "27.0.0",
+      "xnu": "13432.2.10~2",
+      "kernel_version": "Darwin Kernel Version 27.0.0: Thu Aug 13 21:41:35 PDT 2026; root:xnu-13432.2.10~2"
+    }
+  },
+  "models": {
+    "iPhone15,4": {
+      "supportedBuilds": [
+        "21A350",
+        "21B101",
+        "21D50",
+        "21E219",
+        "21F79",
+        "21F90",
+        "21G93",
+        "21H16",
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ],
+      "maxIOS": "27.0.1"
+    },
+    "iPhone15,5": {
+      "supportedBuilds": [
+        "21A350",
+        "21B101",
+        "21D50",
+        "21E219",
+        "21F79",
+        "21F90",
+        "21G93",
+        "21H16",
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ],
+      "maxIOS": "27.0.1"
+    },
+    "iPhone16,1": {
+      "supportedBuilds": [
+        "21A350",
+        "21B101",
+        "21D50",
+        "21E219",
+        "21F79",
+        "21F90",
+        "21G93",
+        "21H16",
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ],
+      "maxIOS": "27.0.1"
+    },
+    "iPhone16,2": {
+      "supportedBuilds": [
+        "21A350",
+        "21B101",
+        "21D50",
+        "21E219",
+        "21F79",
+        "21F90",
+        "21G93",
+        "21H16",
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ],
+      "maxIOS": "27.0.1"
+    },
+    "iPhone17,1": {
+      "name": "iPhone 16 Pro",
+      "boardID": "D93AP",
+      "regulatoryModelNumbers": [
+        "A3083",
+        "A3292",
+        "A3293",
+        "A3294"
+      ],
+      "minIOS": "18.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone17,2": {
+      "name": "iPhone 16 Pro Max",
+      "boardID": "D94AP",
+      "regulatoryModelNumbers": [
+        "A3084",
+        "A3295",
+        "A3296",
+        "A3297"
+      ],
+      "minIOS": "18.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone17,3": {
+      "name": "iPhone 16",
+      "boardID": "D47AP",
+      "regulatoryModelNumbers": [
+        "A3081",
+        "A3286",
+        "A3287",
+        "A3288"
+      ],
+      "minIOS": "18.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone17,4": {
+      "name": "iPhone 16 Plus",
+      "boardID": "D48AP",
+      "regulatoryModelNumbers": [
+        "A3082",
+        "A3289",
+        "A3290",
+        "A3291"
+      ],
+      "minIOS": "18.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "22A3354",
+        "22A3370",
+        "22B83",
+        "22B91",
+        "22C152",
+        "22D72",
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone17,5": {
+      "name": "iPhone 16e",
+      "boardID": "V59AP",
+      "regulatoryModelNumbers": [
+        "A3212",
+        "A3408",
+        "A3409",
+        "A3410"
+      ],
+      "minIOS": "18.3.1",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "22E240",
+        "22E252",
+        "22F76",
+        "22G86",
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone18,1": {
+      "name": "iPhone 17 Pro",
+      "boardID": "V53AP",
+      "regulatoryModelNumbers": [
+        "A3256",
+        "A3522",
+        "A3523",
+        "A3524"
+      ],
+      "minIOS": "26.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone18,2": {
+      "name": "iPhone 17 Pro Max",
+      "boardID": "V54AP",
+      "regulatoryModelNumbers": [
+        "A3257",
+        "A3525",
+        "A3526",
+        "A3527"
+      ],
+      "minIOS": "26.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone18,3": {
+      "name": "iPhone 17",
+      "boardID": "V57AP",
+      "regulatoryModelNumbers": [
+        "A3258",
+        "A3519",
+        "A3520",
+        "A3521"
+      ],
+      "minIOS": "26.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    },
+    "iPhone18,4": {
+      "name": "iPhone Air",
+      "boardID": "D23AP",
+      "regulatoryModelNumbers": [
+        "A3260",
+        "A3516",
+        "A3517",
+        "A3518"
+      ],
+      "minIOS": "26.0",
+      "maxIOS": "27.0.1",
+      "supportedBuilds": [
+        "23A341",
+        "23A355",
+        "24A437",
+        "24A446"
+      ]
+    }
+  }
+}

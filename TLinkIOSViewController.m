@@ -924,7 +924,16 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"partNumber": @"MQ0E3LL/A" },
         @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"partNumber": @"MTP63LL/A" },
         @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"partNumber": @"MTV13LL/A" },
-        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"partNumber": @"MU693LL/A" }
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"partNumber": @"MU693LL/A" },
+        @{ @"name": @"iPhone 16", @"id": @"iPhone17,3" },
+        @{ @"name": @"iPhone 16 Plus", @"id": @"iPhone17,4" },
+        @{ @"name": @"iPhone 16 Pro", @"id": @"iPhone17,1" },
+        @{ @"name": @"iPhone 16 Pro Max", @"id": @"iPhone17,2" },
+        @{ @"name": @"iPhone 16e", @"id": @"iPhone17,5" },
+        @{ @"name": @"iPhone 17", @"id": @"iPhone18,3" },
+        @{ @"name": @"iPhone Air", @"id": @"iPhone18,4" },
+        @{ @"name": @"iPhone 17 Pro", @"id": @"iPhone18,1" },
+        @{ @"name": @"iPhone 17 Pro Max", @"id": @"iPhone18,2" }
     ];
 
     // P0: the legacy picker is no longer an escape hatch around the canonical DB.
@@ -1490,8 +1499,12 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     if (maxIdx <= 0 || maxIdx > (NSInteger)models.count) maxIdx = (NSInteger)models.count;
     if (minIdx > maxIdx) { NSInteger t = minIdx; minIdx = maxIdx; maxIdx = t; }
 
-    NSArray *boards = @[ @"D22AP", @"N841AP", @"D321AP", @"N104AP", @"D421AP", @"D53GAP", @"D53PAP", @"D17AP", @"D63AP", @"D27AP", @"D73AP", @"D37AP", @"D83AP", @"D84AP" ];
-    NSArray *chips = @[ @"A11", @"A12", @"A12", @"A13", @"A13", @"A14", @"A14", @"A15", @"A15", @"A15", @"A16", @"A16", @"A17", @"A17" ];
+    NSArray *boards = @[ @"D22AP", @"N841AP", @"D321AP", @"N104AP", @"D421AP", @"D53GAP", @"D53PAP", @"D17AP", @"D63AP", @"D27AP", @"D73AP", @"D37AP", @"D83AP", @"D84AP",
+                           @"D47AP", @"D48AP", @"D93AP", @"D94AP", @"V59AP",
+                           @"V57AP", @"D23AP", @"V53AP", @"V54AP" ];
+    NSArray *chips = @[ @"A11", @"A12", @"A12", @"A13", @"A13", @"A14", @"A14", @"A15", @"A15", @"A15", @"A16", @"A16", @"A17", @"A17",
+                          @"A18", @"A18", @"A18 Pro", @"A18 Pro", @"A18",
+                          @"A19", @"A19 Pro", @"A19 Pro", @"A19 Pro" ];
     NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:models.count];
     for (NSUInteger index = 0; index < models.count; index++) {
         NSDictionary *model = models[index];
@@ -6563,7 +6576,16 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         @{ @"name": @"iPhone 14 Pro", @"id": @"iPhone15,2", @"partNumber": @"MQ0E3LL/A" },
         @{ @"name": @"iPhone 15", @"id": @"iPhone15,4", @"partNumber": @"MTP63LL/A" },
         @{ @"name": @"iPhone 15 Pro", @"id": @"iPhone16,1", @"partNumber": @"MTV13LL/A" },
-        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"partNumber": @"MU693LL/A" }
+        @{ @"name": @"iPhone 15 Pro Max", @"id": @"iPhone16,2", @"partNumber": @"MU693LL/A" },
+        @{ @"name": @"iPhone 16", @"id": @"iPhone17,3" },
+        @{ @"name": @"iPhone 16 Plus", @"id": @"iPhone17,4" },
+        @{ @"name": @"iPhone 16 Pro", @"id": @"iPhone17,1" },
+        @{ @"name": @"iPhone 16 Pro Max", @"id": @"iPhone17,2" },
+        @{ @"name": @"iPhone 16e", @"id": @"iPhone17,5" },
+        @{ @"name": @"iPhone 17", @"id": @"iPhone18,3" },
+        @{ @"name": @"iPhone Air", @"id": @"iPhone18,4" },
+        @{ @"name": @"iPhone 17 Pro", @"id": @"iPhone18,1" },
+        @{ @"name": @"iPhone 17 Pro Max", @"id": @"iPhone18,2" }
     ];
     IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
     NSMutableArray<NSDictionary *> *supported = [NSMutableArray array];

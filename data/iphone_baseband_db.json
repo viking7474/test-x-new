@@ -1,11 +1,39 @@
 {
   "schemaVersion": 1,
-  "databaseVersion": "p1-baseband-v1",
+  "databaseVersion": "p1-baseband-v2-modern-iphone",
   "families": {},
   "regulatoryModels": {
     "A2846": {
       "known": false,
       "productType": "iPhone15,4"
+    },
+    "A2847": {
+      "known": false,
+      "productType": "iPhone15,5"
+    },
+    "A2848": {
+      "known": false,
+      "productType": "iPhone16,1"
+    },
+    "A2849": {
+      "known": false,
+      "productType": "iPhone16,2"
+    },
+    "A3081": {
+      "known": false,
+      "productType": "iPhone17,3"
+    },
+    "A3082": {
+      "known": false,
+      "productType": "iPhone17,4"
+    },
+    "A3083": {
+      "known": false,
+      "productType": "iPhone17,1"
+    },
+    "A3084": {
+      "known": false,
+      "productType": "iPhone17,2"
     },
     "A3089": {
       "known": false,
@@ -19,10 +47,6 @@
       "known": false,
       "productType": "iPhone15,4"
     },
-    "A2847": {
-      "known": false,
-      "productType": "iPhone15,5"
-    },
     "A3093": {
       "known": false,
       "productType": "iPhone15,5"
@@ -34,10 +58,6 @@
     "A3096": {
       "known": false,
       "productType": "iPhone15,5"
-    },
-    "A2848": {
-      "known": false,
-      "productType": "iPhone16,1"
     },
     "A3101": {
       "known": false,
@@ -51,10 +71,6 @@
       "known": false,
       "productType": "iPhone16,1"
     },
-    "A2849": {
-      "known": false,
-      "productType": "iPhone16,2"
-    },
     "A3105": {
       "known": false,
       "productType": "iPhone16,2"
@@ -66,6 +82,134 @@
     "A3108": {
       "known": false,
       "productType": "iPhone16,2"
+    },
+    "A3212": {
+      "known": false,
+      "productType": "iPhone17,5"
+    },
+    "A3256": {
+      "known": false,
+      "productType": "iPhone18,1"
+    },
+    "A3257": {
+      "known": false,
+      "productType": "iPhone18,2"
+    },
+    "A3258": {
+      "known": false,
+      "productType": "iPhone18,3"
+    },
+    "A3260": {
+      "known": false,
+      "productType": "iPhone18,4"
+    },
+    "A3286": {
+      "known": false,
+      "productType": "iPhone17,3"
+    },
+    "A3287": {
+      "known": false,
+      "productType": "iPhone17,3"
+    },
+    "A3288": {
+      "known": false,
+      "productType": "iPhone17,3"
+    },
+    "A3289": {
+      "known": false,
+      "productType": "iPhone17,4"
+    },
+    "A3290": {
+      "known": false,
+      "productType": "iPhone17,4"
+    },
+    "A3291": {
+      "known": false,
+      "productType": "iPhone17,4"
+    },
+    "A3292": {
+      "known": false,
+      "productType": "iPhone17,1"
+    },
+    "A3293": {
+      "known": false,
+      "productType": "iPhone17,1"
+    },
+    "A3294": {
+      "known": false,
+      "productType": "iPhone17,1"
+    },
+    "A3295": {
+      "known": false,
+      "productType": "iPhone17,2"
+    },
+    "A3296": {
+      "known": false,
+      "productType": "iPhone17,2"
+    },
+    "A3297": {
+      "known": false,
+      "productType": "iPhone17,2"
+    },
+    "A3408": {
+      "known": false,
+      "productType": "iPhone17,5"
+    },
+    "A3409": {
+      "known": false,
+      "productType": "iPhone17,5"
+    },
+    "A3410": {
+      "known": false,
+      "productType": "iPhone17,5"
+    },
+    "A3516": {
+      "known": false,
+      "productType": "iPhone18,4"
+    },
+    "A3517": {
+      "known": false,
+      "productType": "iPhone18,4"
+    },
+    "A3518": {
+      "known": false,
+      "productType": "iPhone18,4"
+    },
+    "A3519": {
+      "known": false,
+      "productType": "iPhone18,3"
+    },
+    "A3520": {
+      "known": false,
+      "productType": "iPhone18,3"
+    },
+    "A3521": {
+      "known": false,
+      "productType": "iPhone18,3"
+    },
+    "A3522": {
+      "known": false,
+      "productType": "iPhone18,1"
+    },
+    "A3523": {
+      "known": false,
+      "productType": "iPhone18,1"
+    },
+    "A3524": {
+      "known": false,
+      "productType": "iPhone18,1"
+    },
+    "A3525": {
+      "known": false,
+      "productType": "iPhone18,2"
+    },
+    "A3526": {
+      "known": false,
+      "productType": "iPhone18,2"
+    },
+    "A3527": {
+      "known": false,
+      "productType": "iPhone18,2"
     }
   }
 }

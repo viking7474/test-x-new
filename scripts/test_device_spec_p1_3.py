@@ -268,7 +268,7 @@ def run_source_matrix(matrix: Matrix) -> None:
 
 
 def run_semantic_matrix(matrix: Matrix) -> None:
-    matrix.check("model: canonical profile count remains stable", len(PROFILES) == 15)
+    matrix.check("model: canonical profile count remains stable", len(PROFILES) == 17)
     matrix.check("model: ARM64_ALL is an accepted ABI subtype", "CPU_SUBTYPE_ARM64_ALL" in ALLOWED_SUBTYPES)
     matrix.check("model: raw subtype 3 is rejected", not profile_usable(PROFILES[0], subtype_override="3"))
     matrix.check("model: raw subtype 13 is rejected", not profile_usable(PROFILES[0], subtype_override="13"))
@@ -278,7 +278,7 @@ def run_semantic_matrix(matrix: Matrix) -> None:
     matrix.check("model: A180 does not alias A18", resolve_profile("Apple A180") is None)
     matrix.check("model: M10 does not alias M1", resolve_profile("Apple M10") is None)
     matrix.check("model: A9-A11 use ARM64_V8", all(resolve_profile(f"Apple {token}").subtype == "CPU_SUBTYPE_ARM64_V8" for token in ["A9", "A10", "A11"]))
-    matrix.check("model: A12+ and M-series use ARM64E", all(resolve_profile(f"Apple {token}").subtype == "CPU_SUBTYPE_ARM64E" for token in ["A12", "A13", "A14", "A15", "A16", "A17", "A18", "M1", "M2"]))
+    matrix.check("model: A12+ and M-series use ARM64E", all(resolve_profile(f"Apple {token}").subtype == "CPU_SUBTYPE_ARM64E" for token in ["A12", "A13", "A14", "A15", "A16", "A17", "A18", "A19", "M1", "M2"]))
 
     known_true, true_value = lookup_optional("hw.optional.arm64", {"PXDeviceCPUFeatureARM64"})
     matrix.check("model: whitelisted enabled feature returns one", known_true and true_value == 1)
