@@ -1,7 +1,7 @@
 # Patch 2 — NSURLSession domain blocking lifecycle
 
 Ngày: 2026-10-24. Baseline: `6ba80d7` (Patch 1 đã được commit và người dùng xác nhận build pass).
-Trạng thái: source implemented; host source/regression gates pass. Lần CI đầu lỗi compile ARC ở switch tạo factory blocks; đã thêm scope riêng cho từng nhánh và đang chờ kết quả CI sau sửa. Chưa xác minh Foundation/Logos/iOS runtime của Patch 2.
+Trạng thái: source implemented; host source/regression gates pass. Đã sửa lỗi compile ARC ở switch. Lượt CI sau compile được Foundation fixture nhưng fail 168/169 vì assertion state quá chặt; RootHide còn lỗi Logos với nested `%orig`. Đã sửa hai điểm này, chờ CI mới; chưa xác minh đầy đủ Foundation/Logos/iOS runtime của Patch 2.
 
 ## Vấn đề đã sửa
 
@@ -60,6 +60,7 @@ Host gates đã chạy:
 `tests/PXDomainTaskLifecycleTests.m` dùng production helper trực tiếp. Native test config dùng test-only NSURLProtocol để đo transport-start, không đưa protocol đó vào production. Test gồm:
 
 - Sáu completion factories data/upload/download; default/ephemeral, shared, delegate-only và custom serial queue.
+- Mỗi completion factory có đối chứng unobserved session với native `cancel` rồi `resume`, bên cạnh domain-blocker case; cả hai phải giữ URL/queue/error, completion đúng một lần và transport-start=0.
 - Create/no resume, cancel trước resume, repeated resume/cancel, invalidateAndCancel, suspended delegate queue, unblocked suspend/resume và live policy change.
 - Callback count/queue/error, task state/error/URL, blocked transport-start=0, unobserved session pass-through và 24 concurrent task creations.
 - Runtime doubles kiểm tra identity, stream host hint, inherited class isolation, override/super, invalid return/argument ABI và registry không retain instances.
@@ -69,6 +70,12 @@ CI macOS chạy `python3 scripts/test_domain_task_lifecycle.py --native`, compil
 ### Sửa lỗi compile từ CI
 
 Clang/ARC báo `cannot jump from switch statement to this case label` trong `PXDomainInstallFactory`: block temporaries capture strong `hook` có lifetime trong scope chung của switch. Thêm `{ ... }` cho từng nhóm case để lifetime kết thúc trước case tiếp theo; giữ nguyên factory signatures, IMP forwarding và policy. Đây là sửa compile, không thay lifecycle behavior. Source gate không thể phát hiện thay compiler lỗi này; native CI hiện có vẫn là gate bắt buộc và cần chạy lại.
+
+### Sửa Logos và cancelled-state assertion từ CI tiếp theo
+
+- RootHide: `PXDomainObservedSession(%orig)` được Logos preprocess thành lời gọi thiếu dấu đóng ngoặc. Cả ba constructor nay dùng `NSURLSession *session = %orig;` rồi mới gọi adapter. Original vẫn gọi đúng một lần với arguments cũ. Source gate được đổi để giữ contract này.
+- Foundation fixture: CI báo 168/169 checks pass, fail ở `task.state == Completed` sau download completion. Assertion này giả định ordering/state quá chặt: [Apple về canceling](https://developer.apple.com/documentation/foundation/urlsessiontask/state-swift.enum/canceling) cho phép completion delegate message đã được gửi khi state vẫn là Canceling. Fixture nay chấp nhận Canceling hoặc Completed sau native cancellation, fail nếu Running/Suspended và in class/state/error/URL khi sai. Không thêm delay, polling hoặc ép state production để làm test pass.
+- Thêm sáu native-cancel baselines để đối chiếu các factory. Giữ toàn bộ checks callback count, queue, error/task.error, metadata và zero transport. Những kiểm tra host được chạy lại: domain lifecycle source contracts, Phase-10 release hardening static, missing-hook completion static và diff whitespace đều PASS. Chưa chạy native fixture hoặc Logos compiler sau sửa trên Windows; không dùng kết quả 168/169 để coi native gate đã pass.
 
 ## Gate còn lại
 

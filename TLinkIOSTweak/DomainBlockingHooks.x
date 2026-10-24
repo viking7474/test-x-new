@@ -245,17 +245,20 @@ static NSURLSession *PXDomainObservedSession(NSURLSession *session) {
 %hook NSURLSession
 
 + (NSURLSession *)sharedSession {
-    return PXDomainObservedSession(%orig);
+    NSURLSession *session = %orig;
+    return PXDomainObservedSession(session);
 }
 
 + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration {
-    return PXDomainObservedSession(%orig);
+    NSURLSession *session = %orig;
+    return PXDomainObservedSession(session);
 }
 
 + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration
                                 delegate:(id<NSURLSessionDelegate>)delegate
                            delegateQueue:(NSOperationQueue *)queue {
-    return PXDomainObservedSession(%orig);
+    NSURLSession *session = %orig;
+    return PXDomainObservedSession(session);
 }
 
 %end

@@ -86,6 +86,19 @@ static NSMutableURLRequest *PXFixtureRequest(void) {
 
 typedef NSURLSessionTask *(^PXFixtureFactory)(NSURLSession *, NSMutableURLRequest *, PXDomainCompletion *);
 
+static BOOL PXHasNativeCancelledState(NSURLSessionTask *task) {
+    // Apple's canceling state explicitly permits the completion delegate message
+    // to have already been delivered. Do not impose completed-only semantics on
+    // cancellation or wait for an undocumented extra state transition.
+    NSURLSessionTaskState state = task.state;
+    if (state == NSURLSessionTaskStateCanceling || state == NSURLSessionTaskStateCompleted) return YES;
+    fprintf(stderr, "Unexpected cancelled state: class=%s state=%ld error=%s URL=%s\n",
+            NSStringFromClass(task.class).UTF8String, (long)state,
+            task.error.description.UTF8String ?: "(nil)",
+            task.originalRequest.URL.absoluteString.UTF8String ?: "(nil)");
+    return NO;
+}
+
 static void PXCheckBlockedFactories(void) {
     NSData *body = [@"payload" dataUsingEncoding:NSUTF8StringEncoding];
     NSString *file = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingString:@".upload"]];
@@ -125,12 +138,17 @@ static void PXCheckBlockedFactories(void) {
             }];
         },
     ];
-    for (NSUInteger i = 0; i < factories.count; i++) {
+    // Compare every adapter cancellation with the same native cancel/resume
+    // sequence on an unobserved session; neither may leak to transport.
+    for (NSUInteger scenario = 0; scenario < factories.count * 2; scenario++) {
         @autoreleasepool {
-            fprintf(stderr, "Factory fixture %lu (default/ephemeral)\n", (unsigned long)i);
+            NSUInteger i = scenario / 2;
+            BOOL observed = scenario % 2 != 0;
+            fprintf(stderr, "Factory fixture %lu (%s, %s)\n", (unsigned long)i,
+                    i % 2 ? "ephemeral" : "default", observed ? "domain blocker" : "native cancel baseline");
             atomic_store(&gTransportStarts, 0);
             PXDomainCompletion *c = [PXDomainCompletion new];
-            NSURLSession *session = PXFixtureSession(c, i % 2, YES);
+            NSURLSession *session = PXFixtureSession(c, i % 2, observed);
             NSMutableURLRequest *request = PXFixtureRequest();
             PXFixtureFactory factory = factories[i];
             NSURLSessionTask *task = factory(session, request, c);
@@ -139,13 +157,14 @@ static void PXCheckBlockedFactories(void) {
             CHECK([request.URL.host isEqualToString:@"blocked.example.test"], "caller request URL preserved");
             CHECK(![c wait:0.12], "no completion without resume");
             CHECK(atomic_load(&gTransportStarts) == 0, "no transport before resume");
+            if (!observed) [task cancel];
             [task resume];
             CHECK([c wait:3], "Foundation completes blocked task");
             CHECK(c.correctQueue, "completion uses session delegate queue");
             CHECK([c.error.domain isEqualToString:NSURLErrorDomain] && c.error.code == NSURLErrorCancelled,
                   "blocked error is genuine cancellation");
+            CHECK(PXHasNativeCancelledState(task), "cancelled task state matches Foundation contract");
             CHECK(task.error.code == c.error.code, "callback error agrees with task.error");
-            CHECK(task.state == NSURLSessionTaskStateCompleted, "terminal task state belongs to Foundation");
             CHECK(atomic_load(&gTransportStarts) == 0, "blocked task never starts transport");
             [task resume]; [task cancel];
             CHECK(![c wait:0.08] && c.count == 1, "repeated resume/cancel does not duplicate completion");
