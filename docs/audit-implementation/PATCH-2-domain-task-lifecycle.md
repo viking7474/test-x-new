@@ -1,7 +1,7 @@
 # Patch 2 — NSURLSession domain blocking lifecycle
 
 Ngày: 2026-10-24. Baseline: `6ba80d7` (Patch 1 đã được commit và người dùng xác nhận build pass).
-Trạng thái: source implemented; host source/regression gates pass. Native Foundation fixture đã nối vào CI nhưng chưa chạy tại Windows; chưa xác minh Logos/iOS runtime của Patch 2.
+Trạng thái: source implemented; host source/regression gates pass. Lần CI đầu lỗi compile ARC ở switch tạo factory blocks; đã thêm scope riêng cho từng nhánh và đang chờ kết quả CI sau sửa. Chưa xác minh Foundation/Logos/iOS runtime của Patch 2.
 
 ## Vấn đề đã sửa
 
@@ -65,6 +65,10 @@ Host gates đã chạy:
 - Runtime doubles kiểm tra identity, stream host hint, inherited class isolation, override/super, invalid return/argument ABI và registry không retain instances.
 
 CI macOS chạy `python3 scripts/test_domain_task_lifecycle.py --native`, compile production helper + fixture bằng xcrun/ARC/Foundation rồi chạy binary. `--native` báo lỗi rõ khi thiếu môi trường, không silently skip. Release regression runner chạy source gate; build Theos lấy helper mới qua wildcard `.m` hiện có.
+
+### Sửa lỗi compile từ CI
+
+Clang/ARC báo `cannot jump from switch statement to this case label` trong `PXDomainInstallFactory`: block temporaries capture strong `hook` có lifetime trong scope chung của switch. Thêm `{ ... }` cho từng nhóm case để lifetime kết thúc trước case tiếp theo; giữ nguyên factory signatures, IMP forwarding và policy. Đây là sửa compile, không thay lifecycle behavior. Source gate không thể phát hiện thay compiler lỗi này; native CI hiện có vẫn là gate bắt buộc và cần chạy lại.
 
 ## Gate còn lại
 

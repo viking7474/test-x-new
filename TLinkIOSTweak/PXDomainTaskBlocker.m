@@ -191,32 +191,38 @@ static BOOL PXDomainInstallFactory(Class cls, NSString *name, PXDomainFactoryKin
     hook.original = method_getImplementation(method);
     if (!hook.original) return NO;
     IMP replacement = NULL;
+    // ARC gives captured block temporaries a lifetime. Keep each branch in its
+    // own scope so another case label cannot jump into that lifetime.
     switch (kind) {
-        case PXDomainFactoryObject:
+        case PXDomainFactoryObject: {
             replacement = imp_implementationWithBlock(^id(id session, id argument) {
                 id task = ((id (*)(id, SEL, id))hook.original)(session, selector, argument);
                 return PXDomainDidCreateTask(task, session, argument, NO);
             });
             break;
+        }
         case PXDomainFactoryObjectBlock:
-        case PXDomainFactoryTwoObjects:
+        case PXDomainFactoryTwoObjects: {
             replacement = imp_implementationWithBlock(^id(id session, id first, id second) {
                 id task = ((id (*)(id, SEL, id, id))hook.original)(session, selector, first, second);
                 return PXDomainDidCreateTask(task, session, first, NO);
             });
             break;
-        case PXDomainFactoryTwoObjectsBlock:
+        }
+        case PXDomainFactoryTwoObjectsBlock: {
             replacement = imp_implementationWithBlock(^id(id session, id first, id second, id completion) {
                 id task = ((id (*)(id, SEL, id, id, id))hook.original)(session, selector, first, second, completion);
                 return PXDomainDidCreateTask(task, session, first, NO);
             });
             break;
-        case PXDomainFactoryHostPort:
+        }
+        case PXDomainFactoryHostPort: {
             replacement = imp_implementationWithBlock(^id(id session, id host, NSInteger port) {
                 id task = ((id (*)(id, SEL, id, NSInteger))hook.original)(session, selector, host, port);
                 return PXDomainDidCreateTask(task, session, host, YES);
             });
             break;
+        }
     }
     if (!replacement) return NO;
     methods[name] = hook;
