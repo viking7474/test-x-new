@@ -38,7 +38,7 @@ void PXAttachLocationSpoofSnapshot(id object, PXLocationSpoofSnapshot *snapshot)
     objc_setAssociatedObject(object,
                              kPXLocationSpoofSnapshotAssociationKey,
                              snapshot,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                             OBJC_ASSOCIATION_RETAIN);
 }
 
 PXLocationSpoofSnapshot *PXLocationSpoofSnapshotForObject(id object) {

@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái: Patch 1 đã triển khai, host checks pass và người dùng xác nhận build pass; device/package acceptance vẫn cần bằng chứng riêng. Patch 2 đã triển khai source và host checks, native CI/iOS runtime chưa xác minh. Patch 3–8 chưa triển khai.
+Trạng thái: Patch 1–2 đã triển khai, host checks pass và người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. Patch 3 đã triển khai source và host checks; native fixture/Logos build mới chưa xác minh tại Windows. Patch 4–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -76,6 +76,8 @@ Gate hoàn tất là runtime Foundation/iOS fixture và build Logos thực tế;
 ### Patch 3 — P0-C: bỏ delegate interception trên NSObject
 
 Phạm vi: LocationSpoofing group trong `Tweak.x`, delegate installation registry/helper và location tests.
+
+Tiến độ và bằng chứng: [báo cáo Patch 3](audit-implementation/PATCH-3-concrete-location-delegates.md).
 
 1. Không thêm/hook CoreLocation optional delegate selectors trên NSObject.
 2. Khi setDelegate, chỉ intercept class/selector thực tế có implementation; xử lý inherited implementation bằng class-local installation để không sửa superclass ngoài phạm vi.

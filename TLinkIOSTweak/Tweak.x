@@ -34,6 +34,7 @@
 // #import <ellekit/ellekit.h> // Removed for rootful - using Substrate
 #import <CoreMotion/CoreMotion.h> // Import CoreMotion framework for sensor spoofing
 #import "LocationSpoofingManager.h" // Import location spoofing manager
+#import "PXLocationDelegateHooks.h"
 #import "MobileGestalt.h"
 #import "IOSVersionInfo.h"
 #import "PXNativeHookCoordinator.h"
@@ -2094,12 +2095,25 @@ static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration)
     }
 }
 
+static id PXLocationDelegateSnapshot(BOOL advanceGeneration) {
+    return PXActiveLocationSnapshot(advanceGeneration);
+}
+
+static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
+    PXAttachLocationSpoofSnapshot(object, snapshot);
+}
+
 %group LocationSpoofing
 
 // Hook CLLocationManager to intercept location updates
 %hook CLLocationManager
 
 - (void)setDelegate:(id)delegate {
+    @try {
+        PXInstallLocationDelegateHooks(delegate, PXLocationDelegateSnapshot, PXLocationDelegateAttachSnapshot);
+    } @catch (__unused NSException *exception) {
+        // Keep the native assignment even if defensive interception fails.
+    }
     %orig;
 
     @try {
@@ -2129,8 +2143,8 @@ static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration)
 }
 
 - (id)delegate {
-    // Original-first and identity-preserving. NSObject delegate callbacks are
-    // already hooked below; reading this property must never replace/proxy it.
+    // Identity-preserving: the setter observes existing concrete callbacks;
+    // reading this property must never replace or proxy the native delegate.
     return %orig;
 }
 
@@ -2215,37 +2229,6 @@ static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration)
     if (!currentSnapshot) return originalCoordinate;
     PXLocationSpoofSnapshot *snapshot = PXLocationSpoofSnapshotForObject(self);
     return (snapshot ?: currentSnapshot).coordinate;
-}
-
-%end
-
-// Hook -[CLLocationManager locationManagerDidUpdateLocations:] delegate method
-%hook NSObject
-
-- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
-    if (manager && locations.count > 0) {
-        PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(YES);
-        if (snapshot) {
-            // One generation for the whole batch. Keep the original NSArray,
-            // object identities, ordering, metadata and current callback queue.
-            for (CLLocation *location in locations) {
-                PXAttachLocationSpoofSnapshot(location, snapshot);
-            }
-        }
-    }
-    %orig;
-}
-
-// Add hook for the legacy location update method
-- (void)locationManager:(CLLocationManager *)manager didUpdateToLocation:(CLLocation *)newLocation fromLocation:(CLLocation *)oldLocation {
-    if (manager && (newLocation || oldLocation)) {
-        PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(YES);
-        if (snapshot) {
-            PXAttachLocationSpoofSnapshot(newLocation, snapshot);
-            PXAttachLocationSpoofSnapshot(oldLocation, snapshot);
-        }
-    }
-    %orig;
 }
 
 %end
@@ -2498,31 +2481,6 @@ static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration)
     // Preserve the caller's argument and evaluate the real implementation
     // first. In active mode, containment follows the projected region center.
     return PXActiveLocationSnapshot(NO) ? YES : originalContains;
-}
-
-%end
-
-// Add more delegate method hooks to NSObject
-%hook NSObject
-
-// Regional monitoring delegate methods
-- (void)locationManager:(CLLocationManager *)manager didEnterRegion:(CLRegion *)region {
-    // Refresh/read the same generation but never suppress or redispatch the
-    // system callback. Manager and region arguments remain byte-for-byte same.
-    (void)PXActiveLocationSnapshot(NO);
-    %orig;
-}
-
-- (void)locationManager:(CLLocationManager *)manager didExitRegion:(CLRegion *)region {
-    (void)PXActiveLocationSnapshot(NO);
-    %orig;
-}
-
-// Heading update delegate method
-- (void)locationManager:(CLLocationManager *)manager didUpdateHeading:(CLHeading *)newHeading {
-    PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
-    if (snapshot) PXAttachLocationSpoofSnapshot(newHeading, snapshot);
-    %orig;
 }
 
 %end

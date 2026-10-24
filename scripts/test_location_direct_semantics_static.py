@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Host-independent P0-03 Location direct-surface and callback contracts."""
+"""Location source wiring gate; --native compiles/runs the production delegate adapter."""
+import argparse
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TWEAK = (ROOT / "TLinkIOSTweak" / "Tweak.x").read_text(encoding="utf-8")
 HEADER = (ROOT / "common" / "LocationSpoofingManager.h").read_text(encoding="utf-8")
 MANAGER = (ROOT / "common" / "LocationSpoofingManager.m").read_text(encoding="utf-8")
+ADAPTER = (ROOT / "TLinkIOSTweak" / "PXLocationDelegateHooks.m").read_text(encoding="utf-8")
 
 
 def require(condition: bool, message: str) -> None:
@@ -54,52 +60,44 @@ require("_lastReportedSpeed = PXLocationOriginalSpeed(currentLoc);" in MANAGER a
         "_lastReportedCourse = PXLocationOriginalCourse(currentLoc);" in MANAGER,
         "path simulation reads projected speed/course back into canonical state")
 
-modern = re.search(
-    r"didUpdateLocations:\(NSArray<CLLocation \*> \*\)locations \{(.*?)\n\}",
-    TWEAK,
-    re.S,
-)
-require(modern is not None, "modern location callback missing")
-modern_body = modern.group(1)
-require(modern_body.count("PXActiveLocationSnapshot(YES)") == 1,
-        "modern callback must advance exactly one generation per batch")
-require("for (CLLocation *location in locations)" in modern_body,
-        "modern callback does not bind every original location to the batch snapshot")
-require("%orig;" in modern_body and "%orig(manager," not in modern_body,
-        "modern callback replaced arguments or changed forwarding semantics")
-require("NSMutableArray" not in modern_body and "dispatch_" not in modern_body,
-        "modern callback changed collection shape or callback queue")
-
-legacy = re.search(
-    r"didUpdateToLocation:\(CLLocation \*\)newLocation fromLocation:\(CLLocation \*\)oldLocation \{(.*?)\n\}",
-    TWEAK,
-    re.S,
-)
-require(legacy is not None, "legacy location callback missing")
-legacy_body = legacy.group(1)
-require(legacy_body.count("PXActiveLocationSnapshot(YES)") == 1,
-        "legacy callback must advance exactly one generation")
-require("PXAttachLocationSpoofSnapshot(newLocation, snapshot);" in legacy_body and
-        "PXAttachLocationSpoofSnapshot(oldLocation, snapshot);" in legacy_body,
-        "legacy new/old locations do not share one snapshot")
-require("%orig;" in legacy_body and "%orig(manager," not in legacy_body,
-        "legacy callback replaced original arguments")
-
-for selector in ("didEnterRegion", "didExitRegion"):
-    match = re.search(rf"{selector}:\(CLRegion \*\)region \{{(.*?)\n\}}", TWEAK, re.S)
-    require(match is not None and "%orig;" in match.group(1),
-            f"{selector} is still suppressed")
-
-heading = re.search(
-    r"didUpdateHeading:\(CLHeading \*\)newHeading \{(.*?)\n\}",
-    TWEAK,
-    re.S,
-)
-require(heading is not None, "heading callback missing")
-require("PXAttachLocationSpoofSnapshot(newHeading, snapshot);" in heading.group(1),
-        "heading callback is not bound to the shared snapshot")
-require("%orig;" in heading.group(1) and "dispatch_" not in heading.group(1),
-        "heading callback changed forwarding queue/arguments")
+require("%hook NSObject" not in TWEAK,
+        "location optional callbacks must never be hooked/fabricated on NSObject")
+setter = TWEAK.split("- (void)setDelegate:(id)delegate {", 1)[1].split("- (id)delegate", 1)[0]
+installation = "PXInstallLocationDelegateHooks(delegate, PXLocationDelegateSnapshot, PXLocationDelegateAttachSnapshot);"
+require(setter.count(installation) == 1 and setter.count("%orig;") == 1 and
+        setter.index(installation) < setter.index("%orig;"),
+        "observe concrete delegate before native assignment; original setter exactly once")
+require("return PXActiveLocationSnapshot(advanceGeneration);" in TWEAK and
+        "PXAttachLocationSpoofSnapshot(object, snapshot);" in TWEAK,
+        "delegate adapter must use the existing live scoped snapshot/attachment pipeline")
+for selector in (
+    "locationManager:didUpdateLocations:", "locationManager:didUpdateToLocation:fromLocation:",
+    "locationManager:didUpdateHeading:", "locationManager:didEnterRegion:", "locationManager:didExitRegion:",
+):
+    require(f'@"{selector}"' in ADAPTER, f"missing delegate adapter selector: {selector}")
+require("method_getReturnType" in ADAPTER and "method_getNumberOfArguments" in ADAPTER and
+        "method_getArgumentType" in ADAPTER and "PXLocationObjectType" in ADAPTER,
+        "all return/argument ABI must be validated before installation")
+require("class_addMethod(cls, selector, replacement" in ADAPTER and
+        "cls == NSObject.class" in ADAPTER and "cls == NSProxy.class" in ADAPTER,
+        "inherited methods must be isolated on concrete classes; never mutate root classes")
+require("@property (atomic, assign) IMP original;" in ADAPTER and
+        ADAPTER.index("hook.original = method_getImplementation(method)") < ADAPTER.index("imp_implementationWithBlock"),
+        "original IMP must be safely published before the replacement is callable")
+require("gPXLocationCallbackFrame = frame.previous;" in ADAPTER and "@finally" in ADAPTER and
+        "class_getSuperclass(frame->owner)" in ADAPTER,
+        "super-chain guard must unwind and preserve independent nested callbacks")
+require("for (id location in locations) hook.attacher(location, snapshot);" in ADAPTER and
+        "hook.attacher(first, snapshot);" in ADAPTER and "hook.attacher(second, snapshot);" in ADAPTER,
+        "batch/legacy projection must attach shared snapshots to original objects")
+require("hook.provider(NO)" in ADAPTER and "hook.kind == PXLocationCallbackHeading" in ADAPTER,
+        "heading/region callbacks must read current generation without advancing")
+require("delegate] != receiver" in ADAPTER,
+        "replaced/nil delegate callbacks must not advance current projection")
+require(not any(token in ADAPTER for token in ("dispatch_async", "dispatch_after", "NSMutableArray", "objc_setAssociatedObject")),
+        "adapter must not redispatch/copy arrays or retain manager/delegate in associations")
+require("OBJC_ASSOCIATION_RETAIN_NONATOMIC" not in MANAGER,
+        "concurrent snapshot association readers must retain the value during replacement")
 
 require("PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);" in TWEAK,
         "object-attached snapshots are not gated by the current scope/toggle")
@@ -108,4 +106,29 @@ require(re.search(r"%hook MKUserLocation.*?PXActiveLocationSnapshot\(NO\).*?snap
 require("initWithClientHeading:" not in TWEAK,
         "private CLHeading initializer must not be synthesized")
 
-print("P0-03 Location direct surface + semantics static checks passed")
+print("PASS: Location direct surfaces and delegate source contracts (native runtime not implied)")
+
+
+def native_tests() -> None:
+    require(sys.platform == "darwin" and shutil.which("xcrun") is not None,
+            "--native requires macOS Foundation/xcrun and must not silently skip")
+    with tempfile.TemporaryDirectory(prefix="px-location-delegate-") as folder:
+        binary = Path(folder) / "location-delegate-tests"
+        subprocess.run([
+            "xcrun", "clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra",
+            "-Werror=implicit-function-declaration", "-I", str(ROOT / "TLinkIOSTweak"),
+            str(ROOT / "TLinkIOSTweak/PXLocationDelegateHooks.m"),
+            str(ROOT / "tests/PXLocationDelegateTests.m"),
+            "-framework", "Foundation", "-framework", "CoreLocation", "-o", str(binary),
+        ], cwd=ROOT, check=True, timeout=60)
+        # New process each iteration, so concurrent first-install paths are
+        # exercised again, rather than only reusing a warmed hook registry.
+        for _ in range(3):
+            subprocess.run([str(binary)], cwd=ROOT, check=True, timeout=45)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--native", action="store_true")
+    if parser.parse_args().native:
+        native_tests()

@@ -1,7 +1,7 @@
 # Patch 2 — NSURLSession domain blocking lifecycle
 
 Ngày: 2026-10-24. Baseline: `6ba80d7` (Patch 1 đã được commit và người dùng xác nhận build pass).
-Trạng thái: source implemented; host source/regression gates pass. Đã sửa lỗi compile ARC ở switch. Lượt CI sau compile được Foundation fixture nhưng fail 168/169 vì assertion state quá chặt; RootHide còn lỗi Logos với nested `%orig`. Đã sửa hai điểm này, chờ CI mới; chưa xác minh đầy đủ Foundation/Logos/iOS runtime của Patch 2.
+Trạng thái: source implemented; host source/regression gates pass. Đã sửa lỗi compile ARC ở switch, cancelled-state assertion và nested `%orig` trong Logos; người dùng xác nhận build pass sau các sửa đó, trước khi triển khai Patch 3. Chưa có log riêng để kết luận đầy đủ từng fixture/lane hoặc iOS device/runtime matrix.
 
 ## Vấn đề đã sửa
 
