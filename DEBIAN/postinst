@@ -13,6 +13,13 @@ if [ -d "/rootfs/var/mobile" ]; then
 fi
 readonly ROOTFS_PREFIX IS_ROOTHIDE
 
+# Stop the previous binary before retirement/self-test. It may still implement
+# the old two-filter protocol and does not participate in newer writer locks.
+if command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout system/com.hydra.weaponx.guardian 2>/dev/null ||
+        launchctl unload /Library/LaunchDaemons/com.hydra.weaponx.guardian.plist 2>/dev/null || true
+fi
+
 # Mark script execution
 echo "Running WeaponX post-installation script..."
 echo "===================================="
@@ -49,6 +56,23 @@ fi
 rm -f /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.dylib
 rm -f /Library/MobileSubstrate/DynamicLibraries/ProjectXTweak.plist
 rm -f /usr/bin/projectx-setup
+
+# The same migration already ran as preinst before unpack. Repeat after legacy
+# data migration and daemon shutdown so a stale writer cannot leave a filter.
+RETIRE_SCRIPT=""
+for RETIRE_CANDIDATE in \
+    /Library/WeaponX/retire_keychain_bridge.sh \
+    /var/jb/Library/WeaponX/retire_keychain_bridge.sh \
+    /private/var/jb/Library/WeaponX/retire_keychain_bridge.sh; do
+    if [ -f "$RETIRE_CANDIDATE" ]; then
+        RETIRE_SCRIPT="$RETIRE_CANDIDATE"
+        break
+    fi
+done
+if [ -z "$RETIRE_SCRIPT" ] || ! /bin/sh "$RETIRE_SCRIPT"; then
+    echo 'Keychain Bridge retirement failed; installation cannot be marked complete.' >&2
+    exit 1
+fi
 
 # Create required directories with proper permissions
 echo "📂 Creating required directories..."

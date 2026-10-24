@@ -588,7 +588,7 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    for (NSString *name in @[@"TLinkIOSTweak.plist", @"WeaponXKeychainBridge.plist"]) {
+    for (NSString *name in @[@"TLinkIOSTweak.plist"]) {
         NSString *path = [stagingDir stringByAppendingPathComponent:name];
         NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
         NSNumber *size = attrs[NSFileSize];
@@ -686,7 +686,7 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
     result[@"uid"] = @(getuid());
     result[@"euid"] = @(geteuid());
     BOOL allFiltersInstalled = YES;
-    for (NSString *name in @[@"TLinkIOSTweak.plist", @"WeaponXKeychainBridge.plist"]) {
+    for (NSString *name in @[@"TLinkIOSTweak.plist"]) {
         NSString *src = [stagingDir stringByAppendingPathComponent:name];
         NSString *dst = [targetDir stringByAppendingPathComponent:name];
         NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:src];
@@ -703,14 +703,8 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
             continue;
         }
 
-        // Canonicalize both staged filters. Broad UIKit/WebKit coverage belongs
-        // only to TLinkIOSTweak; stale/malformed bridge targets are narrowed here.
-        NSArray *sanitizedBundles;
-        if ([name isEqualToString:@"TLinkIOSTweak.plist"]) {
-            sanitizedBundles = PXInjectionComputeTweakBundles(bundles);
-        } else {
-            sanitizedBundles = PXInjectionComputeBridgeBundles(bundles);
-        }
+        // Only the main tweak has an injection filter after bridge retirement.
+        NSArray *sanitizedBundles = PXInjectionComputeTweakBundles(bundles);
         if (![sanitizedBundles isEqualToArray:PXInjectionNormalizeBundleList(bundles)]) {
             NSDictionary *sanitizedPlist = PXInjectionFilterPlistDictionary(sanitizedBundles);
             if (![sanitizedPlist writeToFile:src atomically:YES]) {

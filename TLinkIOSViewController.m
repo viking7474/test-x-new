@@ -287,22 +287,18 @@ static NSArray<NSString *> *PXBundlesFromFilterPlistAtPath(NSString *path) {
 }
 
 /// Rebuild substrate filter plists from full enabled global_scope only.
-/// Never accepts a partial/just-added list; empty scope → SpringBoard-only tweak filter
-/// (never Bundles=[]), and the keychain bridge collapses to the no-injection placeholder.
-/// Always includes SpringBoard so Profile Indicator (and other SB-hosted UI) can load.
+/// Never accepts a partial/just-added list; empty scope is placeholder-only.
+/// Non-empty scope retains SpringBoard and explicit UIKit/WebKit coverage.
 /// Canonical union/empty-state rules live in PXInjectionFilter (shared with the daemon).
 static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
     // 1–5. Canonical filter computation lives in PXInjectionFilter (single source of
     // truth shared with the mount daemon): enabled mains from global_scope → expand
-    // extensions; shared WebKit helpers excluded from monolithic filter → tweak list (+SpringBoard, never empty, never the
-    // placeholder) → keychain bridge (third-party only, placeholder when empty).
+    // extensions -> the single canonical tweak list (placeholder-only when empty).
     NSArray<NSString *> *enabledMain = PXEnabledScopeBundleIDs();
     NSArray<NSString *> *expanded = PXExpandedResetBundleIDs(enabledMain);
     NSArray<NSString *> *validBundles = PXInjectionComputeTweakBundles(expanded);
-    NSArray<NSString *> *bridgeBundles = PXInjectionComputeBridgeBundles(validBundles);
 
     NSDictionary *tweakPlist = PXInjectionFilterPlistDictionary(validBundles);
-    NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridgeBundles);
     NSArray<NSString *> *dirs = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     // RootHide + ElleKit uses /usr/lib/TweakInject as the canonical injector
@@ -332,10 +328,7 @@ static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
         installedAnyBefore = YES;
         NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(
             [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"]);
-        NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(
-            [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"]);
-        if (![installedTweak isEqualToArray:validBundles] ||
-            ![installedBridge isEqualToArray:bridgeBundles]) {
+        if (![installedTweak isEqualToArray:validBundles]) {
             installedAllBefore = NO;
         }
     }
@@ -344,29 +337,20 @@ static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
     NSString *stagingDir = @"/var/mobile/Library/TLinkIOS/filter_plists";
     [fm createDirectoryAtPath:stagingDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
     NSString *tmpTweakPath = [stagingDir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
-    NSString *tmpBridgePath = [stagingDir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
     BOOL wroteTmpTweak = [tweakPlist writeToFile:tmpTweakPath atomically:YES];
-    BOOL wroteTmpBridge = [bridgePlist writeToFile:tmpBridgePath atomically:YES];
 
     // Compare normalized bundles: expected (global scope) vs staging vs installed.
     NSArray<NSString *> *stagingTweakBundles = PXBundlesFromFilterPlistAtPath(tmpTweakPath);
-    NSArray<NSString *> *stagingBridgeBundles = PXBundlesFromFilterPlistAtPath(tmpBridgePath);
     BOOL stagingMatches =
-        wroteTmpTweak && wroteTmpBridge &&
-        [stagingTweakBundles isEqualToArray:validBundles] &&
-        [stagingBridgeBundles isEqualToArray:bridgeBundles];
+        wroteTmpTweak && [stagingTweakBundles isEqualToArray:validBundles];
 
     NSMutableDictionary *debug = [@{
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
         @"enabledMainBundles": enabledMain ?: @[],
         @"bundles": validBundles,
-        @"bridgeBundles": bridgeBundles,
         @"tmpTweakPath": tmpTweakPath,
-        @"tmpBridgePath": tmpBridgePath,
         @"wroteTmpTweak": @(wroteTmpTweak),
-        @"wroteTmpBridge": @(wroteTmpBridge),
         @"stagingTweakBundles": stagingTweakBundles,
-        @"stagingBridgeBundles": stagingBridgeBundles,
         @"targetDirs": dirs ?: @[]
     } mutableCopy];
 
@@ -401,9 +385,7 @@ static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
         }
         directAnyInstalledDir = YES;
         NSString *tweakPath = [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
-        NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
         BOOL wroteTweak = [tweakPlist writeToFile:tweakPath atomically:YES];
-        BOOL wroteBridge = [bridgePlist writeToFile:bridgePath atomically:YES];
         if (!wroteTweak && wroteTmpTweak) {
             int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@",
                                              PXShellQuote(PXBootstrapPathArgument(tmpTweakPath)),
@@ -411,21 +393,10 @@ static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
                                              PXShellQuote(PXBootstrapPathArgument(tweakPath))]);
             debug[[tweakPath stringByAppendingString:@" shellStatus"]] = @(status);
         }
-        if (!wroteBridge && wroteTmpBridge) {
-            int status = PXRunShellCommand([NSString stringWithFormat:@"cp -f %@ %@ && chmod 644 %@",
-                                             PXShellQuote(PXBootstrapPathArgument(tmpBridgePath)),
-                                             PXShellQuote(PXBootstrapPathArgument(bridgePath)),
-                                             PXShellQuote(PXBootstrapPathArgument(bridgePath))]);
-            debug[[bridgePath stringByAppendingString:@" shellStatus"]] = @(status);
-        }
-
         NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(tweakPath);
-        NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(bridgePath);
         BOOL tweakOK = [installedTweak isEqualToArray:validBundles];
-        BOOL bridgeOK = [installedBridge isEqualToArray:bridgeBundles];
-        if (!tweakOK || !bridgeOK) directAllInstalledMatch = NO;
+        if (!tweakOK) directAllInstalledMatch = NO;
         debug[[tweakPath stringByAppendingString:@" directMatch"]] = @(tweakOK);
-        debug[[bridgePath stringByAppendingString:@" directMatch"]] = @(bridgeOK);
     }
     debug[@"directAnyInstalledDir"] = @(directAnyInstalledDir);
     debug[@"directAllInstalledMatch"] = @(directAllInstalledMatch);
@@ -457,16 +428,11 @@ static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
                 }
                 anyInstalledDir = YES;
                 NSString *tweakPath = [dir stringByAppendingPathComponent:@"TLinkIOSTweak.plist"];
-                NSString *bridgePath = [dir stringByAppendingPathComponent:@"WeaponXKeychainBridge.plist"];
                 NSArray *installedTweak = PXBundlesFromFilterPlistAtPath(tweakPath);
-                NSArray *installedBridge = PXBundlesFromFilterPlistAtPath(bridgePath);
                 BOOL tweakOK = [installedTweak isEqualToArray:validBundles];
-                BOOL bridgeOK = [installedBridge isEqualToArray:bridgeBundles];
-                if (!tweakOK || !bridgeOK) allInstalledMatch = NO;
+                if (!tweakOK) allInstalledMatch = NO;
                 debug[[tweakPath stringByAppendingString:@" finalMatch"]] = @(tweakOK);
-                debug[[bridgePath stringByAppendingString:@" finalMatch"]] = @(bridgeOK);
                 debug[[tweakPath stringByAppendingString:@" bundles"]] = installedTweak;
-                debug[[bridgePath stringByAppendingString:@" bundles"]] = installedBridge;
             }
             if (anyInstalledDir && allInstalledMatch) break;
             [NSThread sleepForTimeInterval:0.05];
@@ -490,11 +456,10 @@ static BOOL PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters) {
     debug[@"daemonDebugPath"] = daemonDebugPath;
     debug[@"daemonDebugPresent"] = @(daemonDebug != nil);
     if (daemonDebug) debug[@"daemonDebug"] = daemonDebug;
-    NSLog(@"[TLinkIOS] filter plists syncStatus=%@ polls=%lu tweakCount=%lu bridgeCount=%lu",
+    NSLog(@"[TLinkIOS] filter syncStatus=%@ polls=%lu tweakCount=%lu",
           syncStatus,
           (unsigned long)syncPollCount,
-          (unsigned long)validBundles.count,
-          (unsigned long)bridgeBundles.count);
+          (unsigned long)validBundles.count);
 
     NSString *debugDir = @"/var/mobile/Library/TLinkIOS";
     [fm createDirectoryAtPath:debugDir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
@@ -7862,12 +7827,9 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         BOOL daemonSeen = [syncDebug[@"daemonDebugPresent"] boolValue];
         NSDictionary *daemonDebug = [syncDebug[@"daemonDebug"] isKindOfClass:[NSDictionary class]] ? syncDebug[@"daemonDebug"] : @{};
         NSDictionary *daemonTweak = [daemonDebug[@"TLinkIOSTweak.plist"] isKindOfClass:[NSDictionary class]] ? daemonDebug[@"TLinkIOSTweak.plist"] : @{};
-        NSDictionary *daemonBridge = [daemonDebug[@"WeaponXKeychainBridge.plist"] isKindOfClass:[NSDictionary class]] ? daemonDebug[@"WeaponXKeychainBridge.plist"] : @{};
         NSString *daemonTopStatus = [daemonDebug[@"status"] isKindOfClass:[NSString class]] ? daemonDebug[@"status"] : @"ok-or-unknown";
         NSString *tweakStatus = [daemonTweak[@"status"] isKindOfClass:[NSString class]] ? daemonTweak[@"status"] : @"missing";
-        NSString *bridgeStatus = [daemonBridge[@"status"] isKindOfClass:[NSString class]] ? daemonBridge[@"status"] : @"missing";
         NSString *tweakReason = [daemonTweak[@"reason"] isKindOfClass:[NSString class]] ? daemonTweak[@"reason"] : @"";
-        NSString *bridgeReason = [daemonBridge[@"reason"] isKindOfClass:[NSString class]] ? daemonBridge[@"reason"] : @"";
         NSNumber *daemonSequence = [daemonDebug[@"syncSequence"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"syncSequence"] : nil;
         NSNumber *daemonTimestamp = [daemonDebug[@"completedTimestamp"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"completedTimestamp"] : daemonDebug[@"timestamp"];
         NSNumber *targetWriteAccess = [daemonDebug[@"targetWriteAccess"] isKindOfClass:[NSNumber class]] ? daemonDebug[@"targetWriteAccess"] : nil;
@@ -7880,7 +7842,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                                                            error:nil] ?: @"";
         if (launchdLog.length > 700) launchdLog = [launchdLog substringFromIndex:launchdLog.length - 700];
         NSString *detail = [NSString stringWithFormat:
-            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@ runtime=%@ euid=%@\ndaemonSync=%@ seq=%@ ts=%@\ntargetWrite=%@ (%@)\nTLinkIOSTweak=%@%@\nKeychainBridge=%@%@\n\nlaunchd:\n%@",
+            @"Không thể ghi hoặc xác minh filter của tweak trong jbroot hiện tại.\n\nstatus=%@\ndaemon=%@ runtime=%@ euid=%@\ndaemonSync=%@ seq=%@ ts=%@\ntargetWrite=%@ (%@)\nTLinkIOSTweak=%@%@\n\nlaunchd:\n%@",
             status,
             daemonSeen ? @"seen" : @"not-seen",
             runtimeEvent,
@@ -7892,8 +7854,6 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             targetAccessReason,
             tweakStatus,
             tweakReason.length ? [NSString stringWithFormat:@" (%@)", tweakReason] : @"",
-            bridgeStatus,
-            bridgeReason.length ? [NSString stringWithFormat:@" (%@)", bridgeReason] : @"",
             launchdLog.length ? launchdLog : @"no-install-log"];
         [self showDashboardMessage:@"Không thể bật hook" message:detail];
         return;

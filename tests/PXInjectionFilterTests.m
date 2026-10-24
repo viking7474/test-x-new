@@ -33,11 +33,11 @@ static void PXTTestClassifiers(void) {
     PXT_ASSERT(PXInjectionBundleIsTLinkIOSApp(@"com.hydra.weaponx"), "weaponx app detected");
     PXT_ASSERT(!PXInjectionBundleIsTLinkIOSApp(@"com.acme.app"), "third-party not tlinkios app");
 
-    PXT_ASSERT(PXInjectionBundleIsAppleOrWebKit(@"com.apple.springboard"), "com.apple.* is apple");
-    PXT_ASSERT(PXInjectionBundleIsAppleOrWebKit(@"com.apple.WebKit.GPU"), "webkit helper is apple");
-    PXT_ASSERT(PXInjectionBundleIsAppleOrWebKit(@"org.example.WebKitShim"), "WebKit-named non-apple treated as apple/webkit");
-    PXT_ASSERT(PXInjectionBundleIsAppleOrWebKit(nil), "nil treated as apple/webkit (defensive)");
-    PXT_ASSERT(!PXInjectionBundleIsAppleOrWebKit(@"com.acme.app"), "third-party is not apple/webkit");
+    PXT_ASSERT(PXInjectionBundleIsSharedWebKitHelper(@"com.apple.WebKit.GPU"), "WebKit helper classified");
+    PXT_ASSERT(PXInjectionBundleIsSharedWebKitHelper(@"com.apple.SafariViewService"), "Safari service classified");
+    PXT_ASSERT(!PXInjectionBundleIsSharedWebKitHelper(@"com.apple.springboard"), "SpringBoard is not a shared helper");
+    PXT_ASSERT(!PXInjectionBundleIsSharedWebKitHelper(nil), "nil is not a shared helper");
+    PXT_ASSERT(!PXInjectionBundleIsSharedWebKitHelper(@"com.acme.app"), "third-party is not a shared helper");
 }
 
 static void PXTTestEnabledScope(void) {
@@ -76,7 +76,7 @@ static void PXTTestTweakBundles(void) {
     PXT_ASSERT(![tweak containsObject:PXInjectionPlaceholderBundleID], "tweak never contains placeholder");
     PXT_ASSERT(PXTArrayEquals(tweak, PXInjectionNormalizeBundleList(tweak)), "tweak output is normalized");
 
-    // Empty scope: tweak collapses to placeholder-only (matches plan + keychain bridge; never Bundles=[]).
+    // Empty scope: the sole tweak filter collapses to placeholder-only, never Bundles=[].
     NSArray *emptyTweak = PXInjectionComputeTweakBundles(@[]);
     PXT_ASSERT(PXTArrayEquals(emptyTweak, (@[PXInjectionPlaceholderBundleID])),
                "empty scope -> placeholder-only tweak filter");
@@ -89,22 +89,6 @@ static void PXTTestTweakBundles(void) {
     NSArray *migratedPlaceholder = PXInjectionComputeTweakBundles(@[PXInjectionPlaceholderBundleID]);
     PXT_ASSERT(PXTArrayEquals(migratedPlaceholder, (@[PXInjectionPlaceholderBundleID])),
                "placeholder staging migration remains placeholder-only");
-}
-
-static void PXTTestBridgeBundles(void) {
-    NSArray *tweak = @[@"com.acme.app", @"com.acme.app.ext", @"com.apple.springboard", @"com.apple.WebKit.GPU", @"com.apple.UIKit"];
-    NSArray *bridge = PXInjectionComputeBridgeBundles(tweak);
-    PXT_ASSERT(PXTArrayEquals(bridge, (@[@"com.acme.app", @"com.acme.app.ext"])),
-               "bridge keeps only third-party app/extensions, sorted");
-    PXT_ASSERT(![bridge containsObject:PXInjectionSpringBoardBundleID], "bridge drops SpringBoard");
-    PXT_ASSERT(![bridge containsObject:@"com.apple.WebKit.GPU"], "bridge drops WebKit helpers");
-    PXT_ASSERT(![bridge containsObject:@"com.apple.UIKit"], "bridge drops UIKit coverage");
-    PXT_ASSERT(PXTArrayEquals(bridge, PXInjectionComputeBridgeBundles(bridge)), "bridge canonicalization is idempotent");
-
-    // No third-party apps: bridge collapses to placeholder-only.
-    NSArray *emptyBridge = PXInjectionComputeBridgeBundles(@[PXInjectionSpringBoardBundleID]);
-    PXT_ASSERT(PXTArrayEquals(emptyBridge, (@[PXInjectionPlaceholderBundleID])),
-               "empty bridge -> placeholder-only");
 }
 
 static void PXTTestValidator(void) {
@@ -138,7 +122,7 @@ static void PXTTestValidator(void) {
 }
 
 static void PXTTestConsistencyRoundTrip(void) {
-    // Full pipeline: enabled scope -> tweak -> bridge -> plist dicts must both pass
+    // Full pipeline: enabled scope -> the sole tweak plist must pass
     // the daemon validator (guards against writer/daemon drift, IOS-08 core goal).
     NSDictionary *scope = @{
         @"ScopedApps": @{
@@ -156,21 +140,15 @@ static void PXTTestConsistencyRoundTrip(void) {
     for (NSString *helper in PXInjectionDefaultWebKitHelperBundleIDs()) {
         PXT_ASSERT([tweak containsObject:helper], "round-trip: tweak includes WebKit helper coverage");
     }
-    NSArray *bridge = PXInjectionComputeBridgeBundles(tweak);
     NSDictionary *tweakPlist = PXInjectionFilterPlistDictionary(tweak);
-    NSDictionary *bridgePlist = PXInjectionFilterPlistDictionary(bridge);
 
     NSString *reason = nil;
     PXT_ASSERT(PXInjectionFilterPlistIsValid(tweakPlist, NULL, &reason), "round-trip: tweak plist valid");
-    PXT_ASSERT(PXInjectionFilterPlistIsValid(bridgePlist, NULL, &reason), "round-trip: bridge plist valid");
 
     // Empty scope pipeline must also produce daemon-valid plists.
     NSArray *emptyTweak = PXInjectionComputeTweakBundles(@[]);
-    NSArray *emptyBridge = PXInjectionComputeBridgeBundles(emptyTweak);
     PXT_ASSERT(PXInjectionFilterPlistIsValid(PXInjectionFilterPlistDictionary(emptyTweak), NULL, &reason),
                "round-trip: empty-scope tweak plist valid (placeholder-only)");
-    PXT_ASSERT(PXInjectionFilterPlistIsValid(PXInjectionFilterPlistDictionary(emptyBridge), NULL, &reason),
-               "round-trip: empty-scope bridge plist valid (placeholder-only)");
 }
 
 static void PXTTestChecksum(void) {
@@ -188,7 +166,6 @@ int PXRunInjectionFilterTests(void) {
     PXTTestClassifiers();
     PXTTestEnabledScope();
     PXTTestTweakBundles();
-    PXTTestBridgeBundles();
     PXTTestValidator();
     PXTTestConsistencyRoundTrip();
     PXTTestChecksum();

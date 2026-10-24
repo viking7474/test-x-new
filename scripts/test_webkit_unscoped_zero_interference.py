@@ -96,7 +96,8 @@ require("PXInjectionComputeTweakBundles(bundles)" in daemon,
 require('[monolithicTargets addObjectsFromArray:PXInjectionDefaultWebKitHelperBundleIDs()]' in filter_source and
         '[monolithicTargets addObject:@"com.apple.UIKit"]' in filter_source,
         "Non-empty tweak filter restores explicit WebKit and UIKit coverage")
-require('PXInjectionComputeBridgeBundles(bundles)' in daemon,
-        "Daemon separately narrows bridge staging before installation")
+require('WeaponXKeychainBridge' not in daemon and
+        'PXInjectionComputeBridgeBundles' not in filter_source,
+        "Retired bridge must not be installed for any helper or scoped app")
 
 print("PASS: WebKit constructor and filter static regression")

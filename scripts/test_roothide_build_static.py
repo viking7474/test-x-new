@@ -76,8 +76,7 @@ require("RootHide: moving Theos-staged tweaks to ElleKit /usr/lib/TweakInject" i
         "RootHide: preserving Theos-staged WeaponXDaemon" in makefile and
         "RootHide: preserving Theos-staged backup_helper" in makefile and
         "mkdir -p $(THEOS_STAGING_DIR)/usr/lib/TweakInject" in makefile and
-        "mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/" in makefile and
-        "mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/" in makefile,
+        "mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/" in makefile,
         "RootHide build does not relocate Theos-staged tweaks into ElleKit's canonical injector directory")
 require("THEOS_PACKAGE_SCHEME_ROOTHIDE" in compat, "RootHide compile guard is missing")
 require("jbroot(path)" in compat, "RootHide path conversion is missing")
@@ -311,7 +310,7 @@ require('kCheckInterval = 0.5' in daemon and
         '@"syncSequence"' in daemon,
         "WeaponXDaemon is missing change-gated fast fallback synchronization")
 require('TLinkIOSTweak=%@%@' in view_controller and
-        'KeychainBridge=%@%@' in view_controller and
+         'KeychainBridge=%@%@' not in view_controller and
         'daemonSync=%@ seq=%@ ts=%@' in view_controller and
         'targetWrite=%@ (%@)' in view_controller,
         "Reset Data error does not surface daemon target-access/per-filter diagnostics")
@@ -374,8 +373,10 @@ for token in (
     'test -x "$VERIFY_DIR/Library/WeaponX/backup_helper"',
     'test -f "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.dylib"',
     'test -f "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.plist"',
-    'test -f "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.dylib"',
-    'test -f "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.plist"',
+    'test ! -e "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.dylib"',
+    'test ! -e "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.plist"',
+    'test ! -e "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist"',
+    'scripts/test_keychain_bridge_retirement.py --package-root "$VERIFY_DIR"',
     "@loader_path/.jbroot/usr/lib/libroothide.dylib",
     "DAEMON_ENTITLEMENTS=\"$(ldid -e \"$VERIFY_DIR/Library/WeaponX/WeaponXDaemon\")\"",
     "com.apple.private.security.storage.AppBundles",

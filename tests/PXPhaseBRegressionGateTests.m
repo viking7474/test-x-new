@@ -94,13 +94,11 @@ static void PXPhaseBCaseAppExtension(void) {
     PX_B_ASSERT([tweak containsObject:@"com.apple.WebKit.WebContent"],
                 "B-06 tweak includes host-gated WebKit coverage");
 
-    NSArray *bridge = PXInjectionComputeBridgeBundles(tweak);
-    PX_B_ASSERT([bridge containsObject:@"com.fixture.app"] &&
-                [bridge containsObject:@"com.fixture.app.share-extension"],
-                "B-06 bridge must retain third-party app + extension");
-    PX_B_ASSERT(![bridge containsObject:@"com.apple.WebKit.WebContent"] &&
-                ![bridge containsObject:PXInjectionSpringBoardBundleID],
-                "B-06 bridge must not expand into WebKit/SpringBoard");
+    NSDictionary *filter = PXInjectionFilterPlistDictionary(tweak);
+    PX_B_ASSERT(PXInjectionFilterPlistIsValid(filter, NULL, NULL),
+                "B-06 single tweak filter accepts app + extension + helper coverage");
+    PX_B_ASSERT([tweak isEqualToArray:PXInjectionComputeTweakBundles(tweak)],
+                "B-06 single tweak canonicalization remains idempotent");
 }
 
 static void PXPhaseBCaseWebKitHelper(void) {
@@ -120,10 +118,6 @@ static void PXPhaseBCaseSpringBoardMinimal(void) {
     NSArray *tweak = PXInjectionComputeTweakBundles(@[@"com.fixture.app"]);
     PX_B_ASSERT([tweak containsObject:PXInjectionSpringBoardBundleID],
                 "B-06 scoped tweak filter must retain SpringBoard UI host");
-
-    NSArray *bridge = PXInjectionComputeBridgeBundles(tweak);
-    PX_B_ASSERT(![bridge containsObject:PXInjectionSpringBoardBundleID],
-                "B-06 keychain bridge must never expand into SpringBoard");
 
     NSArray *emptyTweak = PXInjectionComputeTweakBundles(@[]);
     PX_B_ASSERT([emptyTweak isEqualToArray:@[PXInjectionPlaceholderBundleID]],

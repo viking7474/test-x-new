@@ -71,7 +71,7 @@ all::
 	@echo "Building tweak, application, and daemon..."
 
 # Tweak Configuration (Moved from TLinkIOSTweak/Makefile)
-TWEAK_NAME = TLinkIOSTweak WeaponXKeychainBridge
+TWEAK_NAME = TLinkIOSTweak
 
 # Files - Adjusted paths for root compilation
 # Production safety (BUILD-01/P0): AAA_* files are test-only +load/constructor
@@ -108,12 +108,6 @@ TLinkIOSTweak_LIBRARIES = MobileGestalt
 # -Wl,-undefined,dynamic_lookup: standard for tweaks
 TLinkIOSTweak_LDFLAGS = -lobjc -Wl,-ObjC -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
 
-# Keychain Bridge Tweak (minimal, in-app keychain export/import)
-WeaponXKeychainBridge_FILES = WeaponXKeychainBridge/Tweak.m
-WeaponXKeychainBridge_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function
-WeaponXKeychainBridge_FRAMEWORKS = Foundation Security CoreFoundation
-WeaponXKeychainBridge_LDFLAGS = -lobjc -Wl,-ObjC -Wl,-no_fixup_chains -Wl,-undefined,dynamic_lookup
-
 # Include makefiles
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
@@ -129,6 +123,9 @@ internal-stage::
 	@chmod 755 $(THEOS_STAGING_DIR)/DEBIAN/postinst
 	@chmod 755 $(THEOS_STAGING_DIR)/DEBIAN/preinst
 	@chmod 755 $(THEOS_STAGING_DIR)/DEBIAN/prerm
+	@echo "Removing retired Keychain Bridge artifacts from reused staging..."
+	@rm -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist
+	@rm -f $(THEOS_STAGING_DIR)/usr/lib/TweakInject/WeaponXKeychainBridge.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/WeaponXKeychainBridge.plist
 	@echo "Adding setup script to package..."
 	@mkdir -p $(THEOS_STAGING_DIR)/usr/bin
 	@cp -a setup_app.sh $(THEOS_STAGING_DIR)/usr/bin/tlinkios-setup
@@ -138,19 +135,14 @@ internal-stage::
 		echo "RootHide: moving Theos-staged tweaks to ElleKit /usr/lib/TweakInject"; \
 		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib; \
 		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist; \
-		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib; \
-		test -f $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist; \
 		mkdir -p $(THEOS_STAGING_DIR)/usr/lib/TweakInject; \
 		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
 		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.plist $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
-		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
-		mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist $(THEOS_STAGING_DIR)/usr/lib/TweakInject/; \
 		rmdir $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries 2>/dev/null || true; \
 		rmdir $(THEOS_STAGING_DIR)/Library/MobileSubstrate 2>/dev/null || true; \
 	else \
 		mkdir -p $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
 		cp -a $(THEOS_OBJ_DIR)/TLinkIOSTweak.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
-		cp -a $(THEOS_OBJ_DIR)/WeaponXKeychainBridge.* $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/; \
 	fi
 	@echo "Ensuring LaunchScreen.storyboard is properly compiled..."
 	@if [ -f "LaunchScreen.storyboard" ]; then \
@@ -165,6 +157,8 @@ internal-stage::
 	@cp -a com.hydra.weaponx.guardian.plist $(THEOS_STAGING_DIR)/Library/LaunchDaemons/
 	@chmod 644 $(THEOS_STAGING_DIR)/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist
 	@chmod 755 $(THEOS_STAGING_DIR)/Library/WeaponX
+	@cp -a DEBIAN/preinst $(THEOS_STAGING_DIR)/Library/WeaponX/retire_keychain_bridge.sh
+	@chmod 755 $(THEOS_STAGING_DIR)/Library/WeaponX/retire_keychain_bridge.sh
 	@chmod 755 $(THEOS_STAGING_DIR)/Library/WeaponX/Guardian
 	@touch $(THEOS_STAGING_DIR)/Library/WeaponX/Guardian/daemon.log
 	@touch $(THEOS_STAGING_DIR)/Library/WeaponX/Guardian/guardian-stdout.log

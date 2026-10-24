@@ -22,14 +22,6 @@ BOOL PXInjectionBundleIsTLinkIOSApp(NSString *bundleID) {
            [bundleID isEqualToString:@"com.hydra.weaponx"];
 }
 
-BOOL PXInjectionBundleIsAppleOrWebKit(NSString *bundleID) {
-    if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return YES;
-    if ([bundleID hasPrefix:@"com.apple."]) return YES;
-    // Defensive: any WebKit-named helper outside the com.apple. prefix set.
-    if ([bundleID rangeOfString:@"WebKit" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
-    return NO;
-}
-
 BOOL PXInjectionBundleIsSharedWebKitHelper(NSString *bundleID) {
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length) return NO;
     return [bundleID isEqualToString:@"com.apple.SafariViewService"] ||
@@ -87,23 +79,6 @@ NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> *expande
     [monolithicTargets addObject:@"com.apple.UIKit"];
     [monolithicTargets addObjectsFromArray:PXInjectionDefaultWebKitHelperBundleIDs()];
     return PXInjectionNormalizeBundleList(monolithicTargets);
-}
-
-NSArray<NSString *> *PXInjectionComputeBridgeBundles(NSArray<NSString *> *tweakBundles) {
-    NSMutableArray<NSString *> *builder = [NSMutableArray array];
-    for (NSString *bundleID in tweakBundles) {
-        if (![bundleID isKindOfClass:[NSString class]]) continue;
-        if ([bundleID isEqualToString:PXInjectionPlaceholderBundleID] ||
-            [bundleID isEqualToString:PXInjectionLegacyPlaceholderBundleID]) continue;
-        if (PXInjectionBundleIsAppleOrWebKit(bundleID)) continue;
-        if (PXInjectionBundleIsTLinkIOSApp(bundleID)) continue;
-        [builder addObject:bundleID];
-    }
-    NSArray<NSString *> *bridge = PXInjectionNormalizeBundleList(builder);
-    if (bridge.count == 0) {
-        return @[PXInjectionPlaceholderBundleID];
-    }
-    return bridge;
 }
 
 NSDictionary *PXInjectionFilterPlistDictionary(NSArray<NSString *> *bundles) {

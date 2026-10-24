@@ -32,6 +32,9 @@ jobs:
           python3 scripts/audit_backup_restore_hardening.py --self-test
           python3 scripts/audit_backup_restore_hardening.py
 
+      - name: Test retired Keychain Bridge absence and upgrade migration
+        run: python3 scripts/test_keychain_bridge_retirement.py
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 
@@ -171,7 +174,12 @@ jobs:
 
       - name: Audit final release package
         run: |
+          set -euo pipefail
           PACKAGE_FILE="$(ls -t packages/*.deb | head -1)"
+          VERIFY_DIR="$(mktemp -d "$RUNNER_TEMP/tlinkios-rootful-package.XXXXXX")"
+          dpkg-deb -x "$PACKAGE_FILE" "$VERIFY_DIR"
+          dpkg-deb -e "$PACKAGE_FILE" "$VERIFY_DIR/DEBIAN"
+          python3 scripts/test_keychain_bridge_retirement.py --package-root "$VERIFY_DIR"
           python3 scripts/release_hardening.py package \
             --artifact "$PACKAGE_FILE" \
             --report package-hardening-report.json
@@ -322,16 +330,19 @@ jobs:
           test "$(dpkg-deb -f "$PACKAGE_FILE" Architecture)" = "iphoneos-arm64e"
           VERIFY_DIR="$(mktemp -d "$RUNNER_TEMP/tlinkios-roothide-package.XXXXXX")"
           dpkg-deb -x "$PACKAGE_FILE" "$VERIFY_DIR"
+          dpkg-deb -e "$PACKAGE_FILE" "$VERIFY_DIR/DEBIAN"
           test -x "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS"
           test -x "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon"
           test -x "$VERIFY_DIR/Library/WeaponX/backup_helper"
           test -f "$VERIFY_DIR/Library/LaunchDaemons/com.hydra.weaponx.guardian.plist"
           test -f "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.dylib"
           test -f "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.plist"
-          test -f "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.dylib"
-          test -f "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.plist"
+          test ! -e "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.dylib"
+          test ! -e "$VERIFY_DIR/usr/lib/TweakInject/WeaponXKeychainBridge.plist"
           test ! -e "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/TLinkIOSTweak.dylib"
           test ! -e "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.dylib"
+          test ! -e "$VERIFY_DIR/Library/MobileSubstrate/DynamicLibraries/WeaponXKeychainBridge.plist"
+          python3 scripts/test_keychain_bridge_retirement.py --package-root "$VERIFY_DIR"
           otool -L "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null
           otool -L "$VERIFY_DIR/usr/lib/TweakInject/TLinkIOSTweak.dylib" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null
           otool -L "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon" | grep -F '@loader_path/.jbroot/usr/lib/libroothide.dylib' >/dev/null

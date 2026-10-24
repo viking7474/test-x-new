@@ -5,7 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 // IOS-08 — Injection filter.
 //
 // Single source of truth for how TLinkIOS turns the global scope selection into
-// the MobileSubstrate filter plists (TLinkIOSTweak.plist + WeaponXKeychainBridge.plist)
+// the MobileSubstrate filter plist (TLinkIOSTweak.plist)
 // and how the mount daemon validates them before installing. Both the app writer
 // and the daemon delegate to these pure, dependency-free functions so their rules
 // can never drift and can be exercised by a host-runnable test.
@@ -21,9 +21,6 @@ NSArray<NSString *> *PXInjectionNormalizeBundleList(NSArray * _Nullable bundles)
 /// The TLinkIOS app / companion bundles that must never be injected or scoped.
 BOOL PXInjectionBundleIsTLinkIOSApp(NSString * _Nullable bundleID);
 
-/// Apple- or WebKit-family bundles (excluded from the keychain bridge filter).
-BOOL PXInjectionBundleIsAppleOrWebKit(NSString * _Nullable bundleID);
-
 /// Safari/WebKit helper coverage targets; runtime bootstrap requires a scoped host.
 BOOL PXInjectionBundleIsSharedWebKitHelper(NSString * _Nullable bundleID);
 NSArray<NSString *> *PXInjectionDefaultWebKitHelperBundleIDs(void);
@@ -36,10 +33,6 @@ NSArray<NSString *> *PXInjectionEnabledMainBundlesFromScopePlist(NSDictionary * 
 /// Coverage targets alone never count as scope anchors. Empty -> placeholder-only.
 /// Idempotent: safe to canonicalize an already generated staging filter.
 NSArray<NSString *> *PXInjectionComputeTweakBundles(NSArray<NSString *> * _Nullable expandedEnabledBundles);
-
-/// Keychain bridge bundle list: third-party app/extensions only (Apple/WebKit + placeholder dropped).
-/// An empty result collapses to the placeholder-only list.
-NSArray<NSString *> *PXInjectionComputeBridgeBundles(NSArray<NSString *> * _Nullable tweakBundles);
 
 /// Build the { Filter: { Bundles, Mode: "Any" } } plist dictionary for a bundle list.
 NSDictionary *PXInjectionFilterPlistDictionary(NSArray<NSString *> *bundles);

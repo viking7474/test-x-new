@@ -1,8 +1,100 @@
 #!/bin/sh
 
-# Simplified preinst script for rootful jailbreak
+# Also installed as /Library/WeaponX/retire_keychain_bridge.sh and rerun by
+# postinst after stopping the old daemon. No app processes are terminated here.
+set -u
 
-# For backwards compatibility with MobileSubstrate
-mkdir -p /Library/MobileSubstrate/DynamicLibraries 2>/dev/null || true
+RETIRE_ROOT=""
+if [ "${1-}" = "--fixture-root" ]; then
+    # Host tests operate on a disposable filesystem tree, never on the host root.
+    case "${2-}" in
+        ""|/|//*|*"/../"*|*"/./"*|*/..|*/.) exit 64 ;;
+        /*) RETIRE_ROOT=$(CDPATH='' cd -P "$2" && pwd -P) || exit 64 ;;
+        *) exit 64 ;;
+    esac
+    case "$RETIRE_ROOT" in ""|/) exit 64 ;; esac
+    [ -f "$RETIRE_ROOT/.px-bridge-retirement-fixture" ] || exit 64
+fi
 
+RETIRE_ROOTFS=""
+if [ -d "$RETIRE_ROOT/rootfs/var/mobile" ]; then
+    RETIRE_ROOTFS="/rootfs"
+fi
+# Do not create Library/TLinkIOS from preinst: its absence is the postinst
+# condition for copying legacy ProjectX profiles and archives on first upgrade.
+RETIRE_STATUS_DIR="$RETIRE_ROOT$RETIRE_ROOTFS/var/mobile/Library/Preferences"
+RETIRE_STATUS="$RETIRE_STATUS_DIR/com.hydra.tlinkios.bridge-retirement.plist"
+RETIRE_RESTART=false
+RETIRE_FAILED=0
+RETIRE_TMP=""
+trap '[ -z "$RETIRE_TMP" ] || rm -f -- "$RETIRE_TMP"' 0
+trap 'exit 1' 1 2 15
+
+# Record process-lifetime uncertainty before dpkg removes old package files.
+# A rerun must never silently clear a previously recorded restart requirement.
+if [ -f "$RETIRE_STATUS" ] &&
+   grep -Fq '<key>restartRequired</key><true/>' "$RETIRE_STATUS"; then
+    RETIRE_RESTART=true
+fi
+
+retire_paths() {
+    for RETIRE_DIR in \
+        /Library/MobileSubstrate/DynamicLibraries \
+        /usr/lib/TweakInject \
+        /var/jb/Library/MobileSubstrate/DynamicLibraries \
+        /var/jb/usr/lib/TweakInject \
+        /private/var/jb/Library/MobileSubstrate/DynamicLibraries \
+        /private/var/jb/usr/lib/TweakInject; do
+        for RETIRE_SUFFIX in plist dylib; do
+            "$1" "$RETIRE_ROOT$RETIRE_DIR/WeaponXKeychainBridge.$RETIRE_SUFFIX"
+        done
+    done
+    for RETIRE_DATA in TLinkIOS ProjectX; do
+        "$1" "$RETIRE_ROOT$RETIRE_ROOTFS/var/mobile/Library/$RETIRE_DATA/filter_plists/WeaponXKeychainBridge.plist"
+    done
+}
+
+retire_detect() {
+    if [ -e "$1" ] || [ -L "$1" ]; then RETIRE_RESTART=true; fi
+}
+
+retire_remove() {
+    # Exact retired filenames only. Unlink a symlink itself, never its target;
+    # do not recurse into a directory unexpectedly occupying an artifact path.
+    if ! rm -f -- "$1"; then RETIRE_FAILED=1; fi
+    if [ -e "$1" ] || [ -L "$1" ]; then RETIRE_FAILED=1; fi
+}
+
+retire_write_status() {
+    mkdir -p "$RETIRE_STATUS_DIR" || return 1
+    [ ! -d "$RETIRE_STATUS" ] || return 1
+    RETIRE_TMP=$(mktemp "$RETIRE_STATUS_DIR/.bridge-retirement.XXXXXX") || return 1
+    if ! printf '%s\n' \
+        '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<plist version="1.0"><dict>' \
+        "<key>status</key><string>$1</string>" \
+        "<key>restartRequired</key><$RETIRE_RESTART/>" \
+        "<key>artifactsRemoved</key><$2/>" \
+        '<key>runtimeVerified</key><false/>' \
+        '</dict></plist>' > "$RETIRE_TMP"; then return 1; fi
+    chmod 644 "$RETIRE_TMP" || return 1
+    mv -f -- "$RETIRE_TMP" "$RETIRE_STATUS" || return 1
+    RETIRE_TMP=""
+}
+
+retire_paths retire_detect
+retire_write_status cleanup-started false || exit 1
+retire_paths retire_remove
+if [ "$RETIRE_FAILED" -ne 0 ]; then
+    retire_write_status cleanup-failed false || exit 1
+    echo 'Keychain Bridge retirement: cleanup failed; no runtime verification.' >&2
+    exit 1
+fi
+if [ "$RETIRE_RESTART" = true ]; then
+    retire_write_status pending-target-restart true || exit 1
+    echo 'Keychain Bridge files removed. Restart previously injected target apps and TLinkIOS; loaded images remain until process exit.'
+else
+    retire_write_status no-artifacts-detected true || exit 1
+    echo 'Keychain Bridge artifacts absent; loaded target processes have not been inspected.'
+fi
 exit 0

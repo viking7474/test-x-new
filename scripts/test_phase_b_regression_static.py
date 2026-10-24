@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from test_keychain_bridge_retirement import check_source_contracts
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_ROOT = ROOT / "TLinkIOSTweak"
@@ -47,7 +48,6 @@ for token in (
     "PXP1CJBFeatureActive",
     "PXP1CSnapshotNeedsRefresh",
     "PXInjectionComputeTweakBundles",
-    "PXInjectionComputeBridgeBundles",
     "PXP1CWebKitHostScoped",
     "PXInjectionSpringBoardBundleID",
 ):
@@ -65,21 +65,19 @@ for token in (
 ):
     require(token in phase_a, f"B-06 lost Phase-A identity regression prerequisite: {token}")
 
-# App/extension injection and broad coverage remain centralized; the bridge stays narrow.
+# App/extension injection and broad coverage remain centralized in the sole tweak.
 injection = read("tests/PXInjectionFilterTests.m")
 for token in (
     '"tweak keeps extension bundle"',
     '"tweak includes WebKit helpers"',
-    '"bridge keeps only third-party app/extensions, sorted"',
-    '"bridge drops SpringBoard"',
-    '"bridge drops WebKit helpers"',
     '"empty scope -> placeholder-only tweak filter"',
 ):
     require(token in injection, f"B-06 injection-filter prerequisite drifted: {token}")
 
+check_source_contracts()
 daemon = read("WeaponXMountDaemon/WeaponXDaemon.m")
-require('if ([name isEqualToString:@"TLinkIOSTweak.plist"])' in daemon,
-        "B-06 daemon lost monolithic filter migration gate")
+require('for (NSString *name in @[@"TLinkIOSTweak.plist"])' in daemon,
+        "B-06 daemon must install only the main tweak filter")
 require("PXInjectionComputeTweakBundles(bundles)" in daemon,
         "B-06 daemon no longer canonicalizes tweak coverage")
 require('sanitizedPlist writeToFile:src atomically:YES' in daemon,
