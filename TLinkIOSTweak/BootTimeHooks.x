@@ -38,18 +38,46 @@ static NSString *cachedProfilePath = nil;
 static NSDate *cacheTimestamp = nil;
 static const NSTimeInterval kCacheValidityDuration = 30.0;
 
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+static BOOL PXCapturedBootValues(PXRuntimeReadSnapshot *snapshot, NSDate **outBoot, NSTimeInterval *outUptime) {
+    // One strong view owns the complete pair. Never reacquire between fields.
+    if (!snapshot.valid) return NO;
+    NSDictionary *boot = [snapshot profileArtifact:@"bootTime"];
+    NSDictionary *uptimeInfo = [snapshot profileArtifact:@"systemUptime"];
+    NSDate *bootTime = [boot[@"value"] isKindOfClass:NSDate.class] ? boot[@"value"] : nil;
+    id rawUptime = uptimeInfo[@"value"];
+    NSTimeInterval uptime = [rawUptime respondsToSelector:@selector(doubleValue)] ? [rawUptime doubleValue] : 0;
+    if (!bootTime || !(uptime > 0)) return NO;
+    if (outBoot) *outBoot = bootTime;
+    if (outUptime) *outUptime = uptime;
+    return YES;
+}
+#endif
+
 static NSDate *PXCachedBootTimeValue(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXRuntimeReadSnapshot *snapshot = PXCaptureRuntimeSnapshot();
+    NSDate *bootTime = nil;
+    return PXCapturedBootValues(snapshot, &bootTime, NULL) ? bootTime : nil;
+#else
     os_unfair_lock_lock(&gBootTimeCacheLock);
     NSDate *value = cachedBootTime;
     os_unfair_lock_unlock(&gBootTimeCacheLock);
     return value;
+#endif
 }
 
 static NSTimeInterval PXCachedUptimeValue(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXRuntimeReadSnapshot *snapshot = PXCaptureRuntimeSnapshot();
+    NSTimeInterval uptime = 0;
+    return PXCapturedBootValues(snapshot, NULL, &uptime) ? uptime : 0;
+#else
     os_unfair_lock_lock(&gBootTimeCacheLock);
     NSTimeInterval value = cachedUptime;
     os_unfair_lock_unlock(&gBootTimeCacheLock);
     return value;
+#endif
 }
 
 static void PXInvalidateBootTimeCache(void) {
@@ -164,21 +192,8 @@ static NSString *getCurrentProfilePath(void) {
 // Update cached boot time values from profile data
 static void updateCachedBootTimeValues(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    @try {
-        NSDictionary *boot = PXRuntimeSnapshotProfileArtifact(@"bootTime");
-        NSDictionary *uptimeInfo = PXRuntimeSnapshotProfileArtifact(@"systemUptime");
-        NSDate *bootTime = [boot[@"value"] isKindOfClass:NSDate.class] ? boot[@"value"] : nil;
-        NSTimeInterval uptime = [uptimeInfo[@"value"] doubleValue];
-        if (bootTime && uptime > 0) {
-            NSString *profileKey = [NSString stringWithFormat:@"runtime:%@", PXRuntimeSnapshotProfileID() ?: @"unknown"];
-            os_unfair_lock_lock(&gBootTimeCacheLock);
-            cachedBootTime = [bootTime copy];
-            cachedUptime = uptime;
-            cachedProfilePath = profileKey;
-            cacheTimestamp = [NSDate date];
-            os_unfair_lock_unlock(&gBootTimeCacheLock);
-        }
-    } @catch (__unused NSException *e) {}
+    // Captured reader getters above replace the duplicate RootHide cache. No
+    // file parse or copy of an older tuple into a new cache generation here.
     return;
 #endif
     @try {
@@ -599,6 +614,10 @@ static void installSystemCallHooks(void) {
             }
             
             PXLog(@"[BootTimeHooks] 🎯 Installing minimal system call hooks for scoped app: %@", bundleID);
+
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+            (void)PXPrepareRuntimeSnapshotReader();
+#endif
             
             CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
             for (NSString *notificationName in @[

@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái: Patch 1–2 đã triển khai, host checks pass và người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. Patch 3 đã triển khai source và host checks; native fixture/Logos build mới chưa xác minh tại Windows. Patch 4–8 chưa triển khai.
+Trạng thái: Patch 1–3 đã triển khai, host checks pass và người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. Patch 4A.1 (reader core + BootTime RootHide) đã có source và host checks, native CI mới chưa xác minh. 4A chưa hoàn tất: còn migrate toàn bộ consumer/operation ở 4A.2. Patch 4B/4C và 5–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -94,6 +94,8 @@ Cập nhật `test_location_direct_semantics_static.py` từ ràng buộc source
 Chia thành 4A/4B/4C để review được, nhưng chỉ tuyên bố hoàn tất khi cả reader, publisher và source writer contracts cùng đạt.
 
 **4A — Captured reader API**
+
+Triển khai qua hai bước để native fixture kiểm chứng reader trước khi chuyển toàn bộ hooks. [Báo cáo 4A.1](audit-implementation/PATCH-4A-1-runtime-reader-core.md) ghi rõ consumer manifest và giới hạn. 4A.1 thêm reader core, migration BootTime RootHide và native queue/concurrency fixtures; 4A.2 chuyển scope/identity/identifier state và mọi consumer còn lại, bao gồm policy + data trong cùng operation. Chưa coi 4A đạt acceptance khi chỉ 4A.1 pass build.
 
 - Tạo immutable runtime snapshot có publisherEpoch, uint64 revision, schemaVersion và dữ liệu đã validate/deep-copy cần thiết.
 - Mỗi logical operation acquire một lần, giữ strong reference tới snapshot rồi đọc fields/artifacts từ nó; truyền snapshot vào helper liên quan thay vì helper acquire lại.

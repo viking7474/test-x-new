@@ -1,6 +1,8 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXJailbreakCompat.h"
 #import "PXPaths.h"
+#import <CoreFoundation/CoreFoundation.h>
+#import <dispatch/dispatch.h>
 #import <sys/stat.h>
 #import <errno.h>
 #import <string.h>
@@ -8,6 +10,50 @@
 
 static const NSInteger kPXRuntimeSnapshotSchemaVersion = 1;
 static NSDictionary *gPXRuntimeSnapshotLastPublishStats = nil;
+static NSDictionary *PXRuntimeCapturedSource(void);
+
+static PXRuntimeSnapshotReader *PXProcessRuntimeReader(void) {
+    static PXRuntimeSnapshotReader *reader;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        reader = [[PXRuntimeSnapshotReader alloc] initWithLoader:^NSDictionary *{
+            return PXRuntimeCapturedSource();
+        } refreshInterval:5.0];
+    });
+    return reader;
+}
+
+PXRuntimeReadSnapshot *PXCaptureRuntimeSnapshot(void) {
+    int savedErrno = errno;
+    PXRuntimeReadSnapshot *snapshot = [PXProcessRuntimeReader() capture];
+    errno = savedErrno;
+    return snapshot;
+}
+
+static void PXRuntimeReaderNotification(CFNotificationCenterRef center, void *observer,
+                                       CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    @autoreleasepool { [PXProcessRuntimeReader() invalidateAndRefresh]; }
+}
+
+BOOL PXPrepareRuntimeSnapshotReader(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+        if (center) {
+            for (NSString *name in @[@"com.hydra.tlinkios.runtimeSnapshotChanged",
+                                     @"com.hydra.tlinkios.profileChanged",
+                                     @"com.hydra.tlinkios.settings.changed",
+                                     @"com.hydra.tlinkios.scopedAppsChanged"]) {
+                CFNotificationCenterAddObserver(center, NULL, PXRuntimeReaderNotification,
+                    (__bridge CFStringRef)name, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+            }
+        }
+    });
+    PXRuntimeSnapshotReader *reader = PXProcessRuntimeReader();
+    (void)[reader capture];
+    return [reader waitForPendingRefresh:1.0];
+}
 
 static NSDictionary *PXRuntimeDictionaryAtPath(NSString *path) {
     if (![path isKindOfClass:NSString.class] || !path.length) return @{};
@@ -49,6 +95,20 @@ NSDictionary *PXLoadRuntimeSnapshot(void) {
     if (local.count) return local;
 #endif
     return PXValidatedRuntimeSnapshotAtPath(PXRuntimeSnapshotPath());
+}
+
+static NSDictionary *PXRuntimeCapturedSource(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSString *local = PXRuntimeSnapshotLocalContainerPath();
+    if (local.length && [[NSFileManager defaultManager] fileExistsAtPath:local]) {
+        // A corrupt existing local file is a failed publication, not permission
+        // to revive enablement from a different/older global source.
+        return PXRuntimeDictionaryAtPath(local);
+    }
+#endif
+    // Validation/deep freezing belongs to the reader. The legacy loader above
+    // keeps its old schema contract until the remaining consumers migrate.
+    return PXRuntimeDictionaryAtPath(PXRuntimeSnapshotPath());
 }
 
 NSDictionary *PXRuntimeSnapshotLastPublishStats(void) {

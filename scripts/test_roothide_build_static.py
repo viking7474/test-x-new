@@ -170,8 +170,9 @@ require('PXRuntimeSnapshotProfileArtifact(@"storage")' in storage_hooks and
         'PXRuntimeSnapshotTLinkSettings()' in storage_hooks and
         'PXRuntimeSnapshotProfileArtifact(@"batteryInfo")' in battery_hooks and
         'PXRuntimeSnapshotDeviceIDs()' in battery_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"bootTime")' in boot_time_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"systemUptime")' in boot_time_hooks and
+        'PXCaptureRuntimeSnapshot()' in boot_time_hooks and
+        '[snapshot profileArtifact:@"bootTime"]' in boot_time_hooks and
+        '[snapshot profileArtifact:@"systemUptime"]' in boot_time_hooks and
         'PXRuntimeSnapshotProfileArtifact(@"networkSettings")' in network_hooks and
         'PXRuntimeSnapshotProfileArtifact(@"carrierDetails")' in network_hooks and
         'PXRuntimeSnapshotProfileArtifact(@"deviceTheme")' in theme_hooks and

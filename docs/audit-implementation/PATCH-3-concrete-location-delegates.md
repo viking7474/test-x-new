@@ -1,6 +1,6 @@
 # Patch 3 — Concrete location delegates
 
-Ngày: 2026-10-24. Baseline: `74c974b`. Trạng thái: source implemented; host source/regression gates PASS. Native fixture mới đã nối vào CI nhưng chưa chạy trên host Windows. Người dùng đã xác nhận build Patch 2 pass trước lượt triển khai này.
+Ngày: 2026-10-24. Baseline: `74c974b`. Trạng thái: source implemented; host source/regression gates PASS. Người dùng xác nhận build Patch 3 pass trước khi triển khai 4A.1. Host Windows không tự chạy native fixture; chưa có log riêng để xác nhận từng fixture/lane/device matrix.
 
 ## Vấn đề và thay đổi
 
@@ -60,7 +60,7 @@ CI chạy `python3 scripts/test_location_direct_semantics_static.py --native`: c
 
 Chưa có bằng chứng từ host Windows cho:
 
-1. Compile/run fixture mới hoặc build Logos/Objective-C rootful/RootHide Patch 3. Source checks không thay compiler/runtime.
+1. Build Patch 3 do người dùng xác nhận pass; chưa có log compile/run fixture theo từng case hoặc kết quả từng rootful/RootHide lane để ghi độc lập. Source checks không thay compiler/runtime.
 2. Native CLLocationManager setter/callback delivery trên iOS, callback run loop thực tế, delegate capability caching và scope/toggle integration với manager thật.
 3. arm64e/hook-runtime matrix, nhiều tweak cùng swizzle, class đổi động/KVO hoặc private framework delegate/proxy behavior. Class-local installation giữ original chain tại thời điểm cài; không bảo đảm một swizzler khác sau đó vẫn giữ chain.
 
