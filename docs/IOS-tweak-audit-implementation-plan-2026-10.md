@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái: Patch 1 đã triển khai source và kiểm chứng host; còn gate build/package/native/device. Patch 2–8 chưa triển khai.
+Trạng thái: Patch 1 đã triển khai, host checks pass và người dùng xác nhận build pass; device/package acceptance vẫn cần bằng chứng riêng. Patch 2 đã triển khai source và host checks, native CI/iOS runtime chưa xác minh. Patch 3–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -61,9 +61,11 @@ Gates: `audit_backup_restore_hardening.py`, `test_phase_b_regression_static.py`,
 
 Phạm vi: `DomainBlockingHooks.x`, phần blocking adapter cần thiết và runtime regression fixture.
 
+Tiến độ và bằng chứng: [báo cáo Patch 2](audit-implementation/PATCH-2-domain-task-lifecycle.md).
+
 1. Bỏ dispatch_after completion từ task factory và các task giả đã cancel trả về. Không thêm delay hoặc kết nối localhost để mô phỏng lỗi.
 2. Blocking phải gắn với lifecycle thật của task và giữ session delegate/completion queue, original task/request metadata và cancellation semantics.
-3. Hướng triển khai đầu tiên là NSURLProtocol cho các session hỗ trợ, phát lỗi trong startLoading. Thực hiện compatibility fixture trước khi nối vào hooks; không giả định background sessions hoặc WebSocket hỗ trợ custom protocol.
+3. Đã điều chỉnh hướng triển khai sau kiểm tra tài liệu Apple: custom NSURLProtocol không hỗ trợ background sessions. Adapter giữ task thật, đánh giá policy tại `resume`, gọi native `cancel` khi cần chặn rồi forward original resume đúng một lần. Foundation quyết định completion/delegate queue và state; lỗi chặn chuyển thành `NSURLErrorCancelled`. Không rewrite request của NSURLSession, không sửa session configuration. Native fixture phải xác nhận contract; hỗ trợ selector không đồng nghĩa đã xác minh mọi loại task trên iOS.
 4. Shared/default/ephemeral, background, data/upload/download và các hook khác cùng process phải được đối chiếu. Không ship một refactor làm mất coverage đã xác nhận; surface chưa được hỗ trợ phải có kết luận và phương án cụ thể trong report của patch, không giả callback để che khoảng trống.
 5. Requests ngoài scope hoặc không bị block giữ nguyên. Bảo vệ against recursion và không chạy completion khi task chưa resume, ngoại trừ behavior cancellation vốn có của Foundation đã được fixture xác nhận.
 

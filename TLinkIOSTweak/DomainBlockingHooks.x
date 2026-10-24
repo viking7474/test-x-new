@@ -11,6 +11,7 @@
 #import <SafariServices/SafariServices.h>
 #import "TLinkIOSLogging.h"
 #import "PXScope.h"
+#import "PXDomainTaskBlocker.h"
 
 
 
@@ -229,218 +230,32 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 
 %end
 
-#pragma mark - HTTP Request Level Blocking
+#pragma mark - NSURLSession Lifecycle Blocking
 
-%hook NSURLRequest
-
-+ (id)requestWithURL:(NSURL *)url {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: No logging - apps can detect NSLog
-        // Return valid request with localhost to avoid nil detection
-        return [NSURLRequest requestWithURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-    }
-    return %orig;
+// Keep request construction pure: rewriting NSURLRequest/NSMutableURLRequest to
+// localhost hid the real host before session policy could inspect it. Legacy
+// NSURLConnection/CFNetwork/WebKit entry points retain their existing adapters.
+static NSURLSession *PXDomainObservedSession(NSURLSession *session) {
+    PXDomainObserveURLSession(session, ^BOOL(NSString *host) {
+        return shouldBlockDomain(host);
+    });
+    return session;
 }
-
-- (id)initWithURL:(NSURL *)url {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: No logging - initialize with localhost instead of nil
-        return %orig([NSURL URLWithString:@"https://127.0.0.1:1"]);
-    }
-    return %orig;
-}
-
-%end
-
-%hook NSMutableURLRequest
-
-- (void)setURL:(NSURL *)url {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: No logging - silent URL blocking
-        // Set to localhost instead of not setting
-        %orig([NSURL URLWithString:@"https://127.0.0.1:1"]);
-        return;
-    }
-    %orig;
-}
-
-%end
-
-#pragma mark - NSURLSession Comprehensive Blocking
 
 %hook NSURLSession
 
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: No logging, create task with localhost that will fail naturally
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        return %orig(blockRequest);
-    }
-    return %orig;
++ (NSURLSession *)sharedSession {
+    return PXDomainObservedSession(%orig);
 }
 
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Create realistic delayed network failure
-        if (completionHandler) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                                     code:NSURLErrorCannotFindHost 
-                                                 userInfo:@{NSLocalizedDescriptionKey: @"A server with the specified hostname could not be found."}];
-                completionHandler(nil, nil, error);
-            });
-        }
-        // Return cancelled task to simulate network failure
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        NSURLSessionDataTask *task = %orig(blockRequest, nil);
-        [task cancel];
-        return task;
-    }
-    return %orig;
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration {
+    return PXDomainObservedSession(%orig);
 }
 
-- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: No logging, redirect to localhost
-        return %orig([NSURL URLWithString:@"https://127.0.0.1:1"]);
-    }
-    return %orig;
-}
-
-- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: Realistic delayed failure
-        if (completionHandler) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                                     code:NSURLErrorTimedOut 
-                                                 userInfo:@{NSLocalizedDescriptionKey: @"The request timed out."}];
-                completionHandler(nil, nil, error);
-            });
-        }
-        NSURLSessionDataTask *task = %orig([NSURL URLWithString:@"https://127.0.0.1:1"], nil);
-        [task cancel];
-        return task;
-    }
-    return %orig;
-}
-
-// Upload tasks
-- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: No logging
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        return %orig(blockRequest, bodyData);
-    }
-    return %orig;
-}
-
-- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Realistic upload failure
-        if (completionHandler) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                                     code:NSURLErrorNetworkConnectionLost 
-                                                 userInfo:@{NSLocalizedDescriptionKey: @"The network connection was lost."}];
-                completionHandler(nil, nil, error);
-            });
-        }
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        NSURLSessionUploadTask *task = %orig(blockRequest, bodyData, nil);
-        [task cancel];
-        return task;
-    }
-    return %orig;
-}
-
-// Download tasks
-- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: No logging, redirect to localhost that will fail
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        return %orig(blockRequest);
-    }
-    return %orig;
-}
-
-- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))completionHandler {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: Realistic download failure
-        if (completionHandler) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                                     code:NSURLErrorCannotConnectToHost 
-                                                 userInfo:@{NSLocalizedDescriptionKey: @"Could not connect to the server."}];
-                completionHandler(nil, nil, error);
-            });
-        }
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"https://127.0.0.1:1"]];
-        NSURLSessionDownloadTask *task = %orig(blockRequest, nil);
-        [task cancel];
-        return task;
-    }
-    return %orig;
-}
-
-- (NSURLSessionDownloadTask *)downloadTaskWithURL:(NSURL *)url {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: No logging, redirect to localhost
-        return %orig([NSURL URLWithString:@"https://127.0.0.1:1"]);
-    }
-    return %orig;
-}
-
-- (NSURLSessionDownloadTask *)downloadTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))completionHandler {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: Realistic delayed failure
-        if (completionHandler) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                NSError *error = [NSError errorWithDomain:NSURLErrorDomain 
-                                                     code:NSURLErrorTimedOut 
-                                                 userInfo:@{NSLocalizedDescriptionKey: @"The request timed out."}];
-                completionHandler(nil, nil, error);
-            });
-        }
-        NSURLSessionDownloadTask *task = %orig([NSURL URLWithString:@"https://127.0.0.1:1"], nil);
-        [task cancel];
-        return task;
-    }
-    return %orig;
-}
-
-// WebSocket tasks (iOS 13+)
-- (NSURLSessionWebSocketTask *)webSocketTaskWithRequest:(NSURLRequest *)request {
-    if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
-        // STEALTH: No logging, create task with localhost that will fail
-        NSMutableURLRequest *blockRequest = [request mutableCopy];
-        [blockRequest setURL:[NSURL URLWithString:@"wss://127.0.0.1:1"]];
-        return %orig(blockRequest);
-    }
-    return %orig;
-}
-
-- (NSURLSessionWebSocketTask *)webSocketTaskWithURL:(NSURL *)url {
-    if (shouldBlockDomain(url.host) && url && url.host) {
-        // STEALTH: No logging, redirect to localhost
-        return %orig([NSURL URLWithString:@"wss://127.0.0.1:1"]);
-    }
-    return %orig;
-}
-
-// Stream tasks
-- (NSURLSessionStreamTask *)streamTaskWithHostName:(NSString *)hostname port:(NSInteger)port {
-    if (shouldBlockDomain(hostname)) {
-        // STEALTH: No logging, redirect to localhost
-        return %orig(@"127.0.0.1", 1);
-    }
-    return %orig;
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)configuration
+                                delegate:(id<NSURLSessionDelegate>)delegate
+                           delegateQueue:(NSOperationQueue *)queue {
+    return PXDomainObservedSession(%orig);
 }
 
 %end
@@ -556,7 +371,7 @@ static int hooked_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
     if (shouldBlockDomain(request.URL.host) && request.URL && request.URL.host) {
         // STEALTH: Load blank page instead of showing error
-        // Note: This should rarely trigger since NSURLRequest hooks should catch it first
+        // WebKit has its own network process; keep its dedicated adapter.
         NSURLRequest *blockRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@"about:blank"]];
         return %orig(blockRequest);
     }

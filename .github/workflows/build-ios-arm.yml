@@ -35,6 +35,9 @@ jobs:
       - name: Test retired Keychain Bridge absence and upgrade migration
         run: python3 scripts/test_keychain_bridge_retirement.py
 
+      - name: Test native NSURLSession domain-blocking lifecycle
+        run: python3 scripts/test_domain_task_lifecycle.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 

@@ -1,6 +1,6 @@
 # Patch 1 — Keychain Bridge retirement
 
-Ngày: 2026-10-24. Baseline: `b0d35c6`. Trạng thái: source implemented, host checks passed; native CI/package/device gates pending.
+Ngày: 2026-10-24. Baseline: `b0d35c6`. Trạng thái: source implemented, host checks passed; người dùng xác nhận build pass trước khi triển khai Patch 2. Chưa có chi tiết lane/log build hoặc kết quả device/package acceptance để xác nhận toàn bộ release gate.
 
 ## Thay đổi
 
@@ -41,8 +41,8 @@ Backup/restore audit script không bị sửa. Tổng 2504 -> 2500 vì source li
 
 ## Gate chưa có bằng chứng
 
-- Windows hiện không có xcrun/Theos/Foundation toolchain: chưa build Logos/Objective-C native hoặc package thật trong lượt này.
-- Native injection fixtures và extracted-package absence đã được nối vào CI nhưng chưa có kết quả CI mới.
+- Windows hiện không có xcrun/Theos/Foundation toolchain: chưa tự build Logos/Objective-C native hoặc package thật tại host này. Build pass do người dùng xác nhận; không suy diễn lane/architecture từ xác nhận đó.
+- Native injection fixtures và extracted-package absence đã được nối vào CI; chưa có log riêng để ghi kết quả từng fixture/package contract.
 - Chưa install/upgrade lên thiết bị, chưa inspect/unload process, chưa chạy restore hoặc terminate app nào.
 
 ## Device acceptance trước release
