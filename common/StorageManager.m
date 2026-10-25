@@ -2,6 +2,7 @@
 #import "ProfileManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
+#import "PXRuntimeSourceStore.h"
 #import "DeviceModelManager.h"
 #import "IPhoneModelDB.h"
 
@@ -275,10 +276,14 @@
 - (void)saveToProfile:(NSString *)profileId {
     if (!profileId) return;
     
-    NSString *profileDir = [PXProfilesPath() stringByAppendingPathComponent:profileId];
+    NSString *profileDir = PXProfileRootPath(profileId);
+    if (!profileDir.length) return;
     NSString *storagePath = [profileDir stringByAppendingPathComponent:@"storage.plist"];
-    
-    [_storageSettings writeToFile:storagePath atomically:YES];
+    NSDictionary *prepared = [_storageSettings copy];
+    NSError *error = nil;
+    if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return [tx setDictionary:prepared atPath:storagePath error:writeError];
+    }, &error)) PXLog(@"[StorageManager] Failed to commit storage for %@: %@", profileId, error);
 }
 
 - (BOOL)loadFromProfile:(NSString *)profileId {

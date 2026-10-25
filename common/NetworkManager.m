@@ -4,9 +4,14 @@
 #import <arpa/inet.h>
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
+#import "PXRuntimeArtifactWriter.h"
 
 @interface NetworkManager ()
 + (BOOL)saveLocalIPAddress:(NSString *)ipAddress ipv6Address:(NSString *)ipv6Address;
++ (BOOL)saveAddresses:(NSString *)ipv4 ipv6:(NSString *)ipv6 inIdentityDirectory:(NSString *)identityDir;
++ (BOOL)saveSingleAddress:(NSString *)ipv4 inIdentityDirectory:(NSString *)identityDir;
++ (BOOL)saveCarrier:(NSDictionary *)carrier inIdentityDirectory:(NSString *)identityDir;
++ (BOOL)saveCarrierDetails:(NSString *)name mcc:(NSString *)mcc mnc:(NSString *)mnc inIdentityDirectory:(NSString *)identityDir;
 @end
 
 @implementation NetworkManager
@@ -161,29 +166,15 @@
         return NO;
     }
 
-    NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-    NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: [NSMutableDictionary dictionary];
-    if (ipAddress != nil) {
-        networkDict[@"localIPAddress"] = ipAddress;
-    }
-    if (ipv6Address != nil) {
-        networkDict[@"localIPv6Address"] = ipv6Address;
-    }
-    networkDict[@"lastUpdated"] = [NSDate date];
+    return [self saveAddresses:ipAddress ipv6:ipv6Address inIdentityDirectory:identityDir];
+}
 
-    BOOL success = [networkDict writeToFile:networkPath atomically:YES];
-    if (success) {
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-        if (ipAddress != nil) {
-            deviceIds[@"LocalIPAddress"] = ipAddress;
-        }
-        if (ipv6Address != nil) {
-            deviceIds[@"LocalIPv6Address"] = ipv6Address;
-        }
-        success = [deviceIds writeToFile:deviceIdsPath atomically:YES];
-    }
-
++ (BOOL)saveAddresses:(NSString *)ipAddress ipv6:(NSString *)ipv6Address inIdentityDirectory:(NSString *)identityDir {
+    NSDate *now = [NSDate date];
+    NSError *error = nil;
+    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeAddresses(tx, identityDir, ipAddress, ipv6Address, NO, now, writeError);
+    }, &error);
     PXLog(@"[WeaponX] %@ Local IP Address (IPv4/IPv6) saved to profile: %@ / %@",
           success ? @"✅" : @"❌",
           ipAddress ?: @"<unchanged>",
@@ -196,27 +187,29 @@
         return NO;
     }
 
-    // A single-address save must not regenerate an unrelated IPv6 value. Preserve the
-    // profile's existing spoofed IPv6 and only generate it once when no paired value exists.
-    NSString *ipv6Address = nil;
     NSString *identityDir = [self profileIdentityPath];
-    if (identityDir.length) {
-        NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-        NSDictionary *networkDict = [NSDictionary dictionaryWithContentsOfFile:networkPath];
-        ipv6Address = [networkDict[@"localIPv6Address"] isKindOfClass:[NSString class]]
-            ? networkDict[@"localIPv6Address"] : nil;
-        if (!ipv6Address.length) {
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-            ipv6Address = [deviceIds[@"LocalIPv6Address"] isKindOfClass:[NSString class]]
-                ? deviceIds[@"LocalIPv6Address"] : nil;
-        }
-    }
-    if (!ipv6Address.length) {
-        ipv6Address = [self generateSpoofedLocalIPv6AddressFromCurrent];
-    }
+    return identityDir.length ? [self saveSingleAddress:ipAddress inIdentityDirectory:identityDir] : NO;
+}
 
-    return [self saveLocalIPAddress:ipAddress ipv6Address:ipv6Address];
++ (BOOL)saveSingleAddress:(NSString *)ipAddress inIdentityDirectory:(NSString *)identityDir {
+    // Recover before reading a possibly interrupted pair. Existing IPv6 commits
+    // in one pass; interface enumeration/generation only happens outside the gate.
+    __block BOOL needsIPv6 = NO;
+    NSDate *now = [NSDate date];
+    NSError *error = nil;
+    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeIPv4WithExistingPair(tx, identityDir, ipAddress, now, &needsIPv6, writeError);
+    }, &error);
+    if (success && needsIPv6) {
+        NSString *candidateIPv6 = [self generateSpoofedLocalIPv6AddressFromCurrent];
+        NSDate *preparedAt = [NSDate date];
+        success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            // Another writer may have filled IPv6 during preparation. Preserve it.
+            return PXStageRuntimeAddresses(tx, identityDir, ipAddress, candidateIPv6, YES, preparedAt, writeError);
+        }, &error);
+    }
+    PXLog(@"[NetworkManager] %@ IPv4 update at %@: %@", success ? @"Committed" : @"Failed", identityDir, error ?: @"");
+    return success;
 }
 
 + (NSString *)getSavedLocalIPAddress {
@@ -236,8 +229,8 @@
         NSString *localIP = [self generateSpoofedLocalIPAddressFromCurrent];
         NSString *localIPv6 = [self generateSpoofedLocalIPv6AddressFromCurrent];
         if (localIP.length) {
-            [self saveLocalIPAddress:localIP ipv6Address:localIPv6];
-            PXLog(@"[WeaponX] Forced refresh of local IP address pair completed");
+            BOOL saved = [self saveAddresses:localIP ipv6:localIPv6 inIdentityDirectory:identityDir];
+            PXLog(@"[WeaponX] Forced refresh of local IP address pair %@", saved ? @"committed" : @"failed to persist");
         } else {
             PXLog(@"[WeaponX] Forced refresh skipped: no current local IPv4 address is available");
         }
@@ -261,8 +254,8 @@
     if (!localIP) {
         localIP = [self getCurrentLocalIPAddress];
         if (localIP.length) {
-            [self saveLocalIPAddress:localIP];
-            PXLog(@"[WeaponX] No saved Local IP found, using current: %@", localIP);
+            BOOL saved = [self saveSingleAddress:localIP inIdentityDirectory:identityDir];
+            PXLog(@"[WeaponX] No saved Local IP found, using current: %@ (persisted=%@)", localIP, saved ? @"YES" : @"NO");
         } else {
             PXLog(@"[WeaponX] No saved Local IP found and no current local IPv4 address is available");
         }
@@ -286,7 +279,7 @@
         ipv6 = [self generateSpoofedLocalIPv6AddressFromCurrent];
         if (ipv6.length) {
             NSString *currentIPv4 = [self getCurrentLocalIPAddress];
-            [self saveLocalIPAddress:currentIPv4 ipv6Address:ipv6];
+            [self saveAddresses:currentIPv4 ipv6:ipv6 inIdentityDirectory:identityDir];
         }
     }
     return ipv6;
@@ -301,7 +294,10 @@
         PXLog(@"[WeaponX] Error: Could not get profile identity path for carrier details");
         return NO;
     }
-    
+    return [self saveCarrierDetails:carrierName mcc:mcc mnc:mnc inIdentityDirectory:identityDir];
+}
+
++ (BOOL)saveCarrierDetails:(NSString *)carrierName mcc:(NSString *)mcc mnc:(NSString *)mnc inIdentityDirectory:(NSString *)identityDir {
     // Create carrier details dictionary
     NSDictionary *carrierDict = @{
         @"carrierName": carrierName ?: @"",
@@ -310,37 +306,17 @@
         @"lastUpdated": [NSDate date]
     };
     
-    // Save to carrier_details.plist
-    NSString *carrierPath = [identityDir stringByAppendingPathComponent:@"carrier_details.plist"];
-    BOOL success = [carrierDict writeToFile:carrierPath atomically:YES];
-    
-    // Also update the network_settings.plist to keep all network data together
-    if (success) {
-        NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-        NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: [NSMutableDictionary dictionary];
-        
-        networkDict[@"carrierName"] = carrierName ?: @"";
-        networkDict[@"mcc"] = mcc ?: @"";
-        networkDict[@"mnc"] = mnc ?: @"";
-        [networkDict setObject:[NSDate date] forKey:@"lastUpdated"];
-        
-        success = [networkDict writeToFile:networkPath atomically:YES];
-    }
-    
-    // Also update the combined device_ids.plist
-    if (success) {
-        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-        
-        deviceIds[@"CarrierName"] = carrierName ?: @"";
-        deviceIds[@"CarrierMCC"] = mcc ?: @"";
-        deviceIds[@"CarrierMNC"] = mnc ?: @"";
-        
-        success = [deviceIds writeToFile:deviceIdsPath atomically:YES];
-    }
-    
+    return [self saveCarrier:carrierDict inIdentityDirectory:identityDir];
+}
+
++ (BOOL)saveCarrier:(NSDictionary *)carrierDict inIdentityDirectory:(NSString *)identityDir {
+    NSDate *networkTimestamp = [NSDate date];
+    NSError *error = nil;
+    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeCarrier(tx, identityDir, carrierDict, networkTimestamp, writeError);
+    }, &error);
     PXLog(@"[WeaponX] %@ Carrier details saved to profile: %@ (%@-%@)", 
-           success ? @"✅" : @"❌", carrierName ?: @"Unknown", mcc ?: @"", mnc ?: @"");
+           success ? @"✅" : @"❌", carrierDict[@"carrierName"] ?: @"Unknown", carrierDict[@"mcc"] ?: @"", carrierDict[@"mnc"] ?: @"");
     
     return success;
 }
@@ -363,7 +339,7 @@
         NSDictionary *carrierInfo = [self getRandomCarrierForCountry:countryCode];
         
         // Save the generated carrier info
-        [self saveCarrierDetails:carrierInfo[@"name"] mcc:carrierInfo[@"mcc"] mnc:carrierInfo[@"mnc"]];
+        [self saveCarrierDetails:carrierInfo[@"name"] mcc:carrierInfo[@"mcc"] mnc:carrierInfo[@"mnc"] inIdentityDirectory:identityDir];
         
         PXLog(@"[WeaponX] Forced refresh of carrier details: %@ (%@-%@)", 
               carrierInfo[@"name"], carrierInfo[@"mcc"], carrierInfo[@"mnc"]);
@@ -412,7 +388,7 @@
     NSDictionary *carrierInfo = [self getRandomCarrierForCountry:countryCode];
     
     // Save the generated carrier info for future use
-    [self saveCarrierDetails:carrierInfo[@"name"] mcc:carrierInfo[@"mcc"] mnc:carrierInfo[@"mnc"]];
+    [self saveCarrierDetails:carrierInfo[@"name"] mcc:carrierInfo[@"mcc"] mnc:carrierInfo[@"mnc"] inIdentityDirectory:identityDir];
     
     PXLog(@"[WeaponX] No saved carrier details found, generated: %@ (%@-%@)", 
           carrierInfo[@"name"], carrierInfo[@"mcc"], carrierInfo[@"mnc"]);

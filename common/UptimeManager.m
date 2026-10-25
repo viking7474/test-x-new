@@ -1,6 +1,8 @@
 #import "UptimeManager.h"
 #import <sys/sysctl.h>
 #import "TLinkIOSLogging.h"
+#import "PXPaths.h"
+#import "PXRuntimeArtifactWriter.h"
 
 // File paths for persistent storage
 // Removed global paths. All methods now require a profile-specific path.
@@ -55,7 +57,9 @@ static NSString * const kCreationTimeKey = @"creationTime";
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath {
     @try {
         // Validate profile path
-        if (!profilePath || [profilePath length] == 0) {
+        NSString *profileID = profilePath.stringByDeletingLastPathComponent.lastPathComponent;
+        NSString *expectedIdentity = PXProfileIdentityPath(profileID);
+        if (!expectedIdentity.length || ![profilePath isEqualToString:expectedIdentity]) {
             NSString *errorMsg = @"Invalid profile path provided";
             self.error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" 
                                              code:1003 
@@ -109,48 +113,28 @@ static NSString * const kCreationTimeKey = @"creationTime";
         NSDate *bootTime = [NSDate dateWithTimeIntervalSinceNow:-uptime];
         
         // Save boot time to profile-specific file
-        NSString *bootTimePath = [profilePath stringByAppendingPathComponent:@"boot_time.plist"];
         NSDictionary *bootTimeDict = @{@"value": bootTime, @"lastUpdated": now, kUptimeVersionKey: @1};
-        BOOL bootTimeSuccess = [bootTimeDict writeToFile:bootTimePath atomically:YES];
-        if (!bootTimeSuccess) {
-            PXLog(@"[WeaponX] ⚠️ Failed to write boot_time.plist to %@", bootTimePath);
-        }
         
         // Also save to system_uptime.plist for apps that might look there
-        NSString *uptimePath = [profilePath stringByAppendingPathComponent:@"system_uptime.plist"];
         NSString *uptimeString = [NSString stringWithFormat:@"%.0f", uptime];
         NSDictionary *uptimeDict = @{@"value": uptimeString, @"lastUpdated": now, kUptimeVersionKey: @1};
-        BOOL uptimeSuccess = [uptimeDict writeToFile:uptimePath atomically:YES];
-        if (!uptimeSuccess) {
-            PXLog(@"[WeaponX] ⚠️ Failed to write system_uptime.plist to %@", uptimePath);
+        NSError *writeError = nil;
+        if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return PXStageRuntimeUptime(tx, profilePath, bootTimeDict, uptimeDict, now, error);
+        }, &writeError)) {
+            self.error = writeError;
+            PXLog(@"[UptimeManager] Failed to commit boot/uptime group at %@: %@", profilePath, writeError);
+            return;
         }
         
-        // Also save to the combined device_ids.plist
-        NSString *deviceIdsPath = [profilePath stringByAppendingPathComponent:@"device_ids.plist"];
-        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-        if (!deviceIds) {
-            deviceIds = [NSMutableDictionary dictionary];
-        }
-        
-        deviceIds[@"BootTime"] = [NSString stringWithFormat:@"%.0f", [bootTime timeIntervalSince1970]];
-        deviceIds[@"SystemUptime"] = uptimeString;
-        deviceIds[@"LastUpdated"] = now;  // Add timestamp for device_ids.plist too
-        BOOL deviceIdsSuccess = [deviceIds writeToFile:deviceIdsPath atomically:YES];
-        if (!deviceIdsSuccess) {
-            PXLog(@"[WeaponX] ⚠️ Failed to write device_ids.plist to %@", deviceIdsPath);
-        }
-        
-        // Set cache values for use in other methods
+        self.error = nil;
+        // Set cache values for use in other methods only after this commit.
         self.bootTimeValue = bootTime;
         self.uptimeValue = uptime;
         self.cacheTime = now;
         
         PXLog(@"[WeaponX] ✅ Generated consistent uptime (%.2f hours) and boot time (%@) for profile path: %@", 
               uptime/3600.0, bootTime, profilePath);
-        PXLog(@"[WeaponX] 📄 Files saved: boot_time.plist=%@, system_uptime.plist=%@, device_ids.plist=%@",
-              bootTimeSuccess ? @"✅" : @"❌", 
-              uptimeSuccess ? @"✅" : @"❌",
-              deviceIdsSuccess ? @"✅" : @"❌");
     } @catch (NSException *e) {
         NSString *errorMsg = [NSString stringWithFormat:@"Error generating consistent uptime: %@", e];
         self.error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" 
@@ -400,4 +384,4 @@ static NSString * const kCreationTimeKey = @"creationTime";
     return NO;
 }
 
-@end 
+@end

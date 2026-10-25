@@ -64,8 +64,12 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     return YES;
 }
 - (NSDictionary *)dictionaryAtPath:(NSString *)path error:(NSError **)error {
+    return [self dictionaryAtPath:path exists:NULL error:error];
+}
+- (NSDictionary *)dictionaryAtPath:(NSString *)path exists:(BOOL *)exists error:(NSError **)error {
+    if (exists) *exists = NO;
     if (![self checkPath:path error:error]) return nil;
-    if (self.staged[path]) return self.staged[path];
+    if (self.staged[path]) { if (exists) *exists = YES; return self.staged[path]; }
     BOOL absent = NO; NSError *failure = nil;
     id value = PXSourceReadPlist(path, &absent, NULL, NULL, &failure);
     if (absent) return @{};
@@ -73,6 +77,7 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
         self.failure = failure ?: PXSourceError(@"Malformed source dictionary");
         if (error) *error = self.failure; return nil;
     }
+    if (exists) *exists = YES;
     return value;
 }
 - (BOOL)setDictionary:(NSDictionary *)value atPath:(NSString *)path error:(NSError **)error {

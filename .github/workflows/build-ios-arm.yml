@@ -53,6 +53,9 @@ jobs:
       - name: Test native runtime source transaction recovery
         run: python3 scripts/test_runtime_source_transactions.py --native
 
+      - name: Test native runtime artifact writers
+        run: python3 scripts/test_runtime_artifact_writers.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 

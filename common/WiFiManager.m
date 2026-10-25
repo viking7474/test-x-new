@@ -2,6 +2,7 @@
 #import "ProfileManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
+#import "PXRuntimeArtifactWriter.h"
 #import "PXIdentityValidator.h"
 #import <Security/Security.h>
 
@@ -140,6 +141,11 @@
     
     // Build canonical identity/device paths through PXPaths.
     NSString *identityDir = PXProfileIdentityPath(profileId);
+    if (!identityDir.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3002
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid WiFi target profile"}];
+        return;
+    }
     NSString *wifiInfoPath = [identityDir stringByAppendingPathComponent:@"wifi_info.plist"];
     
     // Ensure directory exists
@@ -151,16 +157,16 @@
                                     error:nil];
     }
     
-    // Save to file
-    [self.wifiInfo writeToFile:wifiInfoPath atomically:YES];
-    
-    // Also update the combined device_ids.plist to include WiFi info
-    NSString *deviceIdsPath = PXProfileDeviceIDsPath(profileId);
-    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: 
-                                     [NSMutableDictionary dictionary];
-    deviceIds[@"SSID"] = self.wifiInfo[@"ssid"];
-    deviceIds[@"BSSID"] = self.wifiInfo[@"bssid"];
-    [deviceIds writeToFile:deviceIdsPath atomically:YES];
+    NSDictionary *preparedWiFi = [self.wifiInfo copy];
+    NSError *error = nil;
+    if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeWiFi(tx, identityDir, preparedWiFi, writeError);
+    }, &error)) {
+        self.error = error;
+        PXLog(@"[WiFiManager] Failed to commit WiFi info at %@: %@", wifiInfoPath, error);
+        return;
+    }
+    self.error = nil;
     
     PXLog(@"[WiFiManager] Saved WiFi info to profile %@: SSID=%@, BSSID=%@", 
           profileId, self.wifiInfo[@"ssid"], self.wifiInfo[@"bssid"]);

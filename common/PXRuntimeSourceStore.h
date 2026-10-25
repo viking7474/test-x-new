@@ -9,6 +9,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable NSDictionary *)dictionaryAtPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+/// Includes staged presence; absent returns an empty dictionary with exists=NO.
+- (nullable NSDictionary *)dictionaryAtPath:(NSString *)path exists:(BOOL * _Nullable)exists
+                                      error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)setDictionary:(NSDictionary *)value atPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
 @end
 

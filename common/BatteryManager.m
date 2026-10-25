@@ -1,6 +1,7 @@
 #import "BatteryManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
+#import "PXRuntimeArtifactWriter.h"
 
 // Define file paths
 #define BATTERY_PLIST_PATH @"/var/mobile/Library/Preferences/com.weaponx.battery.plist"
@@ -220,8 +221,12 @@ static BatteryManager *sharedManager = nil;
     }
     
     // Align with IdentifierManager: <profiles>/<id>/identity/battery_info.plist
-    NSString *profileDir = [PXProfilesPath() stringByAppendingPathComponent:profileId];
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
+    NSString *identityDir = PXProfileIdentityPath(profileId);
+    if (!identityDir.length) {
+        self.error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:100
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid battery target profile"}];
+        return nil;
+    }
     
     // Ensure identity directory exists
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -338,18 +343,13 @@ static BatteryManager *sharedManager = nil;
             batteryInfo[kLowPowerModeKey] = @(_currentLowPowerMode);
             batteryInfo[kLastUpdatedKey] = [NSDate date];
             
-            // Write to the plist file
-            [batteryInfo writeToFile:batteryInfoPath atomically:YES];
-            
-            // Also update device_ids.plist for the profile if it exists
-            NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-            NSMutableDictionary *deviceIds = [[NSMutableDictionary alloc] initWithContentsOfFile:deviceIdsPath];
-            if (deviceIds) {
-                // Update the battery values in device_ids.plist
-                deviceIds[kBatteryLevelKey] = _currentBatteryLevel;
-                deviceIds[kLowPowerModeKey] = @(_currentLowPowerMode);
-                [deviceIds writeToFile:deviceIdsPath atomically:YES];
-            }
+            NSError *error = nil;
+            if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                return PXStageRuntimeBattery(tx, identityDir, batteryInfo, writeError);
+            }, &error)) {
+                self.error = error;
+                PXLog(@"[BatteryManager] Failed to commit profile battery info: %@", error);
+            } else self.error = nil;
         }
         @catch (NSException *exception) {
             PXLog(@"[WeaponX] ⚠️ Error saving profile battery info: %@", exception);

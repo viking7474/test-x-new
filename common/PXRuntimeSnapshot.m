@@ -416,9 +416,9 @@ PXRuntimePublisher *PXCreateRuntimeSnapshotPublisher(void (^completion)(NSDictio
         return PXCaptureRuntimeSources(^NSDictionary *(NSError **captureError) {
             (void)captureError;
             NSMutableDictionary *candidate = [PXCaptureRuntimeSnapshotCandidate() mutableCopy];
-            // 4C.1 only enrolls the paired settings/scope writer. Do not mistake
-            // a commit token for coverage of legacy profile/artifact writers.
-            candidate[@"sourceContractCoverage"] = @"settings-scope-only";
+            // Incremental enrollment: legacy profile/identifier/security writers
+            // still bypass this gate. Source identity is not full coverage.
+            candidate[@"sourceContractCoverage"] = @"settings-scope-and-manager-artifacts-partial";
             return candidate;
         }, loadError);
     } writer:^BOOL(NSDictionary *snapshot, NSError **writeError) {
