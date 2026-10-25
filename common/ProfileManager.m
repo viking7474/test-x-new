@@ -2,6 +2,8 @@
 #import <UIKit/UIKit.h>
 #import "ContainerManager.h"
 #import "PXPaths.h"
+#import "PXRuntimeProfileSelection.h"
+#import "NetworkManager.h"
 #import <spawn.h>
 #import <sys/wait.h>
 
@@ -25,7 +27,7 @@
 + (instancetype)sharedManager;
 - (BOOL)isApplicationEnabled:(NSString *)bundleID;
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID;
-- (void)regenerateAllEnabledIdentifiers;
+- (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
 - (void)resetCanvasNoise;
 @end
 
@@ -34,18 +36,30 @@
 @property(readonly) NSString *bundleExecutable;
 @end
 
-@interface NetworkManager : NSObject
-+ (BOOL)saveLocalIPAddress:(NSString *)localIP;
-@end
-
 @interface ProfileManager ()
 
 @property (nonatomic, strong) NSMutableArray<Profile *> *mutableProfiles;
 @property (nonatomic, strong) Profile *mutableCurrentProfile;
 @property (nonatomic, strong) NSFileManager *fileManager;
 @property (nonatomic, strong) NSString *profilesDirectory;
+// These entry points marshal mutations to main. The flag covers async creation;
+// it is not a cross-process profile-directory transaction.
+@property (nonatomic) BOOL creationInProgress;
+- (NSDictionary *)prepareNetworkArtifactsWithOptions:(NSDictionary *)options error:(NSError **)error;
+- (NSDictionary *)captureProfileNetworkOptions;
+- (BOOL)persistProfileSelectionInfo:(NSDictionary *)info error:(NSError **)error;
+- (void)mirrorCurrentProfileID:(NSString *)profileID;
+- (void)publishProfileChangedNotification;
 
 @end
+
+static NSSet<Class> *PXProfileArchiveClasses(void) {
+    static NSSet *classes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ classes = [NSSet setWithArray:@[NSArray.class, NSDictionary.class,
+        NSString.class, NSNumber.class, NSDate.class, NSData.class, Profile.class]]; });
+    return classes;
+}
 
 @implementation Profile
 
@@ -147,7 +161,7 @@
         _iconName = [coder decodeObjectOfClass:[NSString class] forKey:@"iconName"];
         _createdAt = [coder decodeObjectOfClass:[NSDate class] forKey:@"createdAt"];
         _lastUsed = [coder decodeObjectOfClass:[NSDate class] forKey:@"lastUsed"];
-        _settings = [coder decodeObjectOfClass:[NSDictionary class] forKey:@"settings"];
+        _settings = [coder decodeObjectOfClasses:PXProfileArchiveClasses() forKey:@"settings"];
         
         // If timestamps are missing, set them to current time
         if (!_createdAt) {
@@ -160,7 +174,7 @@
         }
         
         // Ensure settings exists
-        if (!_settings) {
+        if (![_settings isKindOfClass:NSDictionary.class]) {
             _settings = @{};
         }
     }
@@ -309,10 +323,20 @@
 #pragma mark - Public Methods
 
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self createProfile:profile completion:completion]; });
+        return;
+    }
+    if (self.creationInProgress) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12
+            userInfo:@{NSLocalizedDescriptionKey: @"Profile creation is still in progress; retry when it completes"}]);
+        return;
+    }
+
     NSLog(@"[WeaponX] 📝 Creating new profile: %@", profile.name);
     
     // Validate profile name
-    if (!profile.name || profile.name.length == 0) {
+    if (![profile.name isKindOfClass:NSString.class] || profile.name.length == 0) {
         NSError *error = [NSError errorWithDomain:@"WeaponXProfileError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Profile name cannot be empty"}];
         if (completion) completion(NO, error);
         return;
@@ -341,6 +365,11 @@
     
     // Create profile directory
     NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:profile.profileId];
+    if (!PXValidatedProfileID(profile.profileId) || [self.fileManager fileExistsAtPath:profileDir]) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:13
+            userInfo:@{NSLocalizedDescriptionKey: @"New profile ID is invalid or its directory already exists"}]);
+        return;
+    }
     [self createDirectoryIfNeeded:profileDir];
     
     // Set the creation and modification dates explicitly on the directory
@@ -368,208 +397,124 @@
         @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
         @"Identifier": profile.profileId
     };
-    [identifiersDict writeToFile:identifiersPath atomically:YES];
+    BOOL identityIsDirectory = NO;
+    if (![self.fileManager fileExistsAtPath:identityDir isDirectory:&identityIsDirectory] || !identityIsDirectory ||
+        ![identifiersDict writeToFile:identifiersPath atomically:YES]) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:11
+            userInfo:@{NSLocalizedDescriptionKey: @"Could not initialize the new profile directory"}]);
+        return;
+    }
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
     
     // NOTE: appdata.plist (write-only, no reader) and per-profile scoped-apps.plist
     // (always empty; real scope lives in com.hydra.tlinkios.global_scope.plist) are
     // intentionally no longer created here.
     
+    self.creationInProgress = YES;
     // Add profile to array
     [self.mutableProfiles addObject:profile];
     
     // Terminate all enabled scoped apps before setting as current profile
     [self terminateEnabledScopedApps];
     
-    // Set as current profile
+    // Selection lifecycle still precedes generation in this partial rollout.
+    // Report selection write failure and leave the previous in-memory selection.
+    NSError *selectionError = nil;
+    if (![self updateCurrentProfileInfoWithProfile:profile error:&selectionError]) {
+        [self.mutableProfiles removeObject:profile];
+        self.creationInProgress = NO;
+        if (completion) completion(NO, selectionError);
+        return;
+    }
     self.mutableCurrentProfile = profile;
-    
-    // Update central store with new profile
-    [self updateCurrentProfileInfoWithProfile:profile];
     
     // Randomize app versions for the new profile
     [self randomizeAppVersionsForProfile:profile.profileId];
     
-    // Generate identifiers for the new profile
+    // Capture target/options before dispatch. No active-profile lookup in worker.
+    NSString *targetID = [profile.profileId copy];
+    NSDictionary *networkOptions = [self captureProfileNetworkOptions];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 1. Generate WiFi information using WiFiManager
-        SEL sharedManagerSel = NSSelectorFromString(@"sharedManager");
-        Class wifiManagerClass = NSClassFromString(@"WiFiManager");
-        
-        if (wifiManagerClass && [wifiManagerClass respondsToSelector:sharedManagerSel]) {
-            // Use NSInvocation to safely call the method
-            NSMethodSignature *signature = [wifiManagerClass methodSignatureForSelector:sharedManagerSel];
-            if (signature) {
-                NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-                [invocation setTarget:wifiManagerClass];
-                [invocation setSelector:sharedManagerSel];
-                [invocation invoke];
-                
-                // Get the result
-                id __unsafe_unretained wifiManager;
-                [invocation getReturnValue:&wifiManager];
-                
-                if (wifiManager) {
-                    SEL generateWiFiInfoSel = NSSelectorFromString(@"generateWiFiInfo");
-                    if ([wifiManager respondsToSelector:generateWiFiInfoSel]) {
-                        NSLog(@"[WeaponX] 📶 Generating WiFi info for profile: %@", profile.name);
-                        
-                        // Use NSInvocation to safely call the method
-                        NSMethodSignature *genSig = [wifiManager methodSignatureForSelector:generateWiFiInfoSel];
-                        NSInvocation *genInvocation = [NSInvocation invocationWithMethodSignature:genSig];
-                        [genInvocation setTarget:wifiManager];
-                        [genInvocation setSelector:generateWiFiInfoSel];
-                        [genInvocation invoke];
+        @autoreleasepool {
+            NSError *generationError = nil;
+            BOOL generated = NO;
+            @try {
+                NSDictionary *network = [self prepareNetworkArtifactsWithOptions:networkOptions error:&generationError];
+                IdentifierManager *manager = [IdentifierManager sharedManager];
+                if (network && [manager respondsToSelector:@selector(regenerateAllEnabledIdentifiersForProfileID:networkArtifacts:error:)])
+                    generated = [manager regenerateAllEnabledIdentifiersForProfileID:targetID networkArtifacts:network error:&generationError];
+                if (!generated && !generationError) generationError = [NSError errorWithDomain:@"WeaponXProfileError" code:14
+                    userInfo:@{NSLocalizedDescriptionKey: @"Identifier generation did not commit"}];
+            } @catch (NSException *exception) {
+                generationError = [NSError errorWithDomain:@"WeaponXProfileError" code:15
+                    userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile generation raised an exception"}];
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Save metadata only after the worker finished. Keep the busy
+                // guard until the save callback so a reentrant mutation cannot
+                // race this operation. Completion and UI effects run on main.
+                [self saveProfilesWithCompletion:^(BOOL saved, NSError *saveError) {
+                    self.creationInProgress = NO;
+                    BOOL success = generated && saved;
+                    NSError *failure = generationError ?: saveError;
+                    if (!success && !failure) failure = [NSError errorWithDomain:@"WeaponXProfileError" code:16
+                        userInfo:@{NSLocalizedDescriptionKey: @"Profile metadata did not persist"}];
+                    if (success) {
+                        @try { [[IdentifierManager sharedManager] resetCanvasNoise]; }
+                        @catch (NSException *exception) { NSLog(@"[ProfileManager] Committed profile; canvas reset failed: %@", exception); }
+                        [self publishProfileChangedNotification];
                     }
-                }
-            }
-        }
-        
-        // 2. Generate local IP and carrier info based on connection type
-        NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
-        BOOL networkDataSpoofEnabled = [securitySettings boolForKey:@"networkDataSpoofEnabled"];
-        NSInteger connectionType = [securitySettings integerForKey:@"networkConnectionType"];
-        
-        // Path to profile identity directory
-        NSString *identityDir = [[PXProfilesPath() stringByAppendingPathComponent:profile.profileId] stringByAppendingPathComponent:@"identity"];
-        
-        // Check if directory exists, create if not
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        if (![fileManager fileExistsAtPath:identityDir]) {
-            [fileManager createDirectoryAtPath:identityDir withIntermediateDirectories:YES attributes:nil error:nil];
-        }
-        
-        // Generate carrier info if in cellular (2) or auto (0) mode
-        if (connectionType == 0 || connectionType == 2) {
-            NSString *countryCode = [securitySettings stringForKey:@"networkISOCountryCode"] ?: @"us";
-            
-            // Get proper carrier info from NetworkManager using NSInvocation
-            Class networkManagerClass = NSClassFromString(@"NetworkManager");
-            SEL randomCarrierSel = NSSelectorFromString(@"getRandomCarrierForCountry:");
-            
-            if ([networkManagerClass respondsToSelector:randomCarrierSel]) {
-                // Use NSInvocation to safely call the class method
-                NSMethodSignature *signature = [networkManagerClass methodSignatureForSelector:randomCarrierSel];
-                if (signature) {
-                    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-                    [invocation setTarget:networkManagerClass];
-                    [invocation setSelector:randomCarrierSel];
-                    [invocation setArgument:&countryCode atIndex:2]; // Arguments start at index 2 (0:self, 1:_cmd)
-                    [invocation invoke];
-                    
-                    // Get the return value
-                    NSDictionary * __unsafe_unretained carrierInfo;
-                    [invocation getReturnValue:&carrierInfo];
-                    
-                    if (carrierInfo) {
-                    // Create carrier_details.plist
-                    NSDictionary *carrierDict = @{
-                        @"carrierName": carrierInfo[@"name"] ?: @"",
-                        @"mcc": carrierInfo[@"mcc"] ?: @"",
-                        @"mnc": carrierInfo[@"mnc"] ?: @"",
-                        @"lastUpdated": [NSDate date]
-                    };
-                    
-                    NSString *carrierPath = [identityDir stringByAppendingPathComponent:@"carrier_details.plist"];
-                    [carrierDict writeToFile:carrierPath atomically:YES];
-                    
-                    // Also update the network_settings.plist
-                    NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-                    NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: 
-                                                    [NSMutableDictionary dictionary];
-                    networkDict[@"carrierName"] = carrierInfo[@"name"];
-                    networkDict[@"mcc"] = carrierInfo[@"mcc"];
-                    networkDict[@"mnc"] = carrierInfo[@"mnc"];
-                    networkDict[@"lastUpdated"] = [NSDate date];
-                    [networkDict writeToFile:networkPath atomically:YES];
-                    
-                    // Also update the device_ids.plist
-                    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                    NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: 
-                                                    [NSMutableDictionary dictionary];
-                    deviceIds[@"CarrierName"] = carrierInfo[@"name"];
-                    deviceIds[@"CarrierMCC"] = carrierInfo[@"mcc"];
-                    deviceIds[@"CarrierMNC"] = carrierInfo[@"mnc"];
-                    [deviceIds writeToFile:deviceIdsPath atomically:YES];
-                    
-                    NSLog(@"[WeaponX] 📱 Generated carrier info for profile %@: %@ (%@-%@)", 
-                        profile.name, carrierInfo[@"name"], carrierInfo[@"mcc"], carrierInfo[@"mnc"]);
-                }
-                }
-            }
-        }
-        
-        // Generate local IP only while Network Data Spoof is enabled.
-        if (networkDataSpoofEnabled && (connectionType == 0 || connectionType == 1 || connectionType == 2)) {
-            // Generate local IP using NSInvocation
-            Class networkManagerClass = NSClassFromString(@"NetworkManager");
-            SEL spoofedIPSel = NSSelectorFromString(@"generateSpoofedLocalIPAddressFromCurrent");
-            if ([networkManagerClass respondsToSelector:spoofedIPSel]) {
-                NSMethodSignature *signature = [networkManagerClass methodSignatureForSelector:spoofedIPSel];
-                if (signature) {
-                    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-                    [invocation setTarget:networkManagerClass];
-                    [invocation setSelector:spoofedIPSel];
-                    [invocation invoke];
-                    NSString * __unsafe_unretained localIP = nil;
-                    [invocation getReturnValue:&localIP];
-                    if (localIP.length) {
-                        NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
-                        NSMutableDictionary *networkDict = [NSMutableDictionary dictionaryWithContentsOfFile:networkPath] ?: [NSMutableDictionary dictionary];
-                        networkDict[@"localIPAddress"] = localIP;
-                        [networkDict writeToFile:networkPath atomically:YES];
-
-                        NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-                        NSMutableDictionary *deviceIds = [NSMutableDictionary dictionaryWithContentsOfFile:deviceIdsPath] ?: [NSMutableDictionary dictionary];
-                        deviceIds[@"LocalIPAddress"] = localIP;
-                        [deviceIds writeToFile:deviceIdsPath atomically:YES];
-
-                        NSLog(@"[WeaponX] 🌐 Generated spoofed local IP for profile %@: %@", profile.name, localIP);
-                        // Keep the existing NetworkManager path responsible for the paired IPv6 value.
-                        [NetworkManager saveLocalIPAddress:localIP];
-                    } else {
-                        NSLog(@"[WeaponX] 🌐 No current local IPv4 available for profile %@; skipping local IP generation", profile.name);
-                    }
-                }
-                }
-        }
-        
-        // 3. Get the IdentifierManager for other identifiers
-        Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
-        if (identifierManagerClass) {
-            id identifierManager = [identifierManagerClass sharedManager];
-            if (identifierManager && [identifierManager respondsToSelector:@selector(regenerateAllEnabledIdentifiers)]) {
-                NSLog(@"[WeaponX] 🔄 Generating identifiers for new profile: %@", profile.name);
-                [identifierManager regenerateAllEnabledIdentifiers];
-            }
+                    if (completion) completion(success, success ? nil : failure);
+                }];
+            });
         }
     });
-    
-    // Save to disk
-    [self saveProfilesWithCompletion:^(BOOL success, NSError * _Nullable error) {
-        if (success) {
-            NSLog(@"[WeaponX] ✅ Profile created successfully: %@ (created at: %@)", profile.name, profile.createdAt);
-            // Reset canvas fingerprint noise for new profile
-            Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
-            if (identifierManagerClass) {
-                id manager = [identifierManagerClass sharedManager];
-                if ([manager respondsToSelector:@selector(resetCanvasNoise)]) {
-                    [manager resetCanvasNoise];
-                    NSLog(@"[WeaponX] 🎨 Canvas fingerprint noise reset after profile creation");
-                }
-            }
-            // Post notification that profile has changed - UI components should refresh
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
-            });
-        } else {
-            NSLog(@"[WeaponX] ❌ Failed to save profile: %@", error);
+}
+
+- (void)publishProfileChangedNotification {
+    @try { [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil]; }
+    @catch (NSException *exception) { NSLog(@"[ProfileManager] Committed profile; notification observer failed: %@", exception); }
+}
+
+- (NSDictionary *)captureProfileNetworkOptions {
+    NSUserDefaults *security = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
+    return @{ @"enabled": @([security boolForKey:@"networkDataSpoofEnabled"]),
+        @"connectionType": @([security integerForKey:@"networkConnectionType"]),
+        @"country": [[security stringForKey:@"networkISOCountryCode"] copy] ?: @"us" };
+}
+
+- (NSDictionary *)prepareNetworkArtifactsWithOptions:(NSDictionary *)options error:(NSError **)error {
+    if (error) *error = nil;
+    NSMutableDictionary *artifacts = [NSMutableDictionary dictionary];
+    NSInteger connection = [options[@"connectionType"] integerValue];
+    if (connection == 0 || connection == 2) {
+        NSDictionary *carrier = [NetworkManager getRandomCarrierForCountry:options[@"country"]];
+        if (carrier) artifacts[@"carrier"] = @{ @"carrierName": carrier[@"name"] ?: @"",
+            @"mcc": carrier[@"mcc"] ?: @"", @"mnc": carrier[@"mnc"] ?: @"", @"lastUpdated": [NSDate date] };
+    }
+    if ([options[@"enabled"] boolValue] && (connection == 0 || connection == 1 || connection == 2)) {
+        NSString *ipv4 = [NetworkManager generateSpoofedLocalIPAddressFromCurrent];
+        // Preserve the no-interface skip policy; never persist a real fallback IP.
+        if (ipv4.length) {
+            artifacts[@"ipv4"] = ipv4;
+            NSString *ipv6 = [NetworkManager generateSpoofedLocalIPv6AddressFromCurrent];
+            if (ipv6.length) artifacts[@"ipv6"] = ipv6;
         }
-        if (completion) completion(success, error);
-    }];
+    }
+    return [artifacts copy];
 }
 
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self updateProfile:profile completion:completion]; });
+        return;
+    }
+    if (self.creationInProgress) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12
+            userInfo:@{NSLocalizedDescriptionKey: @"Profile creation is still in progress; retry when it completes"}]);
+        return;
+    }
+
     NSLog(@"[WeaponX] 🔄 Updating profile: %@", profile.name);
     
     // Find the profile to update
@@ -658,7 +603,7 @@
             
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
+                [self publishProfileChangedNotification];
             });
         } else {
             NSLog(@"[WeaponX] ❌ Failed to save profile: %@", error);
@@ -668,6 +613,16 @@
 }
 
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self deleteProfile:profile completion:completion]; });
+        return;
+    }
+    if (self.creationInProgress) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12
+            userInfo:@{NSLocalizedDescriptionKey: @"Profile creation is still in progress; retry when it completes"}]);
+        return;
+    }
+
     NSLog(@"[WeaponX] 🗑️ Deleting profile: %@", profile.name);
     
     // Don't allow deleting the last profile
@@ -702,7 +657,7 @@
             
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
+                [self publishProfileChangedNotification];
             });
         } else {
             NSLog(@"[WeaponX] ❌ Failed to save profiles: %@", error);
@@ -787,6 +742,20 @@
 }
 
 - (void)switchToProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self switchToProfile:profile completion:completion]; });
+        return;
+    }
+    if (self.creationInProgress) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12
+            userInfo:@{NSLocalizedDescriptionKey: @"Profile creation is still in progress; retry when it completes"}]);
+        return;
+    }
+
+    if (!PXValidatedProfileID(profile.profileId)) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile target"}]);
+        return;
+    }
     NSLog(@"[WeaponX] 🔄 Switching to profile: %@", profile.name);
     
     // Don't switch to the same profile
@@ -798,7 +767,10 @@
         profile.lastUsed = now;
         
         // Update the central profile info store
-        [self updateCurrentProfileInfoWithProfile:profile];
+        NSError *selectionError = nil;
+        if (![self updateCurrentProfileInfoWithProfile:profile error:&selectionError]) {
+            if (completion) completion(NO, selectionError); return;
+        }
         
         // Save to disk
         [self saveProfilesWithCompletion:completion];
@@ -812,11 +784,11 @@
     NSDate *now = [NSDate date];
     profile.lastUsed = now;
     
-    // Set as current profile
+    NSError *selectionError = nil;
+    if (![self updateCurrentProfileInfoWithProfile:profile error:&selectionError]) {
+        if (completion) completion(NO, selectionError); return;
+    }
     self.mutableCurrentProfile = profile;
-    
-    // Update the central profile info store
-    [self updateCurrentProfileInfoWithProfile:profile];
     
     // Update file modification time directly
     NSString *profileDirectory = [NSString stringWithFormat:@"%@/%@", self.profilesDirectory, profile.profileId];
@@ -838,7 +810,7 @@
         if (success) {
             // Post notification that profile has changed - UI components should refresh
             dispatch_async(dispatch_get_main_queue(), ^{
-                [[NSNotificationCenter defaultCenter] postNotificationName:@"com.hydra.tlinkios.profileChanged" object:nil];
+                [self publishProfileChangedNotification];
             });
         }
         if (completion) completion(success, error);
@@ -987,9 +959,13 @@
             }
             
             unarchiver.requiresSecureCoding = YES;
-            NSArray *profilesArray = [unarchiver decodeObjectOfClass:[NSArray class] forKey:NSKeyedArchiveRootObjectKey];
+            NSArray *profilesArray = [unarchiver decodeObjectOfClasses:PXProfileArchiveClasses() forKey:NSKeyedArchiveRootObjectKey];
             
-            if (!profilesArray) {
+            BOOL validProfiles = [profilesArray isKindOfClass:NSArray.class];
+            if (validProfiles) for (id candidate in profilesArray) {
+                if (![candidate isKindOfClass:Profile.class] || !PXValidatedProfileID([candidate profileId])) { validProfiles = NO; break; }
+            }
+            if (!validProfiles) {
                 NSLog(@"[WeaponX] ⚠️ Failed to decode profiles, creating default profile");
                 [self createDefaultProfile];
                 if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Failed to decode profiles"}]);
@@ -1099,11 +1075,11 @@
                     NSLog(@"[WeaponX] ❌ Failed to initialize unarchiver for ID generation: %@", error);
                 } else {
                     unarchiver.requiresSecureCoding = YES;
-                    NSArray *loadedProfiles = [unarchiver decodeObjectOfClass:[NSArray class] forKey:NSKeyedArchiveRootObjectKey];
+                    NSArray *loadedProfiles = [unarchiver decodeObjectOfClasses:PXProfileArchiveClasses() forKey:NSKeyedArchiveRootObjectKey];
                     
-                    if (loadedProfiles) {
+                    if ([loadedProfiles isKindOfClass:NSArray.class]) {
                         for (Profile *profile in loadedProfiles) {
-                            if (profile.profileId) {
+                            if ([profile isKindOfClass:Profile.class] && PXValidatedProfileID(profile.profileId)) {
                                 [existingIDs addObject:profile.profileId];
                             }
                         }
@@ -1114,7 +1090,7 @@
         }
         
         // If loading from plist failed or we got no IDs, scan directory for profile folders
-        if (existingIDs.count == 0) {
+        {
             NSError *error = nil;
             NSArray *contents = [fileManager contentsOfDirectoryAtPath:profilesDirectory error:&error];
             
@@ -1232,59 +1208,20 @@
 }
 
 - (void)saveProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion {
-    NSLog(@"[WeaponX] 💾 Saving profiles to disk");
-    
-    // Ensure profiles directory exists
-    [self createDirectoryIfNeeded:self.profilesDirectory];
-    
-    // Get the profiles file path
-    NSString *profilesPath = [self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"];
-    
-    // Encode profiles
-    NSError *error = nil;
-    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:self.mutableProfiles requiringSecureCoding:YES error:&error];
-    if (error) {
-        NSLog(@"[WeaponX] ❌ Failed to encode profiles: %@", error);
-        if (completion) completion(NO, error);
-        return;
+    NSError *error = nil; BOOL success = NO;
+    @try {
+        [self createDirectoryIfNeeded:self.profilesDirectory];
+        NSString *path = [self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"];
+        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:self.mutableProfiles requiringSecureCoding:YES error:&error];
+        success = data && [data writeToFile:path options:NSDataWritingAtomic error:&error];
+        if (success) [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:path error:NULL];
+        // Do not unlink the last good archive or use a process-wide temp name
+        // after an atomic write failure. Preserve the original failure.
+    } @catch (NSException *exception) {
+        error = [NSError errorWithDomain:@"WeaponXProfileError" code:17 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not save profiles"}];
     }
-    
-    // Try to write with standard API first
-    BOOL success = [data writeToFile:profilesPath options:NSDataWritingAtomic error:&error];
-    
-    if (!success) {
-        // If standard API fails, try writing to temp and then moving
-        NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"temp_profiles.plist"];
-        success = [data writeToFile:tempPath options:NSDataWritingAtomic error:&error];
-        
-        if (success) {
-            // Remove existing file if it exists
-            if ([self.fileManager fileExistsAtPath:profilesPath]) {
-                [self.fileManager removeItemAtPath:profilesPath error:nil];
-            }
-            
-            // Move temp file to final location
-            success = [self.fileManager moveItemAtPath:tempPath toPath:profilesPath error:&error];
-            if (success) {
-                [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644}
-                                 ofItemAtPath:profilesPath
-                                      error:nil];
-            }
-        }
-    } else {
-        // Set permissions if standard write succeeded
-        [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644}
-                         ofItemAtPath:profilesPath
-                              error:nil];
-    }
-    
-    if (success) {
-        NSLog(@"[WeaponX] ✅ Saved %lu profiles to %@", (unsigned long)self.mutableProfiles.count, profilesPath);
-    } else {
-        NSLog(@"[WeaponX] ❌ Failed to write profiles file: %@", error);
-    }
-    
-    if (completion) completion(success, error);
+    if (!success && !error) error = [NSError errorWithDomain:@"WeaponXProfileError" code:16 userInfo:@{NSLocalizedDescriptionKey: @"Profile metadata did not persist"}];
+    if (completion) completion(success, success ? nil : error);
 }
 
 - (void)saveSettings:(NSDictionary *)settings {
@@ -1367,16 +1304,20 @@
 }
 
 - (BOOL)saveCentralProfileInfo:(NSDictionary *)infoDict {
-    NSString *infoPath = [self centralProfileInfoPath];
-    
-    BOOL success = [infoDict writeToFile:infoPath atomically:YES];
-    if (success) {
-        NSLog(@"[WeaponX] Successfully saved current profile info to central store: %@", infoPath);
-    } else {
-        NSLog(@"[WeaponX] Failed to save current profile info to central store: %@", infoPath);
-    }
-    
+    NSError *error = nil;
+    BOOL success = [self persistProfileSelectionInfo:infoDict error:&error];
+    if (!success) NSLog(@"[ProfileManager] Selection pair failed: %@", error);
     return success;
+}
+
+- (BOOL)persistProfileSelectionInfo:(NSDictionary *)info error:(NSError **)error {
+    if (![info isKindOfClass:NSDictionary.class] || !PXValidatedProfileID(info[@"ProfileId"])) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile selection ID"}];
+        return NO;
+    }
+    return PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeProfileSelection(tx, info, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError);
+    }, error);
 }
 
 - (NSDictionary *)loadCentralProfileInfo {
@@ -1400,27 +1341,27 @@
 }
 
 - (void)updateCurrentProfileInfoWithProfile:(Profile *)profile {
-    if (!profile) {
-        NSLog(@"[WeaponX] Cannot update central profile info with nil profile");
-        return;
+    NSError *error = nil;
+    if (![self updateCurrentProfileInfoWithProfile:profile error:&error]) NSLog(@"[ProfileManager] Selection update failed: %@", error);
+}
+
+- (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError **)error {
+    if (!profile || !PXValidatedProfileID(profile.profileId)) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile selection"}];
+        return NO;
     }
-    
-    // Create info dictionary with all relevant profile information
-    NSMutableDictionary *infoDict = [NSMutableDictionary dictionary];
-    infoDict[@"ProfileId"] = profile.profileId;
-    infoDict[@"ProfileName"] = profile.name;
-    infoDict[@"Description"] = profile.shortDescription ?: @"";
-    infoDict[@"LastSelected"] = [NSDate date];
-    
-    // Save to central store
-    [self saveCentralProfileInfo:infoDict];
-    
-    // Also update the shared NSUserDefaults for compatibility with existing code
-    NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
-    [sharedDefaults setObject:profile.profileId forKey:@"CurrentProfileID"];
-    [sharedDefaults synchronize];
-    
-    NSLog(@"[WeaponX] Updated central profile info for profile: %@ (ID: %@)", profile.name, profile.profileId);
+    NSDictionary *info = @{ @"ProfileId": [profile.profileId copy], @"ProfileName": profile.name ?: @"",
+        @"Description": profile.shortDescription ?: @"", @"LastSelected": [NSDate date] };
+    if (![self persistProfileSelectionInfo:info error:error]) return NO;
+    @try { [self mirrorCurrentProfileID:info[@"ProfileId"]]; }
+    @catch (NSException *exception) { NSLog(@"[ProfileManager] Selection committed; defaults mirror failed: %@", exception); }
+    return YES;
+}
+
+- (void)mirrorCurrentProfileID:(NSString *)profileID {
+    NSUserDefaults *shared = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
+    [shared setObject:profileID forKey:@"CurrentProfileID"];
+    [shared synchronize];
 }
 
 - (Profile *)loadCurrentProfileInfoFromCentralStore {

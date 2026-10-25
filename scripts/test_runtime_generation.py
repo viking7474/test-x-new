@@ -14,10 +14,12 @@ spec.loader.exec_module(groups)
 
 def source_contracts():
     manager = read('common/IdentifierManager.m')
-    flow = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error')
+    current = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error')
+    flow = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error')
     wrapper = groups.method(manager, '- (void)regenerateAllEnabledIdentifiers')
     assert 'regenerateAllEnabledIdentifiersWithError:&error' in wrapper
-    assert flow.count('[self profileIdentityPath]') == 1
+    assert current.count('[self profileIdentityPath]') == 1 and 'regenerateAllEnabledIdentifiersAtIdentityDirectory:' in current
+    assert 'profileIdentityPath' not in flow
     assert flow.index('PXSanitizedIdentifierSettings(self.settings)') < flow.index('prepareDeviceProfileGroupWithOptions:')
     assert flow.index('PXStageRuntimeGeneration(') < flow.index('publishRuntimeGeneration:payload')
     assert flow.index('if (!committed)') < flow.index('publishRuntimeGeneration:payload')
@@ -63,7 +65,7 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2G-partial'
+    assert manifest['rollout'] == '4C.2H1-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     for pending in ('profile-lifecycle', 'dashboard-preview', 'storage-preference', 'security-store', 'security-direct'):
         assert manifest['writers'][pending]['status'] == 'pending'

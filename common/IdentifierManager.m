@@ -62,6 +62,7 @@
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
+- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
 - (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error;
 - (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model;
 - (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error;
@@ -1246,9 +1247,26 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error {
+    NSString *identityDir = [[self profileIdentityPath] copy];
+    return [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identityDir networkArtifacts:nil error:error];
+}
+
+- (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
+    if (error) *error = nil;
+    NSString *identityDir = PXProfileIdentityPath(PXValidatedProfileID(profileID));
+    BOOL directory = NO;
+    if (!identityDir.length || ![NSFileManager.defaultManager fileExistsAtPath:identityDir isDirectory:&directory] || !directory) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Explicit profile identity directory does not exist"}];
+        if (error) *error = self.error; return NO;
+    }
+    if (![self migrateProfileSchemaAtIdentityDirectory:identityDir]) { if (error) *error = self.error; return NO; }
+    return [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identityDir networkArtifacts:networkArtifacts error:error];
+}
+
+- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
     if (error) *error = nil;
     self.error = nil;
-    NSString *identityDir = [[self profileIdentityPath] copy];
+    identityDir = [identityDir copy];
     NSError *failure = nil;
     if (!identityDir.length) {
         failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Could not resolve profile identity path"}];
@@ -1258,12 +1276,26 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     // still flush with this operation, as saveSettings did in the legacy flow.
     NSDictionary *scope = self.scopedApps;
     NSDictionary *intent = [scope isKindOfClass:NSDictionary.class] ?
-        PXDetachRuntimeGeneration(@{ @"flags": PXSanitizedIdentifierSettings(self.settings), @"scope": scope }, &failure) : nil;
+        PXDetachRuntimeGeneration(@{ @"flags": PXSanitizedIdentifierSettings(self.settings), @"scope": scope,
+            @"network": networkArtifacts ?: @{} }, &failure) : nil;
     if (!intent) {
         failure = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6024 userInfo:@{NSLocalizedDescriptionKey: @"Invalid generation scope"}];
         self.error = failure; if (error) *error = failure; return NO;
     }
     NSDictionary *flags = intent[@"flags"];
+    NSDictionary *network = intent[@"network"];
+    if (![network isKindOfClass:NSDictionary.class] ||
+        (network[@"carrier"] && ![network[@"carrier"] isKindOfClass:NSDictionary.class]) ||
+        (network[@"ipv4"] && ![network[@"ipv4"] isKindOfClass:NSString.class]) ||
+        (network[@"ipv6"] && ![network[@"ipv6"] isKindOfClass:NSString.class])) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6025 userInfo:@{NSLocalizedDescriptionKey: @"Invalid prepared network artifacts"}];
+        self.error = failure; if (error) *error = failure; return NO;
+    }
+    if (network[@"carrier"]) for (NSString *key in @[@"carrierName", @"mcc", @"mnc"])
+        if (![network[@"carrier"][key] isKindOfClass:NSString.class]) {
+            failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6025 userInfo:@{NSLocalizedDescriptionKey: @"Invalid prepared carrier fields"}];
+            self.error = failure; if (error) *error = failure; return NO;
+        }
     NSString *profileRoot = identityDir.stringByDeletingLastPathComponent;
     NSString *idsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
     NSString *settingsPath = PXTLinkIOSSettingsPath(), *scopePath = PXGlobalScopePath();
@@ -1271,10 +1303,12 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     NSString *batteryPath = [identityDir stringByAppendingPathComponent:@"battery_info.plist"];
     NSString *legacyBatteryPath = [profileRoot stringByAppendingPathComponent:@"battery_info.plist"];
     NSString *securityPath = PXSecuritySettingsPath();
+    NSString *networkPath = [identityDir stringByAppendingPathComponent:@"network_settings.plist"];
     __block NSMutableDictionary *basis = [NSMutableDictionary dictionary];
     __block NSMutableDictionary *present = [NSMutableDictionary dictionary];
     BOOL captured = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
         NSMutableArray *paths = [@[idsPath, settingsPath, scopePath] mutableCopy];
+        if (network.count) [paths addObject:networkPath];
         if ([flags[@"StorageSystem"] boolValue]) [paths addObject:storagePath];
         if ([flags[@"Battery"] boolValue]) [paths addObjectsFromArray:@[batteryPath, legacyBatteryPath]];
         for (NSString *path in paths) {
@@ -1305,7 +1339,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         @"wantsIMEI": flags[@"IMEI"] ?: @NO, @"wantsMEID": flags[@"MEID"] ?: @NO };
     NSDate *now = [NSDate date];
     NSMutableDictionary *candidate = [@{ @"timestamp": now, @"flags": flags, @"scope": intent[@"scope"],
-        @"settingsPath": settingsPath, @"scopePath": scopePath } mutableCopy];
+        @"settingsPath": settingsPath, @"scopePath": scopePath, @"network": network } mutableCopy];
     PXPreparedDeviceProfileGroup *model = nil;
     if (wantsDeviceProfileGroup || needsBaseline) {
         model = [self prepareDeviceProfileGroupWithOptions:options error:&failure];
@@ -1378,11 +1412,18 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     [keys addObjectsFromArray:@[@"SSID", @"BSSID", @"DeviceTheme", @"ProfileSchemaVersion"]];
     if (payload[@"uptime"]) [keys addObjectsFromArray:@[@"BootTime", @"SystemUptime"]];
     if (payload[@"battery"]) [keys addObjectsFromArray:@[@"BatteryLevel", @"LowPowerMode"]];
+    NSMutableArray *networkKeys = [NSMutableArray array];
+    if (network[@"carrier"]) {
+        [keys addObjectsFromArray:@[@"CarrierName", @"CarrierMCC", @"CarrierMNC"]];
+        [networkKeys addObjectsFromArray:@[@"carrierName", @"mcc", @"mnc"]];
+    }
+    if (network[@"ipv4"]) { [keys addObject:@"LocalIPAddress"]; [networkKeys addObject:@"localIPAddress"]; }
     NSMutableDictionary *conditions = [@{
         idsPath: @{ @"values": PXRuntimeIdentifierDependencies(ids, keys.allObjects) },
         settingsPath: @{ @"values": PXRuntimeIdentifierDependencies(basis[settingsPath], @[@"EnabledIdentifiers", @"StorageSystemEnabled"]) },
         scopePath: @{ @"values": PXRuntimeIdentifierDependencies(basis[scopePath], @[@"ScopedApps"]) }
     } mutableCopy];
+    if (network.count) conditions[networkPath] = @{ @"values": PXRuntimeIdentifierDependencies(basis[networkPath], networkKeys) };
     if (basis[securityPath]) conditions[securityPath] = @{ @"values": PXRuntimeIdentifierDependencies(basis[securityPath], @[@"webCompatIOSRangeEnabled"]) };
     if (payload[@"storage"]) conditions[storagePath] = @{ @"values": PXRuntimeIdentifierDependencies(basis[storagePath], @[@"TotalStorage", @"FreeStorage", @"FilesystemType"]) };
     if (payload[@"battery"]) for (NSString *path in @[batteryPath, legacyBatteryPath])

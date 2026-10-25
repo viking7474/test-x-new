@@ -28,6 +28,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)sharedManager;
 
+// Completion runs on main after generation and metadata save. Failure is not
+// a rollback of directory creation/activation in the current partial lifecycle.
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
@@ -36,6 +38,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 // New methods to manage central profile information
 - (void)updateCurrentProfileInfoWithProfile:(Profile *)profile;
+- (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError * _Nullable * _Nullable)error;
 - (Profile *)loadCurrentProfileInfoFromCentralStore;
 - (BOOL)saveCentralProfileInfo:(NSDictionary *)infoDict;
 - (NSDictionary *)loadCentralProfileInfo;
@@ -52,4 +55,4 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-NS_ASSUME_NONNULL_END 
+NS_ASSUME_NONNULL_END

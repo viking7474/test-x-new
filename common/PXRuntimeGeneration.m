@@ -53,6 +53,9 @@ BOOL PXStageRuntimeGeneration(PXRuntimeSourceTransaction *tx, NSString *identity
     if (uptime && !PXStageRuntimeUptime(tx, identity, uptime[@"boot"], uptime[@"uptime"], now, error)) return NO;
     NSDictionary *battery = payload[@"battery"];
     if (battery && !PXStageRuntimeBattery(tx, identity, battery, error)) return NO;
+    NSDictionary *network = payload[@"network"];
+    if (network[@"carrier"] && !PXStageRuntimeCarrier(tx, identity, network[@"carrier"], now, error)) return NO;
+    if (network[@"ipv4"] && !PXStageRuntimeAddresses(tx, identity, network[@"ipv4"], network[@"ipv6"], YES, now, error)) return NO;
     if (payload[@"storage"] && ![tx setDictionary:payload[@"storage"] atPath:[identity.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"storage.plist"] error:error]) return NO;
     NSString *settingsPath = payload[@"settingsPath"];
     NSMutableDictionary *settings = [[tx dictionaryAtPath:settingsPath error:error] mutableCopy];

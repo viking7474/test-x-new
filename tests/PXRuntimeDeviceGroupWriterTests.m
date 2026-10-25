@@ -29,6 +29,8 @@ static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile),
 static NSDictionary *IDs(NSString *identity) { return [NSDictionary dictionaryWithContentsOfFile:Path(identity, @"device_ids.plist")] ?: @{}; }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performWrite:body error:error]; }
 NSString *PXActiveProfileID(void) { return gSelected; }
+NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.class] && [@[@"a", @"b"] containsObject:value] ? [value copy] : nil; }
+NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
 NSString *PXGlobalScopePath(void) { return Path(gRoot, @"scope.plist"); }
 NSString *PXSecuritySettingsPath(void) { return Path(gRoot, @"security.plist"); }
@@ -217,6 +219,7 @@ ARTIFACT_SINGLETON
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (NSString *)profileIdentityPath;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity;
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial;
 #include "PXDeviceGroupDeclarations.inc"
 @end
@@ -231,6 +234,7 @@ ARTIFACT_SINGLETON
 }
 - (NSString *)profileIdentityPath { gSelections++; return gSelected ? Identity(gSelected) : nil; }
 - (BOOL)isIdentifierEnabled:(NSString *)type { return [self.settings[type] boolValue]; }
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity { CHECK([identity isEqual:Identity(@"a")] || [identity isEqual:Identity(@"b")], "explicit wrapper migrates only supplied target"); return YES; }
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial {
     (void)includeNameAndSerial; gCacheChanges++;
     CHECK([IDs(gExpectedIdentity)[type] isEqual:value] && Snapshot(gExpectedIdentity) != nil,
@@ -606,6 +610,40 @@ static void TestBatchGeneration(PXDeviceGroupFixture *manager, NSString *a, NSSt
     manager.settings = [@{ @"IMEI": @YES, @"MEID": @YES } mutableCopy];
 }
 
+static void TestExplicitCreationGeneration(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"b"; gExpectedIdentity = a; gSelections = 0;
+    manager.settings = [@{ @"DeviceModel": @YES, @"IMEI": @YES, @"MEID": @YES } mutableCopy];
+    CHECK(Seed(a, @{ @"GenerationCounter": @0 }, NO), "explicit creation target seeded");
+    NSDictionary *other = Snapshot(b); NSUInteger caches = gCacheChanges;
+    NSDictionary *network = @{ @"carrier": @{ @"carrierName": @"creation-carrier", @"mcc": @"310", @"mnc": @"260" },
+        @"ipv4": @"192.168.1.77", @"ipv6": @"fd00::77" };
+    NSError *error = nil;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"commit-written"]) commits++; };
+    CHECK([manager regenerateAllEnabledIdentifiersForProfileID:@"a" networkArtifacts:network error:&error] && !error &&
+          gSelections == 0 && commits == 1 && caches == gCacheChanges && [other[@"files"] isEqual:Snapshot(b)[@"files"]],
+          "explicit creation generation never retargets to active profile");
+    gStore.testCheckpoint = nil;
+    NSDictionary *record = [NSDictionary dictionaryWithContentsOfFile:Path(a, @"network_settings.plist")];
+    CHECK([IDs(a)[@"CarrierName"] isEqual:@"creation-carrier"] && [IDs(a)[@"LocalIPAddress"] isEqual:@"192.168.1.77"] &&
+          [record[@"localIPv6Address"] isEqual:@"fd00::77"] && [IDs(a)[@"LocalIPv6Address"] isEqual:record[@"localIPv6Address"]],
+          "creation network and identifier artifacts share one source commit");
+    NSDictionary *before = BatchSnapshot();
+    __block NSUInteger writes = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"] && ++writes == 4) [NSException raise:@"fixture" format:@"creation group fault"]; };
+    CHECK(![manager regenerateAllEnabledIdentifiersForProfileID:@"a" networkArtifacts:network error:&error], "explicit creation source fault reported");
+    gStore.testCheckpoint = nil;
+    CHECK([before isEqual:BatchSnapshot()], "creation network rollback restores entire generated tuple");
+    CHECK(![manager regenerateAllEnabledIdentifiersForProfileID:@"../b" networkArtifacts:network error:&error] &&
+          [before isEqual:BatchSnapshot()], "explicit creation rejects invalid target before migration or staging");
+    CHECK(![manager regenerateAllEnabledIdentifiersForProfileID:@"a" networkArtifacts:(id)@[] error:&error] &&
+          [before isEqual:BatchSnapshot()], "explicit creation rejects malformed prepared network");
+    CHECK(SetSource(Path(a, @"network_settings.plist"), @"localIPv6Address", @"fd00::99"), "existing creation IPv6 seeded");
+    CHECK([manager regenerateAllEnabledIdentifiersForProfileID:@"a" networkArtifacts:network error:&error] &&
+          [IDs(a)[@"LocalIPv6Address"] isEqual:@"fd00::99"], "creation preserves existing IPv6 pair policy");
+    gSelected = @"a";
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -619,6 +657,7 @@ int main(void) {
         TestGroups(manager, Identity(@"a"), Identity(@"b"));
         TestDependentRefresh(manager, Identity(@"a"), Identity(@"b"));
         TestBatchGeneration(manager, Identity(@"a"), Identity(@"b"));
+        TestExplicitCreationGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];

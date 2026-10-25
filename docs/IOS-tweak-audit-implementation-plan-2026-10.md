@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái cập nhật 2026-10-25: Patch 1–3, 4A.1, 4A.2, 4B, 4C.1 và 4C.2A–F đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4C.2G đã gom whole-regenerate thành fixed-target prepare/compare/commit, thêm cache-only adoption và error-return API; build/native mới chờ macOS CI. Không coi toàn bộ Patch 4 hoàn tất: còn ProfileManager orchestration/completion, dashboard/security writers pending, defaults authority, cache ordering, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
+Trạng thái cập nhật 2026-10-25: Patch 1–3, 4A.1, 4A.2, 4B, 4C.1 và 4C.2A–G (kể cả scalar-fixture fix) đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4C.2H1 đã sửa explicit-target create generation, completion chờ generation/metadata trên main, source selection pair và archive fallback; build/native mới chờ macOS CI. Profile lifecycle vẫn partial: selection còn đổi trước generation; cần activation-after-prepare, conditional recovery/directory ownership, dashboard/security/defaults authority, cache ordering và rootful live-reader rollout. Patch 5–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -127,6 +127,8 @@ Chia 4C.1 core + settings/scope và 4C.2 writer rollout/authority để native f
 [Báo cáo 4C.2F](audit-implementation/PATCH-4C-2F-identity-preparation.md) ghi immutable model packet, scalar factories, Serial policy adapter và cache publication sau commit. Người dùng đã xác nhận build pass. Whole-regenerate composition được triển khai ở 4C.2G; profile lifecycle/completion vẫn là boundary riêng.
 
 [Báo cáo 4C.2G](audit-implementation/PATCH-4C-2G-whole-regenerate.md) ghi một target/options, dependency compare trước staging, một source commit cho toàn batch + settings/scope, cache-only adoption và notifications sau commit. Giữ unconditional Wi-Fi, canonical model/cellular policy, gộp duplicate theme/uptime/storage saves. API void cũ giữ tương thích, thêm BOOL/error API cho lifecycle callers ở patch tiếp theo. Manifest enroll whole-regenerate; profile lifecycle/dashboard/security/defaults vẫn pending hoặc external. Build/native mới chờ macOS CI.
+
+[Báo cáo 4C.2H1](audit-implementation/PATCH-4C-2H1-profile-creation-completion.md) ghi fixed profile ID/network packet cho worker create, completion success chỉ sau generation + metadata, main-thread entry routing/busy guard và canonical/legacy selection pair. Bỏ direct network writes/NSInvocation và unlink-before-replace archive fallback; ID allocation xét cả directories khi archive đã có IDs. H1 vẫn chọn profile trước generation: không claim toàn create/switch/directory lifecycle atomic, không tự rollback selection khi generation/metadata fail. Phần tiếp theo là activation sau prepared generation và recovery có ownership. Build/native H1 chờ CI.
 
 - Lập manifest mọi source file và writer trước khi đổi code: active profile selection, scope/security/settings, device IDs và profile artifacts.
 - Đưa writer liên quan vào source transaction dùng process-shared lock/commit contract. Multi-file profile update và profile switch phải có commit boundary bao toàn bộ nhóm liên quan.

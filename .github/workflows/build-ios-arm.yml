@@ -62,6 +62,9 @@ jobs:
       - name: Test native scalar preparation and provider lifecycle
         run: python3 scripts/test_runtime_identity_preparation.py --native
 
+      - name: Test native profile creation completion and selection pairs
+        run: python3 scripts/test_profile_creation_flow.py --native
+
       - name: Test native identifier value writers and migration
         run: python3 scripts/test_runtime_identifier_writers.py --native
 
