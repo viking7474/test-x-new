@@ -84,3 +84,7 @@ Backup/restore audit PASS 2548/2548; tăng 12 per-file guards do scope header/im
 `PXRuntimeReadScopeTests.m` compile production reader + scope engine + macro RootHide. Fixture backend chỉ chọn test loader thay storage path; không tự viết lại TLS/cleanup logic. Cases: A->B giữa operation, nested view inheritance, pending nil không resurrect, return-value lifetime sau old-view release, ObjC exception cleanup, 128 thread scopes, concurrent profile/toggle updates, preparation-before-publication/handler replacement và controller web-staging decisions. Chạy ba process mới trong CI bằng `scripts/test_runtime_snapshot_consumers.py --native`.
 
 Chưa tự chạy Foundation/Logos trên Windows, chưa install/terminate app/device, chưa commit/push. Gate kế tiếp: build/native fixture mới, cold launch + profile/toggle/container-reset tests trên scoped/unscoped app/extensions/WebKit cho RootHide và rootful parity. Sau đó tiếp tục 4B theo plan; chưa đánh dấu toàn bộ transactional publication model hoàn tất.
+
+### Sửa dependency của bootstrap fixture từ CI
+
+CI rootful báo undefined `_PXRuntimeReadBool`: `PXBootstrapScopeTests.m` include production `PXScope.m`, nhưng lệnh compile độc lập chưa link `PXRuntimeSnapshotReader.m`, nơi định nghĩa helper mới. Đã bổ sung production source đó vào compile/link command; Foundation/CoreFoundation flags đã có sẵn. Không thêm stub/test implementation hoặc đổi policy. Bootstrap topology gate nay kiểm tra transitive link dependency này. Chờ CI native chạy lại; host source gate không chứng minh link native thành công.

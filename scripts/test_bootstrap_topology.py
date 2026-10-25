@@ -5,6 +5,10 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 read = lambda p: (ROOT / p).read_text(encoding="utf-8")
 makefile = read("Makefile")
+workflow = read(".github/workflows/build-ios-arm.yml")
+bootstrap_link = workflow.split("xcrun clang", 1)[1].split('"$RUNNER_TEMP/px-bootstrap-scope"', 1)[0]
+assert "tests/PXBootstrapScopeTests.m" in bootstrap_link
+assert "common/PXRuntimeSnapshotReader.m" in bootstrap_link, "PXScope fixture must link the production boolean helper"
 assert "$(filter-out TLinkIOSTweak/UberURLHooks.x,$(wildcard TLinkIOSTweak/*.x))" in makefile
 assert "$(filter-out TLinkIOSTweak/AAA_%,$(wildcard TLinkIOSTweak/*.m))" in makefile
 pattern = re.compile(r"%ctor\s*\{|__attribute__\s*\(\(constructor(?:\(\d+\))?\)\)\s*"

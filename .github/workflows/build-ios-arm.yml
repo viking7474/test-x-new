@@ -19,7 +19,7 @@ jobs:
       - name: Test bootstrap scope and injection filter adapters
         run: |
           set -euo pipefail
-          xcrun clang -fobjc-arc -fblocks -Icommon tests/PXBootstrapScopeTests.m \
+          xcrun clang -fobjc-arc -fblocks -Icommon tests/PXBootstrapScopeTests.m common/PXRuntimeSnapshotReader.m \
             -framework Foundation -framework CoreFoundation -o "$RUNNER_TEMP/px-bootstrap-scope"
           "$RUNNER_TEMP/px-bootstrap-scope"
           xcrun clang -fobjc-arc -fblocks -Icommon common/PXInjectionFilter.m \
