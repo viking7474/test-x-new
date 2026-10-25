@@ -1,6 +1,11 @@
 #import "SerialNumberManager.h"
+#import "PXRuntimeScalarPreparation.h"
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <unistd.h>
 #import <Security/Security.h>
 #import <sys/sysctl.h>
+#include <sys/proc.h>
 #import <mach-o/dyld.h>
 
 @interface SerialNumberManager ()
@@ -74,66 +79,39 @@
 }
 
 - (void)clearSensitiveData {
-    if (self.currentIdentifier) {
-        char *ptr = (char *)[self.currentIdentifier UTF8String];
-        size_t len = [self.currentIdentifier length];
-        if (ptr && len > 0) {
-            memset(ptr, 0, len);
-        }
-        self.currentIdentifier = nil;
+    // NSString owns its UTF8String buffer. Release our reference; writing through
+    // that borrowed const pointer can corrupt immutable/shared or tagged storage.
+    self.currentIdentifier = nil;
+}
+
+- (NSString *)prepareSerialNumber {
+    if (![self isEnvironmentSecure]) return nil;
+    self.error = nil;
+    // Preserve the existing policy delay outside persistence/source locks.
+    usleep(arc4random_uniform(50000));
+    NSArray *prefixes = @[@"C02", @"FVF", @"DLXJ", @"GG78", @"HC79"];
+    static atomic_uint patternIndex = 0;
+    unsigned int previous = atomic_load_explicit(&patternIndex, memory_order_relaxed), next;
+    do { next = (previous + 1) % (unsigned int)prefixes.count; }
+    while (!atomic_compare_exchange_weak_explicit(&patternIndex, &previous, next, memory_order_relaxed, memory_order_relaxed));
+    NSError *error = nil;
+    NSString *prepared = PXPrepareRuntimeSerial(prefixes[next], &error);
+    self.error = error;
+    if (!prepared) return nil;
+    if (![self isValidSerialNumber:prepared]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:4002
+            userInfo:@{NSLocalizedDescriptionKey: @"Generated serial number failed validation"}];
+        return nil;
     }
+    return prepared;
 }
 
 - (NSString *)generateSerialNumber {
-    // Add security checks
-    if (![self isEnvironmentSecure]) {
-        return nil;
-    }
-    
-    self.error = nil;
-    
-    // Add random delay to avoid pattern detection
-    usleep(arc4random_uniform(50000));  // 0-50ms delay
-    
-    // Define valid prefixes for USA-based Apple devices
-    NSArray *prefixes = @[@"C02", @"FVF", @"DLXJ", @"GG78", @"HC79"];
-    
-    // Use pattern variation
-    static int patternIndex = 0;
-    patternIndex = (patternIndex + 1) % prefixes.count;
-    NSString *prefix = prefixes[patternIndex];
-    
-    // Create a mutable string with the prefix
-    NSMutableString *serialNumber = [NSMutableString stringWithString:prefix];
-    
-    // Generate random alphanumeric characters for the rest
-    // Skip I, O, 1, 0 to avoid confusion (common in Apple serial numbers)
-    const char *chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-    NSInteger remainingLength = (prefix.length == 3) ? 8 : 7;
-    
-    for (int i = 0; i < remainingLength; i++) {
-        uint32_t randomValue;
-        if (SecRandomCopyBytes(kSecRandomDefault, sizeof(randomValue), (uint8_t *)&randomValue) == errSecSuccess) {
-            [serialNumber appendFormat:@"%c", chars[randomValue % strlen(chars)]];
-        } else {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                           code:4001 
-                                       userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number for serial"}];
-            return nil;
-        }
-    }
-    
-    // Validate the generated serial number
-    if ([self isValidSerialNumber:serialNumber]) {
-        [self clearSensitiveData];  // Clear any previous value securely
-        self.currentIdentifier = [serialNumber copy];
-        return self.currentIdentifier;
-    }
-    
-    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                   code:4002 
-                               userInfo:@{NSLocalizedDescriptionKey: @"Generated serial number failed validation"}];
-    return nil;
+    NSString *prepared = [self prepareSerialNumber];
+    if (!prepared) return nil;
+    [self clearSensitiveData];
+    self.currentIdentifier = [prepared copy];
+    return self.currentIdentifier;
 }
 
 - (NSString *)currentSerialNumber {
@@ -182,4 +160,4 @@
     [self clearSensitiveData];
 }
 
-@end 
+@end

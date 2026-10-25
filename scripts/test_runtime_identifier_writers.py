@@ -14,8 +14,8 @@ read = lambda p: (ROOT / p).read_text(encoding='utf-8')
 GENERATORS = [
     ('generateIDFA', 'IDFAManager', 'generateIDFA', 'IDFA', 'setCurrentIDFA'),
     ('generateIDFV', 'IDFVManager', 'generateIDFV', 'IDFV', 'setCurrentIDFV'),
-    ('generateDeviceName', 'DeviceNameManager', 'generateDeviceName', 'DeviceName', None),
-    ('generateSerialNumber', 'SerialNumberManager', 'generateSerialNumber', 'SerialNumber', None),
+    ('generateDeviceName', 'DeviceNameManager', 'generateDeviceName', 'DeviceName', 'setCurrentDeviceName'),
+    ('generateSerialNumber', 'SerialNumberManager', 'generateSerialNumber', 'SerialNumber', 'setCurrentSerialNumber'),
     ('generateSystemBootUUID', 'SystemUUIDManager', 'generateBootUUID', 'SystemBootUUID', 'setCurrentBootUUID'),
     ('generateDyldCacheUUID', 'DyldCacheUUIDManager', 'generateDyldCacheUUID', 'DyldCacheUUID', 'setCurrentDyldCacheUUID'),
     ('generatePasteboardUUID', 'PasteboardUUIDManager', 'generatePasteboardUUID', 'PasteboardUUID', 'setCurrentPasteboardUUID'),
@@ -46,6 +46,8 @@ def method(source, signature):
 
 def selected_signatures():
     return ['- (NSString *)profileIdentityPath',
+            '- (NSString *)generatePreparedIdentifierForType:(NSString *)type',
+            '- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial',
             '- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type identityDirectory:(NSString *)identityDir incrementGeneration:(BOOL)increment',
             *['- (NSString *)' + row[0] for row in GENERATORS], '- (NSString *)generateUDID',
             '- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type',
@@ -61,10 +63,13 @@ def source_contracts():
     fixture = read('tests/PXRuntimeIdentifierWriterTests.m')
     for name, _, generator, key, _ in GENERATORS:
         body = method(manager, '- (NSString *)' + name)
-        assert body.index('[self profileIdentityPath]') < body.index('] ' + generator + ']')
-        assert body.count('[self profileIdentityPath]') == 1
-        assert f'type:@"{key}" identityDirectory:identityDir incrementGeneration:NO' in body
-        assert 'writeToFile:' not in body and 'return nil;' in body
+        assert f'[self generatePreparedIdentifierForType:@"{key}"]' in body
+        assert 'profileIdentityPath' not in body and '] ' + generator + ']' not in body
+    flow = method(manager, '- (NSString *)generatePreparedIdentifierForType:(NSString *)type')
+    assert flow.count('[self profileIdentityPath]') == 1
+    assert flow.index('[self profileIdentityPath]') < flow.index('PXPrepareRuntimeScalar(type, &prepareError)')
+    assert flow.index('persistPreparedIdentifier:') < flow.index('publishPreparedIdentifier:')
+    assert 'incrementGeneration:NO' in flow and 'prepareSerialNumber' in flow
     for signature in selected_signatures():
         body = method(manager, signature)
         assert 'writeToFile:' not in body, f'unenrolled direct write: {signature}'
@@ -79,7 +84,9 @@ def source_contracts():
     assert identity.index('[schema integerValue] < 2') < identity.index('[self migrateProfileSchemaAtIdentityDirectory:identityDir]'), 'already-current live readers may not enter writer flock'
     custom = method(manager, '- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type')
     assert 'PXRuntimeIdentifierSidecar(type)' in custom and 'incrementGeneration:YES' in custom
-    assert custom.index('if (success)') < custom.index('setCurrentIDFA:value')
+    assert custom.index('if (success)') < custom.index('publishPreparedIdentifier:value type:type includeNameAndSerial:NO')
+    publisher = method(manager, '- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial')
+    assert 'setCurrentIDFA:value' in publisher and 'includeNameAndSerial &&' in publisher
     assert 'if (generation == NSIntegerMax)' in helper and 'generation + 1' in helper
     assert 'PXRuntimeIdentifierSidecars()' in paths and '@"tracking_info.plist"' in paths
     assert '@"storage.plist", @"battery_info.plist"' in paths
@@ -100,7 +107,7 @@ def source_contracts():
         assert 'common/PXRuntimeIdentifierWriter.m' in read('scripts/' + runner), 'new allowlist registry must link transitively'
     assert 'test_runtime_identifier_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2E-partial'
+    assert manifest['rollout'] == '4C.2F-partial'
     for name in ('identifier-values', 'identifier-migration'):
         assert manifest['writers'][name]['status'] == 'enrolled'
     for name in ('identifier-artifacts', 'profile-lifecycle', 'storage-preference', 'security-store', 'security-direct'):
@@ -123,6 +130,9 @@ def generate_native_fragments(folder):
     for _, cls, generator, key, setter in GENERATORS:
         methods_decl = f'- (NSString *){generator};\n' + (f'- (void){setter}:(NSString *)value;\n' if setter else '')
         impl = f'- (NSString *){generator} {{ return PXFixtureGenerate(self, @"{key}"); }}\n'
+        if key == 'SerialNumber':
+            methods_decl += '- (NSString *)prepareSerialNumber;\n'
+            impl += '- (NSString *)prepareSerialNumber { return PXFixtureGenerate(self, @"SerialNumber"); }\n'
         if setter:
             impl += f'- (void){setter}:(NSString *)value {{ PXFixtureSet(self, @"{key}", value); }}\n'
         providers.append(f'@interface {cls} : PXGenerator\n{methods_decl}@end\n@implementation {cls}\n{impl}@end\n')
@@ -137,14 +147,16 @@ def native_tests():
     with tempfile.TemporaryDirectory(prefix='px-identifier-writers-') as temp:
         folder = Path(temp)
         generate_native_fragments(folder)
-        sources = ['common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m',
+        sources = ['common/PXRuntimeScalarPreparation.m', 'common/PXIdentityValidator.m', 'common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m',
                    'common/PXRuntimePublisher.m', 'tests/PXRuntimeIdentifierWriterTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / ('identifier-' + scheme)
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
-                            '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
+                            '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Darc4random=PXIdentifierFixtureRandom',
+                            '-Darc4random_uniform=PXIdentifierFixtureUniform', '-DSecRandomCopyBytes=PXIdentifierFixtureSecure',
+                            '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                             '-I', str(ROOT / 'common'), '-I', str(folder), *defines,
-                            *[str(ROOT / source) for source in sources], '-framework', 'Foundation', '-o', str(binary)],
+                            *[str(ROOT / source) for source in sources], '-framework', 'Foundation', '-framework', 'Security', '-o', str(binary)],
                            check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)

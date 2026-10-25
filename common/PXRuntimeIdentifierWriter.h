@@ -1,6 +1,18 @@
 #import "PXRuntimeSourceStore.h"
 
 NS_ASSUME_NONNULL_BEGIN
+/// Detached immutable model/cellular preparation. Contains no transaction,
+/// provider instance, callback or active-profile selection.
+@interface PXPreparedDeviceProfileGroup : NSObject
+@property (nonatomic, copy, readonly) NSDictionary *updates;
+@property (nonatomic, copy, readonly) NSArray<NSString *> *replacedKeys;
+@property (nonatomic, copy, readonly) NSDictionary *versionInfo;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithUpdates:(NSDictionary *)updates replacedKeys:(NSArray<NSString *> *)keys
+                            versionInfo:(NSDictionary *)versionInfo error:(NSError * _Nullable * _Nullable)error;
+@end
+
 FOUNDATION_EXPORT NSString * _Nullable PXRuntimeIdentifierSidecar(NSString *type);
 FOUNDATION_EXPORT NSSet<NSString *> *PXRuntimeIdentifierSidecars(void);
 /// Preserves historical integerValue/default-zero behavior, rejects signed overflow.

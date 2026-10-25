@@ -1,5 +1,5 @@
 #import "IDFAManager.h"
-#import <AdSupport/AdSupport.h>
+#import "PXRuntimeScalarPreparation.h"
 #import <Security/Security.h>
 
 @interface IDFAManager ()
@@ -19,36 +19,13 @@
 }
 
 - (NSString *)generateIDFA {
-    self.error = nil;
-    
-    // Generate a valid IDFA format (8-4-4-4-12)
-    NSMutableString *idfa = [NSMutableString string];
-    const char *chars = "0123456789ABCDEF";
-    
-    for (int i = 0; i < 32; i++) {
-        if (i == 8 || i == 12 || i == 16 || i == 20) {
-            [idfa appendString:@"-"];
-        }
-        uint32_t randomValue;
-        if (SecRandomCopyBytes(kSecRandomDefault, sizeof(randomValue), (uint8_t *)&randomValue) == errSecSuccess) {
-            [idfa appendFormat:@"%c", chars[randomValue % 16]];
-        } else {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                           code:1001 
-                                       userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number"}];
-            return nil;
-        }
+    NSError *error = nil;
+    NSString *prepared = PXPrepareRuntimeScalar(@"IDFA", &error);
+    self.error = error;
+    if (prepared) {
+        self.currentIdentifier = [prepared copy];
     }
-    
-    if ([self isValidIDFA:idfa]) {
-        self.currentIdentifier = [idfa copy];
-        return self.currentIdentifier;
-    }
-    
-    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                   code:1002 
-                               userInfo:@{NSLocalizedDescriptionKey: @"Generated IDFA failed validation"}];
-    return nil;
+    return prepared;
 }
 
 - (NSString *)currentIDFA {

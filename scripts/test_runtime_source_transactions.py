@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2E-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2F-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -105,7 +105,7 @@ def native_tests():
         # preprocessor guards preserved. This catches rootful-only declarations
         # before the full UIKit application build. Header annotations are strict.
         check = Path(folder) / 'manager-role.m'
-        check.write_text('#import "PXRuntimeSnapshot.h"\n#import "PXRuntimeSourceStore.h"\n#import "PXRuntimeArtifactWriter.h"\n#import "PXRuntimeIdentifierWriter.h"\n#import "PXRuntimeArtifactPreparation.h"\n'
+        check.write_text('#import "PXRuntimeSnapshot.h"\n#import "PXRuntimeSourceStore.h"\n#import "PXRuntimeArtifactWriter.h"\n#import "PXRuntimeIdentifierWriter.h"\n#import "PXRuntimeArtifactPreparation.h"\n#import "PXRuntimeScalarPreparation.h"\n'
                          + manager_role_fragment()
                          + '\nBOOL PXCheckManagerRole(void) { return PXIdentifierManagerIsManagerProcess(); }\n', encoding='utf-8')
         for defines in ([], ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1']):

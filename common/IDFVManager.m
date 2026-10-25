@@ -1,4 +1,5 @@
 #import "IDFVManager.h"
+#import "PXRuntimeScalarPreparation.h"
 #import <Security/Security.h>
 
 @interface IDFVManager ()
@@ -18,36 +19,13 @@
 }
 
 - (NSString *)generateIDFV {
-    self.error = nil;
-    
-    // Generate a valid IDFV format (8-4-4-4-12)
-    NSMutableString *idfv = [NSMutableString string];
-    const char *chars = "0123456789ABCDEF";
-    
-    for (int i = 0; i < 32; i++) {
-        if (i == 8 || i == 12 || i == 16 || i == 20) {
-            [idfv appendString:@"-"];
-        }
-        uint32_t randomValue;
-        if (SecRandomCopyBytes(kSecRandomDefault, sizeof(randomValue), (uint8_t *)&randomValue) == errSecSuccess) {
-            [idfv appendFormat:@"%c", chars[randomValue % 16]];
-        } else {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                           code:2001 
-                                       userInfo:@{NSLocalizedDescriptionKey: @"Failed to generate secure random number"}];
-            return nil;
-        }
+    NSError *error = nil;
+    NSString *prepared = PXPrepareRuntimeScalar(@"IDFV", &error);
+    self.error = error;
+    if (prepared) {
+        self.currentIdentifier = [prepared copy];
     }
-    
-    if ([self isValidIDFV:idfv]) {
-        self.currentIdentifier = [idfv copy];
-        return self.currentIdentifier;
-    }
-    
-    self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                   code:2002 
-                               userInfo:@{NSLocalizedDescriptionKey: @"Generated IDFV failed validation"}];
-    return nil;
+    return prepared;
 }
 
 - (NSString *)currentIDFV {

@@ -1,11 +1,14 @@
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
+#import <Security/Security.h>
+#import "PXRuntimeScalarPreparation.h"
 #import "PXRuntimeIdentifierWriter.h"
 #import "PXRuntimePublisher.h"
 #import "PXPaths.h"
 #import "TLinkIOSLogging.h"
 #include <stdatomic.h>
 #include <unistd.h>
+#include <string.h>
 
 static NSUInteger gChecks, gFailures, gSelections, gCacheSets;
 static _Atomic NSUInteger gWrites;
@@ -13,6 +16,17 @@ static NSString *gRoot, *gSelected, *gExpectedIdentity, *gExpectedKey;
 static PXRuntimeSourceStore *gStore;
 static BOOL gFailGeneration, gCheckCacheCommit;
 static void (^gDuringGeneration)(void);
+static void PXFixturePreparationCallback(void) {
+    void (^callback)(void) = gDuringGeneration; gDuringGeneration = nil;
+    if (callback) callback();
+}
+uint32_t PXIdentifierFixtureRandom(void) { PXFixturePreparationCallback(); return 5; }
+uint32_t PXIdentifierFixtureUniform(uint32_t bound) { PXFixturePreparationCallback(); return bound ? 5 % bound : 0; }
+OSStatus PXIdentifierFixtureSecure(SecRandomRef random, size_t count, void *bytes) {
+    (void)random; PXFixturePreparationCallback();
+    if (gFailGeneration) return errSecNotAvailable;
+    memset(bytes, 5, count); return errSecSuccess;
+}
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 NSString *PXProfilesPath(void) { return gRoot; }
@@ -60,13 +74,12 @@ static BOOL Seed(NSString *identity, NSDictionary *ids) {
 - (NSError *)lastError { return self.error; }
 @end
 static NSString *PXFixtureGenerate(PXGenerator *manager, NSString *key) {
-    if (gDuringGeneration) gDuringGeneration();
+    PXFixturePreparationCallback();
     if (gFailGeneration) {
         manager.error = [NSError errorWithDomain:@"fixture" code:1 userInfo:nil]; return nil;
     }
     manager.error = nil;
-    manager.value = [@"prepared-" stringByAppendingString:key];
-    return manager.value;
+    return [@"prepared-" stringByAppendingString:key];
 }
 static void PXFixtureSet(PXGenerator *manager, NSString *key, NSString *value) {
     gCacheSets++;
@@ -122,11 +135,13 @@ static void TestGeneratedValues(PXIdentifierFixture *manager, NSString *a, NSStr
     for (NSArray<NSString *> *row in cases) {
         NSString *selectorName = row[0], *key = row[1], *file = row[2];
         gSelected = @"a"; gSelections = 0;
+        gExpectedIdentity = a; gExpectedKey = key; gCheckCacheCommit = YES;
         gDuringGeneration = ^{ CHECK(Snapshot(a) != nil, "generation is outside source gate"); gSelected = @"b"; };
         SEL selector = NSSelectorFromString(selectorName);
         NSString *(*invoke)(id, SEL) = (NSString *(*)(id, SEL))[manager methodForSelector:selector];
         NSString *value = invoke(manager, selector);
         gDuringGeneration = nil;
+        gCheckCacheCommit = NO;
         CHECK(value != nil && gSelections == 1, "generator captures target once before preparing value");
         CHECK([Load(Path(a, file))[@"value"] isEqual:value] && [IDs(a)[key] isEqual:value], "generator writes exact sidecar and canonical ID key");
         CHECK([IDs(a)[@"GenerationCounter"] isEqual:@7] && [IDs(a)[@"keep"] boolValue] && !IDs(b)[key],
@@ -137,10 +152,11 @@ static void TestGeneratedValues(PXIdentifierFixture *manager, NSString *a, NSStr
     CHECK([manager generateIDFA] == nil && manager.error != nil && [before isEqual:Snapshot(a)], "generation failure does not mutate persisted sources");
     gFailGeneration = NO;
     __block BOOL interrupted = NO;
+    NSUInteger cacheSetsBefore = gCacheSets;
     gStore.testCheckpoint = ^(NSString *stage) { if (!interrupted && [stage isEqual:@"source-written"]) { interrupted = YES; [NSException raise:@"fixture" format:@"fail scalar commit"]; } };
     CHECK([manager generateSystemBootUUID] == nil && manager.error != nil, "generator reports persist failure");
     gStore.testCheckpoint = nil;
-    CHECK([before isEqual:Snapshot(a)], "failed generated pair rolls back bytes and source identity");
+    CHECK([before isEqual:Snapshot(a)] && gCacheSets == cacheSetsBefore, "failed generated pair rolls back bytes and source identity without publishing cache");
     CHECK(PXRuntimeIdentifierSidecar(@"HardwareUUID") == nil && PXRuntimeIdentifierSidecar(@"DeviceTheme") == nil,
           "custom API does not introduce legacy aliases or extra types");
 }

@@ -1,6 +1,30 @@
 #import "PXRuntimeIdentifierWriter.h"
 #import <dispatch/dispatch.h>
 
+@implementation PXPreparedDeviceProfileGroup
+- (instancetype)initWithUpdates:(NSDictionary *)updates replacedKeys:(NSArray<NSString *> *)keys
+                     versionInfo:(NSDictionary *)versionInfo error:(NSError **)error {
+    if (!(self = [super init])) return nil;
+    if (error) *error = nil;
+    BOOL valid = [updates isKindOfClass:NSDictionary.class] && [keys isKindOfClass:NSArray.class] &&
+        [versionInfo isKindOfClass:NSDictionary.class];
+    if (valid) for (id key in keys) if (![key isKindOfClass:NSString.class]) { valid = NO; break; }
+    if (!valid) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.identifier-write" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid prepared model payload"}];
+        return nil;
+    }
+    // One deep detach: cached/mutable DB/provider payloads cannot alter a
+    // candidate between preparation and staging, including nested collections.
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:@{ @"updates": updates, @"keys": keys, @"version": versionInfo }
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
+    NSDictionary *packet = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:error] : nil;
+    if (!packet) return nil;
+    _updates = packet[@"updates"]; _replacedKeys = packet[@"keys"]; _versionInfo = packet[@"version"];
+    return self;
+}
+@end
+
 static NSDictionary<NSString *, NSString *> *PXIdentifierSidecarMap(void) {
     static NSDictionary *map;
     static dispatch_once_t once;

@@ -8,6 +8,8 @@
 
 // Core functionality
 - (NSString *)generateSerialNumber;
+// Checks environment/reserves a prefix without changing the cached identifier.
+- (NSString *)prepareSerialNumber;
 - (NSString *)currentSerialNumber;
 - (void)setCurrentSerialNumber:(NSString *)serialNumber;
 
@@ -18,4 +20,4 @@
 - (void)clearSensitiveData;
 - (BOOL)isEnvironmentSecure;
 
-@end 
+@end

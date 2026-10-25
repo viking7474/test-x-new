@@ -29,6 +29,8 @@ SIGNATURES = [
     '- (NSString *)generateMEID',
     '- (BOOL)isValidIMEI:(NSString *)imei',
     '- (BOOL)isValidMEID:(NSString *)meid',
+    '- (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error',
+    '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -69,8 +71,14 @@ def source_contracts():
     assert ios.index('if (!success)') < ios.index('setCurrentIOSVersionInfo:versionDict')
     group = method(manager, SIGNATURES[2])
     assert '[NSMutableDictionary dictionaryWithContentsOfFile:' not in group
-    assert 'managedKeys, nil, YES, YES, error' in group
-    assert group.index('if (!wrote)') < group.index('setCurrentDeviceModel:productType')
+    assert 'prepared.updates, prepared.replacedKeys, nil, YES, YES, error' in group
+    assert group.index('if (!wrote)') < group.index('publishPreparedDeviceProfileGroup:prepared')
+    builder = method(manager, '- (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error')
+    assert 'initWithUpdates:deviceIds replacedKeys:managedKeys versionInfo:version error:error' in builder
+    for forbidden in ('self.error', 'profileIdentityPath', 'PXPerformRuntimeSourceWrite', 'setCurrentIOSVersionInfo:', 'setCurrentDeviceModel:'):
+        assert forbidden not in builder
+    publisher = method(manager, '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared')
+    assert 'setCurrentIOSVersionInfo:prepared.versionInfo' in publisher and 'setCurrentDeviceModel:ids[@"DeviceModel"]' in publisher
     assert 'PXRemoveLegacyCellularFiles' not in manager
     assert 'replacedKeys, NSDictionary *expected' in helper
     assert helper.index('Identifier dependencies changed') < helper.index('[ids removeObjectsForKeys:replacedKeys]')
@@ -85,7 +93,7 @@ def source_contracts():
         assert case in fixture, case
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2E-partial'
+    assert manifest['rollout'] == '4C.2F-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'pending'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

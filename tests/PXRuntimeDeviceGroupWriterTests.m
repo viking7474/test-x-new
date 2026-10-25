@@ -338,6 +338,36 @@ static void TestTelephony(PXDeviceGroupFixture *manager, NSString *a, NSString *
     before = Snapshot(a);
     CHECK(![manager setCustomIMEI:imei] && [before isEqual:Snapshot(a)], "malformed telephony sidecar is never silently replaced");
 }
+static void TestModelPreparation(PXDeviceGroupFixture *manager, NSString *identity) {
+    gExpectedIdentity = identity; gSelected = @"a";
+    CHECK(Seed(identity, @{ @"GenerationCounter": @0, @"keep": @YES }, YES), "model preparation fixture seeded");
+    NSDictionary *before = Snapshot(identity); NSUInteger caches = gCacheChanges;
+    NSMutableDictionary *options = [@{ @"webCompat": @NO, @"wantsIMEI": @YES, @"wantsMEID": @YES } mutableCopy];
+    gSelections = 0;
+    gDuringPrepare = ^{ options[@"wantsIMEI"] = @NO; gSelected = @"b"; };
+    NSError *error = nil;
+    PXPreparedDeviceProfileGroup *prepared = [manager prepareDeviceProfileGroupWithOptions:options error:&error];
+    CHECK(prepared != nil && error == nil && prepared.updates[@"IMEI"] != nil && gSelections == 0 &&
+          gCacheChanges == caches && [before isEqual:Snapshot(identity)], "model prepare captures options without source writes selection or cache publication");
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeIdentifierReplacement(tx, identity, prepared.updates, prepared.replacedKeys, nil, YES, YES, writeError);
+    } error:NULL] && gCacheChanges == caches, "prepared model stages independently without publishing callbacks");
+    [manager publishPreparedDeviceProfileGroup:prepared];
+    CHECK(gCacheChanges == caches + 2 && [IDs(identity)[@"GenerationCounter"] isEqual:@1], "prepared model publishes caches only after explicit commit");
+    NSMutableString *model = [@"iPhone15,4" mutableCopy];
+    NSMutableArray *capacities = [@[@128] mutableCopy], *keys = [@[@"DeviceModel"] mutableCopy];
+    NSMutableDictionary *updates = [@{ @"DeviceModel": model, @"StorageCapacitiesGB": capacities } mutableCopy];
+    NSMutableDictionary *version = [@{ @"version": @"17.0" } mutableCopy];
+    PXPreparedDeviceProfileGroup *detached = [[PXPreparedDeviceProfileGroup alloc] initWithUpdates:updates replacedKeys:keys versionInfo:version error:&error];
+    [model setString:@"changed"]; [capacities addObject:@256]; [keys addObject:@"IMEI"]; version[@"version"] = @"changed";
+    CHECK([detached.updates[@"DeviceModel"] isEqual:@"iPhone15,4"] && [detached.updates[@"StorageCapacitiesGB"] count] == 1 &&
+          detached.replacedKeys.count == 1 && [detached.versionInfo[@"version"] isEqual:@"17.0"], "prepared model deep detaches mutable provider graphs");
+    CHECK([[PXPreparedDeviceProfileGroup alloc] initWithUpdates:@{} replacedKeys:(id)@[@1] versionInfo:@{} error:&error] == nil && error != nil,
+          "prepared model rejects malformed ownership keys");
+    CHECK([manager prepareDeviceProfileGroupWithOptions:@{ @"wantsIMEI": NSNull.null } error:&error] == nil && error != nil,
+          "model preparation rejects malformed flags before DB work");
+    gSelected = @"a";
+}
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -347,6 +377,7 @@ int main(void) {
             allowsPath:^BOOL(NSString *path) { return [path hasPrefix:[gRoot stringByAppendingString:@"/"]] && [path hasSuffix:@".plist"] && ![path hasPrefix:Path(gRoot, @"control/")]; } error:NULL];
         CHECK(gStore != nil, "device group source backend initialized");
         PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
+        TestModelPreparation(manager, Identity(@"a"));
         TestGroups(manager, Identity(@"a"), Identity(@"b"));
         TestDependentRefresh(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));

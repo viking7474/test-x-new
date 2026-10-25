@@ -31,6 +31,7 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXRuntimeSourceStore.h"
 #import "PXRuntimeIdentifierWriter.h"
+#import "PXRuntimeScalarPreparation.h"
 #import <Security/Security.h>
 
 @interface LSApplicationWorkspace
@@ -58,6 +59,10 @@
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
+- (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error;
+- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared;
+- (NSString *)generatePreparedIdentifierForType:(NSString *)type;
+- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial;
 - (BOOL)isValidIMEI:(NSString *)imei;
 - (BOOL)isValidMEID:(NSString *)meid;
 - (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate;
@@ -476,23 +481,57 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 
 - (NSString *)regenerateDeviceProfileGroupAtIdentityDirectory:(NSString *)identityDir {
     self.error = nil;
-
     if (!identityDir.length) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Could not resolve profile identity path"}];
         return nil;
     }
+    NSDictionary *options = @{ @"webCompat": @(PXWebCompatIOSRangeEnabled()),
+        @"wantsIMEI": @([self isIdentifierEnabled:@"IMEI"]), @"wantsMEID": @([self isIdentifierEnabled:@"MEID"]) };
+    NSError *sourceError = nil;
+    PXPreparedDeviceProfileGroup *prepared = [self prepareDeviceProfileGroupWithOptions:options error:&sourceError];
+    if (!prepared) { self.error = sourceError; return nil; }
+    BOOL wrote = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXStageRuntimeIdentifierReplacement(tx, identityDir, prepared.updates, prepared.replacedKeys, nil, YES, YES, error);
+    }, &sourceError);
+    if (!wrote) { self.error = sourceError; return nil; }
+    [self publishPreparedDeviceProfileGroup:prepared];
+    return prepared.updates[@"DeviceModel"];
+}
 
+- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared {
+    NSDictionary *ids = prepared.updates;
+    @try { [[IOSVersionInfo sharedManager] setCurrentIOSVersionInfo:prepared.versionInfo]; }
+    @catch (__unused NSException *exception) {}
+    @try { [[DeviceModelManager sharedManager] setCurrentDeviceModel:ids[@"DeviceModel"]]; }
+    @catch (__unused NSException *exception) {}
+    PXLog(@"[WeaponX] DeviceProfileGroup committed: %@ (%@) iOS %@ (%@)", ids[@"DeviceModel"], ids[@"DeviceModelName"], ids[@"IOSVersion"], ids[@"IOSBuild"]);
+    PXDBLog(@"DeviceProfileGroup: device=%@ regulatory=%@ boardID=%@ hwModel=%@", ids[@"DeviceModel"], ids[@"RegulatoryModelNumber"], ids[@"BoardID"], ids[@"HwModel"]);
+}
+
+- (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error {
+    if (error) *error = nil;
+    if (![options isKindOfClass:NSDictionary.class]) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6020 userInfo:@{NSLocalizedDescriptionKey: @"Invalid model preparation options"}];
+        return nil;
+    }
+    options = [options copy];
+    for (NSString *key in @[@"webCompat", @"wantsIMEI", @"wantsMEID"]) {
+        if (options[key] && ![options[key] isKindOfClass:NSNumber.class]) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6020 userInfo:@{NSLocalizedDescriptionKey: @"Invalid model preparation flag"}];
+            return nil;
+        }
+    }
     NSError *dbErr = nil;
     IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
     IOSBuildDB *buildDB = [IOSBuildDB sharedManager];
     if (![modelDB loadIfNeeded:&dbErr] || ![buildDB loadIfNeeded:&dbErr]) {
-        self.error = dbErr;
+        if (error) *error = dbErr;
         PXLog(@"[WeaponX] ⚠️ DeviceProfileGroup: DB not available (%@)", dbErr.localizedDescription ?: @"unknown");
         PXDBLog(@"DeviceProfileGroup: DB not available err=%@", dbErr.localizedDescription ?: @"nil");
         return nil;
     }
 
-    BOOL webCompat = PXWebCompatIOSRangeEnabled();
+    BOOL webCompat = [options[@"webCompat"] boolValue];
 
     // Pick a random iPhone model that supports min iOS 13.0.
     // In WebCompat mode, we also require an iOS build <= 16.3.1 to exist for the chosen device.
@@ -519,20 +558,20 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     }
 
     if (!modelSpec) {
-        self.error = dbErr;
+        if (error) *error = dbErr;
         PXLog(@"[WeaponX] ❌ DeviceProfileGroup: failed to pick model (%@)", dbErr.localizedDescription ?: @"unknown");
         PXDBLog(@"DeviceProfileGroup: failed to pick model err=%@", dbErr.localizedDescription ?: @"nil");
         return nil;
     }
 
     if (!productType.length || !maxIOS.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6002 userInfo:@{NSLocalizedDescriptionKey: @"Invalid model spec (missing productType/maxIOS)"}];
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6002 userInfo:@{NSLocalizedDescriptionKey: @"Invalid model spec (missing productType/maxIOS)"}];
         PXDBLog(@"DeviceProfileGroup: invalid modelSpec missing productType/maxIOS spec=%@", modelSpec);
         return nil;
     }
 
     if (!iosMeta) {
-        self.error = dbErr ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6005 userInfo:@{NSLocalizedDescriptionKey: @"No compatible iOS build found for chosen model"}];
+        if (error) *error = dbErr ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6005 userInfo:@{NSLocalizedDescriptionKey: @"No compatible iOS build found for chosen model"}];
         PXLog(@"[WeaponX] ❌ DeviceProfileGroup: no compatible build for %@ (maxIOS=%@ effectiveMax=%@ webCompat=%@)", productType, maxIOS, effectiveMaxIOS ?: @"<nil>", webCompat ? @"YES" : @"NO");
         PXDBLog(@"DeviceProfileGroup: no compatible build device=%@ maxIOS=%@ effectiveMax=%@ webCompat=%@ err=%@", productType, maxIOS, effectiveMaxIOS ?: @"<nil>", webCompat ? @"YES" : @"NO", dbErr.localizedDescription ?: @"nil");
         return nil;
@@ -544,7 +583,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     NSString *xnu = [iosMeta[@"xnu"] isKindOfClass:[NSString class]] ? iosMeta[@"xnu"] : nil;
     NSString *kernel = [iosMeta[@"kernel_version"] isKindOfClass:[NSString class]] ? iosMeta[@"kernel_version"] : nil;
     if (!iosVersion.length || !iosBuild.length || !darwin.length || !xnu.length || !kernel.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid iOS meta (missing required fields)"}];
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6003 userInfo:@{NSLocalizedDescriptionKey: @"Invalid iOS meta (missing required fields)"}];
         PXDBLog(@"DeviceProfileGroup: invalid iosMeta device=%@ meta=%@", productType, iosMeta);
         return nil;
     }
@@ -553,7 +592,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     // Do not reconstruct RAM/display/camera/storage from ProductType prefixes here.
     NSDictionary *hardwareSpecs = [modelDB canonicalHardwareSpecForProductType:productType];
     if (!hardwareSpecs.count) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6006 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware metadata missing for model"}];
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6006 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware metadata missing for model"}];
         PXDBLog(@"DeviceProfileGroup: missing canonical hardware metadata device=%@", productType);
         return nil;
     }
@@ -578,7 +617,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     NSString *boardID = PXProfileString(pickedVariant[@"boardID"]);
     NSString *hwModel = PXProfileString(pickedVariant[@"hwModel"]);
     if (!boardID.length || !hwModel.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6007 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware variant missing for model"}];
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6007 userInfo:@{NSLocalizedDescriptionKey: @"Canonical hardware variant missing for model"}];
         PXDBLog(@"DeviceProfileGroup: missing variant device=%@ spec=%@", productType, modelSpec);
         return nil;
     }
@@ -589,7 +628,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     NSString *regulatoryModelNumber = PXPickRegulatoryModelNumberFromModelSpec(modelSpec, pickedVariant);
     if ([pickedVariant[@"regulatoryModelNumbers"] isKindOfClass:[NSArray class]] &&
         [pickedVariant[@"regulatoryModelNumbers"] count] > 0 && !regulatoryModelNumber.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6008 userInfo:@{NSLocalizedDescriptionKey: @"Canonical regulatory model number missing for selected variant"}];
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6008 userInfo:@{NSLocalizedDescriptionKey: @"Canonical regulatory model number missing for selected variant"}];
         return nil;
     }
 
@@ -609,7 +648,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
                                          regulatoryModelNumber:regulatoryModelNumber ?: @""
                                                       iosBuild:iosBuild];
             if (!basebandMeta.count) {
-                self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+                if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                                  code:6009
                                              userInfo:@{NSLocalizedDescriptionKey:
                                                             @"Known cellular variant is missing authoritative baseband metadata for selected iOS build"}];
@@ -655,10 +694,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     if (!PXPopulateCanonicalCellularIdentity(deviceIds,
                                              cellularSpec,
                                              basebandMeta,
-                                             [self isIdentifierEnabled:@"IMEI"],
-                                             [self isIdentifierEnabled:@"MEID"],
+                                             [options[@"wantsIMEI"] boolValue],
+                                             [options[@"wantsMEID"] boolValue],
                                              &cellularError)) {
-        self.error = cellularError ?: [NSError errorWithDomain:@"com.hydra.tlinkios"
+        if (error) *error = cellularError ?: [NSError errorWithDomain:@"com.hydra.tlinkios"
                                                            code:6014
                                                        userInfo:@{NSLocalizedDescriptionKey:
                                                                       @"Failed to populate canonical cellular identity"}];
@@ -674,35 +713,9 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 
     deviceIds[@"CommittedAt"] = now;
 
-    NSError *sourceError = nil;
-    BOOL wrote = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierReplacement(tx, identityDir, deviceIds, managedKeys, nil, YES, YES, error);
-    }, &sourceError);
-    if (!wrote) { self.error = sourceError; return nil; }
-
-    // Keep IOSVersionInfo in sync for processes that fall back to it.
-    @try {
-        NSDictionary *versionDict = @{
-            @"version": iosVersion,
-            @"build": iosBuild,
-            @"darwin": darwin,
-            @"xnu": xnu,
-            @"kernel_version": kernel,
-            @"lastUpdated": now
-        };
-        [[IOSVersionInfo sharedManager] setCurrentIOSVersionInfo:versionDict];
-    } @catch (__unused NSException *e) {
-    }
-
-    // Keep DeviceModelManager in sync if present.
-    @try {
-        [[DeviceModelManager sharedManager] setCurrentDeviceModel:productType];
-    } @catch (__unused NSException *e) {
-    }
-
-    PXLog(@"[WeaponX] ✅ DeviceProfileGroup: %@ (%@) iOS %@ (%@)", productType, modelName ?: @"", iosVersion, iosBuild);
-    PXDBLog(@"DeviceProfileGroup: picked device=%@ regulatoryModelNumber=%@ boardID=%@ hwModel=%@", productType, regulatoryModelNumber ?: @"<nil>", boardID ?: @"<nil>", hwModel ?: @"<nil>");
-    return productType;
+    NSDictionary *version = @{ @"version": iosVersion, @"build": iosBuild, @"darwin": darwin,
+        @"xnu": xnu, @"kernel_version": kernel, @"lastUpdated": now };
+    return [[PXPreparedDeviceProfileGroup alloc] initWithUpdates:deviceIds replacedKeys:managedKeys versionInfo:version error:error];
 }
 
 - (NSString *)generateDeviceModel {
@@ -921,44 +934,37 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return success;
 }
 
-- (NSString *)generateIDFA {
+- (NSString *)generatePreparedIdentifierForType:(NSString *)type {
     self.error = nil;
     NSString *identityDir = [self profileIdentityPath];
     if (!identityDir.length) return nil;
-    NSString *value = [[IDFAManager sharedManager] generateIDFA];
-    if (!value) { self.error = [[IDFAManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"IDFA" identityDirectory:identityDir incrementGeneration:NO]) return nil;
+    NSError *prepareError = nil;
+    NSString *value = nil;
+    if ([type isEqualToString:@"SerialNumber"]) {
+        value = [[SerialNumberManager sharedManager] prepareSerialNumber];
+        if (!value) prepareError = [[SerialNumberManager sharedManager] lastError];
+    } else value = PXPrepareRuntimeScalar(type, &prepareError);
+    if (!value) { self.error = prepareError; return nil; }
+    if (![self persistPreparedIdentifier:value type:type identityDirectory:identityDir incrementGeneration:NO]) return nil;
+    [self publishPreparedIdentifier:value type:type includeNameAndSerial:YES];
+    if ([type hasSuffix:@"UUID"] || [type isEqualToString:@"UDID"]) PXLog(@"[IdentifierManager] Committed %@ for %@", type, identityDir);
     return value;
+}
+
+- (NSString *)generateIDFA {
+    return [self generatePreparedIdentifierForType:@"IDFA"];
 }
 
 - (NSString *)generateIDFV {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[IDFVManager sharedManager] generateIDFV];
-    if (!value) { self.error = [[IDFVManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"IDFV" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    return value;
+    return [self generatePreparedIdentifierForType:@"IDFV"];
 }
 
 - (NSString *)generateDeviceName {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[DeviceNameManager sharedManager] generateDeviceName];
-    if (!value) { self.error = [[DeviceNameManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"DeviceName" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    return value;
+    return [self generatePreparedIdentifierForType:@"DeviceName"];
 }
 
 - (NSString *)generateSerialNumber {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[SerialNumberManager sharedManager] generateSerialNumber];
-    if (!value) { self.error = [[SerialNumberManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"SerialNumber" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    return value;
+    return [self generatePreparedIdentifierForType:@"SerialNumber"];
 }
 
 - (NSDictionary *)generateIOSVersion {
@@ -1083,80 +1089,31 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (NSString *)generateSystemBootUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[SystemUUIDManager sharedManager] generateBootUUID];
-    if (!value) { self.error = [[SystemUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"SystemBootUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed SystemBootUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"SystemBootUUID"];
 }
 
 - (NSString *)generateDyldCacheUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[DyldCacheUUIDManager sharedManager] generateDyldCacheUUID];
-    if (!value) { self.error = [[DyldCacheUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"DyldCacheUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed DyldCacheUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"DyldCacheUUID"];
 }
 
 - (NSString *)generatePasteboardUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[PasteboardUUIDManager sharedManager] generatePasteboardUUID];
-    if (!value) { self.error = [[PasteboardUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"PasteboardUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed PasteboardUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"PasteboardUUID"];
 }
 
 - (NSString *)generateKeychainUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[KeychainUUIDManager sharedManager] generateKeychainUUID];
-    if (!value) { self.error = [[KeychainUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"KeychainUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed KeychainUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"KeychainUUID"];
 }
 
 - (NSString *)generateUserDefaultsUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[UserDefaultsUUIDManager sharedManager] generateUserDefaultsUUID];
-    if (!value) { self.error = [[UserDefaultsUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"UserDefaultsUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed UserDefaultsUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"UserDefaultsUUID"];
 }
 
 - (NSString *)generateAppGroupUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[AppGroupUUIDManager sharedManager] generateAppGroupUUID];
-    if (!value) { self.error = [[AppGroupUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"AppGroupUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed AppGroupUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"AppGroupUUID"];
 }
 
 - (NSString *)generateCoreDataUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[CoreDataUUIDManager sharedManager] generateCoreDataUUID];
-    if (!value) { self.error = [[CoreDataUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"CoreDataUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed CoreDataUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"CoreDataUUID"];
 }
 
 - (NSString *)generateSystemUptime {
@@ -1194,25 +1151,11 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (NSString *)generateAppInstallUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[AppInstallUUIDManager sharedManager] generateAppInstallUUID];
-    if (!value) { self.error = [[AppInstallUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"AppInstallUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed AppInstallUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"AppInstallUUID"];
 }
 
 - (NSString *)generateAppContainerUUID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSString *value = [[AppContainerUUIDManager sharedManager] generateAppContainerUUID];
-    if (!value) { self.error = [[AppContainerUUIDManager sharedManager] lastError]; return nil; }
-    if (![self persistPreparedIdentifier:value type:@"AppContainerUUID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed AppContainerUUID for %@", identityDir);
-    return value;
+    return [self generatePreparedIdentifierForType:@"AppContainerUUID"];
 }
 
 
@@ -3048,36 +2991,41 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 
 #pragma mark - Custom Values
 
+- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial {
+    if (includeNameAndSerial && [type isEqualToString:@"DeviceName"]) { [[DeviceNameManager sharedManager] setCurrentDeviceName:value]; return; }
+    if (includeNameAndSerial && [type isEqualToString:@"SerialNumber"]) { [[SerialNumberManager sharedManager] setCurrentSerialNumber:value]; return; }
+    if ([type isEqualToString:@"IDFA"]) {
+        [[IDFAManager sharedManager] setCurrentIDFA:value];
+    } else if ([type isEqualToString:@"IDFV"]) {
+        [[IDFVManager sharedManager] setCurrentIDFV:value];
+    } else if ([type isEqualToString:@"SystemBootUUID"]) {
+        [[SystemUUIDManager sharedManager] setCurrentBootUUID:value];
+    } else if ([type isEqualToString:@"DyldCacheUUID"]) {
+        [[DyldCacheUUIDManager sharedManager] setCurrentDyldCacheUUID:value];
+    } else if ([type isEqualToString:@"PasteboardUUID"]) {
+        [[PasteboardUUIDManager sharedManager] setCurrentPasteboardUUID:value];
+    } else if ([type isEqualToString:@"KeychainUUID"]) {
+        [[KeychainUUIDManager sharedManager] setCurrentKeychainUUID:value];
+    } else if ([type isEqualToString:@"UserDefaultsUUID"]) {
+        [[UserDefaultsUUIDManager sharedManager] setCurrentUserDefaultsUUID:value];
+    } else if ([type isEqualToString:@"AppGroupUUID"]) {
+        [[AppGroupUUIDManager sharedManager] setCurrentAppGroupUUID:value];
+    } else if ([type isEqualToString:@"CoreDataUUID"]) {
+        [[CoreDataUUIDManager sharedManager] setCurrentCoreDataUUID:value];
+    } else if ([type isEqualToString:@"AppInstallUUID"]) {
+        [[AppInstallUUIDManager sharedManager] setCurrentAppInstallUUID:value];
+    } else if ([type isEqualToString:@"AppContainerUUID"]) {
+        [[AppContainerUUIDManager sharedManager] setCurrentAppContainerUUID:value];
+    }
+}
+
 - (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type {
     NSString *identityDir = [self profileIdentityPath];
     if (!identityDir.length || !PXRuntimeIdentifierSidecar(type)) return NO;
     BOOL success = [self persistPreparedIdentifier:value type:type identityDirectory:identityDir incrementGeneration:YES];
     if (success) {
         PXLog(@"[WeaponX] Custom %@ committed for %@", type, identityDir);
-        // For specific types, also update the respective manager
-        if ([type isEqualToString:@"IDFA"]) {
-            [[IDFAManager sharedManager] setCurrentIDFA:value];
-        } else if ([type isEqualToString:@"IDFV"]) {
-            [[IDFVManager sharedManager] setCurrentIDFV:value];
-        } else if ([type isEqualToString:@"SystemBootUUID"]) {
-            [[SystemUUIDManager sharedManager] setCurrentBootUUID:value];
-        } else if ([type isEqualToString:@"DyldCacheUUID"]) {
-            [[DyldCacheUUIDManager sharedManager] setCurrentDyldCacheUUID:value];
-        } else if ([type isEqualToString:@"PasteboardUUID"]) {
-            [[PasteboardUUIDManager sharedManager] setCurrentPasteboardUUID:value];
-        } else if ([type isEqualToString:@"KeychainUUID"]) {
-            [[KeychainUUIDManager sharedManager] setCurrentKeychainUUID:value];
-        } else if ([type isEqualToString:@"UserDefaultsUUID"]) {
-            [[UserDefaultsUUIDManager sharedManager] setCurrentUserDefaultsUUID:value];
-        } else if ([type isEqualToString:@"AppGroupUUID"]) {
-            [[AppGroupUUIDManager sharedManager] setCurrentAppGroupUUID:value];
-        } else if ([type isEqualToString:@"CoreDataUUID"]) {
-            [[CoreDataUUIDManager sharedManager] setCurrentCoreDataUUID:value];
-        } else if ([type isEqualToString:@"AppInstallUUID"]) {
-            [[AppInstallUUIDManager sharedManager] setCurrentAppInstallUUID:value];
-        } else if ([type isEqualToString:@"AppContainerUUID"]) {
-            [[AppContainerUUIDManager sharedManager] setCurrentAppContainerUUID:value];
-        }
+        [self publishPreparedIdentifier:value type:type includeNameAndSerial:NO];
     }
     
     return success;
@@ -3169,14 +3117,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (NSString *)generateUDID {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSMutableString *udid = [NSMutableString stringWithCapacity:40];
-    for (int i = 0; i < 40; i++) [udid appendFormat:@"%x", arc4random_uniform(16)];
-    if (![self persistPreparedIdentifier:udid type:@"UDID" identityDirectory:identityDir incrementGeneration:NO]) return nil;
-    PXLog(@"[IdentifierManager] Committed UDID for %@", identityDir);
-    return [udid copy];
+    return [self generatePreparedIdentifierForType:@"UDID"];
 }
 
 - (BOOL)setCustomUDID:(NSString *)value {

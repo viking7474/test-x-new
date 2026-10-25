@@ -39,6 +39,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_runtime_telephony_writers.py",
     "scripts/test_runtime_artifact_writers.py",
     "scripts/test_runtime_artifact_preparation.py",
+    "scripts/test_runtime_identity_preparation.py",
     "scripts/test_runtime_source_transactions.py",
     "scripts/test_runtime_snapshot_publisher.py",
     "scripts/test_runtime_snapshot_consumers.py",

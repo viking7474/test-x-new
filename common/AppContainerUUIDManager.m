@@ -1,4 +1,5 @@
 #import "AppContainerUUIDManager.h"
+#import "PXRuntimeScalarPreparation.h"
 #import "PXIdentityValidator.h"
 #import "TLinkIOSLogging.h"
 
@@ -19,65 +20,14 @@
 }
 
 - (NSString *)generateAppContainerUUID {
-    // Generate a valid UUID format (8-4-4-4-12)
-    NSMutableString *uuid = [NSMutableString string];
-    
-    // Characters for hex values
-    const char chars[] = "0123456789abcdef";
-    
-    // First section (8 chars)
-    for (int i = 0; i < 8; i++) {
-        int randomValue = arc4random() % 16;
-        [uuid appendFormat:@"%c", chars[randomValue]];
+    NSError *error = nil;
+    NSString *prepared = PXPrepareRuntimeScalar(@"AppContainerUUID", &error);
+    self.error = error;
+    if (prepared) {
+        self.currentIdentifier = [prepared copy];
+        PXLog(@"[WeaponX] Generated App Container UUID: %@", prepared);
     }
-    
-    [uuid appendString:@"-"];
-    
-    // Second section (4 chars)
-    for (int i = 0; i < 4; i++) {
-        int randomValue = arc4random() % 16;
-        [uuid appendFormat:@"%c", chars[randomValue]];
-    }
-    
-    [uuid appendString:@"-"];
-    
-    // Third section (4 chars) - version 4 UUID
-    [uuid appendString:@"4"];
-    for (int i = 0; i < 3; i++) {
-        int randomValue = arc4random() % 16;
-        [uuid appendFormat:@"%c", chars[randomValue]];
-    }
-    
-    [uuid appendString:@"-"];
-    
-    // Fourth section (4 chars) - variant
-    int randomValue = arc4random() % 4 + 8; // 8, 9, A, or B
-    [uuid appendFormat:@"%c", chars[randomValue]];
-    for (int i = 0; i < 3; i++) {
-        randomValue = arc4random() % 16;
-        [uuid appendFormat:@"%c", chars[randomValue]];
-    }
-    
-    [uuid appendString:@"-"];
-    
-    // Fifth section (12 chars)
-    for (int i = 0; i < 12; i++) {
-        randomValue = arc4random() % 16;
-        [uuid appendFormat:@"%c", chars[randomValue]];
-    }
-    
-    // Validate and return
-    if ([self isValidUUID:uuid]) {
-        self.currentIdentifier = [uuid copy];
-        PXLog(@"[WeaponX] 📱 Generated App Container UUID: %@", uuid);
-        return uuid;
-    }
-    
-    // If validation failed, return error
-    self.error = [NSError errorWithDomain:@"com.weaponx.AppContainerUUIDManager" 
-                                     code:1001 
-                                 userInfo:@{NSLocalizedDescriptionKey: @"Generated App Container UUID failed validation"}];
-    return nil;
+    return prepared;
 }
 
 - (NSString *)currentAppContainerUUID {
@@ -98,4 +48,4 @@
     return self.error;
 }
 
-@end 
+@end

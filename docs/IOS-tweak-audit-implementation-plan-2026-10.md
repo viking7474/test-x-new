@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái cập nhật 2026-10-25: Patch 1–3, 4A.1, 4A.2, 4B, 4C.1 và 4C.2A–D đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4C.2E đã tách Wi-Fi/battery/uptime/storage preparation khỏi source/cache side effects, dùng trong standalone wrappers và thêm native composition fixture; build mới chờ macOS CI. Không coi toàn bộ Patch 4 hoàn tất: còn model/scalar preparation, IdentifierManager/ProfileManager orchestration và các source writers pending, defaults authority, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
+Trạng thái cập nhật 2026-10-25: Patch 1–3, 4A.1, 4A.2, 4B, 4C.1 và 4C.2A–E đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4C.2F đã tách prepared model/scalars, đưa IdentifierManager cache publication ra sau commit và sửa Serial immutable-buffer write/prefix race; build mới chờ macOS CI. Không coi toàn bộ Patch 4 hoàn tất: còn whole-regenerate composition, IdentifierManager/ProfileManager orchestration và các source writers pending, defaults authority, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -123,6 +123,8 @@ Chia 4C.1 core + settings/scope và 4C.2 writer rollout/authority để native f
 [Báo cáo 4C.2A](audit-implementation/PATCH-4C-2A-artifact-writers.md) ghi rollout manager artifacts và explicit-target stage functions. [Báo cáo 4C.2B](audit-implementation/PATCH-4C-2B-identifier-writers.md) ghi scalar pairs và schema migration. [Báo cáo 4C.2C](audit-implementation/PATCH-4C-2C-device-group-writers.md) ghi model/iOS/cellular dependencies và journaled deletion. [Báo cáo 4C.2D](audit-implementation/PATCH-4C-2D-telephony-writers.md) ghi standalone telephony validation/persistence; fields có producer trùng vẫn partial. Identifier/profile workflow và defaults authority là phần tiếp theo của 4C.2.
 
 [Báo cáo 4C.2E](audit-implementation/PATCH-4C-2E-artifact-preparation.md) ghi preparation APIs không auto-save cho Wi-Fi/battery/uptime/storage, Battery một save mỗi batch và Wi-Fi signed time offset. Đây là prerequisite dùng lại trong production wrappers; whole-regenerate/profile commit và completion ordering vẫn pending, source coverage chưa tăng.
+
+[Báo cáo 4C.2F](audit-implementation/PATCH-4C-2F-identity-preparation.md) ghi immutable model packet, scalar factories, Serial policy adapter và cache publication sau commit. Prepared composition cho toàn bộ generation và profile lifecycle/completion là bước tiếp theo; không coi source token hiện tại đã bao phủ các workflow pending.
 
 - Lập manifest mọi source file và writer trước khi đổi code: active profile selection, scope/security/settings, device IDs và profile artifacts.
 - Đưa writer liên quan vào source transaction dùng process-shared lock/commit contract. Multi-file profile update và profile switch phải có commit boundary bao toàn bộ nhóm liên quan.
