@@ -3,6 +3,7 @@
 #import <Security/Security.h>
 #import "PXRuntimeIdentifierWriter.h"
 #import "PXRuntimeGeneration.h"
+#import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeScalarPreparation.h"
 #include <sys/sysctl.h>
@@ -33,6 +34,8 @@ NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
 NSString *PXGlobalScopePath(void) { return Path(gRoot, @"scope.plist"); }
+NSString *PXCurrentProfileInfoPath(void) { return Path(gRoot, @"selection.plist"); }
+NSString *PXLegacyActiveProfileInfoPath(void) { return Path(gRoot, @"legacy-selection.plist"); }
 NSString *PXSecuritySettingsPath(void) { return Path(gRoot, @"security.plist"); }
 void PXPostSettingsChangedNotification(void) {
     gBatchNotifications++;
@@ -644,6 +647,53 @@ static void TestExplicitCreationGeneration(PXDeviceGroupFixture *manager, NSStri
     gSelected = @"a";
 }
 
+static void TestDeferredActivation(PXDeviceGroupFixture *manager, NSString *a) {
+    gSelected = @"b"; gExpectedIdentity = a; gSelections = 0;
+    manager.settings[@"IDFA"] = @YES;
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXStageRuntimeProfileSelection(tx, @{ @"ProfileId": @"b", @"SelectionRevision": @"initial" }, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
+    } error:NULL], "deferred activation initial selection seeded");
+    NSData *settings = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()], *scope = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
+    NSUInteger caches = gCacheChanges, notices = gBatchNotifications;
+    NSError *error = nil;
+    PXCommittedRuntimeGeneration *receipt = [manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:@{} error:&error];
+    CHECK(receipt && !error && [receipt.payload[@"deferSettings"] boolValue] && gSelections == 0 &&
+          caches == gCacheChanges && notices == gBatchNotifications && [settings isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]] &&
+          [scope isEqual:[NSData dataWithContentsOfFile:PXGlobalScopePath()]], "inactive generation defers settings scope caches and notification");
+    CHECK(SetSource(Path(a, @"device_ids.plist"), @"concurrent", @YES), "committed target changed before activation");
+    CHECK(![gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXRuntimeGenerationMatchesProof(tx, receipt.proof, writeError) && PXStageRuntimeGenerationSettings(tx, receipt.payload, writeError);
+    } error:&error] && [settings isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]], "receipt proof rejects artifact drift without global writes");
+    receipt = [manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:@{} error:&error];
+    CHECK(receipt && notices == gBatchNotifications, "fresh receipt remains unpublished");
+    __block NSDictionary *expected = nil;
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        expected = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError);
+        return expected != nil;
+    } error:NULL], "activation basis captured");
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXRuntimeGenerationMatchesProof(tx, receipt.proof, writeError) &&
+            PXStageRuntimeGenerationSettings(tx, receipt.payload, writeError) &&
+            PXStageRuntimeProfileSelectionIfUnchanged(tx, @{ @"ProfileId": @"a", @"SelectionRevision": @"activated" }, expected,
+                PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError);
+    } error:&error] && !error && caches == gCacheChanges && notices == gBatchNotifications,
+          "activation commits deferred settings scope selection before publication");
+    gSelected = @"a";
+    [manager publishCommittedRuntimeGeneration:receipt];
+    CHECK(caches < gCacheChanges && notices + 1 == gBatchNotifications &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()] objectForKey:@"EnabledIdentifiers"][@"IDFA"] boolValue],
+          "committed receipt publishes only after deferred global activation");
+    NSMutableDictionary *flags = [@{ @"IDFA": @YES } mutableCopy];
+    NSMutableDictionary *info = [@{ @"keep": @YES } mutableCopy];
+    PXCommittedRuntimeGeneration *detached = [[PXCommittedRuntimeGeneration alloc] initWithIdentityDirectory:a
+        payload:@{ @"flags": flags } proof:@{ Path(a, @"device_ids.plist"): @{ @"exists": @YES, @"info": info } } model:nil error:&error];
+    flags[@"IDFA"] = @NO; info[@"keep"] = @NO;
+    CHECK([detached.payload[@"flags"][@"IDFA"] boolValue] && [detached.proof[Path(a, @"device_ids.plist")][@"info"][@"keep"] boolValue],
+          "committed receipt deep detaches publication and activation proof");
+    CHECK([[PXCommittedRuntimeGeneration alloc] initWithIdentityDirectory:a payload:(id)@[] proof:@{} model:nil error:&error] == nil && error,
+          "receipt rejects malformed payload without throwing");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -658,6 +708,7 @@ int main(void) {
         TestDependentRefresh(manager, Identity(@"a"), Identity(@"b"));
         TestBatchGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestExplicitCreationGeneration(manager, Identity(@"a"), Identity(@"b"));
+        TestDeferredActivation(manager, Identity(@"a"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];

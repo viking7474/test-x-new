@@ -24,12 +24,12 @@ NS_ASSUME_NONNULL_BEGIN
 @interface ProfileManager : NSObject
 
 @property (nonatomic, strong, readonly) NSArray<Profile *> *profiles;
-@property (nonatomic, strong, readonly) Profile *currentProfile;
+@property (nonatomic, strong, readonly, nullable) Profile *currentProfile;
 
 + (instancetype)sharedManager;
 
-// Completion runs on main after generation and metadata save. Failure is not
-// a rollback of directory creation/activation in the current partial lifecycle.
+// Completion runs on main; activation follows committed generation and metadata.
+// Failure may leave inactive artifacts or a ready registered profile for recovery.
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
@@ -39,6 +39,7 @@ NS_ASSUME_NONNULL_BEGIN
 // New methods to manage central profile information
 - (void)updateCurrentProfileInfoWithProfile:(Profile *)profile;
 - (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError * _Nullable * _Nullable)error;
+- (BOOL)refreshCurrentProfileFromCommittedSelectionWithError:(NSError * _Nullable * _Nullable)error;
 - (Profile *)loadCurrentProfileInfoFromCentralStore;
 - (BOOL)saveCentralProfileInfo:(NSDictionary *)infoDict;
 - (NSDictionary *)loadCentralProfileInfo;

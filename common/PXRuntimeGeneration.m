@@ -57,6 +57,10 @@ BOOL PXStageRuntimeGeneration(PXRuntimeSourceTransaction *tx, NSString *identity
     if (network[@"carrier"] && !PXStageRuntimeCarrier(tx, identity, network[@"carrier"], now, error)) return NO;
     if (network[@"ipv4"] && !PXStageRuntimeAddresses(tx, identity, network[@"ipv4"], network[@"ipv6"], YES, now, error)) return NO;
     if (payload[@"storage"] && ![tx setDictionary:payload[@"storage"] atPath:[identity.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"storage.plist"] error:error]) return NO;
+    return [payload[@"deferSettings"] boolValue] || PXStageRuntimeGenerationSettings(tx, payload, error);
+}
+
+BOOL PXStageRuntimeGenerationSettings(PXRuntimeSourceTransaction *tx, NSDictionary *payload, NSError **error) {
     NSString *settingsPath = payload[@"settingsPath"];
     NSMutableDictionary *settings = [[tx dictionaryAtPath:settingsPath error:error] mutableCopy];
     if (!settings) return NO;
@@ -67,3 +71,62 @@ BOOL PXStageRuntimeGeneration(PXRuntimeSourceTransaction *tx, NSString *identity
     return [tx setDictionary:settings atPath:settingsPath error:error] &&
         [tx setDictionary:@{ @"ScopedApps": payload[@"scope"] } atPath:payload[@"scopePath"] error:error];
 }
+
+NSDictionary *PXReadRuntimeGenerationProof(PXRuntimeSourceTransaction *tx, NSString *identity, NSDictionary *payload, NSError **error) {
+    NSMutableSet *paths = [NSMutableSet setWithArray:@[
+        [identity stringByAppendingPathComponent:@"device_ids.plist"],
+        [identity stringByAppendingPathComponent:@"wifi_info.plist"], payload[@"settingsPath"], payload[@"scopePath"] ]];
+    for (NSString *type in payload[@"scalars"]) {
+        NSString *file = PXRuntimeIdentifierSidecar(type);
+        if (file) [paths addObject:[identity stringByAppendingPathComponent:file]];
+    }
+    if (payload[@"model"] || payload[@"cellular"]) for (NSString *file in @[@"imei.plist", @"meid.plist"])
+        [paths addObject:[identity stringByAppendingPathComponent:file]];
+    if (payload[@"theme"]) [paths addObject:[identity stringByAppendingPathComponent:@"device_theme.plist"]];
+    if (payload[@"battery"]) [paths addObject:[identity stringByAppendingPathComponent:@"battery_info.plist"]];
+    if (payload[@"uptime"]) for (NSString *file in @[@"boot_time.plist", @"system_uptime.plist"])
+        [paths addObject:[identity stringByAppendingPathComponent:file]];
+    if (payload[@"storage"]) [paths addObject:[identity.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"storage.plist"]];
+    NSDictionary *network = payload[@"network"];
+    if (network[@"carrier"]) [paths addObject:[identity stringByAppendingPathComponent:@"carrier_details.plist"]];
+    if (network[@"carrier"] || network[@"ipv4"]) [paths addObject:[identity stringByAppendingPathComponent:@"network_settings.plist"]];
+    NSMutableDictionary *proof = [NSMutableDictionary dictionary];
+    for (NSString *path in paths) {
+        BOOL exists = NO;
+        NSDictionary *info = [tx dictionaryAtPath:path exists:&exists error:error];
+        if (!info) return nil;
+        proof[path] = @{ @"exists": @(exists), @"info": info };
+    }
+    return [proof copy];
+}
+
+BOOL PXRuntimeGenerationMatchesProof(PXRuntimeSourceTransaction *tx, NSDictionary *proof, NSError **error) {
+    if (![proof isKindOfClass:NSDictionary.class] || !proof.count)
+        return PXGenerationFailure(@"Missing generation proof", error);
+    for (NSString *path in proof) {
+        NSDictionary *record = proof[path]; BOOL exists = NO;
+        if (![record isKindOfClass:NSDictionary.class] || ![record[@"exists"] isKindOfClass:NSNumber.class] ||
+            ![record[@"info"] isKindOfClass:NSDictionary.class]) return PXGenerationFailure(@"Invalid generation proof", error);
+        NSDictionary *current = [tx dictionaryAtPath:path exists:&exists error:error];
+        if (!current) return NO;
+        if (exists != [record[@"exists"] boolValue] || ![current isEqual:record[@"info"]])
+            return PXGenerationFailure(@"Committed generation changed before activation; retry operation", error);
+    }
+    return YES;
+}
+
+@implementation PXCommittedRuntimeGeneration
+- (instancetype)initWithIdentityDirectory:(NSString *)identity payload:(NSDictionary *)payload proof:(NSDictionary *)proof
+    model:(PXPreparedDeviceProfileGroup *)model error:(NSError **)error {
+    if (!(self = [super init])) return nil;
+    if (![identity isKindOfClass:NSString.class] || !identity.isAbsolutePath ||
+        ![payload isKindOfClass:NSDictionary.class] || ![proof isKindOfClass:NSDictionary.class] ||
+        (model && ![model isKindOfClass:PXPreparedDeviceProfileGroup.class])) {
+        PXGenerationFailure(@"Invalid committed generation receipt", error); return nil;
+    }
+    NSDictionary *detached = PXDetachRuntimeGeneration(@{ @"payload": payload, @"proof": proof }, error);
+    if (!detached) return nil;
+    _identityDirectory = [identity copy]; _payload = detached[@"payload"]; _proof = detached[@"proof"]; _model = model;
+    return self;
+}
+@end

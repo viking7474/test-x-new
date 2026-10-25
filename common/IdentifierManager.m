@@ -63,6 +63,8 @@
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
 - (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
+- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
+- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error;
 - (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error;
 - (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model;
 - (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error;
@@ -1251,20 +1253,55 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identityDir networkArtifacts:nil error:error];
 }
 
-- (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
+- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error {
     if (error) *error = nil;
     NSString *identityDir = PXProfileIdentityPath(PXValidatedProfileID(profileID));
     BOOL directory = NO;
     if (!identityDir.length || ![NSFileManager.defaultManager fileExistsAtPath:identityDir isDirectory:&directory] || !directory) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Explicit profile identity directory does not exist"}];
-        if (error) *error = self.error; return NO;
+        if (error) *error = self.error; return nil;
     }
-    if (![self migrateProfileSchemaAtIdentityDirectory:identityDir]) { if (error) *error = self.error; return NO; }
-    return [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identityDir networkArtifacts:networkArtifacts error:error];
+    if (![self migrateProfileSchemaAtIdentityDirectory:identityDir]) { if (error) *error = self.error; return nil; }
+    return identityDir;
+}
+
+- (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
+    NSString *identity = [self existingGenerationIdentityForProfileID:profileID error:error];
+    return identity && [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identity networkArtifacts:networkArtifacts error:error];
+}
+
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
+    NSString *identity = [self existingGenerationIdentityForProfileID:profileID error:error];
+    if (!identity) return nil;
+    PXCommittedRuntimeGeneration *receipt = nil;
+    return [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts deferSettings:YES receipt:&receipt error:error] ? receipt : nil;
 }
 
 - (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
+    PXCommittedRuntimeGeneration *receipt = nil;
+    if (![self commitRuntimeGenerationAtIdentityDirectory:identityDir networkArtifacts:networkArtifacts deferSettings:NO receipt:&receipt error:error]) return NO;
+    [self publishRuntimeGeneration:receipt.payload identityDirectory:receipt.identityDirectory model:receipt.model];
+    return YES;
+}
+
+- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation {
+    if (![generation isKindOfClass:PXCommittedRuntimeGeneration.class]) { PXPostSettingsChangedNotification(); return; }
+    // Activation already checked the full proof. Recheck artifacts before
+    // knowingly installing a stale candidate; defaults/scope were just advanced.
+    NSMutableDictionary *artifactProof = [generation.proof mutableCopy];
+    if ([generation.payload[@"deferSettings"] boolValue]) {
+        [artifactProof removeObjectsForKeys:@[generation.payload[@"settingsPath"], generation.payload[@"scopePath"]]];
+    }
+    BOOL current = [generation isKindOfClass:PXCommittedRuntimeGeneration.class] && PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXRuntimeGenerationMatchesProof(tx, artifactProof, error);
+    }, NULL);
+    if (current) [self publishRuntimeGeneration:generation.payload identityDirectory:generation.identityDirectory model:generation.model];
+    else PXPostSettingsChangedNotification(); // Wake readers for the latest committed state.
+}
+
+- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error {
     if (error) *error = nil;
+    if (receipt) *receipt = nil;
     self.error = nil;
     identityDir = [identityDir copy];
     NSError *failure = nil;
@@ -1339,7 +1376,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         @"wantsIMEI": flags[@"IMEI"] ?: @NO, @"wantsMEID": flags[@"MEID"] ?: @NO };
     NSDate *now = [NSDate date];
     NSMutableDictionary *candidate = [@{ @"timestamp": now, @"flags": flags, @"scope": intent[@"scope"],
-        @"settingsPath": settingsPath, @"scopePath": scopePath, @"network": network } mutableCopy];
+        @"settingsPath": settingsPath, @"scopePath": scopePath, @"network": network, @"deferSettings": @(deferSettings) } mutableCopy];
     PXPreparedDeviceProfileGroup *model = nil;
     if (wantsDeviceProfileGroup || needsBaseline) {
         model = [self prepareDeviceProfileGroupWithOptions:options error:&failure];
@@ -1428,12 +1465,19 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     if (payload[@"storage"]) conditions[storagePath] = @{ @"values": PXRuntimeIdentifierDependencies(basis[storagePath], @[@"TotalStorage", @"FreeStorage", @"FilesystemType"]) };
     if (payload[@"battery"]) for (NSString *path in @[batteryPath, legacyBatteryPath])
         conditions[path] = @{ @"exists": present[path], @"values": PXRuntimeIdentifierDependencies(basis[path], @[@"LowPowerMode"]) };
+    __block PXCommittedRuntimeGeneration *committedGeneration = nil;
     BOOL committed = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-        return PXStageRuntimeGeneration(tx, identityDir, payload, conditions, writeError);
+        if (!PXStageRuntimeGeneration(tx, identityDir, payload, conditions, writeError)) return NO;
+        NSDictionary *proof = PXReadRuntimeGenerationProof(tx, identityDir, payload, writeError);
+        if (!proof) return NO;
+        // Receipt detachment must succeed before physical commit, so an error
+        // cannot masquerade as an uncommitted generation after files changed.
+        committedGeneration = [[PXCommittedRuntimeGeneration alloc] initWithIdentityDirectory:identityDir payload:payload proof:proof model:model error:writeError];
+        return committedGeneration != nil;
     }, &failure);
     self.error = committed ? nil : failure;
     if (!committed) { if (error) *error = failure; return NO; }
-    [self publishRuntimeGeneration:payload identityDirectory:identityDir model:model];
+    if (receipt) *receipt = committedGeneration;
     return YES;
 }
 

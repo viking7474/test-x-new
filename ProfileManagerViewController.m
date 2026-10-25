@@ -101,7 +101,7 @@
             for (Profile *profile in self.allProfiles) {
                 if ([profile.profileId isEqualToString:activeProfileId]) {
                     // Update manager's currentProfile
-                    [manager updateCurrentProfileInfoWithProfile:profile];
+                    [manager refreshCurrentProfileFromCommittedSelectionWithError:NULL];
                     break;
                 }
             }
@@ -301,7 +301,7 @@
     if (activeProfileId) {
         for (Profile *profile in self.allProfiles) {
             if ([profile.profileId isEqualToString:activeProfileId]) {
-                [manager updateCurrentProfileInfoWithProfile:profile];
+                [manager refreshCurrentProfileFromCommittedSelectionWithError:NULL];
                 
                 // If active profile isn't in the first set of displayed profiles,
                 // make sure it's included by adding it to the beginning
@@ -431,9 +431,9 @@
             if (currentProfile) {
                 currentProfileId = currentProfile.profileId;
                 
-                // Since we found a profile but the central store didn't have it,
-                // update the central store for future use
-                [manager updateCurrentProfileInfoWithProfile:currentProfile];
+                // Refresh memory from committed state; the label must
+                // never choose or write a fallback selection
+                [manager refreshCurrentProfileFromCommittedSelectionWithError:NULL];
             }
         }
         
@@ -1324,11 +1324,11 @@
         else if ([manager.currentProfile.profileId isEqualToString:profile.profileId]) {
             isCurrentProfile = YES;
             
-            // If central store doesn't match but manager does, update central store
+            // A render path must not overwrite a newer selection
             if (centralInfo && centralInfo[@"ProfileId"] && 
                 ![centralInfo[@"ProfileId"] isEqualToString:profile.profileId]) {
-                // Detected mismatch between central store and manager, updating central store
-                [manager updateCurrentProfileInfoWithProfile:profile];
+                // Refresh stale memory from the committed selection
+                [manager refreshCurrentProfileFromCommittedSelectionWithError:NULL];
             }
         }
         

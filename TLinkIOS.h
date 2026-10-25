@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+@class PXCommittedRuntimeGeneration;
 
 @interface IdentifierManager : NSObject
 
@@ -31,6 +32,9 @@
 // Cold creation workflow: explicit existing profile directory, optional prepared
 // network artifacts; never resolve the active profile as the write target.
 - (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
+// Creation: commit inactive artifacts, defer settings/scope and publication to activation.
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
+- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation;
 
 // Settings Management
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type;

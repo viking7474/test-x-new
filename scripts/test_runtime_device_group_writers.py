@@ -37,6 +37,10 @@ SIGNATURES = [
     '- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model',
     '- (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error',
     '- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error',
+    '- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error',
+    '- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error',
+    '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error',
+    '- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -101,7 +105,7 @@ def source_contracts():
         assert case in fixture, case
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H1-partial'
+    assert manifest['rollout'] == '4C.2H2-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
@@ -127,6 +131,7 @@ def native_tests():
         folder = Path(temp)
         generate_native_fragments(folder)
         sources = ['common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+                   'common/PXRuntimeProfileSelection.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactPreparation.m',
                    'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeScalarPreparation.m',
                    'common/PXDeviceProfileSchema.m', 'common/PXIdentityValidator.m', 'common/VersionCompare.m',
