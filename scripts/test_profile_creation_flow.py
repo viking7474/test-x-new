@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -42,7 +43,44 @@ METHODS = [CREATE, SWITCH,
     '- (BOOL)refreshCurrentProfileFromCommittedSelectionWithError:(NSError **)error']
 
 
+def check_macro_arity(source, label):
+    """C macro argument splitting recognizes parentheses, not ObjC [] or {}."""
+    # Preserve offsets so diagnostics point at the original source. Strings,
+    # character constants and comments cannot contribute delimiter tokens.
+    masked = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                    lambda match: ' ' * len(match.group()), source)
+    for invocation in re.finditer(r'\bCHECK\s*\(', masked):
+        line_start = source.rfind('\n', 0, invocation.start()) + 1
+        if re.match(r'\s*#\s*define\b', source[line_start:invocation.start()]):
+            continue
+        depth, arguments = 1, 1
+        for token in masked[invocation.end():]:
+            if token == '(':
+                depth += 1
+            elif token == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            elif token == ',' and depth == 1:
+                arguments += 1
+        line = source.count('\n', 0, invocation.start()) + 1
+        assert depth == 0 and arguments == 2, f'{label}:{line}: CHECK needs 2 macro arguments, found {arguments}; move ObjC literals/blocks to a local or parenthesize the expression'
+
+
 def source_contracts():
+    # Exercise the regression checker against the exact failure category, not
+    # only the corrected fixture: braced literals do not protect their commas.
+    broken = 'CHECK([tx write:@{ @"first": @1, @"second": @2 }], "literal");'
+    try:
+        check_macro_arity(broken, 'unprotected-literal')
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError('macro checker missed an unprotected dictionary comma')
+    check_macro_arity('CHECK(([tx write:@{ @"first": @1, @"second": @2 }]), "literal, message()");', 'protected-literal')
+    check_macro_arity('/* CHECK(not, an, invocation) */ CHECK(ok && (a, b), "escaped \\\"quote");', 'comments-and-strings')
+    for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m'):
+        check_macro_arity(read(path), path)
     source = read('common/ProfileManager.m')
     create = writers.method(source, CREATE)
     for signature in METHODS[:4]:

@@ -45,3 +45,11 @@ Native profile fixture extract exact production create/finish/switch/activation/
 Cases gồm pending create không đổi active/global/cache/app state; generation/metadata failure; selection drift và ABA; changes sau generation; writer trong termination adapter; rollback cả selection/settings/scope; immutable receipt; stale metadata guard; read-only UI refresh; restart với defaults cũ; stale deferred mirror; corrupt archive không đoán selection; preserve profile-zero identity và legacy alias repair. Fixture extraction/source gates không chứng minh native execution.
 
 Host: **34/34 source gates**, **3/3 Node regressions**, backup/restore audit **2648/2648**, production fragment extraction cho profile/group/artifact fixtures và `git diff --check` pass. Windows không có Foundation/xcrun/Theos; chưa báo native/build H2 pass. macOS CI chạy rootful + RootHide, ba process mỗi variant.
+
+## CI follow-up — CHECK macro compile error
+
+Log macOS dừng ở PXProfileCreationFlowTests.m:314: macro CHECK có quá nhiều arguments. Dictionary literal hai keys nằm trong block truyền trực tiếp vào CHECK; C preprocessor chỉ dùng parentheses để nhóm macro arguments, không dùng Objective-C brackets/braces, nên dấu phẩy dictionary bị hiểu là separator. Nullability/unused-parameter lines trong log là warnings, không phải lỗi chặn compile này.
+
+Tách performWrite thành biến BOOL trước CHECK, giữ nguyên transaction, short-circuit của bootstrap assertion và production behavior. Source gate thêm kiểm tra lexical arity cho CHECK trong profile/group fixtures, có broken/protected-literal regression cases; không suppress compiler warnings hoặc nới assertion runtime.
+
+Host follow-up: checker tái hiện fixture HEAD tại dòng 310 là ba arguments, bản sửa pass; **7/7 related source gates**, exact profile production fragment extraction và git diff --check pass. Native macOS chưa chạy tại Windows; cần CI compile/runtime lại.

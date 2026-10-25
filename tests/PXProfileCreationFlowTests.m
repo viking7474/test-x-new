@@ -307,10 +307,11 @@ static void TestRestart(PXProfileCreationFixture *manager, Profile *zero) {
     CHECK(mutationRejected && [before isEqual:ActiveFiles()], "restore failure rejects mutation instead of replacing unknown registry");
     CHECK([saved writeToFile:archive atomically:YES], "restart archive restored");
     // Model a missing canonical record with a valid legacy alias.
-    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+    BOOL repairedLegacySelection = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:error] &&
             [tx setDictionary:@{ @"currentProfileId": @"0", @"ProfileName": @"zero" } atPath:PXLegacyActiveProfileInfoPath() error:error];
-    } error:NULL] && [fresh bootstrapProfileSelectionWithError:NULL] && [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:@"0"],
+    } error:NULL];
+    CHECK(repairedLegacySelection && [fresh bootstrapProfileSelectionWithError:NULL] && [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:@"0"],
           "bootstrap repairs legacy alias without selecting a different profile");
     (void)manager;
 }
