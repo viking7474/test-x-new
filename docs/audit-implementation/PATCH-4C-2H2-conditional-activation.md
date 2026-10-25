@@ -53,3 +53,7 @@ Log macOS dừng ở PXProfileCreationFlowTests.m:314: macro CHECK có quá nhi�
 Tách performWrite thành biến BOOL trước CHECK, giữ nguyên transaction, short-circuit của bootstrap assertion và production behavior. Source gate thêm kiểm tra lexical arity cho CHECK trong profile/group fixtures, có broken/protected-literal regression cases; không suppress compiler warnings hoặc nới assertion runtime.
 
 Host follow-up: checker tái hiện fixture HEAD tại dòng 310 là ba arguments, bản sửa pass; **7/7 related source gates**, exact profile production fragment extraction và git diff --check pass. Native macOS chưa chạy tại Windows; cần CI compile/runtime lại.
+
+## Trạng thái sau CI follow-up
+
+Người dùng đã xác nhận build pass sau macro fix. Tiếp tục directory ownership theo [H3A](PATCH-4C-2H3A-directory-reservation.md); xác nhận build không thay thế device/runtime matrix của toàn Patch 4.

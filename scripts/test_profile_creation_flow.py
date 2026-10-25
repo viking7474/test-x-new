@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""4C.2H1 creation completion, fixed-target generation and paired selection."""
+"""Profile creation, conditional activation and exclusive directory reservation."""
 from pathlib import Path
 import argparse
 import importlib.util
@@ -83,6 +83,9 @@ def source_contracts():
         check_macro_arity(read(path), path)
     source = read('common/ProfileManager.m')
     create = writers.method(source, CREATE)
+    assert 'reserveProfileID:profile.profileId' in create and 'self.creationReservation = reservation;' in create
+    assert 'createDirectoryIfNeeded:' not in create and 'writeToFile:' not in create
+    assert create.count('[reservation validateWithError:&generationError]') == 2
     for signature in METHODS[:4]:
         body = writers.method(source, signature)
         assert 'if (!NSThread.isMainThread)' in body and 'if (self.creationInProgress)' in body
@@ -94,6 +97,7 @@ def source_contracts():
     assert finish.index('validateActivationForProfile:') < finish.index('mutableProfiles addObject:') < finish.index('saveProfilesWithCompletion:')
     assert finish.index('saveProfilesWithCompletion:') < finish.index('activateProfile:') < finish.index('publishCommittedRuntimeGeneration:')
     assert 'removeObjectIdenticalTo:profile' in finish
+    assert finish.count('self.creationReservation = nil;') == 3
     assert finish.index('self.creationInProgress = NO;', finish.index('activateProfile:')) < finish.index('if (completion) completion(activated,')
     for forbidden in ('NSInvocation', '__unsafe_unretained', 'carrier_details.plist', 'network_settings.plist', 'device_ids.plist', 'regenerateAllEnabledIdentifiers]'):
         assert forbidden not in create, forbidden
@@ -120,6 +124,7 @@ def source_contracts():
     activation = writers.method(source, '- (BOOL)activateProfile:(Profile *)profile expectedSelection:(NSDictionary *)expected generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error')
     assert 'PXStageRuntimeProfileSelectionIfUnchanged' in activation and 'PXRuntimeGenerationMatchesProof' in activation
     assert 'PXStageRuntimeGenerationSettings' in activation
+    assert '[self.creationReservation validateWithError:writeError]' in activation
     assert activation.index('if (!committed)') < activation.index('self.mutableCurrentProfile = profile;') < activation.index('mirrorCurrentProfileID:')
     load = writers.method(source, '- (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion')
     assert 'captureProfileSelectionWithError:' in load and 'CurrentProfileID' not in load and 'createDefaultProfile' not in load
@@ -150,8 +155,25 @@ def source_contracts():
                  'stale startup mirror never overwrites newer activation',
                  'corrupt archive never guesses or rewrites selection'):
         assert case in fixture, case
+    reservation = read('common/PXProfileCreationReservation.m')
+    for token in ('mkdirat(', 'O_EXCL', 'O_NOFOLLOW', 'O_CLOEXEC', 'AT_SYMLINK_NOFOLLOW',
+                  'st_ino', 'st_dev', 'st_nlink != 1', 'pread(', 'EINTR', 'dealloc',
+                  '.creation-owner.plist', 'operationID', '@"state": @"reserved"'):
+        assert token in reservation, token
+    for forbidden in ('removeItemAtPath:', 'unlink(', 'rmdir(', 'dispatch_', 'PXPerformRuntimeSourceWrite'):
+        assert forbidden not in reservation, forbidden
+    for fd in ('_rootFD', '_profileFD', '_identityFD', '_markerFD'):
+        assert f'if ({fd} >= 0) close({fd});' in reservation
+    for case in ('exactly one process exclusively reserves the same profile ID',
+                 'exited creator leaves an untouched reservation and restart cannot adopt it',
+                 'success and failure reservations close every held descriptor',
+                 'directory proof rejects replacement symlink and in-place marker mutation',
+                 'configured root aliases remain supported',
+                 'replaced creation directory never activates or publishes success',
+                 'directory change in termination adapter is rechecked before activation'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H2-partial'
+    assert manifest['rollout'] == '4C.2H3A-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'pending'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')
@@ -175,7 +197,7 @@ def native_tests():
     with tempfile.TemporaryDirectory(prefix='px-profile-flow-') as temp:
         folder = Path(temp)
         generate_native_fragments(folder)
-        sources = ['common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+        sources = ['common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeIdentifierWriter.m',
                    'tests/PXProfileCreationFlowTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):

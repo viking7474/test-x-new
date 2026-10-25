@@ -4,9 +4,11 @@
 #import "PXPaths.h"
 #import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeGeneration.h"
+#import "PXProfileCreationReservation.h"
 #import "NetworkManager.h"
 #import <spawn.h>
 #import <sys/wait.h>
+#include <errno.h>
 
 // Forward declaration for app termination
 @interface BottomButtons : NSObject
@@ -48,6 +50,7 @@
 // These entry points marshal mutations to main. The flag covers async creation;
 // it is not a cross-process profile-directory transaction.
 @property (nonatomic) BOOL creationInProgress;
+@property (nonatomic, strong) PXProfileCreationReservation *creationReservation;
 @property (nonatomic) BOOL selectionUnavailable;
 @property (nonatomic) BOOL registryUnavailable;
 - (NSDictionary *)prepareNetworkArtifactsWithOptions:(NSDictionary *)options error:(NSError **)error;
@@ -325,48 +328,25 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     profile.createdAt = now;
     profile.lastUsed = now;
     
-    // Create profile directory
-    NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:profile.profileId];
-    if (!PXValidatedProfileID(profile.profileId) || [self.fileManager fileExistsAtPath:profileDir]) {
-        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:13
-            userInfo:@{NSLocalizedDescriptionKey: @"New profile ID is invalid or its directory already exists"}]);
-        return;
-    }
-    [self createDirectoryIfNeeded:profileDir];
-    
-    // Set the creation and modification dates explicitly on the directory
-    NSDictionary *attributes = @{
-        NSFileCreationDate: now,
-        NSFileModificationDate: now
-    };
-    
-    NSError *attributesError = nil;
-    BOOL attributesSuccess = [self.fileManager setAttributes:attributes ofItemAtPath:profileDir error:&attributesError];
-    
-    if (!attributesSuccess) {
-        NSLog(@"[WeaponX] ⚠️ Failed to set profile directory attributes: %@", attributesError);
-    }
-    
-    // Create identity directory for device IDs
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
-    [self createDirectoryIfNeeded:identityDir];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:identityDir error:nil];
-    
-    // Create identifiers.plist (kept: used for profile display name in the UI)
-    NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
+    // Reserve exclusively: an existence check followed by create-if-needed can
+    // adopt a directory allocated by another instance between the two calls.
     NSDictionary *identifiersDict = @{
         @"DisplayName": profile.name,
         @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
         @"Identifier": profile.profileId
     };
-    BOOL identityIsDirectory = NO;
-    if (![self.fileManager fileExistsAtPath:identityDir isDirectory:&identityIsDirectory] || !identityIsDirectory ||
-        ![identifiersDict writeToFile:identifiersPath atomically:YES]) {
-        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:11
-            userInfo:@{NSLocalizedDescriptionKey: @"Could not initialize the new profile directory"}]);
+    NSError *reservationError = nil;
+    PXProfileCreationReservation *reservation = [PXProfileCreationReservation reserveProfileID:profile.profileId
+        inProfilesDirectory:self.profilesDirectory metadata:identifiersDict error:&reservationError];
+    if (!reservation) {
+        BOOL conflict = [reservationError.domain isEqualToString:@"WeaponXProfileDirectoryError"] &&
+            (reservationError.code == EEXIST || reservationError.code == EINVAL);
+        NSMutableDictionary *info = [@{NSLocalizedDescriptionKey: conflict ?
+            @"New profile ID is invalid or its directory already exists" : @"Could not initialize the new profile directory"} mutableCopy];
+        if (reservationError) info[NSUnderlyingErrorKey] = reservationError;
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:(conflict ? 13 : 11) userInfo:info]);
         return;
     }
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
     
     // NOTE: appdata.plist (write-only, no reader) and per-profile scoped-apps.plist
     // (always empty; real scope lives in com.hydra.tlinkios.global_scope.plist) are
@@ -378,6 +358,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     // No registration, selection, termination, cache publication or global
     // settings change until the inactive target is generated and saved.
     self.creationInProgress = YES;
+    self.creationReservation = reservation;
     NSString *targetID = [profile.profileId copy];
     NSDictionary *networkOptions = [self captureProfileNetworkOptions];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -385,9 +366,11 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
             NSError *generationError = nil;
             PXCommittedRuntimeGeneration *generation = nil;
             @try {
-                NSDictionary *network = [self prepareNetworkArtifactsWithOptions:networkOptions error:&generationError];
+                NSDictionary *network = [reservation validateWithError:&generationError] ?
+                    [self prepareNetworkArtifactsWithOptions:networkOptions error:&generationError] : nil;
                 IdentifierManager *manager = [IdentifierManager sharedManager];
-                if (network && [manager respondsToSelector:@selector(commitRuntimeGenerationForProfileID:networkArtifacts:error:)])
+                if (network && [reservation validateWithError:&generationError] &&
+                    [manager respondsToSelector:@selector(commitRuntimeGenerationForProfileID:networkArtifacts:error:)])
                     generation = [manager commitRuntimeGenerationForProfileID:targetID networkArtifacts:network error:&generationError];
                 if (!generation && !generationError) generationError = [NSError errorWithDomain:@"WeaponXProfileError" code:14
                     userInfo:@{NSLocalizedDescriptionKey: @"Inactive profile generation did not complete"}];
@@ -406,6 +389,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     NSError *failure = generationError;
     if (!generation || ![profile.profileId isEqualToString:targetID] ||
         ![self validateActivationForProfile:profile expectedSelection:expected generation:generation error:&failure]) {
+        self.creationReservation = nil;
         self.creationInProgress = NO;
         if (!failure) failure = [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Profile target changed during creation"}];
         if (completion) completion(NO, failure); return;
@@ -414,6 +398,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     [self saveProfilesWithCompletion:^(BOOL saved, NSError *saveError) {
         if (!saved) {
             [self.mutableProfiles removeObjectIdenticalTo:profile];
+            self.creationReservation = nil;
             self.creationInProgress = NO;
             if (completion) completion(NO, saveError); return;
         }
@@ -436,6 +421,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
             @try { [[IdentifierManager sharedManager] resetCanvasNoise]; }
             @catch (NSException *exception) { NSLog(@"[ProfileManager] Activated profile; canvas reset failed: %@", exception); }
         }
+        self.creationReservation = nil;
         self.creationInProgress = NO;
         if (activated) [self publishProfileChangedNotification];
         if (!activated && !activationError) activationError = [NSError errorWithDomain:@"WeaponXProfileError" code:22 userInfo:@{NSLocalizedDescriptionKey: @"Profile was saved but could not be activated"}];
@@ -460,13 +446,22 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Profile activation target is invalid or unavailable"}];
         return nil;
     }
+    if (generation) {
+        NSError *ownershipError = nil;
+        if (![self.creationReservation.profileID isEqualToString:profile.profileId] ||
+            ![self.creationReservation.identityDirectory isEqualToString:identity] || ![self.creationReservation validateWithError:&ownershipError]) {
+            if (error) *error = ownershipError ?: [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Profile creation no longer owns its directory"}];
+            return nil;
+        }
+    }
     return identity;
 }
 
 - (BOOL)validateActivationForProfile:(Profile *)profile expectedSelection:(NSDictionary *)expected generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error {
     if (![self identityForActivationProfile:profile generation:generation error:error]) return NO;
     return PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
-        return PXRuntimeProfileSelectionMatches(tx, expected, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), readError) &&
+        return (!generation || [self.creationReservation validateWithError:readError]) &&
+            PXRuntimeProfileSelectionMatches(tx, expected, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), readError) &&
             (!generation || PXRuntimeGenerationMatchesProof(tx, generation.proof, readError));
     }, error);
 }
@@ -478,6 +473,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     NSDictionary *info = @{ @"ProfileId": [profile.profileId copy], @"ProfileName": profile.name ?: @"",
         @"Description": profile.shortDescription ?: @"", @"LastSelected": NSDate.date, @"SelectionRevision": NSUUID.UUID.UUIDString };
     BOOL committed = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        if (generation && ![self.creationReservation validateWithError:writeError]) return NO;
         if (generation && !PXRuntimeGenerationMatchesProof(tx, generation.proof, writeError)) return NO;
         if (!PXStageRuntimeProfileSelectionIfUnchanged(tx, info, expected, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError)) return NO;
         return !generation || PXStageRuntimeGenerationSettings(tx, generation.payload, writeError);

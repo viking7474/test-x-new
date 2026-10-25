@@ -4,8 +4,15 @@
 #import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeGeneration.h"
 #import "PXRuntimeArtifactWriter.h"
+#import "PXProfileCreationReservation.h"
 #include <stdatomic.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
+extern char **environ;
 
 static NSUInteger gChecks, gFailures, gNotices, gCanvas, gMirrors, gTerminations, gCachePublications, gSettingsNotices;
 static NSString *gRoot, *gRequested, *gMirroredID, *gMemoryID;
@@ -103,6 +110,7 @@ static void OutsideGate(void) {
 @property (nonatomic, strong) NSFileManager *fileManager;
 @property (nonatomic, strong) NSString *profilesDirectory;
 @property (nonatomic) BOOL creationInProgress;
+@property (nonatomic, strong) PXProfileCreationReservation *creationReservation;
 @property (nonatomic) BOOL selectionUnavailable;
 @property (nonatomic) BOOL registryUnavailable;
 - (void)createDirectoryIfNeeded:(NSString *)path;
@@ -315,11 +323,129 @@ static void TestRestart(PXProfileCreationFixture *manager, Profile *zero) {
           "bootstrap repairs legacy alias without selecting a different profile");
     (void)manager;
 }
-int main(void) {
+static PXProfileCreationReservation *Reserve(NSString *directory, NSString *profileID, NSError **error) {
+    return [PXProfileCreationReservation reserveProfileID:profileID inProfilesDirectory:directory
+        metadata:@{ @"DisplayName": @"reserved", @"Identifier": profileID } error:error];
+}
+static NSUInteger OpenDescriptorCount(void) {
+    NSUInteger count = 0;
+    for (int fd = 0; fd < 1024; fd++) if (fcntl(fd, F_GETFD) != -1) count++;
+    return count;
+}
+static void TestReservation(NSString *executable) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *root = Path(gRoot, @"reservation-fixtures");
+    CHECK([fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:NULL], "reservation fixture directory created");
+    // Competing processes execute the real production mkdirat path. An exited
+    // winner still owns its path; a new process must not reuse an orphan.
+    pid_t children[8]; NSUInteger launched = 0;
+    for (NSUInteger i = 0; i < 8; i++) {
+        char *arguments[] = { (char *)executable.fileSystemRepresentation, "--reserve",
+            (char *)root.fileSystemRepresentation, "1", NULL };
+        pid_t child = 0;
+        int result = posix_spawn(&child, arguments[0], NULL, NULL, arguments, environ);
+        CHECK(result == 0, "competing reservation process launched");
+        if (!result) children[launched++] = child;
+    }
+    NSUInteger winners = 0, conflicts = 0;
+    for (NSUInteger i = 0; i < launched; i++) {
+        int status = 0; pid_t waited;
+        do { waited = waitpid(children[i], &status, 0); } while (waited < 0 && errno == EINTR);
+        CHECK(waited == children[i] && WIFEXITED(status), "reservation subprocess exits normally");
+        if (waited == children[i] && WIFEXITED(status)) {
+            if (WEXITSTATUS(status) == 0) winners++;
+            if (WEXITSTATUS(status) == 2) conflicts++;
+        }
+    }
+    CHECK(launched == 8 && winners == 1 && conflicts == 7, "exactly one process exclusively reserves the same profile ID");
+    NSString *markerPath = Path(Path(root, @"1"), @".creation-owner.plist");
+    NSData *markerBefore = [NSData dataWithContentsOfFile:markerPath];
+    NSError *error = nil;
+    CHECK(!Reserve(root, @"1", &error) && error.code == EEXIST &&
+          [markerBefore isEqual:[NSData dataWithContentsOfFile:markerPath]], "exited creator leaves an untouched reservation and restart cannot adopt it");
+    CHECK(!Reserve(root, @"../outside", &error), "reservation rejects traversal IDs");
+    NSString *file = Path(root, @"2"); CHECK([@"existing" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL], "preexisting file seeded");
+    CHECK(!Reserve(root, @"2", &error) && [[NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:NULL] isEqual:@"existing"], "reservation never replaces an existing file");
+    CHECK([fm createSymbolicLinkAtPath:Path(root, @"3") withDestinationPath:Path(root, @"1") error:NULL], "symlink fixture seeded");
+    CHECK(!Reserve(root, @"3", &error) && [markerBefore isEqual:[NSData dataWithContentsOfFile:markerPath]], "reservation rejects preexisting symlink without touching its destination");
+    // Warm up Foundation allocation before measuring descriptor lifetime.
+    @autoreleasepool { CHECK(Reserve(root, @"4", NULL) != nil, "reservation lifetime warmup"); }
+    NSUInteger descriptors = OpenDescriptorCount();
+    for (NSUInteger i = 0; i < 24; i++) {
+        @autoreleasepool {
+            PXProfileCreationReservation *reservation = Reserve(root, [NSString stringWithFormat:@"life-%lu", (unsigned long)i], NULL);
+            CHECK(reservation && [reservation validateWithError:NULL], "new reservation validates held directory and marker descriptors");
+            CHECK(!Reserve(root, @"1", NULL), "failed reservation releases its root descriptor");
+        }
+    }
+    CHECK(OpenDescriptorCount() == descriptors, "success and failure reservations close every held descriptor");
+    for (NSUInteger mode = 0; mode < 5; mode++) {
+        NSString *profileID = [NSString stringWithFormat:@"proof-%lu", (unsigned long)mode];
+        PXProfileCreationReservation *reservation = Reserve(root, profileID, NULL);
+        CHECK(reservation != nil, "directory proof fixture reserved");
+        NSString *profile = Path(root, profileID), *identity = Path(profile, @"identity");
+        NSString *marker = Path(profile, @".creation-owner.plist");
+        NSString *target = mode == 0 ? identity : mode == 1 ? profile : marker;
+        if (mode < 3) {
+            NSString *old = [target stringByAppendingString:@".old"];
+            CHECK([fm moveItemAtPath:target toPath:old error:NULL] && [fm copyItemAtPath:old toPath:target error:NULL], "replace owned inode while preserving its bytes");
+        } else if (mode == 3) {
+            NSMutableData *bytes = [[NSData dataWithContentsOfFile:marker] mutableCopy];
+            if (bytes.length) ((uint8_t *)bytes.mutableBytes)[0] ^= 1;
+            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:marker];
+            [handle writeData:bytes]; [handle closeFile];
+        } else {
+            CHECK([fm removeItemAtPath:marker error:NULL] && [fm createSymbolicLinkAtPath:marker withDestinationPath:markerPath error:NULL], "replace marker with symlink");
+        }
+        error = nil;
+        CHECK(![reservation validateWithError:&error] && [error.domain isEqual:@"WeaponXProfileDirectoryError"], "directory proof rejects replacement symlink and in-place marker mutation");
+    }
+    NSString *aliasedRoot = Path(gRoot, @"profiles-alias");
+    CHECK([fm createSymbolicLinkAtPath:aliasedRoot withDestinationPath:root error:NULL], "configured profiles root alias created");
+    PXProfileCreationReservation *alias = Reserve(aliasedRoot, @"aliased", NULL);
+    CHECK(alias && [alias validateWithError:NULL], "configured root aliases remain supported");
+    NSString *oldRoot = [root stringByAppendingString:@".old"];
+    CHECK([fm moveItemAtPath:root toPath:oldRoot error:NULL] && [fm createDirectoryAtPath:root withIntermediateDirectories:NO attributes:nil error:NULL], "profiles root replaced");
+    CHECK(![alias validateWithError:NULL], "directory proof rejects replacement of configured root");
+}
+static void ReplaceCreationDirectory(Profile *profile, NSUInteger mode) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *directory = Path(PXProfilesPath(), profile.profileId);
+    NSString *target = mode == 0 ? Path(directory, @"identity") : mode == 1 ? directory : Path(directory, @".creation-owner.plist");
+    NSString *old = [target stringByAppendingString:@".old"];
+    if (![fm moveItemAtPath:target toPath:old error:NULL] || ![fm copyItemAtPath:old toPath:target error:NULL])
+        [NSException raise:@"fixture" format:@"directory replacement failed"];
+}
+static void TestCreationDirectoryDrift(PXProfileCreationFixture *manager) {
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        ResetWorker(); gPause = NO;
+        Profile *candidate = New([NSString stringWithFormat:@"directory-drift-%lu", (unsigned long)mode]);
+        __block NSUInteger callbacks = 0; __block BOOL success = YES; __block NSError *failure = nil;
+        NSDictionary *before = ActiveFiles(); NSData *archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+        NSUInteger notices = gNotices, caches = gCachePublications, mirrors = gMirrors, terminations = gTerminations;
+        if (mode < 3) gAfterGeneration = ^{ ReplaceCreationDirectory(candidate, mode); };
+        else gDuringTermination = ^{ ReplaceCreationDirectory(candidate, 0); };
+        [manager createProfile:candidate completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+        CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && !success && failure &&
+            !manager.creationInProgress && !manager.creationReservation && [before isEqual:ActiveFiles()] &&
+            notices == gNotices && caches == gCachePublications && mirrors == gMirrors,
+            "replaced creation directory never activates or publishes success");
+        if (mode < 3) CHECK(terminations == gTerminations && [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
+            "ownership loss after generation preserves registry and never invokes termination");
+        else CHECK(gTerminations == terminations + 1, "directory change in termination adapter is rechecked before activation");
+    }
+}
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc == 4 && strcmp(argv[1], "--reserve") == 0) {
+            NSError *error = nil;
+            PXProfileCreationReservation *reservation = Reserve([NSString stringWithUTF8String:argv[2]], [NSString stringWithUTF8String:argv[3]], &error);
+            return reservation ? 0 : error.code == EEXIST ? 2 : 3;
+        }
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
         NSFileManager *fm = NSFileManager.defaultManager;
         [fm createDirectoryAtPath:Identity(@"0") withIntermediateDirectories:YES attributes:nil error:NULL];
+        TestReservation([NSString stringWithUTF8String:argv[0]]);
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:Path(gRoot, @"control") owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path hasPrefix:[gRoot stringByAppendingString:@"/"]] && [path hasSuffix:@".plist"] && ![path hasPrefix:Path(gRoot, @"control/")]; } error:NULL];
         CHECK(gStore != nil, "profile source store initialized");
@@ -334,6 +460,7 @@ int main(void) {
             if (gThrowObserver) [NSException raise:@"fixture" format:@"observer failed after commit"];
         }];
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
+        TestCreationDirectoryDrift(manager);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;
