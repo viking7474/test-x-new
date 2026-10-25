@@ -3,6 +3,7 @@
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 #import "PXRuntimeArtifactWriter.h"
+#import "PXRuntimeArtifactPreparation.h"
 
 // File paths for persistent storage
 // Removed global paths. All methods now require a profile-specific path.
@@ -86,38 +87,17 @@ static NSString * const kCreationTimeKey = @"creationTime";
             }
         }
         
-        // Generate a random uptime between 12-48 hours with added randomness
-        NSTimeInterval minUptime = 12 * 3600; // 12 hours
-        NSTimeInterval maxUptime = 48 * 3600; // 48 hours
-        NSTimeInterval uptimeRange = maxUptime - minUptime;
-        NSTimeInterval randomPart = arc4random_uniform((uint32_t)uptimeRange);
-        NSTimeInterval extraSeconds = arc4random_uniform(60 * 45);
-        NSTimeInterval uptime = minUptime + randomPart + extraSeconds;
-        
-        // Check real uptime to ensure spoofed value isn't higher
         struct timeval boottv = {0};
         size_t sz = sizeof(boottv);
         int mib[2] = {CTL_KERN, KERN_BOOTTIME};
         int sysctlResult = sysctl(mib, 2, &boottv, &sz, NULL, 0);
-        if (sysctlResult == 0) {
-            NSDate *realBoot = [NSDate dateWithTimeIntervalSince1970:boottv.tv_sec];
-            NSTimeInterval realUptime = [[NSDate date] timeIntervalSinceDate:realBoot];
-            if (uptime > realUptime - 60) {
-                uptime = realUptime - 60;
-            }
-            if (uptime < minUptime) uptime = minUptime;
-        }
-        
-        // Calculate boot time based on generated uptime
         NSDate *now = [NSDate date];
-        NSDate *bootTime = [NSDate dateWithTimeIntervalSinceNow:-uptime];
-        
-        // Save boot time to profile-specific file
-        NSDictionary *bootTimeDict = @{@"value": bootTime, @"lastUpdated": now, kUptimeVersionKey: @1};
-        
-        // Also save to system_uptime.plist for apps that might look there
-        NSString *uptimeString = [NSString stringWithFormat:@"%.0f", uptime];
-        NSDictionary *uptimeDict = @{@"value": uptimeString, @"lastUpdated": now, kUptimeVersionKey: @1};
+        NSTimeInterval realUptime = sysctlResult == 0 ? now.timeIntervalSince1970 - boottv.tv_sec : 0;
+        NSDictionary *prepared = PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0);
+        NSDictionary *bootTimeDict = prepared[@"boot"];
+        NSDictionary *uptimeDict = prepared[@"uptime"];
+        NSDate *bootTime = bootTimeDict[@"value"];
+        NSTimeInterval uptime = [prepared[@"seconds"] doubleValue];
         NSError *writeError = nil;
         if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return PXStageRuntimeUptime(tx, profilePath, bootTimeDict, uptimeDict, now, error);

@@ -85,7 +85,7 @@ def source_contracts():
         assert case in fixture, case
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2D-partial'
+    assert manifest['rollout'] == '4C.2E-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'pending'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

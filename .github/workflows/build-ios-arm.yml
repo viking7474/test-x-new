@@ -56,6 +56,9 @@ jobs:
       - name: Test native runtime artifact writers
         run: python3 scripts/test_runtime_artifact_writers.py --native
 
+      - name: Test native artifact preparation and manager wrappers
+        run: python3 scripts/test_runtime_artifact_preparation.py --native
+
       - name: Test native identifier value writers and migration
         run: python3 scripts/test_runtime_identifier_writers.py --native
 

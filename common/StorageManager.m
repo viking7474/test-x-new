@@ -1,4 +1,5 @@
 #import "StorageManager.h"
+#import "PXRuntimeArtifactPreparation.h"
 #import "ProfileManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
@@ -105,34 +106,7 @@
 }
 
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity {
-    NSMutableDictionary *storage = [NSMutableDictionary dictionary];
-    
-    double totalGB = [capacity doubleValue];
-    double freePercent;
-    
-    // Calculate realistic free space based on capacity
-    if (totalGB <= 64) {
-        // 64GB devices typically have less free space (15-30%)
-        freePercent = (arc4random_uniform(15) + 15) / 100.0;
-    } else {
-        // 128GB devices (25-40%)
-        freePercent = (arc4random_uniform(15) + 25) / 100.0;
-    }
-    
-    double freeGB = totalGB * freePercent;
-    
-    // Add some variability to the decimal points
-    double decimalVariation = (arc4random_uniform(10) / 10.0);
-    freeGB = freeGB + decimalVariation;
-    
-    // Round to one decimal place
-    freeGB = round(freeGB * 10) / 10;
-    
-    storage[@"TotalStorage"] = capacity;
-    storage[@"FreeStorage"] = [NSString stringWithFormat:@"%.1f", freeGB];
-    storage[@"FilesystemType"] = @"0x1A"; // APFS for modern iOS
-    
-    return storage;
+    return PXPrepareRuntimeStorage(capacity);
 }
 
 #pragma mark - Basic Storage Values

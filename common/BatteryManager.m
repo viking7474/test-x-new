@@ -2,6 +2,7 @@
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 #import "PXRuntimeArtifactWriter.h"
+#import "PXRuntimeArtifactPreparation.h"
 
 // Define file paths
 #define BATTERY_PLIST_PATH @"/var/mobile/Library/Preferences/com.weaponx.battery.plist"
@@ -91,41 +92,9 @@ static BatteryManager *sharedManager = nil;
 }
 
 - (NSString *)randomizeBatteryLevel {
-    // Algorithm for realistic battery level distribution:
-    // - 60% chance of battery level between 30-80%
-    // - 20% chance of battery level between 80-100%
-    // - 15% chance of battery level between 15-30%
-    // - 5% chance of battery level between 5-15%
-    
-    int randomValue = arc4random_uniform(100);
-    float level;
-    
-    if (randomValue < 60) {
-        // 30-80% range (most common)
-        level = (30 + arc4random_uniform(51)) / 100.0f;
-    } else if (randomValue < 80) {
-        // 80-100% range (fully charged state)
-        level = (80 + arc4random_uniform(21)) / 100.0f;
-    } else if (randomValue < 95) {
-        // 15-30% range (low battery state)
-        level = (15 + arc4random_uniform(16)) / 100.0f;
-    } else {
-        // 5-15% range (battery danger zone)
-        level = (5 + arc4random_uniform(11)) / 100.0f;
-    }
-    
-    // Format with 2 decimal places
-    NSString *levelStr = [NSString stringWithFormat:@"%.2f", level];
-    
-    PXLog(@"[WeaponX] 🔋 Randomized battery level: %@ (%d%%)",
-          levelStr, (int)(level * 100));
-    
-    // Update our storage
+    NSString *levelStr = PXPrepareRuntimeBatteryLevel();
     _currentBatteryLevel = levelStr;
-    
-    // Save the change (preserves current LPM)
     [self saveBatteryInfoToDisk];
-    
     return levelStr;
 }
 
@@ -163,19 +132,9 @@ static BatteryManager *sharedManager = nil;
 // Generate comprehensive battery info for UI display.
 // Keeps the current Low Power Mode value; does NOT randomize it.
 - (NSDictionary *)generateBatteryInfo {
-    // Generate battery level first (this updates _currentBatteryLevel and saves)
-    NSString *batteryLevel = [self randomizeBatteryLevel];
-    
-    // Store the values — preserve existing LPM (default NO if never set)
-    _currentBatteryLevel = batteryLevel;
-    
-    // Create a dictionary with all battery info, including preserved LPM
-    NSDictionary *batteryInfo = @{
-        @"BatteryLevel": batteryLevel,
-        @"BatteryPercentage": @((int)([batteryLevel floatValue] * 100)),
-        kLowPowerModeKey: @(_currentLowPowerMode),
-    };
-    
+    NSDictionary *batteryInfo = PXPrepareRuntimeBatteryInfo(_currentLowPowerMode);
+    _currentBatteryLevel = batteryInfo[kBatteryLevelKey];
+
     // Save to disk (includes LPM)
     [self saveBatteryInfoToDisk];
     

@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
-  "rollout": "4C.2D-partial",
+  "rollout": "4C.2E-partial",
   "warning": "A source commit token does not cover writers marked pending or external. Do not claim full multi-file source consistency until they join the contract.",
+  "preparation": {"status": "available-not-batch-enrolled", "files": ["common/PXRuntimeArtifactPreparation.h", "common/PXRuntimeArtifactPreparation.m"], "consumers": ["WiFiManager", "BatteryManager", "UptimeManager", "StorageManager"], "note": "Effect-free preparation is used by existing manager wrappers. Whole regeneration/profile lifecycle remains pending; source coverage is unchanged."},
   "sources": [
     {"field": "activeSelection", "path": "PXCurrentProfileInfoPath()", "writers": ["profile-lifecycle"], "status": "pending"},
     {"field": "legacySelection", "path": "PXLegacyActiveProfileInfoPath()", "writers": ["profile-lifecycle"], "status": "pending"},
