@@ -26,6 +26,8 @@
 - (NSString *)generateDeviceModel;
 - (NSString *)generateUDID;
 - (void)regenerateAllEnabledIdentifiers;
+// Reports source commit failure. Compatibility cache/mirror effects are best effort after commit.
+- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
 
 // Settings Management
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type;

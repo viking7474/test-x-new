@@ -157,6 +157,27 @@ static BatteryManager *sharedManager = nil;
 
 #pragma mark - Error Handling
 
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo {
+    _currentBatteryLevel = [batteryInfo[kBatteryLevelKey] copy];
+    _currentLowPowerMode = [batteryInfo[kLowPowerModeKey] boolValue];
+    _lowPowerModeLoaded = YES;
+    self.error = nil;
+}
+
+- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp {
+    // Legacy mirror is not a runtime snapshot source. Never call the saving
+    // setter here: it would select a profile again and start another commit.
+    NSDictionary *mirror = @{ kBatteryLevelKey: batteryInfo[kBatteryLevelKey],
+        kLowPowerModeKey: batteryInfo[kLowPowerModeKey], kLastUpdatedKey: timestamp };
+    NSString *directory = [BATTERY_PLIST_PATH stringByDeletingLastPathComponent];
+    if (![NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL] ||
+        ![mirror writeToFile:BATTERY_PLIST_PATH atomically:YES])
+        PXLog(@"[BatteryManager] Source committed; legacy battery mirror could not be written");
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BatteryInfoUpdated" object:self userInfo:batteryInfo];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.hydra.tlinkios.battery.updated"), NULL, (__bridge CFDictionaryRef)batteryInfo, YES);
+}
+
 // Return the last error that occurred
 - (NSError *)lastError {
     return _error;

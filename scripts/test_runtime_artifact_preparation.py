@@ -15,10 +15,10 @@ spec = importlib.util.spec_from_file_location('identifier_writers', ROOT / 'scri
 identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
 WRAPPERS = {
-    'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo']),
-    'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo']),
-    'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity']),
-    'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', ['- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath']),
+    'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
+    'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp']),
+    'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo']),
+    'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', ['- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath', '- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp']),
 }
 
 
@@ -55,10 +55,10 @@ def source_contracts():
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2F-partial'
-    assert manifest['writers']['identifier-artifacts']['status'] == 'pending'
+    assert manifest['rollout'] == '4C.2G-partial'
+    assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'pending'
-    print('PASS: Pure artifact preparation source contracts (whole profile workflow still pending; native runtime not implied)')
+    print('PASS: Pure artifact preparation and committed cache adoption contracts (profile lifecycle pending; native runtime not implied)')
 
 
 def generate_native_fragments(folder):

@@ -109,6 +109,10 @@
     return PXPrepareRuntimeStorage(capacity);
 }
 
+- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo {
+    _storageSettings = [storageInfo mutableCopy];
+}
+
 #pragma mark - Basic Storage Values
 
 - (NSString *)totalStorageCapacity {

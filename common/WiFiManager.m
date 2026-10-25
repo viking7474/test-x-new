@@ -183,6 +183,12 @@
     return prepared;
 }
 
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID {
+    self.wifiInfo = [wifiInfo mutableCopy];
+    self.currentProfileId = [profileID copy];
+    self.error = nil;
+}
+
 - (NSDictionary *)currentWiFiInfo {
     // Always check the current profile ID first
     NSString *currentId = [self getCurrentProfileID];

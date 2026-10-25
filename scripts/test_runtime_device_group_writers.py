@@ -31,6 +31,10 @@ SIGNATURES = [
     '- (BOOL)isValidMEID:(NSString *)meid',
     '- (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error',
     '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared',
+    '- (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error',
+    '- (void)regenerateAllEnabledIdentifiers',
+    '- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error',
+    '- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -47,6 +51,8 @@ STATICS = [
     'static NSArray<NSString *> *PXDeviceProfileManagedKeys(void)',
     'static NSInteger PXHexValue(unichar c)',
     'static NSInteger PXMEIDLuhnCheckDigit(NSString *body)',
+    'static NSSet<NSString *> *PXCanonicalIdentifierToggleKeys(void)',
+    'static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings)',
 ]
 
 
@@ -93,9 +99,9 @@ def source_contracts():
         assert case in fixture, case
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2F-partial'
+    assert manifest['rollout'] == '4C.2G-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
-    assert manifest['writers']['identifier-artifacts']['status'] == 'pending'
+    assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
 
 
@@ -119,6 +125,8 @@ def native_tests():
         folder = Path(temp)
         generate_native_fragments(folder)
         sources = ['common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+                   'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactPreparation.m',
+                   'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeScalarPreparation.m',
                    'common/PXDeviceProfileSchema.m', 'common/PXIdentityValidator.m', 'common/VersionCompare.m',
                    'tests/PXRuntimeDeviceGroupWriterTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):

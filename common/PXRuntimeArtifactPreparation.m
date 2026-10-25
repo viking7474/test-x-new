@@ -381,6 +381,20 @@ NSDictionary *PXPrepareRuntimeBatteryInfo(BOOL lowPowerMode) {
     return @{ @"BatteryLevel": level, @"BatteryPercentage": @((int)(level.floatValue * 100)), @"LowPowerMode": @(lowPowerMode) };
 }
 
+NSString *PXChooseRuntimeStorageCapacity(NSArray *rawCapacities, NSString *previous) {
+    previous = [previous isKindOfClass:NSString.class] ? [previous copy] : nil;
+    if (![rawCapacities isKindOfClass:NSArray.class]) rawCapacities = @[@64, @128, @256, @512];
+    NSMutableArray *capacities = [NSMutableArray array];
+    for (id raw in rawCapacities) {
+        NSInteger value = [raw respondsToSelector:@selector(integerValue)] ? [raw integerValue] : 0;
+        if (value > 0) [capacities addObject:[NSString stringWithFormat:@"%ld", (long)value]];
+    }
+    if (!capacities.count) [capacities addObjectsFromArray:@[@"64", @"128", @"256", @"512"]];
+    NSMutableArray *candidates = [capacities mutableCopy];
+    if (candidates.count > 1 && previous.length) [candidates removeObject:previous];
+    if (!candidates.count) candidates = [capacities mutableCopy];
+    return candidates[arc4random_uniform((uint32_t)candidates.count)];
+}
 NSDictionary *PXPrepareRuntimeStorage(NSString *capacity) {
     if (![capacity isKindOfClass:NSString.class]) return nil;
     capacity = [capacity copy];

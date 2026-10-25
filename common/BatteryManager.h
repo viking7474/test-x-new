@@ -16,6 +16,9 @@
 
 // Generate battery info for UI display (keeps current LPM; does not randomize it)
 - (NSDictionary *)generateBatteryInfo;
+// Cache only; caller publishes compatibility effects after the source commit.
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo;
+- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp;
 
 // File operations
 - (void)saveBatteryInfoToDisk;
@@ -24,4 +27,4 @@
 // Error handling
 - (NSError *)lastError;
 
-@end 
+@end

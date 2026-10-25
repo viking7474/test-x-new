@@ -9,6 +9,8 @@
 - (NSDictionary *)generateWiFiInfo;
 - (NSDictionary *)currentWiFiInfo;
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
+// Cache adoption after an explicit-target source commit; never saves.
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
 
 // Individual property getters/setters
 - (NSString *)currentSSID;
@@ -25,4 +27,4 @@
 // Error Handling
 - (NSError *)lastError;
 
-@end 
+@end

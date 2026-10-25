@@ -32,7 +32,10 @@
 #import "PXRuntimeSourceStore.h"
 #import "PXRuntimeIdentifierWriter.h"
 #import "PXRuntimeScalarPreparation.h"
+#import "PXRuntimeArtifactPreparation.h"
+#import "PXRuntimeGeneration.h"
 #import <Security/Security.h>
+#import <sys/sysctl.h>
 
 @interface LSApplicationWorkspace
 + (id)defaultWorkspace;
@@ -59,6 +62,8 @@
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
+- (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error;
+- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model;
 - (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error;
 - (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared;
 - (NSString *)generatePreparedIdentifierForType:(NSString *)type;
@@ -1159,32 +1164,19 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 
-- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile {
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return NO;
-
-    NSDictionary *capturedIDs = [self captureDeviceIDsAtIdentityDirectory:identityDir];
-    if (!capturedIDs) return NO;
+- (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error {
     NSMutableDictionary *deviceIds = [capturedIDs mutableCopy];
     NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
     NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
     NSString *iosBuild = PXProfileString(deviceIds[@"IOSBuild"]);
-
-    // If no coherent baseline exists yet, seed the complete group once. That
-    // path also populates/clears cellular identity according to the current
-    // IMEI/MEID toggles.
-    if (!productType.length || !regulatoryModelNumber.length || !iosBuild.length) {
-        return [self regenerateDeviceProfileGroupAtIdentityDirectory:identityDir].length > 0;
-    }
-
     IPhoneModelDB *modelDB = [IPhoneModelDB sharedManager];
     NSDictionary *modelSpec = [modelDB specForProductType:productType];
     if ([productType hasPrefix:@"iPhone"] && !modelSpec) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                          code:6015
                                      userInfo:@{NSLocalizedDescriptionKey:
                                                     @"Canonical model data is required before cellular identity can be refreshed"}];
-        return NO;
+        return nil;
     }
 
     NSDictionary *cellularSpec = modelSpec
@@ -1202,11 +1194,11 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
                                      regulatoryModelNumber:regulatoryModelNumber
                                                   iosBuild:iosBuild];
         if (!basebandMeta.count) {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                              code:6016
                                          userInfo:@{NSLocalizedDescriptionKey:
                                                         @"Authoritative baseband metadata is unavailable for the current cellular tuple"}];
-            return NO;
+            return nil;
         }
     }
 
@@ -1214,183 +1206,232 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     if (!PXPopulateCanonicalCellularIdentity(deviceIds,
                                              cellularSpec,
                                              basebandMeta,
-                                             [self isIdentifierEnabled:@"IMEI"],
-                                             [self isIdentifierEnabled:@"MEID"],
+                                             [options[@"wantsIMEI"] boolValue],
+                                             [options[@"wantsMEID"] boolValue],
                                              &cellularError)) {
-        self.error = cellularError;
-        return NO;
+        if (error) *error = cellularError;
+        return nil;
     }
 
     NSMutableDictionary *updates = [NSMutableDictionary dictionary];
     for (NSString *key in PXCellularManagedKeys()) if (deviceIds[key]) updates[key] = deviceIds[key];
     updates[@"CommittedAt"] = [NSDate date];
-    NSDictionary *expected = PXCellularPreparationDependencies(capturedIDs);
+    return @{ @"updates": updates, @"keys": PXCellularManagedKeys() };
+}
+
+- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile {
+    NSString *identityDir = [self profileIdentityPath];
+    if (!identityDir.length) return NO;
+    NSDictionary *capturedIDs = [self captureDeviceIDsAtIdentityDirectory:identityDir];
+    if (!capturedIDs) return NO;
+    if (!PXProfileString(capturedIDs[@"DeviceModel"]).length ||
+        !PXProfileString(capturedIDs[@"RegulatoryModelNumber"]).length || !PXProfileString(capturedIDs[@"IOSBuild"]).length)
+        return [self regenerateDeviceProfileGroupAtIdentityDirectory:identityDir].length > 0;
+    NSDictionary *options = @{ @"wantsIMEI": @([self isIdentifierEnabled:@"IMEI"]), @"wantsMEID": @([self isIdentifierEnabled:@"MEID"]) };
     NSError *sourceError = nil;
+    NSDictionary *prepared = [self prepareCellularRefreshForDeviceIDs:capturedIDs options:options error:&sourceError];
+    if (!prepared) { self.error = sourceError; return NO; }
+    NSDictionary *expected = PXCellularPreparationDependencies(capturedIDs);
     BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierReplacement(tx, identityDir, updates, PXCellularManagedKeys(), expected, YES, YES, error);
+        return PXStageRuntimeIdentifierReplacement(tx, identityDir, prepared[@"updates"], prepared[@"keys"], expected, YES, YES, error);
     }, &sourceError);
     self.error = success ? nil : sourceError;
-    if (!success) return NO;
-
-    return YES;
+    return success;
 }
 
 - (void)regenerateAllEnabledIdentifiers {
-        // For WiFi info: Use the WiFiManager to generate
-    Class wifiManagerClass = NSClassFromString(@"WiFiManager");
-    if (wifiManagerClass && [wifiManagerClass respondsToSelector:@selector(sharedManager)]) {
-        id wifiManager = [wifiManagerClass sharedManager];
-        if (wifiManager && [wifiManager respondsToSelector:@selector(generateWiFiInfo)]) {
-            // Generate WiFi info
-            [wifiManager generateWiFiInfo];
-            PXLog(@"[WeaponX] 📶 Generated WiFi information for current profile");
-        }
-    }
-    
-    // Continue with other identifiers
-    if ([self isIdentifierEnabled:@"IDFA"]) {
-        [self generateIDFA];
-    }
-    if ([self isIdentifierEnabled:@"IDFV"]) {
-        [self generateIDFV];
-    }
-    if ([self isIdentifierEnabled:@"DeviceName"]) {
-        [self generateDeviceName];
-    }
-    if ([self isIdentifierEnabled:@"SerialNumber"]) {
-        [self generateSerialNumber];
-    }
-    if ([self isIdentifierEnabled:@"UDID"]) {
-        [self generateUDID];
-    }
-    
-    // Device profile group: DeviceModel + dependent specs + iOS version/build.
-    // Only regenerate when at least one of the dependent identifiers is enabled.
-    BOOL wantsDeviceProfileGroup = [self isIdentifierEnabled:@"DeviceModel"] || [self isIdentifierEnabled:@"IOSVersion"];
-    BOOL regeneratedProfileGroup = NO;
-    if (wantsDeviceProfileGroup) {
-        NSString *newModel = [self regenerateDeviceProfileGroup];
-        regeneratedProfileGroup = newModel.length > 0;
-        if (!newModel) {
-            // P0 is fail-closed: never replace a failed canonical model/build
-            // resolution with independently randomized legacy model + iOS values.
-            PXLog(@"[WeaponX] ❌ Device profile group generation failed; preserving the previous coherent generation");
-        }
-    } else {
-        // Spec-dependent features (for example StorageSystem) still need a
-        // coherent baseline. Seed it from the same canonical model/build group;
-        // never create a hardware-only legacy model with no compatible iOS tuple.
-        if (![self currentValueForIdentifier:@"DeviceModel"]) {
-            regeneratedProfileGroup = [self regenerateDeviceProfileGroup].length > 0;
-        }
-    }
+    NSError *error = nil;
+    if (![self regenerateAllEnabledIdentifiersWithError:&error])
+        PXLog(@"[IdentifierManager] Generation aborted: %@", error);
+}
 
-    // IMEI/MEID may be enabled even when DeviceModel/IOSVersion toggles are off.
-    // Refresh against the existing tuple without selecting a new model/build.
-    if (!wantsDeviceProfileGroup && !regeneratedProfileGroup &&
-        ([self isIdentifierEnabled:@"IMEI"] || [self isIdentifierEnabled:@"MEID"])) {
-        [self refreshCanonicalCellularIdentityForCurrentProfile];
+- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error {
+    if (error) *error = nil;
+    self.error = nil;
+    NSString *identityDir = [[self profileIdentityPath] copy];
+    NSError *failure = nil;
+    if (!identityDir.length) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Could not resolve profile identity path"}];
+        self.error = failure; if (error) *error = failure; return NO;
     }
-    
-    // Always generate device theme if it doesn't exist
-    if (![self currentValueForIdentifier:@"DeviceTheme"]) {
-        NSString *deviceTheme = [self generateDeviceTheme];
-        if (deviceTheme) {
-            [self setCustomDeviceTheme:deviceTheme];
-            PXLog(@"[WeaponX] 🎨 Generated device theme: %@", deviceTheme);
+    // Freeze caller intent before any provider callback. Dirty in-memory options
+    // still flush with this operation, as saveSettings did in the legacy flow.
+    NSDictionary *scope = self.scopedApps;
+    NSDictionary *intent = [scope isKindOfClass:NSDictionary.class] ?
+        PXDetachRuntimeGeneration(@{ @"flags": PXSanitizedIdentifierSettings(self.settings), @"scope": scope }, &failure) : nil;
+    if (!intent) {
+        failure = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6024 userInfo:@{NSLocalizedDescriptionKey: @"Invalid generation scope"}];
+        self.error = failure; if (error) *error = failure; return NO;
+    }
+    NSDictionary *flags = intent[@"flags"];
+    NSString *profileRoot = identityDir.stringByDeletingLastPathComponent;
+    NSString *idsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
+    NSString *settingsPath = PXTLinkIOSSettingsPath(), *scopePath = PXGlobalScopePath();
+    NSString *storagePath = [profileRoot stringByAppendingPathComponent:@"storage.plist"];
+    NSString *batteryPath = [identityDir stringByAppendingPathComponent:@"battery_info.plist"];
+    NSString *legacyBatteryPath = [profileRoot stringByAppendingPathComponent:@"battery_info.plist"];
+    NSString *securityPath = PXSecuritySettingsPath();
+    __block NSMutableDictionary *basis = [NSMutableDictionary dictionary];
+    __block NSMutableDictionary *present = [NSMutableDictionary dictionary];
+    BOOL captured = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        NSMutableArray *paths = [@[idsPath, settingsPath, scopePath] mutableCopy];
+        if ([flags[@"StorageSystem"] boolValue]) [paths addObject:storagePath];
+        if ([flags[@"Battery"] boolValue]) [paths addObjectsFromArray:@[batteryPath, legacyBatteryPath]];
+        for (NSString *path in paths) {
+            BOOL exists = NO;
+            NSDictionary *value = [tx dictionaryAtPath:path exists:&exists error:readError];
+            if (!value) return NO;
+            basis[path] = value; present[path] = @(exists);
+        }
+        NSDictionary *capturedIDs = basis[idsPath];
+        BOOL needsModel = [flags[@"DeviceModel"] boolValue] || [flags[@"IOSVersion"] boolValue] ||
+            !PXProfileString(capturedIDs[@"DeviceModel"]).length ||
+            (([flags[@"IMEI"] boolValue] || [flags[@"MEID"] boolValue]) &&
+             (!PXProfileString(capturedIDs[@"RegulatoryModelNumber"]).length || !PXProfileString(capturedIDs[@"IOSBuild"]).length));
+        if (needsModel) {
+            NSDictionary *security = [tx dictionaryAtPath:securityPath error:readError];
+            if (!security) return NO;
+            basis[securityPath] = security;
+        }
+        return YES;
+    }, &failure);
+    if (!captured) { self.error = failure; if (error) *error = failure; return NO; }
+    NSDictionary *ids = basis[idsPath];
+    BOOL wantsCellular = [flags[@"IMEI"] boolValue] || [flags[@"MEID"] boolValue];
+    BOOL wantsDeviceProfileGroup = [flags[@"DeviceModel"] boolValue] || [flags[@"IOSVersion"] boolValue];
+    BOOL needsBaseline = !PXProfileString(ids[@"DeviceModel"]).length ||
+        (wantsCellular && (!PXProfileString(ids[@"RegulatoryModelNumber"]).length || !PXProfileString(ids[@"IOSBuild"]).length));
+    NSDictionary *options = @{ @"webCompat": @((wantsDeviceProfileGroup || needsBaseline) && PXWebCompatIOSRangeEnabled()),
+        @"wantsIMEI": flags[@"IMEI"] ?: @NO, @"wantsMEID": flags[@"MEID"] ?: @NO };
+    NSDate *now = [NSDate date];
+    NSMutableDictionary *candidate = [@{ @"timestamp": now, @"flags": flags, @"scope": intent[@"scope"],
+        @"settingsPath": settingsPath, @"scopePath": scopePath } mutableCopy];
+    PXPreparedDeviceProfileGroup *model = nil;
+    if (wantsDeviceProfileGroup || needsBaseline) {
+        model = [self prepareDeviceProfileGroupWithOptions:options error:&failure];
+        if (model) candidate[@"model"] = @{ @"updates": model.updates, @"keys": model.replacedKeys, @"version": model.versionInfo };
+    } else if (wantsCellular) {
+        NSDictionary *cellular = [self prepareCellularRefreshForDeviceIDs:ids options:options error:&failure];
+        if (cellular) candidate[@"cellular"] = cellular;
+    }
+    if ((((wantsDeviceProfileGroup || needsBaseline) && !model) ||
+         (wantsCellular && !model && !candidate[@"cellular"])) && !failure)
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6021 userInfo:@{NSLocalizedDescriptionKey: @"Model preparation failed"}];
+    NSMutableDictionary *scalars = [NSMutableDictionary dictionary];
+    for (NSString *type in PXRuntimeGenerationScalarTypes()) {
+        if (failure || ![flags[type] boolValue]) continue;
+        NSString *value;
+        if ([type isEqualToString:@"SerialNumber"]) {
+            SerialNumberManager *serial = [SerialNumberManager sharedManager];
+            value = [serial prepareSerialNumber];
+            if (!value) failure = [serial lastError];
+        } else value = PXPrepareRuntimeScalar(type, &failure);
+        if (!value && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6022 userInfo:@{NSLocalizedDescriptionKey: @"Scalar preparation failed"}];
+        if (value) scalars[type] = value;
+    }
+    candidate[@"scalars"] = scalars;
+    // WiFi generation has always been unconditional in this entry point.
+    if (!failure) candidate[@"wifi"] = PXPrepareRuntimeWiFiInfo();
+    id theme = ids[@"DeviceTheme"];
+    if ([flags[@"DeviceTheme"] boolValue] || (![theme isKindOfClass:NSString.class] && ![theme isKindOfClass:NSNumber.class]))
+        candidate[@"theme"] = arc4random_uniform(2) == 0 ? @"Light" : @"Dark";
+    if (!failure && ([flags[@"SystemUptime"] boolValue] || [flags[@"BootTime"] boolValue])) {
+        struct timeval boot = {0}; size_t size = sizeof(boot); int mib[2] = {CTL_KERN, KERN_BOOTTIME};
+        BOOL hasReal = sysctl(mib, 2, &boot, &size, NULL, 0) == 0;
+        candidate[@"uptime"] = PXPrepareRuntimeUptime(now, hasReal ? now.timeIntervalSince1970 - boot.tv_sec : 0, hasReal);
+    }
+    if (!failure && [flags[@"StorageSystem"] boolValue]) {
+        NSString *product = model ? model.updates[@"DeviceModel"] : PXProfileString(ids[@"DeviceModel"]);
+        // The prepared model already owns a detached canonical hardware packet.
+        NSDictionary *spec = model ? @{ @"storageCapacitiesGB": model.updates[@"StorageCapacitiesGB"] ?: @[] } : nil;
+        if (!model) {
+            IPhoneModelDB *db = [IPhoneModelDB sharedManager];
+            spec = [db specForProductType:product] ? [db canonicalHardwareSpecForProductType:product] : nil;
+        }
+        if ([product hasPrefix:@"iPhone"] && !spec.count)
+            failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6023 userInfo:@{NSLocalizedDescriptionKey: @"Canonical storage specification unavailable"}];
+        else {
+            if (!spec.count) spec = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:product];
+            NSString *capacity = PXChooseRuntimeStorageCapacity(spec[@"storageCapacitiesGB"], basis[storagePath][@"TotalStorage"]);
+            NSDictionary *storage = PXPrepareRuntimeStorage(capacity);
+            if (storage) candidate[@"storage"] = storage;
+            else failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6023 userInfo:@{NSLocalizedDescriptionKey: @"Storage preparation failed"}];
         }
     }
-    
-    // IOSVersion is handled by regenerateDeviceProfileGroup when enabled.
-    if ([self isIdentifierEnabled:@"SystemBootUUID"]) {
-        [self generateSystemBootUUID];
+    if (!failure && [flags[@"Battery"] boolValue]) {
+        NSDictionary *battery = [present[batteryPath] boolValue] ? basis[batteryPath] :
+            ([present[legacyBatteryPath] boolValue] ? basis[legacyBatteryPath] :
+             [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weaponx.battery.plist"]);
+        id lowPowerMode = battery[@"LowPowerMode"];
+        NSDictionary *info = PXPrepareRuntimeBatteryInfo([lowPowerMode respondsToSelector:@selector(boolValue)] && [lowPowerMode boolValue]);
+        candidate[@"batteryUI"] = info;
+        candidate[@"battery"] = @{ @"BatteryLevel": info[@"BatteryLevel"], @"LowPowerMode": info[@"LowPowerMode"], @"LastUpdated": now };
     }
-    if ([self isIdentifierEnabled:@"DyldCacheUUID"]) {
-        [self generateDyldCacheUUID];
-    }
-    if ([self isIdentifierEnabled:@"PasteboardUUID"]) {
-        [self generatePasteboardUUID];
-    }
+    NSDictionary *payload = failure ? nil : PXDetachRuntimeGeneration(candidate, &failure);
+    if (!payload) { self.error = failure; if (error) *error = failure; return NO; }
+    // Only the dependencies used/replaced by this operation participate. A
+    // concurrent network/carrier update and the latest generation counter merge.
+    NSMutableSet *keys = [NSMutableSet setWithObject:@"DeviceModel"];
+    if (model) [keys addObjectsFromArray:model.replacedKeys];
+    else if (payload[@"cellular"]) [keys addObjectsFromArray:PXCellularPreparationDependencies(ids).allKeys];
+    [keys addObjectsFromArray:scalars.allKeys];
+    [keys addObjectsFromArray:@[@"SSID", @"BSSID", @"DeviceTheme", @"ProfileSchemaVersion"]];
+    if (payload[@"uptime"]) [keys addObjectsFromArray:@[@"BootTime", @"SystemUptime"]];
+    if (payload[@"battery"]) [keys addObjectsFromArray:@[@"BatteryLevel", @"LowPowerMode"]];
+    NSMutableDictionary *conditions = [@{
+        idsPath: @{ @"values": PXRuntimeIdentifierDependencies(ids, keys.allObjects) },
+        settingsPath: @{ @"values": PXRuntimeIdentifierDependencies(basis[settingsPath], @[@"EnabledIdentifiers", @"StorageSystemEnabled"]) },
+        scopePath: @{ @"values": PXRuntimeIdentifierDependencies(basis[scopePath], @[@"ScopedApps"]) }
+    } mutableCopy];
+    if (basis[securityPath]) conditions[securityPath] = @{ @"values": PXRuntimeIdentifierDependencies(basis[securityPath], @[@"webCompatIOSRangeEnabled"]) };
+    if (payload[@"storage"]) conditions[storagePath] = @{ @"values": PXRuntimeIdentifierDependencies(basis[storagePath], @[@"TotalStorage", @"FreeStorage", @"FilesystemType"]) };
+    if (payload[@"battery"]) for (NSString *path in @[batteryPath, legacyBatteryPath])
+        conditions[path] = @{ @"exists": present[path], @"values": PXRuntimeIdentifierDependencies(basis[path], @[@"LowPowerMode"]) };
+    BOOL committed = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeGeneration(tx, identityDir, payload, conditions, writeError);
+    }, &failure);
+    self.error = committed ? nil : failure;
+    if (!committed) { if (error) *error = failure; return NO; }
+    [self publishRuntimeGeneration:payload identityDirectory:identityDir model:model];
+    return YES;
+}
 
-    if ([self isIdentifierEnabled:@"KeychainUUID"]) {
-        [self generateKeychainUUID];
-    }
-    if ([self isIdentifierEnabled:@"UserDefaultsUUID"]) {
-        [self generateUserDefaultsUUID];
-    }
-    if ([self isIdentifierEnabled:@"AppGroupUUID"]) {
-        [self generateAppGroupUUID];
-    }
-    if ([self isIdentifierEnabled:@"CoreDataUUID"]) {
-        [self generateCoreDataUUID];
-    }
-    if ([self isIdentifierEnabled:@"SystemUptime"]) {
-        NSString *profilePath = [self profileIdentityPath];
-[[UptimeManager sharedManager] generateUptimeForProfile:profilePath];
-    }
-    if ([self isIdentifierEnabled:@"BootTime"]) {
-        NSString *profilePath = [self profileIdentityPath];
-[[UptimeManager sharedManager] generateBootTimeForProfile:profilePath];
-    }
-    // Even though we already generated WiFi info above, check if it's specifically enabled
-    if ([self isIdentifierEnabled:@"WiFi"]) {
-        // Use WiFiManager to generate new WiFi info
-        id wifiManager = NSClassFromString(@"WiFiManager");
-        if (wifiManager && [wifiManager respondsToSelector:@selector(sharedManager)]) {
-            id sharedManager = [wifiManager sharedManager];
-            if (sharedManager && [sharedManager respondsToSelector:@selector(generateWiFiInfo)]) {
-                [sharedManager generateWiFiInfo];
-                PXLog(@"Generated new WiFi information");
+- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model {
+    NSString *profileID = identityDir.stringByDeletingLastPathComponent.lastPathComponent;
+    [self.spoofCache removeAllObjects];
+    [_appEnabledCache removeAllObjects];
+    @try {
+        // Selection lifecycle is not yet enrolled. Avoid knowingly installing
+        // target A's values in global compatibility caches after a switch to B.
+        if ([PXActiveProfileID() isEqualToString:profileID]) {
+            if (model) [self publishPreparedDeviceProfileGroup:model];
+            for (NSString *type in payload[@"scalars"]) {
+                if (![PXActiveProfileID() isEqualToString:profileID]) break;
+                [self publishPreparedIdentifier:payload[@"scalars"][type] type:type includeNameAndSerial:YES];
             }
-        }
-    }
-    if ([self isIdentifierEnabled:@"StorageSystem"]) {
-        // Use StorageManager to generate new storage info
-        id storageManager = NSClassFromString(@"StorageManager");
-        if (storageManager && [storageManager respondsToSelector:@selector(sharedManager)]) {
-            id sharedManager = [storageManager sharedManager];
-            if (sharedManager && [sharedManager respondsToSelector:@selector(generateStorageForCapacity:)]) {
-                // Randomly choose between 64GB and 128GB
-                NSString *capacity = [sharedManager respondsToSelector:@selector(randomizeStorageCapacity)] ? 
-                                       [sharedManager randomizeStorageCapacity] : @"64";
-                
-                NSDictionary *storageInfo = [sharedManager generateStorageForCapacity:capacity];
-                if (storageInfo) {
-                    [sharedManager setTotalStorageCapacity:storageInfo[@"TotalStorage"]];
-                    [sharedManager setFreeStorageSpace:storageInfo[@"FreeStorage"]];
-                    [sharedManager setFilesystemType:storageInfo[@"FilesystemType"]];
-                    PXLog(@"[WeaponX] 💾 Generated new storage information: %@ GB", storageInfo[@"TotalStorage"]);
+            WiFiManager *wifi = [WiFiManager sharedManager];
+            if ([PXActiveProfileID() isEqualToString:profileID]) [wifi adoptCommittedWiFiInfo:payload[@"wifi"] profileID:profileID];
+            if (payload[@"storage"]) {
+                StorageManager *storage = [StorageManager sharedManager];
+                if ([PXActiveProfileID() isEqualToString:profileID]) [storage adoptCommittedStorageInfo:payload[@"storage"]];
+            }
+            if (payload[@"uptime"]) {
+                UptimeManager *uptime = [UptimeManager sharedManager];
+                if ([PXActiveProfileID() isEqualToString:profileID]) [uptime adoptCommittedUptimeInfo:payload[@"uptime"] timestamp:payload[@"timestamp"]];
+            }
+            if (payload[@"battery"]) {
+                BatteryManager *battery = [BatteryManager sharedManager];
+                if ([PXActiveProfileID() isEqualToString:profileID]) {
+                    [battery adoptCommittedBatteryInfo:payload[@"batteryUI"]];
+                    [battery publishCommittedBatteryInfo:payload[@"batteryUI"] timestamp:payload[@"timestamp"]];
                 }
             }
         }
+    } @catch (NSException *exception) {
+        // A post-commit callback cannot roll back already committed sources.
+        PXLog(@"[IdentifierManager] Sources committed; compatibility publication failed: %@", exception);
     }
-    if ([self isIdentifierEnabled:@"Battery"]) {
-        // Use BatteryManager to generate new battery info
-        id batteryManager = NSClassFromString(@"BatteryManager");
-        if (batteryManager && [batteryManager respondsToSelector:@selector(sharedManager)]) {
-            id sharedManager = [batteryManager sharedManager];
-            if (sharedManager && [sharedManager respondsToSelector:@selector(generateBatteryInfo)]) {
-                NSDictionary *batteryInfo = [sharedManager generateBatteryInfo];
-                if (batteryInfo) {
-                    PXLog(@"[WeaponX] 🔋 Generated new battery information: %@%%", 
-                         @([batteryInfo[@"BatteryLevel"] floatValue] * 100));
-                }
-            }
-        }
-    }
-    // Add AppInstallUUID
-    if ([self isIdentifierEnabled:@"AppInstallUUID"]) {
-        [self generateAppInstallUUID];
-    }
-    // Add AppContainerUUID
-    if ([self isIdentifierEnabled:@"AppContainerUUID"]) {
-        [self generateAppContainerUUID];
-    }
-    // Add DeviceTheme
-    if ([self isIdentifierEnabled:@"DeviceTheme"]) {
-        [self generateDeviceTheme];
-    }
-    [self saveSettings];
+    PXPostSettingsChangedNotification();
 }
 
 #pragma mark - Settings Management

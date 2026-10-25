@@ -2,6 +2,10 @@
 #import <dispatch/dispatch.h>
 #import <Security/Security.h>
 #import "PXRuntimeIdentifierWriter.h"
+#import "PXRuntimeGeneration.h"
+#import "PXRuntimeArtifactPreparation.h"
+#import "PXRuntimeScalarPreparation.h"
+#include <sys/sysctl.h>
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
 #import "VersionCompare.h"
@@ -16,12 +20,23 @@ static NSString *gRoot, *gSelected, *gExpectedIdentity, *gBuild = @"B1";
 static BOOL gFailDB, gNoHardware, gNoFirmware, gUnknownCellular, gDisabledCellular, gWebCompat;
 static BOOL gNoCDMA, gNoTACs, gNoMEIDPrefixes;
 static NSUInteger gTelephonyLookups;
+static NSUInteger gBatchNotifications, gArtifactAdoptions, gBatteryNotifications;
+static BOOL gFailSerial, gThrowBatteryPublication;
 static void (^gDuringPrepare)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
 static NSDictionary *IDs(NSString *identity) { return [NSDictionary dictionaryWithContentsOfFile:Path(identity, @"device_ids.plist")] ?: @{}; }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performWrite:body error:error]; }
+NSString *PXActiveProfileID(void) { return gSelected; }
+NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
+NSString *PXGlobalScopePath(void) { return Path(gRoot, @"scope.plist"); }
+NSString *PXSecuritySettingsPath(void) { return Path(gRoot, @"security.plist"); }
+void PXPostSettingsChangedNotification(void) {
+    gBatchNotifications++;
+    CHECK([gStore capture:^NSDictionary *(NSError **error) { (void)error; return @{}; } error:NULL] != nil,
+          "batch notification runs outside source gate after commit");
+}
 void PXLog(NSString *format, ...) { (void)format; }
 void PXDBLog(NSString *format, ...) { (void)format; }
 static BOOL PXWebCompatIOSRangeEnabled(void) { return gWebCompat; }
@@ -138,18 +153,89 @@ static NSDictionary *Model(NSString *product) {
           "software compatibility callback runs after complete commit outside gate");
 }
 @end
+#define ARTIFACT_SINGLETON + (instancetype)sharedManager { static id instance; static dispatch_once_t once; dispatch_once(&once, ^{ instance = [self new]; }); return instance; }
+static void Adopt(void) {
+    gArtifactAdoptions++;
+    CHECK(Snapshot(gExpectedIdentity) != nil && IDs(gExpectedIdentity)[@"SSID"] != nil,
+          "batch compatibility adoption follows source commit outside gate");
+}
+@interface SerialNumberManager : NSObject
++ (instancetype)sharedManager;
+- (NSString *)prepareSerialNumber;
+- (NSError *)lastError;
+@end
+@implementation SerialNumberManager
+ARTIFACT_SINGLETON
+- (NSString *)prepareSerialNumber { Preparation(); return gFailSerial ? nil : PXPrepareRuntimeSerial(@"FVF", NULL); }
+- (NSError *)lastError { return [NSError errorWithDomain:@"fixture.serial" code:1 userInfo:nil]; }
+@end
+@interface WiFiManager : NSObject
++ (instancetype)sharedManager;
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)info profileID:(NSString *)profile;
+@end
+@implementation WiFiManager
+ARTIFACT_SINGLETON
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)info profileID:(NSString *)profile { (void)info; (void)profile; Adopt(); }
+@end
+@interface StorageManager : NSObject
++ (instancetype)sharedManager;
+- (void)adoptCommittedStorageInfo:(NSDictionary *)info;
+@end
+@implementation StorageManager
+ARTIFACT_SINGLETON
+- (void)adoptCommittedStorageInfo:(NSDictionary *)info { (void)info; Adopt(); }
+@end
+@interface UptimeManager : NSObject
++ (instancetype)sharedManager;
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp;
+@end
+@implementation UptimeManager
+ARTIFACT_SINGLETON
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp { (void)info; (void)timestamp; Adopt(); }
+@end
+@interface BatteryManager : NSObject
++ (instancetype)sharedManager;
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)info;
+- (void)publishCommittedBatteryInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp;
+@end
+@implementation BatteryManager
+ARTIFACT_SINGLETON
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)info { (void)info; Adopt(); }
+- (void)publishCommittedBatteryInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp {
+    (void)timestamp; gBatteryNotifications++;
+    CHECK([info[@"LowPowerMode"] boolValue] && [IDs(gExpectedIdentity)[@"LowPowerMode"] boolValue], "batch battery preserves captured target LPM");
+    if (gThrowBatteryPublication) [NSException raise:@"fixture" format:@"post commit observer failure"];
+}
+@end
 #include "PXDeviceGroupStatics.inc"
-@interface PXDeviceGroupFixture : NSObject
+@interface PXDeviceGroupFixture : NSObject {
+    NSMutableDictionary *_appEnabledCache;
+}
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *settings;
+@property (nonatomic, strong) NSMutableDictionary *scopedApps;
+@property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (NSString *)profileIdentityPath;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
+- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial;
 #include "PXDeviceGroupDeclarations.inc"
 @end
 @implementation PXDeviceGroupFixture
-- (instancetype)init { if ((self = [super init])) _settings = [@{ @"IMEI": @YES, @"MEID": @YES } mutableCopy]; return self; }
+- (instancetype)init {
+    if ((self = [super init])) {
+        _settings = [@{ @"IMEI": @YES, @"MEID": @YES } mutableCopy];
+        _scopedApps = [NSMutableDictionary dictionary]; _spoofCache = [NSMutableDictionary dictionary];
+        _appEnabledCache = [NSMutableDictionary dictionary];
+    }
+    return self;
+}
 - (NSString *)profileIdentityPath { gSelections++; return gSelected ? Identity(gSelected) : nil; }
 - (BOOL)isIdentifierEnabled:(NSString *)type { return [self.settings[type] boolValue]; }
+- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial {
+    (void)includeNameAndSerial; gCacheChanges++;
+    CHECK([IDs(gExpectedIdentity)[type] isEqual:value] && Snapshot(gExpectedIdentity) != nil,
+          "batch scalar publisher sees committed value outside gate");
+}
 #include "PXDeviceGroupMethods.inc"
 @end
 
@@ -368,6 +454,158 @@ static void TestModelPreparation(PXDeviceGroupFixture *manager, NSString *identi
           "model preparation rejects malformed flags before DB work");
     gSelected = @"a";
 }
+static NSDictionary *BatchSnapshot(void) {
+    return [gStore capture:^NSDictionary *(NSError **error) {
+        (void)error; NSMutableDictionary *files = [NSMutableDictionary dictionary];
+        for (NSString *relative in [NSFileManager.defaultManager subpathsAtPath:gRoot])
+            if (![relative hasPrefix:@"control/"] && [relative hasSuffix:@".plist"])
+                files[relative] = [NSData dataWithContentsOfFile:Path(gRoot, relative)];
+        return @{ @"files": files };
+    } error:NULL];
+}
+static BOOL SetSource(NSString *path, NSString *key, id value) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSMutableDictionary *record = [[tx dictionaryAtPath:path error:error] mutableCopy];
+        if (!record) return NO;
+        record[key] = value;
+        return [tx setDictionary:record atPath:path error:error];
+    } error:NULL];
+}
+static void TestBatchGeneration(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a; gFailDB = NO; gBuild = @"B1";
+    NSMutableDictionary *flags = [NSMutableDictionary dictionary];
+    for (NSString *key in PXCanonicalIdentifierToggleKeys()) flags[key] = @YES;
+    manager.settings = [flags mutableCopy];
+    manager.scopedApps = [@{ @"fixture.app": [@{ @"enabled": @YES } mutableCopy] } mutableCopy];
+    CHECK(Seed(a, @{ @"GenerationCounter": @20, @"DeviceTheme": @"Light" }, YES), "batch IDs seeded");
+    NSString *batteryPath = Path(a, @"battery_info.plist");
+    NSString *storagePath = Path(a.stringByDeletingLastPathComponent, @"storage.plist");
+    CHECK(SetSource(batteryPath, @"LowPowerMode", @YES) && SetSource(storagePath, @"TotalStorage", @"128") &&
+          SetSource(PXTLinkIOSSettingsPath(), @"UnrelatedFeature", @YES), "batch artifact and settings bases seeded");
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"commit-written"]) commits++; };
+    NSUInteger notices = gBatchNotifications, batteryNotices = gBatteryNotifications;
+    gSelections = 0; NSError *error = nil;
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && error == nil && commits == 1 && gSelections == 1,
+          "whole regenerate commits once at one captured target");
+    gStore.testCheckpoint = nil;
+    NSDictionary *ids = IDs(a);
+    for (NSString *type in PXRuntimeGenerationScalarTypes()) {
+        NSDictionary *sidecar = [NSDictionary dictionaryWithContentsOfFile:Path(a, PXRuntimeIdentifierSidecar(type))];
+        CHECK([ids[type] isEqual:sidecar[@"value"]], "batch scalar and sidecar agree");
+    }
+    NSDictionary *wifi = [NSDictionary dictionaryWithContentsOfFile:Path(a, @"wifi_info.plist")];
+    NSDictionary *battery = [NSDictionary dictionaryWithContentsOfFile:batteryPath];
+    NSDictionary *storage = [NSDictionary dictionaryWithContentsOfFile:storagePath];
+    NSDictionary *uptime = [NSDictionary dictionaryWithContentsOfFile:Path(a, @"system_uptime.plist")];
+    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    CHECK([ids[@"GenerationCounter"] isEqual:@21] && [ids[@"SSID"] isEqual:wifi[@"ssid"]] &&
+          [ids[@"BatteryLevel"] isEqual:battery[@"BatteryLevel"]] && [ids[@"SystemUptime"] isEqual:uptime[@"value"]] &&
+          [storage[@"TotalStorage"] isEqual:@"256"] && [settings[@"EnabledIdentifiers"] isEqual:flags] &&
+          [settings[@"UnrelatedFeature"] boolValue] && gBatchNotifications == notices + 1 && gBatteryNotifications == batteryNotices + 1,
+          "whole batch joins artifacts settings scope and counter before publication");
+    NSDictionary *before = BatchSnapshot(); NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions;
+    notices = gBatchNotifications; batteryNotices = gBatteryNotifications;
+    for (NSNumber *cut in @[@1, @3, @10]) {
+        __block NSUInteger writes = 0;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if ([stage isEqual:@"source-written"] && ++writes == cut.unsignedIntegerValue) [NSException raise:@"fixture" format:@"batch write failure"];
+        };
+        CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error != nil, "batch source failure reported");
+        gStore.testCheckpoint = nil;
+        CHECK([before isEqual:BatchSnapshot()] && caches == gCacheChanges && adoptions == gArtifactAdoptions &&
+              notices == gBatchNotifications && batteryNotices == gBatteryNotifications,
+              "whole batch rollback restores artifacts settings scope without cache or notification");
+    }
+    gFailDB = YES;
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && [before isEqual:BatchSnapshot()], "batch DB preparation failure writes nothing");
+    gFailDB = NO; gFailSerial = YES;
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && [before isEqual:BatchSnapshot()] && caches == gCacheChanges,
+          "batch scalar preparation failure leaves all source and caches intact");
+    gFailSerial = NO;
+    NSArray *changes = @[
+        @[Path(a, @"device_ids.plist"), @"DeviceModel", @"changed-model"],
+        @[Path(a, @"device_ids.plist"), @"IMEI", @"changed-imei"],
+        @[Path(a, @"device_ids.plist"), @"SSID", @"changed-ssid"],
+        @[Path(a, @"device_ids.plist"), @"IDFA", @"changed-idfa"],
+        @[PXTLinkIOSSettingsPath(), @"EnabledIdentifiers", @{}],
+        @[PXGlobalScopePath(), @"ScopedApps", @{}],
+        @[PXSecuritySettingsPath(), @"webCompatIOSRangeEnabled", @YES],
+        @[storagePath, @"TotalStorage", @"64"], @[batteryPath, @"LowPowerMode", @NO]
+    ];
+    for (NSArray *change in changes) {
+        __block NSDictionary *competitor = nil;
+        gDuringPrepare = ^{ CHECK(SetSource(change[0], change[1], change[2]), "batch competing dependency write commits"); competitor = BatchSnapshot(); };
+        CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error != nil && competitor &&
+              [competitor isEqual:BatchSnapshot()] && caches == gCacheChanges && notices == gBatchNotifications,
+              "batch dependency drift rejects entire candidate including absence");
+    }
+    __block NSDictionary *presenceCompetitor = nil;
+    gDuringPrepare = ^{
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            return [tx setDictionary:@{} atPath:Path(a.stringByDeletingLastPathComponent, @"battery_info.plist") error:writeError];
+        } error:NULL], "empty legacy battery source appears during preparation");
+        presenceCompetitor = BatchSnapshot();
+    };
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && [presenceCompetitor isEqual:BatchSnapshot()],
+          "batch source presence drift rejects even without field differences");
+    CHECK(SetSource(batteryPath, @"LowPowerMode", @YES), "batch target LPM restored");
+    NSInteger expectedCounter = [IDs(a)[@"GenerationCounter"] integerValue] + 6;
+    gDuringPrepare = ^{
+        manager.settings[@"IDFA"] = @NO;
+        manager.scopedApps[@"fixture.app"][@"enabled"] = @NO;
+        CHECK(SetSource(Path(a, @"device_ids.plist"), @"CarrierName", @"concurrent-carrier"), "batch disjoint writer commits");
+        CHECK(SetSource(Path(a, @"device_ids.plist"), @"GenerationCounter", @(expectedCounter - 1)), "batch competing counter advances");
+    };
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && [IDs(a)[@"CarrierName"] isEqual:@"concurrent-carrier"] &&
+          [IDs(a)[@"GenerationCounter"] integerValue] == expectedCounter &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()] objectForKey:@"EnabledIdentifiers"][@"IDFA"] boolValue] &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"][@"fixture.app"][@"enabled"] boolValue],
+          "batch freezes nested caller intent and merges unrelated updates");
+    manager.settings = [flags mutableCopy]; manager.scopedApps[@"fixture.app"][@"enabled"] = @YES;
+    NSDictionary *other = Snapshot(b); caches = gCacheChanges; adoptions = gArtifactAdoptions; notices = gBatchNotifications;
+    gSelections = 0; gDuringPrepare = ^{ gSelected = @"b"; };
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && gSelections == 1 && [other[@"files"] isEqual:Snapshot(b)[@"files"]] &&
+          caches == gCacheChanges && adoptions == gArtifactAdoptions && gBatchNotifications == notices + 1,
+          "batch target switch commits A and skips inactive compatibility caches");
+    // Snapshot carries the global source token, which legitimately advances for A.
+    gSelected = @"a";
+    gThrowBatteryPublication = YES; notices = gBatchNotifications;
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && error == nil && gBatchNotifications == notices + 1,
+          "post commit callback exception cannot report a false rollback");
+    gThrowBatteryPublication = NO;
+    NSMutableDictionary *exhausted = [IDs(a) mutableCopy]; exhausted[@"GenerationCounter"] = @(NSIntegerMax);
+    CHECK(Seed(a, exhausted, YES), "batch counter exhaustion seeded"); before = BatchSnapshot(); notices = gBatchNotifications;
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+          "batch counter exhaustion prevents every artifact and notification");
+    exhausted[@"GenerationCounter"] = @0; CHECK(Seed(a, exhausted, YES), "batch counter restored");
+    NSString *sidecarPath = Path(a, @"advertising_id.plist"); NSData *saved = [NSData dataWithContentsOfFile:sidecarPath];
+    CHECK([[@"malformed" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:sidecarPath atomically:YES], "batch malformed sidecar injected");
+    before = BatchSnapshot();
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && [before isEqual:BatchSnapshot()], "batch malformed beforeimage fails without replacing any source");
+    CHECK([saved writeToFile:sidecarPath atomically:YES], "batch scalar sidecar restored");
+    [manager.settings removeAllObjects];
+    NSNumber *counter = IDs(a)[@"GenerationCounter"]; NSString *build = IDs(a)[@"IOSBuild"];
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && [IDs(a)[@"GenerationCounter"] isEqual:counter] &&
+          [IDs(a)[@"IOSBuild"] isEqual:build] && IDs(a)[@"SSID"] != nil, "batch disabled options preserve tuple and unconditional WiFi policy");
+    manager.settings[@"IMEI"] = @YES;
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && [IDs(a)[@"IOSBuild"] isEqual:build] &&
+          [IDs(a)[@"GenerationCounter"] integerValue] == counter.integerValue + 1, "batch cellular only refresh preserves model and build");
+    [manager.settings removeAllObjects]; CHECK(Seed(a, @{}, YES), "batch missing baseline seeded");
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && [IDs(a)[@"GenerationCounter"] isEqual:@1] &&
+          IDs(a)[@"DeviceModel"] && !IDs(a)[@"IMEI"] && IDs(a)[@"DeviceTheme"], "batch missing baseline seeds canonical group with frozen cellular policy");
+    gSelected = nil; before = BatchSnapshot(); notices = gBatchNotifications;
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error != nil &&
+          [before isEqual:BatchSnapshot()] && notices == gBatchNotifications, "batch missing target fails before any source write");
+    gSelected = @"a";
+    NSMutableDictionary *savedScope = manager.scopedApps;
+    manager.scopedApps = nil; before = BatchSnapshot();
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error != nil && [before isEqual:BatchSnapshot()],
+          "batch missing scope intent fails instead of revoking existing scope");
+    manager.scopedApps = savedScope;
+    manager.settings = [@{ @"IMEI": @YES, @"MEID": @YES } mutableCopy];
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -380,6 +618,7 @@ int main(void) {
         TestModelPreparation(manager, Identity(@"a"));
         TestGroups(manager, Identity(@"a"), Identity(@"b"));
         TestDependentRefresh(manager, Identity(@"a"), Identity(@"b"));
+        TestBatchGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];

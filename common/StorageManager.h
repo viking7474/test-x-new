@@ -15,6 +15,7 @@
  * @return Dictionary with TotalStorage, FreeStorage, and FilesystemType
  */
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
+- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
 
 /**
  * Randomly choose a realistic device capacity

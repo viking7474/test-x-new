@@ -23,6 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)generateBootTimeForProfile:(NSString *)profilePath;
 - (NSDate *)currentBootTimeForProfile:(NSString *)profilePath;
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath;
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp;
 
 // Data validation
 - (BOOL)validateBootTimeConsistencyForProfile:(NSString *)profilePath;
@@ -32,4 +33,4 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-NS_ASSUME_NONNULL_END 
+NS_ASSUME_NONNULL_END

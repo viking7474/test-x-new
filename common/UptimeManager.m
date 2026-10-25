@@ -55,6 +55,13 @@ static NSString * const kCreationTimeKey = @"creationTime";
 
 #pragma mark - Uptime Generation
 
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp {
+    self.bootTimeValue = uptimeInfo[@"boot"][@"value"];
+    self.uptimeValue = [uptimeInfo[@"seconds"] doubleValue];
+    self.cacheTime = timestamp;
+    self.error = nil;
+}
+
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath {
     @try {
         // Validate profile path

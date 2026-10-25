@@ -51,9 +51,11 @@ static NSDictionary *Capture(void) {
 
 @interface PXPreparedWiFiFixture : NSObject
 @property (nonatomic, strong) NSMutableDictionary *wifiInfo;
+@property (nonatomic, strong) NSString *currentProfileId;
 @property (nonatomic, strong) NSError *error;
 - (NSDictionary *)generateWiFiInfo;
 - (void)saveWiFiInfoToCurrentProfile;
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
 @end
 @implementation PXPreparedWiFiFixture
 - (void)saveWiFiInfoToCurrentProfile { gWiFiSaves++; CHECK(self.wifiInfo.count == 6, "WiFi cache ready before legacy save"); }
@@ -67,12 +69,16 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 @interface PXPreparedBatteryFixture : NSObject {
     NSString *_currentBatteryLevel;
     BOOL _currentLowPowerMode;
+    BOOL _lowPowerModeLoaded;
 }
+@property (nonatomic, strong) NSError *error;
 - (NSDictionary *)generateBatteryInfo;
 - (NSString *)randomizeBatteryLevel;
 - (void)saveBatteryInfoToDisk;
 - (void)setFixtureLowPowerMode:(BOOL)value;
 - (NSString *)fixtureLevel;
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo;
+- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp;
 @end
 @implementation PXPreparedBatteryFixture
 - (void)saveBatteryInfoToDisk { gBatterySaves++; CHECK(_currentBatteryLevel.length > 0, "battery cache ready before legacy save"); }
@@ -82,16 +88,27 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 #define CFNotificationCenterPostNotification PXFixtureDarwin
 #define CFNotificationCenterGetDarwinNotifyCenter() NULL
 #define kBatteryLevelKey @"BatteryLevel"
+#define kLowPowerModeKey @"LowPowerMode"
+#define kLastUpdatedKey @"LastUpdated"
+#define BATTERY_PLIST_PATH Path(gRoot, @"legacy-battery.plist")
 #include "PXPreparedBatteryMethods.inc"
+#undef BATTERY_PLIST_PATH
+#undef kLastUpdatedKey
+#undef kLowPowerModeKey
 #undef kBatteryLevelKey
 #undef CFNotificationCenterGetDarwinNotifyCenter
 #undef CFNotificationCenterPostNotification
 @end
 
-@interface PXPreparedStorageFixture : NSObject
+@interface PXPreparedStorageFixture : NSObject {
+    NSMutableDictionary *_storageSettings;
+}
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
+- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
+- (NSDictionary *)fixtureStorage;
 @end
 @implementation PXPreparedStorageFixture
+- (NSDictionary *)fixtureStorage { return _storageSettings; }
 #include "PXPreparedStorageMethod.inc"
 @end
 
@@ -101,6 +118,7 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 @property (nonatomic) NSTimeInterval uptimeValue;
 @property (nonatomic, strong) NSDate *cacheTime;
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)path;
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp;
 @end
 @implementation PXPreparedUptimeFixture
 #include "PXPreparedUptimeMethod.inc"
@@ -163,6 +181,27 @@ static void TestManagerWrappers(void) {
     CHECK([battery randomizeBatteryLevel] != nil && gBatterySaves == 1 && gDarwin == 0, "standalone battery level still saves once without batch notification");
     PXPreparedStorageFixture *storage = [PXPreparedStorageFixture new];
     CHECK([storage generateStorageForCapacity:@"64"] != nil && [storage generateStorageForCapacity:nil] == nil, "storage manager delegates preparation and rejects nil safely");
+    NSUInteger writes = gWrites, saves = gBatterySaves, wifiSaves = gWiFiSaves, darwin = gDarwin;
+    NSDictionary *before = Capture(); NSDate *now = [NSDate dateWithTimeIntervalSince1970:1700000000];
+    [wifi adoptCommittedWiFiInfo:returned profileID:@"a"];
+    [battery adoptCommittedBatteryInfo:info];
+    NSDictionary *storageInfo = PXPrepareRuntimeStorage(@"128");
+    [storage adoptCommittedStorageInfo:storageInfo];
+    PXPreparedUptimeFixture *uptime = [PXPreparedUptimeFixture new];
+    NSDictionary *uptimeInfo = PXPrepareRuntimeUptime(now, 0, NO);
+    [uptime adoptCommittedUptimeInfo:uptimeInfo timestamp:now];
+    CHECK(gWrites == writes && gBatterySaves == saves && gWiFiSaves == wifiSaves && darwin == gDarwin && [before isEqual:Capture()] &&
+          [wifi.currentProfileId isEqual:@"a"] && [[battery fixtureLevel] isEqual:info[@"BatteryLevel"]] &&
+          [[storage fixtureStorage] isEqual:storageInfo] && [uptime.cacheTime isEqual:now] &&
+          [uptime.bootTimeValue isEqual:uptimeInfo[@"boot"][@"value"]], "committed artifact adoption updates caches without autosave or notifications");
+    [battery publishCommittedBatteryInfo:info timestamp:now];
+    NSDictionary *mirror = [NSDictionary dictionaryWithContentsOfFile:Path(gRoot, @"legacy-battery.plist")];
+    CHECK(gDarwin == darwin + 1 && gWrites == writes && [before isEqual:Capture()] && [mirror[@"LastUpdated"] isEqual:now] &&
+          [mirror[@"BatteryLevel"] isEqual:info[@"BatteryLevel"]], "committed battery publisher mirrors and notifies without selecting or saving a profile");
+    Tape(@[]);
+    CHECK([PXChooseRuntimeStorageCapacity(@[@128, @256], @"128") isEqual:@"256"] &&
+          [PXChooseRuntimeStorageCapacity(@[@128], @"128") isEqual:@"128"] &&
+          [PXChooseRuntimeStorageCapacity(@[@0, @"bad"], nil) isEqual:@"64"], "storage capacity selector retains tiers previous avoidance and fallback policy");
 }
 static void TestCompositionAndUptime(void) {
     Tape(@[]);
