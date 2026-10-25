@@ -50,7 +50,14 @@ def source_contracts():
     packet = read('common/PXRuntimeIdentifierWriter.m').split('@implementation PXPreparedDeviceProfileGroup', 1)[1].split('@end', 1)[0]
     assert 'NSPropertyListImmutable' in packet and 'dataWithPropertyList:' in packet
     fixture = read('tests/PXRuntimeScalarPreparationTests.m')
+    assert 'isKindOfClass:NSMutableString.class' not in fixture, 'class cluster membership cannot establish string mutability'
+    uuid_factory = writers.method(scalar, 'static NSString *PXScalarLowerUUID(NSString *errorDomain, NSError **error)')
+    assert 'return [uuid copy];' in uuid_factory, 'retain the production detached-copy contract'
+    for variant in ('8000', '9111', 'a222', 'b333'):
+        assert '-' + variant + '-' in fixture, f'UUID fixture must cover variant {variant[0]}'
+    assert '@(UINT32_MAX)' in fixture and 'UUID fixture: type=' in fixture
     for case in ('scalar formats preserve case version and variant', 'device name patterns retain legacy templates',
+                 'scalar results stay detached across mutable copies and subsequent generation',
                  'secure entropy failure preserves provider cache', 'serial prepare leaves existing identifier intact',
                  'serial clear never modifies borrowed immutable bytes', 'serial prefix reservations remain balanced across threads'):
         assert case in fixture, case

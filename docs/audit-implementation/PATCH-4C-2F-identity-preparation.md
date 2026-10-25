@@ -51,3 +51,11 @@ Host result: **32/32** source/regression gates, **3/3** Node suites, backup audi
 Artifact preparation từ 4C.2E và model/scalar preparation từ 4C.2F hiện được dùng trong production wrappers. Bước kế tiếp là captured profile/options context, compose tất cả prepared stages trong một outer commit, rồi deferred cache/notifications. Sau đó mới chuyển create/switch completion và active-selection ordering, cùng directory recovery boundary. regenerateAllEnabledIdentifiers và ProfileManager vẫn pending trong manifest; không bọc các standalone auto-save/callback APIs trong lexical source lock.
 
 Không commit, push, deploy hoặc terminate ứng dụng trên thiết bị trong lượt này.
+
+## CI follow-up — scalar fixture class-cluster assertion
+
+CI báo native scalar suite **41/50**, với đúng chín lỗi `scalar formats preserve case version and variant`. Assertion cũ ghép format/version/variant với `![value isKindOfClass:NSMutableString.class]`. Class membership không phải phép kiểm tra mutability đáng tin cậy cho Foundation class clusters; xem [Apple Object Mutability](https://developer.apple.com/library/archive/documentation/General/Conceptual/DevPedia-CocoaCore/ObjectMutability.html). Production factory vẫn trả `[uuid copy]`; không thay RNG, format, validator hoặc provider/cache behavior để ép test pass.
+
+Fixture bỏ suy luận mutability từ class, giữ validation và thêm oracle UUID literal cho bảy RNG words trên cả chín type: đủ variants 8/9/a/b, lowercase a–f và UINT32_MAX. Kiểm tra mutable-copy edit và lần generate kế tiếp không thay giá trị trước đó; diagnostics khi fail ghi type, word, value, class và error. Source gate giữ contract production `[uuid copy]` và chặn đưa assertion class membership này trở lại.
+
+Kiểm chứng follow-up trên Windows: **7/7 related source gates**, **7/7 fixture vectors** được kiểm tra độc lập bằng Python UUID, `git diff --check` pass. Đây không phải native execution: macOS rootful/RootHide native suite cần chạy lại trong CI. Không đổi coverage manifest hoặc mở sang profile lifecycle ở fix này.

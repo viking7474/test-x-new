@@ -6,14 +6,16 @@
 #import "PXIdentityValidator.h"
 #import "TLinkIOSLogging.h"
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 static NSUInteger gChecks, gFailures;
 static _Atomic NSUInteger gSecureCalls, gTapeIndex, gFailAt;
+static _Atomic uint32_t gUUIDRandomWord = 5;
 static NSArray<NSNumber *> *gTape;
 static BOOL gSerialAllowed = YES;
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
-uint32_t PXScalarFixtureRandom(void) { return 5; }
+uint32_t PXScalarFixtureRandom(void) { return atomic_load(&gUUIDRandomWord); }
 uint32_t PXScalarFixtureUniform(uint32_t bound) { return bound > 1 ? 1 : 0; }
 OSStatus PXScalarFixtureSecure(SecRandomRef random, size_t count, void *bytes) {
     (void)random;
@@ -43,13 +45,43 @@ static NSString *Invoke(id object, NSString *method) {
 static void TestFactories(void) {
     NSArray *uuidTypes = @[@"SystemBootUUID", @"DyldCacheUUID", @"PasteboardUUID", @"KeychainUUID", @"UserDefaultsUUID",
         @"AppGroupUUID", @"CoreDataUUID", @"AppInstallUUID", @"AppContainerUUID"];
+    // Independent expected values cover all four variants, lowercase hex and
+    // the unsigned RNG boundary. Runtime class membership is not a mutability
+    // contract for Foundation class clusters; the factory returns [uuid copy].
+    NSArray *uuidCases = @[
+        @[@0, @"00000000-0000-4000-8000-000000000000"],
+        @[@1, @"11111111-1111-4111-9111-111111111111"],
+        @[@2, @"22222222-2222-4222-a222-222222222222"],
+        @[@3, @"33333333-3333-4333-b333-333333333333"],
+        @[@5, @"55555555-5555-4555-9555-555555555555"],
+        @[@10, @"aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"],
+        @[@(UINT32_MAX), @"ffffffff-ffff-4fff-bfff-ffffffffffff"]
+    ];
     for (NSString *type in uuidTypes) {
+        for (NSArray *testCase in uuidCases) {
+            uint32_t word = [testCase[0] unsignedIntValue];
+            atomic_store(&gUUIDRandomWord, word);
+            NSError *error = nil; NSString *value = PXPrepareRuntimeScalar(type, &error);
+            BOOL valid = value.length == 36 && error == nil && [value isEqual:testCase[1]] &&
+                [value isEqual:value.lowercaseString] && [value characterAtIndex:14] == '4' &&
+                [[NSCharacterSet characterSetWithCharactersInString:@"89ab"] characterIsMember:[value characterAtIndex:19]] &&
+                PXValidateIdentityValue(value, PXIdentityValueKindUUID, NO);
+            if (!valid) fprintf(stderr, "UUID fixture: type=%s word=%lu value=%s class=%s error=%s\n",
+                type.UTF8String, (unsigned long)word, (value ?: @"(nil)").UTF8String,
+                NSStringFromClass(value.class).UTF8String ?: "(nil)", error.description.UTF8String ?: "(none)");
+            CHECK(valid, "scalar formats preserve case version and variant");
+        }
+        atomic_store(&gUUIDRandomWord, 5);
         NSError *error = nil; NSString *value = PXPrepareRuntimeScalar(type, &error);
-        CHECK(value != nil && error == nil && [value isEqual:value.lowercaseString] && [value characterAtIndex:14] == '4' &&
-              [[NSCharacterSet characterSetWithCharactersInString:@"89ab"] characterIsMember:[value characterAtIndex:19]] &&
-              PXValidateIdentityValue(value, PXIdentityValueKindUUID, NO) && ![value isKindOfClass:NSMutableString.class],
-              "scalar formats preserve case version and variant");
+        NSMutableString *editable = [value mutableCopy];
+        [editable setString:@"edited independently"];
+        atomic_store(&gUUIDRandomWord, 10);
+        NSString *next = PXPrepareRuntimeScalar(type, &error);
+        CHECK([value isEqual:@"55555555-5555-4555-9555-555555555555"] &&
+              [next isEqual:@"aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"] && error == nil &&
+              [editable isEqual:@"edited independently"], "scalar results stay detached across mutable copies and subsequent generation");
     }
+    atomic_store(&gUUIDRandomWord, 5);
     for (NSString *type in @[@"IDFA", @"IDFV"]) {
         Tape(@[], 0); NSError *error = nil;
         NSString *value = PXPrepareRuntimeScalar(type, &error);
