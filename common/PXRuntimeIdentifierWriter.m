@@ -56,3 +56,27 @@ BOOL PXStageRuntimeIdentifierValue(PXRuntimeSourceTransaction *tx, NSString *ide
     return PXStageRuntimeIdentifierState(tx, identity, @{type: value},
         @{file: @{ @"value": value, @"lastUpdated": timestamp }}, increment, error);
 }
+NSDictionary *PXRuntimeIdentifierDependencies(NSDictionary *ids, NSArray<NSString *> *keys) {
+    NSMutableDictionary *expected = [NSMutableDictionary dictionaryWithCapacity:keys.count];
+    for (NSString *key in keys) expected[key] = ids[key] ?: NSNull.null;
+    return [expected copy];
+}
+BOOL PXStageRuntimeIdentifierReplacement(PXRuntimeSourceTransaction *tx, NSString *identity,
+    NSDictionary *updates, NSArray<NSString *> *replacedKeys, NSDictionary *expected,
+    BOOL increment, BOOL removeLegacyCellular, NSError **error) {
+    NSString *path = [identity stringByAppendingPathComponent:@"device_ids.plist"];
+    NSMutableDictionary *ids = [[tx dictionaryAtPath:path error:error] mutableCopy];
+    if (!ids) return NO;
+    for (NSString *key in expected) {
+        if (![(ids[key] ?: NSNull.null) isEqual:expected[key]])
+            return PXIdentifierWriteFailure(@"Identifier dependencies changed during preparation; retry operation", error);
+    }
+    [ids removeObjectsForKeys:replacedKeys];
+    [ids addEntriesFromDictionary:updates];
+    if (increment && !PXAdvanceRuntimeIdentifierGeneration(ids, error)) return NO;
+    if (removeLegacyCellular) {
+        for (NSString *file in @[@"imei.plist", @"meid.plist"])
+            if (![tx removeDictionaryAtPath:[identity stringByAppendingPathComponent:file] error:error]) return NO;
+    }
+    return [tx setDictionary:ids atPath:path error:error];
+}

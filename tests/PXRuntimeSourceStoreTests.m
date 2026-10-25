@@ -146,6 +146,58 @@ static NSTask *Child(NSString *binary, NSString *mode, NSString *folder, NSStrin
     NSTask *task = [NSTask new]; task.launchPath = binary;
     task.arguments = @[mode, folder, argument]; [task launch]; return task;
 }
+static BOOL RemovePair(PXRuntimeSourceStore *store, NSString *folder) {
+    return [store performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:Path(folder, @"a.plist") error:error] &&
+            [tx setDictionary:@{ @"value": @99 } atPath:Path(folder, @"b.plist") error:error] &&
+            [tx removeDictionaryAtPath:Path(folder, @"c.plist") error:error];
+    } error:NULL];
+}
+static void TestRemovals(NSString *root, NSString *binary) {
+    NSString *folder = NewCase(root, @"removal-staging");
+    PXRuntimeSourceStore *store = Store(folder);
+    CHECK(WritePair(store, folder, 1, NO), "removal fixture seeded");
+    CHECK([store performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSString *path = Path(folder, @"a.plist");
+        if (![tx removeDictionaryAtPath:path error:error]) return NO;
+        BOOL exists = YES;
+        NSDictionary *absent = [tx dictionaryAtPath:path exists:&exists error:error];
+        CHECK(absent != nil && !absent.count && !exists, "staged removal reads as absence");
+        CHECK([NSFileManager.defaultManager fileExistsAtPath:path], "staged removal does not unlink live source");
+        if (![tx removeDictionaryAtPath:path error:error]) return NO;
+        return [tx setDictionary:@{ @"value": @2 } atPath:path error:error];
+    } error:NULL], "set after repeated removal wins without size underflow");
+    CHECK([[ReadPair(store, folder)[@"a"] objectForKey:@"value"] isEqual:@2], "replaced staged removal commits dictionary");
+    NSDictionary *before = ReadPair(store, folder);
+    CHECK(![store performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        [tx removeDictionaryAtPath:Path(folder, @"unapproved.plist") error:error]; return YES;
+    } error:NULL] && [before isEqual:ReadPair(store, folder)], "unapproved removal poisons outer transaction");
+    NSData *badBytes = [@"malformed" dataUsingEncoding:NSUTF8StringEncoding];
+    CHECK([badBytes writeToFile:Path(folder, @"a.plist") atomically:YES], "malformed removal fixture prepared");
+    before = ReadPair(store, folder);
+    CHECK(!RemovePair(store, folder) && [badBytes isEqual:[NSData dataWithContentsOfFile:Path(folder, @"a.plist")]] &&
+          [before isEqual:ReadPair(store, folder)], "malformed source deletion fails before mutation");
+
+    for (NSString *phase in @[@"source-written", @"commit-written"]) {
+        NSString *crashFolder = NewCase(root, [@"removal-" stringByAppendingString:phase]);
+        PXRuntimeSourceStore *crashStore = Store(crashFolder);
+        CHECK(WritePair(crashStore, crashFolder, 1, NO), "removal crash fixture seeded");
+        NSString *deletedPath = Path(crashFolder, @"a.plist");
+        chmod(deletedPath.fileSystemRepresentation, 0600);
+        NSData *bytes = [NSData dataWithContentsOfFile:deletedPath];
+        NSTask *child = Child(binary, @"--remove-crash", crashFolder, phase); [child waitUntilExit];
+        CHECK(child.terminationStatus == 77, "removal child exits at exact checkpoint");
+        BOOL committed = [phase isEqual:@"commit-written"];
+        CHECK(committed ? ReadPair(crashStore, crashFolder) != nil : ReadPair(crashStore, crashFolder) == nil,
+              "capture observes committed deletion or rejects pending deletion");
+        CHECK([crashStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) { (void)tx; (void)error; return YES; } error:NULL],
+              "owner recovers interrupted removal");
+        struct stat st = {0}; int status = stat(deletedPath.fileSystemRepresentation, &st);
+        CHECK(committed ? status != 0 : (status == 0 && (st.st_mode & 0777) == 0600 && [bytes isEqual:[NSData dataWithContentsOfFile:deletedPath]]),
+              "removal recovery preserves committed absence or exact before-image and mode");
+        CHECK([ReadPair(crashStore, crashFolder)[@"b"][@"value"] isEqual:(committed ? @99 : @1)], "paired write follows deletion commit decision");
+    }
+}
 static void TestCrashRecovery(NSString *root, NSString *binary) {
     for (NSString *phase in @[@"journal-prepared", @"source-written", @"last-source-written", @"commit-written"]) {
         NSString *folder = NewCase(root, phase);
@@ -217,13 +269,15 @@ int main(int argc, const char *argv[]) {
             NSString *mode = @(argv[1]), *folder = @(argv[2]), *argument = @(argv[3]);
             __attribute__((objc_precise_lifetime)) PXRuntimeSourceStore *store = Store(folder);
             if (!store) return 2;
-            if ([mode isEqual:@"--crash"]) {
+            if ([mode isEqual:@"--crash"] || [mode isEqual:@"--remove-crash"]) {
                 __block NSUInteger files = 0;
                 store.testCheckpoint = ^(NSString *stage) {
                     if ([stage isEqual:@"source-written"]) files++;
                     if ([stage isEqual:argument] || ([argument isEqual:@"last-source-written"] && files == 3)) _exit(77);
                 };
-                WritePair(store, folder, 99, YES); return 3;
+                if ([mode isEqual:@"--remove-crash"]) RemovePair(store, folder);
+                else WritePair(store, folder, 99, YES);
+                return 3;
             }
             if ([mode isEqual:@"--recover-crash"]) {
                 store.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"recovery-source-written"]) _exit(78); };
@@ -256,7 +310,7 @@ int main(int argc, const char *argv[]) {
         [NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
         TestStaging(root); TestFailures(root);
         NSString *binary = [NSString stringWithUTF8String:argv[0]];
-        TestCrashRecovery(root, binary); TestProcesses(root, binary);
+        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary);
         [NSFileManager.defaultManager removeItemAtPath:root error:nil];
         printf("Runtime source transactions: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

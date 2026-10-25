@@ -13,6 +13,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary *)dictionaryAtPath:(NSString *)path exists:(BOOL * _Nullable)exists
                                       error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)setDictionary:(NSDictionary *)value atPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+/// Stages absence with the same before-image/rollback contract as a write.
+- (BOOL)removeDictionaryAtPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
 @end
 
 @interface PXRuntimeSourceStore : NSObject

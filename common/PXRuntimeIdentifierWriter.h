@@ -13,4 +13,11 @@ FOUNDATION_EXPORT BOOL PXStageRuntimeIdentifierState(PXRuntimeSourceTransaction 
 FOUNDATION_EXPORT BOOL PXStageRuntimeIdentifierValue(PXRuntimeSourceTransaction *transaction,
     NSString *identityDirectory, NSString *type, NSString *value, NSDate *timestamp,
     BOOL incrementGeneration, NSError * _Nullable * _Nullable error);
+/// Capture only fields a prepared update depends on. NSNull represents absence
+/// in memory, never in a persisted plist. Conflict fails without partial writes.
+FOUNDATION_EXPORT NSDictionary *PXRuntimeIdentifierDependencies(NSDictionary *ids, NSArray<NSString *> *keys);
+FOUNDATION_EXPORT BOOL PXStageRuntimeIdentifierReplacement(PXRuntimeSourceTransaction *transaction,
+    NSString *identityDirectory, NSDictionary *updates, NSArray<NSString *> *replacedKeys,
+    NSDictionary * _Nullable expectedDependencies, BOOL incrementGeneration, BOOL removeLegacyCellular,
+    NSError * _Nullable * _Nullable error);
 NS_ASSUME_NONNULL_END

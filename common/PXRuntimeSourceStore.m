@@ -35,7 +35,8 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
 
 @interface PXRuntimeSourceTransaction ()
 @property (nonatomic, copy) BOOL (^allowsPath)(NSString *);
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *staged;
+// NSNull is an in-memory removal marker; it is never serialized to the journal.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *staged;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *stagedSizes;
 @property (nonatomic) NSUInteger stagedBytes;
 @property (nonatomic, strong) NSError *failure;
@@ -69,6 +70,7 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
 - (NSDictionary *)dictionaryAtPath:(NSString *)path exists:(BOOL *)exists error:(NSError **)error {
     if (exists) *exists = NO;
     if (![self checkPath:path error:error]) return nil;
+    if (self.staged[path] == NSNull.null) return @{};
     if (self.staged[path]) { if (exists) *exists = YES; return self.staged[path]; }
     BOOL absent = NO; NSError *failure = nil;
     id value = PXSourceReadPlist(path, &absent, NULL, NULL, &failure);
@@ -93,6 +95,13 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     self.staged[path] = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&failure];
     if (failure) { self.failure = failure; if (error) *error = failure; return NO; }
     self.stagedBytes = nextSize; self.stagedSizes[path] = @(data.length);
+    return YES;
+}
+- (BOOL)removeDictionaryAtPath:(NSString *)path error:(NSError **)error {
+    if (![self checkPath:path error:error]) return NO;
+    self.stagedBytes -= [self.stagedSizes[path] unsignedIntegerValue];
+    self.stagedSizes[path] = @0;
+    self.staged[path] = NSNull.null;
     return YES;
 }
 @end
@@ -252,7 +261,7 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     NSMutableArray *entries = [NSMutableArray array];
     NSArray<NSString *> *paths = [transaction.staged.allKeys sortedArrayUsingSelector:@selector(compare:)];
     for (NSString *path in paths) {
-        // Caller staged dictionaries only; capture raw bytes for exact rollback,
+        // Capture raw bytes for writes AND removals, preserving exact rollback,
         // including absence. Existing malformed files are never silently blessed.
         BOOL absent = NO; NSError *failure = nil;
         NSData *data = nil; mode_t mode = 0644;
@@ -273,8 +282,13 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
 #endif
         for (NSDictionary *entry in entries) {
             NSString *path = entry[@"path"];
-            if (!PXRuntimeWritePropertyList(transaction.staged[path], path, _owner, _group,
-                                          [entry[@"mode"] unsignedShortValue], error)) return NO;
+            if (transaction.staged[path] == NSNull.null) {
+                if (unlink(path.fileSystemRepresentation) != 0 && errno != ENOENT) {
+                    if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+                    return NO;
+                }
+            } else if (!PXRuntimeWritePropertyList(transaction.staged[path], path, _owner, _group,
+                                                 [entry[@"mode"] unsignedShortValue], error)) return NO;
 #if defined(PX_SOURCE_TRANSACTION_TESTING)
             if (self.testCheckpoint) self.testCheckpoint(@"source-written");
 #endif

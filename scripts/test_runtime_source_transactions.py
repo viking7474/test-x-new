@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2B-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2C-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -70,7 +70,7 @@ def source_contracts():
     assert 'self.thread != NSThread.currentThread' in core and '!self.active' in core
     assert '[PXValidatedProfileID(parts[0]) isEqualToString:parts[0]]' in paths and 'stringByResolvingSymlinksInPath' in paths
     assert 'owner:501 group:501' in paths and 'RuntimeSource' in paths
-    assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-values-partial"' in runtime
+    assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-dependencies-partial"' in runtime
     save = method(manager, '- (void)saveSettings')
     scope = method(manager, '- (void)saveScopedApps')
     for body in (save, scope):
@@ -87,7 +87,9 @@ def source_contracts():
                   'rollback preserves original source permissions', 'validate all journal paths before any recovery writes',
                   'commit marker decides complete new tuple', 'rollback restores absence',
                   'concurrent capture never mixes', 'no lost increments', 'source capture times out',
-                  'committed journal does not block revocation', 'transaction rejects cross-thread use'):
+                  'committed journal does not block revocation', 'transaction rejects cross-thread use',
+                  'staged removal reads as absence', 'unapproved removal poisons outer transaction',
+                  'removal recovery preserves committed absence', 'malformed source deletion fails before mutation'):
         assert token in fixture, f'native scenario missing: {token}'
     make = read('Makefile').split('WeaponXDaemon_FILES =', 1)[1].splitlines()[0]
     for file in ('common/PXRuntimeSourceStore.m', 'common/PXRuntimeSources.m'):
