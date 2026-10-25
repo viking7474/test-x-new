@@ -29,6 +29,7 @@
 #import "PXIdentityValidator.h"
 #import "PXIdentitySnapshot.h"
 #import "PXRuntimeSnapshot.h"
+#import "PXRuntimeSourceStore.h"
 #import <Security/Security.h>
 
 @interface LSApplicationWorkspace
@@ -2748,6 +2749,10 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) return;
 #endif
+    NSError *sourceError = nil;
+    if (PXIdentifierManagerIsManagerProcess() && !PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        (void)tx; (void)error; return YES;
+    }, &sourceError)) { self.error = sourceError; return; }
     NSString *scopedAppsFile = PXGlobalScopePath();
     PXLog(@"[WeaponX] IdentifierManager DEBUG: Trying to load scoped apps from: %@", scopedAppsFile);
     
@@ -2757,7 +2762,16 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     PXLog(@"[WeaponX] IdentifierManager DEBUG: File exists: %@", [fileManager fileExistsAtPath:scopedAppsFile] ? @"YES" : @"NO");
     
     // Load scoped apps from the global scope file
-    NSDictionary *scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
+    NSDictionary *scopedAppsDict;
+    if (PXIdentifierManagerIsManagerProcess()) {
+        NSDictionary *captured = PXCaptureRuntimeSources(^NSDictionary *(NSError **error) {
+            (void)error; return @{ @"scope": [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile] ?: @{} };
+        }, &sourceError);
+        if (!captured) { self.error = sourceError; return; }
+        scopedAppsDict = captured[@"scope"];
+    } else {
+        scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
+    }
     PXLog(@"[WeaponX] IdentifierManager DEBUG: Loaded dictionary: %@", scopedAppsDict ? @"YES" : @"NO");
     
     NSDictionary *savedApps = scopedAppsDict[@"ScopedApps"];
@@ -2822,33 +2836,27 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // Preserve top-level NSUserDefaults-backed feature flags (for example
     // StorageSystemEnabled) instead of replacing the whole suite plist. Only
     // the canonical identifier toggles belong under EnabledIdentifiers.
-    NSMutableDictionary *saveDict = [NSMutableDictionary dictionaryWithContentsOfFile:prefsFile] ?: [NSMutableDictionary dictionary];
-    saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings);
-    // Keep the legacy top-level storage flag synchronized in the same atomic
-    // write. Rootful StorageManager and older RootHide snapshots still consult
-    // this key, while current hooks prefer EnabledIdentifiers.StorageSystem.
-    if (self.settings[@"StorageSystem"] != nil) {
-        saveDict[@"StorageSystemEnabled"] = @([self.settings[@"StorageSystem"] boolValue]);
-    }
-    saveDict[@"SettingsInitialized"] = @YES;
-    
-    // Save main settings
-    BOOL success = [saveDict writeToFile:prefsFile atomically:YES];
+    NSError *sourceError = nil;
+    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
+        NSDictionary *existing = [transaction dictionaryAtPath:prefsFile error:writeError];
+        if (!existing) return NO;
+        NSMutableDictionary *saveDict = [existing mutableCopy];
+        saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings);
+        // Keep the legacy top-level storage flag synchronized in the same
+        // transaction. Rootful StorageManager still consults this key.
+        if (self.settings[@"StorageSystem"] != nil) {
+            saveDict[@"StorageSystemEnabled"] = @([self.settings[@"StorageSystem"] boolValue]);
+        }
+        saveDict[@"SettingsInitialized"] = @YES;
+        if (![transaction setDictionary:saveDict atPath:prefsFile error:writeError]) return NO;
+        NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
+        return [transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError];
+    }, &sourceError);
     if (!success) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                      code:4005 
-                                  userInfo:@{NSLocalizedDescriptionKey: @"Failed to save settings"}];
-        return;
-    }
-    
-    // Save scoped apps separately in the global scope file
-    NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
-    success = [scopedAppsDict writeToFile:scopedAppsFile atomically:YES];
-    if (!success) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                      code:4006 
-                                  userInfo:@{NSLocalizedDescriptionKey: @"Failed to save global scoped apps"}];
-        PXLog(@"[WeaponX] ❌ Failed to save global scoped apps to: %@", scopedAppsFile);
+                                      code:4006
+                                  userInfo:@{NSLocalizedDescriptionKey: sourceError.localizedDescription ?: @"Failed to save settings and scope transaction"}];
+        PXLog(@"[WeaponX] ❌ Failed to commit settings/scope: %@", sourceError);
         return;
     } else {
         PXLog(@"[WeaponX] ✅ Saved scoped apps to: %@", scopedAppsFile);
@@ -2866,6 +2874,12 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) return;
 #endif
+    NSError *sourceError = nil;
+    // Recovery precedes reading either source or choosing a legacy fallback.
+    // Do not load a crashed transaction into mutable manager state, then save it.
+    if (PXIdentifierManagerIsManagerProcess() && !PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        (void)tx; (void)error; return YES;
+    }, &sourceError)) { self.error = sourceError; return; }
     PXLog(@"[WeaponX] Loading settings...");
     
     NSString *prefsFile = PXTLinkIOSSettingsPath();
@@ -2884,10 +2898,20 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     PXLog(@"[WeaponX] Final settings file path: %@", prefsFile);
     PXLog(@"[WeaponX] Final scoped apps file path: %@", scopedAppsFile);
 
+    NSDictionary *managerSources = nil;
+    if (PXIdentifierManagerIsManagerProcess()) {
+        managerSources = PXCaptureRuntimeSources(^NSDictionary *(NSError **error) {
+            (void)error;
+            return @{ @"settings": [NSDictionary dictionaryWithContentsOfFile:prefsFile] ?: @{},
+                      @"scope": [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile] ?: @{} };
+        }, &sourceError);
+        if (!managerSources) { self.error = sourceError; return; }
+    }
+
     // Sandboxed injected apps consume the RootHide runtime mirror. The manager
     // app itself must read the live settings file so a freshly toggled value is
     // never masked by a not-yet-republished snapshot.
-    NSDictionary *loadedDict = nil;
+    NSDictionary *loadedDict = managerSources[@"settings"];
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
         NSDictionary *runtimeTLinkSettings = PXCaptureRuntimeSnapshot().tlinkSettings;
@@ -2984,7 +3008,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     
     // Load scoped apps from the same RootHide runtime publication when
     // available so scope and identity belong to one daemon-owned generation.
-    NSDictionary *scopedAppsDict = nil;
+    NSDictionary *scopedAppsDict = managerSources[@"scope"];
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
         NSDictionary *runtimeScope = PXCaptureRuntimeSnapshot().globalScope;
@@ -3153,11 +3177,14 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     
     // Save scoped apps separately in the global scope file
     NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
-    BOOL success = [scopedAppsDict writeToFile:scopedAppsFile atomically:YES];
+    NSError *sourceError = nil;
+    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
+        return [transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError];
+    }, &sourceError);
     if (!success) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
                                       code:4006 
-                                  userInfo:@{NSLocalizedDescriptionKey: @"Failed to save global scoped apps"}];
+                                  userInfo:@{NSLocalizedDescriptionKey: sourceError.localizedDescription ?: @"Failed to save global scoped apps"}];
         return;
     }
     

@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái: Patch 1–3, 4A.1, 4A.2 và sửa dependency bootstrap fixture đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4B đã triển khai serial publisher, ownership, identity, structured distribution và sync-once acknowledgement; host checks pass, native fixture/build mới chờ CI. Không coi toàn bộ Patch 4 hoàn tất: còn source transactions 4C, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
+Trạng thái: Patch 1–3, 4A.1, 4A.2, sửa dependency bootstrap fixture và 4B đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4C.1 đã triển khai manifest, journal/recovery core, publisher source gate và paired settings/scope writer; native fixture/build mới chờ CI. Không coi toàn bộ Patch 4 hoàn tất: còn writer rollout 4C.2, defaults authority, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -117,6 +117,8 @@ Tiến độ, policy partial distribution và giới hạn: [báo cáo 4B](audit
 - Phân biệt global commit, mirror thành công, mirror lỗi/missing target và notified state. Retry mirror cùng publication có kiểm soát, tránh publication cũ overwrite publication mới. Có policy rõ cho disabled scope/stale mirror; không ghi nhận full success khi distribution còn lỗi.
 
 **4C — Consistent source capture**
+
+Chia 4C.1 core + settings/scope và 4C.2 writer rollout/authority để native fixtures kiểm chứng boundary trước async profile flows. [Báo cáo 4C.1](audit-implementation/PATCH-4C-1-source-transactions.md) và [manifest writers](audit-implementation/runtime-source-writers.json) ghi coverage thực tế; token source commit không bao phủ writer còn pending/external.
 
 - Lập manifest mọi source file và writer trước khi đổi code: active profile selection, scope/security/settings, device IDs và profile artifacts.
 - Đưa writer liên quan vào source transaction dùng process-shared lock/commit contract. Multi-file profile update và profile switch phải có commit boundary bao toàn bộ nhóm liên quan.

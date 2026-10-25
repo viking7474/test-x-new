@@ -50,6 +50,9 @@ jobs:
       - name: Test native runtime publisher ownership and acknowledgements
         run: python3 scripts/test_runtime_snapshot_publisher.py --native
 
+      - name: Test native runtime source transaction recovery
+        run: python3 scripts/test_runtime_source_transactions.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 

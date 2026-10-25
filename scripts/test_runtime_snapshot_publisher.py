@@ -66,7 +66,8 @@ def native_tests():
         # transitive sources cannot hide behind a fixture-only implementation.
         sources = ['common/PXRuntimePublisher.m', 'common/PXRuntimeSnapshot.m',
                    'common/PXRuntimeSnapshotReader.m', 'common/PXRuntimeReadScope.m',
-                   'common/PXPaths.m', 'tests/PXRuntimePublisherTests.m']
+                   'common/PXPaths.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimeSources.m',
+                   'tests/PXRuntimePublisherTests.m']
         subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
                         '-Wall', '-Wextra', '-Werror=implicit-function-declaration', '-I', str(ROOT / 'common'),
                         *[str(ROOT / source) for source in sources], '-framework', 'Foundation',

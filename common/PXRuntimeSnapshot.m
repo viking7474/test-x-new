@@ -1,6 +1,7 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXJailbreakCompat.h"
 #import "PXPaths.h"
+#import "PXRuntimeSourceStore.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
 #import <os/lock.h>
@@ -412,10 +413,14 @@ static NSDictionary *PXDistributeRuntimeSnapshot(NSDictionary *snapshot) {
 PXRuntimePublisher *PXCreateRuntimeSnapshotPublisher(void (^completion)(NSDictionary *), NSError **error) {
     NSString *directory = [PXRuntimeSnapshotPath().stringByDeletingLastPathComponent stringByAppendingPathComponent:@"publisher"];
     return [[PXRuntimePublisher alloc] initWithDirectory:directory loader:^NSDictionary *(NSError **loadError) {
-        (void)loadError;
-        // Source writers join a shared transaction in 4C. Serial publication
-        // alone does not make these sequential source reads a transaction.
-        return PXCaptureRuntimeSnapshotCandidate();
+        return PXCaptureRuntimeSources(^NSDictionary *(NSError **captureError) {
+            (void)captureError;
+            NSMutableDictionary *candidate = [PXCaptureRuntimeSnapshotCandidate() mutableCopy];
+            // 4C.1 only enrolls the paired settings/scope writer. Do not mistake
+            // a commit token for coverage of legacy profile/artifact writers.
+            candidate[@"sourceContractCoverage"] = @"settings-scope-only";
+            return candidate;
+        }, loadError);
     } writer:^BOOL(NSDictionary *snapshot, NSError **writeError) {
         return PXWriteRuntimeSnapshotAtomically(snapshot, PXRuntimeSnapshotPath(), 0, 0, writeError);
     } distributor:^NSDictionary *(NSDictionary *snapshot) {

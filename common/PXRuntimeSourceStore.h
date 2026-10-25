@@ -1,0 +1,44 @@
+#import <Foundation/Foundation.h>
+#include <sys/types.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+/// Stage only; no source file changes until the outer block succeeds. Instances
+/// must not escape their block or be used from another thread/async callback.
+@interface PXRuntimeSourceTransaction : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable NSDictionary *)dictionaryAtPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+- (BOOL)setDictionary:(NSDictionary *)value atPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+@end
+
+@interface PXRuntimeSourceStore : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithDirectory:(NSString *)directory owner:(uid_t)owner group:(gid_t)group
+                               allowsPath:(BOOL (^)(NSString *path))allowsPath
+                                    error:(NSError * _Nullable * _Nullable)error;
+/// Nested writes on this instance share staged data; an inner error aborts the
+/// outer operation. The block may only stage/read sources: no notifications,
+/// external callbacks, publisher ownership, queue hops or waiting on other work.
+/// Only the configured source owner may write/recover (the root daemon reads).
+- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *transaction, NSError **error))body
+               error:(NSError * _Nullable * _Nullable)error;
+/// Holds the source gate through load AND immutable detach, then releases it
+/// before global write/distribution. Uncommitted/corrupt journals reject capture;
+/// a validated journal matching the commit marker needs only later cleanup.
+- (nullable NSDictionary *)capture:(NSDictionary * _Nullable (^)(NSError **error))loader
+                              error:(NSError * _Nullable * _Nullable)error;
+#if defined(PX_SOURCE_TRANSACTION_TESTING)
+@property (nonatomic, copy, nullable) void (^testCheckpoint)(NSString *stage);
+#endif
+@end
+
+/// Production singleton uses mobile-owned state and an exact source allowlist.
+/// These functions are cold writer/publisher APIs; never call from hot hooks.
+FOUNDATION_EXPORT BOOL PXPerformRuntimeSourceWrite(
+    BOOL (^body)(PXRuntimeSourceTransaction *transaction, NSError **error), NSError * _Nullable * _Nullable error);
+FOUNDATION_EXPORT NSDictionary * _Nullable PXCaptureRuntimeSources(
+    NSDictionary * _Nullable (^loader)(NSError **error), NSError * _Nullable * _Nullable error);
+
+NS_ASSUME_NONNULL_END

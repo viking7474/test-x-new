@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "rollout": "4C.1-partial",
+  "warning": "A source commit token does not cover writers marked pending or external. Do not claim full multi-file source consistency until they join the contract.",
+  "sources": [
+    {"field": "activeSelection", "path": "PXCurrentProfileInfoPath()", "writers": ["profile-lifecycle"], "status": "pending"},
+    {"field": "legacySelection", "path": "PXLegacyActiveProfileInfoPath()", "writers": ["profile-lifecycle"], "status": "pending"},
+    {"field": "globalScope", "path": "PXGlobalScopePath()", "writers": ["identifier-settings-scope"], "status": "enrolled"},
+    {"field": "tlinkSettings", "path": "PXTLinkIOSSettingsPath()", "writers": ["identifier-settings-scope", "storage-preference"], "status": "partial"},
+    {"field": "securitySettings", "path": "PXSecuritySettingsPath()", "writers": ["security-store", "security-direct", "preferences-daemon"], "status": "pending"},
+    {"field": "profileSettings", "path": "<profile>/settings.plist", "writers": [], "status": "external-or-legacy", "note": "No in-repository producer found. ProfileManager.saveSettings writes WeaponX/settings.plist, a different path; it must not be claimed as this writer."},
+    {"field": "deviceIDs", "path": "<profile>/identity/device_ids.plist", "writers": ["identifier-artifacts", "profile-lifecycle", "battery", "network", "wifi", "uptime", "dashboard-preview"], "status": "pending"},
+    {"field": "storage", "path": "<profile>/storage.plist", "writers": ["storage"], "status": "pending"},
+    {"field": "batteryInfo", "path": "<profile>/identity/battery_info.plist", "writers": ["battery", "identifier-artifacts"], "status": "pending"},
+    {"field": "networkSettings", "path": "<profile>/identity/network_settings.plist", "writers": ["network", "profile-lifecycle"], "status": "pending"},
+    {"field": "wifiInfo", "path": "<profile>/identity/wifi_info.plist", "writers": ["wifi"], "status": "pending"},
+    {"field": "carrierDetails", "path": "<profile>/identity/carrier_details.plist", "writers": ["network", "profile-lifecycle"], "status": "pending"},
+    {"field": "deviceTheme", "path": "<profile>/identity/device_theme.plist", "writers": ["identifier-artifacts"], "status": "pending"},
+    {"field": "bootTime", "path": "<profile>/identity/boot_time.plist", "writers": ["identifier-artifacts", "uptime"], "status": "pending"},
+    {"field": "systemUptime", "path": "<profile>/identity/system_uptime.plist", "writers": ["identifier-artifacts", "uptime"], "status": "pending"},
+    {"field": "systemBootUUID", "path": "<profile>/identity/system_boot_uuid.plist", "writers": ["identifier-artifacts"], "status": "pending"},
+    {"field": "dyldCacheUUID", "path": "<profile>/identity/dyld_cache_uuid.plist", "writers": ["identifier-artifacts"], "status": "pending"},
+    {"field": "pasteboardUUID", "path": "<profile>/identity/pasteboard_uuid.plist", "writers": ["identifier-artifacts"], "status": "pending"},
+    {"field": "userDefaultsUUID", "path": "<profile>/identity/userdefaults_uuid.plist", "writers": ["identifier-artifacts"], "status": "pending"}
+  ],
+  "writers": {
+    "identifier-settings-scope": {"files": ["common/IdentifierManager.m"], "entryPoints": ["saveSettings", "saveScopedApps"], "status": "enrolled", "boundary": "Stage settings and scope under one source gate; notify only after outer commit returns."},
+    "profile-lifecycle": {"files": ["common/ProfileManager.m"], "entryPoints": ["init", "createProfile:completion:", "deleteProfile:completion:", "switchToProfile:completion:", "saveCentralProfileInfo:", "updateCurrentProfileInfoWithProfile:", "createProfileZero", "createProfileZeroImmediately"], "status": "pending", "boundary": "Prepare target artifacts before committing active selection. createProfile currently launches async generation after switching; do not hold a lexical lock across that dispatch or external completion. Profile deletion requires a separately reviewed directory lifecycle boundary."},
+    "identifier-artifacts": {"files": ["common/IdentifierManager.m"], "entryPoints": ["regenerateDeviceProfileGroup", "setCustomDeviceModel:", "generateIOSVersion", "generateSystemBootUUID", "generateDyldCacheUUID", "generatePasteboardUUID", "generateUserDefaultsUUID", "generateSystemUptime", "generateBootTime", "regenerateAllEnabledIdentifiers", "saveCustomValue:forType:", "setATTAuthorizationStatus:", "migrateProfileSchemaIfNeeded", "setCustomDeviceTheme:"], "status": "pending", "boundary": "All device_ids writes matter, including identifiers whose individual sidecar is not consumed by runtime snapshot. Enlist nested generators under one outer commit and notify after unlock."},
+    "battery": {"files": ["common/BatteryManager.m"], "entryPoints": ["saveBatteryInfoToDisk"], "status": "pending", "boundary": "Profile battery_info and device_ids pair; the legacy global battery preference is not a direct snapshot source."},
+    "network": {"files": ["common/NetworkManager.m"], "entryPoints": ["saveLocalIPAddress:ipv6Address:", "saveLocalIPAddress:", "saveCarrierDetails:mcc:mnc:"], "status": "pending", "boundary": "Network/carrier/device_ids update and RMW must share a captured target profile."},
+    "wifi": {"files": ["common/WiFiManager.m"], "entryPoints": ["saveWiFiInfoToCurrentProfile"], "status": "pending", "boundary": "wifi_info and device_ids pair."},
+    "uptime": {"files": ["common/UptimeManager.m"], "entryPoints": ["generateConsistentUptimeAndBootTimeForProfile:"], "status": "pending", "boundary": "boot_time, system_uptime and device_ids triple."},
+    "storage": {"files": ["common/StorageManager.m"], "entryPoints": ["saveToProfile:"], "status": "pending", "boundary": "Use explicit target profile; group with model/device_ids when invoked from a model update."},
+    "storage-preference": {"files": ["common/StorageManager.m"], "entryPoints": ["setStorageSpoofingEnabled:"], "status": "pending", "boundary": "NSUserDefaults suite writes can flush after returning and rewrite the same tlink settings file; a lock around synchronize alone is not a complete writer contract."},
+    "dashboard-preview": {"files": ["TLinkIOSViewController.m"], "entryPoints": ["applyFakePreviewToCurrentProfile:"], "status": "pending", "boundary": "Dashboard invokes setters that mutate device_ids before a final tuple write and storage setters. Enlist as one staged transaction after generation/validation."},
+    "security-store": {"files": ["common/PXSecuritySettingsStore.m"], "entryPoints": ["PXWriteSecuritySetting"], "status": "pending", "boundary": "Existing security-only flock is separate. Compatibility defaults mirror must run after source commit; async cfprefsd writes need authority reconciliation."},
+    "security-direct": {"files": ["SecurityTabViewController.m", "CanvasDetailViewController.m", "common/IdentifierManager.m", "common/IPMonitorService.m", "common/ProfileIndicatorView.m", "AppDataCleaner.m", "TimeSpoofDetailViewController.m"], "entryPoints": ["persistCanvasValues:", "setCanvasFingerprintProtection:", "resetCanvasNoiseAndPersist", "target-region pinning and timezone callbacks", "IP monitor cache/state", "profile indicator drag position", "clear metrics writes"], "status": "pending", "boundary": "Includes direct plist, NSUserDefaults and CFPreferences writes. Non-runtime keys still share the same physical security plist and cannot be ignored."},
+    "preferences-daemon": {"files": [], "entryPoints": ["cfprefsd persistence of security/settings domains"], "status": "external", "boundary": "Must settle canonical source authority and preserve legacy suite compatibility; cannot make cfprefsd acquire a private lock by wrapping UI setters."}
+  },
+  "upgradeWriters": [{"file": "DEBIAN/postinst", "status": "outside-steady-state", "note": "Legacy preferences and ProjectX data migration run after stopping old daemon and before new publisher self-test; legacy binaries and concurrent manual commands do not join the new lock."}],
+  "excludedAfterInspection": [
+    {"file": "AppDataBackupManager.m", "reason": "Reads active selection to locate backups; inspected direct write calls are debug output, not these source plists. App container restore has separate transactions."},
+    {"file": "ProfileManagerViewController.m", "reason": "Inspected profile edits write identifiers/scoped-apps/info/appdata display files, not the global scope or runtime artifact paths."},
+    {"file": "common/LocationSpoofingManager.m", "reason": "Writes its location preference, reads global scope; location data is not in this runtime snapshot schema."},
+    {"file": "common/ProfileManager.m#saveSettings:", "reason": "Writes WeaponX/settings.plist, not <profile>/settings.plist."}
+  ]
+}

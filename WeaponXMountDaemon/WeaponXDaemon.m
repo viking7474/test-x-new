@@ -276,6 +276,9 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
         @"notified": result[@"notified"] ?: @NO,
         @"publisherEpoch": snapshot[@"publisherEpoch"] ?: @"",
         @"revision": snapshot[@"revision"] ?: @0,
+        @"sourceState": snapshot[@"sourceState"] ?: @"",
+        @"sourceCommitID": snapshot[@"sourceCommitID"] ?: @"",
+        @"sourceContractCoverage": snapshot[@"sourceContractCoverage"] ?: @"",
         @"error": result[@"error"] ?: @""
     };
     [debug writeToFile:debugPath atomically:YES];
@@ -581,6 +584,9 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
     NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObjects:
         PXTLinkIOSSettingsPath(), PXGlobalScopePath(), PXSecuritySettingsPath(),
         PXCurrentProfileInfoPath(), nil];
+    NSString *sourceState = [PXWeaponXBasePath() stringByAppendingPathComponent:@"RuntimeSource"];
+    [paths addObject:[sourceState stringByAppendingPathComponent:@"commit.plist"]];
+    [paths addObject:[sourceState stringByAppendingPathComponent:@"pending.plist"]];
     if (profileRoot.length) {
         [paths addObject:[profileRoot stringByAppendingPathComponent:@"storage.plist"]];
         [paths addObject:[profileRoot stringByAppendingPathComponent:@"settings.plist"]];
