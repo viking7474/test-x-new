@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2A-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2B-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -70,7 +70,7 @@ def source_contracts():
     assert 'self.thread != NSThread.currentThread' in core and '!self.active' in core
     assert '[PXValidatedProfileID(parts[0]) isEqualToString:parts[0]]' in paths and 'stringByResolvingSymlinksInPath' in paths
     assert 'owner:501 group:501' in paths and 'RuntimeSource' in paths
-    assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-and-manager-artifacts-partial"' in runtime
+    assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-values-partial"' in runtime
     save = method(manager, '- (void)saveSettings')
     scope = method(manager, '- (void)saveScopedApps')
     for body in (save, scope):
@@ -103,7 +103,7 @@ def native_tests():
         # preprocessor guards preserved. This catches rootful-only declarations
         # before the full UIKit application build. Header annotations are strict.
         check = Path(folder) / 'manager-role.m'
-        check.write_text('#import "PXRuntimeSnapshot.h"\n#import "PXRuntimeSourceStore.h"\n#import "PXRuntimeArtifactWriter.h"\n'
+        check.write_text('#import "PXRuntimeSnapshot.h"\n#import "PXRuntimeSourceStore.h"\n#import "PXRuntimeArtifactWriter.h"\n#import "PXRuntimeIdentifierWriter.h"\n'
                          + manager_role_fragment()
                          + '\nBOOL PXCheckManagerRole(void) { return PXIdentifierManagerIsManagerProcess(); }\n', encoding='utf-8')
         for defines in ([], ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1']):
@@ -113,7 +113,7 @@ def native_tests():
         binary = Path(folder) / 'source-transactions'
         sources = ['common/PXRuntimeSourceStore.m', 'common/PXRuntimeSources.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeSnapshot.m', 'common/PXRuntimeSnapshotReader.m', 'common/PXRuntimeReadScope.m',
-                   'common/PXPaths.m', 'tests/PXRuntimeSourceStoreTests.m']
+                   'common/PXPaths.m', 'common/PXRuntimeIdentifierWriter.m', 'tests/PXRuntimeSourceStoreTests.m']
         subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
                         '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                         '-I', str(ROOT / 'common'), *[str(ROOT / source) for source in sources],
