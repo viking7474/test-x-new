@@ -8,6 +8,10 @@
 #include <string.h>
 #include <time.h>
 
+BOOL PXRuntimeReadBool(id value) {
+    return ([value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]) && [value boolValue];
+}
+
 static BOOL PXRuntimeUnsignedInteger(id value, uint64_t *result) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
     const char *type = [value objCType];
@@ -83,6 +87,7 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
 @interface PXRuntimeSnapshotReader () {
     os_unfair_lock _lock;
     PXRuntimeSnapshotLoader _loader;
+    void (^_preparer)(PXRuntimeReadSnapshot *);
     dispatch_queue_t _queue;
     dispatch_group_t _pending;
     PXRuntimeReadSnapshot *_snapshot;
@@ -128,14 +133,17 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
     @try {
         for (;;) {
             uint64_t generation;
+            void (^preparer)(PXRuntimeReadSnapshot *);
             os_unfair_lock_lock(&_lock);
             generation = _requestedGeneration;
+            preparer = _preparer;
             _dirty = NO;
             os_unfair_lock_unlock(&_lock);
             PXRuntimeReadSnapshot *candidate;
             @autoreleasepool {
                 @try {
                     candidate = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:_loader() readerGeneration:generation];
+                    if (candidate.valid && preparer) preparer(candidate);
                 } @catch (__unused NSException *exception) {
                     candidate = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:nil readerGeneration:generation];
                 }
@@ -197,6 +205,20 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
 }
 - (void)invalidateAndRefresh { [self requestRefreshInvalidating:YES]; }
 - (void)requestRefresh { [self requestRefreshInvalidating:NO]; }
+- (void)setPreparationHandler:(void (^)(PXRuntimeReadSnapshot *))handler {
+    void (^copy)(PXRuntimeReadSnapshot *) = [handler copy];
+    __attribute__((objc_precise_lifetime)) id previous = nil;
+    __attribute__((objc_precise_lifetime)) PXRuntimeReadSnapshot *previousView = nil;
+    NSTimeInterval now = PXRuntimeReaderNow();
+    os_unfair_lock_lock(&_lock);
+    previous = _preparer;
+    previousView = _snapshot;
+    _preparer = copy;
+    BOOL schedule = [self markRefreshLocked:YES now:now];
+    os_unfair_lock_unlock(&_lock);
+    (void)previous; (void)previousView;
+    [self enqueueWorker:schedule];
+}
 - (BOOL)waitForPendingRefresh:(NSTimeInterval)timeout {
     if (dispatch_get_specific(&kPXRuntimeReaderQueue) == (__bridge void *)self) return NO;
     if (!isfinite(timeout) || timeout < 0 || timeout > 60) return NO;

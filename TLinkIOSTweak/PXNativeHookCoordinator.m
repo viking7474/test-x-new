@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 // PXNativeHookCoordinator.m
 // Single owner of MSHookFunction for multi-module native symbols.
 
@@ -175,6 +176,7 @@ PX_REG_TYPED(registerCNCopyCurrentNetworkInfoProvider, kPXNativeSymbolCNCopyCurr
 #pragma mark - Dispatch helpers
 
 static int PXCoord_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolSysctl];
     for (PXNativeHookProvider *p in providers) {
@@ -194,6 +196,7 @@ static int PXCoord_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 }
 
 static int PXCoord_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolSysctlByname];
     for (PXNativeHookProvider *p in providers) {
@@ -213,6 +216,7 @@ static int PXCoord_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, v
 }
 
 static int PXCoord_sysctlnametomib(const char *name, int *mib, size_t *namelen) {
+    PX_RUNTIME_READ_OPERATION;
     if (g_inside_sysctlnametomib) {
         return g_orig_sysctlnametomib ? g_orig_sysctlnametomib(name, mib, namelen) : -1;
     }
@@ -254,6 +258,7 @@ static int PXCoord_sysctlnametomib(const char *name, int *mib, size_t *namelen) 
 }
 
 static int PXCoord_gethostname(char *name, size_t namelen) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGethostname];
     for (PXNativeHookProvider *p in providers) {
@@ -273,6 +278,7 @@ static int PXCoord_gethostname(char *name, size_t namelen) {
 }
 
 static int PXCoord_getifaddrs(struct ifaddrs **ifap) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetifaddrs];
     int result = 0;
@@ -298,6 +304,7 @@ static int PXCoord_getifaddrs(struct ifaddrs **ifap) {
 }
 
 static CFTypeRef PXCoord_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperty];
     for (PXNativeHookProvider *p in providers) {
@@ -317,6 +324,7 @@ static CFTypeRef PXCoord_IORegistryEntryCreateCFProperty(io_registry_entry_t ent
 }
 
 static IOReturn PXCoord_IORegistryEntryCreateCFProperties(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolIORegistryEntryCreateCFProperties];
     for (PXNativeHookProvider *p in providers) {
@@ -336,6 +344,7 @@ static IOReturn PXCoord_IORegistryEntryCreateCFProperties(io_registry_entry_t en
 }
 
 static CFTypeRef PXCoord_IORegistryEntrySearchCFProperty(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolIORegistryEntrySearchCFProperty];
     for (PXNativeHookProvider *p in providers) {
@@ -355,6 +364,7 @@ static CFTypeRef PXCoord_IORegistryEntrySearchCFProperty(io_registry_entry_t ent
 }
 
 static CFDictionaryRef PXCoord_CFCopySystemVersionDictionary(void) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolCFCopySystemVersionDictionary];
     for (PXNativeHookProvider *p in providers) {
@@ -374,6 +384,7 @@ static CFDictionaryRef PXCoord_CFCopySystemVersionDictionary(void) {
 }
 
 static int PXCoord_statfs(const char *path, struct statfs *buf) {
+    PX_RUNTIME_READ_OPERATION;
     int result = g_orig_statfs ? g_orig_statfs(path, buf) : -1;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs];
@@ -385,6 +396,7 @@ static int PXCoord_statfs(const char *path, struct statfs *buf) {
 }
 
 static int PXCoord_statfs64(const char *path, PXStatfs64Buf *buf) {
+    PX_RUNTIME_READ_OPERATION;
     int result = g_orig_statfs64 ? g_orig_statfs64(path, buf) : -1;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolStatfs64];
@@ -396,6 +408,7 @@ static int PXCoord_statfs64(const char *path, PXStatfs64Buf *buf) {
 }
 
 static int PXCoord_getfsstat(struct statfs *buf, int bufsize, int flags) {
+    PX_RUNTIME_READ_OPERATION;
     int result = g_orig_getfsstat ? g_orig_getfsstat(buf, bufsize, flags) : -1;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat];
@@ -407,6 +420,7 @@ static int PXCoord_getfsstat(struct statfs *buf, int bufsize, int flags) {
 }
 
 static int PXCoord_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
+    PX_RUNTIME_READ_OPERATION;
     int result = g_orig_getfsstat64 ? g_orig_getfsstat64(buf, bufsize, flags) : -1;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGetfsstat64];
@@ -418,6 +432,7 @@ static int PXCoord_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
 }
 
 static CFDictionaryRef PXCoord_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolCNCopyCurrentNetworkInfo];
     for (PXNativeHookProvider *p in providers) {
@@ -437,6 +452,7 @@ static CFDictionaryRef PXCoord_CNCopyCurrentNetworkInfo(CFStringRef interfaceNam
 }
 
 static int PXCoord_gethostuuid(uuid_t id, const struct timespec *wait) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     NSArray<PXNativeHookProvider *> *providers = [coord _providersCopyForSymbol:kPXNativeSymbolGethostuuid];
     for (PXNativeHookProvider *p in providers) {

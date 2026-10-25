@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import "TLinkIOS.h"
 #import "DeviceModelManager.h"
 #import "IdentifierManager.h"
@@ -41,6 +42,7 @@ static void PXDeviceModelCacheChanged(CFNotificationCenterRef center,
 
 // Check if device model spoofing is enabled for the current app
 static BOOL isDeviceModelSpoofingEnabled(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!currentBundleID) return NO;
     
@@ -65,6 +67,11 @@ static BOOL isDeviceModelSpoofingEnabled(void) {
 // Get the spoofed device model (machine id like iPhone15,3) from profile.
 // Used only to derive the Apple product family for UIDevice.model / localizedModel.
 static NSString* getSpoofedDeviceModel(void) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXIdentitySnapshot *captured = PXCurrentIdentitySnapshot();
+    return captured.valid ? captured.deviceModel : nil;
+#else
     PXEnsureDeviceModelCache();
     
     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -112,6 +119,7 @@ static NSString* getSpoofedDeviceModel(void) {
         PXLog(@"[model] Exception getting spoofed device model: %@", exception);
         return nil;
     }
+#endif
 }
 
 // Map machine id / model string to Apple UIDevice.model family name.
@@ -130,6 +138,7 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
 %hook UIDevice
 
 - (NSString *)model {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalModel = %orig;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
@@ -151,6 +160,7 @@ static NSString* mapDeviceModelToUIDeviceFamily(NSString *spoofedModel, NSString
 }
 
 - (NSString *)localizedModel {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalModel = %orig;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     

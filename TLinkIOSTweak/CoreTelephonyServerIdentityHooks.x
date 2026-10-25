@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <substrate.h>
@@ -23,6 +24,7 @@ static NSDictionary<NSString *, id> *gCTServerResolvedRuntimeKeys = nil;
 static __thread BOOL gInsideCTServerIdentityHook = NO;
 
 static BOOL PXCTServerProcessScopeAllowsProjection(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
     if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return NO;
     NSString *processName = NSProcessInfo.processInfo.processName;
@@ -63,6 +65,7 @@ static NSDictionary<NSString *, id> *PXCTServerRuntimeKeysForInformation(NSDicti
 }
 
 static NSSet<NSString *> *PXCTServerEnabledToggles(IdentifierManager *manager) {
+    PX_RUNTIME_READ_OPERATION;
     if (!manager) return [NSSet set];
     NSMutableSet<NSString *> *enabled = [NSMutableSet set];
     for (NSString *surfaceKey in PXCoreTelephonyServerSurfaceKeys()) {
@@ -80,6 +83,7 @@ static int64_t PXCTServerCopyInfoProjected(PXCTServerCopyInfoFunction original,
                                            void *arg1,
                                            void *arg2,
                                            CFMutableDictionaryRef *outInformation) {
+    PX_RUNTIME_READ_OPERATION;
     // Original-first is part of the observed iFake contract and preserves both
     // status semantics and the caller-owned out-parameter lifetime.
     int64_t status = original ? original(arg1, arg2, outInformation) : 0;
@@ -118,12 +122,14 @@ static int64_t PXCTServerCopyInfoProjected(PXCTServerCopyInfoFunction original,
 static int64_t PXHookCTServerCopyMobileEquipmentInfo(void *arg1,
                                                       void *arg2,
                                                       CFMutableDictionaryRef *outInformation) {
+    PX_RUNTIME_READ_OPERATION;
     return PXCTServerCopyInfoProjected(gOrigCTServerCopyInfo, arg1, arg2, outInformation);
 }
 
 static int64_t PXHookCTServerCopyMobileEquipmentInfoV2(void *arg1,
                                                         void *arg2,
                                                         CFMutableDictionaryRef *outInformation) {
+    PX_RUNTIME_READ_OPERATION;
     return PXCTServerCopyInfoProjected(gOrigCTServerCopyInfoV2, arg1, arg2, outInformation);
 }
 

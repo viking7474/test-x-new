@@ -43,12 +43,12 @@ TLinkIOS_FRAMEWORKS = Foundation MobileCoreServices CoreServices StoreKit IOKit 
 # UIButtonConfiguration and SecTrustCopyCertificateChain are iOS 15+ only
 TLinkIOS_LDFLAGS = -weak_framework UIKit -weak_framework CoreLocationUI -weak_framework Security -lsqlite3 -lz
 TLinkIOS_CODESIGN_FLAGS = -Sent.plist
-TLinkIOS_CFLAGS = -fobjc-arc -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1 -I./common
+TLinkIOS_CFLAGS = -fobjc-arc -fexceptions -fobjc-exceptions -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1 -I./common
 
 # Daemon files
 # common/PXInjectionFilter.m is the shared IOS-08 injection-filter source of truth
 # (pure Foundation) reused by the mount daemon to validate filter plists.
-WeaponXDaemon_FILES = WeaponXMountDaemon/WeaponXDaemon.m common/PXInjectionFilter.m common/PXPaths.m common/PXRuntimeSnapshot.m common/PXRuntimeSnapshotReader.m
+WeaponXDaemon_FILES = WeaponXMountDaemon/WeaponXDaemon.m common/PXInjectionFilter.m common/PXPaths.m common/PXRuntimeSnapshot.m common/PXRuntimeSnapshotReader.m common/PXRuntimeReadScope.m
 WeaponXDaemon_CFLAGS = -fobjc-arc -I./common
 WeaponXDaemon_FRAMEWORKS = Foundation IOKit
 WeaponXDaemon_INSTALL_PATH = /Library/WeaponX
@@ -82,7 +82,7 @@ TWEAK_NAME = TLinkIOSTweak
 TLinkIOSTweak_FILES = $(filter-out TLinkIOSTweak/UberURLHooks.x,$(wildcard TLinkIOSTweak/*.x)) $(filter-out TLinkIOSTweak/AAA_%,$(wildcard TLinkIOSTweak/*.m)) $(wildcard common/*.m)
 
 # CFlags - Adjusted include paths
-TLinkIOSTweak_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I./common -I./include -D USES_LIBUNDIRECT=1 -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1
+TLinkIOSTweak_CFLAGS = -fobjc-arc -fexceptions -fobjc-exceptions -Wno-error=unused-variable -Wno-error=unused-function -I./common -I./include -D USES_LIBUNDIRECT=1 -D SUPPORT_IPAD=1 -D ENABLE_STATE_RESTORATION=1
 
 ifeq ($(INTERNAL_SECURITY_RESEARCH),1)
 # Explicit allowlist only: never use a research/*.m wildcard.
@@ -207,7 +207,7 @@ internal-stage::
 export CFLAGS = -fobjc-arc -Wno-error
 
 TLinkIOSCLI_FILES = TLinkIOSCLIbinary.m DeviceNameManager.m IdentifierManager.m IDFAManager.m IDFVManager.m WiFiManager.m SerialNumberManager.m TLinkIOSLogging.m ProfileManager.m IOSVersionInfo.m
-TLinkIOSCLI_CFLAGS = -fobjc-arc -Wno-error=unused-variable -Wno-error=unused-function -I$(THEOS_VENDOR_INCLUDE_PATH)
+TLinkIOSCLI_CFLAGS = -fobjc-arc -fexceptions -fobjc-exceptions -Wno-error=unused-variable -Wno-error=unused-function -I$(THEOS_VENDOR_INCLUDE_PATH)
 TLinkIOSCLI_FRAMEWORKS = UIKit Foundation AdSupport UserNotifications IOKit Security
 TLinkIOSCLI_PRIVATE_FRAMEWORKS = MobileCoreServices AppSupport
 TLinkIOSCLI_LDFLAGS = -L$(THEOS_VENDOR_LIBRARY_PATH)

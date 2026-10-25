@@ -59,11 +59,13 @@ static NSString *getCurrentBundleID(void) {
 
 // Helper: load scoped apps from plist (with cache)
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Helper: check if current app is in scoped apps list and enabled
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {
@@ -86,6 +88,7 @@ static BOOL isInScopedAppsList(void) {
 
 // Helper: should spoof battery for this bundle (with cache)
 static BOOL shouldSpoofBatteryForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
@@ -93,6 +96,7 @@ static BOOL shouldSpoofBatteryForBundle(NSString *bundleID) {
 
 // Helper to check if battery spoofing is enabled for this app/profile
 static BOOL isBatterySpoofingEnabled(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID) {
@@ -146,6 +150,22 @@ static NSString *PXProfileBatteryInfoPath(void) {
 // Prefer disk first so we never need BatteryManager while UIDevice hooks are active
 // and the singleton is still initializing.
 static PXBatterySnapshot PXGetBatterySnapshot(void) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXBatterySnapshot snap = {0};
+    snap.loadedAt = [NSDate timeIntervalSinceReferenceDate];
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *runtimeBattery = [runtimeView profileArtifact:@"batteryInfo"];
+    NSDictionary *runtimeIDs = runtimeView.deviceIDs;
+    id runtimeLevel = runtimeBattery[@"BatteryLevel"] ?: runtimeIDs[@"BatteryLevel"];
+    id runtimeLPM = runtimeBattery[@"LowPowerMode"] ?: runtimeIDs[@"LowPowerMode"];
+    if ([runtimeLevel isKindOfClass:NSString.class] || [runtimeLevel isKindOfClass:NSNumber.class]) {
+        float v = [runtimeLevel floatValue];
+        if (v >= 0.01f && v <= 1.0f) { snap.level = v; snap.hasLevel = YES; }
+    }
+    if (runtimeLPM != nil) { snap.lowPowerMode = PXRuntimeReadBool(runtimeLPM); snap.hasLPM = YES; }
+    return snap;
+#else
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     PXBatterySnapshot current = PXReadBatterySnapshot();
     if (current.loadedAt > 0 && (now - current.loadedAt) < kBatterySnapTTL) {
@@ -162,20 +182,7 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
 
     PXBatterySnapshot snap = {0};
     snap.loadedAt = now;
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeBattery = PXRuntimeSnapshotProfileArtifact(@"batteryInfo");
-    NSDictionary *runtimeIDs = PXRuntimeSnapshotDeviceIDs();
-    id runtimeLevel = runtimeBattery[@"BatteryLevel"] ?: runtimeIDs[@"BatteryLevel"];
-    id runtimeLPM = runtimeBattery[@"LowPowerMode"] ?: runtimeIDs[@"LowPowerMode"];
-    if ([runtimeLevel isKindOfClass:NSString.class] || [runtimeLevel isKindOfClass:NSNumber.class]) {
-        float v = [runtimeLevel floatValue];
-        if (v >= 0.01f && v <= 1.0f) { snap.level = v; snap.hasLevel = YES; }
-    }
-    if (runtimeLPM != nil) { snap.lowPowerMode = [runtimeLPM boolValue]; snap.hasLPM = YES; }
-    PXPublishBatterySnapshot(snap);
-    gPXBatterySnapshotDepth--;
-    return snap;
-#endif
+
 
     @try {
         // 1) Profile battery_info.plist (no ObjC singleton / no UIDevice)
@@ -228,6 +235,7 @@ static PXBatterySnapshot PXGetBatterySnapshot(void) {
     PXPublishBatterySnapshot(snap);
     gPXBatterySnapshotDepth--;
     return snap;
+#endif
 }
 
 static void PXInvalidateBatterySnapshot(void) {
@@ -236,6 +244,7 @@ static void PXInvalidateBatterySnapshot(void) {
 }
 
 static void PXMaybePostLPMChangeNotification(void) {
+    PX_RUNTIME_READ_OPERATION;
     if (!isBatterySpoofingEnabled()) return;
 
     PXBatterySnapshot snap = PXGetBatterySnapshot();
@@ -257,6 +266,7 @@ static void batterySettingsChanged(CFNotificationCenterRef center,
                                    CFStringRef name,
                                    const void *object,
                                    CFDictionaryRef userInfo) {
+    PX_RUNTIME_READ_OPERATION;
     PXInvalidateScopeDecisionCache();
     BOOL previousLPM = gHavePostedLPM ? gLastPostedLPM : NO;
     BOOL hadPrevious = gHavePostedLPM;
@@ -282,6 +292,7 @@ static void batterySettingsChanged(CFNotificationCenterRef center,
 // Hook for -[UIDevice batteryLevel]
 static float (*orig_batteryLevel)(UIDevice *, SEL);
 static float hook_batteryLevel(UIDevice *self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     // If snapshot load re-enters (BatteryManager init), always pass through original.
     if (gPXBatterySnapshotDepth > 0) {
         return orig_batteryLevel ? orig_batteryLevel(self, _cmd) : -1.0f;
@@ -299,6 +310,7 @@ static float hook_batteryLevel(UIDevice *self, SEL _cmd) {
 // Optionally, hook batteryState (returns UIDeviceBatteryState)
 static NSInteger (*orig_batteryState)(UIDevice *, SEL);
 static NSInteger hook_batteryState(UIDevice *self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     if (isBatterySpoofingEnabled()) {
         return 1; // UIDeviceBatteryStateUnplugged
     }
@@ -309,6 +321,7 @@ static NSInteger hook_batteryState(UIDevice *self, SEL _cmd) {
 // Hook for -[NSProcessInfo isLowPowerModeEnabled]
 static BOOL (*orig_isLowPowerModeEnabled)(NSProcessInfo *, SEL);
 static BOOL hook_isLowPowerModeEnabled(NSProcessInfo *self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     if (gPXBatterySnapshotDepth > 0) {
         return orig_isLowPowerModeEnabled ? orig_isLowPowerModeEnabled(self, _cmd) : NO;
     }

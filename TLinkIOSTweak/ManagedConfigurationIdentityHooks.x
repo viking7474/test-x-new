@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <dlfcn.h>
@@ -24,6 +25,7 @@ static PXMCObjectGetter gOrigMCGestaltGetDeviceUUID = NULL;
 static __thread BOOL gInsideManagedConfigurationIdentityHook = NO;
 
 static BOOL PXMCProcessScopeAllowsProjection(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
     if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return NO;
     NSString *processName = NSProcessInfo.processInfo.processName;
@@ -37,6 +39,7 @@ static id PXMCOriginalValue(PXMCObjectGetter original) {
 }
 
 static id PXMCProjectedValue(NSString *symbolName, PXMCObjectGetter original) {
+    PX_RUNTIME_READ_OPERATION;
     if (gInsideManagedConfigurationIdentityHook) {
         return PXMCOriginalValue(original);
     }
@@ -80,26 +83,32 @@ static id PXMCProjectedValue(NSString *symbolName, PXMCObjectGetter original) {
 }
 
 static id PXHookMCCTIMEI(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXMCProjectedValue(@"MCCTIMEI", gOrigMCCTIMEI);
 }
 
 static id PXHookMCIOSerialString(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXMCProjectedValue(@"MCIOSerialString", gOrigMCIOSerialString);
 }
 
 static id PXHookMCProductVersion(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXMCProjectedValue(@"MCProductVersion", gOrigMCProductVersion);
 }
 
 static id PXHookMCProductBuildVersion(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXMCProjectedValue(@"MCProductBuildVersion", gOrigMCProductBuildVersion);
 }
 
 static id PXHookMCGestaltGetProductName(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXMCProjectedValue(@"MCGestaltGetProductName", gOrigMCGestaltGetProductName);
 }
 
 static id PXHookMCGestaltGetDeviceUUID(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXMCProjectedValue(@"MCGestaltGetDeviceUUID", gOrigMCGestaltGetDeviceUUID);
 }
 

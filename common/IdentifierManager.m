@@ -92,25 +92,30 @@ static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
 static BOOL PXIdentifierManagerIsManagerProcess(void) {
     return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.hydra.tlinkios"];
 }
+#define PX_IDENTIFIER_RUNTIME_READ_OPERATION \
+    PXRuntimeReadScope pxRuntimeOperationScope __attribute__((cleanup(PXRuntimeReadScopeEnd))) = {0}; \
+    if (!PXIdentifierManagerIsManagerProcess()) PXBeginRuntimeSnapshotOperation(&pxRuntimeOperationScope)
+#else
+#define PX_IDENTIFIER_RUNTIME_READ_OPERATION ((void)0)
 #endif
 
-static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type) {
+static BOOL PXRuntimeSnapshotImpliesIdentifierEnabled(NSString *type, PXRuntimeReadSnapshot *runtimeView) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;
-    NSDictionary *ids = PXRuntimeSnapshotDeviceIDs();
-    NSDictionary *security = PXRuntimeSnapshotSecuritySettings();
-    NSDictionary *tlink = PXRuntimeSnapshotTLinkSettings();
+    NSDictionary *ids = runtimeView.deviceIDs;
+    NSDictionary *security = runtimeView.securitySettings;
+    NSDictionary *tlink = runtimeView.tlinkSettings;
 
     if ([type isEqualToString:@"StorageSystem"]) {
         id explicitStorage = tlink[@"StorageSystemEnabled"];
         if ([explicitStorage respondsToSelector:@selector(boolValue)] && [explicitStorage boolValue]) return YES;
-        NSDictionary *storage = PXRuntimeSnapshotProfileArtifact(@"storage");
+        NSDictionary *storage = [runtimeView profileArtifact:@"storage"];
         return storage[@"TotalStorage"] != nil && storage[@"FreeStorage"] != nil;
     }
     if ([type isEqualToString:@"Battery"]) {
         id secondary = security[@"batterySpoofEnabled"];
         if ([secondary respondsToSelector:@selector(boolValue)] && [secondary boolValue]) return YES;
-        return PXRuntimeSnapshotProfileArtifact(@"batteryInfo").count > 0;
+        return [runtimeView profileArtifact:@"batteryInfo"].count > 0;
     }
     if ([type isEqualToString:@"WiFi"] || [type isEqualToString:@"WiFiAddress"]) {
         id secondary = security[@"wifiSpoofEnabled"];
@@ -817,6 +822,7 @@ static NSString *PXPickRegulatoryModelNumberFromModelSpec(NSDictionary *modelSpe
 #pragma mark - Profile Integration
 
 - (NSString *)getActiveProfileId {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     // The manager mutates the live active profile before the daemon has had a
     // chance to republish its runtime snapshot. Reading the snapshot here can
@@ -824,7 +830,7 @@ static NSString *PXPickRegulatoryModelNumberFromModelSpec(NSDictionary *modelSpe
     // profile. Only injected hosts should prefer the sandbox-safe mirror.
     NSString *profileID = nil;
     if (!PXIdentifierManagerIsManagerProcess()) {
-        profileID = PXRuntimeSnapshotProfileID();
+        return PXCaptureRuntimeSnapshot().profileID;
     }
     if (!profileID.length) profileID = PXActiveProfileID();
 #else
@@ -1880,6 +1886,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (BOOL)isIdentifierEnabled:(NSString *)type {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
@@ -1887,13 +1894,14 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         // persisted false remains authoritative. Only a genuinely missing key
         // may fall back to secondary flags/profile evidence to repair older
         // sparse/corrupted RootHide settings files.
-        NSDictionary *runtimeSettings = PXRuntimeSnapshotTLinkSettings();
+        PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+        NSDictionary *runtimeSettings = runtimeView.tlinkSettings;
         NSDictionary *runtimeEnabled = [runtimeSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class]
             ? runtimeSettings[@"EnabledIdentifiers"] : nil;
         NSString *lookupType = [type isEqualToString:@"WiFiAddress"] ? @"WiFi" : type;
         id runtimeValue = runtimeEnabled[lookupType];
-        if (runtimeValue != nil) return [runtimeValue boolValue];
-        return PXRuntimeSnapshotImpliesIdentifierEnabled(type);
+        if (runtimeValue != nil) return PXRuntimeReadBool(runtimeValue);
+        return PXRuntimeSnapshotImpliesIdentifierEnabled(type, runtimeView);
     }
 #endif
     // The TLinkIOS manager/UI process must use its live in-memory settings so a
@@ -1905,6 +1913,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 #pragma mark - Current Values
 
 - (NSString *)currentValueForIdentifier:(NSString *)type {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     // Injected App Store processes cannot rely on direct rootfs access to
     // /var/mobile/Library. Consume the daemon-published jbroot snapshot first.
@@ -1925,6 +1934,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
             }
         }
     }
+#endif
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) return nil;
 #endif
     // First try to get from profile-specific storage
     NSString *identityDir = [self profileIdentityPath];
@@ -2599,6 +2611,23 @@ static NSMutableDictionary *_appEnabledCache = nil;
 static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 seconds
 
 - (BOOL)isApplicationEnabled:(NSString *)bundleID {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        if (!bundleID.length || [bundleID isEqualToString:@"com.hydra.tlinkios"]) return NO;
+        id scoped = PXCaptureRuntimeSnapshot().globalScope[@"ScopedApps"];
+        if (![scoped isKindOfClass:NSDictionary.class]) return NO;
+        id entry = scoped[bundleID];
+        if (entry != nil) return [entry isKindOfClass:NSDictionary.class] && PXRuntimeReadBool(entry[@"enabled"]);
+        for (NSString *key in scoped) {
+            if ([key isKindOfClass:NSString.class] && [key caseInsensitiveCompare:bundleID] == NSOrderedSame) {
+                id candidate = scoped[key];
+                return [candidate isKindOfClass:NSDictionary.class] && PXRuntimeReadBool(candidate[@"enabled"]);
+            }
+        }
+        return NO;
+    }
+#endif
     // Initialize cache if needed
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -2716,6 +2745,9 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 
 // New method to load scoped apps configuration explicitly
 - (void)loadScopedApps {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) return;
+#endif
     NSString *scopedAppsFile = PXGlobalScopePath();
     PXLog(@"[WeaponX] IdentifierManager DEBUG: Trying to load scoped apps from: %@", scopedAppsFile);
     
@@ -2830,6 +2862,10 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 
 
 - (void)loadSettings {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) return;
+#endif
     PXLog(@"[WeaponX] Loading settings...");
     
     NSString *prefsFile = PXTLinkIOSSettingsPath();
@@ -2854,7 +2890,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     NSDictionary *loadedDict = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
-        NSDictionary *runtimeTLinkSettings = PXRuntimeSnapshotTLinkSettings();
+        NSDictionary *runtimeTLinkSettings = PXCaptureRuntimeSnapshot().tlinkSettings;
         if (runtimeTLinkSettings.count) loadedDict = runtimeTLinkSettings;
     }
 #endif
@@ -2951,7 +2987,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     NSDictionary *scopedAppsDict = nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
-        NSDictionary *runtimeScope = PXRuntimeSnapshotGlobalScope();
+        NSDictionary *runtimeScope = PXCaptureRuntimeSnapshot().globalScope;
         if (runtimeScope.count) scopedAppsDict = runtimeScope;
     }
 #endif
@@ -3060,6 +3096,15 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (BOOL)shouldSpoofForBundle:(NSString *)bundleID {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        id scoped = PXCaptureRuntimeSnapshot().globalScope[@"ScopedApps"];
+        id entry = [scoped isKindOfClass:NSDictionary.class] ? scoped[bundleID ?: @""] : nil;
+        return entry != nil ? ([entry isKindOfClass:NSDictionary.class] && PXRuntimeReadBool(entry[@"enabled"]))
+                            : [self isExtensionEnabled:bundleID];
+    }
+#endif
     if (!bundleID) return NO;
     
     // Check cache first
@@ -3132,6 +3177,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (BOOL)isExtensionEnabled:(NSString *)bundleID {
+    PX_IDENTIFIER_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
     
     // Never consider the WeaponX app itself or system apps
@@ -3140,13 +3186,21 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     }
     
     // Check each scoped app's extension pattern
-    for (NSString *scopedBundleID in self.scopedApps) {
-        NSDictionary *appInfo = self.scopedApps[scopedBundleID];
+    NSDictionary *scopedApps = self.scopedApps;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (!PXIdentifierManagerIsManagerProcess()) {
+        id scoped = PXCaptureRuntimeSnapshot().globalScope[@"ScopedApps"];
+        scopedApps = [scoped isKindOfClass:NSDictionary.class] ? scoped : @{};
+    }
+#endif
+    for (NSString *scopedBundleID in scopedApps) {
+        NSDictionary *appInfo = scopedApps[scopedBundleID];
+        if (![appInfo isKindOfClass:NSDictionary.class]) continue;
         NSString *extensionPattern = appInfo[@"extensionPattern"];
         
-        if (extensionPattern && [self isBundleIDMatch:bundleID withPattern:extensionPattern]) {
+        if ([extensionPattern isKindOfClass:NSString.class] && [self isBundleIDMatch:bundleID withPattern:extensionPattern]) {
             PXLog(@"[WeaponX] Bundle ID %@ matches extension pattern %@ from app %@", bundleID, extensionPattern, scopedBundleID);
-            return [appInfo[@"enabled"] boolValue];
+            return PXRuntimeReadBool(appInfo[@"enabled"]);
         }
     }
     

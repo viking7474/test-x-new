@@ -1,5 +1,6 @@
 #import "PXSecuritySettingsStore.h"
 #import "PXPaths.h"
+#import "PXRuntimeSnapshot.h"
 #import <fcntl.h>
 #import <sys/file.h>
 #import <unistd.h>
@@ -36,6 +37,11 @@ static void PXReleaseSecuritySettingsLock(int fd) {
 
 id PXReadSecuritySetting(NSString *key) {
     if (key.length == 0) return nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.hydra.tlinkios"]) {
+        return PXCaptureRuntimeSnapshot().securitySettings[key];
+    }
+#endif
     NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:PXSecuritySettingsPath()];
     id value = disk[key];
     if (value != nil) return value;

@@ -15,6 +15,7 @@
 #import "MethodSwizzler.h"
 
 #import "PXScope.h"
+#import "PXRuntimeSnapshot.h"
 #import "PXPaths.h"
 #import "PXNativeHookCoordinator.h"
 #import <os/lock.h>
@@ -115,6 +116,7 @@ static BOOL isInScopedAppsList(void);
 
 // Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
@@ -127,6 +129,32 @@ static NSString *getCurrentProfileID(void) {
 
 // Get current WiFi info from appropriate profile
 static NSDictionary *getProfileWiFiInfo(void) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    static char wifiKey;
+    PXRuntimeReadSnapshot *view = PXCaptureRuntimeSnapshot();
+    id cachedView = objc_getAssociatedObject(view, &wifiKey);
+    if (cachedView) return cachedView == NSNull.null ? nil : cachedView;
+    NSDictionary *artifact = [view profileArtifact:@"wifiInfo"];
+    NSDictionary *ids = view.deviceIDs;
+    NSDictionary *resolved = nil;
+    if ([artifact[@"ssid"] isKindOfClass:NSString.class] && [artifact[@"bssid"] isKindOfClass:NSString.class]) {
+        resolved = artifact;
+    } else if ([ids[@"SSID"] isKindOfClass:NSString.class] && [ids[@"BSSID"] isKindOfClass:NSString.class]) {
+        resolved = @{ @"ssid": ids[@"SSID"], @"bssid": ids[@"BSSID"], @"networkType": @"Infrastructure" };
+    } else {
+        NSString *value = [ids[@"WiFi"] isKindOfClass:NSString.class] ? ids[@"WiFi"] : nil;
+        NSRange open = value.length ? [value rangeOfString:@"("] : NSMakeRange(NSNotFound, 0);
+        NSRange close = value.length ? [value rangeOfString:@")" options:NSBackwardsSearch] : NSMakeRange(NSNotFound, 0);
+        if (value.length && open.location != NSNotFound && close.location != NSNotFound && close.location > open.location + 1) {
+            NSString *ssid = [[value substringToIndex:open.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSString *bssid = [value substringWithRange:NSMakeRange(open.location + 1, close.location - open.location - 1)];
+            if (ssid.length && bssid.length) resolved = @{ @"ssid": ssid, @"bssid": bssid, @"networkType": @"Infrastructure" };
+        }
+    }
+    if (view) objc_setAssociatedObject(view, &wifiKey, resolved ?: NSNull.null, OBJC_ASSOCIATION_RETAIN);
+    return resolved;
+#else
     NSString *profileId = getCurrentProfileID();
     NSString *identityDir = PXProfileIdentityPath(profileId);
     NSString *deviceIdsPath = PXProfileDeviceIDsPath(profileId);
@@ -201,6 +229,7 @@ static NSDictionary *getProfileWiFiInfo(void) {
     }
 
     return resolved ? PXWiFiPublishInfo(resolved, profileId, now) : nil;
+#endif
 }
 
 #pragma mark - Core Hook Functions
@@ -228,12 +257,14 @@ static CFDictionaryRef PXCreateSpoofedNetworkInfoDict(NSString *ssid, NSString *
 }
 
 static NSDictionary *PXResolvedWiFiInfo(void) {
+    PX_RUNTIME_READ_OPERATION;
     return getProfileWiFiInfo();
 }
 
 // Implementation of CNCopyCurrentNetworkInfo hook
 // On iOS 13+ original often returns NULL without location entitlement — still spoof when scoped.
 static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    PX_RUNTIME_READ_OPERATION;
     CFDictionaryRef originalDict = orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
 
     @try {
@@ -259,6 +290,7 @@ static CFDictionaryRef replaced_CNCopyCurrentNetworkInfo(CFStringRef interfaceNa
 // Ensure apps that iterate interfaces still see a Wi-Fi interface (en0).
 static CFArrayRef (*orig_CNCopySupportedInterfaces)(void) = NULL;
 static CFArrayRef replaced_CNCopySupportedInterfaces(void) {
+    PX_RUNTIME_READ_OPERATION;
     CFArrayRef original = orig_CNCopySupportedInterfaces ? orig_CNCopySupportedInterfaces() : NULL;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -313,7 +345,9 @@ static id PXCreateSpoofedNEHotspotNetwork(NSString *ssid, NSString *bssid) {
 // +[NEHotspotNetwork fetchCurrentWithCompletionHandler:] (iOS 14+) — primary path for many info apps.
 static void (*orig_NEHotspotNetwork_fetchCurrent)(id, SEL, void (^)(id)) = NULL;
 static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^completion)(id network)) {
+    PX_RUNTIME_READ_OPERATION;
     void (^deliver)(id) = ^(id network) {
+    PX_RUNTIME_READ_OPERATION;
         @try {
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
             if (shouldSpoofForBundle(bundleID)) {
@@ -339,6 +373,7 @@ static void replaced_NEHotspotNetwork_fetchCurrent(id self, SEL _cmd, void (^com
 
 // Implementation of NEHotspotHelper dictionaryWithScanResult: hook
 static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
+    PX_RUNTIME_READ_OPERATION;
     // Call original first
     id originalResult = nil;
     if (orig_dictionaryWithScanResult) {
@@ -392,6 +427,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 @implementation NEHotspotNetwork (WeaponXHooks)
 
 - (NSString *)weaponx_SSID {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
         return [self weaponx_SSID]; // original after exchange
@@ -402,6 +438,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 }
 
 - (NSString *)weaponx_BSSID {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
         return [self weaponx_BSSID];
@@ -413,6 +450,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 
 // Additional NEHotspotNetwork property hook for signal strength
 - (double)weaponx_signalStrength {
+    PX_RUNTIME_READ_OPERATION;
     // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
@@ -428,6 +466,7 @@ static id replaced_dictionaryWithScanResult(id self, SEL _cmd, id arg1) {
 
 // Additional NEHotspotNetwork property hook for secure flag
 - (BOOL)weaponx_secure {
+    PX_RUNTIME_READ_OPERATION;
     // Check if we should spoof
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
@@ -458,6 +497,7 @@ static WiFiNetworkRef replaced_WiFiDeviceClientCopyCurrentNetwork(WiFiDeviceClie
 
 // Hook implementation for WiFiNetworkGetSSID
 static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
         return orig_WiFiNetworkGetSSID ? orig_WiFiNetworkGetSSID(network) : NULL;
@@ -473,6 +513,7 @@ static CFStringRef replaced_WiFiNetworkGetSSID(WiFiNetworkRef network) {
 
 // Hook implementation for WiFiNetworkGetBSSID
 static CFStringRef replaced_WiFiNetworkGetBSSID(WiFiNetworkRef network) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) {
         return orig_WiFiNetworkGetBSSID ? orig_WiFiNetworkGetBSSID(network) : NULL;
@@ -493,6 +534,7 @@ typedef int (*Apple80211GetInfoCopy_t)(void *handle, CFDictionaryRef *info);
 static Apple80211GetInfoCopy_t orig_Apple80211GetInfoCopy = NULL;
 
 static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info) {
+    PX_RUNTIME_READ_OPERATION;
     int r = orig_Apple80211GetInfoCopy ? orig_Apple80211GetInfoCopy(handle, info) : -1;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -528,15 +570,18 @@ static int replaced_Apple80211GetInfoCopy(void *handle, CFDictionaryRef *info) {
 }
 
 static void initializeHooks(void) {
+    PX_RUNTIME_READ_OPERATION;
     // CNCopyCurrentNetworkInfo: register as sole dictionary builder on coordinator.
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
     [coord installOwnedSymbolsIfNeeded];
     orig_CNCopyCurrentNetworkInfo = [coord originalForSymbol:kPXNativeSymbolCNCopyCurrentNetworkInfo];
     static dispatch_once_t wifiCNOnce;
     dispatch_once(&wifiCNOnce, ^{
+    PX_RUNTIME_READ_OPERATION;
         [coord registerCNCopyCurrentNetworkInfoProvider:@"wifi.CNCopyCurrentNetworkInfo"
                                               priority:PXNativeHookPriorityNetworkStorage
                                                    pre:^BOOL(CFStringRef interfaceName, CFDictionaryRef *outResult) {
+    PX_RUNTIME_READ_OPERATION;
             // Always fully handle: replaced_* already falls through to original when not spoofing.
             CFDictionaryRef r = replaced_CNCopyCurrentNetworkInfo(interfaceName);
             if (outResult) *outResult = r;
@@ -677,6 +722,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 }
 
 - (NSString *)_getSSID {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) return %orig;
     NSDictionary *wifiInfo = PXResolvedWiFiInfo();
@@ -685,6 +731,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 }
 
 - (id)_getBSSID {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!shouldSpoofForBundle(bundleID)) return %orig;
     NSDictionary *wifiInfo = PXResolvedWiFiInfo();
@@ -843,11 +890,13 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {

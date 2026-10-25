@@ -55,6 +55,7 @@ static BOOL PXCapturedBootValues(PXRuntimeReadSnapshot *snapshot, NSDate **outBo
 #endif
 
 static NSDate *PXCachedBootTimeValue(void) {
+    PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     PXRuntimeReadSnapshot *snapshot = PXCaptureRuntimeSnapshot();
     NSDate *bootTime = nil;
@@ -68,6 +69,7 @@ static NSDate *PXCachedBootTimeValue(void) {
 }
 
 static NSTimeInterval PXCachedUptimeValue(void) {
+    PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     PXRuntimeReadSnapshot *snapshot = PXCaptureRuntimeSnapshot();
     NSTimeInterval uptime = 0;
@@ -135,11 +137,13 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {
@@ -168,6 +172,7 @@ static BOOL isInScopedAppsList(void) {
 
 // Check if boot time spoofing should be applied for the current app
 static BOOL shouldSpoofBootTimeForApp(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID) return NO;
@@ -288,6 +293,7 @@ static BOOL isBootTimeOrUptimeEnabled(void) {
 
 // Hook sysctl() for KERN_BOOTTIME queries - ONLY method that App Store apps commonly use
 int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    PX_RUNTIME_READ_OPERATION;
     static BOOL logged = NO;
     if (!logged) {
         logged = YES;
@@ -413,6 +419,7 @@ int hook_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *new
 
 // Hook sysctlbyname() for "kern.boottime" queries - ONLY method that App Store apps commonly use
 int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    PX_RUNTIME_READ_OPERATION;
     static int loggedCount = 0;
     if (name && loggedCount < 20) {
         loggedCount++;
@@ -464,6 +471,7 @@ int hook_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
 // Hook for -[NSProcessInfo systemUptime]
 static NSTimeInterval (*orig_systemUptime)(NSProcessInfo *, SEL);
 static NSTimeInterval hook_systemUptime(NSProcessInfo *self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     // The guard must cover the scope predicate itself. PXScope is infrastructure
     // used by every spoof hook; if scope evaluation ever touches uptime (directly
     // or indirectly), entering shouldSpoofBootTimeForApp() unguarded creates:
@@ -509,6 +517,7 @@ static void installSystemCallHooks(void) {
         // boot time. Providers MUST return NO while isInsideHook so the coordinator runs the
         // original and we never recurse: provider → UptimeManager → sysctl → provider...
         [coord registerSysctlProvider:@"boottime.sysctl" priority:PXNativeHookPriorityIdentity pre:^BOOL(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
             (void)newp; (void)newlen;
             if (isInsideHook) return NO; // pass through to original (and later providers)
             if (!(namelen >= 2 && name && name[0] == CTL_KERN && name[1] == KERN_BOOTTIME)) return NO;
@@ -541,6 +550,7 @@ static void installSystemCallHooks(void) {
         } post:nil];
 
         [coord registerSysctlBynameProvider:@"boottime.sysctlbyname" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
             (void)newp; (void)newlen;
             if (isInsideHook) return NO;
             if (!name || strcmp(name, "kern.boottime") != 0) return NO;

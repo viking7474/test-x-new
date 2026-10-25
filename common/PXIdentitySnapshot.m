@@ -9,6 +9,7 @@
 #import <dispatch/dispatch.h>
 #import <errno.h>
 #import <os/lock.h>
+#import <objc/runtime.h>
 
 @interface PXIdentitySnapshot ()
 - (instancetype)initWithProfileID:(NSString * _Nullable)profileID
@@ -108,20 +109,25 @@ static id PXIdentityDeepImmutableCopy(id object) {
     return [object conformsToProtocol:@protocol(NSCopying)] ? [object copy] : object;
 }
 
-static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
+static BOOL PXIdentityUsesCapturedRuntime(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.hydra.tlinkios"];
+#else
+    return NO;
+#endif
+}
+
+static char kPXRuntimeIdentityProjection;
+static PXIdentitySnapshot *PXBuildIdentitySnapshot(PXRuntimeReadSnapshot *runtime) {
     NSString *profileID = nil;
     NSDictionary *diskDeviceIDs = nil;
     NSDictionary *diskSettings = nil;
     BOOL usedRuntimeMirror = NO;
 
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeSnapshot = PXLoadRuntimeSnapshot();
-    NSString *runtimeProfileID = [runtimeSnapshot[@"profileID"] isKindOfClass:NSString.class]
-        ? runtimeSnapshot[@"profileID"] : nil;
-    NSDictionary *runtimeDeviceIDs = [runtimeSnapshot[@"deviceIDs"] isKindOfClass:NSDictionary.class]
-        ? runtimeSnapshot[@"deviceIDs"] : nil;
-    NSDictionary *runtimeSettings = [runtimeSnapshot[@"profileSettings"] isKindOfClass:NSDictionary.class]
-        ? runtimeSnapshot[@"profileSettings"] : nil;
+    NSString *runtimeProfileID = runtime.profileID;
+    NSDictionary *runtimeDeviceIDs = runtime.deviceIDs;
+    NSDictionary *runtimeSettings = runtime.profileSettings;
     if (runtimeProfileID.length && runtimeDeviceIDs.count) {
         profileID = runtimeProfileID;
         diskDeviceIDs = runtimeDeviceIDs;
@@ -130,7 +136,7 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
     }
 #endif
 
-    if (!usedRuntimeMirror) {
+    if (!usedRuntimeMirror && !PXIdentityUsesCapturedRuntime()) {
         profileID = PXActiveProfileID();
         NSString *rootPath = PXProfileRootPath(profileID);
         NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileID);
@@ -205,9 +211,32 @@ static PXIdentitySnapshot *PXBuildIdentitySnapshot(void) {
                                                    valid:valid];
 }
 
+static void PXRegisterRuntimeIdentityPreparation(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        PXRuntimeSnapshotRegisterPreparation(^(PXRuntimeReadSnapshot *runtime) {
+            BOOL previous = gPXIdentityBuildInProgress;
+            gPXIdentityBuildInProgress = YES;
+            @try {
+                PXIdentitySnapshot *identity = PXBuildIdentitySnapshot(runtime);
+                objc_setAssociatedObject(runtime, &kPXRuntimeIdentityProjection, identity, OBJC_ASSOCIATION_RETAIN);
+            } @finally {
+                gPXIdentityBuildInProgress = previous;
+            }
+        });
+    });
+}
+
 PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
     (void)reason;
     int incomingErrno = errno;
+    if (PXIdentityUsesCapturedRuntime()) {
+        PXRegisterRuntimeIdentityPreparation();
+        PXInvalidateRuntimeSnapshotReader();
+        PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
+        errno = incomingErrno;
+        return snapshot;
+    }
 
     if (gPXIdentityBuildInProgress) {
         os_unfair_lock_lock(&gPXIdentitySnapshotLock);
@@ -232,10 +261,10 @@ PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
     PXIdentitySnapshot *candidate = nil;
     @try {
         @autoreleasepool {
-            candidate = PXBuildIdentitySnapshot();
+            candidate = PXBuildIdentitySnapshot(nil);
         }
     } @catch (__unused NSException *exception) {
-        candidate = [[PXIdentitySnapshot alloc] initWithProfileID:(PXRuntimeSnapshotProfileID() ?: PXActiveProfileID())
+        candidate = [[PXIdentitySnapshot alloc] initWithProfileID:PXActiveProfileID()
                                                        generation:0
                                                         deviceIDs:@{}
                                                          settings:@{}
@@ -273,6 +302,21 @@ PXIdentitySnapshot *PXReloadIdentitySnapshot(NSString *reason) {
 
 PXIdentitySnapshot *PXCurrentIdentitySnapshot(void) {
     int incomingErrno = errno;
+    if (PXIdentityUsesCapturedRuntime()) {
+        PXRuntimeReadSnapshot *runtime = PXCaptureRuntimeSnapshot();
+        PXIdentitySnapshot *snapshot = objc_getAssociatedObject(runtime, &kPXRuntimeIdentityProjection);
+        if (!snapshot) {
+            static PXIdentitySnapshot *unavailable;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                unavailable = [[PXIdentitySnapshot alloc] initWithProfileID:nil generation:0 deviceIDs:@{}
+                    settings:@{} specs:@{} source:@"runtime-pending" validationIssues:@{} valid:NO];
+            });
+            snapshot = unavailable;
+        }
+        errno = incomingErrno;
+        return snapshot;
+    }
     os_unfair_lock_lock(&gPXIdentitySnapshotLock);
     PXIdentitySnapshot *snapshot = gPXIdentitySnapshot;
     os_unfair_lock_unlock(&gPXIdentitySnapshotLock);
@@ -282,6 +326,10 @@ PXIdentitySnapshot *PXCurrentIdentitySnapshot(void) {
 }
 
 void PXInvalidateIdentitySnapshot(void) {
+    if (PXIdentityUsesCapturedRuntime()) {
+        PXInvalidateRuntimeSnapshotReader();
+        return;
+    }
     os_unfair_lock_lock(&gPXIdentitySnapshotLock);
     gPXIdentitySnapshot = nil;
     gPXIdentityPublishedSequence = ++gPXIdentityReloadSequence;
@@ -302,6 +350,11 @@ static void PXIdentitySnapshotNotification(CFNotificationCenterRef center,
 void PXIdentitySnapshotStartObserving(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        if (PXIdentityUsesCapturedRuntime()) {
+            PXRegisterRuntimeIdentityPreparation();
+            (void)PXPrepareRuntimeSnapshotReader();
+            return;
+        }
         CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
         if (center) {
             for (NSString *name in @[@"com.hydra.tlinkios.settings.changed",

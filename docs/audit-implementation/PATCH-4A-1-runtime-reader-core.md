@@ -1,7 +1,7 @@
 # Patch 4A.1 — Runtime reader core và BootTime RootHide
 
 Ngày: 2026-10-24. Baseline: `85f8c9a`. Người dùng xác nhận build Patch 3 pass trước lượt triển khai này.
-Trạng thái: source implemented, host gates PASS; native fixture/Logos build mới chưa chạy trên Windows. Đây là bước đầu của 4A, chưa hoàn tất migration hoặc transactional publication model.
+Trạng thái: source implemented, host gates PASS; người dùng xác nhận build 4A.1 pass trước khi triển khai 4A.2. Windows không tự chạy native fixture; chưa có log theo từng case/lane/device để xác nhận toàn bộ runtime matrix. Consumer manifest dưới đây là baseline được xử lý tiếp trong [4A.2](PATCH-4A-2-captured-runtime-consumers.md), không phải kết luận transactional model đã hoàn tất.
 
 ## Phạm vi và lý do chia bước
 

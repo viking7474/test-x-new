@@ -3,6 +3,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// Existing numeric/string boolean conventions, fail closed for malformed types.
+FOUNDATION_EXPORT BOOL PXRuntimeReadBool(id _Nullable value);
+
 /// Detached, deeply immutable view. Legacy schema 1 has no publication identity;
 /// readerGeneration is process-local and must never masquerade as publisher revision.
 @interface PXRuntimeReadSnapshot : NSObject
@@ -42,6 +45,9 @@ typedef NSDictionary * _Nullable (^PXRuntimeSnapshotLoader)(void);
 /// Slow fallback refresh retains the current view only while loading; failure
 /// publishes an invalid/empty view rather than preserving enablement indefinitely.
 - (void)requestRefresh;
+/// Runs on the loader queue before publication; changing it invalidates current
+/// views. Handler must not mutate/re-publish a view after this callback returns.
+- (void)setPreparationHandler:(void (^ _Nullable)(PXRuntimeReadSnapshot *view))handler;
 /// Bootstrap/tests only. Never use this on a hot hook or from the loader queue.
 - (BOOL)waitForPendingRefresh:(NSTimeInterval)timeout;
 @end

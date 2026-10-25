@@ -166,18 +166,18 @@ require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
         '@"storage"' in runtime_snapshot and '@"batteryInfo"' in runtime_snapshot and
         '@"bootTime"' in runtime_snapshot and '@"systemUptime"' in runtime_snapshot,
         "RootHide runtime mirror is missing profile artifacts or is not mirrored atomically into scoped app containers")
-require('PXRuntimeSnapshotProfileArtifact(@"storage")' in storage_hooks and
-        'PXRuntimeSnapshotTLinkSettings()' in storage_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"batteryInfo")' in battery_hooks and
-        'PXRuntimeSnapshotDeviceIDs()' in battery_hooks and
+require('[runtimeView profileArtifact:@"storage"]' in storage_hooks and
+        'runtimeView.tlinkSettings' in storage_hooks and
+        '[runtimeView profileArtifact:@"batteryInfo"]' in battery_hooks and
+        'runtimeView.deviceIDs' in battery_hooks and
         'PXCaptureRuntimeSnapshot()' in boot_time_hooks and
         '[snapshot profileArtifact:@"bootTime"]' in boot_time_hooks and
         '[snapshot profileArtifact:@"systemUptime"]' in boot_time_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"networkSettings")' in network_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"carrierDetails")' in network_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"deviceTheme")' in theme_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"userDefaultsUUID")' in user_defaults_hooks and
-        'PXRuntimeSnapshotProfileArtifact(@"pasteboardUUID")' in pasteboard_hooks,
+        '[runtimeView profileArtifact:@"networkSettings"]' in network_hooks and
+        '[runtimeView profileArtifact:@"carrierDetails"]' in network_hooks and
+        '[runtimeView profileArtifact:@"deviceTheme"]' in theme_hooks and
+        '[runtimeView profileArtifact:@"userDefaultsUUID"]' in user_defaults_hooks and
+        '[runtimeView profileArtifact:@"pasteboardUUID"]' in pasteboard_hooks,
         "RootHide runtime hooks still depend on sandbox-inaccessible profile plist paths")
 require('publishRuntimeSnapshotWithReason' in daemon and
         'runtime_snapshot_debug.plist' in daemon and
@@ -189,21 +189,21 @@ require('publishRuntimeSnapshotWithReason' in daemon and
         'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in daemon and
         'com.hydra.tlinkios.scopedAppsChanged' in daemon,
         "WeaponXDaemon does not publish/invalidate/diagnose/poll-fallback the RootHide runtime mirror")
-require('PXRuntimeSnapshotSecuritySettings()' in scope and
-        'PXRuntimeSnapshotGlobalScope()' in scope and
+require('PXCaptureRuntimeSnapshot().securitySettings' in scope and
+        'PXCaptureRuntimeSnapshot().globalScope' in scope and
         'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in scope,
         "PXScope still depends on sandbox-inaccessible rootfs settings on RootHide")
-require('PXLoadRuntimeSnapshot()' in identity_snapshot and
+require('PXRuntimeSnapshotRegisterPreparation' in identity_snapshot and
         'roothide-runtime-mirror' in identity_snapshot and
         'com.hydra.tlinkios.runtimeSnapshotChanged' in identity_snapshot,
         "PXIdentitySnapshot does not consume/invalidate the RootHide runtime mirror")
-require('PXRuntimeSnapshotTLinkSettings()' in identifier_manager and
+require('runtimeView.tlinkSettings' in identifier_manager and
         'runtimeSettings[@"EnabledIdentifiers"]' in identifier_manager and
         'runtimeEnabled[lookupType]' in identifier_manager and
-        'PXRuntimeSnapshotImpliesIdentifierEnabled(type)' in identifier_manager and
+        'PXRuntimeSnapshotImpliesIdentifierEnabled(type, runtimeView)' in identifier_manager and
         'PXIdentifierManagerIsManagerProcess' in identifier_manager and
         'if (!PXIdentifierManagerIsManagerProcess())' in identifier_manager and
-        'PXRuntimeSnapshotGlobalScope()' in identifier_manager and
+        'PXCaptureRuntimeSnapshot().globalScope' in identifier_manager and
         'PXCurrentIdentitySnapshot()' in identifier_manager,
         "IdentifierManager does not separate live manager settings from RootHide injected-host snapshot settings")
 active_profile_method = identifier_manager[
@@ -211,10 +211,10 @@ active_profile_method = identifier_manager[
     identifier_manager.index('- (NSString *)profileIdentityPath')
 ]
 require('if (!PXIdentifierManagerIsManagerProcess())' in active_profile_method and
-        'profileID = PXRuntimeSnapshotProfileID();' in active_profile_method and
+        'return PXCaptureRuntimeSnapshot().profileID;' in active_profile_method and
         'if (!profileID.length) profileID = PXActiveProfileID();' in active_profile_method and
         active_profile_method.index('if (!PXIdentifierManagerIsManagerProcess())') <
-        active_profile_method.index('profileID = PXRuntimeSnapshotProfileID();') <
+        active_profile_method.index('return PXCaptureRuntimeSnapshot().profileID;') <
         active_profile_method.index('if (!profileID.length) profileID = PXActiveProfileID();'),
         "RootHide manager can still regenerate identifiers into the stale runtime-snapshot profile")
 current_value_method = identifier_manager[

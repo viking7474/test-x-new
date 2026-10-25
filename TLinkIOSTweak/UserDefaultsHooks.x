@@ -28,24 +28,33 @@ static void clearCacheCallback(CFNotificationCenterRef center, void *observer, C
 
 // Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
     if (!NSClassFromString(@"IdentifierManager")) return NO;
     IdentifierManager *manager = [NSClassFromString(@"IdentifierManager") sharedManager];
-    return [manager isIdentifierEnabled:@"UserDefaultsUUID"];
+    if (![manager isIdentifierEnabled:@"UserDefaultsUUID"]) return NO;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return getSpoofedUserDefaultsUUID().length > 0;
+#else
+    return YES;
+#endif
 }
 
 // Add function to get spoofed UserDefaults UUID from manager
 static NSString *getSpoofedUserDefaultsUUID(void) {
+    PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeIDs = PXRuntimeSnapshotDeviceIDs();
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *runtimeIDs = runtimeView.deviceIDs;
     NSString *runtimeUUID = PXProfileString(runtimeIDs[@"UserDefaultsUUID"]);
     if (!runtimeUUID.length) {
-        NSDictionary *runtimeArtifact = PXRuntimeSnapshotProfileArtifact(@"userDefaultsUUID");
+        NSDictionary *runtimeArtifact = [runtimeView profileArtifact:@"userDefaultsUUID"];
         runtimeUUID = PXProfileString(runtimeArtifact[@"value"]);
     }
     if (runtimeUUID.length) return runtimeUUID;
+    return nil;
 #endif
     // Rootful / manager fallback: use the historical manager-backed storage.
     UserDefaultsUUIDManager *manager = [UserDefaultsUUIDManager sharedManager];
@@ -96,6 +105,7 @@ static NSString *getSpoofedUserDefaultsUUID(void) {
 // Function to recursively process dictionary values and replace UUIDs.
 // Preserves immutable/mutable contract of the original collection when possible.
 static id processDictionaryValues(id object) {
+    PX_RUNTIME_READ_OPERATION;
     // Base case: not a dictionary or array
     if (!object || (![object isKindOfClass:[NSDictionary class]] && ![object isKindOfClass:[NSArray class]])) {
         return object;
@@ -108,6 +118,7 @@ static id processDictionaryValues(id object) {
         NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:dict.count];
         
         NSString *spoofedUUID = getSpoofedUserDefaultsUUID();
+        if (!spoofedUUID.length) return object;
         
         for (id key in dict) {
             // Check if this key is UUID-related
@@ -173,6 +184,7 @@ static BOOL isUUIDKey(NSString *key) {
 // Base method for getting objects - SAFE VERSION
 // Always get original value first, only spoof if value is actually UUID-like
 - (id)objectForKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     // Recursion guard
     if (isInsideHook || PXScopeIsReadingSecuritySettings()) {
         return %orig;
@@ -263,6 +275,7 @@ static BOOL isUUIDKey(NSString *key) {
 // String-specific method - SAFE VERSION
 // Only spoof if original value looks like UUID
 - (NSString *)stringForKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) return %orig;
     
     // Always get original value first
@@ -289,6 +302,7 @@ static BOOL isUUIDKey(NSString *key) {
 
 // Dictionary method - only process if key looks UUID-related
 - (NSDictionary<NSString *, id> *)dictionaryForKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) return %orig;
     
     NSDictionary *originalDict = %orig;
@@ -316,6 +330,7 @@ static BOOL isUUIDKey(NSString *key) {
 // Add additional accessor methods
 
 - (NSArray *)arrayForKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) return %orig;
     
     NSArray *originalArray = %orig;
@@ -343,6 +358,7 @@ static BOOL isUUIDKey(NSString *key) {
 // Data method - SAFE VERSION
 // Only spoof if key is UUID AND data is 16 bytes (UUID binary format)
 - (NSData *)dataForKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) return %orig;
     
     // Always get original value first
@@ -423,6 +439,7 @@ static BOOL isUUIDKey(NSString *key) {
 // void setter hooks. Getter hooks above still provide UserDefaults spoofing.
 // Base setter method
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) { %orig(value, defaultName); return; }
     id valueToStore = value;
     
@@ -455,6 +472,7 @@ static BOOL isUUIDKey(NSString *key) {
 
 // String-specific setter
 - (void)setString:(NSString *)value forKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) { %orig(value, defaultName); return; }
     NSString *valueToStore = value;
     
@@ -478,6 +496,7 @@ static BOOL isUUIDKey(NSString *key) {
 
 // Dictionary-specific setter
 - (void)setDictionary:(NSDictionary<NSString *,id> *)value forKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) { %orig(value, defaultName); return; }
     NSDictionary *valueToStore = value;
     
@@ -501,6 +520,7 @@ static BOOL isUUIDKey(NSString *key) {
 // Data-specific setter - SAFE VERSION
 // Only spoof if key is UUID AND data is 16 bytes (UUID binary format)
 - (void)setData:(NSData *)value forKey:(NSString *)defaultName {
+    PX_RUNTIME_READ_OPERATION;
     if (isInsideHook) { %orig(value, defaultName); return; }
     NSData *valueToStore = value;
     

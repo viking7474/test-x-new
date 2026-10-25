@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import "TLinkIOS.h"
 #import "DeviceModelManager.h"
 #import "IdentifierManager.h"
@@ -587,6 +588,7 @@ static NSObject *PXDeviceSpecSnapshotLockObject(void) {
 }
 
 static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = getCurrentBundleID();
     NSString *processName = [NSProcessInfo processInfo].processName;
     BOOL allowed = bundleID.length && PXProcessIsAllowedForSpoofing(bundleID,
@@ -673,7 +675,12 @@ static PXDeviceSpecSnapshot *PXBuildDeviceSpecSnapshot(uint64_t generation) {
                                                     source:source];
 }
 
+static PXDeviceSpecSnapshot *PXCurrentDeviceSpecSnapshot(void);
 static PXDeviceSpecSnapshot *PXReloadDeviceSpecSnapshot(NSString *reason) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCurrentDeviceSpecSnapshot();
+#else
     int incomingErrno = errno;
     NSObject *lock = PXDeviceSpecSnapshotLockObject();
 
@@ -752,9 +759,21 @@ static PXDeviceSpecSnapshot *PXReloadDeviceSpecSnapshot(NSString *reason) {
     }
     errno = incomingErrno;
     return published;
+#endif
 }
 
 static PXDeviceSpecSnapshot *PXCurrentDeviceSpecSnapshot(void) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    static char deviceSpecKey;
+    PXRuntimeReadSnapshot *view = PXCaptureRuntimeSnapshot();
+    PXDeviceSpecSnapshot *snapshot = objc_getAssociatedObject(view, &deviceSpecKey);
+    if (!snapshot) {
+        snapshot = PXBuildDeviceSpecSnapshot([PXCurrentIdentitySnapshot() generation]);
+        if (view) objc_setAssociatedObject(view, &deviceSpecKey, snapshot, OBJC_ASSOCIATION_RETAIN);
+    }
+    return snapshot;
+#else
     int incomingErrno = errno;
     NSObject *lock = PXDeviceSpecSnapshotLockObject();
     PXDeviceSpecSnapshot *snapshot = nil;
@@ -764,9 +783,11 @@ static PXDeviceSpecSnapshot *PXCurrentDeviceSpecSnapshot(void) {
     if (!snapshot) snapshot = PXReloadDeviceSpecSnapshot(@"lazy");
     errno = incomingErrno;
     return snapshot;
+#endif
 }
 
 static PXDeviceSpecSnapshot *PXActiveDeviceSpecSnapshot(void) {
+    PX_RUNTIME_READ_OPERATION;
     PXDeviceSpecSnapshot *snapshot = PXCurrentDeviceSpecSnapshot();
     return snapshot.enabled ? snapshot : nil;
 }
@@ -776,18 +797,46 @@ static PXDeviceSpecSnapshot *PXActiveDeviceSpecSnapshot(void) {
 // Central WKWebView ownership lives in CanvasFingerprintHooks.x. This exported helper
 // contributes device capability spoofing without installing additional WKWebView hooks.
 void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentController) {
+    PX_RUNTIME_READ_OPERATION;
     if (!userContentController) return;
 
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
     if (!snapshot) return;
 
+    uint64_t scriptGeneration = snapshot.generation;
+    NSDictionary *specs = snapshot.specs;
+    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
+    NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    scriptGeneration = PXCaptureRuntimeSnapshot().readerGeneration;
+    uint64_t previous = 0;
+    NSInteger previousMemory = 0;
+    NSUInteger previousCores = 0;
+    for (WKUserScript *owned in userContentController.userScripts) {
+        if (![owned.source hasPrefix:@"/*__weaponx_device_capabilities_generation__:"]) continue;
+        NSRange end = [owned.source rangeOfString:@"*/"];
+        if (end.location == NSNotFound) continue;
+        NSArray<NSString *> *parts = [[owned.source substringWithRange:NSMakeRange(2, end.location - 2)] componentsSeparatedByString:@":"];
+        if (parts.count != 4) continue;
+        uint64_t existing = parts[1].longLongValue;
+        if (existing > previous) {
+            previous = existing;
+            previousMemory = parts[2].integerValue;
+            previousCores = parts[3].integerValue;
+        }
+    }
+    if (!PXRuntimeShouldStageWebCapabilities(scriptGeneration, deviceMemoryGB, cpuCoreCount, previous, previousMemory, previousCores)) return;
+    NSString *generationMarker = [NSString stringWithFormat:@"__weaponx_device_capabilities_generation__:%llu:%ld:%lu",
+        (unsigned long long)scriptGeneration, (long)deviceMemoryGB, (unsigned long)cpuCoreCount];
+#else
     NSString *generationMarker = [NSString stringWithFormat:@"__weaponx_device_capabilities_generation__:%llu",
-                                  (unsigned long long)snapshot.generation];
+                                  (unsigned long long)scriptGeneration];
     for (WKUserScript *existingScript in userContentController.userScripts) {
         if ([existingScript.source containsString:generationMarker]) {
             return;
         }
     }
+#endif
 
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     NSString *processName = [NSProcessInfo processInfo].processName;
@@ -797,9 +846,6 @@ void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentControll
         return;
     }
 
-    NSDictionary *specs = snapshot.specs;
-    NSInteger deviceMemoryGB = PXDeviceMemoryGBFromSpecs(specs);
-    NSUInteger cpuCoreCount = PXCPUCoreCountFromSpecs(specs);
     if (deviceMemoryGB <= 0 && cpuCoreCount == 0) return;
 
     // Multiple immutable generations may coexist in a long-lived content
@@ -828,7 +874,7 @@ void PXInstallDeviceSpecUserScripts(WKUserContentController *userContentControll
          "  } catch(e) {}\n"
          "})();",
         generationMarker,
-        (unsigned long long)snapshot.generation,
+        (unsigned long long)scriptGeneration,
         (long)deviceMemoryGB,
         (long)cpuCoreCount];
 
@@ -855,6 +901,7 @@ static CGSize parseResolution(NSString *resolutionString) {
 
 // Check if current process is a WebKit/WebContent process that needs resolution spoofing
 static BOOL shouldSpoofResolutionForCurrentProcess() {
+    PX_RUNTIME_READ_OPERATION;
     // IMPORTANT:
     // By default, do NOT spoof UIScreen bounds/scale for Safari/Auth stack processes.
     // In SafariViewService/WebKit services, spoofing UIScreen can desync touch hit-testing
@@ -884,6 +931,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for bounds (controls size of the screen in points)
 - (CGRect)bounds {
+    PX_RUNTIME_READ_OPERATION;
     CGRect originalBounds = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -941,6 +989,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for nativeBounds (actual pixels)
 - (CGRect)nativeBounds {
+    PX_RUNTIME_READ_OPERATION;
     CGRect originalNativeBounds = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -979,6 +1028,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for scale (affects UI element sizes)
 - (CGFloat)scale {
+    PX_RUNTIME_READ_OPERATION;
     CGFloat originalScale = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1005,6 +1055,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for current mode (affects refresh rate)
 - (UIScreenMode *)currentMode {
+    PX_RUNTIME_READ_OPERATION;
     UIScreenMode *originalMode = %orig;
     
     if (!PXActiveDeviceSpecSnapshot()) {
@@ -1025,6 +1076,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for physical memory (RAM)
 - (unsigned long long)physicalMemory {
+    PX_RUNTIME_READ_OPERATION;
     unsigned long long originalMemory = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1064,6 +1116,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for available memory
 - (unsigned long long)availableMemory {
+    PX_RUNTIME_READ_OPERATION;
     unsigned long long originalAvailableMemory = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1095,6 +1148,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for processor count
 - (NSUInteger)processorCount {
+    PX_RUNTIME_READ_OPERATION;
     NSUInteger originalCount = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1121,6 +1175,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Add hook for CPU architecture information
 - (NSString *)machineHardwareName {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalName = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1154,6 +1209,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // WebKit returns `id` (string/number/array/etc). Returning the wrong type can break JS.
 - (id)getParameter:(unsigned)pname {
+    PX_RUNTIME_READ_OPERATION;
     id original = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1211,6 +1267,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Hook for name property
 - (NSString *)name {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalName = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1236,6 +1293,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Also hook the family name property
 - (NSString *)familyName {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalFamilyName = %orig;
     
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1268,6 +1326,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 // nativeScale is a model datum, not a PPI-derived estimate. Older Plus models
 // intentionally have nativeScale != scale because their render buffer is downsampled.
 - (CGFloat)nativeScale {
+    PX_RUNTIME_READ_OPERATION;
     CGFloat original = %orig;
 
     PXDeviceSpecSnapshot *snapshot = PXActiveDeviceSpecSnapshot();
@@ -1283,6 +1342,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Private spelling used by some callers; project the exact same canonical field.
 - (CGFloat)native_scale {
+    PX_RUNTIME_READ_OPERATION;
     CGFloat originalScale = %orig;
     
     // Avoid spoofing screen density in Safari/Auth stack; it can desync page layout/touch logic.
@@ -1310,6 +1370,7 @@ static BOOL shouldSpoofResolutionForCurrentProcess() {
 
 // Rebuild and atomically publish the next immutable generation on profile changes.
 static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    PX_RUNTIME_READ_OPERATION;
     (void)center;
     (void)observer;
     (void)object;
@@ -1395,6 +1456,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
             orig_sysctlbyname_device_spec = [coord originalForSymbol:kPXNativeSymbolSysctlByname];
             static dispatch_once_t deviceSpecSysctlProviderOnce;
             dispatch_once(&deviceSpecSysctlProviderOnce, ^{
+    PX_RUNTIME_READ_OPERATION;
                 BOOL registered = NO;
                 if (orig_sysctlbyname_device_spec) {
                     registered = [coord registerSysctlBynameProvider:@"devicespec.sysctlbyname"
@@ -1405,6 +1467,7 @@ static void refreshCaches(CFNotificationCenterRef center, void *observer, CFStri
                                                                               void *newp,
                                                                               size_t newlen,
                                                                               int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                     return handleDeviceSpecSysctlByname(name, oldp, oldlenp, newp, newlen, outResult);
                 }
                                                                   post:nil];
@@ -1514,6 +1577,7 @@ static void getConsistentMemoryStats(NSDictionary *specs,
 
 // NXGetLocalArchInfo reports ABI subtype, sourced from the canonical CPU profile.
 static const NXArchInfo *hook_nx_get_local_arch_info(void) {
+    PX_RUNTIME_READ_OPERATION;
     if (!orig_nx_get_local_arch_info) return NULL;
 
     const NXArchInfo *original = orig_nx_get_local_arch_info();
@@ -1547,6 +1611,7 @@ static const NXArchInfo *hook_nx_get_local_arch_info(void) {
 
 // Host statistics hook for memory stats
 static kern_return_t hook_host_statistics64(host_t host, host_flavor_t flavor, host_info64_t info, mach_msg_type_number_t *count) {
+    PX_RUNTIME_READ_OPERATION;
     if (!orig_host_statistics64) return KERN_FAILURE;
     kern_return_t result = orig_host_statistics64(host, flavor, info, count);
 
@@ -1637,6 +1702,7 @@ static kern_return_t hook_host_info_device_spec(host_t host,
                                                 host_flavor_t flavor,
                                                 host_info_t info,
                                                 mach_msg_type_number_t *count) {
+    PX_RUNTIME_READ_OPERATION;
     if (!orig_host_info_device_spec) return KERN_FAILURE;
     kern_return_t result = orig_host_info_device_spec(host, flavor, info, count);
     if (result != KERN_SUCCESS || !info || !count || flavor != HOST_BASIC_INFO ||
@@ -1665,6 +1731,7 @@ static BOOL handleDeviceSpecSysctlByname(const char *name,
                                          void *newp,
                                          size_t newlen,
                                          int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
     if (!name || !outResult || !oldlenp || newp != NULL || newlen != 0) {
         return NO;
     }

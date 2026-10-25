@@ -38,7 +38,9 @@ for folder in ("TLinkIOSTweak", "common"):
 assert entries >= 27, f"Startup inventory unexpectedly shrank: {entries}"
 scope = read("TLinkIOSTweak/PXScope.m")
 assert "static void PXScopeStartObserving(void)" in scope and "PXScopeInit" not in scope
-assert "if (result.capabilities) PXScopeStartObserving();" in scope
+assert re.search(r"if \(result\.capabilities\) \{\s*PXScopeStartObserving\(\);", scope)
+assert scope.count("PXScopeStartObserving();") == 1
+assert re.search(r"if \(result\.capabilities\) \{[^}]*PXIdentitySnapshotStartObserving\(\);", scope)
 assert "BOOL safari = NO;" in scope, "No implicit grant to unscoped Safari"
 helper = scope.split("BOOL PXIsWebKitHelperProcess(", 1)[1].split("NSString *PXWebKitHostBundleIdentifier", 1)[0]
 assert "containsString:" not in helper, "App names must not be mistaken for helper ownership"

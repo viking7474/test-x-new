@@ -101,10 +101,14 @@ static NSDate *lastNetworkTypeChangeTime = nil;
 static const NSTimeInterval kMinNetworkTypeChangeDuration = 120.0; // Minimum 2 minutes between technology changes
 
 static BOOL PXNetworkDataSpoofEnabledCached(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXRuntimeReadBool(PXCaptureRuntimeSnapshot().securitySettings[@"networkDataSpoofEnabled"]);
+#else
     os_unfair_lock_lock(&gNetworkCacheLock);
     BOOL enabled = cachedNetworkDataSpoofEnabled;
     os_unfair_lock_unlock(&gNetworkCacheLock);
     return enabled;
+#endif
 }
 
 static void PXNetworkInvalidateCaches(void) {
@@ -140,8 +144,10 @@ static NSString *getCurrentBundleID() {
 }
 
 static NSDictionary *PXNetworkSecuritySettings(void) {
+    PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    return PXRuntimeSnapshotSecuritySettings();
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    return runtimeView.securitySettings;
 #else
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kSecuritySettingsPath];
     return [settings isKindOfClass:NSDictionary.class] ? settings : @{};
@@ -150,13 +156,22 @@ static NSDictionary *PXNetworkSecuritySettings(void) {
 
 // Get the current ISO country code from security settings
 static NSString *getCurrentISOCountryCode() {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    static char isoResultKey;
+    PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
+    NSString *memo = objc_getAssociatedObject(operationView, &isoResultKey);
+    if (memo) return memo;
+#endif
     NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
     BOOL valid = cachedISOCountryCode && isoCountryCodeCacheTimestamp &&
         [now timeIntervalSinceDate:isoCountryCodeCacheTimestamp] < kISOCountryCodeCacheValidDuration;
     NSString *cached = valid ? cachedISOCountryCode : nil;
     os_unfair_lock_unlock(&gNetworkCacheLock);
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (cached) return cached;
+#endif
 
     NSDictionary *settings = PXNetworkSecuritySettings();
     NSString *isoCode = nil;
@@ -174,21 +189,36 @@ static NSString *getCurrentISOCountryCode() {
     }
 
     os_unfair_lock_lock(&gNetworkCacheLock);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (operationView) objc_setAssociatedObject(operationView, &isoResultKey, isoCode, OBJC_ASSOCIATION_RETAIN);
+    return isoCode;
+#else
     cachedISOCountryCode = [isoCode copy];
     isoCountryCodeCacheTimestamp = now;
     NSString *published = cachedISOCountryCode;
     os_unfair_lock_unlock(&gNetworkCacheLock);
     return published;
+#endif
 }
 
 static NSDictionary *getTargetRegionPinnedOverrides(void) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    static char pinnedResultKey;
+    PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
+    id memo = objc_getAssociatedObject(operationView, &pinnedResultKey);
+    if (memo) return memo == NSNull.null ? nil : memo;
+#endif
     NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
     BOOL valid = targetRegionCacheTimestamp &&
         [now timeIntervalSinceDate:targetRegionCacheTimestamp] < kTargetRegionCacheValidDuration;
     NSDictionary *cached = valid ? cachedTargetRegion : nil;
     os_unfair_lock_unlock(&gNetworkCacheLock);
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (valid) return cached;
+#endif
 
     NSDictionary *settings = PXNetworkSecuritySettings();
     NSDictionary *resolved = nil;
@@ -212,14 +242,21 @@ static NSDictionary *getTargetRegionPinnedOverrides(void) {
     }
 
     os_unfair_lock_lock(&gNetworkCacheLock);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    os_unfair_lock_unlock(&gNetworkCacheLock);
+    if (operationView) objc_setAssociatedObject(operationView, &pinnedResultKey, resolved ?: NSNull.null, OBJC_ASSOCIATION_RETAIN);
+    return resolved;
+#else
     cachedTargetRegion = [resolved copy];
     targetRegionCacheTimestamp = now;
     NSDictionary *published = cachedTargetRegion;
     os_unfair_lock_unlock(&gNetworkCacheLock);
     return published;
+#endif
 }
 
 static BOOL shouldForceCarrierSpoof(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *settings = PXNetworkSecuritySettings();
     if (![settings isKindOfClass:[NSDictionary class]]) return NO;
     if ([settings[@"targetRegionFollowsIPEnabled"] boolValue]) return YES;
@@ -234,11 +271,13 @@ static NSString *getProfileIdentityPath() {
 
 // Read persisted profile IP values without generating or writing from inside native hooks.
 static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *deviceIDsKey) {
+    PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *networkDict = PXRuntimeSnapshotProfileArtifact(@"networkSettings");
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *networkDict = [runtimeView profileArtifact:@"networkSettings"];
     id networkValue = networkDict[networkKey];
     if ([networkValue isKindOfClass:NSString.class] && [(NSString *)networkValue length] > 0) return networkValue;
-    NSDictionary *deviceIds = PXRuntimeSnapshotDeviceIDs();
+    NSDictionary *deviceIds = runtimeView.deviceIDs;
     id deviceValue = deviceIds[deviceIDsKey];
     return [deviceValue isKindOfClass:NSString.class] && [(NSString *)deviceValue length] > 0 ? deviceValue : nil;
 #else
@@ -264,10 +303,12 @@ static NSString *getProfileStoredIPAddress(NSString *networkKey, NSString *devic
 }
 
 static NSString *getProfileLocalIPAddress() {
+    PX_RUNTIME_READ_OPERATION;
     return getProfileStoredIPAddress(@"localIPAddress", @"LocalIPAddress");
 }
 
 static NSString *getProfileLocalIPv6Address() {
+    PX_RUNTIME_READ_OPERATION;
     return getProfileStoredIPAddress(@"localIPv6Address", @"LocalIPv6Address");
 }
 
@@ -283,11 +324,13 @@ static BOOL PXNetworkParseIPv6(NSString *value, struct in6_addr *outAddress) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
 static BOOL isInScopedAppsList() {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = getCurrentBundleID();
     if (!bundleID) {
         return NO;
@@ -322,15 +365,24 @@ static BOOL isInScopedAppsList() {
 
 // Get the current connection type setting from the plist
 static NetworkConnectionType getNetworkConnectionType() {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    static char typeKey;
+    PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
+    NSNumber *memo = objc_getAssociatedObject(operationView, &typeKey);
+    if (memo) return (NetworkConnectionType)memo.integerValue;
+#endif
     NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
     BOOL valid = cacheTimestamp && [now timeIntervalSinceDate:cacheTimestamp] < kCacheValidDuration;
     NetworkConnectionType cachedType = (NetworkConnectionType)cachedConnectionType;
     os_unfair_lock_unlock(&gNetworkCacheLock);
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (valid) return cachedType;
+#endif
 
     NSDictionary *settings = PXNetworkSecuritySettings();
-    BOOL enabled = [settings[@"networkDataSpoofEnabled"] boolValue];
+    BOOL enabled = PXRuntimeReadBool(settings[@"networkDataSpoofEnabled"]);
     NSInteger rawType = [settings[@"networkConnectionType"] respondsToSelector:@selector(integerValue)]
         ? [settings[@"networkConnectionType"] integerValue]
         : NetworkConnectionTypeAuto;
@@ -339,11 +391,15 @@ static NetworkConnectionType getNetworkConnectionType() {
     }
     NetworkConnectionType type = enabled ? (NetworkConnectionType)rawType : (NetworkConnectionType)-1;
 
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (operationView) objc_setAssociatedObject(operationView, &typeKey, @(type), OBJC_ASSOCIATION_RETAIN);
+#else
     os_unfair_lock_lock(&gNetworkCacheLock);
     cachedConnectionType = type;
     cachedNetworkDataSpoofEnabled = enabled;
     cacheTimestamp = now;
     os_unfair_lock_unlock(&gNetworkCacheLock);
+#endif
     return type;
 }
 
@@ -365,6 +421,7 @@ static BOOL shouldUseWiFiForAutoMode() {
 // Hooks remain installed for scoped apps so Security UI changes can take effect live,
 // but they must become transparent whenever the authoritative setting is disabled.
 static BOOL shouldApplyNetworkSpoofing() {
+    PX_RUNTIME_READ_OPERATION;
     NetworkConnectionType type = getNetworkConnectionType();
     if (type == (NetworkConnectionType)-1 || !PXNetworkDataSpoofEnabledCached()) {
         return NO;
@@ -374,11 +431,13 @@ static BOOL shouldApplyNetworkSpoofing() {
 
 // Connection type "None" is an active spoofing mode: report no connection.
 static BOOL shouldSpoofConnectionType() {
+    PX_RUNTIME_READ_OPERATION;
     return shouldApplyNetworkSpoofing();
 }
 
 // Helper to check if we should show as WiFi
 static BOOL shouldShowAsWiFi() {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing()) return NO;
     NetworkConnectionType type = getNetworkConnectionType();
     
@@ -393,6 +452,7 @@ static BOOL shouldShowAsWiFi() {
 
 // Helper to check if we should show as Cellular
 static BOOL shouldShowAsCellular() {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing()) return NO;
     NetworkConnectionType type = getNetworkConnectionType();
     if (type == NetworkConnectionTypeCellular) {
@@ -404,11 +464,19 @@ static BOOL shouldShowAsCellular() {
 }
 
 static BOOL shouldShowAsNoConnection() {
+    PX_RUNTIME_READ_OPERATION;
     return shouldApplyNetworkSpoofing() && getNetworkConnectionType() == NetworkConnectionTypeNone;
 }
 
 // Get carrier details from the current profile
 static NSDictionary *getCarrierDetailsFromProfile() {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    static char carrierResultKey;
+    PXRuntimeReadSnapshot *operationView = PXCaptureRuntimeSnapshot();
+    NSDictionary *memo = objc_getAssociatedObject(operationView, &carrierResultKey);
+    if (memo) return memo;
+#endif
     NSDictionary *pinned = getTargetRegionPinnedOverrides();
     NSDate *now = [NSDate date];
     if (pinned) {
@@ -423,6 +491,9 @@ static NSDictionary *getCarrierDetailsFromProfile() {
         cachedMobileNetworkCode = [result[@"mobileNetworkCode"] copy];
         carrierDetailsCacheTimestamp = now;
         os_unfair_lock_unlock(&gNetworkCacheLock);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        if (operationView) objc_setAssociatedObject(operationView, &carrierResultKey, result, OBJC_ASSOCIATION_RETAIN);
+#endif
         return result;
     }
 
@@ -436,19 +507,25 @@ static NSDictionary *getCarrierDetailsFromProfile() {
         @"mobileNetworkCode": cachedMobileNetworkCode
     } : nil;
     os_unfair_lock_unlock(&gNetworkCacheLock);
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (cached) return cached;
+#endif
 
     NSString *carrierName = kFakeCarrierName;
     NSString *mcc = kFakeMobileCountryCode;
     NSString *mnc = kFakeMobileNetworkCode;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *carrier = PXRuntimeSnapshotProfileArtifact(@"carrierDetails");
-    NSDictionary *network = PXRuntimeSnapshotProfileArtifact(@"networkSettings");
-    NSDictionary *deviceIDs = PXRuntimeSnapshotDeviceIDs();
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *carrier = [runtimeView profileArtifact:@"carrierDetails"];
+    NSDictionary *network = [runtimeView profileArtifact:@"networkSettings"];
+    NSDictionary *deviceIDs = runtimeView.deviceIDs;
     NSDictionary *source = carrier.count ? carrier : (network.count ? network : deviceIDs);
     NSString *sourceName = [source[@"carrierName"] isKindOfClass:NSString.class] ? source[@"carrierName"] : source[@"CarrierName"];
     NSString *sourceMCC = [source[@"mcc"] isKindOfClass:NSString.class] ? source[@"mcc"] : source[@"CarrierMCC"];
     NSString *sourceMNC = [source[@"mnc"] isKindOfClass:NSString.class] ? source[@"mnc"] : source[@"CarrierMNC"];
+    if (![sourceName isKindOfClass:NSString.class]) sourceName = nil;
+    if (![sourceMCC isKindOfClass:NSString.class]) sourceMCC = nil;
+    if (![sourceMNC isKindOfClass:NSString.class]) sourceMNC = nil;
     if (sourceName.length) carrierName = sourceName;
     if (sourceMCC.length) mcc = sourceMCC;
     if (sourceMNC.length) mnc = sourceMNC;
@@ -483,11 +560,15 @@ static NSDictionary *getCarrierDetailsFromProfile() {
     cachedMobileNetworkCode = [result[@"mobileNetworkCode"] copy];
     carrierDetailsCacheTimestamp = now;
     os_unfair_lock_unlock(&gNetworkCacheLock);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    if (operationView) objc_setAssociatedObject(operationView, &carrierResultKey, result, OBJC_ASSOCIATION_RETAIN);
+#endif
     return result;
 }
 
 // Get a realistic WiFi signal strength in dBm that changes gradually over time
 static int getWiFiSignalStrength() {
+    PX_RUNTIME_READ_OPERATION;
     NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
     int current = currentWiFiSignalStrength;
@@ -520,6 +601,7 @@ static int getWiFiSignalStrength() {
 
 // Get realistic cellular signal bars (1-5) that change gradually over time
 static int getCellularSignalBars() {
+    PX_RUNTIME_READ_OPERATION;
     NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gNetworkCacheLock);
     int current = currentCellularSignalBars;
@@ -583,6 +665,7 @@ static NSString *getCurrentCellularNetworkType() {
 static Boolean (*original_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags);
 
 Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
+    PX_RUNTIME_READ_OPERATION;
     Boolean result = original_SCNetworkReachabilityGetFlags(target, flags);
     if (!result || !flags || !shouldSpoofConnectionType()) {
         return result;
@@ -609,6 +692,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 %hook CTTelephonyNetworkInfo
 
 - (NSDictionary<NSString *, CTCarrier *> *)serviceSubscriberCellularProviders {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi()) {
         return %orig;
     }
@@ -618,6 +702,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (CTCarrier *)subscriberCellularProvider {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi()) {
         return %orig;
     }
@@ -626,6 +711,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (NSString *)currentRadioAccessTechnology {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi()) {
         return %orig;
     } else if (shouldShowAsCellular()) {
@@ -635,6 +721,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (NSDictionary<NSString *, NSString *> *)serviceCurrentRadioAccessTechnology {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi()) {
         return %orig;
     } else if (shouldShowAsCellular()) {
@@ -649,6 +736,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 %hook CTCarrier
 
 - (NSString *)carrierName {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi() && !shouldForceCarrierSpoof()) {
         return %orig;
     } else if (shouldShowAsCellular()) {
@@ -661,6 +749,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (NSString *)mobileCountryCode {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi() && !shouldForceCarrierSpoof()) {
         return %orig;
     } else if (shouldShowAsCellular()) {
@@ -673,6 +762,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (NSString *)mobileNetworkCode {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi() && !shouldForceCarrierSpoof()) {
         return %orig;
     } else if (shouldShowAsCellular()) {
@@ -685,6 +775,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (NSString *)isoCountryCode {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi() && !shouldForceCarrierSpoof()) {
         return %orig;
     } else if (shouldShowAsCellular()) {
@@ -697,6 +788,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (BOOL)allowsVOIP {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return %orig;
     }
@@ -713,6 +805,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 %hook NSURLSessionConfiguration
 
 - (BOOL)allowsCellularAccess {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldShowAsWiFi()) {
         return %orig;
     }
@@ -721,6 +814,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 }
 
 - (BOOL)isDiscretionary {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return %orig;
     }
@@ -736,6 +830,7 @@ Boolean hooked_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SC
 
 // Enable getifaddrs hook for local IP spoofing
 static void PXNetworkPostGetifaddrs(struct ifaddrs **ifap, int *inoutResult) {
+    PX_RUNTIME_READ_OPERATION;
     if (!inoutResult || *inoutResult != 0 || !ifap || !*ifap || !shouldApplyNetworkSpoofing()) {
         return;
     }
@@ -804,6 +899,7 @@ static void PXNetworkPostGetifaddrs(struct ifaddrs **ifap, int *inoutResult) {
 %hook NWPath
 
 - (BOOL)isExpensive {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing() || shouldShowAsNoConnection()) {
         return %orig;
     }
@@ -813,6 +909,7 @@ static void PXNetworkPostGetifaddrs(struct ifaddrs **ifap, int *inoutResult) {
 }
 
 - (BOOL)usesInterfaceType:(NSInteger)type {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing()) {
         return %orig;
     }
@@ -872,6 +969,7 @@ static void signalStrengthSettingsChanged(CFNotificationCenterRef center, void *
 static CFDictionaryRef (*original_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName);
 
 static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return original_CNCopyCurrentNetworkInfo(interfaceName);
     }
@@ -892,6 +990,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 %hook CTServiceDescriptor
 
 - (NSString *)signalStrengthBars {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         return %orig;
     }
@@ -907,6 +1006,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
 %hook UIStatusBarSignalStrengthItemView
 
 - (void)setCellularSignalStrengthBars:(int)bars {
+    PX_RUNTIME_READ_OPERATION;
     if (!shouldApplyNetworkSpoofing() || shouldShowAsWiFi() || shouldShowAsNoConnection()) {
         %orig;
         return;
@@ -964,6 +1064,7 @@ static CFDictionaryRef hooked_CNCopyCurrentNetworkInfo(CFStringRef interfaceName
                                                   priority:PXNativeHookPriorityNetworkStorage
                                                        pre:nil
                                                       post:^(struct ifaddrs **ifap, int *result) {
+    PX_RUNTIME_READ_OPERATION;
                 PXNetworkPostGetifaddrs(ifap, result);
             }];
             [nativeCoordinator installOwnedSymbolsIfNeeded];

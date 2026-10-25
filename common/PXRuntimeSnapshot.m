@@ -3,6 +3,7 @@
 #import "PXPaths.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
+#import <os/lock.h>
 #import <sys/stat.h>
 #import <errno.h>
 #import <string.h>
@@ -25,9 +26,39 @@ static PXRuntimeSnapshotReader *PXProcessRuntimeReader(void) {
 
 PXRuntimeReadSnapshot *PXCaptureRuntimeSnapshot(void) {
     int savedErrno = errno;
-    PXRuntimeReadSnapshot *snapshot = [PXProcessRuntimeReader() capture];
+    BOOL scoped = NO;
+    PXRuntimeReadSnapshot *snapshot = PXRuntimeReadScopeCurrent(&scoped);
+    if (!scoped) snapshot = [PXProcessRuntimeReader() capture];
     errno = savedErrno;
     return snapshot;
+}
+
+void PXBeginRuntimeSnapshotOperation(PXRuntimeReadScope *scope) {
+    int savedErrno = errno;
+    PXRuntimeReadScopeBegin(scope, PXProcessRuntimeReader());
+    errno = savedErrno;
+}
+
+void PXRuntimeSnapshotRegisterPreparation(void (^handler)(PXRuntimeReadSnapshot *)) {
+    [PXProcessRuntimeReader() setPreparationHandler:handler];
+}
+
+void PXInvalidateRuntimeSnapshotReader(void) { [PXProcessRuntimeReader() invalidateAndRefresh]; }
+
+BOOL PXPrimeRuntimeSnapshotReader(void) {
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    static BOOL primed;
+    os_unfair_lock_lock(&lock);
+    BOOL ready = primed;
+    os_unfair_lock_unlock(&lock);
+    if (ready) return YES;
+    PXRuntimeSnapshotReader *reader = PXProcessRuntimeReader();
+    (void)[reader capture];
+    BOOL completed = [reader waitForPendingRefresh:1.0];
+    if (completed) {
+        os_unfair_lock_lock(&lock); primed = YES; os_unfair_lock_unlock(&lock);
+    }
+    return completed;
 }
 
 static void PXRuntimeReaderNotification(CFNotificationCenterRef center, void *observer,
@@ -44,7 +75,8 @@ BOOL PXPrepareRuntimeSnapshotReader(void) {
             for (NSString *name in @[@"com.hydra.tlinkios.runtimeSnapshotChanged",
                                      @"com.hydra.tlinkios.profileChanged",
                                      @"com.hydra.tlinkios.settings.changed",
-                                     @"com.hydra.tlinkios.scopedAppsChanged"]) {
+                                     @"com.hydra.tlinkios.scopedAppsChanged",
+                                     @"com.hydra.tlinkios.safariStackSpoofToggleChanged"]) {
                 CFNotificationCenterAddObserver(center, NULL, PXRuntimeReaderNotification,
                     (__bridge CFStringRef)name, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
             }
@@ -118,7 +150,11 @@ NSDictionary *PXRuntimeSnapshotLastPublishStats(void) {
 }
 
 static NSDictionary *PXRuntimeSnapshotDictionary(NSString *key) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *snapshot = PXCaptureRuntimeSnapshot().propertyList;
+#else
     NSDictionary *snapshot = PXLoadRuntimeSnapshot();
+#endif
     id value = snapshot[key];
     return [value isKindOfClass:NSDictionary.class] ? value : @{};
 }
@@ -136,8 +172,12 @@ NSDictionary *PXRuntimeSnapshotTLinkSettings(void) {
 }
 
 NSString *PXRuntimeSnapshotProfileID(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCaptureRuntimeSnapshot().profileID;
+#else
     id value = PXLoadRuntimeSnapshot()[@"profileID"];
     return [value isKindOfClass:NSString.class] && [value length] ? value : nil;
+#endif
 }
 
 NSDictionary *PXRuntimeSnapshotProfileSettings(void) {

@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import "TLinkIOS.h"
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
@@ -81,11 +82,13 @@ static NSDictionary* getSpecsForModel(NSString *model) {
 
 // Reuse helper from DeviceModelHooks.x (simplified duplication for safety)
 static NSString* getSpoofedModel() {
+    PX_RUNTIME_READ_OPERATION;
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     return snapshot.valid ? snapshot.deviceModel : nil;
 }
 
 static BOOL isSpoofingGlobalEnabled() {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
@@ -97,10 +100,12 @@ static BOOL isSpoofingGlobalEnabled() {
 
 // Helper to get GPU name from Chip
 static BOOL isInScopedAppsList_Missing(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXBundleIsEnabledInScope([[NSBundle mainBundle] bundleIdentifier]);
 }
 
 static BOOL shouldSpoofForCurrentProcess_Missing(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     if (!bid.length) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
@@ -108,6 +113,7 @@ static BOOL shouldSpoofForCurrentProcess_Missing(void) {
 }
 
 static NSString *getSpoofedGPUFamily(void) {
+    PX_RUNTIME_READ_OPERATION;
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     NSDictionary *deviceIDs = snapshot.valid ? snapshot.deviceIDs : nil;
     NSString *gpuFamily = PXProfileString(deviceIDs[@"GPUFamily"]);
@@ -120,6 +126,7 @@ static NSString *getSpoofedGPUFamily(void) {
 
 static NSString *(*orig_MTLDevice_name)(id, SEL);
 static NSString *hook_MTLDevice_name(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     if (shouldSpoofForCurrentProcess_Missing()) {
         NSString *gpuName = getSpoofedGPUFamily();
         if (gpuName.length) {

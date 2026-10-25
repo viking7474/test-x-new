@@ -80,6 +80,7 @@ __attribute__((constructor(101))) static void PXTLinkIOSTweakEarlyLoadMarker(voi
 static NSMutableDictionary *valueCache;
 
 static NSString *PXValidatedTelephonySnapshotString(NSString *key) {
+    PX_RUNTIME_READ_OPERATION;
     if (![key isKindOfClass:NSString.class] || !key.length) return nil;
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     if (!snapshot.valid) return nil;
@@ -546,12 +547,11 @@ static BOOL sPXUnameHookInstalled = NO;
 // Missing-key logging
 // Security settings helpers
 static id PXReadSecuritySettingObject(NSString *key) {
+    PX_RUNTIME_READ_OPERATION;
     if (!key.length) return nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeSecurity = PXRuntimeSnapshotSecuritySettings();
-    id runtimeValue = runtimeSecurity[key];
-    if (runtimeValue != nil) return runtimeValue;
-#endif
+    return PXCaptureRuntimeSnapshot().securitySettings[key];
+#else
     CFPropertyListRef pref = CFPreferencesCopyAppValue((__bridge CFStringRef)key, CFSTR("com.weaponx.securitySettings"));
     if (pref) return CFBridgingRelease(pref);
 
@@ -566,21 +566,28 @@ static id PXReadSecuritySettingObject(NSString *key) {
         }
     }
     return nil;
+#endif
 }
 
 static BOOL PXReadSecuritySettingBool(NSString *key) {
+    PX_RUNTIME_READ_OPERATION;
     id v = PXReadSecuritySettingObject(key);
     return v ? [v boolValue] : NO;
 }
 
 static NSDictionary *PXReadSecuritySettingsDictionary(void) {
-    NSDictionary *runtimeSecurity = PXRuntimeSnapshotSecuritySettings();
-    if (runtimeSecurity.count) return runtimeSecurity;
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCaptureRuntimeSnapshot().securitySettings ?: @{};
+#else
+    NSDictionary *legacyRuntimeSecurity = PXLoadRuntimeSnapshot()[@"securitySettings"];
+    if ([legacyRuntimeSecurity isKindOfClass:NSDictionary.class] && legacyRuntimeSecurity.count) return legacyRuntimeSecurity;
     for (NSString *path in @[@"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist", @"/private/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist"]) {
         NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
         if ([dict isKindOfClass:NSDictionary.class]) return dict;
     }
     return @{};
+#endif
 }
 
 static NSString *PXHookMissingLogPath(void) {
@@ -660,6 +667,7 @@ static void PXIdentitySnapshotChanged(CFNotificationCenterRef center,
 }
 
 static NSDictionary *PXGetDeviceIdsSnapshot(NSString **outProfileId, NSNumber **outGen) {
+    PX_RUNTIME_READ_OPERATION;
     return PXDeviceIDsSnapshot(outProfileId, outGen);
 }
 
@@ -789,6 +797,7 @@ static int PXWriteSysctlCStringLocal(const char *value, void *outBuf, size_t *ou
 
 // Hook for sysctl array - handles both Kernel and Hardware queries
 static int sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    PX_RUNTIME_READ_OPERATION;
     static dispatch_once_t diagnosticOnce;
     dispatch_once(&diagnosticOnce, ^{
         PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageSysctlObserved,
@@ -922,6 +931,7 @@ static int PXWriteSysctlInt64(const char *name, int64_t v, void *oldp, size_t *o
 static CFDictionaryRef (*CFCopySystemVersionDictionary_orig)(void);
 
 static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
+    PX_RUNTIME_READ_OPERATION;
     static dispatch_once_t diagnosticOnce;
     dispatch_once(&diagnosticOnce, ^{
         PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageSystemVersionObserved,
@@ -965,6 +975,7 @@ static CFDictionaryRef CFCopySystemVersionDictionary_hook(void) {
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 // Implementation for sysctl hook - commonly used to get device identifiers and detect jailbreak
 static int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, BOOL *outHandled) {
+    PX_RUNTIME_READ_OPERATION;
     static dispatch_once_t diagnosticOnce;
     dispatch_once(&diagnosticOnce, ^{
         PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageSysctlByNameObserved,
@@ -1152,6 +1163,7 @@ static BOOL PXUnameWriteField(char *destination, size_t capacity, NSString *valu
 }
 
 static int uname_hook(struct utsname *buf) {
+    PX_RUNTIME_READ_OPERATION;
     static dispatch_once_t diagnosticOnce;
     dispatch_once(&diagnosticOnce, ^{
         PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageUnameObserved,
@@ -1390,6 +1402,7 @@ static int uname_hook(struct utsname *buf) {
 // transformer. Calling MGCopyAnswer from these hooks is unsafe because the system
 // implementation may delegate back to MGCopyAnswerWithError.
 static CFTypeRef PXMGCreateAlternateProjectedAnswer(CFStringRef property) {
+    PX_RUNTIME_READ_OPERATION;
     if (!property || CFGetTypeID(property) != CFStringGetTypeID() ||
         !NSClassFromString(@"IdentifierManager")) return NULL;
     IdentifierManager *manager = [IdentifierManager sharedManager];
@@ -1456,6 +1469,7 @@ static CFPropertyListRef (*PXOrigMGCopyAnswerWithError)(CFStringRef, CFDictionar
 static CFPropertyListRef PXHookMGCopyAnswerWithError(CFStringRef property,
                                                      CFDictionaryRef options,
                                                      int *error) {
+    PX_RUNTIME_READ_OPERATION;
     CFTypeRef projected = PXMGCreateAlternateProjectedAnswer(property);
     if (projected) {
         if (error) *error = 0;
@@ -1469,6 +1483,7 @@ static CFPropertyListRef PXHookMGCopyAnswerWithError(CFStringRef property,
 static CFPropertyListRef (*PXOrigMGCopyMultipleAnswers)(CFArrayRef, CFDictionaryRef) = NULL;
 static CFPropertyListRef PXHookMGCopyMultipleAnswers(CFArrayRef properties,
                                                      CFDictionaryRef options) {
+    PX_RUNTIME_READ_OPERATION;
     CFPropertyListRef original = PXOrigMGCopyMultipleAnswers
         ? PXOrigMGCopyMultipleAnswers(properties, options)
         : NULL;
@@ -1492,6 +1507,7 @@ static CFPropertyListRef PXHookMGCopyMultipleAnswers(CFArrayRef properties,
 
 static bool (*PXOrigMGGetBoolAnswer)(CFStringRef) = NULL;
 static bool PXHookMGGetBoolAnswer(CFStringRef property) {
+    PX_RUNTIME_READ_OPERATION;
     CFTypeRef projected = PXMGCreateAlternateProjectedAnswer(property);
     if (!projected) return PXOrigMGGetBoolAnswer ? PXOrigMGGetBoolAnswer(property) : false;
     bool value;
@@ -1521,6 +1537,7 @@ static void PXInstallAlternateMobileGestaltHooks(void) {
 }
 
 static BOOL PXATTSpoofActive(void) {
+    PX_RUNTIME_READ_OPERATION;
     if (!%c(IdentifierManager)) return NO;
     IdentifierManager *manager = [%c(IdentifierManager) sharedManager];
     if (!manager) return NO;
@@ -1536,6 +1553,7 @@ static BOOL PXATTSpoofActive(void) {
 // IDFA/IDFV/LaunchServices projection. Missing/invalid status is not re-read
 // from disk because doing so could mix identity generations.
 static NSInteger PXProfileATTAuthorizationStatus(void) {
+    PX_RUNTIME_READ_OPERATION;
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     return snapshot.valid
         ? PXIdentitySnapshotATTAuthorizationStatus(snapshot.deviceIDs)
@@ -1546,6 +1564,7 @@ static NSInteger PXProfileATTAuthorizationStatus(void) {
 %hook ASIdentifierManager
 
 - (BOOL)isAdvertisingTrackingEnabled {
+    PX_RUNTIME_READ_OPERATION;
     if (!PXATTSpoofActive()) {
         return %orig;
     }
@@ -1554,6 +1573,7 @@ static NSInteger PXProfileATTAuthorizationStatus(void) {
 }
 
 - (NSUUID *)advertisingIdentifier {
+    PX_RUNTIME_READ_OPERATION;
     NSUUID *originalIdentifier = %orig;
     if (!%c(IdentifierManager)) {
         return originalIdentifier;
@@ -1591,6 +1611,7 @@ static NSInteger (*orig_ATTrackingManager_trackingAuthorizationStatus)(Class, SE
 static void (*orig_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler)(Class, SEL, void (^)(NSInteger)) = NULL;
 
 static NSInteger hook_ATTrackingManager_trackingAuthorizationStatus(Class self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     if (PXATTSpoofActive()) {
         return PXProfileATTAuthorizationStatus();
     }
@@ -1601,6 +1622,7 @@ static NSInteger hook_ATTrackingManager_trackingAuthorizationStatus(Class self, 
 }
 
 static void hook_ATTrackingManager_requestTrackingAuthorizationWithCompletionHandler(Class self, SEL _cmd, void (^completion)(NSInteger)) {
+    PX_RUNTIME_READ_OPERATION;
     if (PXATTSpoofActive()) {
         // Do NOT call system prompt; deliver profile status async on main queue
         NSInteger status = PXProfileATTAuthorizationStatus();
@@ -1659,6 +1681,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 
 // Hook for identifierForVendor (IDFV)
 - (NSUUID *)identifierForVendor {
+    PX_RUNTIME_READ_OPERATION;
     NSUUID *originalIdentifier = %orig;
     
     @try {
@@ -1695,6 +1718,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 
 // Hook for device name with improved iOS 15-16 compatibility
 - (NSString *)name {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalName = %orig;
     
     @try {
@@ -1738,6 +1762,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 %hook NSFileManager
 
 - (id)ubiquityIdentityToken {
+    PX_RUNTIME_READ_OPERATION;
     if (!%c(IdentifierManager)) {
         return %orig;
     }
@@ -1769,6 +1794,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 %hook NSHost
 
 + (NSHost *)currentHost {
+    PX_RUNTIME_READ_OPERATION;
     NSHost *originalHost = %orig;
     
     if (!%c(IdentifierManager)) {
@@ -1799,6 +1825,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 }
 
 - (NSString *)name {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalName = %orig;
     
     @try {
@@ -1843,6 +1870,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 
 // Basic subscriber cellular provider method
 - (id)subscriberCellularProvider {
+    PX_RUNTIME_READ_OPERATION;
     id original = %orig;
     
     @try {
@@ -1877,6 +1905,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 
 // iOS 12+ multi-carrier support - heavily used in iOS 15-16
 - (NSDictionary *)serviceSubscriberCellularProviders {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *original = %orig;
     
     @try {
@@ -1912,6 +1941,7 @@ static void PXInstallATTHooksIfAvailable(void) {
 
 // iOS 13+ carrier data for specific carrier token
 - (id)subscriberCellularProviderForIdentifier:(NSString *)identifier {
+    PX_RUNTIME_READ_OPERATION;
     id original = %orig;
     
     @try {
@@ -2078,12 +2108,14 @@ static void PXInstallATTHooksIfAvailable(void) {
 
 // Define hook group for location spoofing
 static BOOL PXLocationManagerShouldSpoof(LocationSpoofingManager *manager, NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!manager || ![manager isSpoofingEnabled] || !bundleID.length) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionNone);
 }
 
 static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -2096,6 +2128,7 @@ static PXLocationSpoofSnapshot *PXActiveLocationSnapshot(BOOL advanceGeneration)
 }
 
 static id PXLocationDelegateSnapshot(BOOL advanceGeneration) {
+    PX_RUNTIME_READ_OPERATION;
     return PXActiveLocationSnapshot(advanceGeneration);
 }
 
@@ -2109,6 +2142,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLLocationManager
 
 - (void)setDelegate:(id)delegate {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         PXInstallLocationDelegateHooks(delegate, PXLocationDelegateSnapshot, PXLocationDelegateAttachSnapshot);
     } @catch (__unused NSException *exception) {
@@ -2149,6 +2183,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 }
 
 - (CLLocation *)location {
+    PX_RUNTIME_READ_OPERATION;
     CLLocation *originalLocation = %orig;
     if (!originalLocation) return nil;
     PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
@@ -2157,6 +2192,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 }
 
 - (CLHeading *)heading {
+    PX_RUNTIME_READ_OPERATION;
     CLHeading *originalHeading = %orig;
     if (!originalHeading) return nil;
     PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
@@ -2166,6 +2202,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 
 // Hook location accuracy settings
 - (void)setDesiredAccuracy:(CLLocationAccuracy)accuracy {
+    PX_RUNTIME_READ_OPERATION;
     // Check if we should modify accuracy
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -2223,6 +2260,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLLocation
 
 - (CLLocationCoordinate2D)coordinate {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationCoordinate2D originalCoordinate = %orig;
     if (PXLocationProjectionBypassActive()) return originalCoordinate;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
@@ -2405,6 +2443,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLLocation
 
 - (CLLocationSpeed)speed {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationSpeed originalSpeed = %orig;
     if (PXLocationProjectionBypassActive()) return originalSpeed;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
@@ -2414,6 +2453,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 }
 
 - (CLLocationDirection)course {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationDirection originalCourse = %orig;
     if (PXLocationProjectionBypassActive()) return originalCourse;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
@@ -2427,11 +2467,13 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLLocationSourceInformation
 
 - (BOOL)isSimulatedBySoftware {
+    PX_RUNTIME_READ_OPERATION;
     BOOL originalValue = %orig;
     return PXActiveLocationSnapshot(NO) ? NO : originalValue;
 }
 
 - (BOOL)isProducedByAccessory {
+    PX_RUNTIME_READ_OPERATION;
     BOOL originalValue = %orig;
     return PXActiveLocationSnapshot(NO) ? NO : originalValue;
 }
@@ -2442,6 +2484,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLHeading
 
 - (CLLocationDirection)magneticHeading {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationDirection originalHeading = %orig;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
     if (!currentSnapshot) return originalHeading;
@@ -2450,6 +2493,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 }
 
 - (CLLocationDirection)headingAccuracy {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationDirection originalAccuracy = %orig;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
     if (!currentSnapshot) return originalAccuracy;
@@ -2458,6 +2502,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 }
 
 - (CLLocationDirection)trueHeading {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationDirection originalHeading = %orig;
     PXLocationSpoofSnapshot *currentSnapshot = PXActiveLocationSnapshot(NO);
     if (!currentSnapshot) return originalHeading;
@@ -2471,12 +2516,14 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLRegion
 
 - (CLLocationCoordinate2D)center {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationCoordinate2D originalCenter = %orig;
     PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
     return snapshot ? snapshot.coordinate : originalCenter;
 }
 
 - (BOOL)containsCoordinate:(CLLocationCoordinate2D)coordinate {
+    PX_RUNTIME_READ_OPERATION;
     BOOL originalContains = %orig;
     // Preserve the caller's argument and evaluate the real implementation
     // first. In active mode, containment follows the projected region center.
@@ -2489,6 +2536,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook MKMapView
 
 - (MKUserLocation *)userLocation {
+    PX_RUNTIME_READ_OPERATION;
     MKUserLocation *originalUserLocation = %orig;
     
     @try {
@@ -2523,6 +2571,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook MKUserLocation
 
 - (CLLocationCoordinate2D)coordinate {
+    PX_RUNTIME_READ_OPERATION;
     CLLocationCoordinate2D originalCoordinate = %orig;
     PXLocationSpoofSnapshot *snapshot = PXActiveLocationSnapshot(NO);
     return snapshot ? snapshot.coordinate : originalCoordinate;
@@ -2534,6 +2583,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 %hook CLGeocoder
 
 - (void)reverseGeocodeLocation:(CLLocation *)location completionHandler:(void (^)(NSArray<CLPlacemark *> *placemarks, NSError *error))completionHandler {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -2566,6 +2616,7 @@ static void PXLocationDelegateAttachSnapshot(id object, id snapshot) {
 
 // Add forward geocoding method
 - (void)geocodeAddressString:(NSString *)addressString completionHandler:(void (^)(NSArray<CLPlacemark *> *placemarks, NSError *error))completionHandler {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         LocationSpoofingManager *manager = [LocationSpoofingManager sharedManager];
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -2616,6 +2667,7 @@ typedef struct {
 } PXSensorSnapshot;
 
 static PXSensorSnapshot PXCurrentSensorSnapshot(void) {
+    PX_RUNTIME_READ_OPERATION;
     PXSensorSnapshot snap = (PXSensorSnapshot){
         .active = NO,
         .speed = 0.0,
@@ -2872,8 +2924,10 @@ static void PXSensorPipelineSelfTest(void) {
 // the previous one: "function definition is not allowed here"). Keep hook bodies
 // brace-simple; build the wrapped handlers here, outside any %hook.
 static CMAccelerometerHandler PXWrapAccelerometerHandler(CMAccelerometerHandler handler) {
+    PX_RUNTIME_READ_OPERATION;
     if (!handler) return handler;
     return ^(CMAccelerometerData *accelerometerData, NSError *error) {
+    PX_RUNTIME_READ_OPERATION;
         if (error || !accelerometerData) {
             if (accelerometerData) PXClearAccelerometerOverride(accelerometerData);
             handler(accelerometerData, error);
@@ -2883,8 +2937,10 @@ static CMAccelerometerHandler PXWrapAccelerometerHandler(CMAccelerometerHandler 
     };
 }
 static CMGyroHandler PXWrapGyroHandler(CMGyroHandler handler) {
+    PX_RUNTIME_READ_OPERATION;
     if (!handler) return handler;
     return ^(CMGyroData *gyroData, NSError *error) {
+    PX_RUNTIME_READ_OPERATION;
         if (error || !gyroData) {
             if (gyroData) PXClearGyroOverride(gyroData);
             handler(gyroData, error);
@@ -2894,8 +2950,10 @@ static CMGyroHandler PXWrapGyroHandler(CMGyroHandler handler) {
     };
 }
 static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler handler) {
+    PX_RUNTIME_READ_OPERATION;
     if (!handler) return handler;
     return ^(CMMagnetometerData *magnetometerData, NSError *error) {
+    PX_RUNTIME_READ_OPERATION;
         if (error || !magnetometerData) {
             if (magnetometerData) PXClearMagnetometerOverride(magnetometerData);
             handler(magnetometerData, error);
@@ -2905,8 +2963,10 @@ static CMMagnetometerHandler PXWrapMagnetometerHandler(CMMagnetometerHandler han
     };
 }
 static CMDeviceMotionHandler PXWrapDeviceMotionHandler(CMDeviceMotionHandler handler) {
+    PX_RUNTIME_READ_OPERATION;
     if (!handler) return handler;
     return ^(CMDeviceMotion *motion, NSError *error) {
+    PX_RUNTIME_READ_OPERATION;
         if (error || !motion) {
             if (motion) PXClearDeviceMotionOverride(motion);
             handler(motion, error);
@@ -3071,8 +3131,10 @@ static CMAltitudeData *PXTransformAltitudeData(CMAltitudeData *data,
 }
 
 static CMPedometerHandler PXWrapPedometerHandler(CMPedometerHandler handler) {
+    PX_RUNTIME_READ_OPERATION;
     if (!handler) return handler;
     return ^(CMPedometerData *data, NSError *error) {
+    PX_RUNTIME_READ_OPERATION;
         if (error || !data) {
             if (data) PXClearPedometerOverride(data);
             handler(data, error);
@@ -3083,10 +3145,12 @@ static CMPedometerHandler PXWrapPedometerHandler(CMPedometerHandler handler) {
 }
 
 static CMAltitudeHandler PXWrapAltitudeHandler(CMAltitudeHandler handler) {
+    PX_RUNTIME_READ_OPERATION;
     if (!handler) return handler;
     NSObject *baselineLock = [NSObject new];
     __block NSUInteger baselineGeneration = NSUIntegerMax;
     return ^(CMAltitudeData *data, NSError *error) {
+    PX_RUNTIME_READ_OPERATION;
         if (error || !data) {
             if (data) PXClearAltitudeOverride(data);
             handler(data, error);
@@ -3158,6 +3222,7 @@ static PXCoreMotionNumberGetterRule *PXCoreMotionRuleForSelector(SEL selector) {
 }
 
 static NSNumber *PXCoreMotionProjectedNumberGetter(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     PXCoreMotionNumberGetterRule *rule = PXCoreMotionRuleForSelector(_cmd);
     NSNumber *originalValue = (rule && rule->original)
         ? ((NSNumber *(*)(id, SEL))rule->original)(self, _cmd)
@@ -3342,6 +3407,7 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 %hook CMMotionManager
 
 - (CMAccelerometerData *)accelerometerData {
+    PX_RUNTIME_READ_OPERATION;
     // Read CoreMotion exactly once; the transformer either returns this same object
     // unchanged (OFF/out-of-scope/nil) or attaches an override and returns it (pointer +
     // timestamp preserved). No KVC, no alloc/init, no duplicate %orig read.
@@ -3351,6 +3417,7 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 
 // Add gyroscope data spoofing for complete motion data
 - (CMGyroData *)gyroData {
+    PX_RUNTIME_READ_OPERATION;
     // Read CoreMotion exactly once; the transformer returns this same object unchanged
     // (OFF/out-of-scope/nil) or attaches an override and returns it (pointer + timestamp
     // preserved). No KVC, no alloc/init, no duplicate %orig read.
@@ -3360,6 +3427,7 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 
 // Add magnetometer (compass) data spoofing to align with GPS course
 - (CMMagnetometerData *)magnetometerData {
+    PX_RUNTIME_READ_OPERATION;
     // Read CoreMotion exactly once; the transformer returns this same object unchanged
     // (OFF/out-of-scope/nil) or attaches an override and returns it (pointer + timestamp
     // preserved). No KVC, no alloc/init, no duplicate %orig read.
@@ -3368,6 +3436,7 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 }
 
 - (CMDeviceMotion *)deviceMotion {
+    PX_RUNTIME_READ_OPERATION;
     CMDeviceMotion *originalMotion = %orig;
     return PXTransformDeviceMotionData(originalMotion, PXCurrentSensorSnapshot());
 }
@@ -3383,24 +3452,29 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 // cycle. The original handler runs exactly once, on the queue CoreMotion provides.
 
 - (void)startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMAccelerometerHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(queue, PXWrapAccelerometerHandler(handler));
 }
 
 - (void)startGyroUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMGyroHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(queue, PXWrapGyroHandler(handler));
 }
 
 - (void)startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMMagnetometerHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(queue, PXWrapMagnetometerHandler(handler));
 }
 
 - (void)startDeviceMotionUpdatesToQueue:(NSOperationQueue *)queue withHandler:(CMDeviceMotionHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(queue, PXWrapDeviceMotionHandler(handler));
 }
 
 - (void)startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)referenceFrame
                                              toQueue:(NSOperationQueue *)queue
                                           withHandler:(CMDeviceMotionHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(referenceFrame, queue, PXWrapDeviceMotionHandler(handler));
 }
 
@@ -3410,12 +3484,14 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 
 - (void)startPedometerUpdatesFromDate:(NSDate *)start
                           withHandler:(CMPedometerHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(start, PXWrapPedometerHandler(handler));
 }
 
 - (void)queryPedometerDataFromDate:(NSDate *)start
                             toDate:(NSDate *)end
                        withHandler:(CMPedometerHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     %orig(start, end, PXWrapPedometerHandler(handler));
 }
 
@@ -3426,6 +3502,7 @@ static void PXInstallPedometerAltitudeDirectHooks(void) {
 
 - (void)startRelativeAltitudeUpdatesToQueue:(NSOperationQueue *)queue
                                 withHandler:(CMAltitudeHandler)handler {
+    PX_RUNTIME_READ_OPERATION;
     // CoreMotion retains ownership of scheduling, cardinality and object
     // creation. The wrapper runs on the original queue and returns the same
     // CMAltitudeData pointer with an immutable getter payload attached.
@@ -3486,6 +3563,7 @@ static int (*gethostname_orig)(char *name, size_t namelen);
 
 // Hook implementation for getifaddrs
 static int getifaddrs_hook(struct ifaddrs **ifap) {
+    PX_RUNTIME_READ_OPERATION;
     int result = getifaddrs_orig(ifap);
     if (result == 0 && ifap && *ifap) {
         // Check if jailbreak detection bypass is enabled
@@ -3525,6 +3603,7 @@ static int getifaddrs_hook(struct ifaddrs **ifap) {
 // Hook implementation for gethostname
 // Per Newplan: NOT gated by jailbreakDetectionEnabled. Scoped + DeviceName only.
 static int gethostname_hook(char *name, size_t namelen) {
+    PX_RUNTIME_READ_OPERATION;
     // Buffer null/size 0 → original
     if (!name || namelen == 0) {
         return gethostname_orig ? gethostname_orig(name, namelen) : -1;
@@ -3556,6 +3635,7 @@ static int gethostname_hook(char *name, size_t namelen) {
 
 // Anti-detection callback function (must be a regular function, not a block)
 static void antiDetectionCallback(void) {
+    PX_RUNTIME_READ_OPERATION;
     // Check if jailbreak detection bypass is enabled
     NSUserDefaults *securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
     BOOL jailbreakDetectionEnabled = [securitySettings boolForKey:@"jailbreakDetectionEnabled"];
@@ -3586,6 +3666,7 @@ static IOReturn (*orig_IORegistryEntryCreateCFProperties)(io_registry_entry_t en
 static CFTypeRef (*orig_IORegistryEntrySearchCFProperty)(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options);
 
 static BOOL PXIOKitShouldSpoof(IdentifierManager *manager, NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!manager || !bundleID.length) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     return PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack);
@@ -3615,6 +3696,7 @@ static CFTypeRef PXIOKitCreateRegistryReplacement(CFTypeRef original,
                                                    NSString *profileID,
                                                    NSNumber *generation,
                                                    BOOL *handled) {
+    PX_RUNTIME_READ_OPERATION;
     if (handled) *handled = NO;
     PXIdentitySurfaceEntry *entry = PXIdentitySurfaceEntryForKey(key, PXIdentitySurfaceIORegistry);
     if (!entry || [entry.canonicalKey isEqualToString:@"compatible"]) return NULL;
@@ -3695,6 +3777,7 @@ static CFTypeRef PXIOKitPatchCompatibleValue(CFTypeRef original, NSString *hwMod
 }
 
 static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     static dispatch_once_t diagnosticOnce;
     dispatch_once(&diagnosticOnce, ^{
         PXFileDebugSignalHookDiagnostic(PXHookDiagnosticStageIOKitObserved,
@@ -3935,6 +4018,7 @@ static CFTypeRef hook_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
 }
 
 static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     static BOOL logged = NO;
     if (!logged) {
         logged = YES;
@@ -4114,6 +4198,7 @@ static IOReturn hook_IORegistryEntryCreateCFProperties(io_registry_entry_t entry
 }
 
 static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     static int loggedCount = 0;
     if (key && loggedCount < 30) {
         loggedCount++;
@@ -4258,6 +4343,7 @@ static CFTypeRef hook_IORegistryEntrySearchCFProperty(io_registry_entry_t entry,
 static char* (*orig_GSSystemGetSerialNo)(void);
 
 static char* hook_GSSystemGetSerialNo(void) {
+    PX_RUNTIME_READ_OPERATION;
     if (!%c(IdentifierManager)) {
         return orig_GSSystemGetSerialNo();
     }
@@ -4318,6 +4404,7 @@ static char* hook_GSSystemGetSerialNo(void) {
         [currentBundleID isEqualToString:@"com.apple.springboard"]) {
         PXLog(@"[WeaponX] SpringBoard: minimal init (Profile Indicator only)");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    PX_RUNTIME_READ_OPERATION;
             ProfileIndicatorView *indicator = [ProfileIndicatorView sharedInstance];
             if (PXReadSecuritySettingBool(@"profileIndicatorEnabled")) {
                 [indicator show];
@@ -4327,6 +4414,7 @@ static char* hook_GSSystemGetSerialNo(void) {
         });
         // One late retry if the first scene attach was too early.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    PX_RUNTIME_READ_OPERATION;
             if (!PXReadSecuritySettingBool(@"profileIndicatorEnabled")) return;
             [[ProfileIndicatorView sharedInstance] show];
         });
@@ -4479,15 +4567,18 @@ static char* hook_GSSystemGetSerialNo(void) {
 
         static dispatch_once_t tweakProvOnce;
         dispatch_once(&tweakProvOnce, ^{
+    PX_RUNTIME_READ_OPERATION;
             // sysctl still uses the legacy terminal body. sysctlbyname below is a selective
             // pre-provider and returns NO for unhandled keys so coordinator post-providers run.
             [coord registerSysctlProvider:@"tweak.sysctl" priority:PXNativeHookPriorityIdentity pre:^BOOL(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!sysctl_orig) return NO;
                 int r = sysctl_hook(name, namelen, oldp, oldlenp, newp, newlen);
                 if (outResult) *outResult = r;
                 return YES;
             } post:nil];
             [coord registerSysctlBynameProvider:@"tweak.sysctlbyname" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!sysctlbyname_orig || !name || newp != NULL || newlen != 0) return NO;
                 BOOL handled = NO;
                 int r = sysctlbyname_hook(name, oldp, oldlenp, newp, newlen, &handled);
@@ -4501,6 +4592,7 @@ static char* hook_GSSystemGetSerialNo(void) {
             // - null buffer / size 0 / invalid profile value → return NO so coordinator calls original.
             // - UIDevice.name / NSHost / kern.hostname share the same DeviceName profile value.
             [coord registerGethostnameProvider:@"tweak.gethostname" priority:PXNativeHookPriorityIdentity pre:^BOOL(char *name, size_t namelen, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!name || namelen == 0) return NO;
                 @try {
                     NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -4523,30 +4615,35 @@ static char* hook_GSSystemGetSerialNo(void) {
                 }
             } post:nil];
             [coord registerGetifaddrsProvider:@"tweak.getifaddrs" priority:PXNativeHookPriorityIdentity pre:^BOOL(struct ifaddrs **ifap, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!getifaddrs_orig) return NO;
                 int r = getifaddrs_hook(ifap);
                 if (outResult) *outResult = r;
                 return YES;
             } post:nil];
             [coord registerIORegistryCreateCFPropertyProvider:@"tweak.iokit.create" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!orig_IORegistryEntryCreateCFProperty) return NO;
                 CFTypeRef r = hook_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
                 if (outResult) *outResult = r;
                 return YES;
             } post:nil];
             [coord registerIORegistryCreateCFPropertiesProvider:@"tweak.iokit.properties" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options, IOReturn *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!orig_IORegistryEntryCreateCFProperties) return NO;
                 IOReturn r = hook_IORegistryEntryCreateCFProperties(entry, properties, allocator, options);
                 if (outResult) *outResult = r;
                 return YES;
             } post:nil];
             [coord registerIORegistrySearchCFPropertyProvider:@"tweak.iokit.search" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!orig_IORegistryEntrySearchCFProperty) return NO;
                 CFTypeRef r = hook_IORegistryEntrySearchCFProperty(entry, plane, key, allocator, options);
                 if (outResult) *outResult = r;
                 return YES;
             } post:nil];
             [coord registerCFCopySystemVersionDictionaryProvider:@"tweak.cf.systemversion" priority:PXNativeHookPriorityIdentity pre:^BOOL(CFDictionaryRef *outResult) {
+    PX_RUNTIME_READ_OPERATION;
                 if (!CFCopySystemVersionDictionary_orig) return NO;
                 CFDictionaryRef r = CFCopySystemVersionDictionary_hook();
                 if (outResult) *outResult = r;

@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -64,24 +65,37 @@ static const NSTimeInterval kIOSVersionCacheValidPeriod = 1800.0; // 30 minutes
 static os_unfair_lock gIOSVersionCacheLock = OS_UNFAIR_LOCK_INIT;
 static NSDictionary *versionCache = nil;
 static NSTimeInterval lastVersionLoad = 0;
+static char kPXRuntimeIOSInfo;
 
 static NSDictionary *PXIOSVersionCachedInfo(NSTimeInterval now) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return objc_getAssociatedObject(PXCaptureRuntimeSnapshot(), &kPXRuntimeIOSInfo);
+#else
     os_unfair_lock_lock(&gIOSVersionCacheLock);
     NSDictionary *cached = (versionCache && (now - lastVersionLoad < kIOSVersionCacheValidPeriod))
         ? versionCache
         : nil;
     os_unfair_lock_unlock(&gIOSVersionCacheLock);
     return cached;
+#endif
 }
 
 static NSDictionary *PXIOSVersionPublishInfo(NSDictionary *info, NSTimeInterval loadedAt) {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *immutableInfo = [info isKindOfClass:[NSDictionary class]] ? [info copy] : nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PXRuntimeReadSnapshot *view = PXCaptureRuntimeSnapshot();
+    if (view) objc_setAssociatedObject(view, &kPXRuntimeIOSInfo, immutableInfo, OBJC_ASSOCIATION_RETAIN);
+    return immutableInfo;
+#else
     os_unfair_lock_lock(&gIOSVersionCacheLock);
     versionCache = immutableInfo;
     lastVersionLoad = immutableInfo ? loadedAt : 0;
     NSDictionary *published = versionCache;
     os_unfair_lock_unlock(&gIOSVersionCacheLock);
     return published;
+#endif
 }
 
 static void PXIOSVersionInvalidateCache(void) {
@@ -124,11 +138,13 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {
@@ -181,6 +197,7 @@ static NSSet *criticalSystemBundleIDs() {
 
 // Helper function to check if we should spoof for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         // Basic validation
         if (!bundleID) {
@@ -204,6 +221,7 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 
 // Get the current iOS version information from the profile
 static NSDictionary *getIOSVersionInfo() {
+    PX_RUNTIME_READ_OPERATION;
     static dispatch_once_t sourceLogOnce;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     NSDictionary *cached = PXIOSVersionCachedInfo(now);
@@ -244,18 +262,25 @@ static NSDictionary *getIOSVersionInfo() {
             });
             return published;
         }
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
         IOSVERSION_LOG(@"device_ids.plist missing required iOS fields (version/build/darwin/xnu/kernel)");
+#endif
     }
 
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return nil;
+#else
     NSDictionary *current = [[IOSVersionInfo sharedManager] currentIOSVersionInfo];
     if (current[@"version"] && current[@"build"] && current[@"darwin"] && current[@"xnu"] && current[@"kernel_version"]) {
         return PXIOSVersionPublishInfo(current, now);
     }
     return nil;
+#endif
 }
 
 // Extract just the version number from the full version info
 static NSString *getSpoofedSystemVersion() {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *versionInfo = getIOSVersionInfo();
     return versionInfo ? versionInfo[@"version"] : nil;
 }
@@ -425,6 +450,7 @@ static BOOL PXUADebugScopeAllows(NSString *bundleID, NSString *processName) {
 }
 
 static BOOL PXUAHostIsSensitive(NSString *hostOrDomain) {
+    PX_RUNTIME_READ_OPERATION;
     if (!hostOrDomain.length) return NO;
 
     // In Full Spoof Test Mode we intentionally do NOT exempt sensitive hosts.
@@ -640,6 +666,7 @@ static void PXUASyncApplyToWebViewsForHost(NSString *host, NSString *ua) {
 
 // Compatibility wrapper: every UA surface delegates to the central normalizer.
 static void modifyUserAgentString(NSString **userAgentString, NSString *originalVersion, NSString *spoofedVersion) {
+    PX_RUNTIME_READ_OPERATION;
     (void)originalVersion;
     if (!userAgentString || !*userAgentString || !spoofedVersion.length) return;
     NSDictionary *versionInfo = getIOSVersionInfo();
@@ -696,6 +723,7 @@ static NSString *PXUANativeBaseUserAgent(WKWebViewConfiguration *configuration) 
 }
 
 static NSString *PXUASyntheticSpoofedUserAgent(WKWebViewConfiguration *configuration) {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *versionInfo = getIOSVersionInfo();
     NSString *version = [versionInfo[@"version"] isKindOfClass:[NSString class]] ? versionInfo[@"version"] : nil;
     NSString *build = [versionInfo[@"build"] isKindOfClass:[NSString class]] ? versionInfo[@"build"] : nil;
@@ -719,6 +747,7 @@ static NSString *PXUASyntheticSpoofedUserAgent(WKWebViewConfiguration *configura
 }
 
 static BOOL PXUAShouldApplyForHost(NSString *bundleID, NSString *processName, NSString *host) {
+    PX_RUNTIME_READ_OPERATION;
     BOOL safariPermission = PXProcessIsAllowedForSpoofing(bundleID, processName, PXScopeOptionAllowSafariAuthStack);
     BOOL safariStack = safariPermission && PXIsSafariStackProcess(bundleID, processName);
     if (!PXWebKitHelperProcessIsInScope(bundleID, processName, safariPermission)) return NO;
@@ -733,6 +762,7 @@ static BOOL PXUAShouldApplyForHost(NSString *bundleID, NSString *processName, NS
 }
 
 static NSString *PXUAModifiedUserAgent(NSString *baseUserAgent, WKWebViewConfiguration *configuration) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *spoofedVersion = getSpoofedSystemVersion();
     if (!spoofedVersion.length) return nil;
 
@@ -764,6 +794,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                                          WKWebViewConfiguration *configuration,
                                          NSString *host,
                                          NSString *hookName) {
+    PX_RUNTIME_READ_OPERATION;
     if (!webView) return;
 
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -820,6 +851,17 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 
 // Hook the systemVersion method to return our spoofed version
 - (NSString *)systemVersion {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSString *originalVersion = %orig;
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+    if (shouldSpoofForBundle(bundleID)) {
+        NSDictionary *versionInfo = getIOSVersionInfo();
+        NSString *reported = nil;
+        if (PXReportingIOSVersionBuildForBundle(versionInfo[@"version"], versionInfo[@"build"], bundleID, &reported, NULL)) return reported;
+    }
+    return originalVersion;
+#else
     @try {
         // Rate limiting - don't call this function too frequently
         uint64_t currentTime = mach_absolute_time();
@@ -860,6 +902,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
     }
     
     return %orig;
+#endif
 }
 
 %end
@@ -870,6 +913,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 
 // Hook operatingSystemVersion to return our spoofed version
 - (NSOperatingSystemVersion)operatingSystemVersion {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
@@ -904,6 +948,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 
 // Additional method to hook for getting raw operating system version string
 - (NSString *)operatingSystemVersionString {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
@@ -934,6 +979,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 %hook WKWebView
 
 - (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
+    PX_RUNTIME_READ_OPERATION;
     // Resolve the native base synchronously before construction. No JavaScript round-trip
     // is allowed here because callers may issue loadRequest: immediately after init returns.
     NSString *nativeBaseUserAgent = PXUANativeBaseUserAgent(configuration);
@@ -958,16 +1004,19 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 }
 
 - (WKNavigation *)loadRequest:(NSURLRequest *)request {
+    PX_RUNTIME_READ_OPERATION;
     PXUAEnsureCanonicalUserAgent(self, self.configuration, request.URL.host, @"WKWebView.loadRequest");
     return %orig(request);
 }
 
 - (WKNavigation *)loadHTMLString:(NSString *)string baseURL:(NSURL *)baseURL {
+    PX_RUNTIME_READ_OPERATION;
     PXUAEnsureCanonicalUserAgent(self, self.configuration, baseURL.host, @"WKWebView.loadHTMLString");
     return %orig(string, baseURL);
 }
 
 - (WKNavigation *)loadFileURL:(NSURL *)URL allowingReadAccessToURL:(NSURL *)readAccessURL {
+    PX_RUNTIME_READ_OPERATION;
     PXUAEnsureCanonicalUserAgent(self, self.configuration, URL.host, @"WKWebView.loadFileURL");
     return %orig(URL, readAccessURL);
 }
@@ -976,11 +1025,13 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
                   MIMEType:(NSString *)MIMEType
      characterEncodingName:(NSString *)characterEncodingName
                    baseURL:(NSURL *)baseURL {
+    PX_RUNTIME_READ_OPERATION;
     PXUAEnsureCanonicalUserAgent(self, self.configuration, baseURL.host, @"WKWebView.loadData");
     return %orig(data, MIMEType, characterEncodingName, baseURL);
 }
 
 - (void)setCustomUserAgent:(NSString *)customUserAgent {
+    PX_RUNTIME_READ_OPERATION;
     if (gUASyncApplying || gUACanonicalApplying) {
         %orig(customUserAgent);
         return;
@@ -1037,6 +1088,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 %hook WKWebViewConfiguration
 
 - (void)setApplicationNameForUserAgent:(NSString *)applicationNameForUserAgent {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         NSString *proc = [NSProcessInfo processInfo].processName;
@@ -1089,6 +1141,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 %hook NSMutableURLRequest
 
 - (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSSet *managedIdentityHeaders = [NSSet setWithArray:@[@"accept-language", @"sec-ch-ua-platform", @"sec-ch-ua-mobile"]];
         NSString *canonicalField = [field lowercaseString];
@@ -1173,6 +1226,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 %hook SFUserAgentController
 
 + (NSString *)userAgentWithDomain:(NSString *)domain {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalUA = %orig;
     
     @try {
@@ -1213,6 +1267,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 }
 
 + (NSString *)defaultUserAgentString {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalUA = %orig;
     
     @try {
@@ -1261,6 +1316,7 @@ static void PXUAEnsureCanonicalUserAgent(WKWebView *webView,
 // Hook CFCopySystemVersionDictionary through the IOS-06 unified transformer.
 static CFDictionaryRef (*original_CFCopySystemVersionDictionary)(void);
 CFDictionaryRef replaced_CFCopySystemVersionDictionary(void) {
+    PX_RUNTIME_READ_OPERATION;
     CFDictionaryRef original = original_CFCopySystemVersionDictionary ? original_CFCopySystemVersionDictionary() : NULL;
     @autoreleasepool {
         @try {
@@ -1288,6 +1344,7 @@ CFDictionaryRef replaced_CFCopySystemVersionDictionary(void) {
 
 // Hook sysctlbyname to spoof iOS kernel version information
 int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    PX_RUNTIME_READ_OPERATION;
     static int loggedCount = 0;
     if (name && loggedCount < 30) {
         loggedCount++;
@@ -1308,6 +1365,7 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
         static NSDictionary *cachedVersionInfo = nil;
         static dispatch_once_t onceToken;
         dispatch_once(&onceToken, ^{
+    PX_RUNTIME_READ_OPERATION;
             cachedVersionInfo = getIOSVersionInfo();
             if (cachedVersionInfo) {
                 // Extract build number and cache it
@@ -1493,6 +1551,7 @@ int hooked_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *new
 %hook NSBundle
 
 - (id)objectForInfoDictionaryKey:(NSString *)key {
+    PX_RUNTIME_READ_OPERATION;
     // Never resolve bundleIdentifier from an Info.plist hook: Foundation may implement
     // bundleIdentifier through infoDictionary/objectForInfoDictionaryKey and recurse.
     if (gPXInsideIOSVersionBundleInfoHook || self != [NSBundle mainBundle]) {
@@ -1563,6 +1622,7 @@ static CFStringRef PXIOSVersionBorrowedInfoString(NSString *value) {
 
 // Replacement function for CFBundleGetValueForInfoDictionaryKey
 CFTypeRef replaced_CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle, CFStringRef key) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundle || !key) return NULL;
     if (gPXInsideIOSVersionCFBundleInfoHook) {
         return original_CFBundleGetValueForInfoDictionaryKey
@@ -1669,6 +1729,7 @@ static void settingsChanged(CFNotificationCenterRef center, void *observer, CFSt
 
 // Safe check if a bundle ID is a critical system process
 static BOOL isCriticalSystemProcess(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return YES; // Treat nil as critical for safety
 
     NSString *proc = [NSProcessInfo processInfo].processName;
@@ -1936,6 +1997,7 @@ static BOOL isSystemVersionFile(NSString *path) {
 }
 
 static PXSystemVersionProjection *PXScopedSystemVersionProjection(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     IdentifierManager *manager = [IdentifierManager sharedManager];
     if (!shouldSpoofForBundle(bundleID) || ![manager isIdentifierEnabled:@"IOSVersion"]) return nil;
@@ -1943,12 +2005,14 @@ static PXSystemVersionProjection *PXScopedSystemVersionProjection(void) {
 }
 
 static NSDictionary *spoofSystemVersionPlist(NSDictionary *originalPlist) {
+    PX_RUNTIME_READ_OPERATION;
     if (!originalPlist) return nil;
     PXSystemVersionProjection *projection = PXScopedSystemVersionProjection();
     return projection ? PXTransformSystemVersionDictionary(originalPlist, projection) : originalPlist;
 }
 
 NSData *replaced_NSData_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
+    PX_RUNTIME_READ_OPERATION;
     NSData *originalData = original_NSData_dataWithContentsOfFile
         ? original_NSData_dataWithContentsOfFile(self, _cmd, path)
         : nil;
@@ -1958,6 +2022,7 @@ NSData *replaced_NSData_dataWithContentsOfFile(Class self, SEL _cmd, NSString *p
 }
 
 NSDictionary *replaced_NSDictionary_dictionaryWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *originalDictionary = original_NSDictionary_dictionaryWithContentsOfFile
         ? original_NSDictionary_dictionaryWithContentsOfFile(self, _cmd, path)
         : nil;
@@ -1967,6 +2032,7 @@ NSDictionary *replaced_NSDictionary_dictionaryWithContentsOfFile(Class self, SEL
 
 id replaced_NSString_stringWithContentsOfFile(Class self, SEL _cmd, NSString *path,
                                                NSStringEncoding encoding, NSError **error) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalString = original_NSString_stringWithContentsOfFile
         ? original_NSString_stringWithContentsOfFile(self, _cmd, path, encoding, error)
         : nil;

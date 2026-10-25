@@ -1,7 +1,8 @@
 #import "PXScope.h"
 #import "PXPaths.h"
 #import "PXRuntimeSnapshot.h"
-#import "PXRuntimeSnapshot.h"
+#import "PXIdentitySnapshot.h"
+#import <objc/runtime.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <fcntl.h>
 #import <os/lock.h>
@@ -95,10 +96,8 @@ BOOL PXScopeIsReadingSecuritySettings(void) {
 static id PXReadSecuritySettingObject(NSString *key) {
     if (!key.length) return nil;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeSecurity = PXRuntimeSnapshotSecuritySettings();
-    id runtimeValue = runtimeSecurity[key];
-    if (runtimeValue != nil) return runtimeValue;
-#endif
+    return PXCaptureRuntimeSnapshot().securitySettings[key];
+#else
     gPXReadingSecuritySettings = YES;
     id result = nil;
 
@@ -124,22 +123,24 @@ static id PXReadSecuritySettingObject(NSString *key) {
     }
     gPXReadingSecuritySettings = NO;
     return result;
+#endif
 }
 
 static BOOL PXReadSecuritySettingBool(NSString *key) {
     id v = PXReadSecuritySettingObject(key);
-    return v ? [v boolValue] : NO;
+    return PXRuntimeReadBool(v);
 }
 
 static void PXSynchronizeSecuritySettings(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     // RootHide-injected App Store processes consume the daemon-published jbroot
     // snapshot. Avoid depending on cfprefsd access to another app's domain.
-    if (PXRuntimeSnapshotSecuritySettings().count) return;
-#endif
+    return;
+#else
     gPXReadingSecuritySettings = YES;
     CFPreferencesAppSynchronize(CFSTR("com.weaponx.securitySettings"));
     gPXReadingSecuritySettings = NO;
+#endif
 }
 
 static NSTimeInterval PXMonotonicNow(void) {
@@ -269,17 +270,19 @@ static void PXScopeFileLog(NSString *format, ...) {
 
 static NSDictionary *PXLoadScopedAppsFromDisk(void) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeScope = PXRuntimeSnapshotGlobalScope();
+    NSDictionary *runtimeScope = PXCaptureRuntimeSnapshot().globalScope;
     NSDictionary *runtimeScoped = [runtimeScope[@"ScopedApps"] isKindOfClass:NSDictionary.class]
         ? runtimeScope[@"ScopedApps"] : nil;
-    if (runtimeScoped) return [runtimeScoped copy];
-#endif
+    return runtimeScoped ?: @{};
+#else
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
     NSDictionary *scoped = [dict isKindOfClass:[NSDictionary class]] ? dict[@"ScopedApps"] : nil;
     return [scoped isKindOfClass:[NSDictionary class]] ? [scoped copy] : @{};
+#endif
 }
 
 static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
+    PX_RUNTIME_READ_OPERATION;
     // Sync once per snapshot rebuild. Individual reads below no longer force cfprefsd
     // synchronization, avoiding repeated IPC/I/O on this otherwise hot cache-miss path.
     PXSynchronizeSecuritySettings();
@@ -291,7 +294,7 @@ static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
     BOOL safariEnabled = deviceEnabled;
     id safariSetting = PXReadSecuritySettingObject(@"safariStackSpoofEnabled");
     if (safariSetting != nil) {
-        safariEnabled = deviceEnabled && [safariSetting boolValue];
+        safariEnabled = deviceEnabled && PXRuntimeReadBool(safariSetting);
     }
     if (deviceEnabled && fullTest) {
         safariEnabled = YES;
@@ -300,19 +303,19 @@ static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
     BOOL uiScaleEnabled = deviceEnabled;
     id uiScaleSetting = PXReadSecuritySettingObject(@"displayUIScaleSpoofEnabled");
     if (uiScaleSetting != nil) {
-        uiScaleEnabled = deviceEnabled && [uiScaleSetting boolValue];
+        uiScaleEnabled = deviceEnabled && PXRuntimeReadBool(uiScaleSetting);
     }
 
     BOOL pixelMetricsEnabled = deviceEnabled;
     id pixelMetricsSetting = PXReadSecuritySettingObject(@"displayPixelMetricsSpoofEnabled");
     if (pixelMetricsSetting != nil) {
-        pixelMetricsEnabled = deviceEnabled && [pixelMetricsSetting boolValue];
+        pixelMetricsEnabled = deviceEnabled && PXRuntimeReadBool(pixelMetricsSetting);
     }
 
     BOOL webScreenEnabled = deviceEnabled;
     id webScreenSetting = PXReadSecuritySettingObject(@"displayWebScreenSpoofEnabled");
     if (webScreenSetting != nil) {
-        webScreenEnabled = deviceEnabled && [webScreenSetting boolValue];
+        webScreenEnabled = deviceEnabled && PXRuntimeReadBool(webScreenSetting);
     }
 
     NSDictionary *scoped = PXLoadScopedAppsFromDisk();
@@ -330,6 +333,27 @@ static PXScopeSnapshot *PXBuildSnapshot(uint64_t generation) {
 }
 
 static PXScopeSnapshot *PXCurrentSnapshot(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    PX_RUNTIME_READ_OPERATION;
+    static char scopeKey;
+    PXRuntimeReadSnapshot *runtime = PXCaptureRuntimeSnapshot();
+    if (!runtime.valid) {
+        static PXScopeSnapshot *denied;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            denied = [[PXScopeSnapshot alloc] initWithDeviceSpoofEnabled:NO safariStackEnabled:NO
+                fullSpoofTestModeEnabled:NO displayUIScaleEnabled:NO displayPixelMetricsEnabled:NO
+                displayWebScreenEnabled:NO scopedApps:@{} generation:0 expirationTime:0];
+        });
+        return denied;
+    }
+    PXScopeSnapshot *captured = objc_getAssociatedObject(runtime, &scopeKey);
+    if (!captured) {
+        captured = PXBuildSnapshot(runtime.readerGeneration);
+        objc_setAssociatedObject(runtime, &scopeKey, captured, OBJC_ASSOCIATION_RETAIN);
+    }
+    return captured;
+#else
     PXScopeSnapshot *local = nil;
     NSTimeInterval now = PXMonotonicNow();
 
@@ -374,6 +398,7 @@ static PXScopeSnapshot *PXCurrentSnapshot(void) {
 
     os_unfair_lock_unlock(&gRefreshLock);
     return local;
+#endif
 }
 
 void PXInvalidateScopeDecisionCache(void) {
@@ -385,10 +410,14 @@ void PXInvalidateScopeDecisionCache(void) {
 }
 
 uint64_t PXScopeGeneration(void) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCaptureRuntimeSnapshot().readerGeneration;
+#else
     os_unfair_lock_lock(&gSnapshotLock);
     uint64_t gen = gScopeGeneration;
     os_unfair_lock_unlock(&gSnapshotLock);
     return gen;
+#endif
 }
 
 static void PXScopeNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -399,7 +428,7 @@ static void PXScopeNotify(CFNotificationCenterRef center, void *observer, CFStri
 static BOOL PXScopedBundleEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bundleID) {
     if (![bundleID isKindOfClass:[NSString class]] || !bundleID.length || !snap) return NO;
     NSDictionary *entry = [snap.scopedApps[bundleID] isKindOfClass:[NSDictionary class]] ? snap.scopedApps[bundleID] : nil;
-    return [entry[@"enabled"] boolValue];
+    return PXRuntimeReadBool(entry[@"enabled"]);
 }
 
 static BOOL PXScopedOwnerEnabledInSnapshot(PXScopeSnapshot *snap, NSString *bundleID) {
@@ -471,6 +500,9 @@ static void PXScopeStartObserving(void) {
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.scopedAppsChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(center, NULL, PXScopeNotify, CFSTR("com.hydra.tlinkios.safariStackSpoofToggleChanged"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        (void)PXPrepareRuntimeSnapshotReader();
+#endif
     });
 }
 
@@ -551,10 +583,51 @@ BOOL PXIsWebKitHelperProcess(NSString *bundleID, NSString *processName) {
     return NO;
 }
 
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+static PXRuntimeSnapshotReader *PXWebKitMetadataReader(void) {
+    static PXRuntimeSnapshotReader *reader;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        reader = [[PXRuntimeSnapshotReader alloc] initWithLoader:^NSDictionary *{
+            NSString *resolved = nil;
+            for (NSString *home in gPXHostHomes) {
+                NSString *canonical = home.stringByResolvingSymlinksInPath;
+                if (![canonical hasPrefix:@"/private/var/mobile/Containers/Data/Application/"] &&
+                    ![canonical hasPrefix:@"/var/mobile/Containers/Data/Application/"]) continue;
+                NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:
+                    [canonical stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"]];
+                id identifier = metadata[@"MCMMetadataIdentifier"];
+                if (![identifier isKindOfClass:NSString.class] || ![identifier length]) continue;
+                if (resolved && ![resolved isEqualToString:identifier]) { resolved = nil; break; }
+                resolved = identifier;
+            }
+            return @{ @"schemaVersion": @1, @"profileID": resolved ?: @"" };
+        } refreshInterval:1.0];
+    });
+    return reader;
+}
+
+static void PXPrimeWebKitMetadataReader(void) {
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    static BOOL attempted;
+    os_unfair_lock_lock(&lock);
+    BOOL first = !attempted;
+    attempted = YES;
+    os_unfair_lock_unlock(&lock);
+    if (!first) return;
+    PXRuntimeSnapshotReader *reader = PXWebKitMetadataReader();
+    (void)[reader capture];
+    (void)[reader waitForPendingRefresh:1.0];
+}
+#endif
+
 NSString *PXWebKitHostBundleIdentifier(void) {
     // Called by bootstrap after canonical identity capture. No dispatch_once
     // negative sentinel: sandbox/container metadata can become readable later.
     if (!gPXHostHomes.count) return nil;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return [PXWebKitMetadataReader() capture].profileID;
+#else
     static os_unfair_lock hostLock = OS_UNFAIR_LOCK_INIT;
     static NSString *cachedHost;
     static uint64_t cachedGeneration;
@@ -593,6 +666,7 @@ NSString *PXWebKitHostBundleIdentifier(void) {
         os_unfair_lock_unlock(&hostLock);
     }
     return resolved;
+#endif
 }
 
 BOOL PXWebKitHostIsScopedForSpoofing(void) {
@@ -652,11 +726,18 @@ PXBootstrapDecision PXBootstrapDecisionForCurrentProcess(void) {
                 gPXProcessRole == PXProcessSystemDaemon || gPXProcessRole == PXProcessUnknown) {
                 result = PXBootstrapEvaluate(gPXProcessRole, false, false, false, 0);
             } else {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+                (void)PXPrimeRuntimeSnapshotReader();
+#endif
+                PX_RUNTIME_READ_OPERATION;
                 PXScopeSnapshot *snap = PXCurrentSnapshot();
                 BOOL ownerScoped = NO;
                 if (gPXProcessRole == PXProcessMainApp || gPXProcessRole == PXProcessExtension) {
                     ownerScoped = PXScopedOwnerEnabledInSnapshot(snap, gPXProcessBundleID);
                 } else if (snap.deviceSpoofEnabled && snap.safariStackEnabled) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+                    PXPrimeWebKitMetadataReader();
+#endif
                     NSString *host = PXWebKitHostBundleIdentifier();
                     ownerScoped = host.length && !PXIsWebKitHelperProcess(host, nil) &&
                         !PXIsCriticalSystemProcess(host, nil) &&
@@ -667,7 +748,14 @@ PXBootstrapDecision PXBootstrapDecisionForCurrentProcess(void) {
                 }
                 result = PXBootstrapEvaluate(gPXProcessRole, ownerScoped,
                     snap.deviceSpoofEnabled, snap.safariStackEnabled, snap.generation);
-                if (result.capabilities) PXScopeStartObserving();
+                if (result.capabilities) {
+                    PXScopeStartObserving();
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+                    // Web helpers do not run the native Tweak/DeviceSpec ctors.
+                    // They still need the same prevalidated identity projection.
+                    PXIdentitySnapshotStartObserving();
+#endif
+                }
             }
             if (PXScopeFileDebugEnabled()) {
                 static os_unfair_lock traceLock = OS_UNFAIR_LOCK_INIT;

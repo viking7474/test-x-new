@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 // PrivateIdentityWrapperHooks.x
 // A-05: capability-gated Apple/private identity wrapper parity.
 //
@@ -38,6 +39,7 @@ static dispatch_queue_t gPXPrivateWrapperInstallQueue = nil;
 static __thread BOOL gPXInsidePrivateIdentityWrapper = NO;
 
 static BOOL PXPrivateIdentityProcessAllowed(void) {
+    PX_RUNTIME_READ_OPERATION;
     if (PXIsSpringBoardProcess()) return NO;
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
     NSString *processName = NSProcessInfo.processInfo.processName;
@@ -91,6 +93,7 @@ static id PXPrivateIdentityCallOriginal1(PXPrivateIdentityInstalledHook *record,
 
 static BOOL PXPrivateIdentityProjectionContext(PXIdentitySnapshot **outSnapshot,
                                                IdentifierManager **outManager) {
+    PX_RUNTIME_READ_OPERATION;
     if (!PXPrivateIdentityProcessAllowed()) return NO;
     PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
     if (!snapshot.valid || ![snapshot.deviceIDs isKindOfClass:[NSDictionary class]]) return NO;
@@ -102,6 +105,7 @@ static BOOL PXPrivateIdentityProjectionContext(PXIdentitySnapshot **outSnapshot,
 }
 
 static id PXPrivateIdentityGetter(id receiver, SEL selector) {
+    PX_RUNTIME_READ_OPERATION;
     PXPrivateIdentityInstalledHook *record = PXPrivateIdentityFindInstalled(receiver, selector);
     if (!record) return nil;
     if (gPXInsidePrivateIdentityWrapper) {
@@ -140,6 +144,7 @@ static PXIdentitySurfaceEntry *PXPrivateIdentityEntryForQueriedKey(NSString *key
 }
 
 static id PXPrivateIdentityKeyedGetter(id receiver, SEL selector, id key) {
+    PX_RUNTIME_READ_OPERATION;
     PXPrivateIdentityInstalledHook *record = PXPrivateIdentityFindInstalled(receiver, selector);
     if (!record) return nil;
     if (gPXInsidePrivateIdentityWrapper) {
@@ -202,6 +207,7 @@ static void PXPrivateIdentityPublishInstalled(Class targetClass,
 }
 
 static void PXPrivateIdentityInstallAvailableRules(void) {
+    PX_RUNTIME_READ_OPERATION;
     if (!PXPrivateIdentityProcessAllowed()) return;
 
     for (NSDictionary<NSString *, id> *rule in PXPrivateIdentityWrapperRuleDescriptors()) {
@@ -249,10 +255,12 @@ static void PXPrivateIdentityInstallAvailableRules(void) {
 }
 
 static void PXPrivateIdentityDyldImageAdded(const struct mach_header *header, intptr_t slide) {
+    PX_RUNTIME_READ_OPERATION;
     (void)header;
     (void)slide;
     if (!gPXPrivateWrapperInstallQueue) return;
     dispatch_async(gPXPrivateWrapperInstallQueue, ^{
+    PX_RUNTIME_READ_OPERATION;
         PXPrivateIdentityInstallAvailableRules();
     });
 }

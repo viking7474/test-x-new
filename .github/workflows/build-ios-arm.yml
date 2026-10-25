@@ -44,6 +44,9 @@ jobs:
       - name: Test native captured runtime snapshot reader
         run: python3 scripts/test_runtime_snapshot_reader.py --native
 
+      - name: Test native captured runtime consumer operations
+        run: python3 scripts/test_runtime_snapshot_consumers.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 

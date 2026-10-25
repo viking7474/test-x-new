@@ -6,6 +6,8 @@
 #import "SystemUUIDManager.h"
 #import "DyldCacheUUIDManager.h"
 #import "PXScope.h"
+#import "PXRuntimeSnapshot.h"
+#include <string.h>
 #import "PXNativeHookCoordinator.h"
 #import "PXRuntimeOSCompatibility.h"
 #import <dlfcn.h>
@@ -46,6 +48,7 @@ static void clearCacheCallback(CFNotificationCenterRef center, void *observer, C
 
 // Update the shouldSpoofForBundle function to directly check settings files
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
     NSString *proc = [NSProcessInfo processInfo].processName;
     if (!PXProcessIsAllowedForSpoofing(bundleID, proc, PXScopeOptionAllowSafariAuthStack)) return NO;
@@ -111,7 +114,39 @@ static BOOL isDyldCacheUUIDEnabled(void) {
 }
 
 // Add functions to get spoofed UUIDs from managers
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+static NSString *PXCapturedRuntimeUUID(NSString *key, NSString *artifact) {
+    PX_RUNTIME_READ_OPERATION;
+    static char bootKey, dyldKey;
+    const void *memoKey = [key isEqualToString:@"SystemBootUUID"] ? &bootKey : &dyldKey;
+    PXRuntimeReadSnapshot *view = PXCaptureRuntimeSnapshot();
+    id memo = objc_getAssociatedObject(view, memoKey);
+    if (memo) return memo == NSNull.null ? nil : memo;
+    id primary = view.deviceIDs[key];
+    id fallback = [view profileArtifact:artifact][@"value"];
+    NSString *result = nil;
+    for (id raw in @[primary ?: @"", fallback ?: @""]) {
+        if (![raw isKindOfClass:NSString.class] || [raw length] != 36) continue;
+        const char *text = [raw UTF8String];
+        if (!text || strlen(text) != 36) continue;
+        BOOL valid = YES;
+        for (NSUInteger index = 0; index < 36; index++) {
+            char c = text[index];
+            BOOL dash = index == 8 || index == 13 || index == 18 || index == 23;
+            if (dash ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) { valid = NO; break; }
+        }
+        if (valid) { result = raw; break; }
+    }
+    if (view) objc_setAssociatedObject(view, memoKey, result ?: NSNull.null, OBJC_ASSOCIATION_RETAIN);
+    return result;
+}
+#endif
+
 static NSString *getSpoofedSystemBootUUID() {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCapturedRuntimeUUID(@"SystemBootUUID", @"systemBootUUID");
+#else
     @try {
         // Use the SystemUUIDManager for consistent values across the app and hooks
         SystemUUIDManager *manager = [SystemUUIDManager sharedManager];
@@ -195,9 +230,14 @@ static NSString *getSpoofedSystemBootUUID() {
         PXLog(@"[WeaponX] ❌ Exception in getSpoofedSystemBootUUID: %@", exception);
         return nil; // install-gate: never fabricate identity
     }
+#endif
 }
 
 static NSString *getSpoofedDyldCacheUUID() {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCapturedRuntimeUUID(@"DyldCacheUUID", @"dyldCacheUUID");
+#else
     @try {
         // Use the DyldCacheUUIDManager for consistent values across the app and hooks
         DyldCacheUUIDManager *manager = [DyldCacheUUIDManager sharedManager];
@@ -281,6 +321,7 @@ static NSString *getSpoofedDyldCacheUUID() {
         PXLog(@"[WeaponX] ❌ Exception in getSpoofedDyldCacheUUID: %@", exception);
         return nil; // install-gate: never fabricate identity
     }
+#endif
 }
 
 #pragma mark - Blanket UUID generation intentionally NOT hooked
@@ -366,6 +407,7 @@ static bool (*orig_dyld_get_shared_cache_uuid)(uuid_t uuid_out) = NULL;
 
 // Replacement function for _dyld_get_shared_cache_uuid
 static bool replaced_dyld_get_shared_cache_uuid(uuid_t uuid_out) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         // First check if we need to spoof at all
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -484,6 +526,7 @@ static NSMutableDictionary *threadLocalCaches() {
 
 // Create a copy of the image infos structure with spoofed UUID
 static const struct dyld_all_image_infos* replaced_dyld_get_all_image_infos(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         const struct dyld_all_image_infos *original = orig_dyld_get_all_image_infos();
         if (!original) return NULL;
@@ -564,9 +607,11 @@ static const struct dyld_all_image_infos* replaced_dyld_get_all_image_infos(void
 
 // gethostuuid: returns exactly 16 UUID bytes (NOT the same serializer as kern.uuid).
 static void PXUUIDRegisterNativeProviders(void) {
+    PX_RUNTIME_READ_OPERATION;
     PXNativeHookCoordinator *coord = [PXNativeHookCoordinator sharedCoordinator];
 
     [coord registerGethostuuidProvider:@"uuid.gethostuuid" priority:PXNativeHookPriorityIdentity pre:^BOOL(uuid_t _Nonnull uuid, const struct timespec * _Nullable wait, int * _Nonnull outResult) {
+    PX_RUNTIME_READ_OPERATION;
         (void)wait;
         @try {
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -585,6 +630,7 @@ static void PXUUIDRegisterNativeProviders(void) {
 
     // kern.uuid: NUL-terminated UUID *string* with correct two-call buffer sizing.
     [coord registerSysctlBynameProvider:@"uuid.kern.uuid" priority:PXNativeHookPriorityIdentity pre:^BOOL(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen, int *outResult) {
+    PX_RUNTIME_READ_OPERATION;
         (void)newp; (void)newlen;
         if (!name || strcmp(name, "kern.uuid") != 0) return NO;
         @try {
@@ -618,6 +664,7 @@ static void PXUUIDRegisterNativeProviders(void) {
 
     // IOKit IOPlatformUUID / system-id via coordinator post (identity).
     [coord registerIORegistryCreateCFPropertyProvider:@"uuid.iokit.create" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+    PX_RUNTIME_READ_OPERATION;
         (void)entry; (void)allocator; (void)options;
         if (!key) return NO;
         NSString *keyStr = (__bridge NSString *)key;
@@ -635,6 +682,7 @@ static void PXUUIDRegisterNativeProviders(void) {
     } post:nil];
 
     [coord registerIORegistryCreateCFPropertiesProvider:@"uuid.iokit.properties" priority:PXNativeHookPriorityIdentity pre:nil post:^(io_registry_entry_t entry, CFMutableDictionaryRef *properties, CFAllocatorRef allocator, IOOptionBits options, IOReturn *inoutResult) {
+    PX_RUNTIME_READ_OPERATION;
         (void)entry; (void)allocator; (void)options;
         if (!inoutResult || *inoutResult != kIOReturnSuccess || !properties || !*properties) return;
         @try {
@@ -649,6 +697,7 @@ static void PXUUIDRegisterNativeProviders(void) {
     }];
 
     [coord registerIORegistrySearchCFPropertyProvider:@"uuid.iokit.search" priority:PXNativeHookPriorityIdentity pre:^BOOL(io_registry_entry_t entry, const io_name_t plane, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options, CFTypeRef *outResult) {
+    PX_RUNTIME_READ_OPERATION;
         (void)entry; (void)plane; (void)allocator; (void)options;
         if (!key) return NO;
         NSString *keyStr = (__bridge NSString *)key;
@@ -670,6 +719,7 @@ static void PXUUIDRegisterNativeProviders(void) {
 }
 
 static void setupAdditionalSystemUUIDHooks(void) {
+    PX_RUNTIME_READ_OPERATION;
     // Register providers only — coordinator installs symbols once.
     PXUUIDRegisterNativeProviders();
     [[PXNativeHookCoordinator sharedCoordinator] installOwnedSymbolsIfNeeded];
@@ -678,6 +728,7 @@ static void setupAdditionalSystemUUIDHooks(void) {
 // Install-gate helper: passes only when a real, profile-backed UUID exists for an
 // enabled identifier. Getters never fabricate, so a non-empty value here is real.
 static BOOL PXUUIDInstallGatePasses(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         if (isSystemBootUUIDEnabled() && getSpoofedSystemBootUUID().length) return YES;
         if (isDyldCacheUUIDEnabled() && getSpoofedDyldCacheUUID().length) return YES;
@@ -703,6 +754,7 @@ static BOOL PXUUIDInstallGatePasses(void) {
         // Delay hook initialization to ensure everything is properly set up
         // This helps avoid early hooking that might cause crashes
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    PX_RUNTIME_READ_OPERATION;
             // Enhanced process filtering - check if this is a process we should hook
             NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
             NSString *executablePath = [[NSBundle mainBundle] executablePath];

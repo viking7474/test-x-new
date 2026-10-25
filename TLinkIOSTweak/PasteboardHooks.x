@@ -65,10 +65,12 @@ static NSString *getCurrentBundleID(void) {
 }
 
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {
@@ -93,6 +95,7 @@ static BOOL isInScopedAppsList(void) {
 }
 
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
     if (!PXProcessIsAllowedForSpoofing(bundleID, [NSProcessInfo processInfo].processName, PXScopeOptionAllowSafariAuthStack)) {
         return NO;
@@ -105,20 +108,27 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
             return NO;
         }
     }
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return getSpoofedPasteboardUUID().length > 0;
+#else
     return YES;
+#endif
 }
 
 static NSString *getSpoofedPasteboardUUID(void) {
+    PX_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeIDs = PXRuntimeSnapshotDeviceIDs();
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *runtimeIDs = runtimeView.deviceIDs;
     NSString *runtimeUUID = [runtimeIDs[@"PasteboardUUID"] isKindOfClass:NSString.class]
         ? runtimeIDs[@"PasteboardUUID"] : nil;
     if (!runtimeUUID.length) {
-        NSDictionary *runtimeArtifact = PXRuntimeSnapshotProfileArtifact(@"pasteboardUUID");
+        NSDictionary *runtimeArtifact = [runtimeView profileArtifact:@"pasteboardUUID"];
         runtimeUUID = [runtimeArtifact[@"value"] isKindOfClass:NSString.class]
             ? runtimeArtifact[@"value"] : nil;
     }
     if (runtimeUUID.length) return runtimeUUID;
+    return nil;
 #endif
     PasteboardUUIDManager *manager = [PasteboardUUIDManager sharedManager];
     NSString *uuid = [manager currentPasteboardUUID];
@@ -256,6 +266,7 @@ static UIPasteboard *(*orig_pasteboardWithURLCreate)(id, SEL, NSURL *, BOOL) = N
 #pragma mark - Hook implementations
 
 static NSUUID *hook_uniquePasteboardUUID(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (shouldSpoofForBundle(bundleID)) {
@@ -277,6 +288,7 @@ static NSUUID *hook_uniquePasteboardUUID(id self, SEL _cmd) {
 }
 
 static NSString *hook_name(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *originalName = orig_name ? orig_name(self, _cmd) : nil;
     
     @try {
@@ -300,6 +312,7 @@ static NSString *hook_name(id self, SEL _cmd) {
 }
 
 static UIPasteboard *hook_generalPasteboard(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     UIPasteboard *original = orig_generalPasteboard ? orig_generalPasteboard(self, _cmd) : nil;
     
     @try {
@@ -315,6 +328,7 @@ static UIPasteboard *hook_generalPasteboard(id self, SEL _cmd) {
 }
 
 static UIPasteboard *hook_pasteboardWithNameCreate(id self, SEL _cmd, NSString *pasteboardName, BOOL create) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
@@ -340,6 +354,7 @@ static UIPasteboard *hook_pasteboardWithNameCreate(id self, SEL _cmd, NSString *
 }
 
 static UIPasteboard *hook_pasteboardWithUniqueName(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     UIPasteboard *original = orig_pasteboardWithUniqueName ? orig_pasteboardWithUniqueName(self, _cmd) : nil;
     
     @try {
@@ -355,6 +370,7 @@ static UIPasteboard *hook_pasteboardWithUniqueName(id self, SEL _cmd) {
 }
 
 static UIPasteboard *hook_pasteboardWithURLCreate(id self, SEL _cmd, NSURL *url, BOOL create) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
@@ -391,6 +407,7 @@ static UIPasteboard *hook_pasteboardWithURLCreate(id self, SEL _cmd, NSURL *url,
 }
 
 static NSInteger hook_changeCount(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     NSInteger originalCount = orig_changeCount ? orig_changeCount(self, _cmd) : 0;
     
     @try {
@@ -416,6 +433,7 @@ static NSInteger hook_changeCount(id self, SEL _cmd) {
 }
 
 static void hook_setPersistent(id self, SEL _cmd, BOOL persistent) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
@@ -437,6 +455,7 @@ static void hook_setPersistent(id self, SEL _cmd, BOOL persistent) {
 }
 
 static BOOL hook_isPersistent(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     BOOL originalValue = orig_isPersistent ? orig_isPersistent(self, _cmd) : NO;
     
     @try {
@@ -454,6 +473,7 @@ static BOOL hook_isPersistent(id self, SEL _cmd) {
 }
 
 static NSArray *hook_itemProviders(id self, SEL _cmd) {
+    PX_RUNTIME_READ_OPERATION;
     NSArray *originalProviders = orig_itemProviders ? orig_itemProviders(self, _cmd) : nil;
     
     @try {
@@ -470,6 +490,7 @@ static NSArray *hook_itemProviders(id self, SEL _cmd) {
 }
 
 static NSArray *hook_itemSetWithPreferredPasteboardTypes(id self, SEL _cmd, NSArray *types) {
+    PX_RUNTIME_READ_OPERATION;
     NSArray *originalItemSet = orig_itemSetWithPreferredPasteboardTypes
         ? orig_itemSetWithPreferredPasteboardTypes(self, _cmd, types)
         : nil;
@@ -488,6 +509,7 @@ static NSArray *hook_itemSetWithPreferredPasteboardTypes(id self, SEL _cmd, NSAr
 }
 
 static BOOL hook_containsPasteboardTypes(id self, SEL _cmd, NSArray *pasteboardTypes) {
+    PX_RUNTIME_READ_OPERATION;
     BOOL originalResult = orig_containsPasteboardTypes
         ? orig_containsPasteboardTypes(self, _cmd, pasteboardTypes)
         : NO;
@@ -510,6 +532,7 @@ static BOOL hook_containsPasteboardTypes(id self, SEL _cmd, NSArray *pasteboardT
 }
 
 static id hook_valueForPasteboardType(id self, SEL _cmd, NSString *pasteboardType) {
+    PX_RUNTIME_READ_OPERATION;
     id originalValue = orig_valueForPasteboardType
         ? orig_valueForPasteboardType(self, _cmd, pasteboardType)
         : nil;
@@ -563,6 +586,7 @@ static id hook_valueForPasteboardType(id self, SEL _cmd, NSString *pasteboardTyp
 }
 
 static void hook_setDataForPasteboardType(id self, SEL _cmd, NSData *data, NSString *pasteboardType) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
@@ -580,6 +604,7 @@ static void hook_setDataForPasteboardType(id self, SEL _cmd, NSData *data, NSStr
 }
 
 static void hook_setItems(id self, SEL _cmd, NSArray *items) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         

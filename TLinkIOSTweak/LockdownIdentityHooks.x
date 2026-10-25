@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 // LockdownIdentityHooks.x
 // Runtime wiring for the Lockdown identity research providers (plan §4, Phases 5/6/7).
 //
@@ -90,6 +91,7 @@ static NSString *PXLockdownConstNameForRuntimeKey(NSString *runtimeKey) {
 #pragma mark - Safety runtime
 
 static void PXLockdownRebuildRuntime(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
         NSDictionary *settings = snapshot.settings ?: @{};
@@ -117,6 +119,7 @@ static PXLockdownResearchRuntime *PXLockdownCurrentRuntime(void) {
 // Route one intercepted Lockdown lookup through the correct resolver. Fails closed to
 // `original` on any uncertainty and emits only redacted, value-free audit metadata.
 static id PXLockdownResolveInterceptedValue(NSString *runtimeKey, id original, NSString *rawDomain) {
+    PX_RUNTIME_READ_OPERATION;
     // Never observe or resolve forbidden pairing / certificate / private-key / escrow domains.
     if (PXLockdownObservationDomainIsForbidden(rawDomain)) return original;
 
@@ -192,6 +195,7 @@ static id PXLockdownResolveInterceptedValue(NSString *runtimeKey, id original, N
 #pragma mark - liblockdown interception
 
 static CFTypeRef px_lockdown_copy_value(void *client, CFStringRef domain, CFStringRef key) {
+    PX_RUNTIME_READ_OPERATION;
     CFTypeRef original = orig_lockdown_copy_value ? orig_lockdown_copy_value(client, domain, key) : NULL;
 
     if (gInsideLockdownHook) return original;
@@ -242,6 +246,7 @@ static void PXLockdownInstallInterception(void) {
 
 static void PXLockdownSettingsChanged(CFNotificationCenterRef center, void *observer,
                                       CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    PX_RUNTIME_READ_OPERATION;
     (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
     PXLockdownRebuildRuntime();
 }

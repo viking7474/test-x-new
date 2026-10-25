@@ -1,3 +1,4 @@
+#import "PXRuntimeSnapshot.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
@@ -34,6 +35,10 @@ static void PXEnsureCanvasCache(void) {
 #pragma mark - Canvas Settings
 
 static NSDictionary *PXCanvasSettingsDictionary(void) {
+    PX_RUNTIME_READ_OPERATION;
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return PXCaptureRuntimeSnapshot().securitySettings ?: @{};
+#else
     NSArray<NSString *> *possiblePaths = @[
         PXSecuritySettingsPath(),
         @"/var/mobile/Library/Preferences/com.weaponx.securitySettings.plist",
@@ -45,6 +50,7 @@ static NSDictionary *PXCanvasSettingsDictionary(void) {
         if (settings) return settings;
     }
     return @{};
+#endif
 }
 
 static BOOL PXCanvasSettingBool(NSDictionary *settings, NSString *key, BOOL defaultValue) {
@@ -88,6 +94,7 @@ static uint32_t PXCanvasSeedNonce(NSDictionary *settings) {
 
 // Helper: Always read enablement from profile/plist, not IdentifierManager
 static BOOL isCanvasFingerprintProtectionEnabledForCurrentApp(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *settingsDict = PXCanvasSettingsDictionary();
     NSNumber *enabled = settingsDict[@"canvasFingerprintingEnabled"];
     if (!enabled) enabled = settingsDict[@"CanvasFingerprint"];
@@ -95,6 +102,7 @@ static BOOL isCanvasFingerprintProtectionEnabledForCurrentApp(void) {
 }
 
 static NSDictionary *PXReadCurrentDeviceIdsForFingerprint(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         PXIdentitySnapshot *snapshot = PXCurrentIdentitySnapshot();
         return snapshot.valid ? snapshot.deviceIDs : nil;
@@ -144,6 +152,7 @@ static BOOL PXParseResolutionString(NSString *res, NSInteger *outW, NSInteger *o
 }
 
 static NSString *PXBuildWebScreenSpoofScript(NSDictionary *deviceIds) {
+    PX_RUNTIME_READ_OPERATION;
     if (!PXDisplayWebScreenSpoofEnabled()) return nil;
 
     NSString *viewportRes = PXProfileString(deviceIds[@"ViewportResolution"]);
@@ -220,6 +229,7 @@ static NSString *PXJavaScriptNullableStringLiteral(NSString *value) {
 }
 
 static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *deviceIds = PXReadCurrentDeviceIdsForFingerprint();
     if (!deviceIds) return nil;
 
@@ -895,6 +905,7 @@ static NSString *PXBuildSeededFingerprintProtectionScript(NSString *bundleID) {
 }
 
 static NSString *PXBuildFingerprintRuntimeUpdateScript(NSString *bundleID, NSString **markerOut) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID.length) return nil;
 
     NSDictionary *settings = PXCanvasSettingsDictionary();
@@ -919,6 +930,7 @@ static NSString *PXBuildFingerprintRuntimeUpdateScript(NSString *bundleID, NSStr
 
 // Update shouldProtectBundle to use only the new function
 static BOOL shouldProtectBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID.length) return NO;
     PXEnsureCanvasCache();
     NSString *timestampKey = [bundleID stringByAppendingString:@"_timestamp"];
@@ -931,7 +943,9 @@ static BOOL shouldProtectBundle(NSString *bundleID) {
         [now timeIntervalSinceDate:decisionTimestamp] < kCacheValidityDuration;
     BOOL cachedValue = [cachedDecision boolValue];
     os_unfair_lock_unlock(&gCanvasCacheLock);
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (valid) return cachedValue;
+#endif
 
     BOOL shouldProtect = isCanvasFingerprintProtectionEnabledForCurrentApp() || PXFullSpoofTestModeEnabled();
     os_unfair_lock_lock(&gCanvasCacheLock);
@@ -963,6 +977,7 @@ static NSInteger getNoiseSeedForBundle(NSString *bundleID) {
 
 // Add subtle noise to image data based on the same persisted settings used by the JS path.
 static void addNoiseToImageData(NSMutableData *imageData, NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!imageData || imageData.length == 0 || !bundleID.length) return;
 
     NSDictionary *settings = PXCanvasSettingsDictionary();
@@ -1014,6 +1029,7 @@ static void PXAddDocumentStartUserScriptIfNeeded(WKUserContentController *contro
 }
 
 static void PXInstallDocumentStartSpoofScripts(WKUserContentController *controller) {
+    PX_RUNTIME_READ_OPERATION;
     if (!controller) return;
 
     BOOL hasScreen = PXUserContentControllerContainsMarker(controller,
@@ -1056,7 +1072,9 @@ static void PXInstallDocumentStartSpoofScripts(WKUserContentController *controll
 }
 
 static void PXStageDocumentStartScriptsForExistingWebViews(void) {
+    PX_RUNTIME_READ_OPERATION;
     void (^stageBlock)(void) = ^{
+    PX_RUNTIME_READ_OPERATION;
         UIApplication *application = [UIApplication sharedApplication];
         if (!application) return;
 
@@ -1091,6 +1109,7 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
 %hook WKWebViewConfiguration
 
 - (instancetype)init {
+    PX_RUNTIME_READ_OPERATION;
     WKWebViewConfiguration *configuration = %orig;
     if (configuration) {
         PXInstallDocumentStartSpoofScripts(configuration.userContentController);
@@ -1099,12 +1118,14 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
 }
 
 - (WKUserContentController *)userContentController {
+    PX_RUNTIME_READ_OPERATION;
     WKUserContentController *controller = %orig;
     PXInstallDocumentStartSpoofScripts(controller);
     return controller;
 }
 
 - (void)setUserContentController:(WKUserContentController *)userContentController {
+    PX_RUNTIME_READ_OPERATION;
     PXInstallDocumentStartSpoofScripts(userContentController);
     %orig(userContentController);
 }
@@ -1116,6 +1137,7 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
 %hook WKWebView
 
 - (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
+    PX_RUNTIME_READ_OPERATION;
     if (configuration) {
         PXInstallDocumentStartSpoofScripts(configuration.userContentController);
     }
@@ -1131,6 +1153,7 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
 
 // Method for getting pixel data
 - (NSData *)drawingData {
+    PX_RUNTIME_READ_OPERATION;
     NSData *originalData = %orig;
     
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -1155,6 +1178,7 @@ static void PXStageDocumentStartScriptsForExistingWebViews(void) {
 
 // Refresh settings when profile or settings change
 static void refreshSettings(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    PX_RUNTIME_READ_OPERATION;
     NSString *notificationName = (__bridge NSString *)name;
     PXLog(@"[CanvasFingerprint] Received settings notification: %@", notificationName);
     PXInvalidateScopeDecisionCache();

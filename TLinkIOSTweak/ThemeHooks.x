@@ -47,11 +47,13 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {
@@ -80,6 +82,7 @@ static BOOL isInScopedAppsList(void) {
 
 // Helper function to check if we should spoof theme for this bundle ID (with caching)
 static BOOL shouldSpoofForBundle(NSString *bundleID) {
+    PX_RUNTIME_READ_OPERATION;
     if (!bundleID) return NO;
 
     // SKIP theme spoofing for Safari/Auth stack to avoid text color conflicts
@@ -93,23 +96,27 @@ static BOOL shouldSpoofForBundle(NSString *bundleID) {
 
 // Helper function to get theme value from profile
 static WeaponXThemeStyle getThemeStyleFromProfile(void) {
+    PX_RUNTIME_READ_OPERATION;
     NSDate *now = [NSDate date];
     os_unfair_lock_lock(&gThemeCacheLock);
     NSString *cachedValue = cachedThemeValue;
     NSDate *loadedAt = cacheTimestamp;
     os_unfair_lock_unlock(&gThemeCacheLock);
 
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (cachedValue.length && loadedAt && [now timeIntervalSinceDate:loadedAt] <= kCacheValidityDuration) {
         if ([cachedValue isEqualToString:@"Dark"]) return WeaponXThemeStyleDark;
         if ([cachedValue isEqualToString:@"Light"]) return WeaponXThemeStyleLight;
     }
+#endif
 
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *deviceIDs = PXRuntimeSnapshotDeviceIDs();
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *deviceIDs = runtimeView.deviceIDs;
     NSString *themeValue = [deviceIDs[@"DeviceTheme"] isKindOfClass:NSString.class]
         ? deviceIDs[@"DeviceTheme"] : nil;
     if (!themeValue.length) {
-        NSDictionary *themeInfo = PXRuntimeSnapshotProfileArtifact(@"deviceTheme");
+        NSDictionary *themeInfo = [runtimeView profileArtifact:@"deviceTheme"];
         themeValue = [themeInfo[@"value"] isKindOfClass:NSString.class] ? themeInfo[@"value"] : nil;
     }
 #else
@@ -160,6 +167,7 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 
 // Method for getting userInterfaceStyle property
 - (UIUserInterfaceStyle)userInterfaceStyle {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
     // Check if spoofing is needed for this app
@@ -186,6 +194,7 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 
 // For iOS 17, there's a new named retrieval method
 - (UIUserInterfaceStyle)effectiveUserInterfaceStyle {
+    PX_RUNTIME_READ_OPERATION;
     if (@available(iOS 17.0, *)) {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         
@@ -209,6 +218,7 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 %hook UIScreen
 
 - (UITraitCollection *)traitCollection {
+    PX_RUNTIME_READ_OPERATION;
     UITraitCollection *originalTraitCollection = %orig;
     
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -237,6 +247,7 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 %hook UIView
 
 - (UITraitCollection *)traitCollection {
+    PX_RUNTIME_READ_OPERATION;
     UITraitCollection *originalTraitCollection = %orig;
     
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -265,6 +276,7 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 %hook UIViewController
 
 - (UITraitCollection *)traitCollection {
+    PX_RUNTIME_READ_OPERATION;
     UITraitCollection *originalTraitCollection = %orig;
     
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -294,6 +306,7 @@ static UIUserInterfaceStyle mapThemeStyleToUIUserInterfaceStyle(WeaponXThemeStyl
 
 // Hook preferredColorScheme for WebKit
 - (void)_setPreferredColorScheme:(NSInteger)colorScheme {
+    PX_RUNTIME_READ_OPERATION;
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     
     // Check if we need to spoof

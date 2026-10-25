@@ -75,11 +75,13 @@ static NSString *getCurrentBundleID(void) {
 
 // Load scoped apps from the plist file
 static NSDictionary *loadScopedApps(void) {
+    PX_RUNTIME_READ_OPERATION;
     return PXScopedAppsSnapshot();
 }
 
 // Check if the current app is in the scoped apps list
 static BOOL isInScopedAppsList(void) {
+    PX_RUNTIME_READ_OPERATION;
     @try {
         NSString *bundleID = getCurrentBundleID();
         if (!bundleID || [bundleID length] == 0) {
@@ -112,15 +114,22 @@ static NSDictionary *gCachedStorageValues = nil;
 static NSTimeInterval gStorageCacheLoadedAt = 0;
 
 static NSDictionary *PXStorageCachedValues(NSTimeInterval now) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return nil; // The captured view is the cache authority; never reuse another generation.
+#else
     os_unfair_lock_lock(&gStorageCacheLock);
     NSDictionary *cached = (gCachedStorageValues && now - gStorageCacheLoadedAt < 30.0)
         ? gCachedStorageValues
         : nil;
     os_unfair_lock_unlock(&gStorageCacheLock);
     return cached;
+#endif
 }
 
 static NSDictionary *PXStoragePublishValues(NSDictionary *values, NSTimeInterval now) {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    return values;
+#else
     NSDictionary *immutable = [values isKindOfClass:[NSDictionary class]] ? [values copy] : nil;
     os_unfair_lock_lock(&gStorageCacheLock);
     gCachedStorageValues = immutable;
@@ -128,6 +137,7 @@ static NSDictionary *PXStoragePublishValues(NSDictionary *values, NSTimeInterval
     NSDictionary *published = gCachedStorageValues;
     os_unfair_lock_unlock(&gStorageCacheLock);
     return published;
+#endif
 }
 
 static void PXStorageInvalidateCache(void) {
@@ -142,6 +152,7 @@ static void PXStorageSettingsChanged(CFNotificationCenterRef center,
                                      CFStringRef name,
                                      const void *object,
                                      CFDictionaryRef userInfo) {
+    PX_RUNTIME_READ_OPERATION;
     (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
     PXStorageInvalidateCache();
     PXInvalidateScopeDecisionCache();
@@ -153,27 +164,30 @@ static void PXStorageSettingsChanged(CFNotificationCenterRef center,
                                              DISPATCH_QUEUE_SERIAL);
     });
     dispatch_async(refreshQueue, ^{
+    PX_RUNTIME_READ_OPERATION;
         PXStorageRefreshNativeSnapshot();
     });
 }
 
 // Helper function to get consistent storage values directly from storage.plist.
 static NSDictionary *getStorageValues() {
+    PX_RUNTIME_READ_OPERATION;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     NSDictionary *cached = PXStorageCachedValues(now);
     if (cached) return cached;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    NSDictionary *runtimeSettings = PXRuntimeSnapshotTLinkSettings();
+    PXRuntimeReadSnapshot *runtimeView = PXCaptureRuntimeSnapshot();
+    NSDictionary *runtimeSettings = runtimeView.tlinkSettings;
     NSDictionary *runtimeEnabled = [runtimeSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class] ? runtimeSettings[@"EnabledIdentifiers"] : @{};
-    NSDictionary *runtimeStorage = PXRuntimeSnapshotProfileArtifact(@"storage");
+    NSDictionary *runtimeStorage = [runtimeView profileArtifact:@"storage"];
     id primaryStorageEnabled = runtimeEnabled[@"StorageSystem"];
     BOOL runtimeStorageEnabled = NO;
     if (primaryStorageEnabled != nil) {
-        runtimeStorageEnabled = [primaryStorageEnabled boolValue];
+        runtimeStorageEnabled = PXRuntimeReadBool(primaryStorageEnabled);
     } else {
         id secondaryStorageEnabled = runtimeSettings[@"StorageSystemEnabled"];
         if (secondaryStorageEnabled != nil) {
-            runtimeStorageEnabled = [secondaryStorageEnabled boolValue];
+            runtimeStorageEnabled = PXRuntimeReadBool(secondaryStorageEnabled);
         } else {
             // Compatibility with older sparse settings: storage.plist is only
             // generated for an enabled StorageSystem, so a complete artifact is
@@ -330,6 +344,7 @@ static BOOL PXStorageBundleIsProblematic(NSString *bundleID) {
 
 // Function to get storage values with universal compatibility
 static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
+    PX_RUNTIME_READ_OPERATION;
     if (!totalBytes || !freeBytes) return;
     
     // Initialize with zeros
@@ -439,6 +454,7 @@ static void getStorageValuesForApp(uint64_t *totalBytes, uint64_t *freeBytes) {
 }
 
 static void PXStorageRefreshNativeSnapshot(void) {
+    PX_RUNTIME_READ_OPERATION;
     atomic_store_explicit(&gStorageNativeRefreshInProgress, true, memory_order_release);
 
     uint64_t totalBytes = 0;
@@ -517,6 +533,7 @@ static void PXStorageModifyStatfsWithValues(struct statfs *buf,
 }
 
 static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
+    PX_RUNTIME_READ_OPERATION;
     uint64_t totalBytes = 0;
     uint64_t freeBytes = 0;
     getStorageValuesForApp(&totalBytes, &freeBytes);
@@ -525,12 +542,14 @@ static void modifyStatfsWithSpoofedValues(struct statfs *buf) {
 
 // Helper to modify statfs64 buffer (alias of struct statfs on Darwin)
 static void modifyStatfs64WithSpoofedValues(PXStatfs64Buf *buf) {
+    PX_RUNTIME_READ_OPERATION;
     // Same layout as struct statfs on Apple — reuse the primary helper.
     modifyStatfsWithSpoofedValues((struct statfs *)buf);
 }
 
 // Replacement for statfs to spoof filesystem info
 static int replaced_statfs(const char *path, struct statfs *buf) {
+    PX_RUNTIME_READ_OPERATION;
     // Check for null pointers
     if (!path || !buf) {
         return -1; // EINVAL
@@ -561,6 +580,7 @@ static int replaced_statfs(const char *path, struct statfs *buf) {
 
 // Replacement for statfs64 (64-bit variant)
 static int replaced_statfs64(const char *path, PXStatfs64Buf *buf) {
+    PX_RUNTIME_READ_OPERATION;
     // Check for null pointers
     if (!path || !buf) {
         return -1; // EINVAL
@@ -591,6 +611,7 @@ static int replaced_statfs64(const char *path, PXStatfs64Buf *buf) {
 
 // Replacement for getfsstat
 static int replaced_getfsstat(struct statfs *buf, int bufsize, int flags) {
+    PX_RUNTIME_READ_OPERATION;
     // Check for null pointer or invalid size
     if (!buf || bufsize <= 0) {
         return -1; // EINVAL
@@ -625,6 +646,7 @@ static int replaced_getfsstat(struct statfs *buf, int bufsize, int flags) {
 
 // Replacement for getfsstat64
 static int replaced_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
+    PX_RUNTIME_READ_OPERATION;
     // Check for null pointer or invalid size
     if (!buf || bufsize <= 0) {
         return -1; // EINVAL
@@ -659,6 +681,7 @@ static int replaced_getfsstat64(PXStatfs64Buf *buf, int bufsize, int flags) {
 
 // Replacement for IORegistryEntryCreateCFProperty - used for IOKit property lookups
 static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, IOOptionBits options) {
+    PX_RUNTIME_READ_OPERATION;
     // Call original first
     CFTypeRef result = orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options);
 
@@ -727,6 +750,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 %hook NSFileManager
 
 - (NSDictionary *)attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary *originalAttributes = %orig;
     
     if (!originalAttributes || !shouldApplyStorageSpoofing()) {
@@ -766,6 +790,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Hook the direct volume capacity method added in iOS 11+
 - (unsigned long long)volumeAvailableCapacityForImportantUsageForURL:(NSURL *)url error:(NSError **)error {
+    PX_RUNTIME_READ_OPERATION;
     unsigned long long originalCapacity = %orig;
     
     if (!shouldApplyStorageSpoofing()) {
@@ -789,6 +814,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Hook the direct total capacity method added in iOS 11+
 - (unsigned long long)volumeTotalCapacityForURL:(NSURL *)url error:(NSError **)error {
+    PX_RUNTIME_READ_OPERATION;
     unsigned long long originalCapacity = %orig;
     
     if (!shouldApplyStorageSpoofing()) {
@@ -812,6 +838,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Add iOS 13+ method
 - (unsigned long long)volumeAvailableCapacityForOpportunisticUsageForURL:(NSURL *)url error:(NSError **)error {
+    PX_RUNTIME_READ_OPERATION;
     unsigned long long originalCapacity = %orig;
     
     if (!shouldApplyStorageSpoofing()) {
@@ -840,6 +867,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Hook NSURL's getResourceValue:forKey:error: method for iOS 15+ compatibility
 - (BOOL)getResourceValue:(id *)value forKey:(NSURLResourceKey)key error:(NSError **)error {
+    PX_RUNTIME_READ_OPERATION;
     BOOL result = %orig;
     
     if (!result || !value || !*value || !key || !shouldApplyStorageSpoofing()) {
@@ -895,6 +923,7 @@ static CFTypeRef replaced_IORegistryEntryCreateCFProperty(io_registry_entry_t en
 
 // Hook NSURL's resourceValuesForKeys:error: method for iOS 15+ compatibility
 - (NSDictionary<NSURLResourceKey, id> *)resourceValuesForKeys:(NSArray<NSURLResourceKey> *)keys error:(NSError **)error {
+    PX_RUNTIME_READ_OPERATION;
     NSDictionary<NSURLResourceKey, id> *originalValues = %orig;
     
     if (!originalValues || !keys || !shouldApplyStorageSpoofing()) {
