@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái: Patch 1–3 và 4A.1 đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4A.2 đã migrate các runtime consumers RootHide và operation boundaries, host checks pass; native fixture/Logos/device gates mới chưa xác minh tại Windows. Không coi toàn bộ Patch 4 hoàn tất: còn publisher/source transactions 4B/4C, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
+Trạng thái: Patch 1–3, 4A.1, 4A.2 và sửa dependency bootstrap fixture đã được người dùng xác nhận build pass; device/package/runtime matrix vẫn cần bằng chứng riêng. 4B đã triển khai serial publisher, ownership, identity, structured distribution và sync-once acknowledgement; host checks pass, native fixture/build mới chờ CI. Không coi toàn bộ Patch 4 hoàn tất: còn source transactions 4C, rootful live-source rollout và runtime exit criteria. Patch 5–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -104,6 +104,8 @@ Triển khai qua hai bước để native fixture kiểm chứng reader trước
 - Giữ chính sách scope revocation/fail-closed hiện hành. Không dùng last-known-good để tiếp tục enable scope/toggle đã bị tắt; không tự siết identity validation ngoài phạm vi audit.
 
 **4B — Single publisher và publication identity**
+
+Tiến độ, policy partial distribution và giới hạn: [báo cáo 4B](audit-implementation/PATCH-4B-runtime-publisher.md). Native fixtures/CI và device matrix của lượt mới vẫn pending.
 
 - Daemon dùng serial publication queue và process-shared ownership lease/lock tại path package/data đã resolve đúng và có permission phù hợp. Không dùng lock chỉ tồn tại trong memory.
 - `--sync-once`: nếu daemon có ownership, request daemon thực hiện một sync và đợi acknowledgement có deadline; nếu chưa có daemon, chỉ publish sau khi lấy được ownership. Không tạo publisher cạnh tranh với daemon đang chạy.

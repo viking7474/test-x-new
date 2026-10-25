@@ -1,13 +1,13 @@
 #import <Foundation/Foundation.h>
 #import "PXRuntimeSnapshotReader.h"
 #import "PXRuntimeReadScope.h"
+#import "PXRuntimePublisher.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT NSString *PXRuntimeSnapshotPath(void);
 FOUNDATION_EXPORT NSString * _Nullable PXRuntimeSnapshotLocalContainerPath(void);
 FOUNDATION_EXPORT NSDictionary *PXLoadRuntimeSnapshot(void);
-FOUNDATION_EXPORT NSDictionary *PXRuntimeSnapshotLastPublishStats(void);
 
 /// Captured reader rollout. Nil means initial load/invalidation is pending;
 /// a non-nil invalid view means the last read failed validation or was absent.
@@ -46,6 +46,7 @@ FOUNDATION_EXPORT NSDictionary *PXRuntimeSnapshotProfileArtifact(NSString *key);
 /// Publish a read-only runtime snapshot into jailbreak-owned storage. This is
 /// intended for privileged manager/daemon processes; injected sandboxed apps
 /// should only call the read accessors above.
-FOUNDATION_EXPORT BOOL PXPublishRuntimeSnapshot(NSError * _Nullable * _Nullable error);
+FOUNDATION_EXPORT PXRuntimePublisher * _Nullable PXCreateRuntimeSnapshotPublisher(
+    void (^ _Nullable completion)(NSDictionary *result), NSError * _Nullable * _Nullable error);
 
 NS_ASSUME_NONNULL_END

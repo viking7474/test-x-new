@@ -8,9 +8,8 @@
 #import <errno.h>
 #import <string.h>
 #import <unistd.h>
+#import <notify.h>
 
-static const NSInteger kPXRuntimeSnapshotSchemaVersion = 1;
-static NSDictionary *gPXRuntimeSnapshotLastPublishStats = nil;
 static NSDictionary *PXRuntimeCapturedSource(void);
 
 static PXRuntimeSnapshotReader *PXProcessRuntimeReader(void) {
@@ -115,9 +114,8 @@ NSString *PXRuntimeSnapshotLocalContainerPath(void) {
 
 static NSDictionary *PXValidatedRuntimeSnapshotAtPath(NSString *path) {
     NSDictionary *snapshot = PXRuntimeDictionaryAtPath(path);
-    NSNumber *schema = [snapshot[@"schemaVersion"] isKindOfClass:NSNumber.class]
-        ? snapshot[@"schemaVersion"] : nil;
-    return schema.integerValue == kPXRuntimeSnapshotSchemaVersion ? snapshot : @{};
+    PXRuntimeReadSnapshot *view = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:snapshot readerGeneration:0];
+    return view.valid ? view.propertyList : @{};
 }
 
 NSDictionary *PXLoadRuntimeSnapshot(void) {
@@ -141,12 +139,6 @@ static NSDictionary *PXRuntimeCapturedSource(void) {
     // Validation/deep freezing belongs to the reader. The legacy loader above
     // keeps its old schema contract until the remaining consumers migrate.
     return PXRuntimeDictionaryAtPath(PXRuntimeSnapshotPath());
-}
-
-NSDictionary *PXRuntimeSnapshotLastPublishStats(void) {
-    @synchronized ([NSObject class]) {
-        return [gPXRuntimeSnapshotLastPublishStats copy] ?: @{};
-    }
 }
 
 static NSDictionary *PXRuntimeSnapshotDictionary(NSString *key) {
@@ -211,36 +203,11 @@ static BOOL PXWriteRuntimeSnapshotAtomically(NSDictionary *snapshot,
         if (error) *error = dirError;
         return NO;
     }
-    chmod(dir.fileSystemRepresentation, 0755);
-    chown(dir.fileSystemRepresentation, owner, group);
-
-    NSString *tmp = [path stringByAppendingFormat:@".tmp.%d", getpid()];
-    [fm removeItemAtPath:tmp error:nil];
-    if (![snapshot writeToFile:tmp atomically:NO]) {
-        if (error) {
-            *error = [NSError errorWithDomain:@"com.hydra.tlinkios.runtime-snapshot"
-                                         code:1
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Failed to serialize runtime snapshot"}];
-        }
+    if (chmod(dir.fileSystemRepresentation, 0755) != 0 || chown(dir.fileSystemRepresentation, owner, group) != 0) {
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
         return NO;
     }
-    chmod(tmp.fileSystemRepresentation, 0644);
-    chown(tmp.fileSystemRepresentation, owner, group);
-
-    if (rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation) != 0) {
-        int errNo = errno;
-        [fm removeItemAtPath:tmp error:nil];
-        if (error) {
-            *error = [NSError errorWithDomain:NSPOSIXErrorDomain
-                                         code:errNo
-                                     userInfo:@{NSLocalizedDescriptionKey:
-                                         [NSString stringWithUTF8String:strerror(errNo)] ?: @"rename failed"}];
-        }
-        return NO;
-    }
-    chmod(path.fileSystemRepresentation, 0644);
-    chown(path.fileSystemRepresentation, owner, group);
-    return YES;
+    return PXRuntimeWritePropertyList(snapshot, path, owner, group, 0644, error);
 }
 
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
@@ -252,13 +219,15 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
     [scopedApps enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
         (void)stop;
         if (![key isKindOfClass:NSString.class] || ![value isKindOfClass:NSDictionary.class]) return;
-        if ([value[@"enabled"] boolValue]) [enabledBundles addObject:key];
+        if (PXRuntimeReadBool(value[@"enabled"])) [enabledBundles addObject:key];
     }];
 
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *containerRoot = @"/var/mobile/Containers/Data/Application";
-    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:containerRoot error:nil] ?: @[];
+    NSError *scanError = nil;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:containerRoot error:&scanError] ?: @[];
     NSMutableDictionary<NSString *, NSString *> *failures = [NSMutableDictionary dictionary];
+    if (scanError) failures[@"containerScan"] = scanError.localizedDescription;
     NSMutableSet<NSString *> *matchedBundles = [NSMutableSet set];
     NSMutableSet<NSString *> *mirroredBundles = [NSMutableSet set];
     NSUInteger mirroredContainers = 0;
@@ -270,13 +239,19 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
         NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
         NSString *bundleID = [metadata[@"MCMMetadataIdentifier"] isKindOfClass:NSString.class]
             ? metadata[@"MCMMetadataIdentifier"] : nil;
-        if (!bundleID.length) continue;
-
         NSString *existingMirrorPath = [container stringByAppendingPathComponent:
             @"Library/Caches/com.hydra.tlinkios/runtime_snapshot.plist"];
+        if (!bundleID.length) {
+            if ([fm fileExistsAtPath:existingMirrorPath]) failures[entry] = @"Missing container owner metadata for existing mirror";
+            continue;
+        }
         if (![enabledBundles containsObject:bundleID]) {
-            if ([fm fileExistsAtPath:existingMirrorPath] && [fm removeItemAtPath:existingMirrorPath error:nil]) {
-                removedStaleMirrors++;
+            // Preserve removal policy for disabled targets. Global is already
+            // committed; removal failure must remain an incomplete distribution.
+            if ([fm fileExistsAtPath:existingMirrorPath]) {
+                NSError *revocationError = nil;
+                if ([fm removeItemAtPath:existingMirrorPath error:&revocationError]) removedStaleMirrors++;
+                else failures[entry] = revocationError.localizedDescription ?: @"stale-mirror-removal-failed";
             }
             continue;
         }
@@ -288,21 +263,24 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
         NSString *libraryDir = [container stringByAppendingPathComponent:@"Library"];
         NSString *cachesDir = [libraryDir stringByAppendingPathComponent:@"Caches"];
         NSString *mirrorDir = [cachesDir stringByAppendingPathComponent:@"com.hydra.tlinkios"];
+        NSError *parentError = nil;
         for (NSString *ownedDir in @[libraryDir, cachesDir, mirrorDir]) {
-            [fm createDirectoryAtPath:ownedDir
+            if (![fm createDirectoryAtPath:ownedDir
           withIntermediateDirectories:YES
                            attributes:@{NSFilePosixPermissions: @0755}
-                                error:nil];
-            chmod(ownedDir.fileSystemRepresentation, 0755);
-            chown(ownedDir.fileSystemRepresentation, 501, 501);
+                                error:&parentError]) break;
+            if (chmod(ownedDir.fileSystemRepresentation, 0755) != 0 || chown(ownedDir.fileSystemRepresentation, 501, 501) != 0) {
+                parentError = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil]; break;
+            }
         }
+        if (parentError) { failures[entry] = parentError.localizedDescription; continue; }
         NSString *mirrorPath = [mirrorDir stringByAppendingPathComponent:@"runtime_snapshot.plist"];
         NSError *mirrorError = nil;
         if (PXWriteRuntimeSnapshotAtomically(snapshot, mirrorPath, 501, 501, &mirrorError)) {
             mirroredContainers++;
             [mirroredBundles addObject:bundleID];
         } else {
-            failures[bundleID] = mirrorError.localizedDescription ?: @"mirror-write-failed";
+            failures[entry] = mirrorError.localizedDescription ?: @"mirror-write-failed";
         }
     }
 
@@ -318,13 +296,14 @@ static NSDictionary *PXMirrorRuntimeSnapshotIntoScopedContainers(NSDictionary *s
         @"matchedBundles": matched ?: @[],
         @"mirroredBundles": mirrored ?: @[],
         @"removedStaleMirrorCount": @(removedStaleMirrors),
+        @"complete": @(failures.count == 0 && missing.count == 0),
         @"missingBundles": missing ?: @[],
         @"failures": failures ?: @{}
     };
 }
 #endif
 
-BOOL PXPublishRuntimeSnapshot(NSError **error) {
+static NSDictionary *PXCaptureRuntimeSnapshotCandidate(void) {
     NSString *profileID = PXActiveProfileID();
     NSString *profileRoot = PXProfileRootPath(profileID);
     NSString *deviceIDsPath = PXProfileDeviceIDsPath(profileID);
@@ -362,8 +341,7 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
         if (artifact.count) profileArtifacts[key] = artifact;
     }];
 
-    NSDictionary *snapshot = @{
-        @"schemaVersion": @(kPXRuntimeSnapshotSchemaVersion),
+    return @{
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
         @"profileID": profileID ?: @"",
         @"globalScope": globalScope ?: @{},
@@ -374,16 +352,15 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
         @"profileArtifacts": profileArtifacts ?: @{}
     };
 
-    NSError *globalError = nil;
-    BOOL globalSuccess = PXWriteRuntimeSnapshotAtomically(snapshot,
-                                                           PXRuntimeSnapshotPath(),
-                                                           0, 0,
-                                                           &globalError);
-    NSDictionary *mirrorStats = @{};
+}
+
+static NSDictionary *PXDistributeRuntimeSnapshot(NSDictionary *snapshot) {
+    NSDictionary *tlinkSettings = snapshot[@"tlinkSettings"];
+    NSDictionary *deviceIDs = snapshot[@"deviceIDs"];
+    NSDictionary *profileArtifacts = snapshot[@"profileArtifacts"];
+    NSDictionary *mirrorStats = @{ @"complete": @YES };
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (globalSuccess) {
-        mirrorStats = PXMirrorRuntimeSnapshotIntoScopedContainers(snapshot, globalScope);
-    }
+    mirrorStats = PXMirrorRuntimeSnapshotIntoScopedContainers(snapshot, snapshot[@"globalScope"]);
 #endif
     NSDictionary *enabledIdentifiers = [tlinkSettings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class]
         ? tlinkSettings[@"EnabledIdentifiers"] : @{};
@@ -418,9 +395,9 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
         }
     }];
 
-    @synchronized ([NSObject class]) {
-        gPXRuntimeSnapshotLastPublishStats = @{
-            @"globalSuccess": @(globalSuccess),
+    return @{
+            @"complete": mirrorStats[@"complete"] ?: @NO,
+            @"globalSuccess": @YES,
             @"globalPath": PXRuntimeSnapshotPath() ?: @"",
             @"deviceIDCount": @(deviceIDs.count),
             @"tlinkSettingsKeys": [[tlinkSettings allKeys] sortedArrayUsingSelector:@selector(compare:)],
@@ -429,8 +406,25 @@ BOOL PXPublishRuntimeSnapshot(NSError **error) {
             @"profileArtifactKeys": [[profileArtifacts allKeys] sortedArrayUsingSelector:@selector(compare:)],
             @"missingEnabledArtifacts": missingEnabledArtifacts,
             @"mirror": mirrorStats ?: @{}
-        };
-    }
-    if (!globalSuccess && error) *error = globalError;
-    return globalSuccess;
+    };
+}
+
+PXRuntimePublisher *PXCreateRuntimeSnapshotPublisher(void (^completion)(NSDictionary *), NSError **error) {
+    NSString *directory = [PXRuntimeSnapshotPath().stringByDeletingLastPathComponent stringByAppendingPathComponent:@"publisher"];
+    return [[PXRuntimePublisher alloc] initWithDirectory:directory loader:^NSDictionary *(NSError **loadError) {
+        (void)loadError;
+        // Source writers join a shared transaction in 4C. Serial publication
+        // alone does not make these sequential source reads a transaction.
+        return PXCaptureRuntimeSnapshotCandidate();
+    } writer:^BOOL(NSDictionary *snapshot, NSError **writeError) {
+        return PXWriteRuntimeSnapshotAtomically(snapshot, PXRuntimeSnapshotPath(), 0, 0, writeError);
+    } distributor:^NSDictionary *(NSDictionary *snapshot) {
+        return PXDistributeRuntimeSnapshot(snapshot);
+    } notifier:^BOOL(NSError **notifyError) {
+        uint32_t status = notify_post("com.hydra.tlinkios.runtimeSnapshotChanged");
+        if (status != NOTIFY_STATUS_OK && notifyError) {
+            *notifyError = [NSError errorWithDomain:@"com.hydra.tlinkios.notify" code:status userInfo:nil];
+        }
+        return status == NOTIFY_STATUS_OK;
+    } completion:completion error:error];
 }

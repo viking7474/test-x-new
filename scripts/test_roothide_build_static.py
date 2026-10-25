@@ -34,6 +34,7 @@ device_model_hooks = read("TLinkIOSTweak/DeviceModelHooks.x")
 ios_version_hooks = read("TLinkIOSTweak/IOSVersionHooks.x")
 scope = read("TLinkIOSTweak/PXScope.m")
 runtime_snapshot = read("common/PXRuntimeSnapshot.m")
+runtime_publisher = read("common/PXRuntimePublisher.m")
 identity_snapshot = read("common/PXIdentitySnapshot.m")
 storage_hooks = read("TLinkIOSTweak/StorageHooks.x")
 battery_hooks = read("TLinkIOSTweak/BatteryHooks.x")
@@ -158,8 +159,10 @@ require('common/PXPaths.m common/PXRuntimeSnapshot.m' in makefile and
         '@"matchedBundles"' in runtime_snapshot and
         '/var/mobile/Containers/Data/Application' in runtime_snapshot and
         'MCMMetadataIdentifier' in runtime_snapshot and
-        'PXPublishRuntimeSnapshot' in runtime_snapshot and
-        'rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation)' in runtime_snapshot and
+        'PXCreateRuntimeSnapshotPublisher' in runtime_snapshot and
+        'PXRuntimeWritePropertyList(snapshot, path, owner, group, 0644, error)' in runtime_snapshot and
+        'mkstemp(temporary)' in runtime_publisher and
+        'rename(temporary, path.fileSystemRepresentation)' in runtime_publisher and
         '@"globalScope"' in runtime_snapshot and '@"securitySettings"' in runtime_snapshot and
         '@"tlinkSettings"' in runtime_snapshot and '@"profileSettings"' in runtime_snapshot and
         '@"deviceIDs"' in runtime_snapshot and '@"profileArtifacts"' in runtime_snapshot and
@@ -181,12 +184,12 @@ require('[runtimeView profileArtifact:@"storage"]' in storage_hooks and
         "RootHide runtime hooks still depend on sandbox-inaccessible profile plist paths")
 require('publishRuntimeSnapshotWithReason' in daemon and
         'runtime_snapshot_debug.plist' in daemon and
-        'PXRuntimeSnapshotLastPublishStats()' in daemon and
+        'NSDictionary *publishStats = result[@"stats"]' in daemon and
         '@"publishStats"' in daemon and
         'runtimeStateFingerprint' in daemon and
         'runtime-fingerprint-changed' in daemon and
         'PXCurrentProfileInfoPath()' in daemon and
-        'CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged")' in daemon and
+        'notify_post("com.hydra.tlinkios.runtimeSnapshotChanged")' in runtime_snapshot and
         'com.hydra.tlinkios.scopedAppsChanged' in daemon,
         "WeaponXDaemon does not publish/invalidate/diagnose/poll-fallback the RootHide runtime mirror")
 require('PXCaptureRuntimeSnapshot().securitySettings' in scope and

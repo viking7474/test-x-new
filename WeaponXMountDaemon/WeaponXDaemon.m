@@ -39,6 +39,7 @@ static const char *kTLinkIOSHookDiagnosticNotifyName = "com.hydra.tlinkios.hookD
 @property (nonatomic, assign) int tweakLoadNotifyToken;
 @property (nonatomic, assign) int bootstrapDecisionNotifyToken;
 @property (nonatomic, assign) int hookDiagnosticNotifyToken;
+@property (nonatomic, strong) PXRuntimePublisher *runtimePublisher;
 - (void)syncTLinkIOSFilterPlists;
 - (void)recordTweakLoadSignal;
 - (void)recordBootstrapDecisionSignal;
@@ -47,14 +48,17 @@ static const char *kTLinkIOSHookDiagnosticNotifyName = "com.hydra.tlinkios.hookD
 - (NSString *)stagingFingerprint;
 - (NSString *)runtimeStateFingerprint;
 - (void)writeRuntimeStatus:(NSString *)event;
-- (void)runOneShotSelfTest;
+- (BOOL)runOneShotSelfTest;
+- (void)recordRuntimePublication:(NSDictionary *)result;
 @end
 
 static void PXFilterChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     (void)center; (void)name; (void)object; (void)userInfo;
     WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
-    [daemon syncTLinkIOSFilterPlists];
-    [daemon publishRuntimeSnapshotWithReason:@"filter-plist-changed"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [daemon syncTLinkIOSFilterPlists];
+        [daemon publishRuntimeSnapshotWithReason:@"filter-plist-changed"];
+    });
 }
 
 static void PXTweakLoadedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -68,6 +72,15 @@ static void PXRuntimeStateChangedCallback(CFNotificationCenterRef center, void *
     WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
     NSString *reason = name ? (__bridge NSString *)name : @"darwin-state-change";
     [daemon publishRuntimeSnapshotWithReason:reason];
+}
+
+static void PXRuntimeSyncRequestedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    (void)center; (void)name; (void)object; (void)userInfo;
+    WeaponXDaemon *daemon = (__bridge WeaponXDaemon *)observer;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [daemon syncTLinkIOSFilterPlists];
+        [daemon.runtimePublisher serviceRequestsAndRetry];
+    });
 }
 
 static void PXBootstrapDecisionCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -141,6 +154,9 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
     [self publishRuntimeSnapshotWithReason:@"daemon-start"];
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterAddObserver(darwinCenter, (__bridge const void *)self,
+        PXRuntimeSyncRequestedCallback, (__bridge CFStringRef)PXRuntimeSyncRequestedNotification,
+        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(darwinCenter,
                                     (__bridge const void *)(self),
                                     PXFilterChangedCallback,
@@ -223,9 +239,15 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
 }
 
 - (void)publishRuntimeSnapshotWithReason:(NSString *)reason {
-    NSError *publishError = nil;
-    BOOL success = PXPublishRuntimeSnapshot(&publishError);
-    NSDictionary *snapshot = success ? PXLoadRuntimeSnapshot() : @{};
+    (void)reason;
+    [self.runtimePublisher requestPublication];
+}
+
+// Publisher queue callback: use the exact detached candidate/result. Never read
+// the global file back to guess which publication produced this status.
+- (void)recordRuntimePublication:(NSDictionary *)result {
+    BOOL success = [result[@"success"] boolValue];
+    NSDictionary *snapshot = result[@"snapshot"];
     NSDictionary *scope = [snapshot[@"globalScope"] isKindOfClass:NSDictionary.class] ? snapshot[@"globalScope"] : @{};
     NSDictionary *scopedApps = [scope[@"ScopedApps"] isKindOfClass:NSDictionary.class] ? scope[@"ScopedApps"] : @{};
     NSDictionary *deviceIDs = [snapshot[@"deviceIDs"] isKindOfClass:NSDictionary.class] ? snapshot[@"deviceIDs"] : @{};
@@ -238,34 +260,36 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
                    attributes:@{NSFilePosixPermissions: @0755}
                         error:nil];
     NSString *debugPath = [debugDir stringByAppendingPathComponent:@"runtime_snapshot_debug.plist"];
-    NSDictionary *publishStats = PXRuntimeSnapshotLastPublishStats();
+    NSDictionary *publishStats = result[@"stats"];
     NSDictionary *debug = @{
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
         @"success": @(success),
-        @"reason": reason ?: @"unknown",
+        @"reason": @"serialized-runtime-publication",
         @"snapshotPath": PXRuntimeSnapshotPath() ?: @"",
         @"profileID": profileID ?: @"",
         @"scopedAppCount": @(scopedApps.count),
         @"deviceIDCount": @(deviceIDs.count),
         @"publishStats": publishStats ?: @{},
         @"runtimeFingerprint": [self runtimeStateFingerprint] ?: @"",
-        @"error": publishError.localizedDescription ?: @""
+        @"globalCommitted": result[@"globalCommitted"] ?: @NO,
+        @"distributionComplete": result[@"distributionComplete"] ?: @NO,
+        @"notified": result[@"notified"] ?: @NO,
+        @"publisherEpoch": snapshot[@"publisherEpoch"] ?: @"",
+        @"revision": snapshot[@"revision"] ?: @0,
+        @"error": result[@"error"] ?: @""
     };
     [debug writeToFile:debugPath atomically:YES];
     chmod(debugPath.fileSystemRepresentation, 0644);
     chown(debugPath.fileSystemRepresentation, 501, 501);
 
     if (success) {
-        [self log:[NSString stringWithFormat:@"Published RootHide runtime snapshot reason=%@ profile=%@ scope=%lu deviceIDs=%lu",
-                   reason ?: @"unknown", profileID ?: @"",
+        [self log:[NSString stringWithFormat:@"Published runtime snapshot epoch=%@ revision=%@ profile=%@ scope=%lu deviceIDs=%lu",
+                   snapshot[@"publisherEpoch"], snapshot[@"revision"], profileID ?: @"",
                    (unsigned long)scopedApps.count, (unsigned long)deviceIDs.count]
              withType:OS_LOG_TYPE_INFO];
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                             CFSTR("com.hydra.tlinkios.runtimeSnapshotChanged"),
-                                             NULL, NULL, true);
     } else {
-        [self log:[NSString stringWithFormat:@"Runtime snapshot publish failed reason=%@ error=%@",
-                   reason ?: @"unknown", publishError.localizedDescription ?: @"unknown"]
+        [self log:[NSString stringWithFormat:@"Runtime snapshot publish incomplete committed=%@ error=%@",
+                   result[@"globalCommitted"], result[@"error"] ?: @"unknown"]
              withType:OS_LOG_TYPE_ERROR];
     }
 }
@@ -528,6 +552,7 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
 }
 
 - (void)checkProcesses {
+    [self.runtimePublisher serviceRequestsAndRetry];
     // Darwin notifications are the fast path. This timer is a RootHide-safe
     // fallback in case a notification is delayed/lost across bootstrap
     // boundaries. Fingerprinting keeps the 0.5s poll effectively read-only.
@@ -556,7 +581,10 @@ static void PXHookDiagnosticCallback(CFNotificationCenterRef center, void *obser
     NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObjects:
         PXTLinkIOSSettingsPath(), PXGlobalScopePath(), PXSecuritySettingsPath(),
         PXCurrentProfileInfoPath(), nil];
-    if (profileRoot.length) [paths addObject:[profileRoot stringByAppendingPathComponent:@"storage.plist"]];
+    if (profileRoot.length) {
+        [paths addObject:[profileRoot stringByAppendingPathComponent:@"storage.plist"]];
+        [paths addObject:[profileRoot stringByAppendingPathComponent:@"settings.plist"]];
+    }
     if (identityRoot.length) {
         for (NSString *name in @[@"device_ids.plist", @"battery_info.plist", @"network_settings.plist",
                                  @"wifi_info.plist", @"carrier_details.plist", @"device_theme.plist",
@@ -841,11 +869,11 @@ static NSString *PXFilterBundlesChecksum(NSArray *bundles) {
     chown([path fileSystemRepresentation], 501, 501);
 }
 
-- (void)runOneShotSelfTest {
+- (BOOL)runOneShotSelfTest {
     [self log:@"WeaponXDaemon one-shot self-test" withType:OS_LOG_TYPE_INFO];
     [self writeRuntimeStatus:@"self-test"];
     [self syncTLinkIOSFilterPlists];
-    [self publishRuntimeSnapshotWithReason:@"self-test"];
+    return [[self.runtimePublisher publishNow][@"success"] boolValue];
 }
 
 #pragma mark - Utility Methods
@@ -952,9 +980,25 @@ int main(int argc, char *argv[]) {
                 syncOnce ? "YES" : "NO");
         
         WeaponXDaemon *daemon = [[WeaponXDaemon alloc] init];
+        __weak WeaponXDaemon *weakDaemon = daemon;
+        NSError *publisherError = nil;
+        daemon.runtimePublisher = PXCreateRuntimeSnapshotPublisher(^(NSDictionary *result) {
+            [weakDaemon recordRuntimePublication:result];
+        }, &publisherError);
+        if (!daemon.runtimePublisher) {
+            NSLog(@"Runtime publisher initialization failed: %@", publisherError);
+            return 1;
+        }
         if (syncOnce) {
-            [daemon runOneShotSelfTest];
-            return 0;
+            if ([daemon.runtimePublisher tryAcquireOwnership:&publisherError])
+                return [daemon runOneShotSelfTest] ? 0 : 1;
+            NSDictionary *result = [daemon.runtimePublisher syncOnceWithTimeout:10.0];
+            if (![result[@"success"] boolValue]) NSLog(@"Sync-once failed: %@", result[@"error"]);
+            return [result[@"success"] boolValue] ? 0 : 1;
+        }
+        if (![daemon.runtimePublisher tryAcquireOwnership:&publisherError]) {
+            NSLog(@"Another runtime publisher owns the lease: %@", publisherError);
+            return 1;
         }
         [daemon startDaemon];
     }

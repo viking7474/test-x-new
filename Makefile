@@ -48,8 +48,8 @@ TLinkIOS_CFLAGS = -fobjc-arc -fexceptions -fobjc-exceptions -D SUPPORT_IPAD=1 -D
 # Daemon files
 # common/PXInjectionFilter.m is the shared IOS-08 injection-filter source of truth
 # (pure Foundation) reused by the mount daemon to validate filter plists.
-WeaponXDaemon_FILES = WeaponXMountDaemon/WeaponXDaemon.m common/PXInjectionFilter.m common/PXPaths.m common/PXRuntimeSnapshot.m common/PXRuntimeSnapshotReader.m common/PXRuntimeReadScope.m
-WeaponXDaemon_CFLAGS = -fobjc-arc -I./common
+WeaponXDaemon_FILES = WeaponXMountDaemon/WeaponXDaemon.m common/PXInjectionFilter.m common/PXPaths.m common/PXRuntimeSnapshot.m common/PXRuntimeSnapshotReader.m common/PXRuntimeReadScope.m common/PXRuntimePublisher.m
+WeaponXDaemon_CFLAGS = -fobjc-arc -fexceptions -fobjc-exceptions -I./common
 WeaponXDaemon_FRAMEWORKS = Foundation IOKit
 WeaponXDaemon_INSTALL_PATH = /Library/WeaponX
 WeaponXDaemon_CODESIGN_FLAGS = -Sdaemon_ent.plist
