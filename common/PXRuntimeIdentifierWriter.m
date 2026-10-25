@@ -80,3 +80,11 @@ BOOL PXStageRuntimeIdentifierReplacement(PXRuntimeSourceTransaction *tx, NSStrin
     }
     return [tx setDictionary:ids atPath:path error:error];
 }
+BOOL PXStageRuntimeIdentifierValueWithDependencies(PXRuntimeSourceTransaction *tx, NSString *identity,
+    NSString *type, NSString *value, NSDate *timestamp, NSDictionary *expected, NSError **error) {
+    NSString *file = PXRuntimeIdentifierSidecar(type);
+    if (!file || ![value isKindOfClass:NSString.class]) return PXIdentifierWriteFailure(@"Unsupported identifier value/type", error);
+    if (!PXStageRuntimeIdentifierReplacement(tx, identity, @{type: value}, @[type], expected, YES, NO, error)) return NO;
+    return [tx setDictionary:@{ @"value": value, @"lastUpdated": timestamp }
+                     atPath:[identity stringByAppendingPathComponent:file] error:error];
+}

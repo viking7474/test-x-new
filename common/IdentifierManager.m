@@ -58,6 +58,9 @@
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
+- (BOOL)isValidIMEI:(NSString *)imei;
+- (BOOL)isValidMEID:(NSString *)meid;
+- (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate;
 - (NSString *)regenerateDeviceProfileGroupAtIdentityDirectory:(NSString *)identityDir;
 - (NSDictionary *)captureDeviceIDsAtIdentityDirectory:(NSString *)identityDir;
 - (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type identityDirectory:(NSString *)identityDir incrementGeneration:(BOOL)increment;
@@ -3088,49 +3091,70 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 
 #pragma mark - IMEI/MEID Spoofing (kept strictly separate)
 
-- (BOOL)setCustomIMEI:(NSString *)value {
-    if (![self isValidIMEI:value]) return NO;
+- (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate {
+    self.error = nil;
+    BOOL isIMEI = [type isEqualToString:@"IMEI"];
+    if (!isIMEI && ![type isEqualToString:@"MEID"]) return nil;
 
-    // Once an exact regional cellular slot exists, manual IMEI writes are
-    // governed by that slot too. known=false deliberately rejects a guessed TAC.
+    // Freeze manual input before validation/DB callbacks. Preserve its original
+    // spelling (including accepted lowercase MEID), not a normalized replacement.
+    NSString *prepared = [value isKindOfClass:NSString.class] ? [value copy] : nil;
+    if (!generate && !(isIMEI ? [self isValidIMEI:prepared] : [self isValidMEID:prepared])) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid telephony identifier format"}];
+        return nil;
+    }
     NSString *identityDir = [self profileIdentityPath];
-    NSDictionary *deviceIds = identityDir.length
-        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
-        : nil;
+    if (!identityDir.length) return nil;
+    NSDictionary *deviceIds = [self captureDeviceIDsAtIdentityDirectory:identityDir];
+    if (!deviceIds) return nil;
     NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
     NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
-    if ([productType hasPrefix:@"iPhone"]) {
-        if (!regulatoryModelNumber.length) return NO;
+
+    // Generation always requires a canonical regional slot. Manual values keep
+    // the existing non-iPhone compatibility policy; iPhone writes use the DB.
+    if (generate || [productType hasPrefix:@"iPhone"]) {
+        if (!productType.length || !regulatoryModelNumber.length) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:2
+                userInfo:@{NSLocalizedDescriptionKey: @"Canonical model and regulatory slot are required"}];
+            return nil;
+        }
         NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
                                                                  regulatoryModelNumber:regulatoryModelNumber];
-        BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
-        BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
-        NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:[NSArray class]] ? spec[@"imeiTACs"] : nil;
-        if (!enabled || !PXIdentityHasAllowedPrefix(value, tacs)) return NO;
+        BOOL known = [spec[@"known"] isKindOfClass:NSNumber.class] && [spec[@"known"] boolValue];
+        BOOL enabled = known && [spec[@"enabled"] isKindOfClass:NSNumber.class] && [spec[@"enabled"] boolValue];
+        BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:NSNumber.class] && [spec[@"cdma"] boolValue];
+        NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:NSArray.class] ? spec[@"imeiTACs"] : nil;
+        NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:NSArray.class] ? spec[@"meidPrefixes"] : nil;
+        if (!enabled || (!isIMEI && !cdma)) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:3
+                userInfo:@{NSLocalizedDescriptionKey: @"Regional cellular capability does not permit this identifier"}];
+            return nil;
+        }
+        if (generate) prepared = isIMEI ? PXGenerateIMEIFromAuthoritativeTACs(tacs) : PXGenerateMEIDFromAuthoritativePrefixes(prefixes);
+        if (!prepared.length || (generate && !(isIMEI ? [self isValidIMEI:prepared] : [self isValidMEID:prepared])) ||
+            !(isIMEI ? PXIdentityHasAllowedPrefix(prepared, tacs) : PXIdentityHasAllowedPrefix(prepared, prefixes))) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:4
+                userInfo:@{NSLocalizedDescriptionKey: @"Identifier does not match authoritative regional prefixes"}];
+            return nil;
+        }
     }
-    return [self saveCustomValue:value forType:@"IMEI"];
+    NSDictionary *expected = PXCellularPreparationDependencies(deviceIds);
+    NSDate *timestamp = [NSDate date];
+    NSError *sourceError = nil;
+    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXStageRuntimeIdentifierValueWithDependencies(tx, identityDir, type, prepared, timestamp, expected, error);
+    }, &sourceError);
+    self.error = success ? nil : sourceError;
+    return success ? prepared : nil;
+}
+
+- (BOOL)setCustomIMEI:(NSString *)value {
+    return [self prepareAndPersistTelephonyValue:value type:@"IMEI" generate:NO] != nil;
 }
 
 - (BOOL)setCustomMEID:(NSString *)value {
-    if (![self isValidMEID:value]) return NO;
-
-    NSString *identityDir = [self profileIdentityPath];
-    NSDictionary *deviceIds = identityDir.length
-        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
-        : nil;
-    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
-    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
-    if ([productType hasPrefix:@"iPhone"]) {
-        if (!regulatoryModelNumber.length) return NO;
-        NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
-                                                                 regulatoryModelNumber:regulatoryModelNumber];
-        BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
-        BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
-        BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:[NSNumber class]] && [spec[@"cdma"] boolValue];
-        NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:[NSArray class]] ? spec[@"meidPrefixes"] : nil;
-        if (!cdma || !PXIdentityHasAllowedPrefix(value, prefixes)) return NO;
-    }
-    return [self saveCustomValue:value forType:@"MEID"];
+    return [self prepareAndPersistTelephonyValue:value type:@"MEID" generate:NO] != nil;
 }
 
 #pragma mark - UDID Spoofing
@@ -3395,50 +3419,11 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 }
 
 - (NSString *)generateIMEI {
-    // Compatibility API, but generation is now canonical-only. Never fall back
-    // to a generic TAC pool that can contradict ProductType/A-number.
-    NSString *identityDir = [self profileIdentityPath];
-    NSDictionary *deviceIds = identityDir.length
-        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
-        : nil;
-    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
-    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
-    if (!productType.length || !regulatoryModelNumber.length) return nil;
-
-    NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
-                                                             regulatoryModelNumber:regulatoryModelNumber];
-    BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
-    BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
-    NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:[NSArray class]] ? spec[@"imeiTACs"] : nil;
-    if (!enabled) return nil;
-
-    NSString *imei = PXGenerateIMEIFromAuthoritativeTACs(tacs);
-    if (!imei.length || ![self setCustomIMEI:imei]) return nil;
-    return imei;
+    return [self prepareAndPersistTelephonyValue:nil type:@"IMEI" generate:YES];
 }
 
 - (NSString *)generateMEID {
-    // MEID is available only when the exact regional capability is verified as
-    // CDMA-capable and carries an authoritative prefix list.
-    NSString *identityDir = [self profileIdentityPath];
-    NSDictionary *deviceIds = identityDir.length
-        ? [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]]
-        : nil;
-    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
-    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
-    if (!productType.length || !regulatoryModelNumber.length) return nil;
-
-    NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
-                                                             regulatoryModelNumber:regulatoryModelNumber];
-    BOOL known = [spec[@"known"] isKindOfClass:[NSNumber class]] && [spec[@"known"] boolValue];
-    BOOL enabled = known && [spec[@"enabled"] isKindOfClass:[NSNumber class]] && [spec[@"enabled"] boolValue];
-    BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:[NSNumber class]] && [spec[@"cdma"] boolValue];
-    NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:[NSArray class]] ? spec[@"meidPrefixes"] : nil;
-    if (!cdma) return nil;
-
-    NSString *meid = PXGenerateMEIDFromAuthoritativePrefixes(prefixes);
-    if (!meid.length || ![self setCustomMEID:meid]) return nil;
-    return meid;
+    return [self prepareAndPersistTelephonyValue:nil type:@"MEID" generate:YES];
 }
 
 // IMEI policy is shared across all writers/readers; TAC is not region-locked.

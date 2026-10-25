@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2C-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2D-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -70,7 +70,7 @@ def source_contracts():
     assert 'self.thread != NSThread.currentThread' in core and '!self.active' in core
     assert '[PXValidatedProfileID(parts[0]) isEqualToString:parts[0]]' in paths and 'stringByResolvingSymlinksInPath' in paths
     assert 'owner:501 group:501' in paths and 'RuntimeSource' in paths
-    assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-dependencies-partial"' in runtime
+    assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-telephony-partial"' in runtime
     save = method(manager, '- (void)saveSettings')
     scope = method(manager, '- (void)saveScopedApps')
     for body in (save, scope):

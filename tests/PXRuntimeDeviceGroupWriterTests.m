@@ -14,6 +14,8 @@ static NSUInteger gChecks, gFailures, gSelections, gCacheChanges;
 static PXRuntimeSourceStore *gStore;
 static NSString *gRoot, *gSelected, *gExpectedIdentity, *gBuild = @"B1";
 static BOOL gFailDB, gNoHardware, gNoFirmware, gUnknownCellular, gDisabledCellular, gWebCompat;
+static BOOL gNoCDMA, gNoTACs, gNoMEIDPrefixes;
+static NSUInteger gTelephonyLookups;
 static void (^gDuringPrepare)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
@@ -81,9 +83,10 @@ static NSDictionary *Model(NSString *product) {
 - (NSDictionary *)specForProductType:(NSString *)product { Preparation(); return [product hasPrefix:@"iPhone"] ? Model(product) : nil; }
 - (NSDictionary *)canonicalHardwareSpecForProductType:(NSString *)product { (void)product; Preparation(); return gNoHardware ? nil : Hardware(); }
 - (NSDictionary *)cellularSpecForProductType:(NSString *)product regulatoryModelNumber:(NSString *)regulatory {
-    (void)product; (void)regulatory; Preparation();
+    (void)product; (void)regulatory; gTelephonyLookups++; Preparation();
     return @{ @"known": @(!gUnknownCellular), @"enabled": @(!gDisabledCellular), @"dualSIM": @YES,
-        @"cdma": @YES, @"imeiTACs": @[@"12345678"], @"meidPrefixes": @[@"A00000"] };
+        @"cdma": @(!gNoCDMA), @"imeiTACs": gNoTACs ? @[] : @[@"12345678"],
+        @"meidPrefixes": gNoMEIDPrefixes ? @[] : @[@"A00000"] };
 }
 - (NSDictionary *)basebandMetaForProductType:(NSString *)product regulatoryModelNumber:(NSString *)regulatory iosBuild:(NSString *)build {
     (void)product; (void)regulatory; Preparation();
@@ -225,6 +228,116 @@ static void TestDependentRefresh(PXDeviceGroupFixture *manager, NSString *a, NSS
     gSelections = 0; gDuringPrepare = ^{ gSelected = @"b"; };
     CHECK([manager generateIOSVersion] != nil && gSelections == 1 && [IDs(a)[@"IOSBuild"] isEqual:gBuild] && !IDs(b)[@"DeviceModel"], "missing model fallback keeps captured target");
 }
+static NSString *InvokeTelephony(PXDeviceGroupFixture *manager, BOOL imei, BOOL generate, NSString *value) {
+    if (generate) return imei ? [manager generateIMEI] : [manager generateMEID];
+    BOOL saved = imei ? [manager setCustomIMEI:value] : [manager setCustomMEID:value];
+    return saved ? value : nil;
+}
+static void TestTelephony(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a;
+    NSString *imei = PXGenerateIMEIFromAuthoritativeTACs(@[@"12345678"]);
+    NSString *meid = [PXGenerateMEIDFromAuthoritativePrefixes(@[@"A00000"]) lowercaseString];
+    NSDictionary *baseline = @{ @"DeviceModel": @"iPhone15,4", @"RegulatoryModelNumber": @"A2846", @"IOSBuild": @"B1",
+        @"IMEI": imei, @"MEID": meid, @"GenerationCounter": @12, @"SSID": @"before" };
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        BOOL isIMEI = mode < 2, generate = (mode % 2) == 1;
+        NSString *key = isIMEI ? @"IMEI" : @"MEID";
+        NSString *file = isIMEI ? @"imei.plist" : @"meid.plist";
+        NSString *otherKey = isIMEI ? @"MEID" : @"IMEI";
+        NSString *otherFile = isIMEI ? @"meid.plist" : @"imei.plist";
+        NSString *input = isIMEI ? imei : meid;
+        CHECK(Seed(a, baseline, YES), "standalone telephony fixture seeded");
+        NSData *otherSidecar = [NSData dataWithContentsOfFile:Path(a, otherFile)];
+        NSDictionary *otherIDs = IDs(b);
+        gSelected = @"a"; gSelections = 0; gTelephonyLookups = 0;
+        gDuringPrepare = ^{
+            NSMutableDictionary *latest = [IDs(a) mutableCopy]; latest[@"SSID"] = @"concurrent";
+            CHECK(Seed(a, latest, NO), "telephony unrelated update committed"); gSelected = @"b";
+        };
+        NSString *result = InvokeTelephony(manager, isIMEI, generate, input);
+        CHECK(result != nil && gSelections == 1 && gTelephonyLookups == 1 && [otherIDs isEqual:IDs(b)],
+              "four telephony APIs keep one target and one regional lookup");
+        NSDictionary *sidecar = [NSDictionary dictionaryWithContentsOfFile:Path(a, file)];
+        CHECK([IDs(a)[key] isEqual:result] && [sidecar[@"value"] isEqual:result] &&
+              [sidecar[@"lastUpdated"] isKindOfClass:NSDate.class] && [IDs(a)[@"GenerationCounter"] isEqual:@13] &&
+              [IDs(a)[@"SSID"] isEqual:@"concurrent"], "telephony pair merges unrelated fields and increments once");
+        CHECK([IDs(a)[otherKey] isEqual:baseline[otherKey]] && [otherSidecar isEqual:[NSData dataWithContentsOfFile:Path(a, otherFile)]],
+              "standalone IMEI and MEID keep independent fields and sidecars");
+        if (!isIMEI && !generate) CHECK([IDs(a)[key] isEqual:meid], "manual lowercase MEID spelling preserved");
+        gSelected = @"a";
+        CHECK(Seed(a, baseline, YES), "telephony drift fixture seeded");
+        __block NSDictionary *competitor;
+        gDuringPrepare = ^{
+            NSMutableDictionary *latest = [IDs(a) mutableCopy]; latest[@"RegulatoryModelNumber"] = @"changed";
+            CHECK(Seed(a, latest, NO), "competing telephony region committed"); competitor = Snapshot(a);
+        };
+        CHECK(InvokeTelephony(manager, isIMEI, generate, input) == nil && manager.error != nil && [competitor isEqual:Snapshot(a)],
+              "four telephony APIs reject dependency drift without sidecar writes");
+        CHECK(Seed(a, baseline, YES), "telephony rollback fixture seeded");
+        NSDictionary *before = Snapshot(a);
+        __block BOOL interrupted = NO;
+        gStore.testCheckpoint = ^(NSString *stage) { if (!interrupted && [stage isEqual:@"source-written"]) {
+            interrupted = YES; [NSException raise:@"fixture" format:@"telephony pair failure"];
+        } };
+        CHECK(InvokeTelephony(manager, isIMEI, generate, input) == nil && manager.error != nil, "telephony persistence error returned");
+        gStore.testCheckpoint = nil;
+        CHECK([before isEqual:Snapshot(a)], "telephony pair failure restores bytes counter and commit identity");
+    }
+    CHECK(Seed(a, baseline, YES), "telephony policy baseline seeded");
+    gSelections = 0; NSDictionary *before = Snapshot(a);
+    CHECK(![manager setCustomIMEI:nil] && ![manager setCustomMEID:@"invalid"] && gSelections == 0 && [before isEqual:Snapshot(a)],
+          "invalid manual formats reject before target lookup");
+    gUnknownCellular = YES;
+    CHECK(![manager setCustomIMEI:imei] && ![manager setCustomMEID:meid] && [manager generateIMEI] == nil &&
+          [manager generateMEID] == nil && [before isEqual:Snapshot(a)], "unknown cellular rejects all standalone APIs");
+    gUnknownCellular = NO; gDisabledCellular = YES;
+    CHECK(![manager setCustomIMEI:imei] && ![manager setCustomMEID:meid] && [manager generateIMEI] == nil &&
+          [manager generateMEID] == nil && [before isEqual:Snapshot(a)], "disabled cellular rejects all standalone APIs");
+    gDisabledCellular = NO; gNoCDMA = YES;
+    CHECK(![manager setCustomMEID:meid] && [manager generateMEID] == nil && [before isEqual:Snapshot(a)], "non CDMA rejects standalone MEID");
+    CHECK([manager setCustomIMEI:imei], "non CDMA still permits valid IMEI");
+    gNoCDMA = NO;
+    before = Snapshot(a);
+    CHECK(![manager setCustomIMEI:PXGenerateIMEIFromAuthoritativeTACs(@[@"87654321"])] &&
+          ![manager setCustomMEID:PXGenerateMEIDFromAuthoritativePrefixes(@[@"B00000"])] && [before isEqual:Snapshot(a)],
+          "valid checksums cannot bypass regional prefix policy");
+    gNoTACs = YES; gNoMEIDPrefixes = YES;
+    CHECK([manager generateIMEI] == nil && [manager generateMEID] == nil && [before isEqual:Snapshot(a)],
+          "missing authoritative prefixes never use generic generation");
+    gNoTACs = NO; gNoMEIDPrefixes = NO;
+    CHECK(Seed(a, baseline, YES), "manual input lifetime fixture seeded");
+    NSMutableString *mutableInput = [imei mutableCopy];
+    gDuringPrepare = ^{ [mutableInput setString:@"changed-after-validation"]; };
+    CHECK([manager setCustomIMEI:mutableInput] && [IDs(a)[@"IMEI"] isEqual:imei], "manual input copy survives provider callbacks");
+    for (NSString *key in @[@"DeviceModel", @"IOSBuild", @"IMEI", @"IMEI2"]) {
+        CHECK(Seed(a, baseline, YES), "telephony dependency field fixture seeded");
+        __block NSDictionary *changed;
+        gDuringPrepare = ^{
+            NSMutableDictionary *latest = [IDs(a) mutableCopy]; latest[key] = @"changed-dependency";
+            CHECK(Seed(a, latest, NO), "telephony dependency field changed"); changed = Snapshot(a);
+        };
+        CHECK(![manager setCustomIMEI:imei] && [changed isEqual:Snapshot(a)], "captured model build and existing identities reject drift including absence");
+    }
+    CHECK(Seed(a, @{ @"DeviceModel": @"iPhone15,4", @"GenerationCounter": @0 }, YES), "missing regulatory fixture seeded");
+    before = Snapshot(a);
+    CHECK(![manager setCustomIMEI:imei] && ![manager setCustomMEID:meid] && [manager generateIMEI] == nil &&
+          [manager generateMEID] == nil && [before isEqual:Snapshot(a)], "iPhone writes reject missing regulatory slot");
+    CHECK(Seed(a, @{ @"DeviceModel": @"iPad1,1", @"GenerationCounter": @0 }, YES), "legacy non iPhone fixture seeded");
+    CHECK([manager setCustomIMEI:imei] && [manager setCustomMEID:meid] && [IDs(a)[@"GenerationCounter"] isEqual:@2],
+          "manual non iPhone compatibility policy preserved");
+    before = Snapshot(a);
+    CHECK([manager generateIMEI] == nil && [manager generateMEID] == nil && [before isEqual:Snapshot(a)],
+          "generation requires canonical slot even for legacy model");
+    NSMutableDictionary *exhausted = [baseline mutableCopy]; exhausted[@"GenerationCounter"] = @(NSIntegerMax);
+    CHECK(Seed(a, exhausted, YES), "telephony exhausted counter fixture seeded"); before = Snapshot(a);
+    CHECK(![manager setCustomIMEI:imei] && [manager generateMEID] == nil && [before isEqual:Snapshot(a)],
+          "telephony counter exhaustion preserves complete pair");
+    CHECK(Seed(a, baseline, YES), "telephony malformed sidecar fixture seeded");
+    NSData *badBytes = [@"malformed sidecar" dataUsingEncoding:NSUTF8StringEncoding];
+    CHECK([badBytes writeToFile:Path(a, @"imei.plist") atomically:YES], "malformed telephony sidecar prepared");
+    before = Snapshot(a);
+    CHECK(![manager setCustomIMEI:imei] && [before isEqual:Snapshot(a)], "malformed telephony sidecar is never silently replaced");
+}
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -236,9 +349,10 @@ int main(void) {
         PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
         TestGroups(manager, Identity(@"a"), Identity(@"b"));
         TestDependentRefresh(manager, Identity(@"a"), Identity(@"b"));
+        TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
-        printf("Runtime device group writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
+        printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;
     }
 }

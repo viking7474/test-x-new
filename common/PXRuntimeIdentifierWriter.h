@@ -20,4 +20,9 @@ FOUNDATION_EXPORT BOOL PXStageRuntimeIdentifierReplacement(PXRuntimeSourceTransa
     NSString *identityDirectory, NSDictionary *updates, NSArray<NSString *> *replacedKeys,
     NSDictionary * _Nullable expectedDependencies, BOOL incrementGeneration, BOOL removeLegacyCellular,
     NSError * _Nullable * _Nullable error);
+/// Pair a prepared value and sidecar only if validation's captured basis is
+/// still current. Does not perform generation, DB lookup or callbacks.
+FOUNDATION_EXPORT BOOL PXStageRuntimeIdentifierValueWithDependencies(PXRuntimeSourceTransaction *transaction,
+    NSString *identityDirectory, NSString *type, NSString *value, NSDate *timestamp,
+    NSDictionary *expectedDependencies, NSError * _Nullable * _Nullable error);
 NS_ASSUME_NONNULL_END

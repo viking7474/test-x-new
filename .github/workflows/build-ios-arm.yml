@@ -59,8 +59,10 @@ jobs:
       - name: Test native identifier value writers and migration
         run: python3 scripts/test_runtime_identifier_writers.py --native
 
-      - name: Test native model software cellular dependency writers
-        run: python3 scripts/test_runtime_device_group_writers.py --native
+      - name: Test native model software cellular and standalone telephony writers
+        run: |
+          python3 scripts/test_runtime_telephony_writers.py
+          python3 scripts/test_runtime_device_group_writers.py --native
 
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js

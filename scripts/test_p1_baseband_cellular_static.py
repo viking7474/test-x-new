@@ -251,8 +251,11 @@ def main() -> None:
           "canonical telephony generation uses authoritative regional prefixes")
     check('NSArray *usTACs' not in identifier and 'NSArray *usMEIDPrefixes' not in identifier,
           "public IMEI/MEID generators no longer contain generic fallback prefix pools")
-    check('if ([productType hasPrefix:@"iPhone"])' in identifier and
-          'if (!regulatoryModelNumber.length) return NO;' in identifier,
+    telephony_flow = identifier.split('- (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate {', 1)[1].split('\n- (BOOL)setCustomIMEI:', 1)[0]
+    check('if (generate || [productType hasPrefix:@"iPhone"])' in telephony_flow and
+          'if (!productType.length || !regulatoryModelNumber.length)' in telephony_flow and
+          'Regional cellular capability does not permit this identifier' in telephony_flow and
+          'return nil;' in telephony_flow,
           "manual iPhone IMEI/MEID writes fail closed without a canonical A-number")
     check('for (NSUInteger i = 0; i < 6; i++)' in identifier,
           "canonical IMEI uses 8-digit TAC + six serial digits + Luhn digit")
@@ -261,8 +264,8 @@ def main() -> None:
     check("PXPopulateCanonicalCellularIdentity" in identifier and
           "refreshCanonicalCellularIdentityForCurrentProfile" in identifier,
           "profile generation and individual toggles share canonical cellular path")
-    check("PXIdentityHasAllowedPrefix(value, tacs)" in identifier and
-          "PXIdentityHasAllowedPrefix(value, prefixes)" in identifier,
+    check("PXIdentityHasAllowedPrefix(prepared, tacs)" in telephony_flow and
+          "PXIdentityHasAllowedPrefix(prepared, prefixes)" in telephony_flow,
           "manual IMEI/MEID setters enforce exact regional TAC/prefix data")
     check("PXIdentityHasAllowedPrefix(existingIMEI, tacs)" in identifier and
           "PXIdentityHasAllowedPrefix(existingMEID, prefixes)" in identifier,

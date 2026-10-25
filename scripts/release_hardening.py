@@ -36,6 +36,7 @@ PHASE_TESTS = [
 EXTENDED_PYTHON_TESTS = [
     "scripts/test_runtime_identifier_writers.py",
     "scripts/test_runtime_device_group_writers.py",
+    "scripts/test_runtime_telephony_writers.py",
     "scripts/test_runtime_artifact_writers.py",
     "scripts/test_runtime_source_transactions.py",
     "scripts/test_runtime_snapshot_publisher.py",

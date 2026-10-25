@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""4C.2C production dependency writers and journaled deletion; native on macOS."""
+"""4C.2C/D production dependency/telephony writers; native fixture on macOS."""
 from pathlib import Path
 import argparse
 import importlib.util
@@ -22,6 +22,13 @@ SIGNATURES = [
     '- (BOOL)setCustomDeviceModel:(NSString *)value',
     '- (NSDictionary *)generateIOSVersion',
     '- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile',
+    '- (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate',
+    '- (BOOL)setCustomIMEI:(NSString *)value',
+    '- (BOOL)setCustomMEID:(NSString *)value',
+    '- (NSString *)generateIMEI',
+    '- (NSString *)generateMEID',
+    '- (BOOL)isValidIMEI:(NSString *)imei',
+    '- (BOOL)isValidMEID:(NSString *)meid',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -45,7 +52,7 @@ def source_contracts():
     manager = read('common/IdentifierManager.m')
     helper = read('common/PXRuntimeIdentifierWriter.m')
     core = read('common/PXRuntimeSourceStore.m')
-    for signature in SIGNATURES:
+    for signature in SIGNATURES[:6]:
         body = method(manager, signature)
         assert 'writeToFile:' not in body and 'removeItemAtPath:' not in body
         if signature != '- (NSString *)regenerateDeviceProfileGroup':
@@ -78,7 +85,7 @@ def source_contracts():
         assert case in fixture, case
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2C-partial'
+    assert manifest['rollout'] == '4C.2D-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'pending'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

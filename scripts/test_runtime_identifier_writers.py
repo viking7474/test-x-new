@@ -100,7 +100,7 @@ def source_contracts():
         assert 'common/PXRuntimeIdentifierWriter.m' in read('scripts/' + runner), 'new allowlist registry must link transitively'
     assert 'test_runtime_identifier_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2C-partial'
+    assert manifest['rollout'] == '4C.2D-partial'
     for name in ('identifier-values', 'identifier-migration'):
         assert manifest['writers'][name]['status'] == 'enrolled'
     for name in ('identifier-artifacts', 'profile-lifecycle', 'storage-preference', 'security-store', 'security-direct'):

@@ -418,7 +418,7 @@ PXRuntimePublisher *PXCreateRuntimeSnapshotPublisher(void (^completion)(NSDictio
             NSMutableDictionary *candidate = [PXCaptureRuntimeSnapshotCandidate() mutableCopy];
             // Incremental enrollment: legacy profile/identifier/security writers
             // still bypass this gate. Source identity is not full coverage.
-            candidate[@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-dependencies-partial";
+            candidate[@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-telephony-partial";
             return candidate;
         }, loadError);
     } writer:^BOOL(NSDictionary *snapshot, NSError **writeError) {
