@@ -16,18 +16,18 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithDirectory:(NSString *)directory owner:(uid_t)owner group:(gid_t)group
-                               allowsPath:(BOOL (^)(NSString *path))allowsPath
+                               allowsPath:(BOOL (^ _Nonnull)(NSString * _Nonnull path))allowsPath
                                     error:(NSError * _Nullable * _Nullable)error;
 /// Nested writes on this instance share staged data; an inner error aborts the
 /// outer operation. The block may only stage/read sources: no notifications,
 /// external callbacks, publisher ownership, queue hops or waiting on other work.
 /// Only the configured source owner may write/recover (the root daemon reads).
-- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *transaction, NSError **error))body
+- (BOOL)performWrite:(BOOL (^ _Nonnull)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error))body
                error:(NSError * _Nullable * _Nullable)error;
 /// Holds the source gate through load AND immutable detach, then releases it
 /// before global write/distribution. Uncommitted/corrupt journals reject capture;
 /// a validated journal matching the commit marker needs only later cleanup.
-- (nullable NSDictionary *)capture:(NSDictionary * _Nullable (^)(NSError **error))loader
+- (nullable NSDictionary *)capture:(NSDictionary * _Nullable (^ _Nonnull)(NSError * _Nullable * _Nonnull error))loader
                               error:(NSError * _Nullable * _Nullable)error;
 #if defined(PX_SOURCE_TRANSACTION_TESTING)
 @property (nonatomic, copy, nullable) void (^testCheckpoint)(NSString *stage);
@@ -37,8 +37,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Production singleton uses mobile-owned state and an exact source allowlist.
 /// These functions are cold writer/publisher APIs; never call from hot hooks.
 FOUNDATION_EXPORT BOOL PXPerformRuntimeSourceWrite(
-    BOOL (^body)(PXRuntimeSourceTransaction *transaction, NSError **error), NSError * _Nullable * _Nullable error);
+    BOOL (^ _Nonnull body)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error), NSError * _Nullable * _Nullable error);
 FOUNDATION_EXPORT NSDictionary * _Nullable PXCaptureRuntimeSources(
-    NSDictionary * _Nullable (^loader)(NSError **error), NSError * _Nullable * _Nullable error);
+    NSDictionary * _Nullable (^ _Nonnull loader)(NSError * _Nullable * _Nonnull error), NSError * _Nullable * _Nullable error);
 
 NS_ASSUME_NONNULL_END

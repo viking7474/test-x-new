@@ -16,12 +16,28 @@ def method(source, signature):
     return source.split(signature + ' {', 1)[1].split('\n- (', 1)[0]
 
 
+def manager_role_fragment():
+    """Keep production preprocessor directives, including any guard BEFORE the helper."""
+    source = read('common/IdentifierManager.m')
+    sanitizer = source.index('static NSDictionary *PXSanitizedIdentifierSettings')
+    start = source.index('\n}', sanitizer) + 2
+    end = source.index('\nstatic BOOL PXRuntimeSnapshotImpliesIdentifierEnabled', start)
+    return source[start:end]
+
+
 def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     paths = read('common/PXRuntimeSources.m')
     runtime = read('common/PXRuntimeSnapshot.m')
     manager = read('common/IdentifierManager.m')
     fixture = read('tests/PXRuntimeSourceStoreTests.m')
+    role = manager_role_fragment()
+    assert role.lstrip().startswith('static BOOL PXIdentifierManagerIsManagerProcess(void)'), 'manager role helper must compile on rootful too'
+    assert role.index('static BOOL PXIdentifierManagerIsManagerProcess') < role.index('#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)')
+    publisher_header = read('common/PXRuntimePublisher.h')
+    for name in ('Loader', 'Writer', 'Distributor', 'Notifier'):
+        assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
+    assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
     assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.1-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
@@ -83,6 +99,17 @@ def source_contracts():
 def native_tests():
     assert sys.platform == 'darwin' and shutil.which('xcrun'), '--native requires macOS/xcrun; cannot silently skip'
     with tempfile.TemporaryDirectory(prefix='px-source-transactions-') as folder:
+        # Compile the exact production role/macro region with its surrounding
+        # preprocessor guards preserved. This catches rootful-only declarations
+        # before the full UIKit application build. Header annotations are strict.
+        check = Path(folder) / 'manager-role.m'
+        check.write_text('#import "PXRuntimeSnapshot.h"\n#import "PXRuntimeSourceStore.h"\n'
+                         + manager_role_fragment()
+                         + '\nBOOL PXCheckManagerRole(void) { return PXIdentifierManagerIsManagerProcess(); }\n', encoding='utf-8')
+        for defines in ([], ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1']):
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fsyntax-only',
+                            '-Werror=implicit-function-declaration', '-Werror=nullability-completeness',
+                            '-I', str(ROOT / 'common'), *defines, str(check)], check=True, cwd=ROOT, timeout=30)
         binary = Path(folder) / 'source-transactions'
         sources = ['common/PXRuntimeSourceStore.m', 'common/PXRuntimeSources.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeSnapshot.m', 'common/PXRuntimeSnapshotReader.m', 'common/PXRuntimeReadScope.m',

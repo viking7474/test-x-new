@@ -4,11 +4,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NSDictionary * _Nullable (^PXRuntimePublicationLoader)(NSError * _Nullable * _Nullable error);
-typedef BOOL (^PXRuntimePublicationWriter)(NSDictionary *snapshot, NSError * _Nullable * _Nullable error);
+typedef NSDictionary * _Nullable (^ _Nonnull PXRuntimePublicationLoader)(NSError * _Nullable * _Nullable error);
+typedef BOOL (^ _Nonnull PXRuntimePublicationWriter)(NSDictionary * _Nonnull snapshot, NSError * _Nullable * _Nullable error);
 /// Must return `complete` and diagnostics. Retries receive the same snapshot.
-typedef NSDictionary * (^PXRuntimePublicationDistributor)(NSDictionary *snapshot);
-typedef BOOL (^PXRuntimePublicationNotifier)(NSError * _Nullable * _Nullable error);
+typedef NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)(NSDictionary * _Nonnull snapshot);
+typedef BOOL (^ _Nonnull PXRuntimePublicationNotifier)(NSError * _Nullable * _Nullable error);
 
 /// Privileged publisher only. Every stage and callback runs on its serial queue.
 /// The stable flock inode is never unlinked; ownership lasts until deallocation.

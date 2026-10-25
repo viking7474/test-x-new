@@ -89,10 +89,11 @@ static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
     return result;
 }
 
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
 static BOOL PXIdentifierManagerIsManagerProcess(void) {
     return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.hydra.tlinkios"];
 }
+
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
 #define PX_IDENTIFIER_RUNTIME_READ_OPERATION \
     PXRuntimeReadScope pxRuntimeOperationScope __attribute__((cleanup(PXRuntimeReadScopeEnd))) = {0}; \
     if (!PXIdentifierManagerIsManagerProcess()) PXBeginRuntimeSnapshotOperation(&pxRuntimeOperationScope)

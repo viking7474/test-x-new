@@ -29,7 +29,7 @@ FOUNDATION_EXPORT BOOL PXRuntimeReadBool(id _Nullable value);
 - (NSDictionary *)profileArtifact:(NSString *)key;
 @end
 
-typedef NSDictionary * _Nullable (^PXRuntimeSnapshotLoader)(void);
+typedef NSDictionary * _Nullable (^ _Nonnull PXRuntimeSnapshotLoader)(void);
 
 /// Loader runs only on the reader's serial queue. Captures never wait for I/O.
 /// Callers keep one strong view and pass it to related field readers/helpers.
