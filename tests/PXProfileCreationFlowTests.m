@@ -5,6 +5,7 @@
 #import "PXRuntimeGeneration.h"
 #import "PXRuntimeArtifactWriter.h"
 #import "PXProfileCreationReservation.h"
+#import "PXProfileLifecycleLease.h"
 #include <stdatomic.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,7 +23,8 @@ static NSDictionary *gNetworkOptions;
 static _Atomic BOOL gEntered, gCommitted, gInActivation;
 static void (^gDuringTermination)(void);
 static void (^gAfterGeneration)(void);
-static BOOL gPause, gFailGeneration, gThrowGeneration, gNoIPv4, gThrowObserver;
+static void (^gAfterArchive)(void);
+static BOOL gPause, gFailGeneration, gThrowGeneration, gNoIPv4, gThrowObserver, gThrowNetworkOptions;
 static dispatch_semaphore_t gRelease;
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
@@ -104,6 +106,18 @@ static void OutsideGate(void) {
 - (void)resetCanvasNoise { gCanvas++; CHECK(NSThread.isMainThread && atomic_load(&gCommitted), "canvas reset follows committed generation on main"); }
 @end
 #include "PXProfileModel.inc"
+@interface PXProfileFileManagerFixture : NSFileManager
+@end
+@implementation PXProfileFileManagerFixture
+- (BOOL)setAttributes:(NSDictionary<NSFileAttributeKey, id> *)attributes ofItemAtPath:(NSString *)path error:(NSError **)error {
+    BOOL ok = [super setAttributes:attributes ofItemAtPath:path error:error];
+    if ([path isEqual:Path(PXProfilesPath(), @"profiles.plist")]) {
+        void (^callback)(void) = gAfterArchive; gAfterArchive = nil;
+        if (callback) callback();
+    }
+    return ok;
+}
+@end
 @interface PXProfileCreationFixture : NSObject
 @property (nonatomic, strong) NSMutableArray<Profile *> *mutableProfiles;
 @property (nonatomic, strong) Profile *mutableCurrentProfile;
@@ -111,6 +125,8 @@ static void OutsideGate(void) {
 @property (nonatomic, strong) NSString *profilesDirectory;
 @property (nonatomic) BOOL creationInProgress;
 @property (nonatomic, strong) PXProfileCreationReservation *creationReservation;
+@property (nonatomic, strong) PXProfileLifecycleLease *lifecycleLease;
+@property (nonatomic, copy) NSDictionary *registryRecord;
 @property (nonatomic) BOOL selectionUnavailable;
 @property (nonatomic) BOOL registryUnavailable;
 - (void)createDirectoryIfNeeded:(NSString *)path;
@@ -133,6 +149,7 @@ static void OutsideGate(void) {
 }
 - (void)randomizeAppVersionsForProfile:(NSString *)profile { (void)profile; CHECK(NSThread.isMainThread, "version adapter retains caller queue policy"); }
 - (NSDictionary *)captureProfileNetworkOptions {
+    if (gThrowNetworkOptions) [NSException raise:@"fixture" format:@"synchronous options capture failed"];
     return @{ @"enabled": gNetworkOptions[@"enabled"], @"connectionType": gNetworkOptions[@"connectionType"], @"country": [gNetworkOptions[@"country"] copy] };
 }
 - (void)mirrorCurrentProfileID:(NSString *)profile {
@@ -157,6 +174,14 @@ static NSDictionary *ActiveFiles(void) {
 static BOOL SaveRecord(NSString *path, NSDictionary *info) {
     return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) { return [tx setDictionary:info atPath:path error:error]; } error:NULL];
 }
+// Deliberately bypass the lifecycle lease to model a legacy/external writer.
+// Normal ProfileManager selection writers now reject a concurrent lifecycle op.
+static BOOL ExternalSelectionWrite(NSDictionary *info) {
+    NSMutableDictionary *revisioned = [info mutableCopy]; revisioned[@"SelectionRevision"] = NSUUID.UUID.UUIDString;
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXStageRuntimeProfileSelection(tx, revisioned, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
+    } error:NULL];
+}
 static void TestCreation(PXProfileCreationFixture *manager, Profile *zero) {
     ResetWorker(); Profile *one = New(@"one"); __block NSUInteger callbacks = 0;
     __block BOOL success = NO; __block NSError *failure = nil;
@@ -175,6 +200,13 @@ static void TestCreation(PXProfileCreationFixture *manager, Profile *zero) {
     [manager createProfile:New(@"overlap") completion:rejected]; [manager switchToProfile:zero completion:rejected];
     [manager updateProfile:zero completion:rejected]; [manager deleteProfile:zero completion:rejected];
     CHECK(busy == 4 && callbacks == 0, "overlapping lifecycle operations reject while creation is pending");
+    PXProfileCreationFixture *other = [PXProfileCreationFixture new];
+    [other loadProfilesWithCompletion:rejected];
+    [other createProfile:New(@"other-instance") completion:rejected];
+    [manager loadProfilesWithCompletion:rejected];
+    NSError *selectionError = nil;
+    CHECK(busy == 7 && ![manager persistProfileSelectionInfo:@{ @"ProfileId": @"0" } error:&selectionError] && selectionError.code == 12 &&
+          [before isEqual:ActiveFiles()], "pending create excludes other instances reload and raw selection writers");
     dispatch_semaphore_signal(gRelease);
     CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && success && !failure && gNotices == notices + 1 &&
           [manager.mutableCurrentProfile.profileId isEqual:one.profileId] && mirrors == gMirrors - 1 && caches == gCachePublications - 1,
@@ -215,6 +247,11 @@ static void TestCreation(PXProfileCreationFixture *manager, Profile *zero) {
     CHECK(Pump(^BOOL { return callbacks > 0; }) && success && !failure && callbacks == 1 && !manager.creationInProgress,
           "post commit observer exception never suppresses completion or reports false rollback");
     gThrowObserver = NO;
+    ResetWorker(); gThrowNetworkOptions = YES; callbacks = 0; before = ActiveFiles();
+    [manager createProfile:New(@"options-exception") completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gThrowNetworkOptions = NO;
+    CHECK(callbacks == 1 && !success && failure && !manager.creationInProgress && !manager.lifecycleLease && [before isEqual:ActiveFiles()],
+          "synchronous preparation exception releases lifecycle ownership before failure completion");
 }
 static void TestConflicts(PXProfileCreationFixture *manager) {
     for (NSUInteger mode = 0; mode < 3; mode++) {
@@ -227,8 +264,8 @@ static void TestConflicts(PXProfileCreationFixture *manager) {
         NSDictionary *old = Record(PXCurrentProfileInfoPath());
         __block NSDictionary *competitor = nil;
         if (mode < 2) {
-            CHECK([manager persistProfileSelectionInfo:@{ @"ProfileId": @"0" } error:NULL], "newer selection commits during pending create");
-            if (mode == 1) CHECK([manager persistProfileSelectionInfo:old error:NULL], "ABA returns to same selection with new revision");
+            CHECK(ExternalSelectionWrite(@{ @"ProfileId": @"0" }), "newer selection commits during pending create");
+            if (mode == 1) CHECK(ExternalSelectionWrite(old), "ABA returns to same selection with new revision");
             competitor = ActiveFiles();
         } else gAfterGeneration = ^{
             if (!SaveRecord(PXTLinkIOSSettingsPath(), @{ @"newer": @YES })) [NSException raise:@"fixture" format:@"settings competitor failed"];
@@ -245,7 +282,7 @@ static void TestConflicts(PXProfileCreationFixture *manager) {
     // A writer in the termination adapter lands after preflight. The final CAS
     // must still reject it, leaving the ready candidate registered but inactive.
     ResetWorker(); gPause = NO; __block BOOL done = NO, success = YES; __block NSDictionary *competitor;
-    gDuringTermination = ^{ [manager persistProfileSelectionInfo:@{ @"ProfileId": @"0" } error:NULL]; competitor = ActiveFiles(); };
+    gDuringTermination = ^{ ExternalSelectionWrite(@{ @"ProfileId": @"0" }); competitor = ActiveFiles(); };
     [manager createProfile:New(@"late-conflict") completion:^(BOOL ok, NSError *error) { (void)error; done = YES; success = ok; }];
     CHECK(Pump(^BOOL { return done; }) && !success && competitor && [competitor isEqual:ActiveFiles()], "activation rechecks selection after external termination adapter");
 }
@@ -435,8 +472,158 @@ static void TestCreationDirectoryDrift(PXProfileCreationFixture *manager) {
         else CHECK(gTerminations == terminations + 1, "directory change in termination adapter is rechecked before activation");
     }
 }
+static int TryLeaseInChild(NSString *executable, NSString *directory) {
+    char *arguments[] = { (char *)executable.fileSystemRepresentation, "--try-lease", (char *)directory.fileSystemRepresentation, NULL };
+    pid_t child = 0;
+    if (posix_spawn(&child, arguments[0], NULL, NULL, arguments, environ) != 0) return -1;
+    int status = 0; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+static void TestLifecycleLease(NSString *executable) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *directory = Path(gRoot, @"lifecycle-fixtures");
+    CHECK([fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL], "lifecycle fixture root created");
+    NSData *first = [@"first registry" dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *second = [@"second registry" dataUsingEncoding:NSUTF8StringEncoding];
+    @autoreleasepool {
+        __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:directory error:NULL];
+        CHECK(lease && TryLeaseInChild(executable, directory) == 2, "lifecycle lease excludes another process without waiting");
+        NSDictionary *absent = [lease readRegistryWithError:NULL];
+        CHECK(![absent[@"exists"] boolValue] && [lease writeRegistryData:first expected:absent error:NULL], "registry CAS captures absence and commits initial bytes");
+        NSDictionary *basis = [lease readRegistryWithError:NULL];
+        CHECK([lease writeRegistryData:second expected:basis error:NULL] && ![lease writeRegistryData:first expected:basis error:NULL] &&
+              [[lease readRegistryWithError:NULL][@"bytes"] isEqual:second], "registry CAS rejects stale bytes without overwriting the newer archive");
+    }
+    CHECK(TryLeaseInChild(executable, directory) == 0, "releasing lifecycle lease lets another process continue");
+    // A dead process cannot strand an in-memory busy flag or a flock owner.
+    CHECK(TryLeaseInChild(executable, directory) == 0, "exited process releases lifecycle ownership");
+    @autoreleasepool {
+        __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:directory error:NULL];
+        NSString *archive = Path(directory, @"profiles.plist");
+        CHECK([fm removeItemAtPath:archive error:NULL] && [fm createSymbolicLinkAtPath:archive withDestinationPath:Path(directory, @"other") error:NULL], "registry symlink fixture created");
+        CHECK([lease readRegistryWithError:NULL] == nil, "registry reader rejects a symlink destination");
+        NSString *lock = Path(directory, @".profile-lifecycle.lock");
+        CHECK([fm moveItemAtPath:lock toPath:[lock stringByAppendingString:@".old"] error:NULL] &&
+              [@"replacement" writeToFile:lock atomically:YES encoding:NSUTF8StringEncoding error:NULL], "lifecycle lock replacement fixture created");
+        CHECK(![lease validateWithError:NULL], "lifecycle lease detects replacement of its lock inode");
+    }
+}
+static BOOL Reload(PXProfileCreationFixture *manager) {
+    __block BOOL loaded = NO;
+    [manager loadProfilesWithCompletion:^(BOOL ok, NSError *error) { loaded = ok && error == nil; }];
+    return loaded;
+}
+static Profile *SeedRegistered(PXProfileCreationFixture *manager, NSString *name) {
+    Profile *profile = New(name); [profile setValue:[manager generateProfileID] forKey:@"profileId"];
+    [manager createDirectoryIfNeeded:Identity(profile.profileId)];
+    [@"keep until metadata commits" writeToFile:Path(Identity(profile.profileId), @"sentinel") atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [manager.mutableProfiles addObject:profile];
+    [manager saveProfilesWithCompletion:^(BOOL ok, NSError *error) { CHECK(ok && !error, "deletion fixture registry seeded"); }];
+    return profile;
+}
+static void Select(PXProfileCreationFixture *manager, Profile *profile) {
+    __block BOOL done = NO, success = NO;
+    [manager switchToProfile:profile completion:^(BOOL ok, NSError *error) { done = YES; success = ok && error == nil; }];
+    CHECK(done && success, "deletion fixture selection committed");
+}
+static void TestRegistryAndDeletion(void) {
+    PXProfileCreationFixture *manager = [PXProfileCreationFixture new]; manager.fileManager = [PXProfileFileManagerFixture new];
+    CHECK(Reload(manager), "deletion manager reloads current registry basis");
+    PXProfileCreationFixture *stale = [PXProfileCreationFixture new]; CHECK(Reload(stale), "second manager captures old registry basis");
+    Profile *inactive = SeedRegistered(manager, @"delete-inactive");
+    NSData *currentBytes = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    __block BOOL called = NO, success = YES; __block NSError *failure = nil;
+    [stale createProfile:New(@"stale-instance") completion:^(BOOL ok, NSError *error) { called = YES; success = ok; failure = error; }];
+    CHECK(called && !success && failure.code == 25 && !stale.creationInProgress &&
+          [currentBytes isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]], "stale manager cannot overwrite a registry changed by another instance");
+    // Match by registered ID, even when the UI passes a different Profile object.
+    Profile *alias = New(@"different-object"); [alias setValue:inactive.profileId forKey:@"profileId"];
+    NSDictionary *before = ActiveFiles(); NSUInteger terminations = gTerminations;
+    called = NO;
+    [manager deleteProfile:alias completion:^(BOOL ok, NSError *error) { called = YES; success = ok; failure = error; }];
+    CHECK(called && success && !failure && [before isEqual:ActiveFiles()] && ![manager.fileManager fileExistsAtPath:Identity(inactive.profileId)] &&
+          gTerminations == terminations && !manager.lifecycleLease, "inactive deletion removes registered ID after metadata commit without changing selection");
+    Profile *active = SeedRegistered(manager, @"delete-active"); Select(manager, active);
+    NSString *activeID = active.profileId; manager.mutableCurrentProfile = manager.mutableProfiles.firstObject;
+    NSUInteger settingsNotices = gSettingsNotices; terminations = gTerminations;
+    [manager deleteProfile:active completion:^(BOOL ok, NSError *error) {
+        success = ok; failure = error;
+        __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *next = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+        CHECK(!manager.creationInProgress && !manager.lifecycleLease && next, "delete completion runs after releasing lifecycle ownership");
+    }];
+    NSString *selected = Record(PXCurrentProfileInfoPath())[@"ProfileId"];
+    CHECK(success && !failure && ![selected isEqual:activeID] && [Record(PXLegacyActiveProfileInfoPath())[@"ProfileId"] isEqual:selected] &&
+          [manager.mutableCurrentProfile.profileId isEqual:selected] && [manager.fileManager fileExistsAtPath:Identity(selected)] &&
+          ![manager.fileManager fileExistsAtPath:Identity(activeID)] && settingsNotices + 1 == gSettingsNotices && terminations == gTerminations,
+          "active deletion uses committed selection and persists a valid fallback before removing files");
+    active = SeedRegistered(manager, @"delete-selection-failure"); Select(manager, active);
+    before = ActiveFiles(); currentBytes = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"delete selection failure"]; };
+    [manager deleteProfile:active completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }]; gStore.testCheckpoint = nil;
+    CHECK(!success && failure && [before isEqual:ActiveFiles()] && [manager.fileManager fileExistsAtPath:Identity(active.profileId)] &&
+          [currentBytes isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]], "delete selection failure preserves registry and directory");
+    // Fail archive encoding only after the fallback selection has committed.
+    Profile *fallback = manager.mutableProfiles.firstObject;
+    NSDictionary *oldSettings = fallback.settings; fallback.settings = @{ @"unsupported": [NSObject new] };
+    settingsNotices = gSettingsNotices;
+    [manager deleteProfile:active completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }]; fallback.settings = oldSettings;
+    CHECK(!success && failure && [manager.fileManager fileExistsAtPath:Identity(active.profileId)] && [manager.mutableProfiles containsObject:active] &&
+          [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:fallback.profileId] && [manager.mutableCurrentProfile.profileId isEqual:fallback.profileId] &&
+          settingsNotices + 1 == gSettingsNotices && [currentBytes isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
+          "archive failure after fallback commit retains the old profile and a valid selection");
+    inactive = SeedRegistered(manager, @"delete-external-drift"); NSString *driftID = inactive.profileId;
+    gAfterArchive = ^{ if (!ExternalSelectionWrite(@{ @"ProfileId": driftID })) [NSException raise:@"fixture" format:@"delete external drift failed"]; };
+    [manager deleteProfile:inactive completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
+    CHECK(!success && failure && [manager.fileManager fileExistsAtPath:Identity(driftID)] && Reload(manager) &&
+          [manager.mutableCurrentProfile.profileId isEqual:driftID], "selection drift after unregister restores only our own registry and preserves all files");
+    CHECK(Pump(^BOOL { return [gMemoryID isEqual:driftID]; }), "external drift defaults mirror catches up before the next lifecycle operation");
+    Profile *registryDrift = SeedRegistered(manager, @"delete-registry-drift");
+    NSData *externalRegistry = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    gAfterArchive = ^{ [externalRegistry writeToFile:Path(PXProfilesPath(), @"profiles.plist") atomically:YES]; };
+    [manager deleteProfile:registryDrift completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
+    CHECK(!success && failure.code == 25 && manager.registryUnavailable && [manager.fileManager fileExistsAtPath:Identity(registryDrift.profileId)] &&
+          [externalRegistry isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && Reload(manager),
+          "registry drift after unregister preserves files and never overwrites an external archive");
+    Profile *registryDrift = SeedRegistered(manager, @"delete-registry-drift");
+    NSData *externalRegistry = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    gAfterArchive = ^{ [externalRegistry writeToFile:Path(PXProfilesPath(), @"profiles.plist") atomically:YES]; };
+    [manager deleteProfile:registryDrift completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
+    CHECK(!success && failure.code == 25 && manager.registryUnavailable && [manager.fileManager fileExistsAtPath:Identity(registryDrift.profileId)] &&
+          [externalRegistry isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && Reload(manager),
+          "registry drift after unregister preserves files and never overwrites an external archive");
+    Profile *cloneCurrent = manager.mutableCurrentProfile;
+    Profile *replacementTarget = SeedRegistered(manager, @"delete-replaced-target"); NSString *replacementID = replacementTarget.profileId;
+    gAfterArchive = ^{
+        ReplaceCreationDirectory(replacementTarget, 1);
+        [@"replacement" writeToFile:Path(Identity(replacementID), @"new-owner") atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    };
+    [manager deleteProfile:replacementTarget completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
+    CHECK(success && !failure && [manager.fileManager fileExistsAtPath:Path(Identity(replacementID), @"new-owner")] && Reload(manager) &&
+          [manager.mutableCurrentProfile.profileId isEqual:cloneCurrent.profileId], "cleanup refuses a replaced target and restart preserves the committed registry");
+    BOOL registered = NO;
+    for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:replacementID]) registered = YES;
+    CHECK(!registered, "restart never adopts an inactive directory from a reserved marker alone");
+    PXProfileCreationFixture *single = [PXProfileCreationFixture new]; [single.mutableProfiles addObject:manager.mutableCurrentProfile];
+    [single deleteProfile:manager.mutableCurrentProfile completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
+    CHECK(!success && failure.code == 4, "last profile deletion is rejected before filesystem mutation");
+    NSString *archive = Path(PXProfilesPath(), @"profiles.plist");
+    NSData *validArchive = [NSData dataWithContentsOfFile:archive];
+    NSData *duplicate = [NSKeyedArchiver archivedDataWithRootObject:@[manager.mutableCurrentProfile, manager.mutableCurrentProfile] requiringSecureCoding:YES error:NULL];
+    CHECK([duplicate writeToFile:archive atomically:YES], "duplicate registry fixture installed");
+    PXProfileCreationFixture *invalid = [PXProfileCreationFixture new];
+    CHECK(!Reload(invalid) && invalid.registryUnavailable && [duplicate isEqual:[NSData dataWithContentsOfFile:archive]], "duplicate registry IDs reject load without guessing or rewriting the archive");
+    CHECK([validArchive writeToFile:archive atomically:YES] && Reload(manager), "valid registry restored after duplicate fixture");
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "registry and deletion mirrors drained");
+}
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc == 3 && strcmp(argv[1], "--try-lease") == 0) {
+            NSError *error = nil;
+            __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:[NSString stringWithUTF8String:argv[2]] error:&error];
+            return lease ? 0 : error.code == 12 ? 2 : 3;
+        }
         if (argc == 4 && strcmp(argv[1], "--reserve") == 0) {
             NSError *error = nil;
             PXProfileCreationReservation *reservation = Reserve([NSString stringWithUTF8String:argv[2]], [NSString stringWithUTF8String:argv[3]], &error);
@@ -446,6 +633,7 @@ int main(int argc, const char *argv[]) {
         NSFileManager *fm = NSFileManager.defaultManager;
         [fm createDirectoryAtPath:Identity(@"0") withIntermediateDirectories:YES attributes:nil error:NULL];
         TestReservation([NSString stringWithUTF8String:argv[0]]);
+        TestLifecycleLease([NSString stringWithUTF8String:argv[0]]);
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:Path(gRoot, @"control") owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path hasPrefix:[gRoot stringByAppendingString:@"/"]] && [path hasSuffix:@".plist"] && ![path hasPrefix:Path(gRoot, @"control/")]; } error:NULL];
         CHECK(gStore != nil, "profile source store initialized");
@@ -461,6 +649,7 @@ int main(int argc, const char *argv[]) {
         }];
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager);
+        TestRegistryAndDeletion();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

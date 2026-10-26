@@ -55,9 +55,9 @@ def source_contracts():
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3A-partial'
+    assert manifest['rollout'] == '4C.2H3B-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
-    assert manifest['writers']['profile-lifecycle']['status'] == 'pending'
+    assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Pure artifact preparation and committed cache adoption contracts (profile lifecycle pending; native runtime not implied)')
 
 

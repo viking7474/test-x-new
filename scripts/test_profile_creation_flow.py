@@ -41,6 +41,10 @@ METHODS = [CREATE, SWITCH,
     '- (void)updateCurrentProfileInfoWithProfile:(Profile *)profile',
     '- (void)createProfileZeroImmediately',
     '- (BOOL)refreshCurrentProfileFromCommittedSelectionWithError:(NSError **)error']
+METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void)endProfileOperation',
+    '- (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion',
+    '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error',
+    '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error']
 
 
 def check_macro_arity(source, label):
@@ -90,15 +94,15 @@ def source_contracts():
         body = writers.method(source, signature)
         assert 'if (!NSThread.isMainThread)' in body and 'if (self.creationInProgress)' in body
     finish = writers.method(source, '- (void)finishProfileCreation:(Profile *)profile targetID:(NSString *)targetID generation:(PXCommittedRuntimeGeneration *)generation expectedSelection:(NSDictionary *)expected error:(NSError *)generationError completion:(void (^)(BOOL success, NSError * _Nullable error))completion')
-    assert create.index('NSString *targetID = [profile.profileId copy]') < create.index('dispatch_get_global_queue')
+    assert create.index('targetID = [profile.profileId copy]') < create.index('dispatch_get_global_queue')
     assert 'commitRuntimeGenerationForProfileID:targetID' in create
     for forbidden in ('terminateEnabledScopedApps', 'mutableCurrentProfile =', 'mutableProfiles addObject:', 'updateCurrentProfileInfoWithProfile:'):
         assert forbidden not in create, forbidden
     assert finish.index('validateActivationForProfile:') < finish.index('mutableProfiles addObject:') < finish.index('saveProfilesWithCompletion:')
     assert finish.index('saveProfilesWithCompletion:') < finish.index('activateProfile:') < finish.index('publishCommittedRuntimeGeneration:')
     assert 'removeObjectIdenticalTo:profile' in finish
-    assert finish.count('self.creationReservation = nil;') == 3
-    assert finish.index('self.creationInProgress = NO;', finish.index('activateProfile:')) < finish.index('if (completion) completion(activated,')
+    assert finish.count('[self endProfileOperation];') == 3
+    assert finish.index('[self endProfileOperation];', finish.index('activateProfile:')) < finish.index('if (completion) completion(activated,')
     for forbidden in ('NSInvocation', '__unsafe_unretained', 'carrier_details.plist', 'network_settings.plist', 'device_ids.plist', 'regenerateAllEnabledIdentifiers]'):
         assert forbidden not in create, forbidden
     network = writers.method(source, METHODS[4])
@@ -106,7 +110,7 @@ def source_contracts():
         assert forbidden not in network, forbidden
     assert 'generateSpoofedLocalIPAddressFromCurrent' in network and 'generateSpoofedLocalIPv6AddressFromCurrent' in network
     archive = writers.method(source, METHODS[8])
-    assert 'NSDataWritingAtomic' in archive and '@catch' in archive
+    assert 'writeRegistryData:data expected:self.registryRecord' in archive and '@catch' in archive
     assert 'removeItemAtPath:' not in archive and 'temp_profiles.plist' not in source
     assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 3
     allocation = writers.method(source, '- (NSString *)generateProfileID')
@@ -126,7 +130,9 @@ def source_contracts():
     assert 'PXStageRuntimeGenerationSettings' in activation
     assert '[self.creationReservation validateWithError:writeError]' in activation
     assert activation.index('if (!committed)') < activation.index('self.mutableCurrentProfile = profile;') < activation.index('mirrorCurrentProfileID:')
-    load = writers.method(source, '- (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion')
+    reload_entry = writers.method(source, '- (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion')
+    assert 'if (self.creationInProgress)' in reload_entry and '@finally { [self endProfileOperation]; }' in reload_entry
+    load = writers.method(source, '- (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion')
     assert 'captureProfileSelectionWithError:' in load and 'CurrentProfileID' not in load and 'createDefaultProfile' not in load
     assert 'SelectionRevision' in source and 'selectionUnavailable' in source
     assert 'registryUnavailable' in source
@@ -172,9 +178,41 @@ def source_contracts():
                  'replaced creation directory never activates or publishes success',
                  'directory change in termination adapter is rechecked before activation'):
         assert case in fixture, case
+    lease = read('common/PXProfileLifecycleLease.m')
+    for token in ('LOCK_EX | LOCK_NB', 'O_CLOEXEC | O_NOFOLLOW', 'st_uid != geteuid()',
+                  'AT_SYMLINK_NOFOLLOW', 'NSDataWritingAtomic', 'observed isEqual:expected', 'dealloc'):
+        assert token in lease, token
+    begin = writers.method(source, '- (BOOL)beginProfileOperationWithError:(NSError **)error')
+    assert 'expected isEqual:observed' in begin and 'self.lifecycleLease = lease;' in begin
+    assert '[self.lifecycleLease invalidate];' in writers.method(source, '- (void)endProfileOperation')
+    assert 'NS_RETURNS_RETAINED' in read('common/PXProfileLifecycleLease.h')
+    for signature in METHODS[:4]:
+        assert 'beginProfileOperationWithError:' in writers.method(source, signature)
+    delete = writers.method(source, '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error')
+    assert delete.index('activateProfile:fallback') < delete.index('self.mutableProfiles = remaining') < delete.index('removeDirectoryForProfileID:')
+    assert 'if (!saved)' in delete and 'PXRuntimeProfileSelectionMatches' in delete
+    for signature in ('- (BOOL)bootstrapProfileSelectionWithError:(NSError **)error',
+                      '- (BOOL)persistProfileSelectionInfo:(NSDictionary *)info error:(NSError **)error',
+                      '- (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError **)error'):
+        assert 'objc_precise_lifetime' in writers.method(source, signature)
+    for case in ('pending create excludes other instances reload and raw selection writers',
+                 'synchronous preparation exception releases lifecycle ownership before failure completion',
+                 'lifecycle lease excludes another process without waiting',
+                 'registry CAS rejects stale bytes without overwriting the newer archive',
+                 'exited process releases lifecycle ownership',
+                 'stale manager cannot overwrite a registry changed by another instance',
+                 'active deletion uses committed selection and persists a valid fallback before removing files',
+                 'delete selection failure preserves registry and directory',
+                 'archive failure after fallback commit retains the old profile and a valid selection',
+                 'selection drift after unregister restores only our own registry and preserves all files',
+                 'registry drift after unregister preserves files and never overwrites an external archive',
+                 'cleanup refuses a replaced target and restart preserves the committed registry',
+                 'restart never adopts an inactive directory from a reserved marker alone',
+                 'duplicate registry IDs reject load without guessing or rewriting the archive'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3A-partial'
-    assert manifest['writers']['profile-lifecycle']['status'] == 'pending'
+    assert manifest['rollout'] == '4C.2H3B-partial'
+    assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_profile_creation_flow.py' in read('scripts/release_hardening.py')
@@ -197,7 +235,7 @@ def native_tests():
     with tempfile.TemporaryDirectory(prefix='px-profile-flow-') as temp:
         folder = Path(temp)
         generate_native_fragments(folder)
-        sources = ['common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+        sources = ['common/PXProfileLifecycleLease.m', 'common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeIdentifierWriter.m',
                    'tests/PXProfileCreationFlowTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):

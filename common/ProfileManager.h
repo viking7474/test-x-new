@@ -32,6 +32,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Failure may leave inactive artifacts or a ready registered profile for recovery.
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+// Active deletion selects a valid fallback before unregistering/removing files.
+// Failure after fallback commit preserves the old profile; reload before retry.
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)switchToProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;

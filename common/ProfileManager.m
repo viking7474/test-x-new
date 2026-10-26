@@ -5,6 +5,7 @@
 #import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeGeneration.h"
 #import "PXProfileCreationReservation.h"
+#import "PXProfileLifecycleLease.h"
 #import "NetworkManager.h"
 #import <spawn.h>
 #import <sys/wait.h>
@@ -51,6 +52,8 @@
 // it is not a cross-process profile-directory transaction.
 @property (nonatomic) BOOL creationInProgress;
 @property (nonatomic, strong) PXProfileCreationReservation *creationReservation;
+@property (nonatomic, strong) PXProfileLifecycleLease *lifecycleLease;
+@property (nonatomic, copy) NSDictionary *registryRecord;
 @property (nonatomic) BOOL selectionUnavailable;
 @property (nonatomic) BOOL registryUnavailable;
 - (NSDictionary *)prepareNetworkArtifactsWithOptions:(NSDictionary *)options error:(NSError **)error;
@@ -65,6 +68,11 @@
 - (BOOL)validateActivationForProfile:(Profile *)profile expectedSelection:(NSDictionary *)expected generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error;
 - (BOOL)activateProfile:(Profile *)profile expectedSelection:(NSDictionary *)expected generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error;
 - (void)finishProfileCreation:(Profile *)profile targetID:(NSString *)targetID generation:(PXCommittedRuntimeGeneration *)generation expectedSelection:(NSDictionary *)expected error:(NSError *)generationError completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+- (BOOL)beginProfileOperationWithError:(NSError **)error;
+- (void)endProfileOperation;
+- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error;
+- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
+- (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 
 @end
 
@@ -213,6 +221,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     self = [super init];
     if (self) {
         _mutableProfiles = [NSMutableArray array];
+        _registryUnavailable = YES;
         _fileManager = [NSFileManager defaultManager];
         
         // Use the specified jailbreak directory structure
@@ -284,6 +293,30 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 
 #pragma mark - Public Methods
 
+- (BOOL)beginProfileOperationWithError:(NSError **)error {
+    if (!NSThread.isMainThread || self.creationInProgress || self.lifecycleLease) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:12 userInfo:@{NSLocalizedDescriptionKey: @"Another profile operation is in progress"}]; return NO;
+    }
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+    NSDictionary *observed = [lease readRegistryWithError:error];
+    if (!observed) return NO;
+    NSDictionary *expected = self.registryRecord ?: @{ @"exists": @NO };
+    if (![expected isEqual:observed]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed; reload the list before changing profiles"}]; return NO;
+    }
+    self.registryRecord = observed;
+    self.lifecycleLease = lease;
+    self.creationInProgress = YES;
+    return YES;
+}
+
+- (void)endProfileOperation {
+    self.creationReservation = nil;
+    [self.lifecycleLease invalidate];
+    self.lifecycleLease = nil;
+    self.creationInProgress = NO;
+}
+
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self createProfile:profile completion:completion]; });
@@ -316,51 +349,45 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         }
     }
     
-    // Generate a sequential profile ID instead of using UUID
-    NSString *profileID = [self generateProfileID];
-    
-    // Set the generated ID
-    // We need to use setValue:forKey: because profileId is readonly
-    [profile setValue:profileID forKey:@"profileId"];
-    
-    // Set creation and last used dates with precise timestamps
-    NSDate *now = [NSDate date];
-    profile.createdAt = now;
-    profile.lastUsed = now;
-    
-    // Reserve exclusively: an existence check followed by create-if-needed can
-    // adopt a directory allocated by another instance between the two calls.
-    NSDictionary *identifiersDict = @{
-        @"DisplayName": profile.name,
-        @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
-        @"Identifier": profile.profileId
-    };
-    NSError *reservationError = nil;
-    PXProfileCreationReservation *reservation = [PXProfileCreationReservation reserveProfileID:profile.profileId
-        inProfilesDirectory:self.profilesDirectory metadata:identifiersDict error:&reservationError];
-    if (!reservation) {
-        BOOL conflict = [reservationError.domain isEqualToString:@"WeaponXProfileDirectoryError"] &&
-            (reservationError.code == EEXIST || reservationError.code == EINVAL);
-        NSMutableDictionary *info = [@{NSLocalizedDescriptionKey: conflict ?
-            @"New profile ID is invalid or its directory already exists" : @"Could not initialize the new profile directory"} mutableCopy];
-        if (reservationError) info[NSUnderlyingErrorKey] = reservationError;
-        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:(conflict ? 13 : 11) userInfo:info]);
-        return;
+    NSError *operationError = nil;
+    if (![self beginProfileOperationWithError:&operationError]) { if (completion) completion(NO, operationError); return; }
+    PXProfileCreationReservation *reservation = nil;
+    NSDictionary *expected = nil, *networkOptions = nil;
+    NSString *targetID = nil;
+    NSError *preparationError = nil;
+    @try {
+        NSString *profileID = [self generateProfileID];
+        [profile setValue:profileID forKey:@"profileId"];
+        profile.createdAt = profile.lastUsed = NSDate.date;
+        NSDictionary *identifiers = @{ @"DisplayName": profile.name,
+            @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profileID], @"Identifier": profileID };
+        NSError *reservationError = nil;
+        reservation = [PXProfileCreationReservation reserveProfileID:profile.profileId
+            inProfilesDirectory:self.profilesDirectory metadata:identifiers error:&reservationError];
+        if (!reservation) {
+            BOOL conflict = [reservationError.domain isEqualToString:@"WeaponXProfileDirectoryError"] &&
+                (reservationError.code == EEXIST || reservationError.code == EINVAL);
+            NSMutableDictionary *info = [@{NSLocalizedDescriptionKey: conflict ?
+                @"New profile ID is invalid or its directory already exists" : @"Could not initialize the new profile directory"} mutableCopy];
+            if (reservationError) info[NSUnderlyingErrorKey] = reservationError;
+            preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:(conflict ? 13 : 11) userInfo:info];
+        } else {
+            expected = [self captureProfileSelectionWithError:&preparationError];
+            if (expected) {
+                targetID = [profile.profileId copy];
+                networkOptions = [self captureProfileNetworkOptions];
+            }
+        }
+    } @catch (NSException *exception) {
+        preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:15 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile preparation raised an exception"}];
     }
-    
-    // NOTE: appdata.plist (write-only, no reader) and per-profile scoped-apps.plist
-    // (always empty; real scope lives in com.hydra.tlinkios.global_scope.plist) are
-    // intentionally no longer created here.
-    
-    NSError *captureError = nil;
-    NSDictionary *expected = [self captureProfileSelectionWithError:&captureError];
-    if (!expected) { if (completion) completion(NO, captureError); return; }
-    // No registration, selection, termination, cache publication or global
-    // settings change until the inactive target is generated and saved.
-    self.creationInProgress = YES;
+    if (preparationError || !reservation || !expected || !networkOptions || !targetID) {
+        [self endProfileOperation];
+        if (!preparationError) preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:11 userInfo:@{NSLocalizedDescriptionKey: @"Profile preparation did not complete"}];
+        if (completion) completion(NO, preparationError); return;
+    }
+    // No registration/selection/cache effects until inactive generation commits.
     self.creationReservation = reservation;
-    NSString *targetID = [profile.profileId copy];
-    NSDictionary *networkOptions = [self captureProfileNetworkOptions];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @autoreleasepool {
             NSError *generationError = nil;
@@ -389,8 +416,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     NSError *failure = generationError;
     if (!generation || ![profile.profileId isEqualToString:targetID] ||
         ![self validateActivationForProfile:profile expectedSelection:expected generation:generation error:&failure]) {
-        self.creationReservation = nil;
-        self.creationInProgress = NO;
+        [self endProfileOperation];
         if (!failure) failure = [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Profile target changed during creation"}];
         if (completion) completion(NO, failure); return;
     }
@@ -398,8 +424,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     [self saveProfilesWithCompletion:^(BOOL saved, NSError *saveError) {
         if (!saved) {
             [self.mutableProfiles removeObjectIdenticalTo:profile];
-            self.creationReservation = nil;
-            self.creationInProgress = NO;
+            [self endProfileOperation];
             if (completion) completion(NO, saveError); return;
         }
         NSError *activationError = nil; BOOL activated = NO;
@@ -421,8 +446,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
             @try { [[IdentifierManager sharedManager] resetCanvasNoise]; }
             @catch (NSException *exception) { NSLog(@"[ProfileManager] Activated profile; canvas reset failed: %@", exception); }
         }
-        self.creationReservation = nil;
-        self.creationInProgress = NO;
+        [self endProfileOperation];
         if (activated) [self publishProfileChangedNotification];
         if (!activated && !activationError) activationError = [NSError errorWithDomain:@"WeaponXProfileError" code:22 userInfo:@{NSLocalizedDescriptionKey: @"Profile was saved but could not be activated"}];
         if (completion) completion(activated, activated ? nil : activationError);
@@ -439,6 +463,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (NSString *)identityForActivationProfile:(Profile *)profile generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error {
+    if (self.lifecycleLease && ![self.lifecycleLease validateWithError:error]) return nil;
     NSString *identity = PXProfileIdentityPath(PXValidatedProfileID(profile.profileId)); BOOL directory = NO;
     if (!identity.length || ![self.fileManager fileExistsAtPath:identity isDirectory:&directory] || !directory ||
         (generation && (![generation isKindOfClass:PXCommittedRuntimeGeneration.class] ||
@@ -467,6 +492,17 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)activateProfile:(Profile *)profile expectedSelection:(NSDictionary *)expected generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error {
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Profile activation requires main"}]; return NO;
+    }
+    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = self.lifecycleLease ?: [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+    if (!lease || ![lease validateWithError:error]) return NO;
+    if (self.registryRecord && ![[lease readRegistryWithError:error] isEqual:self.registryRecord]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed before activation"}]; return NO;
+    }
+    if (self.registryRecord && ![[lease readRegistryWithError:error] isEqual:self.registryRecord]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed before activation"}]; return NO;
+    }
     // Revalidate after any external termination callback. A preflight alone
     // cannot protect the later commit against reentry/another source writer.
     if (![self identityForActivationProfile:profile generation:generation error:error]) return NO;
@@ -532,6 +568,9 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         return;
     }
 
+    if (![profile.name isKindOfClass:NSString.class] || ![PXValidatedProfileID(profile.profileId) isEqualToString:profile.profileId]) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile name or ID"}]); return;
+    }
     NSLog(@"[WeaponX] 🔄 Updating profile: %@", profile.name);
     
     // Find the profile to update
@@ -544,7 +583,19 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         if (completion) completion(NO, error);
         return;
     }
+    NSError *operationError = nil;
+    if (![self beginProfileOperationWithError:&operationError]) { if (completion) completion(NO, operationError); return; }
     
+    BOOL success = NO; NSError *failure = nil;
+    @try { success = [self updateProfileUnderLease:profile index:index error:&failure]; }
+    @catch (NSException *exception) {
+        failure = [NSError errorWithDomain:@"WeaponXProfileError" code:17 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile update failed"}];
+    } @finally { [self endProfileOperation]; }
+    if (success) [self publishProfileChangedNotification];
+    if (completion) completion(success, success ? nil : failure);
+}
+
+- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error {
     // Get the profile directory
     NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:profile.profileId];
     NSString *appDataDir = [profileDir stringByAppendingPathComponent:@"appdata"];
@@ -613,77 +664,112 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         self.mutableCurrentProfile = profile;
     }
     
-    // Save to disk
-    [self saveProfilesWithCompletion:^(BOOL success, NSError * _Nullable error) {
-        if (success) {
-            NSLog(@"[WeaponX] ✅ Profile updated successfully: %@", profile.name);
-            
-            // Post notification that profile has changed - UI components should refresh
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self publishProfileChangedNotification];
-            });
-        } else {
-            NSLog(@"[WeaponX] ❌ Failed to save profile: %@", error);
-        }
-        if (completion) completion(success, error);
-    }];
+    __block BOOL success = NO; __block NSError *failure = nil;
+    [self saveProfilesWithCompletion:^(BOOL ok, NSError *saveError) { success = ok; failure = saveError; }];
+    if (!success && error) *error = failure;
+    return success;
 }
 
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
     if (!NSThread.isMainThread) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self deleteProfile:profile completion:completion]; });
-        return;
+        dispatch_async(dispatch_get_main_queue(), ^{ [self deleteProfile:profile completion:completion]; }); return;
     }
     if (self.selectionUnavailable || self.registryUnavailable) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Reload a valid profile selection and registry before changing profiles"}]); return;
     }
     if (self.creationInProgress) {
-        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12
-            userInfo:@{NSLocalizedDescriptionKey: @"Profile creation is still in progress; retry when it completes"}]);
-        return;
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12 userInfo:@{NSLocalizedDescriptionKey: @"Another profile change is in progress"}]); return;
     }
-
-    NSLog(@"[WeaponX] 🗑️ Deleting profile: %@", profile.name);
-    
-    // Don't allow deleting the last profile
+    NSString *targetID = [PXValidatedProfileID(profile.profileId) copy];
+    Profile *registered = nil;
+    for (Profile *candidate in self.mutableProfiles) if ([candidate.profileId isEqualToString:targetID]) { registered = candidate; break; }
+    if (!registered || ![registered.profileId isEqualToString:profile.profileId]) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Profile not found"}]); return;
+    }
     if (self.mutableProfiles.count <= 1) {
-        NSError *error = [NSError errorWithDomain:@"WeaponXProfileError" code:4 userInfo:@{NSLocalizedDescriptionKey: @"Cannot delete the last profile"}];
-        if (completion) completion(NO, error);
-        return;
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:4 userInfo:@{NSLocalizedDescriptionKey: @"Cannot delete the last profile"}]); return;
     }
-    
-    // Remove profile directory
-    NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:profile.profileId];
-    if ([self.fileManager fileExistsAtPath:profileDir]) {
-        NSError *error = nil;
-        [self.fileManager removeItemAtPath:profileDir error:&error];
-        if (error) {
-            NSLog(@"[WeaponX] ⚠️ Failed to remove profile directory: %@", error);
+    NSError *failure = nil;
+    if (![self beginProfileOperationWithError:&failure]) { if (completion) completion(NO, failure); return; }
+    BOOL success = NO, selectionChanged = NO;
+    @try { success = [self deleteRegisteredProfileID:targetID selectionChanged:&selectionChanged error:&failure]; }
+    @catch (NSException *exception) {
+        self.registryUnavailable = YES;
+        failure = [NSError errorWithDomain:@"WeaponXProfileError" code:26 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile deletion did not finish; reload the registry"}];
+    } @finally { [self endProfileOperation]; }
+    if (selectionChanged) PXPostSettingsChangedNotification();
+    if (success) [self publishProfileChangedNotification];
+    if (completion) completion(success, success ? nil : failure);
+}
+
+- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error {
+    NSArray *original = [self.mutableProfiles copy];
+    NSDictionary *proof = [self.lifecycleLease directoryProofForProfileID:targetID error:error];
+    NSDictionary *expected = proof ? [self captureProfileSelectionWithError:error] : nil;
+    if (!expected) return NO;
+    NSDictionary *central = expected[PXCurrentProfileInfoPath()], *legacy = expected[PXLegacyActiveProfileInfoPath()];
+    NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+    NSString *selectedID = PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]);
+    Profile *selected = nil, *fallback = nil;
+    NSMutableArray *remaining = [NSMutableArray array];
+    for (Profile *candidate in original) {
+        if ([candidate.profileId isEqualToString:selectedID]) selected = candidate;
+        if (![candidate.profileId isEqualToString:targetID]) {
+            [remaining addObject:candidate];
+            if (!fallback && [self identityForActivationProfile:candidate generation:nil error:NULL]) fallback = candidate;
         }
     }
-    
-    // Remove from array
-    [self.mutableProfiles removeObject:profile];
-    
-    // If this was the current profile, switch to another one
-    if ([self.mutableCurrentProfile.profileId isEqualToString:profile.profileId]) {
-        self.mutableCurrentProfile = self.mutableProfiles.firstObject;
+    if (!selected || ![self identityForActivationProfile:selected generation:nil error:NULL] || !remaining.count || ([selectedID isEqualToString:targetID] && !fallback)) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"A valid committed selection and fallback profile are required for deletion"}]; return NO;
     }
-    
-    // Save to disk
-    [self saveProfilesWithCompletion:^(BOOL success, NSError * _Nullable error) {
-        if (success) {
-            NSLog(@"[WeaponX] ✅ Profile deleted successfully: %@", profile.name);
-            
-            // Post notification that profile has changed - UI components should refresh
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self publishProfileChangedNotification];
-            });
-        } else {
-            NSLog(@"[WeaponX] ❌ Failed to save profiles: %@", error);
-        }
-        if (completion) completion(success, error);
-    }];
+    // Preserve the old registry/directory until the fallback selection commits.
+    // A later archive failure can leave a valid fallback active; never roll a
+    // newer selection back merely because deletion did not finish.
+    if ([selectedID isEqualToString:targetID]) {
+        if (![self validateActivationForProfile:fallback expectedSelection:expected generation:nil error:error] ||
+            ![self activateProfile:fallback expectedSelection:expected generation:nil error:error]) return NO;
+        *selectionChanged = YES;
+        expected = [self captureProfileSelectionWithError:error];
+        if (!expected) return NO;
+    } else self.mutableCurrentProfile = selected;
+    self.mutableProfiles = remaining;
+    __block BOOL saved = NO; __block NSError *archiveError = nil;
+    [self saveProfilesWithCompletion:^(BOOL ok, NSError *failure) { saved = ok; archiveError = failure; }];
+    if (!saved) {
+        self.mutableProfiles = [original mutableCopy];
+        if (error) *error = archiveError; return NO; // No directory has been removed.
+    }
+    if (![[self.lifecycleLease readRegistryWithError:error] isEqual:self.registryRecord]) {
+        self.registryUnavailable = YES;
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed before directory cleanup; reload required"}]; return NO;
+    }
+    if (![[self.lifecycleLease readRegistryWithError:error] isEqual:self.registryRecord]) {
+        self.registryUnavailable = YES;
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed before directory cleanup; reload required"}]; return NO;
+    }
+    BOOL stillCurrent = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        return PXRuntimeProfileSelectionMatches(tx, expected, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), readError);
+    }, error);
+    if (!stillCurrent) {
+        // Only restore our own registry replacement, under its exact byte basis.
+        // This never overwrites a competing registry or compensates selection.
+        self.mutableProfiles = [original mutableCopy];
+        __block BOOL restored = NO;
+        [self saveProfilesWithCompletion:^(BOOL ok, NSError *failure) { (void)failure; restored = ok; }];
+        if (!restored) self.registryUnavailable = YES;
+        [self refreshCurrentProfileFromCommittedSelectionWithError:NULL];
+        return NO;
+    }
+    NSError *cleanupError = nil;
+    @try {
+        if (![self.lifecycleLease removeDirectoryForProfileID:targetID proof:proof error:&cleanupError])
+            NSLog(@"[ProfileManager] Profile removed from registry; inactive directory preserved/cleanup incomplete: %@", cleanupError);
+    } @catch (NSException *exception) {
+        NSLog(@"[ProfileManager] Profile removed from registry; inactive cleanup raised: %@", exception);
+    }
+    // As with the existing API, cleanup failure does not undo a committed
+    // logical deletion. Never retry a stale path automatically.
+    return YES;
 }
 
 - (void)terminateEnabledScopedApps {
@@ -776,10 +862,13 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     if (!registered) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Profile is not registered"}]); return;
     }
+    NSError *operationError = nil;
+    if (![self beginProfileOperationWithError:&operationError]) { if (completion) completion(NO, operationError); return; }
     NSString *targetID = [profile.profileId copy];
     NSError *error = nil;
     NSDictionary *expected = [self captureProfileSelectionWithError:&error];
     if (!expected || ![self validateActivationForProfile:profile expectedSelection:expected generation:nil error:&error]) {
+        [self endProfileOperation];
         if (completion) completion(NO, error); return;
     }
     NSString *observedID = PXValidatedProfileID(expected[PXCurrentProfileInfoPath()][@"info"][@"ProfileId"]);
@@ -787,11 +876,10 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     BOOL same = [observedID isEqualToString:profile.profileId] && [self.mutableCurrentProfile.profileId isEqualToString:profile.profileId];
     NSDate *previousLastUsed = profile.lastUsed;
     profile.lastUsed = NSDate.date;
-    self.creationInProgress = YES;
     [self saveProfilesWithCompletion:^(BOOL saved, NSError *saveError) {
         if (!saved) {
             profile.lastUsed = previousLastUsed;
-            self.creationInProgress = NO;
+            [self endProfileOperation];
             if (completion) completion(NO, saveError); return;
         }
         NSError *activationError = nil; BOOL activated = NO;
@@ -812,7 +900,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
             }
             PXPostSettingsChangedNotification();
         }
-        self.creationInProgress = NO;
+        [self endProfileOperation];
         if (activated && !same) [self publishProfileChangedNotification];
         if (completion) completion(activated, activated ? nil : activationError);
     }];
@@ -938,6 +1026,8 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)bootstrapProfileSelectionWithError:(NSError **)error {
+    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+    if (!lease) { self.selectionUnavailable = YES; return NO; }
     NSDictionary *expected = [self captureProfileSelectionWithError:error];
     if (!expected) { self.selectionUnavailable = YES; return NO; }
     NSDictionary *central = expected[PXCurrentProfileInfoPath()], *legacy = expected[PXLegacyActiveProfileInfoPath()];
@@ -979,6 +1069,27 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self loadProfilesWithCompletion:completion]; }); return;
+    }
+    if (self.creationInProgress) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12 userInfo:@{NSLocalizedDescriptionKey: @"Cannot reload profiles during another profile operation"}]); return;
+    }
+    NSError *leaseError = nil;
+    self.lifecycleLease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:&leaseError];
+    if (!self.lifecycleLease) { if (completion) completion(NO, leaseError); return; }
+    self.creationInProgress = YES;
+    __block BOOL success = NO; __block NSError *failure = nil;
+    @try {
+        [self loadProfilesUnderLeaseWithCompletion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
+    } @catch (NSException *exception) {
+        self.registryUnavailable = YES;
+        failure = [NSError errorWithDomain:@"WeaponXProfileError" code:24 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not reload profile registry"}];
+    } @finally { [self endProfileOperation]; }
+    if (completion) completion(success, success ? nil : failure);
+}
+
+- (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion {
     NSError *error = nil;
     NSDictionary *selection = [self captureProfileSelectionWithError:&error];
     NSDictionary *central = selection[PXCurrentProfileInfoPath()], *legacy = selection[PXLegacyActiveProfileInfoPath()];
@@ -994,18 +1105,21 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         self.selectionUnavailable = YES;
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Selected profile directory is unavailable"}]); return;
     }
-    NSString *path = [self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"];
+    NSDictionary *registry = [self.lifecycleLease readRegistryWithError:&error];
+    if (!registry) { self.registryUnavailable = YES; if (completion) completion(NO, error); return; }
     NSMutableArray *profiles = [NSMutableArray array];
-    if ([self.fileManager fileExistsAtPath:path]) {
+    if ([registry[@"exists"] boolValue]) {
         @try {
-            NSData *data = [NSData dataWithContentsOfFile:path options:0 error:&error];
+            NSData *data = registry[@"bytes"];
             NSKeyedUnarchiver *decoder = data ? [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:&error] : nil;
             decoder.requiresSecureCoding = YES;
             id decoded = decoder ? [decoder decodeObjectOfClasses:PXProfileArchiveClasses() forKey:NSKeyedArchiveRootObjectKey] : nil;
             [decoder finishDecoding];
             BOOL valid = [decoded isKindOfClass:NSArray.class] && !error;
+            NSMutableSet *seenIDs = [NSMutableSet set];
             if (valid) for (id item in decoded) {
-                if (![item isKindOfClass:Profile.class] || !PXValidatedProfileID([item profileId])) { valid = NO; break; }
+                if (![item isKindOfClass:Profile.class] || ![PXValidatedProfileID([item profileId]) isEqualToString:[item profileId]] || [seenIDs containsObject:[item profileId]]) { valid = NO; break; }
+                [seenIDs addObject:[item profileId]];
             }
             if (valid) [profiles addObjectsFromArray:decoded];
             else if (!error) error = [NSError errorWithDomain:@"WeaponXProfileError" code:24 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile archive; preserving the existing file"}];
@@ -1029,6 +1143,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         [current setValue:selectedID forKey:@"profileId"];
         [profiles addObject:current];
     }
+    self.registryRecord = registry;
     self.mutableProfiles = profiles;
     self.mutableCurrentProfile = current;
     self.registryUnavailable = NO;
@@ -1039,29 +1154,8 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (void)setCurrentProfileToLastUsed {
-    // Find the most recently used profile
-    Profile *lastUsedProfile = [self.mutableProfiles sortedArrayUsingComparator:^NSComparisonResult(Profile *obj1, Profile *obj2) {
-        return [obj2.lastUsed compare:obj1.lastUsed];
-    }].firstObject;
-    
-    if (lastUsedProfile) {
-        self.mutableCurrentProfile = lastUsedProfile;
-        NSLog(@"[WeaponX] ✅ Set current profile to last used: %@", lastUsedProfile.name);
-        
-        // Update shared defaults with the current profile ID
-        NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
-        [sharedDefaults setObject:lastUsedProfile.profileId forKey:@"CurrentProfileID"];
-        [sharedDefaults synchronize];
-    } else if (self.mutableProfiles.count > 0) {
-        // Fallback to first profile if no last used found
-        self.mutableCurrentProfile = self.mutableProfiles.firstObject;
-        NSLog(@"[WeaponX] ✅ Set current profile to first available: %@", self.mutableCurrentProfile.name);
-        
-        // Update shared defaults with the current profile ID
-        NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.shared"];
-        [sharedDefaults setObject:self.mutableCurrentProfile.profileId forKey:@"CurrentProfileID"];
-        [sharedDefaults synchronize];
-    }
+    // Compatibility selector: committed selection remains authoritative.
+    [self loadProfilesWithCompletion:nil];
 }
 
 #pragma mark - Private Methods
@@ -1219,31 +1313,31 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (void)createDefaultProfile {
-    Profile *defaultProfile = [[Profile alloc] initWithName:@"Default" iconName:@"default_profile"];
-    
-    // Use our ID generation system
-    NSString *profileID = [self generateProfileID];
-    [defaultProfile setValue:profileID forKey:@"profileId"];
-    
-    [self.mutableProfiles addObject:defaultProfile];
-    self.mutableCurrentProfile = defaultProfile;
-    [self saveProfilesWithCompletion:nil];
+    [self createProfile:[[Profile alloc] initWithName:@"Default" iconName:@"default_profile"] completion:nil];
 }
 
 - (void)saveProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Registry writes require main"}]); return;
+    }
     NSError *error = nil; BOOL success = NO;
+    BOOL ownsOperation = self.lifecycleLease == nil;
+    if (ownsOperation && ![self beginProfileOperationWithError:&error]) { if (completion) completion(NO, error); return; }
     @try {
-        [self createDirectoryIfNeeded:self.profilesDirectory];
-        NSString *path = [self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"];
-        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:self.mutableProfiles requiringSecureCoding:YES error:&error];
-        success = data && [data writeToFile:path options:NSDataWritingAtomic error:&error];
-        if (success) [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:path error:NULL];
-        // Do not unlink the last good archive or use a process-wide temp name
-        // after an atomic write failure. Preserve the original failure.
+        if (NSThread.isMainThread && [self.lifecycleLease validateWithError:&error]) {
+            NSData *data = [NSKeyedArchiver archivedDataWithRootObject:self.mutableProfiles requiringSecureCoding:YES error:&error];
+            success = data && [self.lifecycleLease writeRegistryData:data expected:self.registryRecord error:&error];
+            if (success) {
+                self.registryRecord = @{ @"exists": @YES, @"bytes": data };
+                [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644}
+                    ofItemAtPath:[self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"] error:NULL];
+            }
+        }
     } @catch (NSException *exception) {
         error = [NSError errorWithDomain:@"WeaponXProfileError" code:17 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not save profiles"}];
     }
     if (!success && !error) error = [NSError errorWithDomain:@"WeaponXProfileError" code:16 userInfo:@{NSLocalizedDescriptionKey: @"Profile metadata did not persist"}];
+    if (ownsOperation) [self endProfileOperation];
     if (completion) completion(success, success ? nil : error);
 }
 
@@ -1334,9 +1428,18 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)persistProfileSelectionInfo:(NSDictionary *)info error:(NSError **)error {
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Profile selection writes require main"}]; return NO;
+    }
+    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+    if (!lease) return NO;
     if (![info isKindOfClass:NSDictionary.class] || !PXValidatedProfileID(info[@"ProfileId"])) {
         if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile selection ID"}];
         return NO;
+    }
+    BOOL directory = NO; NSString *identity = PXProfileIdentityPath(info[@"ProfileId"]);
+    if (!identity || ![self.fileManager fileExistsAtPath:identity isDirectory:&directory] || !directory) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Selection target directory is unavailable"}]; return NO;
     }
     NSMutableDictionary *revisioned = [info mutableCopy];
     revisioned[@"SelectionRevision"] = NSUUID.UUID.UUIDString;
@@ -1395,6 +1498,11 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError **)error {
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Profile selection writes require main"}]; return NO;
+    }
+    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+    if (!lease) return NO;
     if (error) *error = nil;
     if (!profile || !PXValidatedProfileID(profile.profileId)) {
         if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid current profile metadata"}]; return NO;
@@ -1460,60 +1568,19 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 
 // New method to create profile "0"
 - (void)createProfileZero {
-    // Create profile directory
-    NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:@"0"];
-    [self createDirectoryIfNeeded:profileDir];
-    
-    // Create profile object
-    Profile *defaultProfile = [[Profile alloc] initWithName:@"Default" iconName:@"default_profile"];
-    [defaultProfile setValue:@"0" forKey:@"profileId"];
-    
-    NSDate *now = [NSDate date];
-    defaultProfile.createdAt = now;
-    defaultProfile.lastUsed = now;
-    
-    // Create identity directory for device IDs
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
-    [self createDirectoryIfNeeded:identityDir];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:identityDir error:nil];
-    
-    // Create identifiers.plist (kept: used for profile display name in the UI)
-    NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
-    NSDictionary *identifiersDict = @{
-        @"DisplayName": defaultProfile.name,
-        @"Description": @"Default Profile",
-        @"Identifier": @"0"
-    };
-    [identifiersDict writeToFile:identifiersPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
-    
-    // NOTE: appdata.plist and per-profile scoped-apps.plist are intentionally no
-    // longer created here (write-only / always-empty; scope lives in global_scope.plist).
-    
-    // Add to profiles array
-    [self.mutableProfiles addObject:defaultProfile];
-    self.mutableCurrentProfile = defaultProfile;
-    
-    // Save to profiles.plist
-    [self saveProfilesWithCompletion:nil];
-    
-    // Update central profile info
-    [self updateCurrentProfileInfoWithProfile:defaultProfile];
-    
-    // Also write directly to active_profile_info.plist as a backup
-    NSString *activeInfoPath = PXLegacyActiveProfileInfoPath();
-    NSDictionary *activeInfo = @{
-        @"ProfileId": @"0",
-        @"ProfileName": defaultProfile.name,
-        @"LastSelected": now
-    };
-    [activeInfo writeToFile:activeInfoPath atomically:YES];
-    
-    NSLog(@"[WeaponX] ✅ Created and set profile '0' as the default profile");
+    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self createProfileZero]; }); return; }
+    if (self.creationInProgress) return;
+    [self createProfileZeroImmediately];
+    NSError *error = nil;
+    if ([self bootstrapProfileSelectionWithError:&error]) [self loadProfilesWithCompletion:nil];
+    else NSLog(@"[ProfileManager] Legacy bootstrap deferred: %@", error);
 }
 
 // Immediate profile creation without waiting for loadProfiles
 - (void)createProfileZeroImmediately {
+    NSError *leaseError = nil;
+    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:&leaseError];
+    if (!lease) { NSLog(@"[ProfileManager] Profile zero seed deferred: %@", leaseError); return; }
     // Create profile directory
     NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:@"0"];
     [self createDirectoryIfNeeded:profileDir];

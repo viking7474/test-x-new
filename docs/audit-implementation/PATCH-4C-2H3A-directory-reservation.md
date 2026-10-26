@@ -27,3 +27,7 @@ Performance chỉ ảnh hưởng cold create/activation: thêm một marker nh�
 Native profile fixture link module production mới, vẫn extract exact production create/finish/activation methods. Thêm 8 subprocess cạnh tranh cùng ID (một winner, bảy conflicts), exited-creator reservation, file/symlink/traversal rejection, descriptor lifetime trên success/failure, directory/identity/marker inode replacement giữ nguyên bytes, in-place marker corruption, root aliases/root replacement, và path drift sau generation/trong termination adapter. Các adapters không terminate app thật.
 
 Host Windows: **11/11 source gates liên quan pass**, exact production profile-fragment extraction pass và `git diff --check` pass. Gates bao gồm profile flow, generation, identifier/device-group/telephony/artifact/preparation/source transactions, release contracts và RootHide contracts. Không có xcrun/Foundation/Theos tại local; native subprocess/runtime/descriptor assertions mới chưa chạy. CI hiện có chạy fixture rootful + RootHide, ba lượt mỗi variant; không thêm native assertion giả lập bằng Python để báo runtime đã pass.
+
+## Trạng thái sau H3A
+
+Người dùng đã xác nhận build H3A pass. Tiếp tục coordination/registry/delete theo [H3B](PATCH-4C-2H3B-lifecycle-coordination.md); confirmation này không thay thế device/runtime matrix của toàn Patch 4.

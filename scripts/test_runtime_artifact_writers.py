@@ -29,10 +29,11 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3A-partial'
+    assert manifest['rollout'] == '4C.2H3B-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
-    for name in ('profile-lifecycle', 'security-store', 'security-direct', 'storage-preference'):
+    assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
+    for name in ('security-store', 'security-direct', 'storage-preference'):
         assert manifest['writers'][name]['status'] == 'pending', f'cannot claim coverage of {name}'
     for forbidden in ('PXActiveProfile', 'PXPerformRuntimeSourceWrite', 'writeToFile:', 'createDirectory', 'PXLog(',
                       'PostNotification', 'dispatch_', 'getifaddrs', 'NSClassFromString'):
