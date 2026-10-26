@@ -18,7 +18,55 @@ def objc_method(source, signature):
     return source[start:min(ends)]
 
 
+def native_compile_command(folder, scheme):
+    assert scheme in ('rootful', 'roothide'), f'unsupported native fixture scheme: {scheme}'
+    # Compile actual manager, carrier dependency, stage helpers and source engine.
+    sources = ['common/NetworkManager.m', 'common/CarrierDB.m', 'common/PXRuntimeArtifactWriter.m',
+               'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+               'common/PXProfileArtifactMutation.m', 'common/PXProfileLifecycleLease.m',
+               'common/PXProfileDeletionJournal.m', 'common/PXRuntimeProfileSelection.m',
+               'tests/PXRuntimeArtifactWriterTests.m']
+    command = ['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+               '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
+               '-I', str(ROOT / 'common')]
+    if scheme == 'roothide':
+        # This macOS fixture runs before Theos/RootHide SDK setup. Keep the shim
+        # in its temporary include directory, never on production include paths.
+        support = folder / 'roothide-fixture-include'
+        support.mkdir(exist_ok=True)
+        shutil.copyfile(ROOT / 'tests/native/roothide/roothide.h', support / 'roothide.h')
+        command += ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1', '-I', str(support)]
+    return command + [str(ROOT / source) for source in sources] + [
+        '-framework', 'Foundation', '-framework', 'Security', '-o', str(folder / scheme)]
+
+
+def native_support_contracts():
+    # Exercise the exact command builder used by --native without requiring a
+    # macOS compiler. In particular, a scheme define alone is not SDK support.
+    shim = read('tests/native/roothide/roothide.h')
+    assert '#if !defined(PX_SOURCE_TRANSACTION_TESTING) || !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)' in shim
+    assert '#error' in shim and 'NSString *jbroot(NSString *path)' in shim and 'NSString *rootfs(NSString *path)' in shim
+    assert '#import <roothide.h>' in read('common/PXJailbreakCompat.h'), 'production must keep its real SDK dependency'
+    assert 'tests/native/roothide' not in read('Makefile'), 'fixture shim must not enter production include paths'
+    with tempfile.TemporaryDirectory(prefix='px-artifact-command-') as temp:
+        folder = Path(temp)
+        rootful = native_compile_command(folder, 'rootful')
+        assert '-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1' not in rootful
+        assert not (folder / 'roothide-fixture-include').exists()
+        roothide = native_compile_command(folder, 'roothide')
+        support = folder / 'roothide-fixture-include'
+        assert (support / 'roothide.h').read_text(encoding='utf-8') == shim
+        assert roothide.count('-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1') == 1
+        assert any(roothide[i:i + 2] == ['-I', str(support)] for i in range(len(roothide) - 1))
+        assert str(support) not in rootful
+        for command in (rootful, roothide):
+            assert '-DPX_SOURCE_TRANSACTION_TESTING=1' in command
+            assert str(ROOT / 'common/CarrierDB.m') in command
+            assert str(ROOT / 'common/NetworkManager.m') in command
+
+
 def source_contracts():
+    native_support_contracts()
     helper = read('common/PXRuntimeArtifactWriter.m')
     header = read('common/PXRuntimeArtifactWriter.h')
     network = read('common/NetworkManager.m')
@@ -123,20 +171,12 @@ def source_contracts():
 def native_tests():
     assert sys.platform == 'darwin' and shutil.which('xcrun'), '--native requires macOS/xcrun; cannot silently skip'
     with tempfile.TemporaryDirectory(prefix='px-artifact-writers-') as folder:
-        # Only the root/path/transaction-selection/log sink are fixture backends.
-        # Compile actual manager, carrier dependency, stage helpers and source engine.
-        sources = ['common/NetworkManager.m', 'common/CarrierDB.m', 'common/PXRuntimeArtifactWriter.m',
-                   'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
-                   'common/PXProfileArtifactMutation.m', 'common/PXProfileLifecycleLease.m',
-                   'common/PXProfileDeletionJournal.m', 'common/PXRuntimeProfileSelection.m',
-                   'tests/PXRuntimeArtifactWriterTests.m']
-        for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
-            binary = Path(folder) / scheme
-            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
-                            '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
-                            '-I', str(ROOT / 'common'), *defines, *[str(ROOT / source) for source in sources],
-                            '-framework', 'Foundation', '-framework', 'Security', '-o', str(binary)],
-                           check=True, cwd=ROOT, timeout=60)
+        folder = Path(folder)
+        for scheme in ('rootful', 'roothide'):
+            binary = folder / scheme
+            if scheme == 'roothide':
+                print('RootHide define fixture uses a test-only path shim; real SDK/namespace behavior is not tested', flush=True)
+            subprocess.run(native_compile_command(folder, scheme), check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
 

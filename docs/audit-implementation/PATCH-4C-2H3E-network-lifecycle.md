@@ -24,13 +24,21 @@ Forced IP/carrier refresh acquire trước lookup/provider và commit đúng tar
 
 ## Kiểm chứng và giới hạn
 
-Native runner compile NetworkManager, CarrierDB, source store, pure stage helpers và ownership scope thật; fixture chỉ thay paths/role, provider outputs và log sink. Runner nay build cả rootful và RootHide defines, chạy mỗi binary ba lần trên macOS CI. Các case cũ về merge, IPv6 precedence, fixed target, rollback, malformed artifact và concurrent disjoint updates vẫn giữ.
+Native runner compile NetworkManager, CarrierDB, source store, pure stage helpers và ownership scope thật; fixture thay paths/role, provider outputs, log sink và hai RootHide namespace adapters như mô tả bên dưới. Runner build cả rootful và RootHide defines, chạy mỗi binary ba lần trên macOS CI. Các case cũ về merge, IPv6 precedence, fixed target, rollback, malformed artifact và concurrent disjoint updates vẫn giữ. Lượt define RootHide là fixture trên macOS, không phải kiểm chứng RootHide SDK/namespace thực tế.
 
 Fixture mới kiểm tra busy/pending trước lookup/provider/source gate; saved reads dưới competing lease không vào writer gate; busy read miss không generate; provider reentry trả busy; lease held qua IPv6 preparation; release trước save log/return; exception trong single-address/forced-IP/IPv6/carrier; selection đổi giữa read miss và ownership; late delete journal; identity missing/replaced/symlink; absent profile không được tái tạo; invalidated capability không gọi stage body; malformed/throwing resolver; descriptor closure qua success/failure/exception/dealloc. Fault injection còn kiểm tra candidate-return compatibility khi forced-refresh persistence rollback.
 
 Concurrent fixture có bounded caller retries cho nonblocking busy, không thêm retry vào production. Fixture target tree dùng `<profiles>/<id>/identity` và allowlist thêm selection/journal paths đúng dependency của production ownership. Macro argument guard bao phủ cả artifact fixture để chặn lỗi CHECK với Objective-C literals/blocks trước native compile.
 
 Windows đã pass 14 source/host gates liên quan, macro validation, exact native-fragment extraction cho các fixtures phụ thuộc và git diff check. Không chạy được Foundation/Theos native ở máy này; build/native H3E chờ macOS CI. Build pass của H3D không thay cho kết quả H3E hoặc iOS device matrix.
+
+### Sửa dependency của native fixture sau phản hồi CI
+
+Lượt native RootHide ban đầu fail khi compile CarrierDB: define `THEOS_PACKAGE_SCHEME_ROOTHIDE` làm PXJailbreakCompat import `<roothide.h>`, nhưng bước Foundation fixture chạy trước Theos/RootHide SDK setup. Đây là thiếu dependency trong runner mới, không phải lý do để thêm fallback vào production compatibility header hoặc bỏ lượt kiểm thử.
+
+Runner dùng chung `native_compile_command` và copy `tests/native/roothide/roothide.h` vào include directory tạm riêng cho lượt RootHide. Header có hard error nếu thiếu source-transaction-testing hoặc RootHide define; Makefile production không thêm directory này. Shim cung cấp identity adapters cho NSString `jbroot`/`rootfs`, vì profiles/path backend của lifecycle fixture đã dùng temporary tree. Không mô phỏng hoặc xác nhận randomized jbroot translation. CarrierDB thật vẫn được compile; không thay source dependency bằng class giả. Production tiếp tục bắt buộc RootHide SDK thật, và Theos/package/device gates vẫn có boundary riêng.
+
+Host regression gọi đúng command builder, kiểm tra header thật được copy vào include path, RootHide define và testing guard có mặt, rootful command không nhận shim, và source list vẫn có CarrierDB/NetworkManager. Artifact writer, profile flow/macro validation, RootHide build static và release hardening static gates đã pass sau sửa, cùng git diff check. Native compile/runtime sau sửa vẫn chờ macOS CI; host regression không được coi là native pass.
 
 Cold network mutations thêm lifecycle flock, target/directory stat, một identity FD và pending-state reads. Relative overhead dự kiến low–moderate, chưa benchmark; source gate vẫn không bao provider/interface enumeration. Read hits không nhận thêm flock/source transaction. Scope tăng ba descriptor trong thời gian operation (hai từ lease, một identity FD), không thêm timer, queue thường trực, network request hoặc polling. Lifecycle operations khác có thể trả busy trong lúc provider chạy.
 
