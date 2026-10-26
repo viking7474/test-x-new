@@ -29,7 +29,7 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3D-partial'
+    assert manifest['rollout'] == '4C.2H3E-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -46,15 +46,55 @@ def source_contracts():
     assert 'ids[@"SSID"] = wifi[@"ssid"]' in helper and 'ids[@"BSSID"] = wifi[@"bssid"]' in helper
     assert 'timeIntervalSince1970' in helper and 'ids[@"LastUpdated"] = timestamp' in helper
     assert 'writeToFile:' not in network, 'NetworkManager may not bypass source transactions'
-    for signature in ('+ (BOOL)saveAddresses:(NSString *)ipAddress ipv6:(NSString *)ipv6Address inIdentityDirectory:(NSString *)identityDir',
-                      '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inIdentityDirectory:(NSString *)identityDir',
-                      '+ (BOOL)saveCarrier:(NSDictionary *)carrierDict inIdentityDirectory:(NSString *)identityDir'):
+    mutation = read('common/PXProfileArtifactMutation.m')
+    acquire = objc_method(mutation, '+ (instancetype)acquireWithIdentityResolver:(NSString *(^)(void))resolver error:(NSError **)error')
+    assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver()')
+    assert 'NS_RETURNS_RETAINED' in read('common/PXProfileArtifactMutation.h')
+    assert 'O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW' in acquire and '@finally' in acquire and 'if (!handedOff)' in acquire
+    validate = objc_method(mutation, '- (BOOL)validateWithError:(NSError **)error')
+    assert 'validateForDirectory:PXProfilesPath()' in validate and 'directoryProofForProfileID:' in validate
+    assert 'fstat(_identityFD' in validate and 'lstat(self.identityDirectory' in validate and 'st_ino' in validate
+    write = objc_method(mutation, '- (BOOL)performSourceWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
+    assert write.index('[self validateWithError:') < write.index('PXProfileDeletionJournalPath()') < write.index('return body(tx, writeError)')
+    assert 'close(_identityFD)' in mutation and '- (void)dealloc { [self invalidate]; }' in mutation
+    for forbidden in ('dispatch_', 'createDirectory', 'removeItemAtPath:', 'PXActiveProfile', 'PXLog(', 'NSNotification'):
+        assert forbidden not in mutation, forbidden
+    for signature in (
+        '+ (BOOL)saveLocalIPAddress:(NSString *)ipAddress ipv6Address:(NSString *)ipv6Address',
+        '+ (BOOL)saveLocalIPAddress:(NSString *)ipAddress',
+        '+ (BOOL)saveCarrierDetails:(NSString *)carrierName mcc:(NSString *)mcc mnc:(NSString *)mnc',
+        '+ (NSString *)generateAndSaveAddressForIdentityDirectory:(NSString *)expected forceRefresh:(BOOL)forceRefresh',
+        '+ (NSString *)generateAndSaveIPv6ForIdentityDirectory:(NSString *)expected',
+        '+ (NSDictionary *)generateAndSaveCarrierForIdentityDirectory:(NSString *)expected'):
         body = objc_method(network, signature)
-        assert 'PXPerformRuntimeSourceWrite' in body and 'PXStageRuntime' in body
+        assert 'acquireMutationForIdentityDirectory:' in body and '@finally { [mutation invalidate]; }' in body
+    assert 'PXPerformRuntimeSourceWrite' not in network and 'inIdentityDirectory:' not in network
+    for token in ('busy network writers stop before target lookup providers and source gate',
+                  'saved network read hits remain available without lifecycle or source lock',
+                  'busy network read misses never generate or persist fallback values',
+                  'pending delete blocks network writes before target lookup or generation',
+                  'network provider reentry fails busy without deadlock',
+                  'network holds lifecycle across IPv6 preparation and paired commit',
+                  'network provider exception preserves source and releases owned scope',
+                  'network read miss rejects selection drift before generating at either target',
+                  'late delete intent rejects network candidate before paired staging',
+                  'network commit rejects missing replaced or symlink identity without recreating it',
+                  'network refuses missing profile before providers and never creates a retired target',
+                  'network getter preserves candidate return on persistence failure without partial source commit',
+                  'invalidated artifact mutation never calls staging body',
+                  'artifact mutation rejects malformed resolver target',
+                  'artifact mutation success failure exception and dealloc paths close every descriptor'):
+        assert token in fixture, token
+
+    for signature in ('+ (BOOL)saveAddresses:(NSString *)ipAddress ipv6:(NSString *)ipv6Address inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error',
+                      '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error',
+                      '+ (BOOL)saveCarrierDetails:(NSString *)carrierName mcc:(NSString *)mcc mnc:(NSString *)mnc inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error'):
+        body = objc_method(network, signature)
+        assert '[mutation performSourceWrite:' in body and 'PXStageRuntime' in body
         assert 'profileIdentityPath' not in body, 'explicit-target persistence must not select a second profile'
-    single = objc_method(network, '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inIdentityDirectory:(NSString *)identityDir')
+    single = objc_method(network, '+ (BOOL)saveSingleAddress:(NSString *)ipAddress inMutation:(PXProfileArtifactMutation *)mutation error:(NSError **)error')
     assert single.index('PXStageRuntimeIPv4WithExistingPair') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
-    assert single.index('}, &error)') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
+    assert single.index('} error:error]') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfile'), 'WiFi'),
                               (objc_method(battery, '- (void)saveBatteryInfoToDisk'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
@@ -83,18 +123,22 @@ def source_contracts():
 def native_tests():
     assert sys.platform == 'darwin' and shutil.which('xcrun'), '--native requires macOS/xcrun; cannot silently skip'
     with tempfile.TemporaryDirectory(prefix='px-artifact-writers-') as folder:
-        binary = Path(folder) / 'artifact-writers'
         # Only the root/path/transaction-selection/log sink are fixture backends.
         # Compile actual manager, carrier dependency, stage helpers and source engine.
         sources = ['common/NetworkManager.m', 'common/CarrierDB.m', 'common/PXRuntimeArtifactWriter.m',
-                   'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m', 'tests/PXRuntimeArtifactWriterTests.m']
-        subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
-                        '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
-                        '-I', str(ROOT / 'common'), *[str(ROOT / source) for source in sources],
-                        '-framework', 'Foundation', '-framework', 'Security', '-o', str(binary)],
-                       check=True, cwd=ROOT, timeout=60)
-        for _ in range(3):
-            subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
+                   'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+                   'common/PXProfileArtifactMutation.m', 'common/PXProfileLifecycleLease.m',
+                   'common/PXProfileDeletionJournal.m', 'common/PXRuntimeProfileSelection.m',
+                   'tests/PXRuntimeArtifactWriterTests.m']
+        for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
+            binary = Path(folder) / scheme
+            subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
+                            '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
+                            '-I', str(ROOT / 'common'), *defines, *[str(ROOT / source) for source in sources],
+                            '-framework', 'Foundation', '-framework', 'Security', '-o', str(binary)],
+                           check=True, cwd=ROOT, timeout=60)
+            for _ in range(3):
+                subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=60)
 
 
 if __name__ == '__main__':

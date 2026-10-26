@@ -20,6 +20,11 @@
 + (NSArray *)getCanadaCarriers;
 
 // Local IP address methods
+// Mutating saves/refreshes use nonblocking profile lifecycle ownership. Saves
+// return NO and generating getters return nil if ownership is unavailable or
+// deletion recovery is already pending before generation starts.
+// Existing saved-value reads keep their ordinary read path. Once generation
+// starts, a getter's candidate is not proof that its disk commit succeeded.
 + (NSString *)getCurrentLocalIPAddress;
 + (BOOL)saveLocalIPAddress:(NSString *)ipAddress;
 + (BOOL)saveLocalIPAddress:(NSString *)ipAddress
