@@ -13,7 +13,7 @@ static PXRuntimeSourceStore *PXProcessSourceStore(NSError **error) {
             // Store all canonical spellings up front. Resolving only /var's
             // system alias still rejects a per-profile/file symlink escape.
             NSSet<NSString *> *globalPaths = [NSSet setWithArray:@[
-                PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(),
+                PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), PXProfileDeletionJournalPath(),
                 PXTLinkIOSSettingsPath(), PXGlobalScopePath(), PXSecuritySettingsPath() ]];
             NSMutableDictionary<NSString *, NSString *> *canonicalGlobals = [NSMutableDictionary dictionary];
             for (NSString *path in globalPaths) {

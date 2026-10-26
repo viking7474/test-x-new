@@ -69,7 +69,7 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3B-partial'
+    assert manifest['rollout'] == '4C.2H3C-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     for pending in ('dashboard-preview', 'storage-preference', 'security-store', 'security-direct'):

@@ -8,6 +8,7 @@ FOUNDATION_EXPORT NSString *PXWeaponXBasePath(void);
 FOUNDATION_EXPORT NSString *PXProfilesPath(void);
 FOUNDATION_EXPORT NSString *PXCurrentProfileInfoPath(void);
 FOUNDATION_EXPORT NSString *PXLegacyActiveProfileInfoPath(void);
+FOUNDATION_EXPORT NSString *PXProfileDeletionJournalPath(void);
 FOUNDATION_EXPORT NSString * _Nullable PXValidatedProfileID(id _Nullable value);
 FOUNDATION_EXPORT NSString * _Nullable PXActiveProfileID(void);
 FOUNDATION_EXPORT NSString * _Nullable PXProfileRootPath(NSString * _Nullable profileID);

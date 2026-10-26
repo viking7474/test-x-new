@@ -33,7 +33,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 // Active deletion selects a valid fallback before unregistering/removing files.
-// Failure after fallback commit preserves the old profile; reload before retry.
+// Encoding fails before activation. An I/O failure after the journal decision
+// commits leaves recovery pending; reload completes/cancels it from known state.
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)switchToProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;

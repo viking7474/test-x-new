@@ -45,6 +45,8 @@ METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void
     '- (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion',
     '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error',
     '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error']
+METHODS += ['- (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error',
+            '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error']
 
 
 def check_macro_arity(source, label):
@@ -189,8 +191,8 @@ def source_contracts():
     for signature in METHODS[:4]:
         assert 'beginProfileOperationWithError:' in writers.method(source, signature)
     delete = writers.method(source, '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error')
-    assert delete.index('activateProfile:fallback') < delete.index('self.mutableProfiles = remaining') < delete.index('removeDirectoryForProfileID:')
-    assert 'if (!saved)' in delete and 'PXRuntimeProfileSelectionMatches' in delete
+    assert delete.index('PXPrepareProfileDeletion(') < delete.index('PXCommitProfileDeletion(') < delete.index('writeRegistryData:afterBytes') < delete.index('removeDirectoryForProfileID:')
+    assert 'PXMarkProfileDeletionArchiveWritten(' in delete and 'PXRecoverProfileDeletion(' in delete
     for signature in ('- (BOOL)bootstrapProfileSelectionWithError:(NSError **)error',
                       '- (BOOL)persistProfileSelectionInfo:(NSDictionary *)info error:(NSError **)error',
                       '- (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError **)error'):
@@ -203,15 +205,34 @@ def source_contracts():
                  'stale manager cannot overwrite a registry changed by another instance',
                  'active deletion uses committed selection and persists a valid fallback before removing files',
                  'delete selection failure preserves registry and directory',
-                 'archive failure after fallback commit retains the old profile and a valid selection',
+                 'archive preparation failure preserves selection registry and directory',
                  'selection drift after unregister restores only our own registry and preserves all files',
                  'registry drift after unregister preserves files and never overwrites an external archive',
                  'cleanup refuses a replaced target and restart preserves the committed registry',
                  'restart never adopts an inactive directory from a reserved marker alone',
                  'duplicate registry IDs reject load without guessing or rewriting the archive'):
         assert case in fixture, case
+    journal = read('common/PXProfileDeletionJournal.m')
+    for token in ('@"prepared"', '@"committed"', '@"archived"', '@"compensating"',
+                  'PXStageRuntimeProfileSelection(tx', 'PXProfileDeletionJournalPath()',
+                  'Unknown registry during deletion recovery', 'PXClearDeletionIntent'):
+        assert token in journal, token
+    for forbidden in ('removeDirectoryForProfileID:', 'removeItemAtPath:', 'dispatch_', 'PXPostSettingsChangedNotification()'):
+        assert forbidden not in journal, forbidden
+    assert 'PXProfileDeletionJournalPath()' in read('common/PXRuntimeSources.m')
+    assert load.index('PXRecoverProfileDeletion(') < load.index('captureProfileSelectionWithError:')
+    assert activation.count('Profile registry changed before activation') == 1
+    assert fixture.count('Profile *registryDrift = SeedRegistered') == 1
+    for case in ('prepared intent aborts on restart without changing selection registry or files',
+                 'committed deletion replays known archive and preserves the committed fallback',
+                 'recovery is idempotent and never retries recursive directory removal',
+                 'compensating decision survives restart and never rolls back a newer selection',
+                 'malformed deletion intent never rewrites selection archive or directory',
+                 'unknown registry blocks replay and preserves the deletion journal',
+                 'journal validation preserves legacy timestamp fallback compatibility'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3B-partial'
+    assert manifest['rollout'] == '4C.2H3C-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')
@@ -224,8 +245,9 @@ def generate_native_fragments(folder):
     methods = [writers.method(source, signature) for signature in METHODS]
     (folder / 'PXProfileFlowMethods.inc').write_text('\n\n'.join(methods), encoding='utf-8')
     (folder / 'PXProfileFlowDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in methods), encoding='utf-8')
-    start = source.index('@implementation Profile\n')
-    end = source.index('\n@end', start) + len('\n@end')
+    start = source.index('@interface Profile ()\n')
+    implementation = source.index('@implementation Profile\n', start)
+    end = source.index('\n@end', implementation) + len('\n@end')
     helper = writers.method(source, 'static NSSet<Class> *PXProfileArchiveClasses(void)')
     (folder / 'PXProfileModel.inc').write_text(helper + '\n' + source[start:end], encoding='utf-8')
 
@@ -235,7 +257,7 @@ def native_tests():
     with tempfile.TemporaryDirectory(prefix='px-profile-flow-') as temp:
         folder = Path(temp)
         generate_native_fragments(folder)
-        sources = ['common/PXProfileLifecycleLease.m', 'common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
+        sources = ['common/PXProfileDeletionJournal.m', 'common/PXProfileLifecycleLease.m', 'common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeIdentifierWriter.m',
                    'tests/PXProfileCreationFlowTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):

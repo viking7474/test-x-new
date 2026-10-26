@@ -45,6 +45,10 @@ NSString *PXLegacyActiveProfileInfoPath(void) {
     return [PXWeaponXBasePath() stringByAppendingPathComponent:@"active_profile_info.plist"];
 }
 
+NSString *PXProfileDeletionJournalPath(void) {
+    return [PXProfilesPath() stringByAppendingPathComponent:@".profile-delete-journal.plist"];
+}
+
 NSString *PXValidatedProfileID(id value) {
     if (![value isKindOfClass:[NSString class]]) return nil;
     NSString *profileID = [(NSString *)value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];

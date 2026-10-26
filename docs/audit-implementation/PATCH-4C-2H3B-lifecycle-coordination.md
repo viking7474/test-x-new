@@ -41,3 +41,7 @@ Không thêm hook, timer, polling hay worker queue. Có thêm hai held descripto
 Native fixture link lease production, extract **31 exact production methods** và giữ real source transactions/NSKeyedArchiver/temp-directory IO. Thêm process lease contention/release, stale-manager rejection, reload/raw writer exclusion trong pending create, raw byte CAS, symlink/lock replacement, active/inactive/delete-by-ID, selection fault rollback, synchronous preparation exception, archive-encoding failure sau fallback, external selection/registry drift sau unregister, cleanup replacement, duplicate archive IDs và conservative restart. Test file-manager hook chỉ inject ở post-archive permissions step trong fixture; adapters không terminate app thật.
 
 Host Windows: **11/11 source gates liên quan pass**, production fragment extraction (31 methods) và `git diff --check` pass. Gates cũ được cập nhật từ lifecycle pending sang partial, giữ dashboard/security/preferences pending và không nâng thành enrolled. Không có xcrun/Foundation/Theos local nên **native fixtures mới và build H3B chưa chạy**; macOS CI hiện có chạy rootful + RootHide, ba lượt mỗi variant.
+
+## Trạng thái sau H3B
+
+Người dùng đã xác nhận build H3B pass. [H3C](PATCH-4C-2H3C-delete-decision-recovery.md) bổ sung decision journal/replay; encoding failure chuyển về trước selection commit, còn post-commit I/O failure có pending recovery. Device matrix riêng vẫn cần kiểm chứng.

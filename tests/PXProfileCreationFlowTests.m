@@ -6,7 +6,9 @@
 #import "PXRuntimeArtifactWriter.h"
 #import "PXProfileCreationReservation.h"
 #import "PXProfileLifecycleLease.h"
+#import "PXProfileDeletionJournal.h"
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <spawn.h>
@@ -31,6 +33,7 @@ static NSString *Path(NSString *root, NSString *name) { return [root stringByApp
 NSString *PXProfilesPath(void) { return Path(gRoot, @"profiles"); }
 NSString *PXCurrentProfileInfoPath(void) { return Path(PXProfilesPath(), @"current_profile_info.plist"); }
 NSString *PXLegacyActiveProfileInfoPath(void) { return Path(gRoot, @"active_profile_info.plist"); }
+NSString *PXProfileDeletionJournalPath(void) { return Path(PXProfilesPath(), @".profile-delete-journal.plist"); }
 NSString *PXValidatedProfileID(id value) {
     if (![value isKindOfClass:NSString.class] || ![value length] || [value containsString:@"/"] || [value containsString:@"\\"] ||
         [value isEqual:@"."] || [value isEqual:@".."]) return nil;
@@ -127,6 +130,8 @@ static void OutsideGate(void) {
 @property (nonatomic, strong) PXProfileCreationReservation *creationReservation;
 @property (nonatomic, strong) PXProfileLifecycleLease *lifecycleLease;
 @property (nonatomic, copy) NSDictionary *registryRecord;
+@property (nonatomic) BOOL deletionRecoveryNoticePending;
+@property (nonatomic) BOOL didLoadCommittedProfiles;
 @property (nonatomic) BOOL selectionUnavailable;
 @property (nonatomic) BOOL registryUnavailable;
 - (void)createDirectoryIfNeeded:(NSString *)path;
@@ -514,6 +519,26 @@ static BOOL Reload(PXProfileCreationFixture *manager) {
     [manager loadProfilesWithCompletion:^(BOOL ok, NSError *error) { loaded = ok && error == nil; }];
     return loaded;
 }
+@interface PXLegacyDatesArchiverFixture : NSKeyedArchiver
+@end
+@implementation PXLegacyDatesArchiverFixture
+- (void)encodeObject:(id)object forKey:(NSString *)key {
+    if ([key isEqual:@"createdAt"] || [key isEqual:@"lastUsed"]) return;
+    [super encodeObject:object forKey:key];
+}
+@end
+@interface PXBadProfileNameFixture : Profile
+@end
+@implementation PXBadProfileNameFixture
+- (void)encodeWithCoder:(NSCoder *)coder {
+    [coder encodeObject:self.profileId forKey:@"profileId"];
+    [coder encodeObject:@42 forKey:@"name"]; // Wrong secure-decoding field type.
+    [coder encodeObject:self.iconName forKey:@"iconName"];
+    [coder encodeObject:self.createdAt forKey:@"createdAt"];
+    [coder encodeObject:self.lastUsed forKey:@"lastUsed"];
+    [coder encodeObject:self.settings forKey:@"settings"];
+}
+@end
 static Profile *SeedRegistered(PXProfileCreationFixture *manager, NSString *name) {
     Profile *profile = New(name); [profile setValue:[manager generateProfileID] forKey:@"profileId"];
     [manager createDirectoryIfNeeded:Identity(profile.profileId)];
@@ -563,15 +588,14 @@ static void TestRegistryAndDeletion(void) {
     [manager deleteProfile:active completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }]; gStore.testCheckpoint = nil;
     CHECK(!success && failure && [before isEqual:ActiveFiles()] && [manager.fileManager fileExistsAtPath:Identity(active.profileId)] &&
           [currentBytes isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]], "delete selection failure preserves registry and directory");
-    // Fail archive encoding only after the fallback selection has committed.
+    // Encoding is now preparation: it must fail before any selection commit.
     Profile *fallback = manager.mutableProfiles.firstObject;
     NSDictionary *oldSettings = fallback.settings; fallback.settings = @{ @"unsupported": [NSObject new] };
-    settingsNotices = gSettingsNotices;
+    settingsNotices = gSettingsNotices; before = ActiveFiles();
     [manager deleteProfile:active completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }]; fallback.settings = oldSettings;
     CHECK(!success && failure && [manager.fileManager fileExistsAtPath:Identity(active.profileId)] && [manager.mutableProfiles containsObject:active] &&
-          [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:fallback.profileId] && [manager.mutableCurrentProfile.profileId isEqual:fallback.profileId] &&
-          settingsNotices + 1 == gSettingsNotices && [currentBytes isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
-          "archive failure after fallback commit retains the old profile and a valid selection");
+          [before isEqual:ActiveFiles()] && settingsNotices == gSettingsNotices && [currentBytes isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
+          "archive preparation failure preserves selection registry and directory");
     inactive = SeedRegistered(manager, @"delete-external-drift"); NSString *driftID = inactive.profileId;
     gAfterArchive = ^{ if (!ExternalSelectionWrite(@{ @"ProfileId": driftID })) [NSException raise:@"fixture" format:@"delete external drift failed"]; };
     [manager deleteProfile:inactive completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
@@ -583,15 +607,13 @@ static void TestRegistryAndDeletion(void) {
     gAfterArchive = ^{ [externalRegistry writeToFile:Path(PXProfilesPath(), @"profiles.plist") atomically:YES]; };
     [manager deleteProfile:registryDrift completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
     CHECK(!success && failure.code == 25 && manager.registryUnavailable && [manager.fileManager fileExistsAtPath:Identity(registryDrift.profileId)] &&
-          [externalRegistry isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && Reload(manager),
+          [externalRegistry isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && !Reload(manager),
           "registry drift after unregister preserves files and never overwrites an external archive");
-    Profile *registryDrift = SeedRegistered(manager, @"delete-registry-drift");
-    NSData *externalRegistry = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
-    gAfterArchive = ^{ [externalRegistry writeToFile:Path(PXProfilesPath(), @"profiles.plist") atomically:YES]; };
-    [manager deleteProfile:registryDrift completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
-    CHECK(!success && failure.code == 25 && manager.registryUnavailable && [manager.fileManager fileExistsAtPath:Identity(registryDrift.profileId)] &&
-          [externalRegistry isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && Reload(manager),
-          "registry drift after unregister preserves files and never overwrites an external archive");
+    // Resolve the injected external archive explicitly in this fixture; recovery
+    // must not invent a decision or overwrite it on its own.
+    NSDictionary *pending = Record(PXProfileDeletionJournalPath());
+    CHECK([pending[@"registryAfter"][@"bytes"] writeToFile:Path(PXProfilesPath(), @"profiles.plist") atomically:YES] && Reload(manager),
+          "known archive restoration permits pending deletion recovery");
     Profile *cloneCurrent = manager.mutableCurrentProfile;
     Profile *replacementTarget = SeedRegistered(manager, @"delete-replaced-target"); NSString *replacementID = replacementTarget.profileId;
     gAfterArchive = ^{
@@ -614,11 +636,119 @@ static void TestRegistryAndDeletion(void) {
     PXProfileCreationFixture *invalid = [PXProfileCreationFixture new];
     CHECK(!Reload(invalid) && invalid.registryUnavailable && [duplicate isEqual:[NSData dataWithContentsOfFile:archive]], "duplicate registry IDs reject load without guessing or rewriting the archive");
     CHECK([validArchive writeToFile:archive atomically:YES] && Reload(manager), "valid registry restored after duplicate fixture");
+    PXBadProfileNameFixture *bad = [[PXBadProfileNameFixture alloc] initWithName:@"bad-name-type" iconName:@"default_profile"];
+    [bad setValue:manager.mutableCurrentProfile.profileId forKey:@"profileId"];
+    NSData *badData = [NSKeyedArchiver archivedDataWithRootObject:@[bad] requiringSecureCoding:YES error:NULL];
+    CHECK([badData writeToFile:archive atomically:YES] && !Reload(manager) && [badData isEqual:[NSData dataWithContentsOfFile:archive]],
+          "secure decoder field errors never silently replace invalid profile metadata");
+    CHECK([validArchive writeToFile:archive atomically:YES] && Reload(manager), "valid registry restored after field type fixture");
     __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
     CHECK(Pump(^BOOL { return drained; }), "registry and deletion mirrors drained");
 }
+static int RunDeletionChild(NSString *executable, NSArray<NSString *> *arguments) {
+    __attribute__((objc_precise_lifetime)) NSMutableArray *strings = [NSMutableArray arrayWithObject:executable]; [strings addObjectsFromArray:arguments];
+    char **values = calloc(strings.count + 1, sizeof(char *));
+    if (!values) return -1;
+    for (NSUInteger i = 0; i < strings.count; i++) values[i] = (char *)[strings[i] fileSystemRepresentation];
+    pid_t child = 0; int result = posix_spawn(&child, values[0], NULL, NULL, values, environ); free(values);
+    if (result != 0) return -1;
+    int status = 0; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+static void SetupStore(void) {
+    gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:Path(gRoot, @"control") owner:geteuid() group:getegid()
+        allowsPath:^BOOL(NSString *path) { return [path hasPrefix:[gRoot stringByAppendingString:@"/"]] && [path hasSuffix:@".plist"] && ![path hasPrefix:Path(gRoot, @"control/")]; } error:NULL];
+}
+static void TestDeletionRecovery(NSString *executable) {
+    PXProfileCreationFixture *manager = [PXProfileCreationFixture new]; CHECK(Reload(manager), "journal manager loads known registry");
+    NSString *archive = Path(PXProfilesPath(), @"profiles.plist");
+    for (NSString *stage in @[@"prepared", @"committed", @"archive-written", @"settled"]) {
+        Profile *target = SeedRegistered(manager, [@"crash-" stringByAppendingString:stage]); Select(manager, target);
+        NSDictionary *before = ActiveFiles(); NSData *archiveBefore = [NSData dataWithContentsOfFile:archive];
+        NSArray *arguments = @[@"--delete-crash", gRoot, target.profileId, stage];
+        CHECK(RunDeletionChild(executable, arguments) == 77, "delete subprocess exits at the requested production checkpoint");
+        CHECK([manager.fileManager fileExistsAtPath:Identity(target.profileId)], "crash before cleanup preserves target directory");
+        if ([stage isEqual:@"committed"]) {
+            CHECK(RunDeletionChild(executable, @[@"--recover-crash", gRoot, @"recovery-archive-written"]) == 77,
+                  "recovery subprocess can exit after archive replay before journal cleanup");
+        }
+        NSUInteger wakeups = gSettingsNotices;
+        manager = [PXProfileCreationFixture new]; // Model process memory being lost.
+        CHECK(Reload(manager) && ![manager.fileManager fileExistsAtPath:PXProfileDeletionJournalPath()] && !manager.lifecycleLease,
+              "restart settles deletion journal and releases lifecycle ownership");
+        CHECK(gSettingsNotices == wakeups + 1, "first restart load requests publication after a settled-before-notify exit");
+        BOOL found = NO; for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:target.profileId]) found = YES;
+        if ([stage isEqual:@"prepared"]) {
+            CHECK(found && [before isEqual:ActiveFiles()] && [archiveBefore isEqual:[NSData dataWithContentsOfFile:archive]],
+                  "prepared intent aborts on restart without changing selection registry or files");
+        } else {
+            CHECK(!found && ![manager.mutableCurrentProfile.profileId isEqual:target.profileId] &&
+                  [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:manager.mutableCurrentProfile.profileId],
+                  "committed deletion replays known archive and preserves the committed fallback");
+        }
+        CHECK([manager.fileManager fileExistsAtPath:Identity(target.profileId)] && Reload(manager),
+              "recovery is idempotent and never retries recursive directory removal");
+    }
+    Profile *target = SeedRegistered(manager, @"recover-external-selection"); Select(manager, target);
+    CHECK(RunDeletionChild(executable, @[@"--delete-crash", gRoot, target.profileId, @"archive-written"]) == 77, "selection drift recovery fixture committed");
+    CHECK(ExternalSelectionWrite(@{ @"ProfileId": target.profileId }), "external writer reselects target before recovery");
+    CHECK(RunDeletionChild(executable, @[@"--recover-crash", gRoot, @"recovery-archive-written"]) == 77,
+          "compensation can exit after restoring archive before clearing journal");
+    CHECK([Record(PXProfileDeletionJournalPath())[@"state"] isEqual:@"compensating"] && Reload(manager) &&
+          [manager.mutableCurrentProfile.profileId isEqual:target.profileId] && [manager.fileManager fileExistsAtPath:Identity(target.profileId)],
+          "compensating decision survives restart and never rolls back a newer selection");
+    target = SeedRegistered(manager, @"recover-corrupt-intent"); Select(manager, target);
+    CHECK(RunDeletionChild(executable, @[@"--delete-crash", gRoot, target.profileId, @"committed"]) == 77, "corrupt intent recovery fixture committed");
+    NSDictionary *intent = Record(PXProfileDeletionJournalPath()); NSDictionary *sourceBefore = ActiveFiles();
+    NSData *registryBefore = [NSData dataWithContentsOfFile:archive];
+    for (NSUInteger mode = 0; mode < 3; mode++) {
+        NSMutableDictionary *corrupt = [intent mutableCopy];
+        if (mode == 0) corrupt[@"schemaVersion"] = @999;
+        else if (mode == 1) corrupt[@"targetID"] = @"../outside";
+        else corrupt[@"registryAfter"] = @{ @"exists": @YES, @"bytes": [@"invalid archive" dataUsingEncoding:NSUTF8StringEncoding] };
+        CHECK([corrupt writeToFile:PXProfileDeletionJournalPath() atomically:YES], "corrupt journal installed");
+        CHECK(!Reload(manager) && manager.registryUnavailable && [sourceBefore isEqual:ActiveFiles()] &&
+              [registryBefore isEqual:[NSData dataWithContentsOfFile:archive]] && [manager.fileManager fileExistsAtPath:Identity(target.profileId)],
+              "malformed deletion intent never rewrites selection archive or directory");
+    }
+    CHECK(SaveRecord(PXProfileDeletionJournalPath(), intent), "validated journal restored without losing timestamp precision");
+    NSData *unknown = [@"external registry bytes" dataUsingEncoding:NSUTF8StringEncoding]; CHECK([unknown writeToFile:archive atomically:YES], "unknown archive installed");
+    CHECK(!Reload(manager) && [unknown isEqual:[NSData dataWithContentsOfFile:archive]] && [manager.fileManager fileExistsAtPath:PXProfileDeletionJournalPath()],
+          "unknown registry blocks replay and preserves the deletion journal");
+    CHECK([registryBefore writeToFile:archive atomically:YES] && Reload(manager), "known registry permits replay after explicit fixture repair");
+    // Legacy archives can omit timestamps; validation must distinguish decoder
+    // fallback values from an actual change to persisted timestamp fields.
+    Profile *legacyTarget = SeedRegistered(manager, @"legacy-timestamps-delete");
+    PXLegacyDatesArchiverFixture *encoder = [[PXLegacyDatesArchiverFixture alloc] initRequiringSecureCoding:YES];
+    [encoder encodeObject:manager.mutableProfiles forKey:NSKeyedArchiveRootObjectKey]; [encoder finishEncoding];
+    CHECK([encoder.encodedData writeToFile:archive atomically:YES] && Reload(manager), "legacy missing timestamp archive loaded");
+    Profile *loadedTarget = nil; for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:legacyTarget.profileId]) loadedTarget = profile;
+    CHECK(loadedTarget.pxDecodedMissingCreatedAt && loadedTarget.pxDecodedMissingLastUsed, "legacy fixture actually omits encoded timestamps");
+    __block BOOL deleted = NO;
+    [manager deleteProfile:loadedTarget completion:^(BOOL ok, NSError *error) { deleted = ok && error == nil; }];
+    CHECK(deleted && Reload(manager), "journal validation preserves legacy timestamp fallback compatibility");
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "journal recovery mirrors drained before teardown");
+}
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
+            gRoot = [NSString stringWithUTF8String:argv[2]]; SetupStore();
+            PXProfileCreationFixture *manager = [PXProfileCreationFixture new];
+            NSString *stage = [NSString stringWithUTF8String:argv[argc - 1]];
+            if (argc == 4) {
+                PXProfileDeletionTestCheckpoint = ^(NSString *value) { OutsideGate(); if ([value isEqual:stage]) _exit(77); };
+                return Reload(manager) ? 91 : 92;
+            }
+            if (!Reload(manager)) return 93;
+            NSString *targetID = [NSString stringWithUTF8String:argv[3]]; Profile *target = nil;
+            for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:targetID]) target = profile;
+            if (!target) return 94;
+            PXProfileDeletionTestCheckpoint = ^(NSString *value) { OutsideGate(); if ([value isEqual:stage]) _exit(77); };
+            [manager deleteProfile:target completion:nil];
+            return 95;
+        }
         if (argc == 3 && strcmp(argv[1], "--try-lease") == 0) {
             NSError *error = nil;
             __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:[NSString stringWithUTF8String:argv[2]] error:&error];
@@ -650,6 +780,7 @@ int main(int argc, const char *argv[]) {
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager);
         TestRegistryAndDeletion();
+        TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;
