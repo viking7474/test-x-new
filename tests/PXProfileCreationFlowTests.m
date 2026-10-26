@@ -519,12 +519,73 @@ static BOOL Reload(PXProfileCreationFixture *manager) {
     [manager loadProfilesWithCompletion:^(BOOL ok, NSError *error) { loaded = ok && error == nil; }];
     return loaded;
 }
-@interface PXLegacyDatesArchiverFixture : NSKeyedArchiver
+// Model the strict missing-key failure independently of NSKeyedArchiver's
+// fixture subclass: the exact production initWithCoder must not request an
+// absent optional field, and must not erase a genuine decoder failure.
+@interface PXMissingKeyCoderFixture : NSCoder
+@property (nonatomic, copy) NSDictionary *values;
+@property (nonatomic, strong) NSMutableArray<NSString *> *missingRequests;
+@property (nonatomic, strong) NSError *failure;
+- (id)lookup:(NSString *)key;
 @end
-@implementation PXLegacyDatesArchiverFixture
-- (void)encodeObject:(id)object forKey:(NSString *)key {
-    if ([key isEqual:@"createdAt"] || [key isEqual:@"lastUsed"]) return;
-    [super encodeObject:object forKey:key];
+@implementation PXMissingKeyCoderFixture
+- (instancetype)init {
+    if ((self = [super init])) { _values = @{}; _missingRequests = [NSMutableArray array]; }
+    return self;
+}
+- (BOOL)allowsKeyedCoding { return YES; }
+- (BOOL)containsValueForKey:(NSString *)key { return self.values[key] != nil; }
+- (NSError *)error { return self.failure; }
+- (void)failWithError:(NSError *)error { if (!self.failure) self.failure = error; }
+- (id)lookup:(NSString *)key {
+    if (self.failure) return nil;
+    id value = self.values[key];
+    if (!value) {
+        [self.missingRequests addObject:key];
+        [self failWithError:[NSError errorWithDomain:@"fixture.missing-key" code:1 userInfo:nil]];
+    }
+    return value == NSNull.null ? nil : value;
+}
+- (id)decodeObjectOfClass:(Class)class forKey:(NSString *)key { (void)class; return [self lookup:key]; }
+- (id)decodeObjectOfClasses:(NSSet<Class> *)classes forKey:(NSString *)key { (void)classes; return [self lookup:key]; }
+@end
+static void TestOptionalProfileDecoding(void) {
+    NSDictionary *settings = @{ @"preserved": @YES };
+    PXMissingKeyCoderFixture *coder = [PXMissingKeyCoderFixture new];
+    coder.values = @{ @"profileId": @"optional-fixture", @"name": @"optional", @"iconName": @"default_profile", @"settings": settings };
+    Profile *profile = [[Profile alloc] initWithCoder:coder];
+    CHECK(!coder.error && coder.missingRequests.count == 0 && profile.pxDecodedMissingCreatedAt && profile.pxDecodedMissingLastUsed &&
+          [profile.settings isEqual:settings] && profile.shortDescription == nil &&
+          [profile.createdAt isKindOfClass:NSDate.class] && [profile.lastUsed isKindOfClass:NSDate.class],
+          "absent optional timestamps and description never poison decoder or discard later settings");
+    NSMutableDictionary *values = [coder.values mutableCopy]; [values removeObjectForKey:@"settings"];
+    coder = [PXMissingKeyCoderFixture new]; coder.values = values; profile = [[Profile alloc] initWithCoder:coder];
+    CHECK(!coder.error && coder.missingRequests.count == 0 && profile.settings.count == 0,
+          "absent legacy settings uses the existing empty dictionary fallback without decoding a missing key");
+    values[@"createdAt"] = NSNull.null; values[@"lastUsed"] = NSNull.null;
+    coder = [PXMissingKeyCoderFixture new]; coder.values = values; profile = [[Profile alloc] initWithCoder:coder];
+    CHECK(!coder.error && profile.pxDecodedMissingCreatedAt && profile.pxDecodedMissingLastUsed,
+          "explicit nil timestamps preserve the existing date fallback");
+    values[@"createdAt"] = @42;
+    coder = [PXMissingKeyCoderFixture new]; coder.values = values; profile = [[Profile alloc] initWithCoder:coder];
+    CHECK(coder.error && [coder.error.domain isEqual:@"WeaponXProfileError"],
+          "present invalid timestamp still fails validation instead of using a missing-key fallback");
+    [values removeObjectForKey:@"profileId"];
+    coder = [PXMissingKeyCoderFixture new]; coder.values = values; profile = [[Profile alloc] initWithCoder:coder];
+    CHECK(coder.error && [coder.missingRequests containsObject:@"profileId"], "required profile ID remains a required decode request");
+}
+@interface PXLegacyDatesProfileFixture : Profile
+@end
+@implementation PXLegacyDatesProfileFixture
+- (Class)classForKeyedArchiver { return Profile.class; }
+- (void)encodeWithCoder:(NSCoder *)coder {
+    // Use the standard archiver envelope and the production Profile class name;
+    // only these two historical fields are intentionally absent from the object.
+    [coder encodeObject:self.profileId forKey:@"profileId"];
+    [coder encodeObject:self.name forKey:@"name"];
+    [coder encodeObject:self.shortDescription forKey:@"shortDescription"];
+    [coder encodeObject:self.iconName forKey:@"iconName"];
+    [coder encodeObject:self.settings forKey:@"settings"];
 }
 @end
 @interface PXBadProfileNameFixture : Profile
@@ -720,11 +781,19 @@ static void TestDeletionRecovery(NSString *executable) {
     // Legacy archives can omit timestamps; validation must distinguish decoder
     // fallback values from an actual change to persisted timestamp fields.
     Profile *legacyTarget = SeedRegistered(manager, @"legacy-timestamps-delete");
-    PXLegacyDatesArchiverFixture *encoder = [[PXLegacyDatesArchiverFixture alloc] initRequiringSecureCoding:YES];
-    [encoder encodeObject:manager.mutableProfiles forKey:NSKeyedArchiveRootObjectKey]; [encoder finishEncoding];
-    CHECK([encoder.encodedData writeToFile:archive atomically:YES] && Reload(manager), "legacy missing timestamp archive loaded");
+    NSMutableArray *legacyProfiles = [NSMutableArray array];
+    for (Profile *profile in manager.mutableProfiles)
+        [legacyProfiles addObject:[[PXLegacyDatesProfileFixture alloc] initWithDictionary:profile.toDictionary]];
+    NSError *legacyEncodeError = nil;
+    NSData *legacyData = [NSKeyedArchiver archivedDataWithRootObject:legacyProfiles requiringSecureCoding:YES error:&legacyEncodeError];
+    BOOL legacyWritten = legacyData && [legacyData writeToFile:archive atomically:YES];
+    __block BOOL legacyLoaded = NO; __block NSError *legacyError = nil;
+    if (legacyWritten) [manager loadProfilesWithCompletion:^(BOOL ok, NSError *error) { legacyLoaded = ok; legacyError = error; }];
+    CHECK(legacyWritten && legacyLoaded, "legacy missing timestamp archive loaded");
+    if (!legacyWritten || !legacyLoaded) fprintf(stderr, "Legacy timestamp fixture: encoded=%lu bytes, write=%d, encodeError=%s, loadError=%s\n",
+        (unsigned long)legacyData.length, legacyWritten, legacyEncodeError.description.UTF8String ?: "none", legacyError.description.UTF8String ?: "none");
     Profile *loadedTarget = nil; for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:legacyTarget.profileId]) loadedTarget = profile;
-    CHECK(loadedTarget.pxDecodedMissingCreatedAt && loadedTarget.pxDecodedMissingLastUsed, "legacy fixture actually omits encoded timestamps");
+    CHECK([loadedTarget isMemberOfClass:Profile.class] && loadedTarget.pxDecodedMissingCreatedAt && loadedTarget.pxDecodedMissingLastUsed, "legacy fixture actually omits encoded timestamps");
     __block BOOL deleted = NO;
     [manager deleteProfile:loadedTarget completion:^(BOOL ok, NSError *error) { deleted = ok && error == nil; }];
     CHECK(deleted && Reload(manager), "journal validation preserves legacy timestamp fallback compatibility");
@@ -760,6 +829,7 @@ int main(int argc, const char *argv[]) {
             return reservation ? 0 : error.code == EEXIST ? 2 : 3;
         }
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
+        TestOptionalProfileDecoding();
         NSFileManager *fm = NSFileManager.defaultManager;
         [fm createDirectoryAtPath:Identity(@"0") withIntermediateDirectories:YES attributes:nil error:NULL];
         TestReservation([NSString stringWithUTF8String:argv[0]]);

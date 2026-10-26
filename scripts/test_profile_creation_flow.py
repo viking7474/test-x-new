@@ -115,6 +115,12 @@ def source_contracts():
     assert 'writeRegistryData:data expected:self.registryRecord' in archive and '@catch' in archive
     assert 'removeItemAtPath:' not in archive and 'temp_profiles.plist' not in source
     assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 3
+    coding = writers.method(source, '- (instancetype)initWithCoder:(NSCoder *)coder')
+    for key in ('shortDescription', 'createdAt', 'lastUsed', 'settings'):
+        assert f'[coder containsValueForKey:@"{key}"] ? [coder decodeObjectOfClass' in coding, f'optional {key} must not request an absent key'
+    assert '_profileId = [coder decodeObjectOfClass:[NSString class] forKey:@"profileId"];' in coding
+    assert '[coder failWithError:' in coding and 'failure = failure ?: decoder.error;' in source
+
     allocation = writers.method(source, '- (NSString *)generateProfileID')
     assert 'if (existingIDs.count == 0) {\n            NSError *error' not in allocation
     manager = read('common/IdentifierManager.m')
@@ -147,6 +153,8 @@ def source_contracts():
     assert 'updateCurrentProfileInfoWithProfile:' not in getter and 'writeToFile:' not in getter
     assert 'PXRuntimeProfileSelectionMatches' in pair and 'exists' in pair
     fixture = read('tests/PXProfileCreationFlowTests.m')
+    assert 'PXLegacyDatesArchiverFixture' not in fixture, 'legacy fixture must use a standard archiver envelope'
+    assert '- (Class)classForKeyedArchiver { return Profile.class; }' in fixture
     for case in ('creation waits for generation and completion runs once on main',
                  'creation worker preserves supplied profile after selection drift',
                  'overlapping lifecycle operations reject while creation is pending',
@@ -223,7 +231,12 @@ def source_contracts():
     assert load.index('PXRecoverProfileDeletion(') < load.index('captureProfileSelectionWithError:')
     assert activation.count('Profile registry changed before activation') == 1
     assert fixture.count('Profile *registryDrift = SeedRegistered') == 1
-    for case in ('prepared intent aborts on restart without changing selection registry or files',
+    for case in ('absent optional timestamps and description never poison decoder or discard later settings',
+                 'absent legacy settings uses the existing empty dictionary fallback without decoding a missing key',
+                 'explicit nil timestamps preserve the existing date fallback',
+                 'present invalid timestamp still fails validation instead of using a missing-key fallback',
+                 'required profile ID remains a required decode request',
+                 'prepared intent aborts on restart without changing selection registry or files',
                  'committed deletion replays known archive and preserves the committed fallback',
                  'recovery is idempotent and never retries recursive directory removal',
                  'compensating decision survives restart and never rolls back a newer selection',

@@ -190,12 +190,15 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     self = [super init];
     if (self) {
         _profileId = [coder decodeObjectOfClass:[NSString class] forKey:@"profileId"];
+        // Some legacy keys are optional. Decoding an absent key can poison
+        // the unarchiver, so apply existing nil/date/settings defaults without
+        // issuing a decode request. Present invalid values still fail normally.
         _name = [coder decodeObjectOfClass:[NSString class] forKey:@"name"];
-        _shortDescription = [coder decodeObjectOfClass:[NSString class] forKey:@"shortDescription"];
+        _shortDescription = [coder containsValueForKey:@"shortDescription"] ? [coder decodeObjectOfClass:[NSString class] forKey:@"shortDescription"] : nil;
         _iconName = [coder decodeObjectOfClass:[NSString class] forKey:@"iconName"];
-        _createdAt = [coder decodeObjectOfClass:[NSDate class] forKey:@"createdAt"];
-        _lastUsed = [coder decodeObjectOfClass:[NSDate class] forKey:@"lastUsed"];
-        _settings = [coder decodeObjectOfClasses:PXProfileArchiveClasses() forKey:@"settings"];
+        _createdAt = [coder containsValueForKey:@"createdAt"] ? [coder decodeObjectOfClass:[NSDate class] forKey:@"createdAt"] : nil;
+        _lastUsed = [coder containsValueForKey:@"lastUsed"] ? [coder decodeObjectOfClass:[NSDate class] forKey:@"lastUsed"] : nil;
+        _settings = [coder containsValueForKey:@"settings"] ? [coder decodeObjectOfClasses:PXProfileArchiveClasses() forKey:@"settings"] : nil;
         // The outer allowed-classes set is intentionally broad for nested
         // settings. Check individual field types before applying legacy defaults.
         BOOL validFields = (!_name || [_name isKindOfClass:NSString.class]) &&
