@@ -153,6 +153,17 @@ def source_contracts():
     assert 'updateCurrentProfileInfoWithProfile:' not in getter and 'writeToFile:' not in getter
     assert 'PXRuntimeProfileSelectionMatches' in pair and 'exists' in pair
     fixture = read('tests/PXProfileCreationFlowTests.m')
+    assert 'gMemoryID' not in fixture, 'mirror-time sample must not masquerade as live manager memory'
+    assert 'NSString *memoryID = gNotifyingManager.mutableCurrentProfile.profileId;' in fixture
+    assert 'BOOL ordered = ProfileNoticeHasCommittedMemory(gNotifyingManager);' in fixture
+    assert '@try { [super publishProfileChangedNotification]; }' in fixture
+    assert '@finally { gNotifyingManager = previous; }' in fixture
+    assert '[PXProfileCreationFixture new]' not in fixture, 'notification producers must use the observed fixture factory'
+    for case in ('legacy reload adopts committed memory while the defaults mirror is still queued',
+                 'notification oracle rejects stale producer memory and accepts committed memory independently of mirror samples',
+                 'inactive deletion notifies committed producer memory before deferred defaults mirroring',
+                 'queued defaults mirror eventually adopts the committed profile after inactive deletion'):
+        assert case in fixture, case
     assert 'PXLegacyDatesArchiverFixture' not in fixture, 'legacy fixture must use a standard archiver envelope'
     assert '- (Class)classForKeyedArchiver { return Profile.class; }' in fixture
     for case in ('creation waits for generation and completion runs once on main',

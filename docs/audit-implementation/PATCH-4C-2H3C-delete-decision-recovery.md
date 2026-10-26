@@ -60,3 +60,13 @@ Fixture cũ subclass NSKeyedArchiver còn có portability risk về archive iden
 Giữ cả ba legacy assertions, bổ sung strict NSCoder fixture chạy exact production initWithCoder: không request optional key vắng mặt, settings sau missing timestamp không bị mất do poisoned decoder, missing settings giữ empty fallback, explicit nil dates giữ fallback và present invalid timestamp/required missing ID vẫn tạo error. Đây là native regression mới, không giả lập thành một runtime pass trên Windows.
 
 Host follow-up: xác nhận baseline thiếu presence guards; **7/7 related source gates**, exact production model/33-method extraction và git diff --check pass. Cần macOS CI compile/runtime lại; chưa có native pass cho bản sửa này.
+
+## CI follow-up — notification oracle reads a stale mirror sample
+
+Log tiếp theo đạt **334/335**; legacy timestamp load/provenance/delete assertions không còn fail. Failure duy nhất là `profile success notification follows activation on main`. Source fixture gán `gMemoryID` chỉ trong mirrorCurrentProfileID, nên biến này là mẫu memory ở lần mirror trước, không phải live memory của manager phát event. Sau restart/load, production đã adopt committed currentProfile nhưng intentionally queue defaults mirror. Inactive delete không activate lại selection; nó có thể publish event trước khi main queue chạy mirror. Các dòng Setting missing timestamp trong log là existing legacy fallback logs, không phải lỗi build.
+
+Sửa fixture: rename sample thành gMemoryAtLastMirrorID; observed fixture subclass ghi weak producer context, gọi super để vẫn chạy exact production notifier, rồi restore context trong finally. Observer so main thread + committed source ID với mutableCurrentProfile của đúng producer. Không dùng một manager khác hoặc sample defaults để suy ra live memory. Production ProfileManager và notification/defaults timing giữ nguyên.
+
+Regression ép defaults/mirror sample stale trước legacy reload, xác nhận reload đã adopt memory, inactive deletion notify đúng producer trước mirror và defaults hội tụ sau khi queue drain. Oracle còn được kiểm tra với producer có memory sai để bảo đảm assertion không bị nới lỏng. Existing mirror ordering, stale queued mirror, callback/count và generation publication checks được giữ. Nếu assertion còn fail, diagnostic in riêng source ID, producer memory ID, defaults ID và last mirror sample.
+
+Host: profile source gate + release source gate pass, exact 33-method extraction (bao gồm notifier production không đổi) và git diff --check pass. Không có xcrun/Foundation tại local; native fixture mới vẫn cần macOS CI chạy lại.

@@ -17,8 +17,11 @@
 #include <unistd.h>
 extern char **environ;
 
+@class PXProfileCreationFixture;
+static __weak PXProfileCreationFixture *gNotifyingManager;
+
 static NSUInteger gChecks, gFailures, gNotices, gCanvas, gMirrors, gTerminations, gCachePublications, gSettingsNotices;
-static NSString *gRoot, *gRequested, *gMirroredID, *gMemoryID;
+static NSString *gRoot, *gRequested, *gMirroredID, *gMemoryAtLastMirrorID;
 static NSDictionary *gPreparedNetwork;
 static PXRuntimeSourceStore *gStore;
 static NSDictionary *gNetworkOptions;
@@ -101,7 +104,7 @@ static void OutsideGate(void) {
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation {
     gCachePublications++;
     NSString *target = generation.identityDirectory.stringByDeletingLastPathComponent.lastPathComponent;
-    CHECK(NSThread.isMainThread && atomic_load(&gCommitted) && [gMemoryID isEqual:target] &&
+    CHECK(NSThread.isMainThread && atomic_load(&gCommitted) && [gMemoryAtLastMirrorID isEqual:target] &&
           [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:target] &&
           [Record(PXTLinkIOSSettingsPath())[@"EnabledIdentifiers"][@"Fixture"] boolValue], "generation caches publish only after memory selection and settings activation");
     OutsideGate(); PXPostSettingsChangedNotification();
@@ -158,13 +161,30 @@ static void OutsideGate(void) {
     return @{ @"enabled": gNetworkOptions[@"enabled"], @"connectionType": gNetworkOptions[@"connectionType"], @"country": [gNetworkOptions[@"country"] copy] };
 }
 - (void)mirrorCurrentProfileID:(NSString *)profile {
-    gMirrors++; gMemoryID = [self.mutableCurrentProfile.profileId copy]; gMirroredID = [profile copy];
+    gMirrors++; gMemoryAtLastMirrorID = [self.mutableCurrentProfile.profileId copy]; gMirroredID = [profile copy];
     CHECK([Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:profile] &&
           [Record(PXLegacyActiveProfileInfoPath())[@"ProfileId"] isEqual:profile], "defaults mirror follows committed selection pair");
     OutsideGate();
 }
 #include "PXProfileFlowMethods.inc"
 @end
+// Associate each synchronous notification with its actual producer while
+// forwarding through the unmodified, extracted production implementation.
+@interface PXObservedProfileCreationFixture : PXProfileCreationFixture
+@end
+@implementation PXObservedProfileCreationFixture
+- (void)publishProfileChangedNotification {
+    PXProfileCreationFixture *previous = gNotifyingManager;
+    gNotifyingManager = self;
+    @try { [super publishProfileChangedNotification]; }
+    @finally { gNotifyingManager = previous; }
+}
+@end
+static PXProfileCreationFixture *NewManager(void) { return [PXObservedProfileCreationFixture new]; }
+static BOOL ProfileNoticeHasCommittedMemory(PXProfileCreationFixture *producer) {
+    return NSThread.isMainThread && producer != nil &&
+        [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:producer.mutableCurrentProfile.profileId];
+}
 static Profile *New(NSString *name) { return [[Profile alloc] initWithName:name iconName:@"default_profile"]; }
 static void ResetWorker(void) {
     atomic_store(&gEntered, NO); atomic_store(&gCommitted, NO); atomic_store(&gInActivation, NO); gDuringTermination = nil; gAfterGeneration = nil;
@@ -205,7 +225,7 @@ static void TestCreation(PXProfileCreationFixture *manager, Profile *zero) {
     [manager createProfile:New(@"overlap") completion:rejected]; [manager switchToProfile:zero completion:rejected];
     [manager updateProfile:zero completion:rejected]; [manager deleteProfile:zero completion:rejected];
     CHECK(busy == 4 && callbacks == 0, "overlapping lifecycle operations reject while creation is pending");
-    PXProfileCreationFixture *other = [PXProfileCreationFixture new];
+    PXProfileCreationFixture *other = NewManager();
     [other loadProfilesWithCompletion:rejected];
     [other createProfile:New(@"other-instance") completion:rejected];
     [manager loadProfilesWithCompletion:rejected];
@@ -326,7 +346,7 @@ static void TestBackgroundAndPolicy(PXProfileCreationFixture *manager) {
 }
 static void TestRestart(PXProfileCreationFixture *manager, Profile *zero) {
     NSString *selected = Record(PXCurrentProfileInfoPath())[@"ProfileId"]; gMirroredID = @"stale-default";
-    PXProfileCreationFixture *fresh = [PXProfileCreationFixture new]; __block BOOL loaded = NO, ok = NO;
+    PXProfileCreationFixture *fresh = NewManager(); __block BOOL loaded = NO, ok = NO;
     [fresh loadProfilesWithCompletion:^(BOOL success, NSError *error) { loaded = YES; ok = success && !error; }];
     CHECK(loaded && ok && [fresh.mutableCurrentProfile.profileId isEqual:selected] && [gMirroredID isEqual:@"stale-default"],
           "restart restores committed selection before stale defaults mirror");
@@ -614,9 +634,9 @@ static void Select(PXProfileCreationFixture *manager, Profile *profile) {
     CHECK(done && success, "deletion fixture selection committed");
 }
 static void TestRegistryAndDeletion(void) {
-    PXProfileCreationFixture *manager = [PXProfileCreationFixture new]; manager.fileManager = [PXProfileFileManagerFixture new];
+    PXProfileCreationFixture *manager = NewManager(); manager.fileManager = [PXProfileFileManagerFixture new];
     CHECK(Reload(manager), "deletion manager reloads current registry basis");
-    PXProfileCreationFixture *stale = [PXProfileCreationFixture new]; CHECK(Reload(stale), "second manager captures old registry basis");
+    PXProfileCreationFixture *stale = NewManager(); CHECK(Reload(stale), "second manager captures old registry basis");
     Profile *inactive = SeedRegistered(manager, @"delete-inactive");
     NSData *currentBytes = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
     __block BOOL called = NO, success = YES; __block NSError *failure = nil;
@@ -662,7 +682,7 @@ static void TestRegistryAndDeletion(void) {
     [manager deleteProfile:inactive completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
     CHECK(!success && failure && [manager.fileManager fileExistsAtPath:Identity(driftID)] && Reload(manager) &&
           [manager.mutableCurrentProfile.profileId isEqual:driftID], "selection drift after unregister restores only our own registry and preserves all files");
-    CHECK(Pump(^BOOL { return [gMemoryID isEqual:driftID]; }), "external drift defaults mirror catches up before the next lifecycle operation");
+    CHECK(Pump(^BOOL { return [gMemoryAtLastMirrorID isEqual:driftID]; }), "external drift defaults mirror catches up before the next lifecycle operation");
     Profile *registryDrift = SeedRegistered(manager, @"delete-registry-drift");
     NSData *externalRegistry = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
     gAfterArchive = ^{ [externalRegistry writeToFile:Path(PXProfilesPath(), @"profiles.plist") atomically:YES]; };
@@ -687,14 +707,14 @@ static void TestRegistryAndDeletion(void) {
     BOOL registered = NO;
     for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:replacementID]) registered = YES;
     CHECK(!registered, "restart never adopts an inactive directory from a reserved marker alone");
-    PXProfileCreationFixture *single = [PXProfileCreationFixture new]; [single.mutableProfiles addObject:manager.mutableCurrentProfile];
+    PXProfileCreationFixture *single = NewManager(); [single.mutableProfiles addObject:manager.mutableCurrentProfile];
     [single deleteProfile:manager.mutableCurrentProfile completion:^(BOOL ok, NSError *error) { success = ok; failure = error; }];
     CHECK(!success && failure.code == 4, "last profile deletion is rejected before filesystem mutation");
     NSString *archive = Path(PXProfilesPath(), @"profiles.plist");
     NSData *validArchive = [NSData dataWithContentsOfFile:archive];
     NSData *duplicate = [NSKeyedArchiver archivedDataWithRootObject:@[manager.mutableCurrentProfile, manager.mutableCurrentProfile] requiringSecureCoding:YES error:NULL];
     CHECK([duplicate writeToFile:archive atomically:YES], "duplicate registry fixture installed");
-    PXProfileCreationFixture *invalid = [PXProfileCreationFixture new];
+    PXProfileCreationFixture *invalid = NewManager();
     CHECK(!Reload(invalid) && invalid.registryUnavailable && [duplicate isEqual:[NSData dataWithContentsOfFile:archive]], "duplicate registry IDs reject load without guessing or rewriting the archive");
     CHECK([validArchive writeToFile:archive atomically:YES] && Reload(manager), "valid registry restored after duplicate fixture");
     PXBadProfileNameFixture *bad = [[PXBadProfileNameFixture alloc] initWithName:@"bad-name-type" iconName:@"default_profile"];
@@ -722,7 +742,7 @@ static void SetupStore(void) {
         allowsPath:^BOOL(NSString *path) { return [path hasPrefix:[gRoot stringByAppendingString:@"/"]] && [path hasSuffix:@".plist"] && ![path hasPrefix:Path(gRoot, @"control/")]; } error:NULL];
 }
 static void TestDeletionRecovery(NSString *executable) {
-    PXProfileCreationFixture *manager = [PXProfileCreationFixture new]; CHECK(Reload(manager), "journal manager loads known registry");
+    PXProfileCreationFixture *manager = NewManager(); CHECK(Reload(manager), "journal manager loads known registry");
     NSString *archive = Path(PXProfilesPath(), @"profiles.plist");
     for (NSString *stage in @[@"prepared", @"committed", @"archive-written", @"settled"]) {
         Profile *target = SeedRegistered(manager, [@"crash-" stringByAppendingString:stage]); Select(manager, target);
@@ -735,7 +755,7 @@ static void TestDeletionRecovery(NSString *executable) {
                   "recovery subprocess can exit after archive replay before journal cleanup");
         }
         NSUInteger wakeups = gSettingsNotices;
-        manager = [PXProfileCreationFixture new]; // Model process memory being lost.
+        manager = NewManager(); // Model process memory being lost.
         CHECK(Reload(manager) && ![manager.fileManager fileExistsAtPath:PXProfileDeletionJournalPath()] && !manager.lifecycleLease,
               "restart settles deletion journal and releases lifecycle ownership");
         CHECK(gSettingsNotices == wakeups + 1, "first restart load requests publication after a settled-before-notify exit");
@@ -788,23 +808,41 @@ static void TestDeletionRecovery(NSString *executable) {
     NSData *legacyData = [NSKeyedArchiver archivedDataWithRootObject:legacyProfiles requiringSecureCoding:YES error:&legacyEncodeError];
     BOOL legacyWritten = legacyData && [legacyData writeToFile:archive atomically:YES];
     __block BOOL legacyLoaded = NO; __block NSError *legacyError = nil;
+    gMirroredID = @"legacy-pending-defaults";
+    gMemoryAtLastMirrorID = @"legacy-last-mirror-memory";
     if (legacyWritten) [manager loadProfilesWithCompletion:^(BOOL ok, NSError *error) { legacyLoaded = ok; legacyError = error; }];
     CHECK(legacyWritten && legacyLoaded, "legacy missing timestamp archive loaded");
     if (!legacyWritten || !legacyLoaded) fprintf(stderr, "Legacy timestamp fixture: encoded=%lu bytes, write=%d, encodeError=%s, loadError=%s\n",
         (unsigned long)legacyData.length, legacyWritten, legacyEncodeError.description.UTF8String ?: "none", legacyError.description.UTF8String ?: "none");
     Profile *loadedTarget = nil; for (Profile *profile in manager.mutableProfiles) if ([profile.profileId isEqual:legacyTarget.profileId]) loadedTarget = profile;
     CHECK([loadedTarget isMemberOfClass:Profile.class] && loadedTarget.pxDecodedMissingCreatedAt && loadedTarget.pxDecodedMissingLastUsed, "legacy fixture actually omits encoded timestamps");
+    PXProfileCreationFixture *wrongProducer = NewManager();
+    Profile *wrongMemory = New(@"stale-notification-memory"); [wrongMemory setValue:@"stale-notification-id" forKey:@"profileId"];
+    wrongProducer.mutableCurrentProfile = wrongMemory;
+    CHECK(!ProfileNoticeHasCommittedMemory(wrongProducer) && ProfileNoticeHasCommittedMemory(manager),
+          "notification oracle rejects stale producer memory and accepts committed memory independently of mirror samples");
+    CHECK([manager.mutableCurrentProfile.profileId isEqual:Record(PXCurrentProfileInfoPath())[@"ProfileId"]] &&
+          ![loadedTarget.profileId isEqual:manager.mutableCurrentProfile.profileId] &&
+          [gMirroredID isEqual:@"legacy-pending-defaults"] && [gMemoryAtLastMirrorID isEqual:@"legacy-last-mirror-memory"],
+          "legacy reload adopts committed memory while the defaults mirror is still queued");
+    NSUInteger noticesBeforeDelete = gNotices;
     __block BOOL deleted = NO;
     [manager deleteProfile:loadedTarget completion:^(BOOL ok, NSError *error) { deleted = ok && error == nil; }];
-    CHECK(deleted && Reload(manager), "journal validation preserves legacy timestamp fallback compatibility");
+    CHECK(deleted, "journal validation preserves legacy timestamp fallback compatibility");
+    CHECK(deleted && gNotices == noticesBeforeDelete + 1 && [gMirroredID isEqual:@"legacy-pending-defaults"] &&
+          [gMemoryAtLastMirrorID isEqual:@"legacy-last-mirror-memory"],
+          "inactive deletion notifies committed producer memory before deferred defaults mirroring");
+    CHECK(Reload(manager), "registry remains loadable after legacy inactive deletion");
     __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
     CHECK(Pump(^BOOL { return drained; }), "journal recovery mirrors drained before teardown");
+    CHECK([gMirroredID isEqual:manager.mutableCurrentProfile.profileId],
+          "queued defaults mirror eventually adopts the committed profile after inactive deletion");
 }
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
             gRoot = [NSString stringWithUTF8String:argv[2]]; SetupStore();
-            PXProfileCreationFixture *manager = [PXProfileCreationFixture new];
+            PXProfileCreationFixture *manager = NewManager();
             NSString *stage = [NSString stringWithUTF8String:argv[argc - 1]];
             if (argc == 4) {
                 PXProfileDeletionTestCheckpoint = ^(NSString *value) { OutsideGate(); if ([value isEqual:stage]) _exit(77); };
@@ -838,13 +876,19 @@ int main(int argc, const char *argv[]) {
             allowsPath:^BOOL(NSString *path) { return [path hasPrefix:[gRoot stringByAppendingString:@"/"]] && [path hasSuffix:@".plist"] && ![path hasPrefix:Path(gRoot, @"control/")]; } error:NULL];
         CHECK(gStore != nil, "profile source store initialized");
         gNetworkOptions = @{ @"enabled": @YES, @"connectionType": @0, @"country": @"us" };
-        PXProfileCreationFixture *manager = [PXProfileCreationFixture new]; Profile *zero = New(@"zero"); [zero setValue:@"0" forKey:@"profileId"];
+        PXProfileCreationFixture *manager = NewManager(); Profile *zero = New(@"zero"); [zero setValue:@"0" forKey:@"profileId"];
         zero.settings = @{ @"enabled": @YES, @"nested": @[@1, @"value", NSDate.date], @"data": [@"bytes" dataUsingEncoding:NSUTF8StringEncoding] };
         [manager.mutableProfiles addObject:zero]; manager.mutableCurrentProfile = zero;
         CHECK([manager updateCurrentProfileInfoWithProfile:zero error:NULL], "initial selection pair committed");
         [manager saveProfilesWithCompletion:^(BOOL ok, NSError *error) { CHECK(ok && !error, "secure profile archive seeded"); }];
         id observer = [NSNotificationCenter.defaultCenter addObserverForName:@"com.hydra.tlinkios.profileChanged" object:nil queue:nil usingBlock:^(NSNotification *note) {
-            (void)note; gNotices++; CHECK(NSThread.isMainThread && [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:gMemoryID], "profile success notification follows activation on main");
+            (void)note; gNotices++;
+            NSString *committedID = Record(PXCurrentProfileInfoPath())[@"ProfileId"];
+            NSString *memoryID = gNotifyingManager.mutableCurrentProfile.profileId;
+            BOOL ordered = ProfileNoticeHasCommittedMemory(gNotifyingManager);
+            CHECK(ordered, "profile success notification follows activation on main");
+            if (!ordered) fprintf(stderr, "Profile notification: source=%s, producerMemory=%s, lastDefaults=%s, lastMirrorMemory=%s\n",
+                committedID.UTF8String ?: "nil", memoryID.UTF8String ?: "nil", gMirroredID.UTF8String ?: "nil", gMemoryAtLastMirrorID.UTF8String ?: "nil");
             if (gThrowObserver) [NSException raise:@"fixture" format:@"observer failed after commit"];
         }];
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
