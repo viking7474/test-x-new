@@ -98,6 +98,8 @@ def source_contracts():
     finish = writers.method(source, '- (void)finishProfileCreation:(Profile *)profile targetID:(NSString *)targetID generation:(PXCommittedRuntimeGeneration *)generation expectedSelection:(NSDictionary *)expected error:(NSError *)generationError completion:(void (^)(BOOL success, NSError * _Nullable error))completion')
     assert create.index('targetID = [profile.profileId copy]') < create.index('dispatch_get_global_queue')
     assert 'commitRuntimeGenerationForProfileID:targetID' in create
+    assert 'networkArtifacts:network lifecycleLease:generationLease error:' in create
+    assert create.index('generationLease = self.lifecycleLease') < create.index('dispatch_get_global_queue')
     for forbidden in ('terminateEnabledScopedApps', 'mutableCurrentProfile =', 'mutableProfiles addObject:', 'updateCurrentProfileInfoWithProfile:'):
         assert forbidden not in create, forbidden
     assert finish.index('validateActivationForProfile:') < finish.index('mutableProfiles addObject:') < finish.index('saveProfilesWithCompletion:')
@@ -153,6 +155,8 @@ def source_contracts():
     assert 'updateCurrentProfileInfoWithProfile:' not in getter and 'writeToFile:' not in getter
     assert 'PXRuntimeProfileSelectionMatches' in pair and 'exists' in pair
     fixture = read('tests/PXProfileCreationFlowTests.m')
+    assert 'creation did not retain lifecycle ownership on worker' in fixture
+    assert 'generation invalidated caller lease' in fixture
     assert 'gMemoryID' not in fixture, 'mirror-time sample must not masquerade as live manager memory'
     assert 'NSString *memoryID = gNotifyingManager.mutableCurrentProfile.profileId;' in fixture
     assert 'BOOL ordered = ProfileNoticeHasCommittedMemory(gNotifyingManager);' in fixture
@@ -256,7 +260,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3C-partial'
+    assert manifest['rollout'] == '4C.2H3D-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')

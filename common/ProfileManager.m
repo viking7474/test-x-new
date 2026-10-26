@@ -34,6 +34,7 @@
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID;
 - (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
 - (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation;
 - (void)resetCanvasNoise;
 @end
@@ -415,6 +416,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     }
     // No registration/selection/cache effects until inactive generation commits.
     self.creationReservation = reservation;
+    PXProfileLifecycleLease *generationLease = self.lifecycleLease;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         @autoreleasepool {
             NSError *generationError = nil;
@@ -424,8 +426,8 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
                     [self prepareNetworkArtifactsWithOptions:networkOptions error:&generationError] : nil;
                 IdentifierManager *manager = [IdentifierManager sharedManager];
                 if (network && [reservation validateWithError:&generationError] &&
-                    [manager respondsToSelector:@selector(commitRuntimeGenerationForProfileID:networkArtifacts:error:)])
-                    generation = [manager commitRuntimeGenerationForProfileID:targetID networkArtifacts:network error:&generationError];
+                    [manager respondsToSelector:@selector(commitRuntimeGenerationForProfileID:networkArtifacts:lifecycleLease:error:)])
+                    generation = [manager commitRuntimeGenerationForProfileID:targetID networkArtifacts:network lifecycleLease:generationLease error:&generationError];
                 if (!generation && !generationError) generationError = [NSError errorWithDomain:@"WeaponXProfileError" code:14
                     userInfo:@{NSLocalizedDescriptionKey: @"Inactive profile generation did not complete"}];
             } @catch (NSException *exception) {

@@ -34,6 +34,8 @@
 #import "PXRuntimeScalarPreparation.h"
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeGeneration.h"
+#import "PXProfileLifecycleLease.h"
+#import "PXProfileDeletionJournal.h"
 #import <Security/Security.h>
 #import <sys/sysctl.h>
 
@@ -62,8 +64,8 @@
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
-- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
-- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
+- (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error;
+- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
 - (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error;
 - (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error;
 - (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model;
@@ -1249,8 +1251,30 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error {
-    NSString *identityDir = [[self profileIdentityPath] copy];
-    return [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identityDir networkArtifacts:nil error:error];
+    PXCommittedRuntimeGeneration *receipt = [self ownedRuntimeGenerationForProfileID:nil currentProfile:YES networkArtifacts:nil deferSettings:NO error:error];
+    if (!receipt) return NO;
+    [self publishCommittedRuntimeGeneration:receipt]; // Ownership is released before compatibility callbacks.
+    return YES;
+}
+
+- (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error {
+    if (error) *error = nil;
+    NSError *failure = nil;
+    PXCommittedRuntimeGeneration *receipt = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&failure];
+    @try {
+        if (lease && [lease validateForDirectory:PXProfilesPath() error:&failure] && PXRequireNoPendingProfileDeletion(&failure)) {
+            NSString *identity = current ? [[self profileIdentityPath] copy] : [self existingGenerationIdentityForProfileID:profileID error:&failure];
+            if (identity.length) [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts lifecycleLease:lease deferSettings:deferSettings receipt:&receipt error:&failure];
+            else if (!failure) failure = self.error;
+        }
+    } @catch (NSException *exception) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Runtime generation preparation raised an exception"}];
+    } @finally { [lease invalidate]; }
+    if (!receipt && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Runtime generation did not complete under lifecycle ownership"}];
+    self.error = receipt ? nil : failure;
+    if (!receipt && error) *error = failure;
+    return receipt;
 }
 
 - (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error {
@@ -1266,22 +1290,35 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
-    NSString *identity = [self existingGenerationIdentityForProfileID:profileID error:error];
-    return identity && [self regenerateAllEnabledIdentifiersAtIdentityDirectory:identity networkArtifacts:networkArtifacts error:error];
+    PXCommittedRuntimeGeneration *receipt = [self ownedRuntimeGenerationForProfileID:profileID currentProfile:NO networkArtifacts:networkArtifacts deferSettings:NO error:error];
+    if (!receipt) return NO;
+    [self publishCommittedRuntimeGeneration:receipt];
+    return YES;
 }
 
 - (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
-    NSString *identity = [self existingGenerationIdentityForProfileID:profileID error:error];
-    if (!identity) return nil;
-    PXCommittedRuntimeGeneration *receipt = nil;
-    return [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts deferSettings:YES receipt:&receipt error:error] ? receipt : nil;
+    return [self ownedRuntimeGenerationForProfileID:profileID currentProfile:NO networkArtifacts:networkArtifacts deferSettings:YES error:error];
 }
 
-- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error {
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error {
+    if (error) *error = nil;
+    NSError *failure = nil;
     PXCommittedRuntimeGeneration *receipt = nil;
-    if (![self commitRuntimeGenerationAtIdentityDirectory:identityDir networkArtifacts:networkArtifacts deferSettings:NO receipt:&receipt error:error]) return NO;
-    [self publishRuntimeGeneration:receipt.payload identityDirectory:receipt.identityDirectory model:receipt.model];
-    return YES;
+    @try {
+        BOOL validLease = [lease isKindOfClass:PXProfileLifecycleLease.class] && [lease validateForDirectory:PXProfilesPath() error:&failure];
+        if (!validLease && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Creation generation requires its caller's lifecycle capability"}];
+        if (validLease && PXRequireNoPendingProfileDeletion(&failure)) {
+            NSString *identity = [self existingGenerationIdentityForProfileID:profileID error:&failure];
+            if (identity) [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts lifecycleLease:lease deferSettings:YES receipt:&receipt error:&failure];
+        }
+    } @catch (NSException *exception) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Creation generation preparation raised an exception"}];
+    }
+    // The caller retains lifecycle ownership across generation/metadata/activation.
+    if (!receipt && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Creation generation did not complete"}];
+    self.error = receipt ? nil : failure;
+    if (!receipt && error) *error = failure;
+    return receipt;
 }
 
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation {
@@ -1299,7 +1336,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     else PXPostSettingsChangedNotification(); // Wake readers for the latest committed state.
 }
 
-- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error {
+- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error {
     if (error) *error = nil;
     if (receipt) *receipt = nil;
     self.error = nil;
@@ -1307,6 +1344,16 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     NSError *failure = nil;
     if (!identityDir.length) {
         failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Could not resolve profile identity path"}];
+        self.error = failure; if (error) *error = failure; return NO;
+    }
+    if (![lease isKindOfClass:PXProfileLifecycleLease.class] || ![lease validateForDirectory:PXProfilesPath() error:&failure] || !PXRequireNoPendingProfileDeletion(&failure)) {
+        failure = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Missing runtime generation lifecycle ownership"}];
+        self.error = failure; if (error) *error = failure; return NO;
+    }
+    NSString *profileID = identityDir.stringByDeletingLastPathComponent.lastPathComponent;
+    NSDictionary *directoryProof = [lease directoryProofForProfileID:profileID error:&failure];
+    if (![PXProfileIdentityPath(PXValidatedProfileID(profileID)) isEqual:identityDir] || ![directoryProof[@"exists"] boolValue]) {
+        failure = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Runtime generation target directory is unavailable"}];
         self.error = failure; if (error) *error = failure; return NO;
     }
     // Freeze caller intent before any provider callback. Dirty in-memory options
@@ -1467,6 +1514,15 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         conditions[path] = @{ @"exists": present[path], @"values": PXRuntimeIdentifierDependencies(basis[path], @[@"LowPowerMode"]) };
     __block PXCommittedRuntimeGeneration *committedGeneration = nil;
     BOOL committed = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        if (![lease validateForDirectory:PXProfilesPath() error:writeError]) return NO;
+        if (![[lease directoryProofForProfileID:profileID error:writeError] isEqual:directoryProof]) {
+            if (writeError) *writeError = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Runtime generation target directory changed during preparation"}]; return NO;
+        }
+        BOOL deletionPending = NO;
+        if (![tx dictionaryAtPath:PXProfileDeletionJournalPath() exists:&deletionPending error:writeError]) return NO;
+        if (deletionPending) {
+            if (writeError) *writeError = [NSError errorWithDomain:@"WeaponXProfileError" code:27 userInfo:@{NSLocalizedDescriptionKey: @"Deletion recovery started during runtime generation"}]; return NO;
+        }
         if (!PXStageRuntimeGeneration(tx, identityDir, payload, conditions, writeError)) return NO;
         NSDictionary *proof = PXReadRuntimeGenerationProof(tx, identityDir, payload, writeError);
         if (!proof) return NO;
@@ -1486,8 +1542,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     [self.spoofCache removeAllObjects];
     [_appEnabledCache removeAllObjects];
     @try {
-        // Selection lifecycle is not yet enrolled. Avoid knowingly installing
-        // target A's values in global compatibility caches after a switch to B.
+        // Owned batches release lifecycle ownership before compatibility callbacks.
+        // Avoid knowingly installing A's values if selection has since moved to B.
         if ([PXActiveProfileID() isEqualToString:profileID]) {
             if (model) [self publishPreparedDeviceProfileGroup:model];
             for (NSString *type in payload[@"scalars"]) {

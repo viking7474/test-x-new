@@ -15,15 +15,24 @@ spec.loader.exec_module(groups)
 def source_contracts():
     manager = read('common/IdentifierManager.m')
     current = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error')
-    flow = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
-    publisher_wrapper = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error')
+    flow = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
+    publisher_wrapper = groups.method(manager, '- (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error')
     wrapper = groups.method(manager, '- (void)regenerateAllEnabledIdentifiers')
     assert 'regenerateAllEnabledIdentifiersWithError:&error' in wrapper
-    assert current.count('[self profileIdentityPath]') == 1 and 'regenerateAllEnabledIdentifiersAtIdentityDirectory:' in current
+    assert publisher_wrapper.count('[self profileIdentityPath]') == 1
+    assert 'ownedRuntimeGenerationForProfileID:nil currentProfile:YES' in current
+    assert publisher_wrapper.index('acquireInDirectory:') < publisher_wrapper.index('[self profileIdentityPath]')
+    assert publisher_wrapper.index('PXRequireNoPendingProfileDeletion') < publisher_wrapper.index('[self profileIdentityPath]')
+    assert '@finally { [lease invalidate]; }' in publisher_wrapper
+    assert current.index('ownedRuntimeGenerationForProfileID:') < current.index('publishCommittedRuntimeGeneration:')
+    assert 'directoryProofForProfileID:' in flow and 'validateForDirectory:' in flow
+    assert flow.index('PXProfileDeletionJournalPath() exists:') < flow.index('PXStageRuntimeGeneration(')
+    borrowed = groups.method(manager, '- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error')
+    assert 'validateForDirectory:PXProfilesPath()' in borrowed and '[lease invalidate]' not in borrowed
     assert 'profileIdentityPath' not in flow
     assert flow.index('PXSanitizedIdentifierSettings(self.settings)') < flow.index('prepareDeviceProfileGroupWithOptions:')
     assert flow.index('PXStageRuntimeGeneration(') < flow.index('initWithIdentityDirectory:')
-    assert publisher_wrapper.index('commitRuntimeGenerationAtIdentityDirectory:') < publisher_wrapper.index('publishRuntimeGeneration:')
+    assert publisher_wrapper.index('commitRuntimeGenerationAtIdentityDirectory:') < publisher_wrapper.index('@finally')
     assert flow.index('initWithIdentityDirectory:') < flow.index('if (!committed)')
     assert 'return committedGeneration != nil;' in flow
     assert 'publishRuntimeGeneration:' not in flow
@@ -62,14 +71,30 @@ def source_contracts():
                  'batch malformed beforeimage fails without replacing any source',
                  'batch disabled options preserve tuple and unconditional WiFi policy',
                  'batch cellular only refresh preserves model and build',
-                 'batch missing baseline seeds canonical group with frozen cellular policy'):
+                 'batch missing baseline seeds canonical group with frozen cellular policy',
+                 'held lifecycle lease blocks current batch before target lookup',
+                 'held lifecycle lease blocks explicit batch before migration',
+                 'held lifecycle lease blocks standalone deferred generation',
+                 'busy generation leaves source providers target resolution and caches untouched',
+                 'borrowed generation succeeds without recursively acquiring or releasing caller lease',
+                 'borrowed generation exception preserves source and caller lease',
+                 'invalidated capability rejected before migration and providers',
+                 'wrong root capability rejected while preserving its ownership',
+                 'borrowed capability accepts configured root aliases by inode',
+                 'pending deletion blocks all owned batch APIs before target lookup migration or preparation',
+                 'pending deletion also blocks borrowed batch without releasing caller',
+                 'owned provider exception leaves source and callbacks untouched',
+                 'batch holds lifecycle during providers and releases before compatibility publication',
+                 'late deletion intent rejects batch before staging any artifact',
+                 'directory replacement rejects prepared batch without writing replacement or old target'):
         assert case in fixture, case
-    for source in ('common/PXRuntimeGeneration.m', 'common/PXRuntimeScalarPreparation.m', 'common/PXRuntimeArtifactPreparation.m'):
+    for source in ('common/PXRuntimeGeneration.m', 'common/PXRuntimeScalarPreparation.m', 'common/PXRuntimeArtifactPreparation.m',
+                   'common/PXProfileLifecycleLease.m', 'common/PXProfileDeletionJournal.m'):
         assert source in read('scripts/test_runtime_device_group_writers.py')
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3C-partial'
+    assert manifest['rollout'] == '4C.2H3D-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     for pending in ('dashboard-preview', 'storage-preference', 'security-store', 'security-direct'):

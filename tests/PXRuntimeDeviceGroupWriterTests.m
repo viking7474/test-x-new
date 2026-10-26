@@ -6,6 +6,8 @@
 #import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeScalarPreparation.h"
+#import "PXProfileLifecycleLease.h"
+#import "PXProfileDeletionJournal.h"
 #include <sys/sysctl.h>
 #import "PXDeviceProfileSchema.h"
 #import "PXIdentityValidator.h"
@@ -20,10 +22,11 @@ static PXRuntimeSourceStore *gStore;
 static NSString *gRoot, *gSelected, *gExpectedIdentity, *gBuild = @"B1";
 static BOOL gFailDB, gNoHardware, gNoFirmware, gUnknownCellular, gDisabledCellular, gWebCompat;
 static BOOL gNoCDMA, gNoTACs, gNoMEIDPrefixes;
-static NSUInteger gTelephonyLookups;
+static NSUInteger gTelephonyLookups, gPreparations, gMigrations;
 static NSUInteger gBatchNotifications, gArtifactAdoptions, gBatteryNotifications;
 static BOOL gFailSerial, gThrowBatteryPublication;
 static void (^gDuringPrepare)(void);
+static void (^gDuringPublication)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
@@ -32,6 +35,8 @@ BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSEr
 NSString *PXActiveProfileID(void) { return gSelected; }
 NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.class] && [@[@"a", @"b"] containsObject:value] ? [value copy] : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
+NSString *PXProfilesPath(void) { return gRoot; }
+NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
 NSString *PXGlobalScopePath(void) { return Path(gRoot, @"scope.plist"); }
 NSString *PXCurrentProfileInfoPath(void) { return Path(gRoot, @"selection.plist"); }
@@ -64,6 +69,7 @@ static BOOL Seed(NSString *identity, NSDictionary *ids, BOOL legacy) {
     } error:NULL];
 }
 static void Preparation(void) {
+    gPreparations++;
     CHECK(Snapshot(gExpectedIdentity) != nil, "DB and generation run outside source gate");
     void (^callback)(void) = gDuringPrepare;
     gDuringPrepare = nil;
@@ -160,6 +166,7 @@ static NSDictionary *Model(NSString *product) {
 @end
 #define ARTIFACT_SINGLETON + (instancetype)sharedManager { static id instance; static dispatch_once_t once; dispatch_once(&once, ^{ instance = [self new]; }); return instance; }
 static void Adopt(void) {
+    void (^callback)(void) = gDuringPublication; gDuringPublication = nil; if (callback) callback();
     gArtifactAdoptions++;
     CHECK(Snapshot(gExpectedIdentity) != nil && IDs(gExpectedIdentity)[@"SSID"] != nil,
           "batch compatibility adoption follows source commit outside gate");
@@ -237,7 +244,7 @@ ARTIFACT_SINGLETON
 }
 - (NSString *)profileIdentityPath { gSelections++; return gSelected ? Identity(gSelected) : nil; }
 - (BOOL)isIdentifierEnabled:(NSString *)type { return [self.settings[type] boolValue]; }
-- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity { CHECK([identity isEqual:Identity(@"a")] || [identity isEqual:Identity(@"b")], "explicit wrapper migrates only supplied target"); return YES; }
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity { gMigrations++; CHECK([identity isEqual:Identity(@"a")] || [identity isEqual:Identity(@"b")], "explicit wrapper migrates only supplied target"); return YES; }
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial {
     (void)includeNameAndSerial; gCacheChanges++;
     CHECK([IDs(gExpectedIdentity)[type] isEqual:value] && Snapshot(gExpectedIdentity) != nil,
@@ -613,6 +620,115 @@ static void TestBatchGeneration(PXDeviceGroupFixture *manager, NSString *a, NSSt
     manager.settings = [@{ @"IMEI": @YES, @"MEID": @YES } mutableCopy];
 }
 
+
+static void CheckLeaseFree(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(lease != nil && error == nil, "owned batch releases lifecycle lease before callbacks and failures return");
+    [lease invalidate];
+}
+static BOOL ClearDeletionIntent(void) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:error];
+    } error:NULL];
+}
+static void TestGenerationLifecycle(PXDeviceGroupFixture *manager, NSString *a) {
+    gSelected = @"a"; gExpectedIdentity = a;
+    manager.settings = [@{ @"DeviceModel": @YES, @"IMEI": @YES, @"MEID": @YES } mutableCopy];
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(lease && !error, "batch contention owner acquired");
+    NSString *alias = Path(gRoot, @"profiles-alias");
+    CHECK([NSFileManager.defaultManager createSymbolicLinkAtPath:alias withDestinationPath:gRoot error:&error] &&
+          [lease validateForDirectory:alias error:&error], "borrowed capability accepts configured root aliases by inode");
+    CHECK([NSFileManager.defaultManager removeItemAtPath:alias error:&error], "fixture root alias removed");
+    NSUInteger selections = gSelections, preparations = gPreparations, migrations = gMigrations;
+    NSUInteger notices = gBatchNotifications, caches = gCacheChanges, adoptions = gArtifactAdoptions;
+    NSDictionary *before = BatchSnapshot();
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error.code == 12,
+          "held lifecycle lease blocks current batch before target lookup");
+    CHECK(![manager regenerateAllEnabledIdentifiersForProfileID:@"a" networkArtifacts:nil error:&error] && error.code == 12,
+          "held lifecycle lease blocks explicit batch before migration");
+    CHECK(![manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil error:&error] && error.code == 12,
+          "held lifecycle lease blocks standalone deferred generation");
+    CHECK(selections == gSelections && preparations == gPreparations && migrations == gMigrations &&
+          notices == gBatchNotifications && caches == gCacheChanges && adoptions == gArtifactAdoptions && [before isEqual:BatchSnapshot()],
+          "busy generation leaves source providers target resolution and caches untouched");
+    PXCommittedRuntimeGeneration *receipt = [manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil lifecycleLease:lease error:&error];
+    CHECK(receipt && !error && [lease validateWithError:NULL] && notices == gBatchNotifications && caches == gCacheChanges,
+          "borrowed generation succeeds without recursively acquiring or releasing caller lease");
+    PXProfileLifecycleLease *competitor = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(!competitor && error.code == 12, "borrowed generation leaves caller ownership held after success");
+    [competitor invalidate];
+    before = BatchSnapshot();
+    gDuringPrepare = ^{ [NSException raise:@"fixture" format:@"provider preparation exception"]; };
+    CHECK(![manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil lifecycleLease:lease error:&error] && error &&
+          [lease validateWithError:NULL] && [before isEqual:BatchSnapshot()], "borrowed generation exception preserves source and caller lease");
+    [lease invalidate];
+    preparations = gPreparations; migrations = gMigrations;
+    CHECK(![manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil lifecycleLease:lease error:&error] && error &&
+          preparations == gPreparations && migrations == gMigrations, "invalidated capability rejected before migration and providers");
+    NSString *otherRoot = Path(gRoot, @"unrelated-root");
+    CHECK([NSFileManager.defaultManager createDirectoryAtPath:otherRoot withIntermediateDirectories:NO attributes:nil error:&error], "unrelated lease root created");
+    lease = [PXProfileLifecycleLease acquireInDirectory:otherRoot error:&error];
+    CHECK(lease && ![manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil lifecycleLease:lease error:&error] && error &&
+          preparations == gPreparations && migrations == gMigrations && [lease validateWithError:NULL],
+          "wrong root capability rejected while preserving its ownership");
+    [lease invalidate];
+    CHECK([NSFileManager.defaultManager removeItemAtPath:otherRoot error:&error], "unrelated fixture lease root removed");
+    // Presence alone blocks mutation, including unknown/malformed logical intents.
+    CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"fixture-pending"), "pending deletion intent seeded");
+    before = BatchSnapshot(); selections = gSelections;
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error.code == 27 &&
+          ![manager regenerateAllEnabledIdentifiersForProfileID:@"a" networkArtifacts:nil error:&error] && error.code == 27 &&
+          ![manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil error:&error] && error.code == 27 &&
+          preparations == gPreparations && migrations == gMigrations && selections == gSelections && [before isEqual:BatchSnapshot()],
+          "pending deletion blocks all owned batch APIs before target lookup migration or preparation");
+    lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(lease && ![manager commitRuntimeGenerationForProfileID:@"a" networkArtifacts:nil lifecycleLease:lease error:&error] && error.code == 27 &&
+          [lease validateWithError:NULL], "pending deletion also blocks borrowed batch without releasing caller");
+    [lease invalidate]; CHECK(ClearDeletionIntent(), "pending deletion fixture cleared"); CheckLeaseFree();
+    before = BatchSnapshot();
+    gDuringPrepare = ^{ [NSException raise:@"fixture" format:@"owned provider exception"]; };
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error && [before isEqual:BatchSnapshot()] &&
+          notices == gBatchNotifications && caches == gCacheChanges, "owned provider exception leaves source and callbacks untouched");
+    CheckLeaseFree();
+    __block BOOL preparationObserved = NO, publicationObserved = NO;
+    gDuringPrepare = ^{
+        NSError *busy = nil;
+        PXProfileLifecycleLease *other = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&busy];
+        preparationObserved = !other && busy.code == 12; [other invalidate];
+    };
+    gDuringPublication = ^{ CheckLeaseFree(); publicationObserved = YES; };
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && !error && preparationObserved && publicationObserved,
+          "batch holds lifecycle during providers and releases before compatibility publication");
+    // Simulate a writer that ignores the lifecycle contract during preparation.
+    __block NSDictionary *competitorState = nil;
+    gDuringPrepare = ^{
+        CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"late-pending"), "bypass writer installs deletion during preparation");
+        competitorState = BatchSnapshot();
+    };
+    notices = gBatchNotifications; caches = gCacheChanges;
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error.code == 27 && competitorState &&
+          [competitorState isEqual:BatchSnapshot()] && notices == gBatchNotifications && caches == gCacheChanges,
+          "late deletion intent rejects batch before staging any artifact");
+    CHECK(ClearDeletionIntent(), "late intent fixture cleared"); CheckLeaseFree();
+    NSString *profilePath = a.stringByDeletingLastPathComponent, *displaced = Path(gRoot, @"displaced-a");
+    __block BOOL replaced = NO;
+    competitorState = nil;
+    gDuringPrepare = ^{
+        replaced = [NSFileManager.defaultManager moveItemAtPath:profilePath toPath:displaced error:NULL];
+        if (replaced) replaced = [NSFileManager.defaultManager createDirectoryAtPath:a withIntermediateDirectories:YES attributes:nil error:NULL];
+        competitorState = BatchSnapshot();
+    };
+    CHECK(![manager regenerateAllEnabledIdentifiersWithError:&error] && error && replaced &&
+          [competitorState isEqual:BatchSnapshot()] && notices == gBatchNotifications && caches == gCacheChanges,
+          "directory replacement rejects prepared batch without writing replacement or old target");
+    CHECK([NSFileManager.defaultManager removeItemAtPath:profilePath error:&error] &&
+          [NSFileManager.defaultManager moveItemAtPath:displaced toPath:profilePath error:&error], "original batch directory restored after bypass fixture");
+    CheckLeaseFree();
+}
+
 static void TestExplicitCreationGeneration(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
     gSelected = @"b"; gExpectedIdentity = a; gSelections = 0;
     manager.settings = [@{ @"DeviceModel": @YES, @"IMEI": @YES, @"MEID": @YES } mutableCopy];
@@ -707,6 +823,7 @@ int main(void) {
         TestGroups(manager, Identity(@"a"), Identity(@"b"));
         TestDependentRefresh(manager, Identity(@"a"), Identity(@"b"));
         TestBatchGeneration(manager, Identity(@"a"), Identity(@"b"));
+        TestGenerationLifecycle(manager, Identity(@"a"));
         TestExplicitCreationGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestDeferredActivation(manager, Identity(@"a"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));

@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 @class PXCommittedRuntimeGeneration;
+@class PXProfileLifecycleLease;
 
 @interface IdentifierManager : NSObject
 
@@ -34,6 +35,9 @@
 - (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
 // Creation: commit inactive artifacts, defer settings/scope and publication to activation.
 - (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;
+// Creation worker borrows the caller's existing lifecycle ownership. This API
+// validates it and never invalidates/releases the caller's capability.
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation;
 
 // Settings Management

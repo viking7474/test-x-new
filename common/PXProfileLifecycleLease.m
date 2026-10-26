@@ -74,6 +74,14 @@ static BOOL PXProfileLeaseError(NSError **error, NSInteger code, NSString *messa
         return @{ @"exists": @YES, @"bytes": [data copy] };
     } @finally { close(fd); }
 }
+- (BOOL)validateForDirectory:(NSString *)directory error:(NSError **)error {
+    if (![self validateWithError:error]) return NO;
+    struct stat owned, requested;
+    if (!directory.isAbsolutePath || fstat(_rootFD, &owned) != 0 || stat(directory.fileSystemRepresentation, &requested) != 0 ||
+        !S_ISDIR(requested.st_mode) || owned.st_dev != requested.st_dev || owned.st_ino != requested.st_ino)
+        return PXProfileLeaseError(error, 25, @"Lifecycle capability belongs to a different profiles root");
+    return YES;
+}
 - (BOOL)writeRegistryData:(NSData *)data expected:(NSDictionary *)expected error:(NSError **)error {
     NSDictionary *observed = [self readRegistryWithError:error];
     if (!observed) return NO;

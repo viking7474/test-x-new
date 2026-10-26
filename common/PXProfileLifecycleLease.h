@@ -11,6 +11,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Explicitly closes ownership before a completion/reentrant caller runs.
 - (void)invalidate;
 - (BOOL)validateWithError:(NSError * _Nullable * _Nullable)error;
+/// Borrowed capabilities must own the configured profiles root, not an
+/// unrelated valid directory/lock. Root aliases are compared by device/inode.
+- (BOOL)validateForDirectory:(NSString *)directory error:(NSError * _Nullable * _Nullable)error;
 /// Raw bytes plus explicit absence, independent of archive object mutation.
 - (nullable NSDictionary *)readRegistryWithError:(NSError * _Nullable * _Nullable)error;
 - (BOOL)writeRegistryData:(NSData *)data expected:(NSDictionary *)expected error:(NSError * _Nullable * _Nullable)error;

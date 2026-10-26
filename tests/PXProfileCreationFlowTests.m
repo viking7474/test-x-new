@@ -73,6 +73,7 @@ static void OutsideGate(void) {
 @interface IdentifierManager : NSObject
 + (instancetype)sharedManager;
 - (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)artifacts error:(NSError **)error;
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)artifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation;
 - (void)resetCanvasNoise;
 @end
@@ -100,6 +101,18 @@ static void OutsideGate(void) {
     atomic_store(&gCommitted, ok);
     void (^callback)(void) = gAfterGeneration; gAfterGeneration = nil; if (callback) callback();
     return ok ? receipt : nil;
+}
+- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)artifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error {
+    OutsideGate();
+    if (![lease validateForDirectory:PXProfilesPath() error:error]) return nil;
+    NSError *busy = nil;
+    PXProfileLifecycleLease *competitor = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&busy];
+    BOOL held = competitor == nil && [busy.domain isEqual:@"WeaponXProfileError"] && busy.code == 12;
+    [competitor invalidate];
+    if (!held) [NSException raise:@"fixture" format:@"creation did not retain lifecycle ownership on worker"];
+    PXCommittedRuntimeGeneration *receipt = [self commitRuntimeGenerationForProfileID:profileID networkArtifacts:artifacts error:error];
+    if (![lease validateWithError:NULL]) [NSException raise:@"fixture" format:@"generation invalidated caller lease"];
+    return receipt;
 }
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation {
     gCachePublications++;
