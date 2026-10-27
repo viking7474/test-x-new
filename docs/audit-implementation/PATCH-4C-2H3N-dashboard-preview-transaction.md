@@ -48,6 +48,14 @@ Windows pass 17 source/host gates: dashboard preview, device-group, profile crea
 
 Foundation/xcrun/Theos không có trên máy Windows; native compile/runtime và package H3N cần macOS CI. RootHide-defined host fixtures không xác minh actual SDK paths, injected process hoặc iOS device behavior.
 
+## CI follow-up — hardware/storage gate (2026-10-27)
+
+CI báo `Reset reapplies storage from the final fake model` fail vì hardware gate vẫn tìm lời gọi chọn capacity trong UI method cũ. Sau H3N, UI delegate sang `IdentifierManager.applyDashboardPreview:error:`; coordinator vẫn resolve final model trước chọn capacity và stage storage cùng identifiers. Đây là source assertion lỗi thời; follow-up không sửa production code hoặc storage/value policy.
+
+Gate nay extract đúng hai methods, kiểm tra UI delegation, explicit model và software-only marker resolution, enabled/model guard, model-aware capacity/generation, storage staging cùng transaction và cache adoption sau success/release. Năm negative source cases xác nhận token nằm ngoài method không che được delegation/model/staging/publication bị hỏng. Native fixture ghi lại model/count truyền vào capacity selector, kiểm tra preview model khác persisted model, software-only restoration marker, và không gọi selector ở scalar-only/disabled-storage paths. Fixture vẫn dùng capacity generator giả; không coi đây là device benchmark hoặc proof cho toàn bộ storage tier database.
+
+Windows pass hardware 17/17, negative gate 5/5, WebGL 70/70, dashboard/device-group/profile-creation source contracts (bao macro arity), iOS DB và Phase-10 release hardening. Exact native fragment extraction pass cho device-group/identifier/artifact-preparation/profile-creation. Native fixture mới chưa compile/run tại Windows; chờ macOS CI rootful/RootHide-defined runs. H3O native/package status vẫn pending.
+
 ## Tiếp theo
 
 Metadata/defaults/security authority, remaining profile producers, cache/thread safety/publication ordering, rootful captured readers và directory cleanup/durability vẫn pending/partial. Whole Reset Data atomicity, catalogue dependency redesign và automatic recovery cleanup không thuộc mốc này.

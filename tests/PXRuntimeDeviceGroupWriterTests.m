@@ -34,6 +34,8 @@ static void ProbeDependencyPublication(void);
 static BOOL gCheckDependencyPublication, gThrowDependencyPublication;
 static BOOL gCheckDashboardPublication, gBadDashboardStorage, gFailDashboardTuple, gIncompleteDashboardTuple;
 static NSDictionary *gDashboardStorage;
+static NSString *gDashboardStorageModel;
+static NSUInteger gDashboardStorageSelections;
 static void ProbeDashboardStorage(NSDictionary *info);
 static void (^gDuringDependencyPublication)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
@@ -213,7 +215,9 @@ ARTIFACT_SINGLETON
 @implementation StorageManager
 ARTIFACT_SINGLETON
 - (NSDictionary *)currentStorageInfo { return gDashboardStorage ?: @{}; }
-- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)model { (void)model; Preparation(); return @"128"; }
+- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)model {
+    gDashboardStorageModel = [model copy]; gDashboardStorageSelections++; Preparation(); return @"128";
+}
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity { Preparation(); return gBadDashboardStorage ? @{} : PXPrepareRuntimeStorage(capacity); }
 - (void)adoptCommittedStorageInfo:(NSDictionary *)info { gDashboardStorage = [info copy]; Adopt(); ProbeDashboardStorage(info); }
 @end
@@ -885,6 +889,7 @@ static void ProbeDashboardStorage(NSDictionary *info) {
     CHECK([persisted isEqual:info], "dashboard storage cache sees complete committed record after ownership release");
 }
 static BOOL SeedDashboard(NSString *identity, NSInteger generation) {
+    gDashboardStorageModel = nil;
     gDashboardStorage = @{ @"TotalStorage": @"64", @"FreeStorage": @"32", @"FilesystemType": @"old", @"cacheExtra": @"preserved" };
     NSDictionary *ids = @{ @"DeviceModel": @"iPhone15,4", @"RegulatoryModelNumber": @"A2846", @"IOSBuild": @"B1",
         @"GenerationCounter": @(generation), @"keep": @YES, @"SSID": @"dashboard-before" };
@@ -930,7 +935,7 @@ static void TestDashboardPreview(PXDeviceGroupFixture *manager, NSString *a, NSS
     gStore.testCheckpoint = nil;
     NSDictionary *storage = [NSDictionary dictionaryWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")];
     CHECK([storage[@"TotalStorage"] isEqual:@"128"] && [storage[@"cacheExtra"] isEqual:@"preserved"] && !storage[@"diskExtra"] &&
-          [storage isEqual:gDashboardStorage], "dashboard storage keeps legacy cache authority and unrelated cached fields");
+          [storage isEqual:gDashboardStorage] && [gDashboardStorageModel isEqual:@"iPhone15,4"], "dashboard storage keeps legacy cache authority and unrelated cached fields");
     NSUInteger totalWrites = writes; CHECK(totalWrites >= 6, "dashboard complete transaction includes all sidecar and storage changes");
     gCheckDashboardPublication = NO; gCheckDependencyPublication = NO;
     for (NSUInteger fault = 1; fault <= totalWrites; fault++) {
@@ -1014,19 +1019,31 @@ static void TestDashboardPreview(PXDeviceGroupFixture *manager, NSString *a, NSS
         CHECK(SeedDashboard(a, 7), "dashboard scalar-only case seeded");
         NSData *storageBefore = [NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")];
         adoptions = gArtifactAdoptions;
+        NSUInteger storageSelections = gDashboardStorageSelections;
         NSInteger expectedGeneration = 7 + [row[@"increment"] integerValue];
         CHECK([manager applyDashboardPreview:row[@"preview"] error:&error] && !error && [IDs(a)[@"GenerationCounter"] integerValue] == expectedGeneration &&
-              adoptions == gArtifactAdoptions && [storageBefore isEqual:[NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]],
+              adoptions == gArtifactAdoptions && storageSelections == gDashboardStorageSelections && [storageBefore isEqual:[NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]],
               "dashboard scalar-only and metadata cases preserve counters without preparing or saving storage");
     }
+    CHECK(SeedDashboard(a, 7), "dashboard changed model storage case seeded");
+    NSMutableDictionary *changedModel = [DashboardPreview() mutableCopy];
+    changedModel[@"DeviceModel"] = @"iPhone16,1"; changedModel[@"IOSProductType"] = @"iPhone16,1";
+    NSUInteger storageSelections = gDashboardStorageSelections;
+    CHECK([manager applyDashboardPreview:changedModel error:&error] && !error && [IDs(a)[@"DeviceModel"] isEqual:@"iPhone16,1"] &&
+          [gDashboardStorageModel isEqual:@"iPhone16,1"] && storageSelections + 1 == gDashboardStorageSelections &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")] isEqual:gDashboardStorage],
+          "dashboard storage selection uses final preview model instead of previous persisted model");
     CHECK(SeedDashboard(a, 7), "dashboard software-only marker seeded");
     NSDictionary *softwareMarker = @{ @"IOSVersion": @"17.0", @"IOSBuild": @"B1", @"Darwin": @"23.0", @"XNU": @"xnu", @"KernelVersion": @"kernel", @"IOSProductType": @"iPhone16,1" };
-    CHECK([manager applyDashboardPreview:softwareMarker error:&error] && !error && [IDs(a)[@"DeviceModel"] isEqual:@"iPhone16,1"] && !IDs(a)[@"IOSProductType"],
+    storageSelections = gDashboardStorageSelections;
+    CHECK([manager applyDashboardPreview:softwareMarker error:&error] && !error && [IDs(a)[@"DeviceModel"] isEqual:@"iPhone16,1"] && !IDs(a)[@"IOSProductType"] &&
+          [gDashboardStorageModel isEqual:@"iPhone16,1"] && storageSelections + 1 == gDashboardStorageSelections,
           "dashboard software-only marker restores prepared model instead of transient generated model");
     CHECK(SeedDashboard(a, 7), "dashboard disabled storage case seeded");
     manager.settings[@"StorageSystem"] = @NO;
     NSData *unchangedStorage = [NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]; adoptions = gArtifactAdoptions;
-    CHECK([manager applyDashboardPreview:DashboardPreview() error:&error] && !error && adoptions == gArtifactAdoptions &&
+    storageSelections = gDashboardStorageSelections;
+    CHECK([manager applyDashboardPreview:DashboardPreview() error:&error] && !error && adoptions == gArtifactAdoptions && storageSelections == gDashboardStorageSelections &&
           [unchangedStorage isEqual:[NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]], "dashboard honors disabled storage while applying model tuple");
     manager.settings[@"StorageSystem"] = @YES;
     CHECK(SeedDashboard(a, 7), "dashboard callback exception baseline seeded");

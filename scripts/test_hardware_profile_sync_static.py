@@ -2,6 +2,7 @@
 """Static regression checks for model/RAM/camera/storage profile parity."""
 
 from pathlib import Path
+from test_runtime_identifier_writers import method
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +10,52 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def reset_storage_contract(dashboard: str, manager: str) -> bool:
+    """Follow the UI adapter into the owned coordinator, not an old UI body."""
+    try:
+        ui = method(dashboard, '- (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview')
+        apply = method(manager, '- (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error')
+    except (ValueError, AssertionError):
+        return False
+    if '[self.manager applyDashboardPreview:preview error:&error]' not in ui:
+        return False
+    # Resolve the final hardware identity before capacity selection, then stage
+    # storage with the identifiers and publish its cache only after commit/release.
+    ordered = (
+        'model = resolved[@"DeviceModel"]',
+        'if (!model.length && requestedVersion.length && tupleProduct.length) model = targetProduct = tupleProduct;',
+        'if (model.length && [self isIdentifierEnabled:@"StorageSystem"])',
+        'randomizeStorageCapacityForDeviceModel:model',
+        'generateStorageForCapacity:capacity',
+        'committed = [mutation performSourceWrite:',
+        'PXStageRuntimeIdentifierState(tx, identity, packet[@"updates"]',
+        '[tx setDictionary:storage atPath:[mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"] error:stageError]',
+        '} error:&writeError];',
+        '[mutation invalidate]',
+        'if (!committed) return NO;',
+        'adoptCommittedStorageInfo:storage',
+    )
+    positions = [apply.find(token) for token in ordered]
+    return all(position >= 0 for position in positions) and positions == sorted(positions)
+
+
+def check_reset_storage_regressions(dashboard: str, manager: str) -> None:
+    # Tokens elsewhere in a file must not hide a broken coordinator/adapter.
+    cases = (
+        ('UI delegation', dashboard, 'applyDashboardPreview:preview error:&error'),
+        ('software-only final model', manager, 'model = targetProduct = tupleProduct;'),
+        ('capacity model', manager, 'randomizeStorageCapacityForDeviceModel:model'),
+        ('storage staging', manager, '[tx setDictionary:storage atPath:'),
+        ('post-commit cache', manager, 'adoptCommittedStorageInfo:storage'),
+    )
+    for name, source, token in cases:
+        assert token in source, f'missing regression fixture token: {name}'
+        broken = source.replace(token, 'BROKEN_STORAGE_CONTRACT') + '\n' + token
+        ui, coordinator = (broken, manager) if name == 'UI delegation' else (dashboard, broken)
+        assert not reset_storage_contract(ui, coordinator), f'gate missed regression: {name}'
+    print(f'PASS: Reset storage gate rejects broken delegation/model/staging/publication ({len(cases)}/{len(cases)})')
 
 
 def main() -> None:
@@ -32,7 +79,7 @@ def main() -> None:
             'hasLiDARScanner', 'supports4KVideo']),
         "schema carries supported storage tiers": 'storageCapacitiesGB' in schema and 'StorageCapacitiesGB' in schema,
         "storage selection is model-aware": "randomizeStorageCapacityForDeviceModel" in storage and 'storageCapacitiesGB' in storage,
-        "Reset reapplies storage from the final fake model": "randomizeStorageCapacityForDeviceModel:model" in dashboard,
+        "Reset reapplies storage from the final fake model": reset_storage_contract(dashboard, manager),
         "fake iOS only preserves current hardware identity": "Fake iOS without Fake Model must preserve the current hardware identity" in dashboard and '@"BoardID", @"HwModel"' in dashboard,
         "iPhone 15 Pro Max storage tiers exclude 128GB": '[model isEqualToString:@"iPhone16,2"] || [model isEqualToString:@"iPhone17,2"]) capacities = @[@256, @512, @1024]' in model,
         "storage selection avoids immediate repeat": "[candidates removeObject:previous]" in storage,
@@ -60,6 +107,7 @@ def main() -> None:
         print("missing models: " + ", ".join(missing))
     if failed:
         raise SystemExit(f"hardware profile sync static test: FAIL ({len(failed)}/{len(checks)})")
+    check_reset_storage_regressions(dashboard, manager)
     print(f"hardware profile sync static test: PASS ({len(checks)}/{len(checks)})")
 
 

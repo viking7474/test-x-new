@@ -43,6 +43,7 @@ def source_contracts():
                  'pending deletion blocks dashboard without partial setters',
                  'dashboard model sidecars tuple storage and legacy counter policy commit together once before caches',
                  'dashboard storage keeps legacy cache authority and unrelated cached fields',
+                 'dashboard storage selection uses final preview model instead of previous persisted model',
                  'dashboard fault at each written source restores hardware tuple sidecars storage counter and token',
                  'dashboard storage preparation failure writes no source',
                  'dashboard model preparation failure has no partial model name serial or storage write',
