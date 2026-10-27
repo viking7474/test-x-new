@@ -113,6 +113,10 @@ def source_contracts():
     for path, _ in WRAPPERS.values():
         assert '#import "PXRuntimeArtifactPreparation.h"' in read(path), path
     fixture = read('tests/PXRuntimeArtifactPreparationTests.m')
+    # Extracting method bodies does not bring their production file's imports.
+    # The linked .m supplies a definition, but clang also needs its real header
+    # before parsing the extracted call (C99 rejects implicit declarations).
+    assert fixture.index('#import "PXProfileDeletionJournal.h"') < fixture.index('#include "PXOwnedBatteryMethods.inc"')
     for case in ('WiFi past connection time cannot unsigned wrap', 'battery weighted buckets retain endpoint policy',
                  'storage rejects unsafe capacity before staging', 'uptime preserves legacy minimum over real uptime',
                  'preparation never writes sources', 'battery batch saves once before notifications',

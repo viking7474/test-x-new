@@ -44,6 +44,8 @@ Borrowed-scope cases dùng actual staging/commit, kiểm tra invalidate/fail/thr
 
 Windows đã pass 15 source/host gates, macro validation, exact native-fragment extraction và git diff check. Foundation/Theos native H3H chưa chạy trên máy này; cần macOS CI. RootHide define fixture không xác nhận actual SDK/namespace hoặc iOS device behavior.
 
+Sau phản hồi CI: owned battery fragment gọi PXRequireNoPendingProfileDeletion nhưng fixture chưa import PXProfileDeletionJournal.h. Runner đã link implementation, tuy nhiên compile vẫn cần declaration trước include method bodies. Đã thêm header thật vào fixture và source regression kiểm tra import đứng trước PXOwnedBatteryMethods.inc; không thêm forward declaration giả hoặc tắt implicit-function-declaration error. Bốn source/host gates liên quan, exact battery-fragment extraction và diff check pass sau sửa. Production BatteryManager đã có import này và không đổi; native compile/runtime sau sửa vẫn chờ macOS CI.
+
 ## Giới hạn và tiếp theo
 
 Global mirror ghi sau release vẫn có thể bị publisher mới hơn vượt qua; mirror/notifications không có total ordering hoặc durable crash-retry. Process exit sau source commit nhưng trước mirror/notify vẫn là convergence concern. Batch/create publication có caller ordering riêng từ H2/H3D; H3H không reorder các adapters hoặc invalidate lease của caller publishCommittedBatteryInfo. Không claim mọi battery callback đều chạy khi mọi caller lease đã nhả.

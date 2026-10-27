@@ -5,6 +5,7 @@
 #import "PXRuntimeArtifactWriter.h"
 #import "PXProfileArtifactMutation.h"
 #import "PXProfileLifecycleLease.h"
+#import "PXProfileDeletionJournal.h"
 #import "PXIdentityValidator.h"
 #import "PXPaths.h"
 #import "TLinkIOSLogging.h"
