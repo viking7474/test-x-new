@@ -18,7 +18,7 @@ method = identifier.method
 SIGNATURES = [
     '- (NSDictionary *)captureDeviceIDsAtIdentityDirectory:(NSString *)identityDir',
     '- (NSString *)regenerateDeviceProfileGroup',
-    '- (NSString *)regenerateDeviceProfileGroupAtIdentityDirectory:(NSString *)identityDir',
+    '- (PXPreparedDeviceProfileGroup *)commitDeviceProfileGroupWithMutation:(PXProfileArtifactMutation *)mutation',
     '- (BOOL)setCustomDeviceModel:(NSString *)value',
     '- (NSDictionary *)generateIOSVersion',
     '- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile',
@@ -71,22 +71,39 @@ def source_contracts():
     for signature in SIGNATURES[:6]:
         body = method(manager, signature)
         assert 'writeToFile:' not in body and 'removeItemAtPath:' not in body
-        if signature != '- (NSString *)regenerateDeviceProfileGroup':
+        if signature == SIGNATURES[0]:
             assert 'PXPerformRuntimeSourceWrite' in body
+        else:
+            assert 'PXPerformRuntimeSourceWrite' not in body
+    for signature in (SIGNATURES[1], SIGNATURES[3], SIGNATURES[4], SIGNATURES[5]):
+        body = method(manager, signature)
+        assert body.count('[self currentIdentifierMutation]') == 1
+        assert '@finally { [mutation invalidate]; }' in body
+        assert 'profileIdentityPath' not in body
     for signature in (SIGNATURES[4], SIGNATURES[5]):
         body = method(manager, signature)
-        assert body.count('[self profileIdentityPath]') == 1
         assert 'captureDeviceIDsAtIdentityDirectory:identityDir' in body
         assert 'PXCellularPreparationDependencies(capturedIDs)' in body
-        assert 'regenerateDeviceProfileGroupAtIdentityDirectory:identityDir' in body
+        assert 'commitDeviceProfileGroupWithMutation:mutation' in body
+        assert '[mutation performSourceWrite:' in body
     ios = method(manager, SIGNATURES[4])
     assert 'iosBuild:iosBuild' in ios and 'PXPopulateCanonicalCellularIdentity' in ios
     assert 'expected, NO, YES, error' in ios
     assert ios.index('if (!success)') < ios.index('setCurrentIOSVersionInfo:versionDict')
+    assert ios.index('[mutation invalidate]') < ios.index('publishPreparedDeviceProfileGroup:prepared')
+    assert '[mutation invalidate];\n        [[IOSVersionInfo sharedManager] setCurrentIOSVersionInfo:versionDict]' in ios
+    custom = method(manager, SIGNATURES[3])
+    assert '[value copy]' in custom and '[mutation performSourceWrite:' in custom
+    assert custom.index('[mutation invalidate]') < custom.index('setCurrentDeviceModel:value')
     group = method(manager, SIGNATURES[2])
     assert '[NSMutableDictionary dictionaryWithContentsOfFile:' not in group
     assert 'prepared.updates, prepared.replacedKeys, nil, YES, YES, error' in group
-    assert group.index('if (!wrote)') < group.index('publishPreparedDeviceProfileGroup:prepared')
+    assert '[mutation performSourceWrite:' in group and 'mutation.identityDirectory' in group
+    assert 'publishPreparedDeviceProfileGroup:' not in group and '[mutation invalidate]' not in group
+    assert 'currentIdentifierMutation' not in group and 'return wrote ? prepared : nil' in group
+    wrapper = method(manager, SIGNATURES[1])
+    assert wrapper.index('[mutation invalidate]') < wrapper.index('publishPreparedDeviceProfileGroup:prepared')
+    assert 'regenerateDeviceProfileGroupAtIdentityDirectory:' not in manager
     builder = method(manager, '- (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error')
     assert 'initWithUpdates:deviceIds replacedKeys:managedKeys versionInfo:version error:error' in builder
     for forbidden in ('self.error', 'profileIdentityPath', 'PXPerformRuntimeSourceWrite', 'setCurrentIOSVersionInfo:', 'setCurrentDeviceModel:'):
@@ -105,9 +122,25 @@ def source_contracts():
                  'cellular refresh preserves valid IMEI', 'missing model fallback keeps captured target',
                  'known cellular without firmware fails closed', 'counter exhaustion leaves entire group intact'):
         assert case in fixture, case
+    for case in ('dependency APIs including fallbacks fail busy before target preparation and publication',
+                 'dependency APIs including fallbacks stop at pending deletion',
+                 'dependency preparation reentry fails busy instead of acquiring recursively',
+                 'dependency success and missing tuple fallbacks share scope without changing counter policy',
+                 'dependency preparation exception preserves sources caches and releases ownership',
+                 'dependency late deletion prevents tuple sidecar removal and publication',
+                 'dependency namespace replacement never stages or removes competitor files',
+                 'owned dependency commit fault restores complete tuple sidecars counter and token',
+                 'dependency compatibility callback can acquire fresh scope after release',
+                 'throwing software publication preserves already committed source',
+                 'custom model detaches mutable caller before DB callbacks and publication',
+                 'missing dependency selection rejects before provider work',
+                 'owned custom model preserves non iPhone validation fallback and counter',
+                 'invalid custom model keeps validation before target ownership'):
+        assert case in fixture, case
+    assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3J-partial'
+    assert manifest['rollout'] == '4C.2H3K-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

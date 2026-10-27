@@ -30,6 +30,9 @@ static void (^gDuringPrepare)(void);
 static void (^gDuringPublication)(void);
 static void (^gDuringResolve)(void);
 static void CheckLeaseFree(void);
+static void ProbeDependencyPublication(void);
+static BOOL gCheckDependencyPublication, gThrowDependencyPublication;
+static void (^gDuringDependencyPublication)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
@@ -154,6 +157,7 @@ static NSDictionary *Model(NSString *product) {
     gCacheChanges++;
     CHECK(Snapshot(gExpectedIdentity) != nil && [IDs(gExpectedIdentity)[@"DeviceModel"] isEqual:product] && !HasLegacy(gExpectedIdentity),
           "model compatibility callback runs after complete commit outside gate");
+    ProbeDependencyPublication();
 }
 @end
 @interface IOSVersionInfo : NSObject
@@ -166,6 +170,7 @@ static NSDictionary *Model(NSString *product) {
     gCacheChanges++;
     CHECK(Snapshot(gExpectedIdentity) != nil && [IDs(gExpectedIdentity)[@"IOSBuild"] isEqual:value[@"build"]] && !HasLegacy(gExpectedIdentity),
           "software compatibility callback runs after complete commit outside gate");
+    ProbeDependencyPublication();
 }
 @end
 #define ARTIFACT_SINGLETON + (instancetype)sharedManager { static id instance; static dispatch_once_t once; dispatch_once(&once, ^{ instance = [self new]; }); return instance; }
@@ -728,6 +733,130 @@ static void TestTelephonyLifecycle(PXDeviceGroupFixture *manager, NSString *a, N
           [IDs(a)[@"IMEI"] isEqual:imei] && [IDs(a)[@"MEID"] isEqual:meid], "telephony copies type before provider can mutate caller input");
     CheckLeaseFree();
 }
+static void ProbeDependencyPublication(void) {
+    if (!gCheckDependencyPublication) return;
+    CheckLeaseFree();
+    void (^callback)(void) = gDuringDependencyPublication; gDuringDependencyPublication = nil;
+    if (callback) callback();
+    if (gThrowDependencyPublication) [NSException raise:@"fixture" format:@"dependency publication exception"];
+}
+static BOOL InvokeDependency(PXDeviceGroupFixture *manager, NSUInteger mode) {
+    if (mode == 0) return [manager regenerateDeviceProfileGroup] != nil;
+    if (mode == 1) return [manager setCustomDeviceModel:@"iPhone16,1"];
+    if (mode == 2 || mode == 4) return [manager generateIOSVersion] != nil;
+    return [manager refreshCanonicalCellularIdentityForCurrentProfile];
+}
+static void CheckDependencyLeaseHeld(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(!lease && error.code == 12, "model software cellular hold lifecycle across target and preparation");
+    [lease invalidate];
+    CHECK(Snapshot(gExpectedIdentity) != nil, "dependency providers run outside source gate");
+}
+static void TestDependencyLifecycle(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a; gBuild = @"B1";
+    manager.settings = [@{ @"IMEI": @YES, @"MEID": @YES } mutableCopy];
+    NSString *imei = PXGenerateIMEIFromAuthoritativeTACs(@[@"12345678"]);
+    NSString *meid = PXGenerateMEIDFromAuthoritativePrefixes(@[@"A00000"]);
+    NSDictionary *full = @{ @"DeviceModel": @"iPhone15,4", @"RegulatoryModelNumber": @"A2846", @"IOSBuild": @"B1",
+        @"GenerationCounter": @12, @"IMEI": imei, @"MEID": meid, @"SSID": @"before" };
+    NSDictionary *empty = @{ @"GenerationCounter": @12, @"SSID": @"fallback" };
+    for (NSUInteger mode = 0; mode < 8; mode++) {
+        NSMutableDictionary *baseline = [(mode == 4 || mode == 5 ? empty : full) mutableCopy];
+        if (mode == 6) [baseline removeObjectForKey:@"RegulatoryModelNumber"];
+        if (mode == 7) [baseline removeObjectForKey:@"IOSBuild"];
+        gSelected = @"a";
+        CHECK(Seed(a, baseline, YES), "dependency lifecycle baseline seeded");
+        PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+        CHECK(owner != nil, "dependency competing owner acquired");
+        NSUInteger selections = gSelections, preparations = gPreparations, caches = gCacheChanges;
+        NSDictionary *before = BatchSnapshot();
+        CHECK(!InvokeDependency(manager, mode) && manager.error.code == 12 && selections == gSelections && preparations == gPreparations &&
+              caches == gCacheChanges && [before isEqual:BatchSnapshot()], "dependency APIs including fallbacks fail busy before target preparation and publication");
+        CHECK([owner validateForDirectory:gRoot error:NULL], "busy dependency writer preserves competing capability");
+        [owner invalidate]; CheckLeaseFree();
+        CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"pending"), "dependency pending deletion seeded");
+        before = BatchSnapshot();
+        CHECK(!InvokeDependency(manager, mode) && manager.error.code == 27 && selections == gSelections && preparations == gPreparations &&
+              caches == gCacheChanges && [before isEqual:BatchSnapshot()], "dependency APIs including fallbacks stop at pending deletion");
+        CHECK(ClearDeletionIntent(), "dependency pending deletion cleared"); CheckLeaseFree();
+        gDuringResolve = ^{ CheckDependencyLeaseHeld(); };
+        gDuringPrepare = ^{
+            CheckDependencyLeaseHeld();
+            CHECK(![manager refreshCanonicalCellularIdentityForCurrentProfile] && manager.error.code == 12,
+                  "dependency preparation reentry fails busy instead of acquiring recursively");
+        };
+        gCheckDependencyPublication = YES;
+        CHECK(InvokeDependency(manager, mode) && !manager.error && [IDs(a)[@"GenerationCounter"] isEqual:((mode == 1 || mode == 2) ? @12 : @13)],
+              "dependency success and missing tuple fallbacks share scope without changing counter policy");
+        gCheckDependencyPublication = NO; CheckLeaseFree();
+        CHECK(Seed(a, baseline, YES), "dependency exception baseline seeded"); before = BatchSnapshot(); caches = gCacheChanges;
+        gDuringPrepare = ^{ CheckDependencyLeaseHeld(); [NSException raise:@"fixture" format:@"dependency provider exception"]; };
+        BOOL threw = NO;
+        @try { (void)InvokeDependency(manager, mode); } @catch (NSException *exception) { (void)exception; threw = YES; }
+        CHECK(threw && caches == gCacheChanges && [before isEqual:BatchSnapshot()], "dependency preparation exception preserves sources caches and releases ownership"); CheckLeaseFree();
+        __block NSDictionary *competitor = nil;
+        gDuringPrepare = ^{
+            CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"late"), "dependency late journal committed by bypass writer");
+            competitor = BatchSnapshot();
+        };
+        CHECK(!InvokeDependency(manager, mode) && manager.error.code == 27 && caches == gCacheChanges && [competitor isEqual:BatchSnapshot()],
+              "dependency late deletion prevents tuple sidecar removal and publication");
+        CHECK(ClearDeletionIntent(), "dependency late journal cleared"); CheckLeaseFree();
+        for (NSUInteger kind = 0; kind < 3; kind++) {
+            NSString *old = Path(a.stringByDeletingLastPathComponent, @"owned-old-dependency");
+            __block BOOL moved = NO; competitor = nil;
+            gDuringPrepare = ^{
+                moved = [NSFileManager.defaultManager moveItemAtPath:a toPath:old error:NULL];
+                if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:a withIntermediateDirectories:NO attributes:nil error:NULL];
+                if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:a withDestinationPath:b error:NULL];
+                competitor = BatchSnapshot();
+            };
+            CHECK(!InvokeDependency(manager, mode) && manager.error && moved && caches == gCacheChanges && [competitor isEqual:BatchSnapshot()],
+                  "dependency namespace replacement never stages or removes competitor files");
+            if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:a error:NULL], "dependency replacement fixture removed");
+            CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:a error:NULL], "dependency identity restored"); CheckLeaseFree();
+        }
+        before = BatchSnapshot();
+        __block BOOL interrupted = NO;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if (!interrupted && [stage isEqual:@"source-written"]) { interrupted = YES; [NSException raise:@"fixture" format:@"owned dependency commit fault"]; }
+        };
+        CHECK(!InvokeDependency(manager, mode) && manager.error && interrupted && caches == gCacheChanges && [before isEqual:BatchSnapshot()],
+              "owned dependency commit fault restores complete tuple sidecars counter and token");
+        gStore.testCheckpoint = nil; CheckLeaseFree();
+    }
+    CHECK(Seed(a, full, YES), "dependency callback baseline seeded");
+    gCheckDependencyPublication = YES;
+    __block BOOL reentered = NO;
+    gDuringDependencyPublication = ^{
+        reentered = [manager refreshCanonicalCellularIdentityForCurrentProfile];
+        CHECK(reentered, "dependency compatibility callback can acquire fresh scope after release");
+    };
+    CHECK([manager regenerateDeviceProfileGroup] && reentered, "dependency callback reentry completes without recursive ownership");
+    gThrowDependencyPublication = YES; gBuild = @"B2";
+    BOOL threw = NO;
+    @try { [manager generateIOSVersion]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [IDs(a)[@"IOSBuild"] isEqual:@"B2"], "throwing software publication preserves already committed source");
+    gThrowDependencyPublication = NO; gCheckDependencyPublication = NO; CheckLeaseFree();
+    CHECK(Seed(a, full, YES), "mutable custom model baseline seeded");
+    NSMutableString *input = [@"iPhone16,1" mutableCopy];
+    gDuringPrepare = ^{ [input setString:@"iPhone-mutated"]; };
+    CHECK([manager setCustomDeviceModel:input] && [IDs(a)[@"DeviceModel"] isEqual:@"iPhone16,1"],
+          "custom model detaches mutable caller before DB callbacks and publication"); CheckLeaseFree();
+    CHECK([manager setCustomDeviceModel:@"iPad1,1"] && [IDs(a)[@"GenerationCounter"] isEqual:@12] && !IDs(a)[@"IOSBuild"],
+          "owned custom model preserves non iPhone validation fallback and counter"); CheckLeaseFree();
+    NSUInteger selections = gSelections;
+    CHECK(![manager setCustomDeviceModel:@"invalid-model"] && manager.error.code == 2003 && selections == gSelections,
+          "invalid custom model keeps validation before target ownership");
+    gSelected = nil;
+    NSUInteger preparations = gPreparations; NSDictionary *before = BatchSnapshot();
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        CHECK(!InvokeDependency(manager, mode) && manager.error && preparations == gPreparations && [before isEqual:BatchSnapshot()],
+              "missing dependency selection rejects before provider work"); CheckLeaseFree();
+    }
+    gSelected = @"a";
+}
 static void TestGenerationLifecycle(PXDeviceGroupFixture *manager, NSString *a) {
     gSelected = @"a"; gExpectedIdentity = a;
     manager.settings = [@{ @"DeviceModel": @YES, @"IMEI": @YES, @"MEID": @YES } mutableCopy];
@@ -922,6 +1051,7 @@ int main(void) {
         TestGenerationLifecycle(manager, Identity(@"a"));
         TestExplicitCreationGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestDeferredActivation(manager, Identity(@"a"));
+        TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"));
         TestTelephonyLifecycle(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
