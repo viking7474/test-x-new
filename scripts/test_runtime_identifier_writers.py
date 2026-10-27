@@ -54,6 +54,7 @@ def selected_signatures():
             '- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type',
             '- (void)setATTAuthorizationStatus:(NSInteger)status', '- (BOOL)setCustomDeviceTheme:(NSString *)value',
             '- (NSString *)generateSystemUptime', '- (NSString *)generateBootTime',
+            '- (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot',
             '- (void)migrateProfileSchemaIfNeeded', '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir']
 
 
@@ -97,6 +98,25 @@ def source_contracts():
     assert 'PXAdvanceRuntimeIdentifierGeneration(deviceIds, error)' in migration
     assert 'schemaVersion >= 2' in migration and 'profileBatteryPath' in migration
     assert migration.index('}, &writeError)') < migration.index('PXLog('), 'migration logs must run after unlock'
+    uptime = method(manager, '- (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot')
+    assert '[self currentIdentifierMutation]' in uptime and '@finally { [mutation invalidate]; }' in uptime
+    assert 'generateIfMissing:NO' in uptime and 'prepareConsistentUptimeInfo' in uptime
+    assert '[mutation performSourceWrite:' in uptime and 'PXStageRuntimeUptime' in uptime
+    assert uptime.index('PXStageRuntimeUptime') < uptime.index('PXStageRuntimeIdentifierState')
+    assert uptime.index('[mutation invalidate]') < uptime.index('adoptCommittedUptimeInfo:')
+    assert 'PXPerformRuntimeSourceWrite' not in uptime
+    for name, flag in (('generateSystemUptime', 'NO'), ('generateBootTime', 'YES')):
+        assert f'generateUptimeCompatibilityForBootTime:{flag}' in method(manager, '- (NSString *)' + name)
+    for case in ('busy uptime compatibility rejects before target read provider and source mutation',
+                 'pending deletion blocks both uptime compatibility paths',
+                 'uptime compatibility reentry fails busy without getter generation',
+                 'uptime read hit or missing pair commits once and adopts only after success',
+                 'uptime read exception releases ownership without cache or source effects',
+                 'uptime preparation exception cannot publish or leak lifecycle',
+                 'late delete rejects compatibility pair initialization and scalar together',
+                 'uptime compatibility rejects missing replaced and symlink identity without adopting cache',
+                 'uptime compatibility transaction failure rolls back pair scalar and commit token'):
+        assert case in fixture, case
     identity = method(manager, '- (NSString *)profileIdentityPath')
     assert 'static _Thread_local BOOL sMigratingSchema' in identity and '@finally { sMigratingSchema = NO; }' in identity
     assert '[self migrateProfileSchemaAtIdentityDirectory:identityDir]' in identity
@@ -139,7 +159,7 @@ def source_contracts():
         assert 'common/PXRuntimeIdentifierWriter.m' in read('scripts/' + runner), 'new allowlist registry must link transitively'
     assert 'test_runtime_identifier_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3K-partial'
+    assert manifest['rollout'] == '4C.2H3L-partial'
     for name in ('identifier-values', 'identifier-migration', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -183,7 +203,8 @@ def native_tests():
         sources = ['common/PXRuntimeScalarPreparation.m', 'common/PXIdentityValidator.m', 'common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m',
                    'common/PXRuntimePublisher.m', 'common/PXProfileArtifactMutation.m',
                    'common/PXProfileLifecycleLease.m', 'common/PXProfileDeletionJournal.m',
-                   'common/PXRuntimeProfileSelection.m', 'tests/PXRuntimeIdentifierWriterTests.m']
+                   'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeArtifactWriter.m',
+                   'common/PXRuntimeArtifactPreparation.m', 'tests/PXRuntimeIdentifierWriterTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / ('identifier-' + scheme)
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',

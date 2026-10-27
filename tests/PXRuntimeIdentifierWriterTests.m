@@ -3,6 +3,8 @@
 #import <Security/Security.h>
 #import "PXRuntimeScalarPreparation.h"
 #import "PXRuntimeIdentifierWriter.h"
+#import "PXRuntimeArtifactWriter.h"
+#import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimePublisher.h"
 #import "PXProfileArtifactMutation.h"
 #import "PXProfileLifecycleLease.h"
@@ -107,13 +109,38 @@ static void PXFixtureSet(PXGenerator *manager, NSString *key, NSString *value) {
 }
 // Generated fixture provider adapters; production IdentifierManager method bodies follow.
 #include "PXIdentifierFixtureProviders.inc"
+static BOOL gMissingUptime;
+static NSUInteger gUptimeReads, gUptimePreparations, gUptimeAdoptions;
+static void (^gDuringUptimeRead)(void), (^gDuringUptimePrepare)(void);
 @interface UptimeManager : PXGenerator
-- (NSTimeInterval)currentUptimeForProfile:(NSString *)path;
-- (NSDate *)currentBootTimeForProfile:(NSString *)path;
+- (NSTimeInterval)currentUptimeForProfile:(NSString *)path generateIfMissing:(BOOL)generate;
+- (NSDate *)currentBootTimeForProfile:(NSString *)path generateIfMissing:(BOOL)generate;
+- (NSDictionary *)prepareConsistentUptimeInfo;
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp;
 @end
 @implementation UptimeManager
-- (NSTimeInterval)currentUptimeForProfile:(NSString *)path { (void)path; if (gDuringGeneration) gDuringGeneration(); return 7200; }
-- (NSDate *)currentBootTimeForProfile:(NSString *)path { (void)path; if (gDuringGeneration) gDuringGeneration(); return [NSDate dateWithTimeIntervalSince1970:123456]; }
+- (void)checkRead:(BOOL)generate {
+    CHECK(!generate, "identifier compatibility reads never recursively auto generate");
+    gUptimeReads++;
+    void (^callback)(void) = gDuringUptimeRead; gDuringUptimeRead = nil; if (callback) callback();
+}
+- (NSTimeInterval)currentUptimeForProfile:(NSString *)path generateIfMissing:(BOOL)generate {
+    (void)path; [self checkRead:generate]; return gMissingUptime ? 0 : 7200;
+}
+- (NSDate *)currentBootTimeForProfile:(NSString *)path generateIfMissing:(BOOL)generate {
+    (void)path; [self checkRead:generate]; return gMissingUptime ? nil : [NSDate dateWithTimeIntervalSince1970:123456];
+}
+- (NSDictionary *)prepareConsistentUptimeInfo {
+    gUptimePreparations++;
+    void (^callback)(void) = gDuringUptimePrepare; gDuringUptimePrepare = nil; if (callback) callback();
+    return PXPrepareRuntimeUptime([NSDate dateWithTimeIntervalSince1970:1700000000], 0, NO);
+}
+- (void)adoptCommittedUptimeInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp {
+    (void)timestamp; gUptimeAdoptions++; CheckIdentifierLeaseFree();
+    NSString *bootScalar = [NSString stringWithFormat:@"%.0f", [info[@"boot"][@"value"] timeIntervalSince1970]];
+    CHECK([IDs(gExpectedIdentity)[@"BootTime"] isEqual:bootScalar] &&
+          [Load(Path(gExpectedIdentity, @"boot_time.plist"))[@"value"] isEqual:info[@"boot"][@"value"]], "compatibility uptime adoption sees committed pair after release");
+}
 @end
 #include "PXIdentifierFixtureStatics.inc"
 @interface PXIdentifierFixture : NSObject
@@ -382,10 +409,100 @@ static void TestScalarLifecycle(PXIdentifierFixture *manager, NSString *a, NSStr
     gSelected = @"a";
 }
 
+static NSString *InvokeUptimeCompatibility(PXIdentifierFixture *manager, BOOL boot) {
+    return boot ? [manager generateBootTime] : [manager generateSystemUptime];
+}
+static BOOL SeedCompatibilityUptime(NSString *identity) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{ @"ProfileSchemaVersion": @2, @"GenerationCounter": @12, @"keep": @YES }
+                         atPath:Path(identity, @"device_ids.plist") error:error] &&
+            [tx removeDictionaryAtPath:Path(identity, @"boot_time.plist") error:error] &&
+            [tx removeDictionaryAtPath:Path(identity, @"system_uptime.plist") error:error];
+    } error:NULL];
+}
+static void TestUptimeCompatibilityLifecycle(PXIdentifierFixture *manager, NSString *identity, NSString *other) {
+    gSelected = @"owned-time"; gExpectedIdentity = identity;
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        BOOL boot = mode % 2; gMissingUptime = mode >= 2;
+        CHECK(SeedCompatibilityUptime(identity), "compatibility uptime baseline seeded");
+        PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+        CHECK(owner != nil, "compatibility uptime competing owner acquired");
+        NSUInteger selections = gSelections, reads = gUptimeReads, preparations = gUptimePreparations, adoptions = gUptimeAdoptions;
+        NSDictionary *before = IdentifierAllFiles();
+        CHECK(!InvokeUptimeCompatibility(manager, boot) && manager.error.code == 12 && selections == gSelections && reads == gUptimeReads &&
+              preparations == gUptimePreparations && adoptions == gUptimeAdoptions && [before isEqual:IdentifierAllFiles()],
+              "busy uptime compatibility rejects before target read provider and source mutation");
+        [owner invalidate]; CheckIdentifierLeaseFree();
+        CHECK(IdentifierDeleteIntent(YES), "compatibility uptime pending deletion seeded"); before = IdentifierAllFiles();
+        CHECK(!InvokeUptimeCompatibility(manager, boot) && manager.error.code == 27 && selections == gSelections && reads == gUptimeReads &&
+              preparations == gUptimePreparations && [before isEqual:IdentifierAllFiles()], "pending deletion blocks both uptime compatibility paths");
+        CHECK(IdentifierDeleteIntent(NO), "compatibility uptime pending deletion cleared");
+        gDuringUptimeRead = ^{
+            CheckIdentifierLeaseHeld();
+            CHECK(![manager generateBootTime] && manager.error.code == 12, "uptime compatibility reentry fails busy without getter generation");
+        };
+        __block NSUInteger commits = 0;
+        gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+        NSString *result = InvokeUptimeCompatibility(manager, boot); gStore.testCheckpoint = nil;
+        CHECK(result && !manager.error && commits == 1 && reads + 1 == gUptimeReads &&
+              preparations + (gMissingUptime ? 1 : 0) == gUptimePreparations && adoptions + (gMissingUptime ? 1 : 0) == gUptimeAdoptions &&
+              [IDs(identity)[@"GenerationCounter"] isEqual:@12] && [IDs(identity)[@"keep"] boolValue],
+              "uptime read hit or missing pair commits once and adopts only after success");
+        NSString *key = boot ? @"BootTime" : @"SystemUptime", *file = boot ? @"boot_time.plist" : @"system_uptime.plist";
+        CHECK([IDs(identity)[key] isKindOfClass:NSString.class] &&
+              [Load(Path(identity, file))[@"value"] isKindOfClass:(boot ? NSDate.class : NSString.class)], "uptime compatibility preserves persisted date seconds and display types");
+        if (gMissingUptime) {
+            CHECK([IDs(identity)[@"SystemUptime"] isKindOfClass:NSString.class] && [IDs(identity)[@"BootTime"] isKindOfClass:NSString.class] &&
+                  [Load(Path(identity, @"boot_time.plist"))[@"value"] isKindOfClass:NSDate.class] &&
+                  [Load(Path(identity, @"system_uptime.plist"))[@"value"] isKindOfClass:NSString.class], "missing compatibility uptime initializes both source records atomically");
+        }
+        if (!boot) {
+            NSString *display = [NSString stringWithFormat:@"%.2f hours", [IDs(identity)[key] doubleValue] / 3600.0];
+            CHECK([result isEqual:display], "uptime compatibility display keeps hours while persistence uses seconds");
+        }
+        CheckIdentifierLeaseFree();
+        CHECK(SeedCompatibilityUptime(identity), "compatibility uptime failure baseline seeded"); before = IdentifierAllFiles(); adoptions = gUptimeAdoptions;
+        gDuringUptimeRead = ^{ CheckIdentifierLeaseHeld(); [NSException raise:@"fixture" format:@"uptime read failure"]; };
+        BOOL threw = NO;
+        @try { (void)InvokeUptimeCompatibility(manager, boot); } @catch (NSException *exception) { (void)exception; threw = YES; }
+        CHECK(threw && adoptions == gUptimeAdoptions && [before isEqual:IdentifierAllFiles()], "uptime read exception releases ownership without cache or source effects"); CheckIdentifierLeaseFree();
+        if (gMissingUptime) {
+            gDuringUptimePrepare = ^{ CheckIdentifierLeaseHeld(); [NSException raise:@"fixture" format:@"uptime prepare failure"]; }; threw = NO;
+            @try { (void)InvokeUptimeCompatibility(manager, boot); } @catch (NSException *exception) { (void)exception; threw = YES; }
+            CHECK(threw && adoptions == gUptimeAdoptions && [before isEqual:IdentifierAllFiles()], "uptime preparation exception cannot publish or leak lifecycle"); CheckIdentifierLeaseFree();
+        }
+        __block NSDictionary *competitor = nil;
+        gDuringUptimeRead = ^{ CHECK(IdentifierDeleteIntent(YES), "uptime compatibility late delete seeded"); competitor = IdentifierAllFiles(); };
+        CHECK(!InvokeUptimeCompatibility(manager, boot) && manager.error.code == 27 && adoptions == gUptimeAdoptions && [competitor isEqual:IdentifierAllFiles()],
+              "late delete rejects compatibility pair initialization and scalar together");
+        CHECK(IdentifierDeleteIntent(NO), "uptime compatibility late intent cleared"); CheckIdentifierLeaseFree();
+        for (NSUInteger kind = 0; kind < 3; kind++) {
+            NSString *old = Path(identity.stringByDeletingLastPathComponent, @"old-compatibility-time"); __block BOOL moved = NO;
+            gDuringUptimeRead = ^{
+                moved = [NSFileManager.defaultManager moveItemAtPath:identity toPath:old error:NULL];
+                if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:identity withIntermediateDirectories:NO attributes:nil error:NULL];
+                if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:identity withDestinationPath:other error:NULL];
+                competitor = IdentifierAllFiles();
+            };
+            CHECK(!InvokeUptimeCompatibility(manager, boot) && manager.error && moved && adoptions == gUptimeAdoptions && [competitor isEqual:IdentifierAllFiles()],
+                  "uptime compatibility rejects missing replaced and symlink identity without adopting cache");
+            if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:identity error:NULL], "uptime compatibility replacement fixture removed");
+            CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:identity error:NULL], "uptime compatibility original identity restored"); CheckIdentifierLeaseFree();
+        }
+        before = IdentifierAllFiles(); __block BOOL interrupted = NO;
+        gStore.testCheckpoint = ^(NSString *phase) {
+            if (!interrupted && [phase isEqual:@"source-written"]) { interrupted = YES; [NSException raise:@"fixture" format:@"uptime compatibility commit failure"]; }
+        };
+        CHECK(!InvokeUptimeCompatibility(manager, boot) && manager.error && interrupted && adoptions == gUptimeAdoptions && [before isEqual:IdentifierAllFiles()],
+              "uptime compatibility transaction failure rolls back pair scalar and commit token");
+        gStore.testCheckpoint = nil; CheckIdentifierLeaseFree();
+    }
+    gMissingUptime = NO; gSelected = @"a";
+}
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
-        for (NSString *profile in @[@"a", @"b", @"custom", @"migration", @"failure", @"corrupt", @"race", @"throw", @"owned-legacy", @"owned-throw"]) {
+        for (NSString *profile in @[@"a", @"b", @"custom", @"migration", @"failure", @"corrupt", @"race", @"throw", @"owned-legacy", @"owned-throw", @"owned-time"]) {
             [NSFileManager.defaultManager createDirectoryAtPath:PXProfileIdentityPath(profile) withIntermediateDirectories:YES attributes:nil error:nil];
         }
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:Path(gRoot, @"control") owner:geteuid() group:getegid()
@@ -399,6 +516,7 @@ int main(void) {
         TestCustomAndMetadata(manager, PXProfileIdentityPath(@"custom"));
         TestMigration(manager, PXProfileIdentityPath(@"migration"), PXProfileIdentityPath(@"failure"), PXProfileIdentityPath(@"race"), PXProfileIdentityPath(@"throw"));
         TestScalarLifecycle(manager, PXProfileIdentityPath(@"a"), PXProfileIdentityPath(@"b"));
+        TestUptimeCompatibilityLifecycle(manager, PXProfileIdentityPath(@"owned-time"), PXProfileIdentityPath(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime identifier writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

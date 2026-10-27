@@ -77,7 +77,7 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3K-partial'
+    assert manifest['rollout'] == '4C.2H3L-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -162,7 +162,9 @@ def source_contracts():
     assert 'initWithSuiteName:@"com.hydra.tlinkios.settings"' in storage, 'defaults authority rollout remains pending'
     uptime_save = objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath')
     assert uptime_save.index('[mutation performSourceWrite:') < uptime_save.index('self.bootTimeValue = bootTime')
-    assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in uptime_save
+    provider = objc_method(uptime, '- (NSDictionary *)prepareConsistentUptimeInfo')
+    assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in provider
+    assert uptime_save.index('acquireWithIdentityResolver:') < uptime_save.index('[self prepareConsistentUptimeInfo]') < uptime_save.index('[mutation performSourceWrite:')
     assert 'if (uptime < minUptime) uptime = minUptime;' in read('common/PXRuntimeArtifactPreparation.m'), 'generation policy must not silently change'
     for token in ('network IPv6 precedence preserved', 'existing IPv6 avoids generation',
                   'profile switch during prepare cannot redirect', 'prepared candidate cannot overwrite',

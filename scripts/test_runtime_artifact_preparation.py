@@ -39,7 +39,12 @@ WRAPPERS = {
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
         '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
         '- (void)setTotalStorageCapacity:(NSString *)capacity', '- (void)setFreeStorageSpace:(NSString *)freeSpace', '- (void)setFilesystemType:(NSString *)fsType']),
-    'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', ['- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath', '- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp']),
+    'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', ['- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath', '- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp',
+        '- (NSDictionary *)prepareConsistentUptimeInfo',
+        '- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath',
+        '- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath',
+        '- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing',
+        '- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing']),
 }
 
 
@@ -93,10 +98,23 @@ def source_contracts():
 
     assert 'PXPrepareRuntimeStorage(capacity)' in read('common/StorageManager.m')
     uptime = identifier.method(read('common/UptimeManager.m'), WRAPPERS['PXPreparedUptimeMethod.inc'][1][0])
-    assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in uptime
-    assert uptime.index('acquireWithIdentityResolver:') < uptime.index('sysctl(mib') < uptime.index('[mutation performSourceWrite:')
+    provider = identifier.method(read('common/UptimeManager.m'), '- (NSDictionary *)prepareConsistentUptimeInfo')
+    assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in provider
+    assert uptime.index('acquireWithIdentityResolver:') < uptime.index('[self prepareConsistentUptimeInfo]') < uptime.index('[mutation performSourceWrite:')
     assert uptime.index('[mutation invalidate]') < uptime.index('self.bootTimeValue = bootTime')
     assert '@finally { [mutation invalidate]; }' in uptime and 'createDirectoryAtPath:' not in uptime
+    for typename, name, sentinel in (('NSTimeInterval', 'currentUptimeForProfile', '0'), ('NSDate *', 'currentBootTimeForProfile', 'nil')):
+        typename = typename.rstrip()
+        signature = f'- ({typename}){name}:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing'
+        body = identifier.method(read('common/UptimeManager.m'), signature)
+        assert f'if (!generateIfMissing) return {sentinel};' in body
+        assert body.index('if (!generateIfMissing)') < body.index('[self generateConsistentUptimeAndBootTimeForProfile:')
+    for case in ('read only uptime preserves boot precedence and avoids lock generation persistence and cache adoption',
+                 'read only uptime preserves elapsed sidecar and boot scalar fallbacks',
+                 'malformed uptime sidecar fields fall through instead of sending unsafe selectors',
+                 'read only missing or malformed uptime returns sentinel without creating profile or source',
+                 'legacy uptime getters retain safe default policy when generation is busy'):
+        assert case in read('tests/PXRuntimeArtifactPreparationTests.m'), case
     storage = read('common/StorageManager.m')
     persist = identifier.method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
     assert persist.index('acquireWithProfileIDResolver:') < persist.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()') < persist.index('[_storageSettings copy]')
@@ -208,7 +226,7 @@ def source_contracts():
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3K-partial'
+    assert manifest['rollout'] == '4C.2H3L-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')

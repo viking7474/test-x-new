@@ -28,6 +28,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath;
 - (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp;
 
+// With NO, a miss returns 0/nil without generation, persistence or cache adoption.
+// Used by writers already owning the profile lifecycle scope.
+- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing;
+- (nullable NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing;
+// Provider preparation only: no persistence, lifecycle acquire or cache effects.
+- (NSDictionary *)prepareConsistentUptimeInfo;
+
 // Data validation
 - (BOOL)validateBootTimeConsistencyForProfile:(NSString *)profilePath;
 

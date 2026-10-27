@@ -63,6 +63,16 @@ static NSString * const kCreationTimeKey = @"creationTime";
     self.error = nil;
 }
 
+- (NSDictionary *)prepareConsistentUptimeInfo {
+    struct timeval boottv = {0};
+    size_t sz = sizeof(boottv);
+    int mib[2] = {CTL_KERN, KERN_BOOTTIME};
+    int sysctlResult = sysctl(mib, 2, &boottv, &sz, NULL, 0);
+    NSDate *now = [NSDate date];
+    NSTimeInterval realUptime = sysctlResult == 0 ? now.timeIntervalSince1970 - boottv.tv_sec : 0;
+    return PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0);
+}
+
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath {
     PXProfileArtifactMutation *mutation = nil;
     @try {
@@ -83,13 +93,8 @@ static NSString * const kCreationTimeKey = @"creationTime";
         mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{ return profilePath; } error:&writeError];
         if (!mutation) { self.error = writeError; return; }
 
-        struct timeval boottv = {0};
-        size_t sz = sizeof(boottv);
-        int mib[2] = {CTL_KERN, KERN_BOOTTIME};
-        int sysctlResult = sysctl(mib, 2, &boottv, &sz, NULL, 0);
-        NSDate *now = [NSDate date];
-        NSTimeInterval realUptime = sysctlResult == 0 ? now.timeIntervalSince1970 - boottv.tv_sec : 0;
-        NSDictionary *prepared = PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0);
+        NSDictionary *prepared = [self prepareConsistentUptimeInfo];
+        NSDate *now = prepared[@"boot"][@"lastUpdated"];
         NSDictionary *bootTimeDict = prepared[@"boot"];
         NSDictionary *uptimeDict = prepared[@"uptime"];
         NSDate *bootTime = bootTimeDict[@"value"];
@@ -131,6 +136,10 @@ static NSString * const kCreationTimeKey = @"creationTime";
 }
 
 - (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath {
+    return [self currentUptimeForProfile:profilePath generateIfMissing:YES];
+}
+
+- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing {
     // Check if path is valid
     if (!profilePath || [profilePath length] == 0) {
         self.error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" 
@@ -153,7 +162,8 @@ static NSString * const kCreationTimeKey = @"creationTime";
     // If boot_time.plist failed, try system_uptime.plist
     NSString *uptimePath = [profilePath stringByAppendingPathComponent:@"system_uptime.plist"];
     NSDictionary *uptimeDict = [NSDictionary dictionaryWithContentsOfFile:uptimePath];
-    if (uptimeDict && uptimeDict[@"value"] && uptimeDict[@"lastUpdated"]) {
+    if ([uptimeDict[@"value"] respondsToSelector:@selector(doubleValue)] &&
+        [uptimeDict[@"lastUpdated"] isKindOfClass:NSDate.class]) {
         NSString *uptimeString = uptimeDict[@"value"];
         NSDate *lastUpdated = uptimeDict[@"lastUpdated"];
         NSTimeInterval storedUptime = [uptimeString doubleValue];
@@ -170,13 +180,15 @@ static NSString * const kCreationTimeKey = @"creationTime";
     // Try device_ids.plist as a last resort
     NSString *deviceIdsPath = [profilePath stringByAppendingPathComponent:@"device_ids.plist"];
     NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-    if (deviceIds && deviceIds[@"SystemUptime"]) {
+    if ([deviceIds[@"SystemUptime"] respondsToSelector:@selector(doubleValue)]) {
         NSTimeInterval uptime = [deviceIds[@"SystemUptime"] doubleValue];
         if (uptime > 0) {
             return uptime;
         }
     }
     
+    if (!generateIfMissing) return 0;
+
     // If all lookups failed, generate new values and retry
     PXLog(@"[WeaponX] ⚠️ No valid uptime found for profile %@, generating new values", profilePath);
     [self generateConsistentUptimeAndBootTimeForProfile:profilePath];
@@ -222,6 +234,10 @@ static NSString * const kCreationTimeKey = @"creationTime";
 }
 
 - (NSDate *)currentBootTimeForProfile:(NSString *)profilePath {
+    return [self currentBootTimeForProfile:profilePath generateIfMissing:YES];
+}
+
+- (NSDate *)currentBootTimeForProfile:(NSString *)profilePath generateIfMissing:(BOOL)generateIfMissing {
     // Check if path is valid
     if (!profilePath || [profilePath length] == 0) {
         self.error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" 
@@ -240,13 +256,15 @@ static NSString * const kCreationTimeKey = @"creationTime";
     // Try device_ids.plist as a fallback
     NSString *deviceIdsPath = [profilePath stringByAppendingPathComponent:@"device_ids.plist"];
     NSDictionary *deviceIds = [NSDictionary dictionaryWithContentsOfFile:deviceIdsPath];
-    if (deviceIds && deviceIds[@"BootTime"]) {
+    if ([deviceIds[@"BootTime"] respondsToSelector:@selector(doubleValue)]) {
         NSTimeInterval timestamp = [deviceIds[@"BootTime"] doubleValue];
         if (timestamp > 0) {
             return [NSDate dateWithTimeIntervalSince1970:timestamp];
         }
     }
     
+    if (!generateIfMissing) return nil;
+
     // If no valid boot time found, generate new values and retry
     PXLog(@"[WeaponX] ⚠️ No valid boot time found for profile %@, generating new values", profilePath);
     [self generateConsistentUptimeAndBootTimeForProfile:profilePath];

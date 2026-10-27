@@ -33,6 +33,7 @@
 #import "PXRuntimeIdentifierWriter.h"
 #import "PXRuntimeScalarPreparation.h"
 #import "PXRuntimeArtifactPreparation.h"
+#import "PXRuntimeArtifactWriter.h"
 #import "PXRuntimeGeneration.h"
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileArtifactMutation.h"
@@ -80,6 +81,7 @@
 - (PXPreparedDeviceProfileGroup *)commitDeviceProfileGroupWithMutation:(PXProfileArtifactMutation *)mutation;
 - (NSDictionary *)captureDeviceIDsAtIdentityDirectory:(NSString *)identityDir;
 - (PXProfileArtifactMutation *)currentIdentifierMutation;
+- (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot;
 - (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type mutation:(PXProfileArtifactMutation *)mutation incrementGeneration:(BOOL)increment;
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir;
 @end
@@ -1154,33 +1156,46 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (NSString *)generateSystemUptime {
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSTimeInterval uptime = [[UptimeManager sharedManager] currentUptimeForProfile:identityDir];
-    if (uptime <= 0) { self.error = [[UptimeManager sharedManager] lastError]; return nil; }
-    NSString *uptimeString = [NSString stringWithFormat:@"%.0f", uptime];
-    NSDictionary *info = @{ @"value": uptimeString, @"lastUpdated": [NSDate date] };
-    NSError *writeError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierState(tx, identityDir, @{ @"SystemUptime": uptimeString }, @{ @"system_uptime.plist": info }, NO, error);
-    }, &writeError);
-    self.error = success ? nil : writeError;
-    return success ? [NSString stringWithFormat:@"%.2f hours", uptime / 3600.0] : nil;
+    return [self generateUptimeCompatibilityForBootTime:NO];
 }
 
 - (NSString *)generateBootTime {
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:identityDir];
-    if (!bootTime) { self.error = [[UptimeManager sharedManager] lastError]; return nil; }
-    NSDictionary *info = @{ @"value": bootTime, @"lastUpdated": [NSDate date] };
-    NSString *timestamp = [NSString stringWithFormat:@"%.0f", bootTime.timeIntervalSince1970];
-    NSError *writeError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierState(tx, identityDir, @{ @"BootTime": timestamp }, @{ @"boot_time.plist": info }, NO, error);
-    }, &writeError);
-    self.error = success ? nil : writeError;
-    if (!success) return nil;
+    return [self generateUptimeCompatibilityForBootTime:YES];
+}
+
+- (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot {
+    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    if (!mutation) return nil;
+    UptimeManager *manager = nil;
+    NSDictionary *prepared = nil;
+    NSDate *bootTime = nil;
+    NSTimeInterval uptime = 0;
+    @try {
+        manager = [UptimeManager sharedManager];
+        NSString *identityDir = mutation.identityDirectory;
+        if (isBoot) bootTime = [manager currentBootTimeForProfile:identityDir generateIfMissing:NO];
+        else uptime = [manager currentUptimeForProfile:identityDir generateIfMissing:NO];
+        if (isBoot ? !bootTime : uptime <= 0) {
+            prepared = [manager prepareConsistentUptimeInfo];
+            bootTime = prepared[@"boot"][@"value"];
+            uptime = [prepared[@"seconds"] doubleValue];
+            if (!bootTime || uptime <= 0) { self.error = [manager lastError]; return nil; }
+        }
+        NSString *type = isBoot ? @"BootTime" : @"SystemUptime";
+        id value = isBoot ? (id)bootTime : [NSString stringWithFormat:@"%.0f", uptime];
+        NSString *scalar = isBoot ? [NSString stringWithFormat:@"%.0f", bootTime.timeIntervalSince1970] : value;
+        NSDictionary *info = @{ @"value": value, @"lastUpdated": [NSDate date] };
+        NSString *file = isBoot ? @"boot_time.plist" : @"system_uptime.plist";
+        NSError *writeError = nil;
+        BOOL success = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            if (prepared && !PXStageRuntimeUptime(tx, identityDir, prepared[@"boot"], prepared[@"uptime"], prepared[@"boot"][@"lastUpdated"], error)) return NO;
+            return PXStageRuntimeIdentifierState(tx, identityDir, @{type: scalar}, @{file: info}, NO, error);
+        } error:&writeError];
+        self.error = success ? nil : writeError;
+        if (!success) return nil;
+    } @finally { [mutation invalidate]; }
+    if (prepared) [manager adoptCommittedUptimeInfo:prepared timestamp:prepared[@"boot"][@"lastUpdated"]];
+    if (!isBoot) return [NSString stringWithFormat:@"%.2f hours", uptime / 3600.0];
     NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
     formatter.dateStyle = NSDateFormatterMediumStyle;
     formatter.timeStyle = NSDateFormatterMediumStyle;

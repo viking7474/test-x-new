@@ -169,6 +169,11 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 @property (nonatomic) NSTimeInterval uptimeValue;
 @property (nonatomic, strong) NSDate *cacheTime;
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)path;
+- (NSDictionary *)prepareConsistentUptimeInfo;
+- (NSTimeInterval)currentUptimeForProfile:(NSString *)path;
+- (NSDate *)currentBootTimeForProfile:(NSString *)path;
+- (NSTimeInterval)currentUptimeForProfile:(NSString *)path generateIfMissing:(BOOL)generateIfMissing;
+- (NSDate *)currentBootTimeForProfile:(NSString *)path generateIfMissing:(BOOL)generateIfMissing;
 - (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp;
 @end
 static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
@@ -647,6 +652,55 @@ static void TestUptimeLifecycle(void) {
 }
 
 
+static BOOL SeedReadOnlyUptime(NSDictionary *boot, NSDictionary *uptime, NSDictionary *ids) {
+    NSString *identity = PXProfileIdentityPath(@"b");
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:boot atPath:Path(identity, @"boot_time.plist") error:error] &&
+            [tx setDictionary:uptime atPath:Path(identity, @"system_uptime.plist") error:error] &&
+            [tx setDictionary:ids atPath:Path(identity, @"device_ids.plist") error:error];
+    } error:NULL];
+}
+static void TestUptimeReadOnly(void) {
+    PXPreparedUptimeFixture *manager = [PXPreparedUptimeFixture new];
+    NSString *identity = PXProfileIdentityPath(@"b");
+    NSDate *bootDate = [NSDate dateWithTimeIntervalSinceNow:-7200];
+    NSDictionary *boot = @{ @"value": bootDate };
+    NSDictionary *elapsed = @{ @"value": @"300", @"lastUpdated": [NSDate date] };
+    NSDictionary *ids = @{ @"SystemUptime": @"600", @"BootTime": @"123456" };
+    CHECK(SeedReadOnlyUptime(boot, elapsed, ids), "read only uptime precedence fixture seeded");
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "read only uptime competing owner acquired");
+    NSUInteger providers = gUptimeProviders, writes = gWrites;
+    NSDictionary *before = AllArtifactFiles();
+    NSDate *beforeRead = [NSDate date];
+    NSTimeInterval value = [manager currentUptimeForProfile:identity generateIfMissing:NO];
+    NSDate *afterRead = [NSDate date];
+    CHECK(value >= [beforeRead timeIntervalSinceDate:bootDate] && value <= [afterRead timeIntervalSinceDate:bootDate] && [[manager currentBootTimeForProfile:identity generateIfMissing:NO] isEqual:bootDate] &&
+          providers == gUptimeProviders && writes == gWrites && !manager.cacheTime && [before isEqual:AllArtifactFiles()],
+          "read only uptime preserves boot precedence and avoids lock generation persistence and cache adoption");
+    CHECK(SeedReadOnlyUptime(@{}, elapsed, ids), "read only uptime secondary precedence seeded");
+    beforeRead = [NSDate date];
+    value = [manager currentUptimeForProfile:identity generateIfMissing:NO];
+    afterRead = [NSDate date];
+    CHECK(value >= 300 + [beforeRead timeIntervalSinceDate:elapsed[@"lastUpdated"]] && value <= 300 + [afterRead timeIntervalSinceDate:elapsed[@"lastUpdated"]] && [[manager currentBootTimeForProfile:identity generateIfMissing:NO] timeIntervalSince1970] == 123456,
+          "read only uptime preserves elapsed sidecar and boot scalar fallbacks");
+    NSDictionary *malformed = @{ @"value": @[], @"lastUpdated": @[] };
+    CHECK(SeedReadOnlyUptime(malformed, malformed, ids), "read only uptime malformed fallback seeded");
+    CHECK([manager currentUptimeForProfile:identity generateIfMissing:NO] == 600 &&
+          [[manager currentBootTimeForProfile:identity generateIfMissing:NO] timeIntervalSince1970] == 123456,
+          "malformed uptime sidecar fields fall through instead of sending unsafe selectors");
+    NSDictionary *badIDs = @{ @"SystemUptime": @[], @"BootTime": @{} };
+    CHECK(SeedReadOnlyUptime(malformed, malformed, badIDs), "read only uptime fully malformed fixture seeded");
+    before = AllArtifactFiles();
+    CHECK([manager currentUptimeForProfile:identity generateIfMissing:NO] == 0 && ![manager currentBootTimeForProfile:identity generateIfMissing:NO] &&
+          [manager currentUptimeForProfile:PXProfileIdentityPath(@"c") generateIfMissing:NO] == 0 &&
+          ![manager currentBootTimeForProfile:PXProfileIdentityPath(@"c") generateIfMissing:NO] && providers == gUptimeProviders && writes == gWrites &&
+          [before isEqual:AllArtifactFiles()], "read only missing or malformed uptime returns sentinel without creating profile or source");
+    CHECK([manager currentUptimeForProfile:PXProfileIdentityPath(@"c")] == 12 * 3600 &&
+          [manager currentBootTimeForProfile:PXProfileIdentityPath(@"c")] != nil && providers == gUptimeProviders && [before isEqual:AllArtifactFiles()],
+          "legacy uptime getters retain safe default policy when generation is busy");
+    [owner invalidate]; CheckArtifactLeaseFree();
+}
 static BOOL SetWiFiFixture(NSString *profileID, NSDictionary *record) {
     NSString *path = Path(PXProfileIdentityPath(profileID), @"wifi_info.plist");
     return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
@@ -1028,7 +1082,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;
