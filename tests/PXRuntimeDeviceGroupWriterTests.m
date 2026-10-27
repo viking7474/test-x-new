@@ -32,6 +32,9 @@ static void (^gDuringResolve)(void);
 static void CheckLeaseFree(void);
 static void ProbeDependencyPublication(void);
 static BOOL gCheckDependencyPublication, gThrowDependencyPublication;
+static BOOL gCheckDashboardPublication, gBadDashboardStorage, gFailDashboardTuple, gIncompleteDashboardTuple;
+static NSDictionary *gDashboardStorage;
+static void ProbeDashboardStorage(NSDictionary *info);
 static void (^gDuringDependencyPublication)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
@@ -136,6 +139,8 @@ static NSDictionary *Model(NSString *product) {
 - (BOOL)loadIfNeeded:(NSError **)error { (void)error; Preparation(); return YES; }
 - (NSDictionary *)randomMetaForDevice:(NSString *)product min:(NSString *)min max:(NSString *)max error:(NSError **)error {
     (void)product; (void)min; (void)max; (void)error; Preparation();
+    if (gFailDashboardTuple) { if (error) *error = [NSError errorWithDomain:@"fixture.tuple" code:1 userInfo:nil]; return nil; }
+    if (gIncompleteDashboardTuple) return @{ @"version": @"17.0", @"build": gBuild };
     return @{ @"version": @"17.0", @"build": gBuild, @"darwin": @"23.0", @"xnu": @"fixture-xnu", @"kernel_version": @"fixture-kernel" };
 }
 @end
@@ -201,10 +206,16 @@ ARTIFACT_SINGLETON
 @interface StorageManager : NSObject
 + (instancetype)sharedManager;
 - (void)adoptCommittedStorageInfo:(NSDictionary *)info;
+- (NSDictionary *)currentStorageInfo;
+- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)model;
+- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 @end
 @implementation StorageManager
 ARTIFACT_SINGLETON
-- (void)adoptCommittedStorageInfo:(NSDictionary *)info { (void)info; Adopt(); }
+- (NSDictionary *)currentStorageInfo { return gDashboardStorage ?: @{}; }
+- (NSString *)randomizeStorageCapacityForDeviceModel:(NSString *)model { (void)model; Preparation(); return @"128"; }
+- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity { Preparation(); return gBadDashboardStorage ? @{} : PXPrepareRuntimeStorage(capacity); }
+- (void)adoptCommittedStorageInfo:(NSDictionary *)info { gDashboardStorage = [info copy]; Adopt(); ProbeDashboardStorage(info); }
 @end
 @interface UptimeManager : NSObject
 + (instancetype)sharedManager;
@@ -867,6 +878,163 @@ static void TestDependencyLifecycle(PXDeviceGroupFixture *manager, NSString *a, 
     }
     gSelected = @"a";
 }
+static void ProbeDashboardStorage(NSDictionary *info) {
+    if (!gCheckDashboardPublication) return;
+    CheckLeaseFree();
+    NSDictionary *persisted = [NSDictionary dictionaryWithContentsOfFile:Path(gExpectedIdentity.stringByDeletingLastPathComponent, @"storage.plist")];
+    CHECK([persisted isEqual:info], "dashboard storage cache sees complete committed record after ownership release");
+}
+static BOOL SeedDashboard(NSString *identity, NSInteger generation) {
+    gDashboardStorage = @{ @"TotalStorage": @"64", @"FreeStorage": @"32", @"FilesystemType": @"old", @"cacheExtra": @"preserved" };
+    NSDictionary *ids = @{ @"DeviceModel": @"iPhone15,4", @"RegulatoryModelNumber": @"A2846", @"IOSBuild": @"B1",
+        @"GenerationCounter": @(generation), @"keep": @YES, @"SSID": @"dashboard-before" };
+    if (!Seed(identity, ids, YES)) return NO;
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{ @"value": @"old-name" } atPath:Path(identity, @"device_name.plist") error:error] &&
+            [tx setDictionary:@{ @"value": @"old-serial" } atPath:Path(identity, @"serial_number.plist") error:error] &&
+            [tx setDictionary:@{ @"diskExtra": @"old-source" } atPath:Path(identity.stringByDeletingLastPathComponent, @"storage.plist") error:error];
+    } error:NULL];
+}
+static NSDictionary *DashboardPreview(void) {
+    return @{ @"DeviceModel": @"iPhone15,4", @"DeviceModelName": @"Preview name", @"DeviceName": @"Preview device",
+        @"SerialNumber": @"FVF12345678", @"IOSProductType": @"iPhone15,4", @"IOSVersion": @"17.0", @"IOSBuild": @"B1",
+        @"Darwin": @"23.0", @"XNU": @"preview-xnu", @"KernelVersion": @"preview-kernel", @"MACAddress": @"02:11:22:33:44:55",
+        @"CountryCode": @"us", @"CarrierName": @"Preview carrier" };
+}
+static void TestDashboardPreview(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a; gBuild = @"B1";
+    manager.settings = [@{ @"StorageSystem": @YES } mutableCopy];
+    NSError *error = nil;
+    CHECK(SeedDashboard(a, 7), "dashboard baseline seeded");
+    NSDictionary *before = BatchSnapshot(); NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions;
+    PXPreparedDeviceProfileGroup *custom = [manager prepareCustomDeviceModel:@"iPhone15,4" error:&error];
+    CHECK(custom && !error && custom.versionInfo.count == 0 && [before isEqual:BatchSnapshot()] && caches == gCacheChanges && adoptions == gArtifactAdoptions,
+          "custom model builder prepares detached replacement without source or cache effects");
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    NSUInteger selections = gSelections, preparations = gPreparations, notices = gBatchNotifications;
+    CHECK(owner && ![manager applyDashboardPreview:DashboardPreview() error:&error] && error.code == 12 && selections == gSelections && preparations == gPreparations &&
+          [before isEqual:BatchSnapshot()], "busy dashboard stops before target providers and all candidate writes");
+    [owner invalidate]; CheckLeaseFree();
+    CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"pending"), "dashboard pending intent seeded"); before = BatchSnapshot();
+    CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error.code == 27 && selections == gSelections && preparations == gPreparations &&
+          [before isEqual:BatchSnapshot()], "pending deletion blocks dashboard without partial setters");
+    CHECK(ClearDeletionIntent(), "dashboard pending intent cleared");
+    gCheckDashboardPublication = YES; gCheckDependencyPublication = YES;
+    __block NSUInteger commits = 0, writes = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; if ([phase isEqual:@"source-written"]) writes++; };
+    CHECK([manager applyDashboardPreview:DashboardPreview() error:&error] && !error && commits == 1 && [IDs(a)[@"GenerationCounter"] isEqual:@10] &&
+          [IDs(a)[@"DeviceModelName"] isEqual:@"Preview name"] && [IDs(a)[@"DeviceName"] isEqual:@"Preview device"] &&
+          [IDs(a)[@"IOSBuild"] isEqual:@"B1"] && [IDs(a)[@"WiFiAddress"] isEqual:@"02:11:22:33:44:55"] && !IDs(a)[@"IOSProductType"] && !HasLegacy(a) &&
+          caches + 1 == gCacheChanges && adoptions + 1 == gArtifactAdoptions && notices == gBatchNotifications,
+          "dashboard model sidecars tuple storage and legacy counter policy commit together once before caches");
+    gStore.testCheckpoint = nil;
+    NSDictionary *storage = [NSDictionary dictionaryWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")];
+    CHECK([storage[@"TotalStorage"] isEqual:@"128"] && [storage[@"cacheExtra"] isEqual:@"preserved"] && !storage[@"diskExtra"] &&
+          [storage isEqual:gDashboardStorage], "dashboard storage keeps legacy cache authority and unrelated cached fields");
+    NSUInteger totalWrites = writes; CHECK(totalWrites >= 6, "dashboard complete transaction includes all sidecar and storage changes");
+    gCheckDashboardPublication = NO; gCheckDependencyPublication = NO;
+    for (NSUInteger fault = 1; fault <= totalWrites; fault++) {
+        CHECK(SeedDashboard(a, 7), "dashboard rollback baseline seeded"); before = BatchSnapshot(); caches = gCacheChanges; adoptions = gArtifactAdoptions;
+        __block NSUInteger step = 0;
+        gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"] && ++step == fault) [NSException raise:@"fixture" format:@"dashboard source fault"]; };
+        CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error && step == fault && [before isEqual:BatchSnapshot()] &&
+              caches == gCacheChanges && adoptions == gArtifactAdoptions && notices == gBatchNotifications,
+              "dashboard fault at each written source restores hardware tuple sidecars storage counter and token");
+        gStore.testCheckpoint = nil; CheckLeaseFree();
+    }
+    CHECK(SeedDashboard(a, 7), "dashboard preparation failure baseline seeded"); before = BatchSnapshot(); caches = gCacheChanges; adoptions = gArtifactAdoptions;
+    gBadDashboardStorage = YES;
+    CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error && [before isEqual:BatchSnapshot()], "dashboard storage preparation failure writes no source");
+    gBadDashboardStorage = NO; gNoHardware = YES;
+    CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error && [before isEqual:BatchSnapshot()] && caches == gCacheChanges && adoptions == gArtifactAdoptions,
+          "dashboard model preparation failure has no partial model name serial or storage write");
+    gNoHardware = NO;
+    NSDictionary *partial = @{ @"IOSVersion": @"17.0", @"DeviceModel": @"iPhone15,4" };
+    gFailDashboardTuple = YES;
+    CHECK(![manager applyDashboardPreview:partial error:&error] && error && [before isEqual:BatchSnapshot()], "dashboard unavailable tuple resolution preserves every source");
+    gFailDashboardTuple = NO; gIncompleteDashboardTuple = YES;
+    CHECK(![manager applyDashboardPreview:partial error:&error] && error && [before isEqual:BatchSnapshot()], "dashboard malformed DB tuple never publishes a partial software identity");
+    gIncompleteDashboardTuple = NO;
+    CHECK([manager applyDashboardPreview:partial error:&error] && !error && [IDs(a)[@"IOSBuild"] isEqual:@"B1"] && [IDs(a)[@"KernelVersion"] isEqual:@"fixture-kernel"],
+          "dashboard resolves complete tuple for requested model and version");
+    CHECK(SeedDashboard(a, 7), "dashboard immutable intent baseline seeded");
+    NSMutableString *name = [@"Frozen name" mutableCopy]; NSMutableDictionary *preview = [DashboardPreview() mutableCopy]; preview[@"DeviceName"] = name;
+    NSDictionary *otherBefore = Snapshot(b)[@"files"]; gSelections = 0;
+    gDuringPrepare = ^{
+        CheckDependencyLeaseHeld(); [name setString:@"changed"]; preview[@"SerialNumber"] = @"changed"; gSelected = @"b";
+        CHECK(SetSource(Path(a, @"device_ids.plist"), @"SSID", @"disjoint-winner"), "dashboard bypass disjoint update committed");
+        NSError *busy = nil;
+        CHECK(![manager applyDashboardPreview:DashboardPreview() error:&busy] && busy.code == 12, "dashboard provider reentry fails busy without recursive setters");
+    };
+    CHECK([manager applyDashboardPreview:preview error:&error] && !error && gSelections == 1 && [IDs(a)[@"DeviceName"] isEqual:@"Frozen name"] &&
+          [IDs(a)[@"SerialNumber"] isEqual:@"FVF12345678"] && [IDs(a)[@"SSID"] isEqual:@"disjoint-winner"] && [otherBefore isEqual:Snapshot(b)[@"files"]],
+          "dashboard freezes mutable intent merges unrelated updates and keeps one captured target");
+    gSelected = @"a";
+    CHECK(SeedDashboard(a, 7), "dashboard provider exception baseline seeded"); before = BatchSnapshot(); caches = gCacheChanges; adoptions = gArtifactAdoptions;
+    gDuringPrepare = ^{ CheckDependencyLeaseHeld(); [NSException raise:@"fixture" format:@"dashboard provider exception"]; };
+    BOOL threw = NO;
+    @try { [manager applyDashboardPreview:DashboardPreview() error:&error]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [before isEqual:BatchSnapshot()] && caches == gCacheChanges && adoptions == gArtifactAdoptions, "dashboard provider exception releases ownership without mutation"); CheckLeaseFree();
+    __block NSDictionary *competitor = nil;
+    gDuringPrepare = ^{ CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"late"), "dashboard late deletion intent seeded"); competitor = BatchSnapshot(); };
+    CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error.code == 27 && [competitor isEqual:BatchSnapshot()], "late deletion rejects entire dashboard candidate before staging");
+    CHECK(ClearDeletionIntent(), "dashboard late intent cleared"); CheckLeaseFree();
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        NSString *old = Path(a.stringByDeletingLastPathComponent, @"old-dashboard-identity"); __block BOOL moved = NO;
+        gDuringPrepare = ^{
+            moved = [NSFileManager.defaultManager moveItemAtPath:a toPath:old error:NULL];
+            if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:a withIntermediateDirectories:NO attributes:nil error:NULL];
+            if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:a withDestinationPath:b error:NULL];
+            competitor = BatchSnapshot();
+        };
+        CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error && moved && [competitor isEqual:BatchSnapshot()] && caches == gCacheChanges && adoptions == gArtifactAdoptions,
+              "dashboard rejects missing replaced or symlink identity without source or cache publication");
+        if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:a error:NULL], "dashboard replacement fixture removed");
+        CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:a error:NULL], "dashboard identity restored"); CheckLeaseFree();
+    }
+    NSDictionary *softwareOnly = @{ @"IOSVersion": @"17.0" };
+    gDuringPrepare = ^{ CHECK(SetSource(Path(a, @"device_ids.plist"), @"DeviceModel", @"iPhone16,1"), "dashboard model dependency drift seeded"); competitor = BatchSnapshot(); };
+    CHECK(![manager applyDashboardPreview:softwareOnly error:&error] && error && [competitor isEqual:BatchSnapshot()], "dashboard software resolution rejects captured model drift without overwriting competitor");
+    CHECK(SeedDashboard(a, NSIntegerMax - 2), "dashboard exhausted counter seeded"); before = BatchSnapshot();
+    CHECK(![manager applyDashboardPreview:DashboardPreview() error:&error] && error && [before isEqual:BatchSnapshot()], "dashboard counter exhaustion rolls back all intermediate increments");
+    CHECK(SeedDashboard(a, 7), "dashboard invalid input baseline seeded"); before = BatchSnapshot();
+    NSDictionary *shortSerial = @{ @"DeviceName": @"valid-name", @"SerialNumber": @"short" };
+    CHECK(![manager applyDashboardPreview:shortSerial error:&error] && error.code == 7003 && [before isEqual:BatchSnapshot()], "dashboard rejects short serial rather than writing unpaired invalid scalar");
+    selections = gSelections;
+    CHECK(![manager applyDashboardPreview:(id)@[] error:&error] && error && ![manager applyDashboardPreview:@{} error:&error] && error && selections == gSelections,
+          "dashboard empty or non dictionary input fails before ownership and lookup");
+    NSArray *scalarCases = @[
+        @{ @"preview": @{ @"DeviceName": @"only-name" }, @"increment": @2 },
+        @{ @"preview": @{ @"SerialNumber": @"FVF12345678" }, @"increment": @2 },
+        @{ @"preview": @{ @"DeviceName": @"both", @"SerialNumber": @"FVF12345678" }, @"increment": @3 },
+        @{ @"preview": @{ @"CountryCode": @"vn" }, @"increment": @1 },
+        @{ @"preview": @{ @"MACAddress": @42 }, @"increment": @1 }
+    ];
+    for (NSDictionary *row in scalarCases) {
+        CHECK(SeedDashboard(a, 7), "dashboard scalar-only case seeded");
+        NSData *storageBefore = [NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")];
+        adoptions = gArtifactAdoptions;
+        NSInteger expectedGeneration = 7 + [row[@"increment"] integerValue];
+        CHECK([manager applyDashboardPreview:row[@"preview"] error:&error] && !error && [IDs(a)[@"GenerationCounter"] integerValue] == expectedGeneration &&
+              adoptions == gArtifactAdoptions && [storageBefore isEqual:[NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]],
+              "dashboard scalar-only and metadata cases preserve counters without preparing or saving storage");
+    }
+    CHECK(SeedDashboard(a, 7), "dashboard software-only marker seeded");
+    NSDictionary *softwareMarker = @{ @"IOSVersion": @"17.0", @"IOSBuild": @"B1", @"Darwin": @"23.0", @"XNU": @"xnu", @"KernelVersion": @"kernel", @"IOSProductType": @"iPhone16,1" };
+    CHECK([manager applyDashboardPreview:softwareMarker error:&error] && !error && [IDs(a)[@"DeviceModel"] isEqual:@"iPhone16,1"] && !IDs(a)[@"IOSProductType"],
+          "dashboard software-only marker restores prepared model instead of transient generated model");
+    CHECK(SeedDashboard(a, 7), "dashboard disabled storage case seeded");
+    manager.settings[@"StorageSystem"] = @NO;
+    NSData *unchangedStorage = [NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]; adoptions = gArtifactAdoptions;
+    CHECK([manager applyDashboardPreview:DashboardPreview() error:&error] && !error && adoptions == gArtifactAdoptions &&
+          [unchangedStorage isEqual:[NSData dataWithContentsOfFile:Path(a.stringByDeletingLastPathComponent, @"storage.plist")]], "dashboard honors disabled storage while applying model tuple");
+    manager.settings[@"StorageSystem"] = @YES;
+    CHECK(SeedDashboard(a, 7), "dashboard callback exception baseline seeded");
+    gCheckDependencyPublication = YES; gThrowDependencyPublication = YES; gCheckDashboardPublication = YES;
+    CHECK([manager applyDashboardPreview:DashboardPreview() error:&error] && !error && [IDs(a)[@"GenerationCounter"] isEqual:@10],
+          "dashboard committed source remains success after compatibility callback exception");
+    gCheckDependencyPublication = NO; gThrowDependencyPublication = NO; gCheckDashboardPublication = NO; CheckLeaseFree();
+}
 static void TestGenerationLifecycle(PXDeviceGroupFixture *manager, NSString *a) {
     gSelected = @"a"; gExpectedIdentity = a;
     manager.settings = [@{ @"DeviceModel": @YES, @"IMEI": @YES, @"MEID": @YES } mutableCopy];
@@ -1062,6 +1230,7 @@ int main(void) {
         TestExplicitCreationGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestDeferredActivation(manager, Identity(@"a"));
         TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"));
+        TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"));
         TestTelephonyLifecycle(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;

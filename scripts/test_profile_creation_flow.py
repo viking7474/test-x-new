@@ -260,7 +260,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3M-partial'
+    assert manifest['rollout'] == '4C.2H3N-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')

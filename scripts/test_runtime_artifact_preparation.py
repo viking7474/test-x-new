@@ -35,7 +35,7 @@ WRAPPERS = {
         '- (NSString *)batteryInfoPathForCurrentProfile', '- (void)loadBatteryInfoFromDisk', '- (void)saveBatteryInfoToDisk',
         '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
         '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
-    'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo',
+    'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
         '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
         '- (void)setTotalStorageCapacity:(NSString *)capacity', '- (void)setFreeStorageSpace:(NSString *)freeSpace', '- (void)setFilesystemType:(NSString *)fsType']),
@@ -226,7 +226,7 @@ def source_contracts():
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3M-partial'
+    assert manifest['rollout'] == '4C.2H3N-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')

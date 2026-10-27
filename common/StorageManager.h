@@ -16,6 +16,8 @@
  */
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
+/// Snapshot only; callers freeze the candidate before a source commit.
+- (NSDictionary *)currentStorageInfo;
 
 /**
  * Randomly choose a realistic device capacity

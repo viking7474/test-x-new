@@ -215,12 +215,14 @@ check('randomMetaForDevice:iosProductType' in view_controller and
       'preview[@"XNU"] = xnu;' in view_controller and
       'preview[@"KernelVersion"] = kernel;' in view_controller,
       "fake preview publishes version/build/darwin/xnu/kernel as one tuple")
-apply_tail = view_controller.split('applyFakePreviewToCurrentProfile:', 1)[1]
+manager_source = open(os.path.join(ROOT, 'common/IdentifierManager.m'), encoding='utf-8').read()
+apply_tail = manager_source.split('- (BOOL)applyDashboardPreview:', 1)[1].split('+ (instancetype)sharedManager', 1)[0]
+check('applyDashboardPreview:preview error:&error' in view_controller, 'Dashboard delegates source apply to owned preview coordinator')
 check('@"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"' in apply_tail,
       "Reset Data writes the complete iOS tuple into device_ids.plist")
 check('Refusing partial iOS override' in apply_tail and
       'return NO;' in apply_tail and
-      'GenerationCounter' in apply_tail,
+      'PXStageRuntimeIdentifierState' in apply_tail and 'YES, stageError' in apply_tail,
       "Reset Data fails closed on partial/mismatched tuple overrides")
 check('coherentChoices' in view_controller and
       'Excluding incompatible fake model' in view_controller and

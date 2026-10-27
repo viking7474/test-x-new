@@ -113,6 +113,10 @@
     return PXPrepareRuntimeStorage(capacity);
 }
 
+- (NSDictionary *)currentStorageInfo {
+    return [_storageSettings copy] ?: @{};
+}
+
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo {
     _storageSettings = [storageInfo mutableCopy];
 }

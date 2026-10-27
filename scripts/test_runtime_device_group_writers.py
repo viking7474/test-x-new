@@ -43,6 +43,9 @@ SIGNATURES = [
     '- (PXCommittedRuntimeGeneration *)commitRuntimeGenerationForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error',
     '- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation',
     '- (PXProfileArtifactMutation *)currentIdentifierMutation',
+    '- (BOOL)validateCustomDeviceModel:(NSString *)value error:(NSError **)error',
+    '- (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error',
+    '- (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -95,6 +98,11 @@ def source_contracts():
     custom = method(manager, SIGNATURES[3])
     assert '[value copy]' in custom and '[mutation performSourceWrite:' in custom
     assert custom.index('[mutation invalidate]') < custom.index('setCurrentDeviceModel:value')
+    custom_builder = method(manager, '- (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error')
+    assert 'initWithUpdates:deviceIds replacedKeys:PXDeviceProfileManagedKeys() versionInfo:@{}' in custom_builder
+    for forbidden in ('self.error', 'PXPerformRuntimeSourceWrite', 'performSourceWrite:', 'profileIdentityPath', 'setCurrentDeviceModel:'):
+        assert forbidden not in custom_builder
+
     group = method(manager, SIGNATURES[2])
     assert '[NSMutableDictionary dictionaryWithContentsOfFile:' not in group
     assert 'prepared.updates, prepared.replacedKeys, nil, YES, YES, error' in group
@@ -140,7 +148,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3M-partial'
+    assert manifest['rollout'] == '4C.2H3N-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

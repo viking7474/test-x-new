@@ -147,6 +147,7 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
 - (NSDictionary *)fixtureStorage;
+- (NSDictionary *)currentStorageInfo;
 - (void)setFixtureSnapshot:(NSDictionary *)record;
 - (void)saveToCurrentProfile;
 - (void)saveToProfile:(NSString *)profileId;
@@ -373,7 +374,7 @@ static void TestManagerWrappers(void) {
     [uptime adoptCommittedUptimeInfo:uptimeInfo timestamp:now];
     CHECK(gWrites == writes && gBatterySaves == saves && gWiFiSaves == wifiSaves && darwin == gDarwin && [before isEqual:Capture()] &&
           [wifi.currentProfileId isEqual:@"a"] && [[battery fixtureLevel] isEqual:info[@"BatteryLevel"]] &&
-          [[storage fixtureStorage] isEqual:storageInfo] && [uptime.cacheTime isEqual:now] &&
+          [[storage fixtureStorage] isEqual:storageInfo] && [[storage currentStorageInfo] isEqual:storageInfo] && [uptime.cacheTime isEqual:now] &&
           [uptime.bootTimeValue isEqual:uptimeInfo[@"boot"][@"value"]], "committed artifact adoption updates caches without autosave or notifications");
     [battery publishCommittedBatteryInfo:info timestamp:now];
     NSDictionary *mirror = [NSDictionary dictionaryWithContentsOfFile:Path(gRoot, @"legacy-battery.plist")];
