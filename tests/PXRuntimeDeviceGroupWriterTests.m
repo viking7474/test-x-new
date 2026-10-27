@@ -237,8 +237,10 @@ ARTIFACT_SINGLETON
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (NSString *)profileIdentityPath;
+- (NSString *)profileIdentityPathWithLifecycleLease:(PXProfileLifecycleLease *)lease;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity;
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity lifecycleLease:(PXProfileLifecycleLease *)lease;
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial;
 #include "PXDeviceGroupDeclarations.inc"
 @end
@@ -256,6 +258,14 @@ ARTIFACT_SINGLETON
     void (^callback)(void) = gDuringResolve; gDuringResolve = nil;
     if (callback) callback();
     return gSelected ? Identity(gSelected) : nil;
+}
+- (NSString *)profileIdentityPathWithLifecycleLease:(PXProfileLifecycleLease *)lease {
+    CHECK([lease validateForDirectory:gRoot error:NULL], "group target resolver receives held lifecycle capability");
+    return [self profileIdentityPath];
+}
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity lifecycleLease:(PXProfileLifecycleLease *)lease {
+    CHECK([lease validateForDirectory:gRoot error:NULL], "group migration composes existing lifecycle capability");
+    return [self migrateProfileSchemaAtIdentityDirectory:identity];
 }
 - (BOOL)isIdentifierEnabled:(NSString *)type { return [self.settings[type] boolValue]; }
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity { gMigrations++; CHECK([identity isEqual:Identity(@"a")] || [identity isEqual:Identity(@"b")], "explicit wrapper migrates only supplied target"); return YES; }

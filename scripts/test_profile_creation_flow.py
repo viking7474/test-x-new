@@ -126,7 +126,7 @@ def source_contracts():
     allocation = writers.method(source, '- (NSString *)generateProfileID')
     assert 'if (existingIDs.count == 0) {\n            NSError *error' not in allocation
     manager = read('common/IdentifierManager.m')
-    explicit = writers.method(manager, '- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error')
+    explicit = writers.method(manager, '- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error')
     assert 'PXProfileIdentityPath(PXValidatedProfileID(profileID))' in explicit
     assert 'migrateProfileSchemaAtIdentityDirectory:identityDir' in explicit
     assert 'profileIdentityPath]' not in explicit and 'PXActiveProfile' not in explicit
@@ -260,7 +260,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3L-partial'
+    assert manifest['rollout'] == '4C.2H3M-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')

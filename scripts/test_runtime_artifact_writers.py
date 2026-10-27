@@ -77,7 +77,7 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3L-partial'
+    assert manifest['rollout'] == '4C.2H3M-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -95,8 +95,8 @@ def source_contracts():
     assert 'timeIntervalSince1970' in helper and 'ids[@"LastUpdated"] = timestamp' in helper
     assert 'writeToFile:' not in network, 'NetworkManager may not bypass source transactions'
     mutation = read('common/PXProfileArtifactMutation.m')
-    acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error')
-    assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver()')
+    acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(PXProfileLifecycleLease *))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error')
+    assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver(mutation.lease)')
     assert 'NS_RETURNS_RETAINED' in read('common/PXProfileArtifactMutation.h')
     assert 'O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW' in acquire and '@finally' in acquire and 'if (!handedOff)' in acquire
     validate = objc_method(mutation, '- (BOOL)validateWithError:(NSError **)error')

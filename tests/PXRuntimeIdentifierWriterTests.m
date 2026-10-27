@@ -154,13 +154,28 @@ static void (^gDuringUptimeRead)(void), (^gDuringUptimePrepare)(void);
 - (NSString *)getActiveProfileId { gSelections++; return gSelected; }
 #include "PXIdentifierProductionMethods.inc"
 @end
+static void (^gBeforeMigration)(void);
+@interface PXMigrationProbe : PXIdentifierFixture
+@end
+@implementation PXMigrationProbe
+- (BOOL)commitProfileSchemaWithMutation:(PXProfileArtifactMutation *)mutation {
+    void (^callback)(void) = gBeforeMigration; gBeforeMigration = nil; if (callback) callback();
+    return [super commitProfileSchemaWithMutation:mutation];
+}
+@end
+@interface PXMovingReader : PXIdentifierFixture
+@property (nonatomic) NSUInteger selections;
+@end
+@implementation PXMovingReader
+- (NSString *)getActiveProfileId { return ++self.selections == 1 ? @"owned-migration" : @"b"; }
+@end
 @interface PXThrowOnceIdentifier : PXIdentifierFixture
 @property (nonatomic) NSUInteger calls;
 @end
 @implementation PXThrowOnceIdentifier
-- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity {
+- (BOOL)commitProfileSchemaWithMutation:(PXProfileArtifactMutation *)mutation {
     if (++self.calls == 1) [NSException raise:@"fixture" format:@"migration exception"];
-    return [super migrateProfileSchemaAtIdentityDirectory:identity];
+    return [super commitProfileSchemaWithMutation:mutation];
 }
 @end
 
@@ -274,24 +289,21 @@ static void TestMigration(PXIdentifierFixture *manager, NSString *identity, NSSt
           "malformed migration input preserves bytes schema and commit identity");
     CHECK(Seed(raceIdentity, @{ @"GenerationCounter": @8 }), "concurrent migration fixture seeded");
     dispatch_group_t group = dispatch_group_create();
-    static _Atomic NSUInteger failures; atomic_store(&failures, 0);
+    static _Atomic NSUInteger failures, successes;
+    atomic_store(&failures, 0); atomic_store(&successes, 0);
     for (NSUInteger i = 0; i < 8; ++i) dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         PXIdentifierFixture *instance = [PXIdentifierFixture new]; instance.settings = [manager.settings mutableCopy];
-        BOOL migrated = NO;
-        for (NSUInteger attempt = 0; attempt < 3 && !migrated; ++attempt) {
-            migrated = [instance migrateProfileSchemaAtIdentityDirectory:raceIdentity];
-            // Only a documented contention deadline is retryable under CI load.
-            if (!migrated && ![instance.error.localizedDescription hasPrefix:@"Timed out waiting for source "]) break;
-        }
-        if (!migrated) atomic_fetch_add(&failures, 1);
+        if ([instance migrateProfileSchemaAtIdentityDirectory:raceIdentity]) atomic_fetch_add(&successes, 1);
+        else if (![instance.error.domain isEqual:@"WeaponXProfileError"] || instance.error.code != 12) atomic_fetch_add(&failures, 1);
     });
-    CHECK(dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0 && atomic_load(&failures) == 0 &&
-          [IDs(raceIdentity)[@"GenerationCounter"] isEqual:@9], "concurrent migrations bump once after serialized schema recheck");
+    CHECK(dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0 && atomic_load(&failures) == 0 && atomic_load(&successes) > 0 &&
+          [manager migrateProfileSchemaAtIdentityDirectory:raceIdentity] && [IDs(raceIdentity)[@"GenerationCounter"] isEqual:@9],
+          "concurrent migrations accept explicit busy and successful retry without duplicate generation");
     gSelected = @"throw";
     CHECK(Seed(throwIdentity, @{}), "exception migration fixture seeded");
     PXThrowOnceIdentifier *thrower = [PXThrowOnceIdentifier new];
     @try { [thrower profileIdentityPath]; } @catch (__unused NSException *exception) {}
-    CHECK([thrower profileIdentityPath] != nil && thrower.calls == 2 && [IDs(throwIdentity)[@"ProfileSchemaVersion"] isEqual:@2], "thread-local migration guard resets during exception unwinding");
+    CHECK([thrower profileIdentityPath] != nil && thrower.calls == 2 && [IDs(throwIdentity)[@"ProfileSchemaVersion"] isEqual:@2], "migration capability cleanup permits retry during exception unwinding");
 }
 
 static void CheckIdentifierLeaseFree(void) {
@@ -405,7 +417,7 @@ static void TestScalarLifecycle(PXIdentifierFixture *manager, NSString *a, NSStr
     @try { [thrower generateIDFA]; } @catch (NSException *exception) { (void)exception; threw = YES; }
     CHECK(threw, "writer schema exception propagates through resolver"); CheckIdentifierLeaseFree();
     CHECK([thrower generateIDFA] && !thrower.error && thrower.calls == 2 && [IDs(throwIdentity)[@"ProfileSchemaVersion"] isEqual:@2],
-          "writer resolver exception releases lifecycle and resets schema reentry guard");
+          "writer resolver exception releases lifecycle and permits schema retry");
     gSelected = @"a";
 }
 
@@ -499,10 +511,110 @@ static void TestUptimeCompatibilityLifecycle(PXIdentifierFixture *manager, NSStr
     }
     gMissingUptime = NO; gSelected = @"a";
 }
+static void TestMigrationLifecycle(NSString *identity, NSString *other) {
+    PXMigrationProbe *manager = [PXMigrationProbe new];
+    manager.settings = [@{ @"UDID": @YES, @"IDFA": @YES } mutableCopy];
+    gSelected = @"owned-migration"; gExpectedIdentity = identity;
+    NSDictionary *legacy = @{ @"GenerationCounter": @12, @"HardwareUUID": @"legacy-boot" };
+    CHECK(Seed(identity, legacy), "owned migration baseline seeded");
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "owned migration competing owner acquired");
+    NSUInteger providers = gProviderCalls, selections = gSelections;
+    NSDictionary *before = IdentifierAllFiles();
+    CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity] && manager.error.code == 12,
+          "direct migration fails busy before source staging");
+    [manager migrateProfileSchemaIfNeeded];
+    CHECK(manager.error.code == 12 && selections == gSelections, "current migration acquires ownership before active lookup");
+    CHECK(![manager profileIdentityPath] && manager.error.code == 12 && providers == gProviderCalls && [before isEqual:IdentifierAllFiles()],
+          "cold reader migration fails busy without source mutation");
+    gSelected = @"missing-migration";
+    CHECK(![manager profileIdentityPath] && manager.error.code == 12 &&
+          ![NSFileManager.defaultManager fileExistsAtPath:PXProfileRootPath(gSelected)], "busy cold reader never creates missing profile identity");
+    gSelected = @"owned-migration"; [owner invalidate]; CheckIdentifierLeaseFree();
+    CHECK(IdentifierDeleteIntent(YES), "migration pending intent seeded"); before = IdentifierAllFiles();
+    CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity] && manager.error.code == 27 && ![manager profileIdentityPath] && manager.error.code == 27 &&
+          providers == gProviderCalls && [before isEqual:IdentifierAllFiles()], "direct and cold reader migration stop at pending deletion");
+    gSelected = @"missing-migration";
+    CHECK(![manager profileIdentityPath] && manager.error.code == 27 && ![NSFileManager.defaultManager fileExistsAtPath:PXProfileRootPath(gSelected)],
+          "pending deletion blocks cold path directory repair");
+    gSelected = @"owned-migration"; CHECK(IdentifierDeleteIntent(NO), "migration pending intent cleared");
+    PXMovingReader *moving = [PXMovingReader new]; before = IdentifierAllFiles();
+    CHECK(![moving profileIdentityPath] && moving.error.code == 20 && moving.selections == 2 && [before isEqual:IdentifierAllFiles()],
+          "cold reader rejects selection drift before directory repair or migration"); CheckIdentifierLeaseFree();
+    owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    gBeforeMigration = ^{
+        CheckIdentifierLeaseHeld();
+        CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity] && manager.error.code == 12,
+              "migration reentry requires explicit capability instead of implicit reuse");
+    };
+    CHECK([manager migrateProfileSchemaAtIdentityDirectory:identity lifecycleLease:owner] && !manager.error &&
+          [IDs(identity)[@"ProfileSchemaVersion"] isEqual:@2] && [IDs(identity)[@"GenerationCounter"] isEqual:@13] && [owner validateForDirectory:gRoot error:NULL],
+          "borrowed migration commits once without acquiring or invalidating caller ownership");
+    [owner invalidate]; CheckIdentifierLeaseFree();
+    owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    providers = gProviderCalls; NSUInteger writes = atomic_load(&gWrites); before = IdentifierAllFiles();
+    CHECK([[manager profileIdentityPath] isEqual:identity] && providers == gProviderCalls && writes == atomic_load(&gWrites) && [before isEqual:IdentifierAllFiles()],
+          "current schema reader remains available under contention without writer gate");
+    [owner invalidate];
+    CHECK(Seed(identity, legacy), "borrowed migration failure baseline seeded");
+    owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL]; before = IdentifierAllFiles();
+    __block BOOL interrupted = NO;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if (!interrupted && [phase isEqual:@"source-written"]) { interrupted = YES; [NSException raise:@"fixture" format:@"borrowed migration commit failure"]; }
+    };
+    CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity lifecycleLease:owner] && manager.error && interrupted &&
+          [before isEqual:IdentifierAllFiles()] && [owner validateForDirectory:gRoot error:NULL], "borrowed migration rollback preserves sidecars token and caller lease");
+    gStore.testCheckpoint = nil; [owner invalidate]; CheckIdentifierLeaseFree();
+    CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity lifecycleLease:nil] && manager.error,
+          "migration rejects missing borrowed capability");
+    owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL]; [owner invalidate];
+    CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity lifecycleLease:owner] && manager.error && [before isEqual:IdentifierAllFiles()],
+          "migration rejects invalidated capability without source mutation");
+    NSString *foreignRoot = Path(gRoot, @"foreign-migration-root");
+    CHECK([NSFileManager.defaultManager createDirectoryAtPath:foreignRoot withIntermediateDirectories:NO attributes:nil error:NULL], "foreign migration root created");
+    PXProfileLifecycleLease *foreign = [PXProfileLifecycleLease acquireInDirectory:foreignRoot error:NULL];
+    CHECK(foreign && ![manager migrateProfileSchemaAtIdentityDirectory:identity lifecycleLease:foreign] && manager.error &&
+          [foreign validateForDirectory:foreignRoot error:NULL] && [before isEqual:IdentifierAllFiles()], "migration rejects wrong root while preserving foreign ownership");
+    [foreign invalidate];
+    owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    gBeforeMigration = ^{ [NSException raise:@"fixture" format:@"borrowed migration exception"]; };
+    BOOL threw = NO;
+    @try { [manager migrateProfileSchemaAtIdentityDirectory:identity lifecycleLease:owner]; }
+    @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [owner validateForDirectory:gRoot error:NULL] && [before isEqual:IdentifierAllFiles()],
+          "borrowed migration exception closes child scope while caller remains held");
+    [owner invalidate]; CheckIdentifierLeaseFree();
+    __block NSDictionary *competitor = nil;
+    gBeforeMigration = ^{ CHECK(IdentifierDeleteIntent(YES), "late migration intent committed by bypass writer"); competitor = IdentifierAllFiles(); };
+    CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity] && manager.error.code == 27 && [competitor isEqual:IdentifierAllFiles()],
+          "migration checks late deletion before staging entire schema group");
+    CHECK(IdentifierDeleteIntent(NO), "late migration intent cleared"); CheckIdentifierLeaseFree();
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        NSString *old = Path(identity.stringByDeletingLastPathComponent, @"old-owned-migration"); __block BOOL moved = NO;
+        gBeforeMigration = ^{
+            moved = [NSFileManager.defaultManager moveItemAtPath:identity toPath:old error:NULL];
+            if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:identity withIntermediateDirectories:NO attributes:nil error:NULL];
+            if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:identity withDestinationPath:other error:NULL];
+            competitor = IdentifierAllFiles();
+        };
+        CHECK(![manager migrateProfileSchemaAtIdentityDirectory:identity] && manager.error && moved && [competitor isEqual:IdentifierAllFiles()],
+              "owned migration rejects removed replaced and symlink identity before schema staging");
+        if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:identity error:NULL], "migration replacement fixture removed");
+        CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:identity error:NULL], "migration identity restored"); CheckIdentifierLeaseFree();
+    }
+    CHECK([[manager profileIdentityPath] isEqual:identity] && [IDs(identity)[@"GenerationCounter"] isEqual:@13],
+          "cold reader migration succeeds with one schema bump after ownership retry");
+    CHECK(Seed(identity, legacy), "current migration success baseline seeded");
+    selections = gSelections;
+    [manager migrateProfileSchemaIfNeeded];
+    CHECK(!manager.error && selections + 1 == gSelections && [IDs(identity)[@"GenerationCounter"] isEqual:@13] &&
+          [IDs(identity)[@"ProfileSchemaVersion"] isEqual:@2], "current migration resolves once under ownership and commits schema"); CheckIdentifierLeaseFree();
+    gSelected = @"a";
+}
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
-        for (NSString *profile in @[@"a", @"b", @"custom", @"migration", @"failure", @"corrupt", @"race", @"throw", @"owned-legacy", @"owned-throw", @"owned-time"]) {
+        for (NSString *profile in @[@"a", @"b", @"custom", @"migration", @"failure", @"corrupt", @"race", @"throw", @"owned-legacy", @"owned-throw", @"owned-time", @"owned-migration"]) {
             [NSFileManager.defaultManager createDirectoryAtPath:PXProfileIdentityPath(profile) withIntermediateDirectories:YES attributes:nil error:nil];
         }
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:Path(gRoot, @"control") owner:geteuid() group:getegid()
@@ -517,6 +629,7 @@ int main(void) {
         TestMigration(manager, PXProfileIdentityPath(@"migration"), PXProfileIdentityPath(@"failure"), PXProfileIdentityPath(@"race"), PXProfileIdentityPath(@"throw"));
         TestScalarLifecycle(manager, PXProfileIdentityPath(@"a"), PXProfileIdentityPath(@"b"));
         TestUptimeCompatibilityLifecycle(manager, PXProfileIdentityPath(@"owned-time"), PXProfileIdentityPath(@"b"));
+        TestMigrationLifecycle(PXProfileIdentityPath(@"owned-migration"), PXProfileIdentityPath(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime identifier writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

@@ -211,7 +211,7 @@ require('runtimeView.tlinkSettings' in identifier_manager and
         "IdentifierManager does not separate live manager settings from RootHide injected-host snapshot settings")
 active_profile_method = identifier_manager[
     identifier_manager.index('- (NSString *)getActiveProfileId'):
-    identifier_manager.index('- (NSString *)profileIdentityPath')
+    identifier_manager.index('- (NSString *)profileIdentityPath {')
 ]
 require('if (!PXIdentifierManagerIsManagerProcess())' in active_profile_method and
         'return PXCaptureRuntimeSnapshot().profileID;' in active_profile_method and

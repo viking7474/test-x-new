@@ -13,6 +13,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSString *profileDirectory;
 + (nullable instancetype)acquireWithIdentityResolver:(NSString * _Nullable (^)(void))resolver
     error:(NSError * _Nullable * _Nullable)error NS_RETURNS_RETAINED;
+/// Resolver may explicitly compose migration using this held capability.
+/// It must not invalidate/retain the capability beyond this synchronous call.
++ (nullable instancetype)acquireWithIdentityResolverUsingLease:(NSString * _Nullable (^)(PXProfileLifecycleLease *lease))resolver
+    error:(NSError * _Nullable * _Nullable)error NS_RETURNS_RETAINED;
 /// For artifacts directly under a profile (e.g. storage.plist). Pins the profile
 /// directory itself; an identity child is neither required nor created.
 + (nullable instancetype)acquireWithProfileIDResolver:(NSString * _Nullable (^)(void))resolver

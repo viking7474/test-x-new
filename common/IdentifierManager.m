@@ -68,7 +68,7 @@
 - (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;
 - (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error;
 - (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
-- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error;
+- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
 - (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error;
 - (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model;
 - (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error;
@@ -84,6 +84,10 @@
 - (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot;
 - (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type mutation:(PXProfileArtifactMutation *)mutation incrementGeneration:(BOOL)increment;
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir;
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir lifecycleLease:(PXProfileLifecycleLease *)lease;
+- (BOOL)commitProfileSchemaWithMutation:(PXProfileArtifactMutation *)mutation;
+- (NSString *)profileIdentityPathWithLifecycleLease:(PXProfileLifecycleLease *)lease;
+- (NSString *)prepareProfileIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease;
 @end
 
 @implementation IdentifierManager
@@ -890,54 +894,57 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (NSString *)profileIdentityPath {
-    // Get current profile ID without directly using ProfileManager
-    NSString *profileId = [self getActiveProfileId];
-    if (!profileId) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2001
-            userInfo:@{NSLocalizedDescriptionKey: @"No active profile identity target"}];
-        NSLog(@"[WeaponX] Error: No active profile when getting identity path");
-        return nil;
-    }
-    
-    // Build the identity path through the shared profile resolver.
-    NSString *identityDir = PXProfileIdentityPath(profileId);
+    NSString *profileID = [[self getActiveProfileId] copy];
+    NSString *identityDir = PXProfileIdentityPath(profileID);
     if (!identityDir.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2001
-            userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile identity target"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2001 userInfo:@{NSLocalizedDescriptionKey: @"No valid active profile identity target"}];
         return nil;
     }
-    
-    // Create the directory if it doesn't exist
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    if (![fileManager fileExistsAtPath:identityDir]) {
-        NSDictionary *attributes = @{NSFilePosixPermissions: @0755,
-                                    NSFileOwnerAccountName: @"mobile"};
-        
-        NSError *dirError = nil;
-        if (![fileManager createDirectoryAtPath:identityDir 
-                    withIntermediateDirectories:YES 
-                                     attributes:attributes
-                                          error:&dirError]) {
-            NSLog(@"[WeaponX] Error creating identity directory: %@", dirError);
-            self.error = dirError;
+    // Current-schema readers retain the live-file fast path without ownership.
+    NSDictionary *ids = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
+    id schema = ids[@"ProfileSchemaVersion"];
+    if ([schema respondsToSelector:@selector(integerValue)] && [schema integerValue] >= 2) return identityDir;
+
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&error];
+    @try {
+        if (!lease) { self.error = error; return nil; }
+        // A reader observed the target before ownership; reject a selection move.
+        if (![[self getActiveProfileId] isEqualToString:profileID]) {
+            self.error = [NSError errorWithDomain:@"WeaponXProfileError" code:20 userInfo:@{NSLocalizedDescriptionKey: @"Profile selection changed before migration"}];
             return nil;
         }
+        return [self prepareProfileIdentityForProfileID:profileID lifecycleLease:lease];
+    } @finally { [lease invalidate]; }
+}
+
+- (NSString *)profileIdentityPathWithLifecycleLease:(PXProfileLifecycleLease *)lease {
+    return [self prepareProfileIdentityForProfileID:[[self getActiveProfileId] copy] lifecycleLease:lease];
+}
+
+- (NSString *)prepareProfileIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease {
+    NSError *error = nil;
+    if (![lease isKindOfClass:PXProfileLifecycleLease.class] || ![lease validateForDirectory:PXProfilesPath() error:&error] || !PXRequireNoPendingProfileDeletion(&error)) {
+        self.error = error ?: [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Missing profile migration capability"}];
+        return nil;
     }
-    
-    // Already-current profiles keep the legacy read-only fast path. This path
-    // is also used by rootful live readers; do not put every read under a
-    // writer flock. A required migration rechecks the schema inside the gate.
-    static _Thread_local BOOL sMigratingSchema = NO;
-    if (!sMigratingSchema) {
-        NSDictionary *ids = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
-        id schema = ids[@"ProfileSchemaVersion"];
-        if (![schema respondsToSelector:@selector(integerValue)] || [schema integerValue] < 2) {
-            sMigratingSchema = YES;
-            @try { if (![self migrateProfileSchemaAtIdentityDirectory:identityDir]) return nil; }
-            @finally { sMigratingSchema = NO; }
+    NSString *identityDir = PXProfileIdentityPath([profileID copy]);
+    if (!identityDir.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2001 userInfo:@{NSLocalizedDescriptionKey: @"No valid active profile identity target"}];
+        return nil;
+    }
+    // Keep legacy directory repair, now after lifecycle/recovery preflight.
+    if (![NSFileManager.defaultManager fileExistsAtPath:identityDir]) {
+        NSDictionary *attributes = @{NSFilePosixPermissions: @0755, NSFileOwnerAccountName: @"mobile"};
+        if (![NSFileManager.defaultManager createDirectoryAtPath:identityDir withIntermediateDirectories:YES attributes:attributes error:&error]) {
+            self.error = error; return nil;
         }
     }
-    
+    NSDictionary *ids = [NSDictionary dictionaryWithContentsOfFile:[identityDir stringByAppendingPathComponent:@"device_ids.plist"]];
+    id schema = ids[@"ProfileSchemaVersion"];
+    if (![schema respondsToSelector:@selector(integerValue)] || [schema integerValue] < 2) {
+        if (![self migrateProfileSchemaAtIdentityDirectory:identityDir lifecycleLease:lease]) return nil;
+    }
     return identityDir;
 }
 
@@ -946,10 +953,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 - (PXProfileArtifactMutation *)currentIdentifierMutation {
     self.error = nil;
     NSError *error = nil;
-    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{
-        // Preserve the existing path repair/schema migration behavior, but run
-        // it under writer ownership. Already-current reader paths stay unchanged.
-        return [self profileIdentityPath];
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithIdentityResolverUsingLease:^NSString *(PXProfileLifecycleLease *lease) {
+        return [self profileIdentityPathWithLifecycleLease:lease];
     } error:&error];
     if (!mutation && !self.error) self.error = error;
     return mutation;
@@ -1313,7 +1318,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&failure];
     @try {
         if (lease && [lease validateForDirectory:PXProfilesPath() error:&failure] && PXRequireNoPendingProfileDeletion(&failure)) {
-            NSString *identity = current ? [[self profileIdentityPath] copy] : [self existingGenerationIdentityForProfileID:profileID error:&failure];
+            NSString *identity = current ? [[self profileIdentityPathWithLifecycleLease:lease] copy] : [self existingGenerationIdentityForProfileID:profileID lifecycleLease:lease error:&failure];
             if (identity.length) [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts lifecycleLease:lease deferSettings:deferSettings receipt:&receipt error:&failure];
             else if (!failure) failure = self.error;
         }
@@ -1326,7 +1331,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return receipt;
 }
 
-- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID error:(NSError **)error {
+- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error {
     if (error) *error = nil;
     NSString *identityDir = PXProfileIdentityPath(PXValidatedProfileID(profileID));
     BOOL directory = NO;
@@ -1334,7 +1339,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6001 userInfo:@{NSLocalizedDescriptionKey: @"Explicit profile identity directory does not exist"}];
         if (error) *error = self.error; return nil;
     }
-    if (![self migrateProfileSchemaAtIdentityDirectory:identityDir]) { if (error) *error = self.error; return nil; }
+    if (![self migrateProfileSchemaAtIdentityDirectory:identityDir lifecycleLease:lease]) { if (error) *error = self.error; return nil; }
     return identityDir;
 }
 
@@ -1357,7 +1362,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         BOOL validLease = [lease isKindOfClass:PXProfileLifecycleLease.class] && [lease validateForDirectory:PXProfilesPath() error:&failure];
         if (!validLease && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6030 userInfo:@{NSLocalizedDescriptionKey: @"Creation generation requires its caller's lifecycle capability"}];
         if (validLease && PXRequireNoPendingProfileDeletion(&failure)) {
-            NSString *identity = [self existingGenerationIdentityForProfileID:profileID error:&failure];
+            NSString *identity = [self existingGenerationIdentityForProfileID:profileID lifecycleLease:lease error:&failure];
             if (identity) [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts lifecycleLease:lease deferSettings:YES receipt:&receipt error:&failure];
         }
     } @catch (NSException *exception) {
@@ -3433,12 +3438,38 @@ static BOOL PXIsNonZeroUUIDString(NSString *uuid) {
 }
 
 - (void)migrateProfileSchemaIfNeeded {
-    NSString *identityDir = PXProfileIdentityPath([self getActiveProfileId]);
-    if (!identityDir.length || ![NSFileManager.defaultManager fileExistsAtPath:identityDir]) return;
-    (void)[self migrateProfileSchemaAtIdentityDirectory:identityDir];
+    self.error = nil;
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&error];
+    @try {
+        if (!lease || ![lease validateForDirectory:PXProfilesPath() error:&error] || !PXRequireNoPendingProfileDeletion(&error)) { self.error = error; return; }
+        NSString *identityDir = PXProfileIdentityPath([[self getActiveProfileId] copy]);
+        if (!identityDir.length || ![NSFileManager.defaultManager fileExistsAtPath:identityDir]) return;
+        (void)[self migrateProfileSchemaAtIdentityDirectory:identityDir lifecycleLease:lease];
+    } @finally { [lease invalidate]; }
 }
 
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir {
+    self.error = nil;
+    identityDir = [identityDir copy];
+    NSError *error = nil;
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{ return identityDir; } error:&error];
+    if (!mutation) { self.error = error; return NO; }
+    @try { return [self commitProfileSchemaWithMutation:mutation]; }
+    @finally { [mutation invalidate]; }
+}
+
+- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir lifecycleLease:(PXProfileLifecycleLease *)lease {
+    NSError *error = nil;
+    identityDir = [identityDir copy];
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ return identityDir; } error:&error];
+    if (!mutation) { self.error = error; return NO; }
+    @try { return [self commitProfileSchemaWithMutation:mutation]; }
+    @finally { [mutation invalidate]; }
+}
+
+- (BOOL)commitProfileSchemaWithMutation:(PXProfileArtifactMutation *)mutation {
+    NSString *identityDir = mutation.identityDirectory;
     NSString *profileDir = identityDir.stringByDeletingLastPathComponent;
     NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
     BOOL udidEnabled = [self.settings[@"UDID"] boolValue];
@@ -3447,7 +3478,7 @@ static BOOL PXIsNonZeroUUIDString(NSString *uuid) {
     __block BOOL migrated = NO;
     __block NSInteger previousSchema = 0;
     NSError *writeError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+    BOOL success = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         NSMutableDictionary *deviceIds = [[tx dictionaryAtPath:deviceIdsPath error:error] mutableCopy];
         if (!deviceIds) return NO;
         NSInteger schemaVersion = [deviceIds[@"ProfileSchemaVersion"] respondsToSelector:@selector(integerValue)]
@@ -3567,9 +3598,9 @@ static BOOL PXIsNonZeroUUIDString(NSString *uuid) {
         if (![tx setDictionary:deviceIds atPath:deviceIdsPath error:error]) return NO;
         migrated = YES;
         return YES;
-    }, &writeError);
-    if (!success) self.error = writeError;
-    else if (migrated) PXLog(@"[IdentifierManager] Schema v%ld -> v2 committed at %@", (long)previousSchema, identityDir);
+    } error:&writeError];
+    self.error = success ? nil : writeError;
+    if (success && migrated) PXLog(@"[IdentifierManager] Schema v%ld -> v2 committed at %@", (long)previousSchema, identityDir);
     return success;
 }
 

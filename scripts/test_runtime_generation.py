@@ -19,10 +19,10 @@ def source_contracts():
     publisher_wrapper = groups.method(manager, '- (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error')
     wrapper = groups.method(manager, '- (void)regenerateAllEnabledIdentifiers')
     assert 'regenerateAllEnabledIdentifiersWithError:&error' in wrapper
-    assert publisher_wrapper.count('[self profileIdentityPath]') == 1
+    assert publisher_wrapper.count('[self profileIdentityPathWithLifecycleLease:lease]') == 1
     assert 'ownedRuntimeGenerationForProfileID:nil currentProfile:YES' in current
-    assert publisher_wrapper.index('acquireInDirectory:') < publisher_wrapper.index('[self profileIdentityPath]')
-    assert publisher_wrapper.index('PXRequireNoPendingProfileDeletion') < publisher_wrapper.index('[self profileIdentityPath]')
+    assert publisher_wrapper.index('acquireInDirectory:') < publisher_wrapper.index('[self profileIdentityPathWithLifecycleLease:lease]')
+    assert publisher_wrapper.index('PXRequireNoPendingProfileDeletion') < publisher_wrapper.index('[self profileIdentityPathWithLifecycleLease:lease]')
     assert '@finally { [lease invalidate]; }' in publisher_wrapper
     assert current.index('ownedRuntimeGenerationForProfileID:') < current.index('publishCommittedRuntimeGeneration:')
     assert 'directoryProofForProfileID:' in flow and 'validateForDirectory:' in flow
@@ -94,7 +94,7 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3L-partial'
+    assert manifest['rollout'] == '4C.2H3M-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     for pending in ('dashboard-preview', 'storage-preference', 'security-store', 'security-direct'):

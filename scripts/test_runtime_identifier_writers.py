@@ -46,6 +46,8 @@ def method(source, signature):
 
 def selected_signatures():
     return ['- (NSString *)profileIdentityPath',
+            '- (NSString *)profileIdentityPathWithLifecycleLease:(PXProfileLifecycleLease *)lease',
+            '- (NSString *)prepareProfileIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease',
             '- (PXProfileArtifactMutation *)currentIdentifierMutation',
             '- (NSString *)generatePreparedIdentifierForType:(NSString *)type',
             '- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial',
@@ -55,7 +57,9 @@ def selected_signatures():
             '- (void)setATTAuthorizationStatus:(NSInteger)status', '- (BOOL)setCustomDeviceTheme:(NSString *)value',
             '- (NSString *)generateSystemUptime', '- (NSString *)generateBootTime',
             '- (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot',
-            '- (void)migrateProfileSchemaIfNeeded', '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir']
+            '- (void)migrateProfileSchemaIfNeeded', '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir',
+            '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir lifecycleLease:(PXProfileLifecycleLease *)lease',
+            '- (BOOL)commitProfileSchemaWithMutation:(PXProfileArtifactMutation *)mutation']
 
 
 def source_contracts():
@@ -69,7 +73,7 @@ def source_contracts():
         assert 'profileIdentityPath' not in body and '] ' + generator + ']' not in body
     flow = method(manager, '- (NSString *)generatePreparedIdentifierForType:(NSString *)type')
     acquire = method(manager, '- (PXProfileArtifactMutation *)currentIdentifierMutation')
-    assert acquire.count('[self profileIdentityPath]') == 1 and 'acquireWithIdentityResolver:' in acquire
+    assert acquire.count('[self profileIdentityPathWithLifecycleLease:lease]') == 1 and 'acquireWithIdentityResolverUsingLease:' in acquire
     assert flow.index('[self currentIdentifierMutation]') < flow.index('PXPrepareRuntimeScalar(type, &prepareError)')
     assert '@finally { [mutation invalidate]; }' in flow
     assert flow.index('[mutation invalidate]') < flow.index('publishPreparedIdentifier:')
@@ -93,11 +97,41 @@ def source_contracts():
     for signature in selected_signatures():
         body = method(manager, signature)
         assert 'writeToFile:' not in body, f'unenrolled direct write: {signature}'
-    migration = method(manager, '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir')
-    assert 'dictionaryWithContentsOfFile:' not in migration and 'PXPerformRuntimeSourceWrite' in migration
+    migration = method(manager, '- (BOOL)commitProfileSchemaWithMutation:(PXProfileArtifactMutation *)mutation')
+    assert 'dictionaryWithContentsOfFile:' not in migration and '[mutation performSourceWrite:' in migration
     assert 'PXAdvanceRuntimeIdentifierGeneration(deviceIds, error)' in migration
     assert 'schemaVersion >= 2' in migration and 'profileBatteryPath' in migration
-    assert migration.index('}, &writeError)') < migration.index('PXLog('), 'migration logs must run after unlock'
+    assert migration.index('} error:&writeError]') < migration.index('PXLog('), 'migration logs must run after unlock'
+    owned = method(manager, '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir')
+    borrowed = method(manager, '- (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir lifecycleLease:(PXProfileLifecycleLease *)lease')
+    assert 'acquireWithIdentityResolver:' in owned and 'borrowWithLifecycleLease:lease' in borrowed
+    for body in (owned, borrowed):
+        assert 'commitProfileSchemaWithMutation:mutation' in body and '@finally { [mutation invalidate]; }' in body
+        assert '[lease invalidate]' not in body
+    path = method(manager, '- (NSString *)prepareProfileIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease')
+    assert path.index('PXRequireNoPendingProfileDeletion') < path.index('createDirectoryAtPath:')
+    assert 'migrateProfileSchemaAtIdentityDirectory:identityDir lifecycleLease:lease' in path
+    current = method(manager, '- (void)migrateProfileSchemaIfNeeded')
+    assert current.index('acquireInDirectory:') < current.index('getActiveProfileId')
+    assert '@finally { [lease invalidate]; }' in current
+    for case in ('direct migration fails busy before source staging',
+                 'current migration acquires ownership before active lookup',
+                 'cold reader migration fails busy without source mutation',
+                 'busy cold reader never creates missing profile identity',
+                 'direct and cold reader migration stop at pending deletion',
+                 'pending deletion blocks cold path directory repair',
+                 'migration reentry requires explicit capability instead of implicit reuse',
+                 'borrowed migration commits once without acquiring or invalidating caller ownership',
+                 'current schema reader remains available under contention without writer gate',
+                 'borrowed migration rollback preserves sidecars token and caller lease',
+                 'migration rejects invalidated capability without source mutation',
+                 'migration rejects wrong root while preserving foreign ownership',
+                 'borrowed migration exception closes child scope while caller remains held',
+                 'migration checks late deletion before staging entire schema group',
+                 'owned migration rejects removed replaced and symlink identity before schema staging',
+                 'cold reader rejects selection drift before directory repair or migration',
+                 'cold reader migration succeeds with one schema bump after ownership retry'):
+        assert case in fixture, case
     uptime = method(manager, '- (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot')
     assert '[self currentIdentifierMutation]' in uptime and '@finally { [mutation invalidate]; }' in uptime
     assert 'generateIfMissing:NO' in uptime and 'prepareConsistentUptimeInfo' in uptime
@@ -118,9 +152,9 @@ def source_contracts():
                  'uptime compatibility transaction failure rolls back pair scalar and commit token'):
         assert case in fixture, case
     identity = method(manager, '- (NSString *)profileIdentityPath')
-    assert 'static _Thread_local BOOL sMigratingSchema' in identity and '@finally { sMigratingSchema = NO; }' in identity
-    assert '[self migrateProfileSchemaAtIdentityDirectory:identityDir]' in identity
-    assert identity.index('[schema integerValue] < 2') < identity.index('[self migrateProfileSchemaAtIdentityDirectory:identityDir]'), 'already-current live readers may not enter writer flock'
+    assert identity.index('[schema integerValue] >= 2') < identity.index('acquireInDirectory:')
+    assert '@finally { [lease invalidate]; }' in identity and 'sMigratingSchema' not in identity
+    assert 'prepareProfileIdentityForProfileID:profileID lifecycleLease:lease' in identity
     custom = method(manager, '- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type')
     assert 'PXRuntimeIdentifierSidecar(type)' in custom and 'incrementGeneration:YES' in custom
     assert custom.index('if (success)') < custom.index('publishPreparedIdentifier:value type:type includeNameAndSerial:NO')
@@ -136,8 +170,8 @@ def source_contracts():
         assert forbidden not in helper
     for token in ('generator captures target once', 'compatibility setter runs after complete commit',
                   'failed custom commit cannot publish', 'counter exhaustion rejects',
-                  'schema migration commits whole group', 'concurrent migrations bump once',
-                  'thread-local migration guard resets', 'migration rollback restores all sidecars',
+                  'schema migration commits whole group', 'concurrent migrations accept explicit busy',
+                  'migration capability cleanup permits retry', 'migration rollback restores all sidecars',
                   'already-current live path never enters writer gate', 'malformed migration input preserves bytes'):
         assert token in fixture, f'missing native case: {token}'
     for case in ('busy scalar metadata writers never resolve migrate prepare write or publish',
@@ -151,7 +185,7 @@ def source_contracts():
                  'owned ATT preserves clamp policy and releases before logging',
                  'owned theme retains paired state without changing generation policy',
                  'scalar failure preserves completed schema preflight without claiming whole-operation rollback',
-                 'writer resolver exception releases lifecycle and resets schema reentry guard'):
+                 'writer resolver exception releases lifecycle and permits schema retry'):
         assert case in fixture, case
     make = read('Makefile').split('WeaponXDaemon_FILES =', 1)[1].splitlines()[0]
     assert 'common/PXRuntimeIdentifierWriter.m' in make
@@ -159,7 +193,7 @@ def source_contracts():
         assert 'common/PXRuntimeIdentifierWriter.m' in read('scripts/' + runner), 'new allowlist registry must link transitively'
     assert 'test_runtime_identifier_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3L-partial'
+    assert manifest['rollout'] == '4C.2H3M-partial'
     for name in ('identifier-values', 'identifier-migration', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
