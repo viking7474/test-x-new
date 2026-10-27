@@ -16,6 +16,14 @@ identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
 WRAPPERS = {
     'PXPreparedWiFiMethod.inc': ('common/WiFiManager.m', ['- (NSDictionary *)generateWiFiInfo', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID']),
+    'PXOwnedWiFiMethods.inc': ('common/WiFiManager.m', [
+        '- (instancetype)init', '- (void)registerForProfileNotifications', '- (id)profileManagerForWiFi',
+        '- (NSString *)getCurrentProfileID', '- (NSString *)profileIDFromManager:(id)manager',
+        '- (void)loadWiFiInfoFromCurrentProfile', '- (void)loadWiFiInfoForProfileID:(NSString *)profileID',
+        '- (void)saveWiFiInfoToCurrentProfile', '- (NSDictionary *)generateWiFiInfo',
+        '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID',
+        '- (NSDictionary *)currentWiFiInfo', '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo',
+        '- (BOOL)isValidSSID:(NSString *)ssid', '- (BOOL)isValidBSSID:(NSString *)bssid', '- (void)dealloc']),
     'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp']),
     'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
@@ -35,6 +43,25 @@ def source_contracts():
     assert 'UINT64_MAX / 1e9' in preparation and '!isfinite(parsedCapacity)' in preparation
     wifi = identifier.method(read('common/WiFiManager.m'), WRAPPERS['PXPreparedWiFiMethod.inc'][1][0])
     assert 'PXPrepareRuntimeWiFiInfo()' in wifi and wifi.count('saveWiFiInfoToCurrentProfile') == 1
+    wifi_source = read('common/WiFiManager.m')
+    save_wifi = identifier.method(wifi_source, '- (void)saveWiFiInfoToCurrentProfile')
+    assert save_wifi.index('[self profileManagerForWiFi]') < save_wifi.index('acquireWithIdentityResolver:') < save_wifi.index('[self.wifiInfo copy]')
+    assert '[self profileIDFromManager:manager]' in save_wifi and '[mutation performSourceWrite:' in save_wifi
+    assert '@finally { [mutation invalidate]; }' in save_wifi and 'createDirectoryAtPath:' not in save_wifi
+    assert 'PXPerformRuntimeSourceWrite' not in wifi_source
+    observer = identifier.method(wifi_source, '- (void)registerForProfileNotifications')
+    assert '@synchronized (self)' in observer and 'if (self.profileChangeObserver) return;' in observer
+    assert '__weak typeof(self) weakSelf' in observer and '__strong typeof(weakSelf) owner' in observer
+    assert 'loadWiFiInfoFromCurrentProfile' in observer and 'currentProfileId = eventID' not in observer
+    assert '@property (nonatomic, strong) id profileChangeObserver;' in wifi_source
+    profile_manager = identifier.method(wifi_source, '- (id)profileManagerForWiFi')
+    assert 'respondsToSelector:@selector(sharedManager)' in profile_manager
+    loader = identifier.method(wifi_source, '- (void)loadWiFiInfoForProfileID:(NSString *)profileID')
+    assert loader.index('self.wifiInfo = [NSMutableDictionary dictionary]') < loader.index('dictionaryWithContentsOfFile:')
+    assert 'PXProfileIdentityPath(target)' in loader and 'PXProfilesPath()' not in loader
+    getter = identifier.method(wifi_source, '- (NSDictionary *)currentWiFiInfo')
+    assert getter.count('getCurrentProfileID') == 1 and 'loadWiFiInfoForProfileID:currentID' in getter
+
     battery = identifier.method(read('common/BatteryManager.m'), '- (NSDictionary *)generateBatteryInfo')
     assert 'PXPrepareRuntimeBatteryInfo(_currentLowPowerMode)' in battery
     assert battery.count('[self saveBatteryInfoToDisk]') == 1 and 'randomizeBatteryLevel' not in battery
@@ -90,16 +117,39 @@ def source_contracts():
                  'late deletion journal rejects entire uptime tuple without adopting cache',
                  'uptime rejects removed replaced and symlink identity without source or cache adoption'):
         assert case in fixture, case
+    for case in ('WiFi observer registration is idempotent and retains one token',
+                 'WiFi profile notification clears old cache on missing target without writing source',
+                 'WiFi missing-profile getter generates B instead of returning or overwriting A',
+                 'WiFi cached read hit adds no lifecycle or source transaction',
+                 'WiFi malformed reload clears cache instead of retaining previous data',
+                 'busy WiFi persistence stops before target resolution snapshot and source writes',
+                 'pending deletion stops WiFi persistence before cache snapshot',
+                 'WiFi persistence never recreates missing identity directory',
+                 'WiFi snapshot excludes reentrant storage persistence',
+                 'WiFi persistence captures one target and never redirects during snapshot',
+                 'WiFi read after source-target switch reloads actual active profile',
+                 'WiFi source failure rolls back wifi and IDs before error logging',
+                 'WiFi snapshot exception releases scope and preserves source',
+                 'late journal rejects WiFi candidate before paired staging',
+                 'WiFi persistence rejects missing replaced and symlink identity without recreating it',
+                 'WiFi custom setter retains MAC validation and rejects all-zero address',
+                 'WiFi custom setter persists candidate through owned paired commit',
+                 'WiFi persistence preserves optional manager-first profile authority',
+                 'WiFi fallback retains numeric profile ID normalization',
+                 'WiFi default fallback keeps ephemeral cache without repeated generation or directory writes',
+                 'WiFi observer does not retain manager and dealloc removes its token',
+                 'queued WiFi notification reloads current authority and safely ignores deallocated observer owner'):
+        assert case in fixture, case
     assert 'test_runtime_artifact_preparation.py --native' in read('.github/workflows/build-ios-arm.yml')
     # The common glob carries the new factory into both manager app and tweak.
     make = read('Makefile')
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3F-partial'
+    assert manifest['rollout'] == '4C.2H3G-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
-    print('PASS: Artifact preparation and storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')
+    print('PASS: Artifact preparation and WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')
 
 
 def generate_native_fragments(folder):

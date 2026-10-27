@@ -6,6 +6,10 @@
 + (instancetype)sharedManager;
 
 // Core functionality
+// Standalone persistence owns an existing identity directory through paired
+// commit. These legacy APIs remain cache-first: a candidate/error is not a
+// persistence acknowledgement. Reloads clear values from a previous profile
+// when the selected profile has no readable WiFi record.
 - (NSDictionary *)generateWiFiInfo;
 - (NSDictionary *)currentWiFiInfo;
 - (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;

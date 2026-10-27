@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <dispatch/dispatch.h>
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeArtifactWriter.h"
 #import "PXProfileArtifactMutation.h"
@@ -20,7 +21,10 @@ static PXRuntimeSourceStore *gStore;
 static NSArray<NSNumber *> *gTape;
 static NSUInteger gTapeIndex;
 static BOOL gHigh;
-static NSUInteger gUptimeProviders, gStorageCopies;
+static NSUInteger gUptimeProviders, gStorageCopies, gWiFiSelections, gWiFiCopies, gWiFiReloads;
+static BOOL gWiFiManagerAvailable = YES;
+static NSString *gWiFiMemoryID;
+static void (^gDuringWiFiCopy)(void), (^gDuringWiFiWarmup)(void);
 static void (^gDuringUptime)(void), (^gDuringStorageCopy)(void), (^gDuringLog)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 uint32_t PXPreparationFixtureRandom(uint32_t bound) {
@@ -165,6 +169,72 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 #define sysctl PXPreparationFixtureSysctl
 #include "PXPreparedUptimeMethod.inc"
 #undef sysctl
+@end
+
+// The real optional ProfileManager is not linked into this Foundation fixture.
+// Observe the singleton/current-profile seam without copying its lifecycle code.
+@interface PXWiFiProfileFixture : NSObject
+@property (nonatomic, copy) NSString *profileId;
+@end
+@implementation PXWiFiProfileFixture
+@end
+@interface ProfileManager : NSObject
++ (instancetype)sharedManager;
+- (id)currentProfile;
+@end
+@implementation ProfileManager
++ (instancetype)sharedManager {
+    if (gDuringWiFiWarmup) gDuringWiFiWarmup();
+    if (!gWiFiManagerAvailable) return nil;
+    static ProfileManager *manager; static dispatch_once_t once;
+    dispatch_once(&once, ^{ manager = [self new]; }); return manager;
+}
+- (id)currentProfile {
+    gWiFiSelections++;
+    id selected = gWiFiMemoryID ?: [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()][@"ProfileId"];
+    if (![selected isKindOfClass:NSString.class]) return nil;
+    PXWiFiProfileFixture *profile = [PXWiFiProfileFixture new]; profile.profileId = selected; return profile;
+}
+@end
+@interface PXWiFiSnapshotFixture : NSObject <NSCopying>
+@property (nonatomic, copy) NSDictionary *record;
+@end
+@implementation PXWiFiSnapshotFixture
+- (id)copyWithZone:(NSZone *)zone {
+    (void)zone; gWiFiCopies++;
+    NSDictionary *snapshot = [self.record copy];
+    void (^callback)(void) = gDuringWiFiCopy; gDuringWiFiCopy = nil; if (callback) callback();
+    return snapshot;
+}
+@end
+@interface PXOwnedWiFiFixture : NSObject
+@property (nonatomic, strong) NSMutableDictionary *wifiInfo;
+@property (nonatomic, strong) NSString *currentProfileId;
+@property (nonatomic, strong) NSError *error;
+@property (nonatomic, strong) id profileChangeObserver;
+- (void)registerForProfileNotifications;
+- (id)profileManagerForWiFi;
+- (NSString *)getCurrentProfileID;
+- (NSString *)profileIDFromManager:(id)manager;
+- (void)loadWiFiInfoFromCurrentProfile;
+- (void)loadWiFiInfoForProfileID:(NSString *)profileID;
+- (void)saveWiFiInfoToCurrentProfile;
+- (NSDictionary *)generateWiFiInfo;
+- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID;
+- (NSDictionary *)currentWiFiInfo;
+- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo;
+- (BOOL)isValidSSID:(NSString *)ssid;
+- (BOOL)isValidBSSID:(NSString *)bssid;
+@end
+@implementation PXOwnedWiFiFixture
+#include "PXOwnedWiFiMethods.inc"
+@end
+@interface PXObservedWiFiFixture : PXOwnedWiFiFixture
+@end
+@implementation PXObservedWiFiFixture
+- (void)loadWiFiInfoForProfileID:(NSString *)profileID {
+    gWiFiReloads++; [super loadWiFiInfoForProfileID:profileID];
+}
 @end
 
 static void TestPurePreparation(void) {
@@ -513,6 +583,139 @@ static void TestUptimeLifecycle(void) {
     CHECK(SetArtifactSelection(@"a"), "artifact lifecycle selection restored");
 }
 
+
+static BOOL SetWiFiFixture(NSString *profileID, NSDictionary *record) {
+    NSString *path = Path(PXProfileIdentityPath(profileID), @"wifi_info.plist");
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return record ? PXStageRuntimeWiFi(tx, PXProfileIdentityPath(profileID), record, error) : [tx removeDictionaryAtPath:path error:error];
+    } error:NULL];
+}
+static void WiFiSpy(PXOwnedWiFiFixture *manager, NSDictionary *record) {
+    PXWiFiSnapshotFixture *spy = [PXWiFiSnapshotFixture new]; spy.record = record; manager.wifiInfo = (id)spy;
+}
+static BOOL PumpWiFiReload(NSUInteger count) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+    while (gWiFiReloads < count && deadline.timeIntervalSinceNow > 0)
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    return gWiFiReloads == count;
+}
+static void TestWiFiLifecycle(void) {
+    Tape(@[]);
+    NSDictionary *a = @{ @"ssid": @"Saved A", @"bssid": @"02:11:22:33:44:55" };
+    NSDictionary *next = @{ @"ssid": @"Next A", @"bssid": @"02:11:22:33:44:66" };
+    CHECK(SetArtifactSelection(@"a") && SetWiFiFixture(@"a", a) && SetWiFiFixture(@"b", nil), "WiFi profiles seeded with saved A and missing B");
+    __attribute__((objc_precise_lifetime)) PXObservedWiFiFixture *wifi = [PXObservedWiFiFixture new];
+    CHECK([wifi.wifiInfo isEqual:a] && [wifi.currentProfileId isEqual:@"a"], "WiFi constructor loads only selected profile cache");
+    id token = wifi.profileChangeObserver;
+    [wifi registerForProfileNotifications]; [wifi registerForProfileNotifications];
+    CHECK(token && token == wifi.profileChangeObserver, "WiFi observer registration is idempotent and retains one token");
+    CHECK(SetArtifactSelection(@"b"), "WiFi current selection changed to missing B");
+    NSUInteger reloads = gWiFiReloads, writes = gWrites;
+    [NSNotificationCenter.defaultCenter postNotificationName:@"WeaponXProfileChanged" object:nil userInfo:@{ @"ProfileId": @"b" }];
+    CHECK(PumpWiFiReload(reloads + 1) && [wifi.currentProfileId isEqual:@"b"] && wifi.wifiInfo.count == 0 && gWrites == writes,
+          "WiFi profile notification clears old cache on missing target without writing source");
+    NSDictionary *generated = [wifi currentWiFiInfo];
+    CHECK(generated.count == 6 && [wifi.currentProfileId isEqual:@"b"] &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"b"), @"wifi_info.plist")] isEqual:generated] &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:a],
+          "WiFi missing-profile getter generates B instead of returning or overwriting A");
+    writes = gWrites;
+    CHECK([[wifi currentWiFiInfo] isEqual:generated] && gWrites == writes, "WiFi cached read hit adds no lifecycle or source transaction");
+    NSString *bPath = Path(PXProfileIdentityPath(@"b"), @"wifi_info.plist"); NSData *saved = [NSData dataWithContentsOfFile:bPath];
+    CHECK([[@"broken" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:bPath atomically:YES], "WiFi malformed file injected");
+    [wifi loadWiFiInfoFromCurrentProfile];
+    CHECK(wifi.wifiInfo.count == 0 && [wifi.currentProfileId isEqual:@"b"], "WiFi malformed reload clears cache instead of retaining previous data");
+    CHECK([saved writeToFile:bPath atomically:YES], "WiFi malformed fixture restored");
+    WiFiSpy(wifi, next);
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL]; CHECK(owner != nil, "WiFi competing lifecycle owner acquired");
+    NSUInteger copies = gWiFiCopies, selections = gWiFiSelections; NSDictionary *before = AllArtifactFiles();
+    [wifi saveWiFiInfoToCurrentProfile];
+    CHECK(wifi.error.code == 12 && copies == gWiFiCopies && selections == gWiFiSelections && [before isEqual:AllArtifactFiles()],
+          "busy WiFi persistence stops before target resolution snapshot and source writes");
+    [owner invalidate];
+    CHECK(SetArtifactIntent(YES), "WiFi pending intent seeded"); before = AllArtifactFiles();
+    [wifi saveWiFiInfoToCurrentProfile];
+    CHECK(wifi.error.code == 27 && copies == gWiFiCopies && selections == gWiFiSelections && [before isEqual:AllArtifactFiles()],
+          "pending deletion stops WiFi persistence before cache snapshot");
+    CHECK(SetArtifactIntent(NO) && SetArtifactSelection(@"c"), "WiFi pending intent cleared and legacy target selected");
+    [wifi saveWiFiInfoToCurrentProfile];
+    CHECK(wifi.error && copies == gWiFiCopies && ![NSFileManager.defaultManager fileExistsAtPath:PXProfileIdentityPath(@"c")],
+          "WiFi persistence never recreates missing identity directory"); CheckArtifactLeaseFree();
+    CHECK(SetArtifactSelection(@"a"), "WiFi selected A for captured-target test");
+    gDuringWiFiWarmup = ^{ CheckArtifactLeaseFree(); };
+    gDuringWiFiCopy = ^{
+        CheckArtifactLeaseHeld();
+        PXPreparedStorageFixture *other = [PXPreparedStorageFixture new]; NSError *busy = nil;
+        CHECK(![other persistStorageToProfile:@"b" current:NO error:&busy] && busy.code == 12, "WiFi snapshot excludes reentrant storage persistence");
+        CHECK(SetArtifactSelection(@"b"), "bypass writer changes active selection during WiFi copy");
+    };
+    [wifi saveWiFiInfoToCurrentProfile]; gDuringWiFiWarmup = nil;
+    CHECK(!wifi.error && [wifi.currentProfileId isEqual:@"a"] &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:next] &&
+          [[NSDictionary dictionaryWithContentsOfFile:bPath] isEqual:generated], "WiFi persistence captures one target and never redirects during snapshot");
+    CHECK([[wifi currentWiFiInfo] isEqual:generated] && [wifi.currentProfileId isEqual:@"b"], "WiFi read after source-target switch reloads actual active profile");
+    CHECK(SetArtifactSelection(@"a"), "WiFi source-fault target restored"); WiFiSpy(wifi, a); before = AllArtifactFiles();
+    __block BOOL interrupted = NO;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"] && !interrupted) { interrupted = YES; [NSException raise:@"fixture" format:@"WiFi fault"]; } };
+    gDuringLog = ^{ CheckArtifactLeaseFree(); };
+    [wifi saveWiFiInfoToCurrentProfile]; gDuringLog = nil; gStore.testCheckpoint = nil;
+    CHECK(wifi.error && interrupted && [before isEqual:AllArtifactFiles()], "WiFi source failure rolls back wifi and IDs before error logging"); CheckArtifactLeaseFree();
+    gDuringWiFiCopy = ^{ [NSException raise:@"fixture" format:@"WiFi copy exception"]; };
+    BOOL threw = NO; @try { [wifi saveWiFiInfoToCurrentProfile]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [before isEqual:AllArtifactFiles()], "WiFi snapshot exception releases scope and preserves source"); CheckArtifactLeaseFree();
+    __block NSDictionary *competitor = nil;
+    gDuringWiFiCopy = ^{ CHECK(SetArtifactIntent(YES), "bypass WiFi deletion intent committed"); competitor = AllArtifactFiles(); };
+    [wifi saveWiFiInfoToCurrentProfile];
+    CHECK(wifi.error.code == 27 && [competitor isEqual:AllArtifactFiles()], "late journal rejects WiFi candidate before paired staging");
+    CHECK(SetArtifactIntent(NO), "WiFi late intent cleared");
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        NSString *identity = PXProfileIdentityPath(@"a"), *old = Path(PXProfileRootPath(@"a"), @"old-wifi-identity");
+        __block BOOL moved = NO; competitor = nil;
+        gDuringWiFiCopy = ^{
+            moved = [NSFileManager.defaultManager moveItemAtPath:identity toPath:old error:NULL];
+            if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:identity withIntermediateDirectories:NO attributes:nil error:NULL];
+            if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:identity withDestinationPath:PXProfileIdentityPath(@"b") error:NULL];
+            competitor = AllArtifactFiles();
+        };
+        [wifi saveWiFiInfoToCurrentProfile];
+        CHECK(wifi.error && moved && [competitor isEqual:AllArtifactFiles()], "WiFi persistence rejects missing replaced and symlink identity without recreating it");
+        if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:identity error:NULL], "WiFi identity replacement fixture removed");
+        CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:identity error:NULL], "WiFi original identity restored"); CheckArtifactLeaseFree();
+    }
+    [wifi loadWiFiInfoFromCurrentProfile]; NSDictionary *cache = [wifi.wifiInfo copy]; before = AllArtifactFiles();
+    [wifi setCurrentWiFiInfo:@{ @"ssid": @"missing BSSID" }];
+    CHECK(wifi.error.code == 3001 && [cache isEqual:wifi.wifiInfo] && [before isEqual:AllArtifactFiles()], "WiFi custom setter preserves required-field validation before persistence");
+    [wifi setCurrentWiFiInfo:@{ @"ssid": @"Invalid MAC", @"bssid": @"00:00:00:00:00:00" }];
+    CHECK(wifi.error.code == 3005 && [cache isEqual:wifi.wifiInfo] && [before isEqual:AllArtifactFiles()], "WiFi custom setter retains MAC validation and rejects all-zero address");
+    [wifi setCurrentWiFiInfo:next];
+    CHECK(!wifi.error && [wifi.wifiInfo isEqual:next] && [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:next],
+          "WiFi custom setter persists candidate through owned paired commit");
+    // Preserve the existing optional-manager authority and file-only fallback.
+    CHECK(SetArtifactSelection(@"b"), "WiFi file authority B selected"); gWiFiMemoryID = @"a";
+    [wifi setCurrentWiFiInfo:a];
+    CHECK(!wifi.error && [wifi.currentProfileId isEqual:@"a"] && [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"wifi_info.plist")] isEqual:a],
+          "WiFi persistence preserves optional manager-first profile authority");
+    gWiFiMemoryID = nil; gWiFiManagerAvailable = NO;
+    CHECK(SetArtifactSelection(@7) && [[wifi getCurrentProfileID] isEqual:@"7"], "WiFi fallback retains numeric profile ID normalization");
+    CHECK(SetArtifactSelection(nil), "WiFi no-active fallback seeded"); before = AllArtifactFiles();
+    [wifi loadWiFiInfoFromCurrentProfile]; NSDictionary *ephemeral = [wifi currentWiFiInfo]; id cached = wifi.wifiInfo;
+    CHECK(ephemeral.count == 6 && wifi.error && [[wifi currentWiFiInfo] isEqual:ephemeral] && wifi.wifiInfo == cached &&
+          [wifi.currentProfileId isEqual:@"default"] && [before isEqual:AllArtifactFiles()], "WiFi default fallback keeps ephemeral cache without repeated generation or directory writes");
+    gWiFiManagerAvailable = YES; CHECK(SetArtifactSelection(@"a"), "WiFi selected A after fallback tests");
+    [wifi loadWiFiInfoFromCurrentProfile];
+    __weak PXOwnedWiFiFixture *weakOwner = nil;
+    @autoreleasepool {
+        PXOwnedWiFiFixture *temporary = [PXOwnedWiFiFixture new]; weakOwner = temporary;
+        [temporary registerForProfileNotifications];
+    }
+    CHECK(weakOwner == nil, "WiFi observer does not retain manager and dealloc removes its token");
+    reloads = gWiFiReloads; writes = gWrites;
+    [NSNotificationCenter.defaultCenter postNotificationName:@"WeaponXProfileChanged" object:nil userInfo:@{ @"ProfileId": @"c" }];
+    CHECK(PumpWiFiReload(reloads + 1) && [wifi.currentProfileId isEqual:@"a"] && [wifi.wifiInfo isEqual:a] && gWrites == writes && weakOwner == nil,
+          "queued WiFi notification reloads current authority and safely ignores deallocated observer owner");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -523,7 +726,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle(); TestWiFiLifecycle();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

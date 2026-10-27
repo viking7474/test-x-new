@@ -77,7 +77,7 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3F-partial'
+    assert manifest['rollout'] == '4C.2H3G-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -147,7 +147,7 @@ def source_contracts():
                               (objc_method(battery, '- (void)saveBatteryInfoToDisk'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
         assert f'PXStageRuntime{helper_name}' in body
-        assert ('[mutation performSourceWrite:' if helper_name == 'Uptime' else 'PXPerformRuntimeSourceWrite') in body
+        assert ('[mutation performSourceWrite:' if helper_name in ('Uptime', 'WiFi') else 'PXPerformRuntimeSourceWrite') in body
         assert 'writeToFile:deviceIdsPath' not in body
     assert 'writeToFile:BATTERY_PLIST_PATH' in battery, 'legacy global battery compatibility remains separate'
     storage_save = objc_method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
