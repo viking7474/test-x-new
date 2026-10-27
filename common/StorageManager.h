@@ -102,6 +102,10 @@
 
 #pragma mark - Profile Management
 
+// Saves use nonblocking lifecycle ownership of an existing profile directory;
+// they never create a missing target. Current saves keep canonical selection-file
+// authority. Setter cache changes still precede their individual autosaves.
+
 /**
  * Save storage settings to a specific profile
  * @param profileId The profile ID to save to

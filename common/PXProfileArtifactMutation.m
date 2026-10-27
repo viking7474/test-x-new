@@ -11,22 +11,33 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
     return NO;
 }
 @interface PXProfileArtifactMutation () {
-    int _identityFD;
+    int _directoryFD;
 }
 @property (nonatomic, copy, readwrite) NSString *identityDirectory;
+@property (nonatomic, copy, readwrite) NSString *profileDirectory;
+@property (nonatomic, copy) NSString *targetDirectory;
 @property (nonatomic, copy) NSString *profileID;
 @property (nonatomic, copy) NSDictionary *directoryProof;
 @property (nonatomic, strong) PXProfileLifecycleLease *lease;
 - (instancetype)initForMutation;
 - (BOOL)validateWithError:(NSError **)error;
++ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget error:(NSError **)error NS_RETURNS_RETAINED;
 @end
 
 @implementation PXProfileArtifactMutation
 - (instancetype)initForMutation {
-    if ((self = [super init])) _identityFD = -1;
+    if ((self = [super init])) _directoryFD = -1;
     return self;
 }
 + (instancetype)acquireWithIdentityResolver:(NSString *(^)(void))resolver error:(NSError **)error {
+    return [self acquireWithDirectoryResolver:resolver identityTarget:YES error:error];
+}
++ (instancetype)acquireWithProfileIDResolver:(NSString *(^)(void))resolver error:(NSError **)error {
+    return [self acquireWithDirectoryResolver:^NSString *{
+        return PXProfileRootPath(PXValidatedProfileID(resolver ? resolver() : nil));
+    } identityTarget:NO error:error];
+}
++ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget error:(NSError **)error {
     if (error) *error = nil;
     PXProfileArtifactMutation *mutation = [[self alloc] initForMutation];
     mutation.lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:error];
@@ -34,20 +45,23 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
     @try {
         if (!mutation.lease || !PXRequireNoPendingProfileDeletion(error)) return nil;
         id resolved = resolver ? resolver() : nil;
-        NSString *identity = [resolved isKindOfClass:NSString.class] ? [resolved copy] : nil;
-        NSString *profileID = identity.stringByDeletingLastPathComponent.lastPathComponent;
-        if (!identity || ![PXProfileIdentityPath(PXValidatedProfileID(profileID)) isEqual:identity]) {
+        NSString *target = [resolved isKindOfClass:NSString.class] ? [resolved copy] : nil;
+        NSString *profileID = identityTarget ? target.stringByDeletingLastPathComponent.lastPathComponent : target.lastPathComponent;
+        NSString *expected = identityTarget ? PXProfileIdentityPath(PXValidatedProfileID(profileID)) : PXProfileRootPath(PXValidatedProfileID(profileID));
+        if (!target || ![expected isEqual:target]) {
             PXArtifactMutationError(error, @"Profile artifact target is invalid or selection changed before ownership"); return nil;
         }
-        mutation.identityDirectory = identity;
+        mutation.identityDirectory = PXProfileIdentityPath(profileID);
+        mutation.profileDirectory = PXProfileRootPath(profileID);
+        mutation.targetDirectory = target;
         mutation.profileID = profileID;
         mutation.directoryProof = [mutation.lease directoryProofForProfileID:profileID error:error];
         if (![mutation.directoryProof[@"exists"] boolValue]) {
             PXArtifactMutationError(error, @"Profile artifact target directory no longer exists"); return nil;
         }
-        // Pin the identity inode until release; reject replacement/symlinks at
-        // commit checkpoints instead of recreating a removed identity directory.
-        mutation->_identityFD = open(identity.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        // Pin the writer's directory until release; reject replacement/symlinks
+        // at commit checkpoints instead of recreating a removed target.
+        mutation->_directoryFD = open(target.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         if (![mutation validateWithError:error]) return nil;
         handedOff = YES;
         return mutation;
@@ -62,9 +76,9 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
     if (!observed) return NO;
     if (![observed isEqual:self.directoryProof]) return PXArtifactMutationError(error, @"Profile directory changed during artifact preparation");
     struct stat held, current;
-    if (_identityFD < 0 || fstat(_identityFD, &held) != 0 || lstat(self.identityDirectory.fileSystemRepresentation, &current) != 0 ||
+    if (_directoryFD < 0 || fstat(_directoryFD, &held) != 0 || lstat(self.targetDirectory.fileSystemRepresentation, &current) != 0 ||
         !S_ISDIR(held.st_mode) || !S_ISDIR(current.st_mode) || held.st_dev != current.st_dev || held.st_ino != current.st_ino)
-        return PXArtifactMutationError(error, @"Profile identity directory is unavailable or was replaced");
+        return PXArtifactMutationError(error, @"Profile artifact directory is unavailable or was replaced");
     return YES;
 }
 - (BOOL)performSourceWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error {
@@ -80,7 +94,7 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
     }, error);
 }
 - (void)invalidate {
-    if (_identityFD >= 0) { close(_identityFD); _identityFD = -1; }
+    if (_directoryFD >= 0) { close(_directoryFD); _directoryFD = -1; }
     [self.lease invalidate];
     self.lease = nil;
 }

@@ -33,6 +33,7 @@ NSString *PXValidatedProfileID(id value) {
     return [value isKindOfClass:NSString.class] && [value length] && ![value containsString:@"/"] &&
         ![value containsString:@"\\"] && ![value isEqual:@"."] && ![value isEqual:@".."] ? [value copy] : nil;
 }
+NSString *PXProfileRootPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(PXProfilesPath(), profile) : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(Path(PXProfilesPath(), profile), @"identity") : nil; }
 NSString *PXActiveProfileIdentityPath(void) {
     atomic_fetch_add(&gSelections, 1);

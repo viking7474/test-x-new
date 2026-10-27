@@ -4,6 +4,7 @@
 #import "PXPaths.h"
 #import "PXRuntimeArtifactWriter.h"
 #import "PXRuntimeArtifactPreparation.h"
+#import "PXProfileArtifactMutation.h"
 
 // File paths for persistent storage
 // Removed global paths. All methods now require a profile-specific path.
@@ -63,7 +64,9 @@ static NSString * const kCreationTimeKey = @"creationTime";
 }
 
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath {
+    PXProfileArtifactMutation *mutation = nil;
     @try {
+        profilePath = [profilePath copy];
         // Validate profile path
         NSString *profileID = profilePath.stringByDeletingLastPathComponent.lastPathComponent;
         NSString *expectedIdentity = PXProfileIdentityPath(profileID);
@@ -76,24 +79,10 @@ static NSString * const kCreationTimeKey = @"creationTime";
             return;
         }
         
-        // Ensure profile directory exists
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSError *dirError = nil;
-        if (![fileManager createDirectoryAtPath:profilePath 
-                     withIntermediateDirectories:YES 
-                                      attributes:nil 
-                                           error:&dirError]) {
-            // Check if the error is because directory already exists
-            if (dirError.code != NSFileWriteFileExistsError && ![fileManager fileExistsAtPath:profilePath]) {
-                NSString *errorMsg = [NSString stringWithFormat:@"Failed to create profile directory: %@", dirError.localizedDescription];
-                self.error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" 
-                                                 code:1004 
-                                             userInfo:@{NSLocalizedDescriptionKey: errorMsg}];
-                PXLog(@"[WeaponX] ❌ %@", errorMsg);
-                return;
-            }
-        }
-        
+        NSError *writeError = nil;
+        mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{ return profilePath; } error:&writeError];
+        if (!mutation) { self.error = writeError; return; }
+
         struct timeval boottv = {0};
         size_t sz = sizeof(boottv);
         int mib[2] = {CTL_KERN, KERN_BOOTTIME};
@@ -105,10 +94,11 @@ static NSString * const kCreationTimeKey = @"creationTime";
         NSDictionary *uptimeDict = prepared[@"uptime"];
         NSDate *bootTime = bootTimeDict[@"value"];
         NSTimeInterval uptime = [prepared[@"seconds"] doubleValue];
-        NSError *writeError = nil;
-        if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-            return PXStageRuntimeUptime(tx, profilePath, bootTimeDict, uptimeDict, now, error);
-        }, &writeError)) {
+        BOOL committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return PXStageRuntimeUptime(tx, mutation.identityDirectory, bootTimeDict, uptimeDict, now, error);
+        } error:&writeError];
+        [mutation invalidate]; // Release before compatibility cache setters/logging.
+        if (!committed) {
             self.error = writeError;
             PXLog(@"[UptimeManager] Failed to commit boot/uptime group at %@: %@", profilePath, writeError);
             return;
@@ -123,12 +113,13 @@ static NSString * const kCreationTimeKey = @"creationTime";
         PXLog(@"[WeaponX] ✅ Generated consistent uptime (%.2f hours) and boot time (%@) for profile path: %@", 
               uptime/3600.0, bootTime, profilePath);
     } @catch (NSException *e) {
+        [mutation invalidate];
         NSString *errorMsg = [NSString stringWithFormat:@"Error generating consistent uptime: %@", e];
         self.error = [NSError errorWithDomain:@"com.weaponx.UptimeManager" 
                                          code:1002 
                                      userInfo:@{NSLocalizedDescriptionKey: errorMsg}];
         PXLog(@"[WeaponX] ❌ %@", errorMsg);
-    }
+    } @finally { [mutation invalidate]; }
 }
 
 - (NSString *)generateUptimeForProfile:(NSString *)profilePath {

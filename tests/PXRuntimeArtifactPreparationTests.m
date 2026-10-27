@@ -2,6 +2,8 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeArtifactWriter.h"
+#import "PXProfileArtifactMutation.h"
+#import "PXProfileLifecycleLease.h"
 #import "PXIdentityValidator.h"
 #import "PXPaths.h"
 #import "TLinkIOSLogging.h"
@@ -10,6 +12,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 static NSUInteger gChecks, gFailures, gWrites, gBatterySaves, gDarwin, gLocal, gWiFiSaves;
 static NSString *gRoot;
@@ -17,6 +20,8 @@ static PXRuntimeSourceStore *gStore;
 static NSArray<NSNumber *> *gTape;
 static NSUInteger gTapeIndex;
 static BOOL gHigh;
+static NSUInteger gUptimeProviders, gStorageCopies;
+static void (^gDuringUptime)(void), (^gDuringStorageCopy)(void), (^gDuringLog)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 uint32_t PXPreparationFixtureRandom(uint32_t bound) {
     CHECK(bound > 0, "random preparation has bounded nonzero input");
@@ -30,13 +35,22 @@ uint32_t PXPreparationFixtureRandom(uint32_t bound) {
 }
 static void Tape(NSArray<NSNumber *> *values) { gTape = values; gTapeIndex = 0; gHigh = NO; }
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
+NSString *PXProfilesPath(void) { return gRoot; }
+NSString *PXCurrentProfileInfoPath(void) { return Path(gRoot, @"current_profile_info.plist"); }
+NSString *PXLegacyActiveProfileInfoPath(void) { return Path(gRoot, @"legacy_selection.plist"); }
+NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
+NSString *PXValidatedProfileID(id value) {
+    return [value isKindOfClass:NSString.class] && [@[@"a", @"b", @"c"] containsObject:value] ? [value copy] : nil;
+}
+NSString *PXProfileRootPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(gRoot, profile) : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) {
-    return [@[@"a", @"b"] containsObject:profile] ? Path(Path(gRoot, profile), @"identity") : nil;
+    NSString *root = PXProfileRootPath(profile);
+    return root ? Path(root, @"identity") : nil;
 }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
     gWrites++; return [gStore performWrite:body error:error];
 }
-void PXLog(NSString *format, ...) { (void)format; }
+void PXLog(NSString *format, ...) { (void)format; if (gDuringLog) gDuringLog(); }
 static NSDictionary *IDs(void) { return [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist")] ?: @{}; }
 static NSDictionary *Capture(void) {
     return [gStore capture:^NSDictionary *(NSError **error) {
@@ -100,15 +114,37 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 #undef CFNotificationCenterPostNotification
 @end
 
+@interface PXStorageSnapshotFixture : NSObject <NSCopying>
+@property (nonatomic, copy) NSDictionary *record;
+@end
+@implementation PXStorageSnapshotFixture
+- (id)copyWithZone:(NSZone *)zone {
+    (void)zone; gStorageCopies++;
+    NSDictionary *snapshot = [self.record copy];
+    void (^callback)(void) = gDuringStorageCopy; gDuringStorageCopy = nil; if (callback) callback();
+    return snapshot;
+}
+@end
+
 @interface PXPreparedStorageFixture : NSObject {
     NSMutableDictionary *_storageSettings;
 }
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
 - (NSDictionary *)fixtureStorage;
+- (void)setFixtureSnapshot:(NSDictionary *)record;
+- (void)saveToCurrentProfile;
+- (void)saveToProfile:(NSString *)profileId;
+- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error;
+- (void)setTotalStorageCapacity:(NSString *)capacity;
+- (void)setFreeStorageSpace:(NSString *)freeSpace;
+- (void)setFilesystemType:(NSString *)fsType;
 @end
 @implementation PXPreparedStorageFixture
 - (NSDictionary *)fixtureStorage { return _storageSettings; }
+- (void)setFixtureSnapshot:(NSDictionary *)record {
+    PXStorageSnapshotFixture *spy = [PXStorageSnapshotFixture new]; spy.record = record; _storageSettings = (id)spy;
+}
 #include "PXPreparedStorageMethod.inc"
 @end
 
@@ -120,8 +156,15 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 - (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)path;
 - (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp;
 @end
+static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    gUptimeProviders++;
+    void (^callback)(void) = gDuringUptime; gDuringUptime = nil; if (callback) callback();
+    return sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+}
 @implementation PXPreparedUptimeFixture
+#define sysctl PXPreparationFixtureSysctl
 #include "PXPreparedUptimeMethod.inc"
+#undef sysctl
 @end
 
 static void TestPurePreparation(void) {
@@ -241,6 +284,235 @@ static void TestCompositionAndUptime(void) {
     [manager generateConsistentUptimeAndBootTimeForProfile:identity]; gStore.testCheckpoint = nil;
     CHECK(manager.error != nil && manager.bootTimeValue == previous && manager.cacheTime == previousClock && [before isEqual:Capture()], "uptime cache changes only after commit");
 }
+
+static NSDictionary *AllArtifactFiles(void) {
+    return [gStore capture:^NSDictionary *(NSError **error) {
+        (void)error; NSMutableDictionary *files = [NSMutableDictionary dictionary];
+        for (NSString *relative in [NSFileManager.defaultManager subpathsAtPath:gRoot])
+            if (![relative hasPrefix:@"control/"] && [relative hasSuffix:@".plist"])
+                files[relative] = [NSData dataWithContentsOfFile:Path(gRoot, relative)];
+        return @{ @"files": files };
+    } error:NULL];
+}
+static BOOL SetArtifactSelection(id profileID) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSDictionary *selection = profileID ? @{ @"ProfileId": profileID } : @{};
+        return [tx setDictionary:selection atPath:PXCurrentProfileInfoPath() error:error];
+    } error:NULL];
+}
+static BOOL SetArtifactIntent(BOOL present) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return present ? [tx setDictionary:@{ @"fixture": @YES } atPath:PXProfileDeletionJournalPath() error:error] :
+            [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:error];
+    } error:NULL];
+}
+static void CheckArtifactLeaseFree(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(lease && !error, "standalone artifact releases lifecycle before cache callbacks logging and return");
+    [lease invalidate];
+}
+static void CheckArtifactLeaseHeld(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(!lease && error.code == 12, "standalone artifact owns lifecycle during preparation outside source gate");
+    [lease invalidate];
+    CHECK(AllArtifactFiles() != nil, "standalone artifact preparation executes outside source gate");
+}
+static NSUInteger ArtifactDescriptorCount(void) {
+    NSUInteger count = 0;
+    for (int fd = 0; fd < 1024; fd++) if (fcntl(fd, F_GETFD) != -1) count++;
+    return count;
+}
+@interface PXObservedUptimeFixture : PXPreparedUptimeFixture
+@end
+@implementation PXObservedUptimeFixture
+- (void)setBootTimeValue:(NSDate *)value {
+    CheckArtifactLeaseFree();
+    NSString *persisted = IDs()[@"BootTime"];
+    CHECK(([persisted isEqual:[NSString stringWithFormat:@"%.0f", value.timeIntervalSince1970]]),
+          "uptime cache setter sees committed tuple after ownership release");
+    [super setBootTimeValue:value];
+}
+@end
+
+static void TestStorageLifecycle(void) {
+    PXPreparedStorageFixture *manager = [PXPreparedStorageFixture new];
+    NSDictionary *record = @{ @"TotalStorage": @"256", @"FreeStorage": @"99.5", @"FilesystemType": @"0x1A" };
+    [manager setFixtureSnapshot:record];
+    CHECK(SetArtifactSelection(@"b"), "storage inactive-target fixture selected B");
+    NSError *error = nil;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    CHECK([manager persistStorageToProfile:@"a" current:NO error:&error] && !error && commits == 1 &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileRootPath(@"a"), @"storage.plist")] isEqual:record],
+          "storage explicit inactive target persists once without selecting active profile");
+    gStore.testCheckpoint = nil;
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "external artifact lifecycle owner acquired");
+    NSUInteger copies = gStorageCopies, providers = gUptimeProviders;
+    NSDictionary *before = AllArtifactFiles();
+    CHECK(![manager persistStorageToProfile:@"a" current:NO error:&error] && error.code == 12 &&
+          ![manager persistStorageToProfile:nil current:YES error:&error] && error.code == 12 &&
+          copies == gStorageCopies && [before isEqual:AllArtifactFiles()], "busy storage blocks current and explicit persistence before copying cache");
+    [owner invalidate];
+    CHECK(SetArtifactIntent(YES), "storage pending intent seeded"); before = AllArtifactFiles();
+    CHECK(![manager persistStorageToProfile:@"a" current:NO error:&error] && error.code == 27 &&
+          ![manager persistStorageToProfile:nil current:YES error:&error] && error.code == 27 &&
+          copies == gStorageCopies && [before isEqual:AllArtifactFiles()], "pending delete blocks storage before target cache capture");
+    CHECK(SetArtifactIntent(NO), "storage pending intent cleared"); CheckArtifactLeaseFree();
+    CHECK([NSFileManager.defaultManager createDirectoryAtPath:PXProfileRootPath(@"c") withIntermediateDirectories:NO attributes:nil error:NULL], "legacy storage-only profile directory created");
+    CHECK([manager persistStorageToProfile:@"c" current:NO error:&error] && !error &&
+          ![NSFileManager.defaultManager fileExistsAtPath:PXProfileIdentityPath(@"c")],
+          "storage supports existing profile without requiring or creating identity child");
+    // Keep the old canonical-file authority even if a legacy selection exists.
+    CHECK(SetArtifactSelection(nil), "storage missing canonical selection seeded");
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return [tx setDictionary:@{ @"ProfileId": @"a" } atPath:PXLegacyActiveProfileInfoPath() error:writeError];
+    } error:NULL], "legacy selection present beside empty canonical selection");
+    before = AllArtifactFiles(); copies = gStorageCopies;
+    CHECK(![manager persistStorageToProfile:nil current:YES error:&error] && error && copies == gStorageCopies &&
+          [before isEqual:AllArtifactFiles()], "current storage does not substitute legacy selection when canonical ID is absent");
+    CHECK(SetArtifactSelection(@7), "invalid canonical profile ID seeded"); before = AllArtifactFiles();
+    CHECK(![manager persistStorageToProfile:nil current:YES error:&error] && copies == gStorageCopies &&
+          [before isEqual:AllArtifactFiles()], "invalid storage selection fails before copying cache or writing source");
+    CHECK(SetArtifactSelection(@"a"), "storage canonical selection restored");
+    NSDictionary *bStorage = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")];
+    gDuringStorageCopy = ^{
+        CheckArtifactLeaseHeld();
+        NSError *busy = nil;
+        CHECK(![manager persistStorageToProfile:@"b" current:NO error:&busy] && busy.code == 12, "storage copy reentry rejects busy without deadlock");
+        CHECK(SetArtifactSelection(@"b"), "bypass selection changes during storage preparation");
+    };
+    CHECK([manager persistStorageToProfile:nil current:YES error:&error] && !error &&
+          [[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileRootPath(@"a"), @"storage.plist")] isEqual:record] &&
+          ((!bStorage && ![NSFileManager.defaultManager fileExistsAtPath:Path(PXProfileRootPath(@"b"), @"storage.plist")]) ||
+            [bStorage isEqual:[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileRootPath(@"b"), @"storage.plist")]]),
+          "current storage captures target once and cannot redirect after preparation");
+    CHECK(SetArtifactSelection(@"a"), "storage current target restored");
+    [manager setFixtureSnapshot:@{ @"TotalStorage": @"512", @"FreeStorage": @"123.4", @"FilesystemType": @"0x1A" }];
+    before = AllArtifactFiles(); __block BOOL interrupted = NO;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"] && !interrupted) { interrupted = YES; [NSException raise:@"fixture" format:@"storage failure"]; } };
+    CHECK(![manager persistStorageToProfile:@"a" current:NO error:&error] && error && interrupted, "storage commit fault is reported");
+    gStore.testCheckpoint = nil;
+    CHECK([before isEqual:AllArtifactFiles()], "storage commit failure preserves previous file and source token"); CheckArtifactLeaseFree();
+    gDuringStorageCopy = ^{ [NSException raise:@"fixture" format:@"cache copy exception"]; };
+    BOOL threw = NO;
+    @try { [manager saveToProfile:@"a"]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [before isEqual:AllArtifactFiles()], "storage cache-copy exception preserves source and releases scope"); CheckArtifactLeaseFree();
+    __block NSDictionary *competitor = nil;
+    gDuringStorageCopy = ^{ CHECK(SetArtifactIntent(YES), "bypass storage deletion intent committed"); competitor = AllArtifactFiles(); };
+    CHECK(![manager persistStorageToProfile:@"a" current:NO error:&error] && error.code == 27 && [competitor isEqual:AllArtifactFiles()],
+          "late deletion journal rejects storage before staging");
+    CHECK(SetArtifactIntent(NO), "storage late intent cleared"); CheckArtifactLeaseFree();
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        NSString *root = PXProfileRootPath(@"a"), *old = Path(gRoot, @"displaced-storage-a");
+        __block BOOL moved = NO; competitor = nil;
+        gDuringStorageCopy = ^{
+            moved = [NSFileManager.defaultManager moveItemAtPath:root toPath:old error:NULL];
+            if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:NO attributes:nil error:NULL];
+            if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:root withDestinationPath:PXProfileRootPath(@"b") error:NULL];
+            competitor = AllArtifactFiles();
+        };
+        CHECK(![manager persistStorageToProfile:@"a" current:NO error:&error] && error && moved && [competitor isEqual:AllArtifactFiles()],
+              "storage rejects removed replaced and symlink profile roots without recreating target");
+        if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:root error:NULL], "storage replacement fixture removed");
+        CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:root error:NULL], "storage profile root restored"); CheckArtifactLeaseFree();
+    }
+    // Public setters still update their cache before attempting their legacy
+    // autosave; ownership does not make three separate setters one transaction.
+    [manager adoptCommittedStorageInfo:record];
+    gDuringLog = ^{ CheckArtifactLeaseFree(); };
+    [manager setTotalStorageCapacity:@"128"]; [manager setFreeStorageSpace:@"42.0"]; [manager setFilesystemType:@"0x1A"];
+    gDuringLog = nil;
+    NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileRootPath(@"a"), @"storage.plist")];
+    CHECK([stored isEqual:[manager fixtureStorage]] && [stored[@"TotalStorage"] isEqual:@"128"] &&
+          [stored[@"FreeStorage"] isEqual:@"42.0"] && gUptimeProviders == providers, "storage setter autosaves use owned current-target persistence without altering units");
+    NSUInteger descriptors = ArtifactDescriptorCount();
+    for (NSUInteger i = 0; i < 12; i++) {
+        @autoreleasepool {
+            PXProfileArtifactMutation *scope = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{ return @"c"; } error:&error];
+            CHECK(scope && !error && [scope.profileDirectory isEqual:PXProfileRootPath(@"c")], "profile-root capability captures existing legacy directory");
+            if (i % 2) [scope invalidate];
+            scope = nil;
+            scope = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{ return @"../a"; } error:&error];
+            CHECK(!scope && error, "profile-root capability rejects invalid resolver ID");
+        }
+    }
+    CHECK(descriptors == ArtifactDescriptorCount(), "profile-root capability closes descriptors on explicit release dealloc and failed acquire");
+    CheckArtifactLeaseFree();
+}
+
+static void TestUptimeLifecycle(void) {
+    Tape(@[]);
+    PXObservedUptimeFixture *manager = [PXObservedUptimeFixture new];
+    PXPreparedStorageFixture *storage = [PXPreparedStorageFixture new];
+    [storage adoptCommittedStorageInfo:PXPrepareRuntimeStorage(@"128")];
+    NSString *identity = PXProfileIdentityPath(@"a");
+    CHECK(SetArtifactSelection(@"b"), "uptime explicit inactive target selected");
+    [manager generateConsistentUptimeAndBootTimeForProfile:identity];
+    CHECK(!manager.error && manager.bootTimeValue && manager.uptimeValue > 0, "uptime commits explicit inactive target under lifecycle ownership");
+    NSDate *previous = manager.bootTimeValue, *clock = manager.cacheTime;
+    NSTimeInterval seconds = manager.uptimeValue;
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "uptime competing lifecycle owner acquired");
+    NSUInteger providers = gUptimeProviders; NSDictionary *before = AllArtifactFiles();
+    [manager generateConsistentUptimeAndBootTimeForProfile:identity];
+    CHECK(manager.error.code == 12 && providers == gUptimeProviders && previous == manager.bootTimeValue && clock == manager.cacheTime &&
+          seconds == manager.uptimeValue && [before isEqual:AllArtifactFiles()], "busy uptime avoids sysctl preparation cache changes and source writes");
+    [owner invalidate];
+    CHECK(SetArtifactIntent(YES), "uptime pending intent seeded"); before = AllArtifactFiles();
+    [manager generateConsistentUptimeAndBootTimeForProfile:identity];
+    CHECK(manager.error.code == 27 && providers == gUptimeProviders && previous == manager.bootTimeValue &&
+          [before isEqual:AllArtifactFiles()], "pending delete stops uptime before sysctl and preserves cache");
+    CHECK(SetArtifactIntent(NO), "uptime pending intent cleared");
+    [manager generateConsistentUptimeAndBootTimeForProfile:PXProfileIdentityPath(@"c")];
+    CHECK(manager.error && providers == gUptimeProviders && ![NSFileManager.defaultManager fileExistsAtPath:PXProfileIdentityPath(@"c")] &&
+          previous == manager.bootTimeValue, "uptime refuses absent identity instead of recreating legacy directory");
+    before = AllArtifactFiles();
+    gDuringUptime = ^{ CheckArtifactLeaseHeld(); [NSException raise:@"fixture" format:@"sysctl adapter exception"]; };
+    gDuringLog = ^{ CheckArtifactLeaseFree(); };
+    [manager generateConsistentUptimeAndBootTimeForProfile:identity];
+    gDuringLog = nil;
+    CHECK(manager.error.code == 1002 && previous == manager.bootTimeValue && clock == manager.cacheTime && [before isEqual:AllArtifactFiles()],
+          "uptime provider exception releases lease before error logging and leaves cache unchanged"); CheckArtifactLeaseFree();
+    NSMutableString *callerPath = [identity mutableCopy];
+    gDuringUptime = ^{
+        CheckArtifactLeaseHeld();
+        NSError *busy = nil;
+        CHECK(![storage persistStorageToProfile:@"b" current:NO error:&busy] && busy.code == 12, "uptime preparation excludes reentrant storage writer");
+        [callerPath setString:PXProfileIdentityPath(@"b")];
+    };
+    NSDictionary *other = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"b"), @"device_ids.plist")];
+    [manager generateConsistentUptimeAndBootTimeForProfile:callerPath];
+    CHECK(!manager.error && ((!other && ![NSFileManager.defaultManager fileExistsAtPath:Path(PXProfileIdentityPath(@"b"), @"device_ids.plist")]) ||
+          [other isEqual:[NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"b"), @"device_ids.plist")]]),
+          "uptime detaches mutable caller path and cannot redirect during preparation");
+    previous = manager.bootTimeValue; clock = manager.cacheTime;
+    __block NSDictionary *competitor = nil;
+    gDuringUptime = ^{ CHECK(SetArtifactIntent(YES), "bypass uptime deletion intent committed"); competitor = AllArtifactFiles(); };
+    [manager generateConsistentUptimeAndBootTimeForProfile:identity];
+    CHECK(manager.error.code == 27 && previous == manager.bootTimeValue && clock == manager.cacheTime && [competitor isEqual:AllArtifactFiles()],
+          "late deletion journal rejects entire uptime tuple without adopting cache");
+    CHECK(SetArtifactIntent(NO), "uptime late intent cleared");
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        NSString *old = Path(PXProfileRootPath(@"a"), @"old-uptime-identity");
+        __block BOOL moved = NO; competitor = nil;
+        gDuringUptime = ^{
+            moved = [NSFileManager.defaultManager moveItemAtPath:identity toPath:old error:NULL];
+            if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:identity withIntermediateDirectories:NO attributes:nil error:NULL];
+            if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:identity withDestinationPath:PXProfileIdentityPath(@"b") error:NULL];
+            competitor = AllArtifactFiles();
+        };
+        [manager generateConsistentUptimeAndBootTimeForProfile:identity];
+        CHECK(manager.error && moved && previous == manager.bootTimeValue && clock == manager.cacheTime && [competitor isEqual:AllArtifactFiles()],
+              "uptime rejects removed replaced and symlink identity without source or cache adoption");
+        if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:identity error:NULL], "uptime identity replacement fixture removed");
+        CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:identity error:NULL], "uptime original identity restored"); CheckArtifactLeaseFree();
+    }
+    CHECK(SetArtifactSelection(@"a"), "artifact lifecycle selection restored");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -251,7 +523,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

@@ -3,7 +3,7 @@
 #import "ProfileManager.h"
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
-#import "PXRuntimeSourceStore.h"
+#import "PXProfileArtifactMutation.h"
 #import "DeviceModelManager.h"
 #import "IPhoneModelDB.h"
 
@@ -16,6 +16,10 @@
 
 // Standard APFS block size
 #define DEFAULT_BLOCK_SIZE (4096ULL)
+
+@interface StorageManager ()
+- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error;
+@end
 
 @implementation StorageManager {
     NSMutableDictionary *_storageSettings;
@@ -241,27 +245,35 @@
 #pragma mark - Profile Management
 
 - (void)saveToCurrentProfile {
-    // Get active profile ID
-    NSString *profilesPath = PXCurrentProfileInfoPath();
-    NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:profilesPath];
-    
-    if (currentProfileInfo && currentProfileInfo[@"ProfileId"]) {
-        NSString *profileId = currentProfileInfo[@"ProfileId"];
-        [self saveToProfile:profileId];
-    }
+    NSError *error = nil;
+    if (![self persistStorageToProfile:nil current:YES error:&error])
+        PXLog(@"[StorageManager] Failed to commit current storage: %@", error);
 }
 
 - (void)saveToProfile:(NSString *)profileId {
     if (!profileId) return;
-    
-    NSString *profileDir = PXProfileRootPath(profileId);
-    if (!profileDir.length) return;
-    NSString *storagePath = [profileDir stringByAppendingPathComponent:@"storage.plist"];
-    NSDictionary *prepared = [_storageSettings copy];
     NSError *error = nil;
-    if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-        return [tx setDictionary:prepared atPath:storagePath error:writeError];
-    }, &error)) PXLog(@"[StorageManager] Failed to commit storage for %@: %@", profileId, error);
+    if (![self persistStorageToProfile:profileId current:NO error:&error])
+        PXLog(@"[StorageManager] Failed to commit storage for %@: %@", profileId, error);
+}
+
+- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error {
+    NSString *explicitID = PXValidatedProfileID(profileID);
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithProfileIDResolver:^NSString *{
+        // Preserve the canonical selection-file authority of the old current
+        // writer. Resolve once, only after lifecycle ownership is acquired.
+        if (!current) return explicitID;
+        NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+        return PXValidatedProfileID(selection[@"ProfileId"]);
+    } error:error];
+    @try {
+        if (!mutation) return NO;
+        NSString *storagePath = [mutation.profileDirectory stringByAppendingPathComponent:@"storage.plist"];
+        NSDictionary *prepared = [_storageSettings copy];
+        return [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            return [tx setDictionary:prepared atPath:storagePath error:writeError];
+        } error:error];
+    } @finally { [mutation invalidate]; }
 }
 
 - (BOOL)loadFromProfile:(NSString *)profileId {

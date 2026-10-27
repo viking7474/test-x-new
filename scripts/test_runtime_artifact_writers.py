@@ -77,7 +77,7 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3E-partial'
+    assert manifest['rollout'] == '4C.2H3F-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -95,16 +95,16 @@ def source_contracts():
     assert 'timeIntervalSince1970' in helper and 'ids[@"LastUpdated"] = timestamp' in helper
     assert 'writeToFile:' not in network, 'NetworkManager may not bypass source transactions'
     mutation = read('common/PXProfileArtifactMutation.m')
-    acquire = objc_method(mutation, '+ (instancetype)acquireWithIdentityResolver:(NSString *(^)(void))resolver error:(NSError **)error')
+    acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget error:(NSError **)error')
     assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver()')
     assert 'NS_RETURNS_RETAINED' in read('common/PXProfileArtifactMutation.h')
     assert 'O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW' in acquire and '@finally' in acquire and 'if (!handedOff)' in acquire
     validate = objc_method(mutation, '- (BOOL)validateWithError:(NSError **)error')
     assert 'validateForDirectory:PXProfilesPath()' in validate and 'directoryProofForProfileID:' in validate
-    assert 'fstat(_identityFD' in validate and 'lstat(self.identityDirectory' in validate and 'st_ino' in validate
+    assert 'fstat(_directoryFD' in validate and 'lstat(self.targetDirectory' in validate and 'st_ino' in validate
     write = objc_method(mutation, '- (BOOL)performSourceWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
     assert write.index('[self validateWithError:') < write.index('PXProfileDeletionJournalPath()') < write.index('return body(tx, writeError)')
-    assert 'close(_identityFD)' in mutation and '- (void)dealloc { [self invalidate]; }' in mutation
+    assert 'close(_directoryFD)' in mutation and '- (void)dealloc { [self invalidate]; }' in mutation
     for forbidden in ('dispatch_', 'createDirectory', 'removeItemAtPath:', 'PXActiveProfile', 'PXLog(', 'NSNotification'):
         assert forbidden not in mutation, forbidden
     for signature in (
@@ -146,15 +146,16 @@ def source_contracts():
     for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfile'), 'WiFi'),
                               (objc_method(battery, '- (void)saveBatteryInfoToDisk'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
-        assert f'PXStageRuntime{helper_name}' in body and 'PXPerformRuntimeSourceWrite' in body
+        assert f'PXStageRuntime{helper_name}' in body
+        assert ('[mutation performSourceWrite:' if helper_name == 'Uptime' else 'PXPerformRuntimeSourceWrite') in body
         assert 'writeToFile:deviceIdsPath' not in body
     assert 'writeToFile:BATTERY_PLIST_PATH' in battery, 'legacy global battery compatibility remains separate'
-    storage_save = objc_method(storage, '- (void)saveToProfile:(NSString *)profileId')
-    assert 'PXProfileRootPath(profileId)' in storage_save and '[tx setDictionary:prepared atPath:storagePath' in storage_save
+    storage_save = objc_method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
+    assert 'mutation.profileDirectory' in storage_save and 'acquireWithProfileIDResolver:' in storage_save and '[tx setDictionary:prepared atPath:storagePath' in storage_save
     assert 'writeToFile:' not in storage_save
     assert 'initWithSuiteName:@"com.hydra.tlinkios.settings"' in storage, 'defaults authority rollout remains pending'
     uptime_save = objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath')
-    assert uptime_save.index('PXPerformRuntimeSourceWrite') < uptime_save.index('self.bootTimeValue = bootTime')
+    assert uptime_save.index('[mutation performSourceWrite:') < uptime_save.index('self.bootTimeValue = bootTime')
     assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in uptime_save
     assert 'if (uptime < minUptime) uptime = minUptime;' in read('common/PXRuntimeArtifactPreparation.m'), 'generation policy must not silently change'
     for token in ('network IPv6 precedence preserved', 'existing IPv6 avoids generation',
