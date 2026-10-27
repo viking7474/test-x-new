@@ -16,6 +16,10 @@ identifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identifier)
 METHODS = ['- (BOOL)setCanvasFingerprintProtection:(BOOL)enabled', '- (BOOL)resetCanvasNoiseAndPersist']
 DETAIL = '- (BOOL)persistCanvasValues:(NSDictionary<NSString *, id> *)values'
+IP_METHODS = ['- (void)saveLastKnownIP:(NSString *)ip', '- (void)saveIPToCache:(NSString *)ip',
+              '- (BOOL)setMonitoringEnabledAndPersist:(BOOL)enabled error:(NSError **)error',
+              '- (void)stopMonitoring', '- (BOOL)isMonitoring']
+IP_UI = '- (void)ipMonitorToggleChanged:(UISwitch *)sender'
 
 
 def source_contracts():
@@ -43,6 +47,26 @@ def source_contracts():
     detail = identifier.method(read('CanvasDetailViewController.m'), DETAIL)
     assert 'PXWriteSecuritySettings(values, &error)' in detail and 'writeToFile:' not in detail and 'synchronize' not in detail
     assert detail.index('return NO;') < detail.index('PXPostSettingsChangedNotification()')
+    monitor = read('common/IPMonitorService.m')
+    observed, cache, enabled, stopped, effective = [identifier.method(monitor, signature) for signature in IP_METHODS]
+    for body in (observed, cache):
+        assert body.count('PXWriteSecuritySettings(') == 1
+        assert '@"CachedIP": ip' in body and '@"IPCacheTime": [NSDate date]' in body
+    assert '@"lastKnownIP": ip' in observed and '[self saveIPToCache:' not in observed
+    assert '@"lastKnownIP"' not in cache
+    assert enabled.index('if (!PXWriteSecurityBool(@"ipMonitorEnabled", enabled, error)) return NO;') < enabled.index('[self startMonitoring]')
+    assert '[self stopMonitoring]' in enabled
+    assert 'setMonitoringEnabledAndPersist:' in read('common/IPMonitorService.h')
+    assert 'if (!_isMonitoring && !self.monitoringTimer)' in stopped
+    assert 'if (!self.isMonitoring)' not in stopped and '[self.monitoringTimer invalidate]' in stopped and 'self.monitoringTimer = nil;' in stopped
+    assert 'return active && enabled;' in effective
+    assert 'setObject:' not in monitor and 'setBool:' not in monitor and 'synchronize' not in monitor
+    alert = identifier.method(monitor, '- (void)showIPChangeAlertWithOldIP:(NSString *)oldIP newIP:(NSString *)newIP')
+    assert alert.index('if (![self setMonitoringEnabledAndPersist:NO error:&error])') < alert.index('IP Monitoring Disabled')
+    ui = identifier.method(read('SecurityTabViewController.m'), IP_UI)
+    assert 'setMonitoringEnabledAndPersist:enabled error:&error' in ui and '[sender setOn:previous animated:YES]' in ui
+    assert 'setBool:' not in ui and 'synchronize' not in ui and 'startMonitoring]' not in ui and 'stopMonitoring]' not in ui
+    assert ui.index('return;') < ui.index('[self updateSecurityHeroCount]')
     fixture = read('tests/PXRuntimeSecurityWriterTests.m')
     assert fixture.index('#define NSUserDefaults PXFixtureDefaults') < fixture.index('#include "../common/PXSecuritySettingsStore.m"')
     for case in ('empty security packet is a no-op without source or compatibility effects',
@@ -58,10 +82,22 @@ def source_contracts():
                  'canvas protection aliases commit together before notification',
                  'failed canvas alias detail and nonce writes preserve all bytes and emit no success callbacks'):
         assert case in fixture, case
+    for case in ('observed IP cache and timestamp commit once preserving unrelated security values',
+                 'cache-only IP save preserves last known IP and uses one source commit',
+                 'failed IP cache packets preserve bytes token mirrors and notifications',
+                 'IP monitor stops and invalidates timer after persisted toggle makes effective getter false',
+                 'IP monitor cleans a leftover timer even when running flag is false',
+                 'failed IP toggle preserves running timer and emits no service success',
+                 'IP monitor UI rolls back failed disable without stopping active timer',
+                 'IP monitor UI rolls back failed enable without starting service',
+                 'IP monitor UI success starts and stops only after committed setting'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3O-partial'
+    assert manifest['rollout'] == '4C.2H3P-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
+    assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
+    assert 'ip-monitor' in manifest['sources'][4]['writers']
     assert manifest['writers']['preferences-daemon']['status'] == 'external'
     assert manifest['sources'][4]['field'] == 'securitySettings' and manifest['sources'][4]['status'] == 'partial'
     assert 'test_runtime_security_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
@@ -73,6 +109,8 @@ def generate_native_fragments(folder):
     source = read('common/IdentifierManager.m')
     (folder / 'PXCanvasManagerMethods.inc').write_text('\n\n'.join(identifier.method(source, method) for method in METHODS), encoding='utf-8')
     (folder / 'PXCanvasDetailMethod.inc').write_text(identifier.method(read('CanvasDetailViewController.m'), DETAIL), encoding='utf-8')
+    (folder / 'PXIPMonitorMethods.inc').write_text('\n\n'.join(identifier.method(read('common/IPMonitorService.m'), signature) for signature in IP_METHODS), encoding='utf-8')
+    (folder / 'PXIPMonitorUIMethod.inc').write_text(identifier.method(read('SecurityTabViewController.m'), IP_UI), encoding='utf-8')
 
 
 def native_tests():

@@ -1,7 +1,7 @@
 # Kế hoạch triển khai sau audit iOS tweak
 
 Ngày chốt: 2026-10-24. Baseline source: `b0d35c6`.
-Trạng thái cập nhật 2026-10-27: Patch 1–3, 4A.1, 4A.2, 4B, 4C.1 và 4C.2A–H3N đã được người dùng xác nhận build pass, gồm các sửa fixture legacy timestamps, notification memory oracle, native RootHide header support và battery header/XML timestamp comparison. 4C.2H3O chuyển shared security mutations và Canvas aliases/detail/nonce sang standalone source transactions, mirror/notify sau commit; security/defaults authority vẫn partial vì cfprefsd và direct writers chưa chuyển. Build/native H3O chờ macOS CI. Recovery không retry directory cleanup. Whole Reset Data workflow, directory cleanup/durability, remaining artifact producers, metadata/defaults/security authority, cache ordering, rootful reader rollout và device/runtime matrix vẫn pending/partial. Patch 5–8 chưa triển khai.
+Trạng thái cập nhật 2026-10-27: Patch 1–3, 4A.1, 4A.2, 4B, 4C.1 và 4C.2A–H3O đã được người dùng xác nhận build pass, gồm các sửa fixture legacy timestamps, notification memory oracle, native RootHide header support, battery header/XML timestamp comparison và hardware/Canvas gate follow-ups. 4C.2H3P chuyển IP Monitor cache/toggle sang security transactions và sửa stop bỏ cleanup timer sau khi preference đã off; security/defaults authority vẫn partial vì cfprefsd và direct writers chưa chuyển. Build/native H3P chờ macOS CI. Recovery không retry directory cleanup. Whole Reset Data workflow, directory cleanup/durability, remaining artifact producers, metadata/defaults/security authority, cache ordering, rootful reader rollout và device/runtime matrix vẫn pending/partial. Patch 5–8 chưa triển khai.
 Tài liệu này thay thế các khuyến nghị tương ứng trong trao đổi audit, không thay thế roadmap backup/restore khác trong repo.
 
 ## 1. Kết luận và quy tắc triển khai
@@ -169,6 +169,8 @@ Chia 4C.1 core + settings/scope và 4C.2 writer rollout/authority để native f
 - Giữ snapshot committed trước khi transient source update lỗi, nhưng publish explicit disable/revocation theo policy; phân biệt legacy source migration với malformed input, không âm thầm ghép từng field từ hai generation.
 
 Acceptance: notification burst; simultaneous reader refresh; daemon restart/new epoch; `--sync-once` khi daemon đang sống; hai CLI đồng thời; source write/profile switch giữa capture; process crash giữa source transaction/global rename/mirror; disk full/permission error; partial mirrors; stale/corrupt/legacy snapshots; scope disable; container reset. Không mixed tuple trong một operation, không publish vượt thứ tự, không báo success giả.
+
+[Báo cáo 4C.2H3P](audit-implementation/PATCH-4C-2H3P-ip-monitor-security-writers.md) ghi IP observed/cache/timestamp thành một source packet và verified toggle trước start/stop; UI rollback khi persistence fail. Stop kiểm tra raw running flag/timer thay vì getter phụ thuộc preference để persisted disable vẫn invalidate timer. Không đổi polling/consensus policy; late callbacks/session lifetime, defaults authority và mirror ordering vẫn riêng. Source contracts và exact production extraction được kiểm tra tại Windows; native/package H3P chờ macOS CI.
 
 ### Patch 5 — P1-B: active UIDevice.systemVersion cache
 

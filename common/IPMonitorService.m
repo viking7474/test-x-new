@@ -2,6 +2,7 @@
 #import "IPStatusViewController.h"
 #import "TLinkIOSLogging.h"
 #import "PXUIKitCompat.h"
+#import "PXSecuritySettingsStore.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <netinet/in.h>
 #import <UIKit/UIKit.h>
@@ -100,20 +101,29 @@ static IPMonitorService *sharedInstance = nil;
 - (void)saveLastKnownIP:(NSString *)ip {
     if (ip) {
         PXLog(@"[IPMonitor] Saving last known IP: %@", ip);
-        [self.securitySettings setObject:ip forKey:@"lastKnownIP"];
-        [self.securitySettings synchronize];
-        
-        // Also save to cache with timestamp
-        [self saveIPToCache:ip];
+        // Keep the observed IP and its cache timestamp in one source commit.
+        NSError *error = nil;
+        if (!PXWriteSecuritySettings(@{ @"lastKnownIP": ip, @"CachedIP": ip, @"IPCacheTime": [NSDate date] }, &error)) {
+            PXLog(@"[IPMonitor] Failed to persist observed IP: %@", error);
+        }
     }
 }
 
 
 
 - (void)saveIPToCache:(NSString *)ip {
-    [self.securitySettings setObject:ip forKey:@"CachedIP"];
-    [self.securitySettings setObject:[NSDate date] forKey:@"IPCacheTime"];
-    [self.securitySettings synchronize];
+    if (!ip) return;
+    NSError *error = nil;
+    if (!PXWriteSecuritySettings(@{ @"CachedIP": ip, @"IPCacheTime": [NSDate date] }, &error)) {
+        PXLog(@"[IPMonitor] Failed to persist IP cache: %@", error);
+    }
+}
+
+- (BOOL)setMonitoringEnabledAndPersist:(BOOL)enabled error:(NSError **)error {
+    if (!PXWriteSecurityBool(@"ipMonitorEnabled", enabled, error)) return NO;
+    if (enabled) [self startMonitoring];
+    else [self stopMonitoring];
+    return YES;
 }
 
 - (NSString *)loadCachedIP {
@@ -190,7 +200,9 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (void)stopMonitoring {
-    if (!self.isMonitoring) {
+    // The effective getter becomes NO as soon as the stored toggle is disabled.
+    // Cleanup must inspect the running state/resources independently of that toggle.
+    if (!_isMonitoring && !self.monitoringTimer) {
         PXLog(@"[IPMonitor] Stop monitoring called but not currently monitoring");
         return;
     }
@@ -494,12 +506,11 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
         [alert addAction:[UIAlertAction actionWithTitle:@"Turn OFF IP Monitoring" 
                                                  style:UIAlertActionStyleDestructive 
                                                handler:^(UIAlertAction * _Nonnull action) {
-            // Disable IP monitoring
-            [self.securitySettings setBool:NO forKey:@"ipMonitorEnabled"];
-            [self.securitySettings synchronize];
-            
-            // Stop the monitoring service
-            [self stopMonitoring];
+            NSError *error = nil;
+            if (![self setMonitoringEnabledAndPersist:NO error:&error]) {
+                PXLog(@"[IPMonitor] Failed to disable IP monitoring: %@", error);
+                return;
+            }
             
             // Show confirmation alert
             UIAlertController *confirmationAlert = [UIAlertController alertControllerWithTitle:@"IP Monitoring Disabled"

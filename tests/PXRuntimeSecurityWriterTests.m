@@ -100,6 +100,64 @@ static void PXFixturePostDarwin(CFNotificationCenterRef center, CFStringRef name
 #undef CFNotificationCenterGetDarwinNotifyCenter
 #undef PXPostSettingsChangedNotification
 
+// Only persistence/stop and the UI handler are extracted. No network requests,
+// scheduled run loop timers, UIKit, or real user defaults are used here.
+@interface PXIPMonitorFixture : NSObject
+@property (nonatomic, assign) BOOL isMonitoring;
+@property (nonatomic, strong) NSTimer *monitoringTimer;
+@property (nonatomic, assign) NSUInteger starts;
++ (instancetype)sharedInstance;
+- (BOOL)isIPMonitoringEnabled;
+- (BOOL)runningFlag;
+- (void)startMonitoring;
+- (void)saveLastKnownIP:(NSString *)ip;
+- (void)saveIPToCache:(NSString *)ip;
+- (BOOL)setMonitoringEnabledAndPersist:(BOOL)enabled error:(NSError **)error;
+- (void)stopMonitoring;
+@end
+@implementation PXIPMonitorFixture
+@synthesize isMonitoring = _isMonitoring;
++ (instancetype)sharedInstance { static id monitor; static dispatch_once_t once; dispatch_once(&once, ^{ monitor = [self new]; }); return monitor; }
+- (BOOL)isIPMonitoringEnabled { return [Load()[@"ipMonitorEnabled"] boolValue]; }
+- (BOOL)runningFlag { return _isMonitoring; }
+- (void)startMonitoring {
+    CHECK(Capture() != nil && [Load()[@"ipMonitorEnabled"] boolValue], "IP monitor start observes committed toggle outside source gate");
+    self.starts++; self.isMonitoring = YES;
+    self.monitoringTimer = [NSTimer timerWithTimeInterval:3600 repeats:NO block:^(__unused NSTimer *timer) {}];
+}
+#include "PXIPMonitorMethods.inc"
+@end
+@interface PXMonitorSwitch : NSObject
+@property (nonatomic, assign, getter=isOn) BOOL on;
+- (void)setOn:(BOOL)on animated:(BOOL)animated;
+@end
+@implementation PXMonitorSwitch
+- (void)setOn:(BOOL)on animated:(BOOL)animated { (void)animated; self.on = on; }
+@end
+// Model the manager app's disk-precedence read in both host compilation lanes.
+// A macOS command-line bundle is not the real RootHide manager bundle identity.
+static BOOL PXManagerReadSecurityBool(NSString *key, BOOL fallback) {
+    id value = Load()[key]; return value ? [value boolValue] : fallback;
+}
+@interface PXIPMonitorUIFixture : NSObject
+@property (nonatomic, assign) NSUInteger heroChanges;
+@property (nonatomic, copy) NSString *toast;
+- (void)showToastWithMessage:(NSString *)message;
+- (void)updateSecurityHeroCount;
+- (void)ipMonitorToggleChanged:(PXMonitorSwitch *)sender;
+@end
+@implementation PXIPMonitorUIFixture
+- (void)showToastWithMessage:(NSString *)message { self.toast = message; CHECK(Capture() != nil, "IP monitor UI feedback runs outside source gate"); }
+- (void)updateSecurityHeroCount { self.heroChanges++; }
+#define UISwitch PXMonitorSwitch
+#define IPMonitorService PXIPMonitorFixture
+#define PXReadSecurityBool PXManagerReadSecurityBool
+#include "PXIPMonitorUIMethod.inc"
+#undef PXReadSecurityBool
+#undef IPMonitorService
+#undef UISwitch
+@end
+
 static void TestSecurityPackets(void) {
     NSError *error = nil;
     CHECK(Seed(@{ @"keep": @YES }), "security packet baseline seeded");
@@ -188,6 +246,64 @@ static void TestNonceAndCanvas(void) {
           "failed canvas alias detail and nonce writes preserve all bytes and emit no success callbacks");
     gStore.testCheckpoint = nil; gCheckMirror = NO;
 }
+static void TestIPMonitorWriters(void) {
+    CHECK(Seed(@{ @"keep": @YES, @"ipMonitorEnabled": @NO, @"lastKnownIP": @"old" }), "IP monitor source baseline seeded");
+    PXIPMonitorFixture *monitor = PXIPMonitorFixture.sharedInstance;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    NSUInteger notices = gSettingsNotices, resets = gResetNotices;
+    gCheckMirror = YES;
+    [monitor saveLastKnownIP:@"203.0.113.7"];
+    CHECK(commits == 1 && [Load()[@"lastKnownIP"] isEqual:@"203.0.113.7"] && [Load()[@"CachedIP"] isEqual:@"203.0.113.7"] &&
+          [Load()[@"IPCacheTime"] isKindOfClass:NSDate.class] && [Load()[@"keep"] boolValue] && notices == gSettingsNotices && resets == gResetNotices,
+          "observed IP cache and timestamp commit once preserving unrelated security values");
+    [monitor saveIPToCache:@"203.0.113.8"];
+    CHECK(commits == 2 && [Load()[@"lastKnownIP"] isEqual:@"203.0.113.7"] && [Load()[@"CachedIP"] isEqual:@"203.0.113.8"] &&
+          [Load()[@"IPCacheTime"] isKindOfClass:NSDate.class], "cache-only IP save preserves last known IP and uses one source commit");
+    NSUInteger attempts = atomic_load(&gAttempts);
+    [monitor saveLastKnownIP:nil]; [monitor saveIPToCache:nil];
+    CHECK(attempts == atomic_load(&gAttempts) && commits == 2, "nil IP candidates do not enter source transaction");
+    NSDictionary *before = Capture(); NSUInteger mirrors = gMirrors;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"IP packet fault"]; };
+    [monitor saveLastKnownIP:@"203.0.113.9"]; [monitor saveIPToCache:@"203.0.113.10"];
+    CHECK([before isEqual:Capture()] && mirrors == gMirrors && notices == gSettingsNotices && resets == gResetNotices,
+          "failed IP cache packets preserve bytes token mirrors and notifications");
+    gStore.testCheckpoint = nil;
+    NSError *error = nil;
+    CHECK([monitor setMonitoringEnabledAndPersist:YES error:&error] && !error && monitor.runningFlag && monitor.monitoringTimer.valid,
+          "IP monitor enabled source starts service after commit");
+    NSTimer *timer = monitor.monitoringTimer;
+    CHECK([monitor setMonitoringEnabledAndPersist:NO error:&error] && !error && !monitor.isMonitoring && !monitor.runningFlag && !timer.valid && !monitor.monitoringTimer,
+          "IP monitor stops and invalidates timer after persisted toggle makes effective getter false");
+    monitor.monitoringTimer = [NSTimer timerWithTimeInterval:3600 repeats:NO block:^(__unused NSTimer *tick) {}]; timer = monitor.monitoringTimer;
+    [monitor stopMonitoring]; [monitor stopMonitoring];
+    CHECK(!timer.valid && !monitor.monitoringTimer && !monitor.runningFlag, "IP monitor cleans a leftover timer even when running flag is false");
+    CHECK([monitor setMonitoringEnabledAndPersist:YES error:&error], "IP monitor disable fault baseline enabled");
+    timer = monitor.monitoringTimer; before = Capture(); mirrors = gMirrors; NSUInteger starts = monitor.starts;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"IP toggle fault"]; };
+    CHECK(![monitor setMonitoringEnabledAndPersist:NO error:&error] && error && monitor.runningFlag && timer.valid && monitor.monitoringTimer == timer &&
+          starts == monitor.starts && mirrors == gMirrors && [before isEqual:Capture()], "failed IP toggle preserves running timer and emits no service success");
+    PXIPMonitorUIFixture *ui = [PXIPMonitorUIFixture new]; PXMonitorSwitch *sender = [PXMonitorSwitch new]; sender.on = NO;
+    [ui ipMonitorToggleChanged:sender];
+    CHECK(sender.isOn && ui.heroChanges == 0 && [ui.toast hasPrefix:@"Unable"] && timer.valid && monitor.runningFlag && [before isEqual:Capture()],
+          "IP monitor UI rolls back failed disable without stopping active timer");
+    gStore.testCheckpoint = nil;
+    CHECK([monitor setMonitoringEnabledAndPersist:NO error:&error], "IP monitor enable fault baseline disabled"); before = Capture();
+    sender.on = YES;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"IP toggle fault"]; };
+    [ui ipMonitorToggleChanged:sender];
+    CHECK(!sender.isOn && ui.heroChanges == 0 && [ui.toast hasPrefix:@"Unable"] && !monitor.runningFlag && !monitor.monitoringTimer && starts == monitor.starts && [before isEqual:Capture()],
+          "IP monitor UI rolls back failed enable without starting service");
+    gStore.testCheckpoint = nil;
+    sender.on = YES; [ui ipMonitorToggleChanged:sender]; timer = monitor.monitoringTimer;
+    CHECK(sender.isOn && ui.heroChanges == 1 && [ui.toast isEqual:@"IP Monitoring Enabled"] && [Load()[@"ipMonitorEnabled"] boolValue] && monitor.runningFlag && timer.valid,
+          "IP monitor UI enables only after committed setting");
+    sender.on = NO; [ui ipMonitorToggleChanged:sender];
+    CHECK(!sender.isOn && ui.heroChanges == 2 && [ui.toast isEqual:@"IP Monitoring Disabled"] && ![Load()[@"ipMonitorEnabled"] boolValue] && !monitor.runningFlag && !timer.valid && !monitor.monitoringTimer &&
+          notices == gSettingsNotices && resets == gResetNotices, "IP monitor UI success starts and stops only after committed setting");
+    gCheckMirror = NO;
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -196,7 +312,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

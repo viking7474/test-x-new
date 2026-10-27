@@ -279,14 +279,13 @@
 #pragma mark - IP Monitor Toggle Handler
 - (void)ipMonitorToggleChanged:(UISwitch *)sender {
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"ipMonitorEnabled"];
-    [self.securitySettings synchronize];
-
-    // Start or stop IP monitoring based on toggle state
-    if (enabled) {
-        [[IPMonitorService sharedInstance] startMonitoring];
-    } else {
-        [[IPMonitorService sharedInstance] stopMonitoring];
+    BOOL previous = PXReadSecurityBool(@"ipMonitorEnabled", NO);
+    NSError *error = nil;
+    if (![[IPMonitorService sharedInstance] setMonitoringEnabledAndPersist:enabled error:&error]) {
+        [sender setOn:previous animated:YES];
+        PXLog(@"[IPMonitor] Failed to persist monitoring toggle: %@", error);
+        [self showToastWithMessage:@"Unable to save IP monitoring setting"];
+        return;
     }
 
     NSString *msg = enabled ? @"IP Monitoring Enabled" : @"IP Monitoring Disabled";
