@@ -3,7 +3,7 @@ Name: TLinkIOS (RootHide)
 Version: 3.0.0
 Architecture: iphoneos-arm64e
 Description: Spoof device identifiers and manage application profiles on RootHide iOS 15+ devices.
-Depends: firmware (>= 15.0), mobilesubstrate (>= 0.9.5000)
+Depends: firmware (>= 15.0), ellekit
 Maintainer: HYDRA
 Author: HYDRA
 Section: System

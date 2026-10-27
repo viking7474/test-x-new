@@ -380,6 +380,7 @@ jobs:
           VERIFY_DIR="$(mktemp -d "$RUNNER_TEMP/tlinkios-roothide-package.XXXXXX")"
           dpkg-deb -x "$PACKAGE_FILE" "$VERIFY_DIR"
           dpkg-deb -e "$PACKAGE_FILE" "$VERIFY_DIR/DEBIAN"
+          python3 scripts/test_roothide_package_metadata.py --control "$VERIFY_DIR/DEBIAN/control"
           test -x "$VERIFY_DIR/Applications/TLinkIOS.app/TLinkIOS"
           test -x "$VERIFY_DIR/Library/WeaponX/WeaponXDaemon"
           test -x "$VERIFY_DIR/Library/WeaponX/backup_helper"

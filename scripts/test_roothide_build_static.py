@@ -2,6 +2,7 @@
 """Static contracts for the RootHide build lane and randomized-jbroot paths."""
 
 from pathlib import Path
+from test_roothide_package_metadata import source_contracts as package_metadata_contracts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ def require(condition: bool, message: str) -> None:
 
 makefile = read("Makefile")
 control = read("control.roothide")
+package_metadata_contracts()
 compat = read("common/PXJailbreakCompat.h")
 postinst = read("DEBIAN/postinst")
 keychain = read("scripts/keychain_backup.sh")
@@ -59,6 +61,12 @@ for token in (
 
 require("Architecture: iphoneos-arm64e" in control, "RootHide control architecture is wrong")
 require("firmware (>= 15.0)" in control, "RootHide minimum firmware is missing")
+roothide_scheme = makefile.split('ifeq ($(THEOS_PACKAGE_SCHEME),roothide)', 1)[1].split('endif', 1)[0]
+require('override _THEOS_DEB_PACKAGE_CONTROL_PATH := $(CURDIR)/control.roothide' in roothide_scheme,
+        "direct RootHide builds can fall back to rootful control metadata")
+roothide_workflow = workflow.split('  build-roothide:', 1)[1]
+require('python3 scripts/test_roothide_package_metadata.py --control "$VERIFY_DIR/DEBIAN/control"' in roothide_workflow,
+        "RootHide CI does not verify injector dependencies from the actual package")
 require("com.apple.private.security.storage.AppBundles" in entitlements and
         "com.apple.private.security.storage.AppDataContainers" in entitlements,
         "RootHide app entitlements are missing documented container access")

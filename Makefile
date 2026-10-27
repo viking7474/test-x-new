@@ -7,6 +7,9 @@ ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
 TARGET := iphone:clang:16.5:15.0
 ARCHS := arm64
 DEB_ARCH := iphoneos-arm64e
+# deb.mk assigns this internal variable unconditionally; override also protects
+# a direct `make package THEOS_PACKAGE_SCHEME=roothide` from rootful metadata.
+override _THEOS_DEB_PACKAGE_CONTROL_PATH := $(CURDIR)/control.roothide
 endif
 LOGOS_DEFAULT_GENERATOR = internal
 INSTALL_TARGET_PROCESSES = SpringBoard TLinkIOS
