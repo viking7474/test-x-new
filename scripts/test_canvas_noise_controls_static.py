@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Static contract for Canvas Fingerprint Noise controls and persistence wiring."""
 from pathlib import Path
+import re
+from test_runtime_identifier_writers import method
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -13,6 +15,46 @@ def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
     print(f"PASS: {message}")
+
+
+def canvas_setter_failure_contract(source: str) -> bool:
+    """Check the actual write failure branch, independent of log wording."""
+    try:
+        setter = method(source, '- (BOOL)setCanvasFingerprintProtection:(BOOL)enabled')
+    except (ValueError, AssertionError):
+        return False
+    failure = re.search(r'if \(!PXWriteSecuritySettings\((?P<args>.*?)\)\) \{(?P<body>.*?)^    \}',
+                        setter, re.S | re.M)
+    if not failure:
+        return False
+    arguments, body = failure.group('args'), failure.group('body')
+    logged_error = re.search(r'PXLog\([^;]*,\s*error\);', body)
+    if not (all(token in arguments for token in ('@"canvasFingerprintingEnabled"', '@"CanvasFingerprint"', '&error'))
+            and logged_error and 'return NO;' in body and logged_error.end() < body.index('return NO;')):
+        return False
+    if 'PXPostSettingsChangedNotification' in body or 'return YES;' in body:
+        return False
+    success = setter[failure.end():]
+    return 'PXPostSettingsChangedNotification();' in success and 'return YES;' in success and \
+        success.index('PXPostSettingsChangedNotification();') < success.index('return YES;')
+
+
+def check_canvas_setter_regressions(source: str) -> None:
+    setter = method(source, '- (BOOL)setCanvasFingerprintProtection:(BOOL)enabled')
+    # Unrelated methods still contain logs/returns; they must not satisfy this gate.
+    for name, old, new in (
+        ('missing failure return', 'return NO;', 'return YES;'),
+        ('missing error logging', ', error);', ', nil);'),
+        ('inverted persistence result', 'if (!PXWriteSecuritySettings', 'if (PXWriteSecuritySettings'),
+        ('success notification on failure', 'return NO;', 'PXPostSettingsChangedNotification(); return NO;'),
+    ):
+        assert old in setter, f'missing regression fixture token: {name}'
+        broken = source.replace(setter, setter.replace(old, new), 1)
+        require(not canvas_setter_failure_contract(broken), f'Canvas failure gate rejects {name}')
+    reworded = re.sub(r'PXLog\(@"[^"\n]*"', 'PXLog(@"Alternative persistence message: %@"', setter)
+    assert reworded != setter
+    require(canvas_setter_failure_contract(source.replace(setter, reworded, 1)),
+            'Canvas failure gate accepts different diagnostic wording')
 
 
 ui = read("CanvasDetailViewController.m")
@@ -52,10 +94,14 @@ require("!PXCanvasNativeScopeEnabled(settings)" in hook, "WKNativeCanvas obeys N
 require("rotateSessionSeed" in hook and "resetCanvasNoise" in hook, "runtime reset rotates session seed cache")
 
 require("resetCanvasNoiseAndPersist" in identifier_h, "IdentifierManager exposes persistent Canvas reset")
-require("canvasNoiseSeedNonce" in identifier_m, "IdentifierManager persists Canvas reset nonce")
-require("Failed to persist Canvas Fingerprint Protection" in identifier_m and "return NO;" in identifier_m,
+nonce = method(identifier_m, '- (BOOL)resetCanvasNoiseAndPersist')
+require('PXAdvanceSecurityNonce(@"canvasNoiseSeedNonce", &nonce, &error)' in nonce,
+        "IdentifierManager persists Canvas reset nonce")
+require(canvas_setter_failure_contract(identifier_m),
         "IdentifierManager reports Canvas persistence failures")
-require("if (![self setCanvasFingerprintProtection:newValue])" in identifier_m,
+check_canvas_setter_regressions(identifier_m)
+toggle = method(identifier_m, '- (BOOL)toggleCanvasFingerprintProtection')
+require("if (![self setCanvasFingerprintProtection:newValue])" in toggle and 'return currentValue;' in toggle,
         "IdentifierManager toggle respects Canvas persistence failure")
 
 require("[self refreshCanvasFingerprintingControlState];" in security,

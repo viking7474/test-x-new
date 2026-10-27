@@ -44,6 +44,14 @@ Windows pass 21 source/host checks: security writer, source transactions, securi
 
 New security native runner được đăng ký CI rootful và RootHide-defined lanes, cùng existing source-engine native regression suite. Máy Windows không có Foundation/xcrun/Theos: native compile/runtime và package H3O vẫn cần macOS CI xác nhận.
 
+## CI follow-up — Canvas failure diagnostic gate (2026-10-27)
+
+`test_canvas_noise_controls_static.py` còn yêu cầu nguyên văn log `Failed to persist Canvas Fingerprint Protection`. H3O dùng diagnostic `Failed to persist Canvas protection: %@`; actual setter vẫn log NSError, return NO trước notification khi packet write fail. Assertion cũ còn tìm `return NO;` ở toàn file, nên không chứng minh được failure branch của đúng setter. Đây là gate chưa đồng bộ, không cần đổi production behavior để giữ câu log cũ.
+
+Gate nay extract đúng setter, kiểm tra paired alias packet qua shared writer, error logging/return NO trong guarded failure branch, không notify ở branch này và notify/return YES sau success. Toggle và nonce checks cũng giới hạn trong đúng methods. Bốn negative cases kiểm tra missing failure return, missing NSError diagnostic, inverted write result và success notification trong failure branch; một positive case xác nhận đổi wording diagnostic vẫn pass. Existing native writer fixture đã kiểm tra source-fault rollback và không mirror/notify cho cả Canvas alias/detail/nonce; follow-up không thay native production fragments.
+
+Windows: Canvas controls và transactional security gates pass; exact Canvas native fragment extraction 2/2 và diff check pass. Chạy độc lập toàn bộ 62 Python/Node suites trong release inventory để không dừng ở lỗi đầu: 61 pass, riêng Keychain Bridge retirement migration suite fail khi Git Bash `mkdir` truy cập `/c/Users/ADMIN` (Permission denied), cả khi chuyển scratch directory vào workspace. Official two-iteration release runner dừng ở lỗi môi trường này; không claim complete release regression pass hoặc native/package validation. Native rootful/RootHide-defined compile/runtime và migration trên macOS CI vẫn cần xác nhận.
+
 ## Tiếp theo
 
 Cần chốt canonical authority/import/mirror migration trước khi security source lên enrolled, đồng thời chuyển remaining direct/defaults/CFPreferences writers và đối chiếu legacy readers. Settings/defaults authority, whole Reset Data workflow, cache/publication ordering, rootful captured readers và directory durability vẫn partial. Không thêm automatic cleanup/retry hoặc thay behavior của các writers chưa chuyển.
