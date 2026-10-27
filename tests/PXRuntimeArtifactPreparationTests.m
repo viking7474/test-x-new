@@ -786,6 +786,42 @@ static BOOL SeedBatteryRecord(NSString *profileID, NSString *level) {
             @{ @"BatteryLevel": level, @"LowPowerMode": @YES, @"LastUpdated": NSDate.date }, error);
     } error:NULL];
 }
+static BOOL BatteryLegacyMirrorMatchesSource(NSDictionary *source, NSDictionary *mirror) {
+    if (![source isKindOfClass:NSDictionary.class] || ![mirror isKindOfClass:NSDictionary.class]) return NO;
+    // The source store writes binary plists. The legacy NSDictionary writer
+    // uses XML, whose NSDate precision can differ. Compare every key/value
+    // against that format's round-trip, rather than ignoring the timestamp.
+    NSData *xml = [NSPropertyListSerialization dataWithPropertyList:source format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+    NSDictionary *expected = xml ? [NSPropertyListSerialization propertyListWithData:xml options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+    return expected != nil && [expected isEqual:mirror];
+}
+static void TestBatteryLegacyMirrorPrecision(void) {
+    NSString *normalPath = gOwnedBatteryMirrorPath;
+    gOwnedBatteryMirrorPath = Path(gRoot, @"fractional-battery-mirror.plist");
+    @try {
+        PXOwnedBatteryFixture *writer = [PXOwnedBatteryFixture new];
+        NSDictionary *record = @{ @"BatteryLevel": @"0.62", @"LowPowerMode": @YES,
+            @"LastUpdated": [NSDate dateWithTimeIntervalSince1970:1700000000.875] };
+        NSError *error = nil;
+        BOOL wrote = [writer mirrorBatteryRecord:record error:&error];
+        NSData *data = [NSData dataWithContentsOfFile:gOwnedBatteryMirrorPath];
+        NSPropertyListFormat format = 0;
+        NSDictionary *mirror = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:&format error:&error] : nil;
+        CHECK(wrote && !error && format == NSPropertyListXMLFormat_v1_0 && BatteryLegacyMirrorMatchesSource(record, mirror),
+              "fractional battery timestamp matches real legacy XML round trip");
+        NSMutableDictionary *changed = [mirror mutableCopy];
+        changed[@"BatteryLevel"] = @"0.99";
+        CHECK(!BatteryLegacyMirrorMatchesSource(record, changed), "legacy mirror oracle rejects changed battery level");
+        changed = [mirror mutableCopy]; changed[@"LowPowerMode"] = @NO;
+        CHECK(!BatteryLegacyMirrorMatchesSource(record, changed), "legacy mirror oracle rejects changed low power mode");
+        changed = [mirror mutableCopy]; changed[@"LastUpdated"] = [record[@"LastUpdated"] dateByAddingTimeInterval:1];
+        CHECK(!BatteryLegacyMirrorMatchesSource(record, changed), "legacy mirror oracle rejects different timestamp beyond XML precision");
+        changed = [mirror mutableCopy]; [changed removeObjectForKey:@"LastUpdated"];
+        CHECK(!BatteryLegacyMirrorMatchesSource(record, changed), "legacy mirror oracle rejects omitted timestamp");
+        changed = [mirror mutableCopy]; changed[@"unexpected"] = @YES;
+        CHECK(!BatteryLegacyMirrorMatchesSource(record, changed), "legacy mirror oracle rejects extra fields");
+    } @finally { gOwnedBatteryMirrorPath = normalPath; }
+}
 static void TestBatteryLifecycle(void) {
     Tape(@[]);
     gOwnedBatteryMirrorPath = Path(gRoot, @"owned-battery-global.plist");
@@ -815,8 +851,20 @@ static void TestBatteryLifecycle(void) {
     gStore.testCheckpoint = nil;
     NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"battery_info.plist")];
     NSDictionary *mirror = [NSDictionary dictionaryWithContentsOfFile:gOwnedBatteryMirrorPath];
-    CHECK(commits == 1 && !battery.error && generated[@"BatteryPercentage"] && [source isEqual:mirror] &&
-          gOwnedBatteryLocal == 1 && gOwnedBatteryDarwin == 1, "battery generation commits once before mirror and both notifications");
+    BOOL generationOK = commits == 1 && !battery.error && generated[@"BatteryPercentage"] &&
+        gOwnedBatteryLocal == 1 && gOwnedBatteryDarwin == 1;
+    BOOL mirrorOK = BatteryLegacyMirrorMatchesSource(source, mirror);
+    CHECK(generationOK, "battery generation commits once before mirror and both notifications");
+    CHECK(mirrorOK, "battery legacy mirror preserves complete source record at XML precision");
+    if (!generationOK || !mirrorOK) {
+        id sourceDate = source[@"LastUpdated"], mirrorDate = mirror[@"LastUpdated"];
+        fprintf(stderr, "Battery generation diagnostic: commits=%lu local=%lu darwin=%lu error=%s percentage=%s sourceTime=%.9f mirrorTime=%.9f mirrorMatch=%d\n",
+            (unsigned long)commits, (unsigned long)gOwnedBatteryLocal, (unsigned long)gOwnedBatteryDarwin,
+            battery.error.description.UTF8String ?: "none", [generated[@"BatteryPercentage"] description].UTF8String ?: "missing",
+            [sourceDate isKindOfClass:NSDate.class] ? [sourceDate timeIntervalSince1970] : NAN,
+            [mirrorDate isKindOfClass:NSDate.class] ? [mirrorDate timeIntervalSince1970] : NAN, (int)mirrorOK);
+    }
+    TestBatteryLegacyMirrorPrecision();
     NSUInteger local = gOwnedBatteryLocal, darwin = gOwnedBatteryDarwin, mirrors = gOwnedBatteryMirrors;
     NSDictionary *before = AllArtifactFiles();
     PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];

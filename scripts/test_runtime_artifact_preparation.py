@@ -170,6 +170,13 @@ def source_contracts():
                  'queued WiFi notification reloads current authority and safely ignores deallocated observer owner'):
         assert case in fixture, case
     for case in ('battery generation commits once before mirror and both notifications',
+                 'battery legacy mirror preserves complete source record at XML precision',
+                 'fractional battery timestamp matches real legacy XML round trip',
+                 'legacy mirror oracle rejects changed battery level',
+                 'legacy mirror oracle rejects changed low power mode',
+                 'legacy mirror oracle rejects different timestamp beyond XML precision',
+                 'legacy mirror oracle rejects omitted timestamp',
+                 'legacy mirror oracle rejects extra fields',
                  'battery profile commit precedes global mirror with the same captured record',
                  'busy battery leaves profile mirror and notifications untouched while returning legacy candidate',
                  'pending delete blocks battery source mirror and notifications',
