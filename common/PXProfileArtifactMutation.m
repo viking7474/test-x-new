@@ -19,9 +19,10 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
 @property (nonatomic, copy) NSString *profileID;
 @property (nonatomic, copy) NSDictionary *directoryProof;
 @property (nonatomic, strong) PXProfileLifecycleLease *lease;
+@property (nonatomic) BOOL ownsLease;
 - (instancetype)initForMutation;
 - (BOOL)validateWithError:(NSError **)error;
-+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget error:(NSError **)error NS_RETURNS_RETAINED;
++ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error NS_RETURNS_RETAINED;
 @end
 
 @implementation PXProfileArtifactMutation
@@ -30,20 +31,28 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
     return self;
 }
 + (instancetype)acquireWithIdentityResolver:(NSString *(^)(void))resolver error:(NSError **)error {
-    return [self acquireWithDirectoryResolver:resolver identityTarget:YES error:error];
+    return [self acquireWithDirectoryResolver:resolver identityTarget:YES lifecycleLease:nil error:error];
 }
 + (instancetype)acquireWithProfileIDResolver:(NSString *(^)(void))resolver error:(NSError **)error {
     return [self acquireWithDirectoryResolver:^NSString *{
         return PXProfileRootPath(PXValidatedProfileID(resolver ? resolver() : nil));
-    } identityTarget:NO error:error];
+    } identityTarget:NO lifecycleLease:nil error:error];
 }
-+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget error:(NSError **)error {
++ (instancetype)borrowWithLifecycleLease:(PXProfileLifecycleLease *)lease identityResolver:(NSString *(^)(void))resolver error:(NSError **)error {
+    if (error) *error = nil;
+    if (![lease isKindOfClass:PXProfileLifecycleLease.class]) {
+        PXArtifactMutationError(error, @"Missing borrowed artifact lifecycle capability"); return nil;
+    }
+    return [self acquireWithDirectoryResolver:resolver identityTarget:YES lifecycleLease:lease error:error];
+}
++ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error {
     if (error) *error = nil;
     PXProfileArtifactMutation *mutation = [[self alloc] initForMutation];
-    mutation.lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:error];
+    mutation.ownsLease = borrowed == nil;
+    mutation.lease = borrowed ?: [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:error];
     BOOL handedOff = NO;
     @try {
-        if (!mutation.lease || !PXRequireNoPendingProfileDeletion(error)) return nil;
+        if (!mutation.lease || ![mutation.lease validateForDirectory:PXProfilesPath() error:error] || !PXRequireNoPendingProfileDeletion(error)) return nil;
         id resolved = resolver ? resolver() : nil;
         NSString *target = [resolved isKindOfClass:NSString.class] ? [resolved copy] : nil;
         NSString *profileID = identityTarget ? target.stringByDeletingLastPathComponent.lastPathComponent : target.lastPathComponent;
@@ -95,7 +104,7 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
 }
 - (void)invalidate {
     if (_directoryFD >= 0) { close(_directoryFD); _directoryFD = -1; }
-    [self.lease invalidate];
+    if (self.ownsLease) [self.lease invalidate];
     self.lease = nil;
 }
 - (void)dealloc { [self invalidate]; }

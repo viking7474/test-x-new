@@ -3,6 +3,9 @@
 #import "PXPaths.h"
 #import "PXRuntimeArtifactWriter.h"
 #import "PXRuntimeArtifactPreparation.h"
+#import "PXProfileArtifactMutation.h"
+#import "PXProfileLifecycleLease.h"
+#import "PXProfileDeletionJournal.h"
 
 // Define file paths
 #define BATTERY_PLIST_PATH @"/var/mobile/Library/Preferences/com.weaponx.battery.plist"
@@ -15,6 +18,9 @@
 @property (nonatomic, assign) BOOL currentLowPowerMode;
 @property (nonatomic, assign) BOOL lowPowerModeLoaded;
 @property (nonatomic, strong) NSError *error;
+- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled;
+- (BOOL)persistBatteryRecord:(NSDictionary *)record;
+- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error;
 @end
 
 @implementation BatteryManager
@@ -62,9 +68,6 @@ static BatteryManager *sharedManager = nil;
     // If we don't have a value yet, generate one
     if (!_currentBatteryLevel || _currentBatteryLevel.length == 0) {
         _currentBatteryLevel = [self generateBatteryLevel];
-        
-        // Save the generated value
-        [self saveBatteryInfoToDisk];
     }
     
     // Validate the value is within range
@@ -73,7 +76,6 @@ static BatteryManager *sharedManager = nil;
         // Fix invalid values
         PXLog(@"[WeaponX] ⚠️ Fixing invalid battery level: %@", _currentBatteryLevel);
         _currentBatteryLevel = [self generateBatteryLevel];
-        [self saveBatteryInfoToDisk];
     }
     
     return _currentBatteryLevel;
@@ -108,7 +110,8 @@ static BatteryManager *sharedManager = nil;
 - (void)setLowPowerModeEnabled:(BOOL)enabled {
     _currentLowPowerMode = enabled;
     _lowPowerModeLoaded = YES;
-    [self saveBatteryInfoToDisk];
+    NSDictionary *record = [self batteryRecordForLevel:_currentBatteryLevel lowPowerMode:enabled];
+    if (![self persistBatteryRecord:record]) return;
     
     PXLog(@"[WeaponX] 🔋 Low Power Mode set to: %@", enabled ? @"YES" : @"NO");
     
@@ -116,7 +119,7 @@ static BatteryManager *sharedManager = nil;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"BatteryInfoUpdated"
                                                         object:self
                                                       userInfo:@{
-                                                          kBatteryLevelKey: _currentBatteryLevel ?: @"0.75",
+                                                          kBatteryLevelKey: record[kBatteryLevelKey],
                                                           kLowPowerModeKey: @(enabled)
                                                       }];
     
@@ -136,7 +139,8 @@ static BatteryManager *sharedManager = nil;
     _currentBatteryLevel = batteryInfo[kBatteryLevelKey];
 
     // Save to disk (includes LPM)
-    [self saveBatteryInfoToDisk];
+    NSDictionary *record = [self batteryRecordForLevel:batteryInfo[kBatteryLevelKey] lowPowerMode:[batteryInfo[kLowPowerModeKey] boolValue]];
+    if (![self persistBatteryRecord:record]) return batteryInfo;
     
     // Notify listeners about the change
     [[NSNotificationCenter defaultCenter] postNotificationName:@"BatteryInfoUpdated"
@@ -169,10 +173,9 @@ static BatteryManager *sharedManager = nil;
     // setter here: it would select a profile again and start another commit.
     NSDictionary *mirror = @{ kBatteryLevelKey: batteryInfo[kBatteryLevelKey],
         kLowPowerModeKey: batteryInfo[kLowPowerModeKey], kLastUpdatedKey: timestamp };
-    NSString *directory = [BATTERY_PLIST_PATH stringByDeletingLastPathComponent];
-    if (![NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL] ||
-        ![mirror writeToFile:BATTERY_PLIST_PATH atomically:YES])
-        PXLog(@"[BatteryManager] Source committed; legacy battery mirror could not be written");
+    NSError *mirrorError = nil;
+    if (![self mirrorBatteryRecord:mirror error:&mirrorError])
+        PXLog(@"[BatteryManager] Source committed; legacy battery mirror could not be written: %@", mirrorError);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"BatteryInfoUpdated" object:self userInfo:batteryInfo];
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         CFSTR("com.hydra.tlinkios.battery.updated"), NULL, (__bridge CFDictionaryRef)batteryInfo, YES);
@@ -187,38 +190,10 @@ static BatteryManager *sharedManager = nil;
 
 // Private helper to get the path to profile-specific battery_info.plist
 - (NSString *)batteryInfoPathForCurrentProfile {
-    // First try to get active profile ID
-    NSString *profilesPath = PXCurrentProfileInfoPath();
-    NSDictionary *currentProfileInfo = [NSDictionary dictionaryWithContentsOfFile:profilesPath];
-    NSString *profileId = currentProfileInfo[@"ProfileId"];
-    
-    if (!profileId) {
-        _error = [NSError errorWithDomain:@"com.weaponx.BatteryManager"
-                                     code:100
-                                 userInfo:@{NSLocalizedDescriptionKey: @"No active profile found"}];
-        PXLog(@"[WeaponX] ⚠️ Error: No active profile when getting identity path in BatteryManager");
-        return nil;
-    }
-    
-    // Align with IdentifierManager: <profiles>/<id>/identity/battery_info.plist
-    NSString *identityDir = PXProfileIdentityPath(profileId);
-    if (!identityDir.length) {
-        self.error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:100
-            userInfo:@{NSLocalizedDescriptionKey: @"Invalid battery target profile"}];
-        return nil;
-    }
-    
-    // Ensure identity directory exists
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:identityDir]) {
-        [fm createDirectoryAtPath:identityDir
-      withIntermediateDirectories:YES
-                       attributes:nil
-                            error:nil];
-    }
-    
-    // Return the path to the battery_info.plist in this profile's identity dir
-    return [identityDir stringByAppendingPathComponent:@"battery_info.plist"];
+    NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+    NSString *identity = PXProfileIdentityPath(PXValidatedProfileID(selection[@"ProfileId"]));
+    // A read must never recreate a retired profile/identity directory.
+    return identity.length ? [identity stringByAppendingPathComponent:@"battery_info.plist"] : nil;
 }
 
 // Load battery values from disk
@@ -271,70 +246,75 @@ static BatteryManager *sharedManager = nil;
 
 // Save battery values to disk (both global and profile-specific)
 - (void)saveBatteryInfoToDisk {
-    // Basic validation
-    if (!_currentBatteryLevel) {
-        return;
+    if (!_currentBatteryLevel) return;
+    NSDictionary *record = [self batteryRecordForLevel:_currentBatteryLevel lowPowerMode:_currentLowPowerMode];
+    if (![self persistBatteryRecord:record]) PXLog(@"[BatteryManager] Battery persistence failed: %@", self.error);
+}
+
+- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled {
+    if (!level) return nil;
+    return @{ kBatteryLevelKey: [level copy], kLowPowerModeKey: @(enabled), kLastUpdatedKey: NSDate.date };
+}
+
+- (BOOL)persistBatteryRecord:(NSDictionary *)record {
+    if (!record) {
+        self.error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:103 userInfo:@{NSLocalizedDescriptionKey: @"Missing battery persistence record"}];
+        return NO;
     }
-    
+    NSError *failure = nil;
+    PXProfileLifecycleLease *lease = nil;
+    PXProfileArtifactMutation *mutation = nil;
+    BOOL profileCommitted = NO;
     @try {
-        // First save to the global battery plist
-        NSMutableDictionary *batteryInfo = [NSMutableDictionary dictionary];
-        batteryInfo[kBatteryLevelKey] = _currentBatteryLevel;
-        batteryInfo[kLowPowerModeKey] = @(_currentLowPowerMode);
-        batteryInfo[kLastUpdatedKey] = [NSDate date];
-        
-        // Create the directory if it doesn't exist
+        lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&failure];
+        if (!lease || ![lease validateForDirectory:PXProfilesPath() error:&failure] || !PXRequireNoPendingProfileDeletion(&failure)) {
+            self.error = failure; return NO;
+        }
+        NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+        id selected = selection[@"ProfileId"];
+        if (selected) {
+            NSString *profileID = PXValidatedProfileID(selected);
+            if (!profileID) {
+                self.error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:100 userInfo:@{NSLocalizedDescriptionKey: @"Invalid battery target profile"}]; return NO;
+            }
+            mutation = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{
+                return PXProfileIdentityPath(profileID);
+            } error:&failure];
+            if (!mutation) { self.error = failure; return NO; }
+            profileCommitted = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                return PXStageRuntimeBattery(tx, mutation.identityDirectory, record, error);
+            } error:&failure];
+            if (!profileCommitted) { self.error = failure; return NO; }
+        }
+        // No canonical active ID preserves the legacy global-only branch.
+        // A present but invalid/missing target never downgrades to that branch.
+    } @catch (NSException *exception) {
+        self.error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:101 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Battery persistence raised an exception"}];
+        return NO;
+    } @finally {
+        [mutation invalidate];
+        [lease invalidate];
+    }
+    // The mirror is a compatibility output, outside the source transaction.
+    // Never update it when an intended profile commit failed.
+    BOOL mirrored = [self mirrorBatteryRecord:record error:&failure];
+    if (!mirrored && !profileCommitted) { self.error = failure; return NO; }
+    self.error = nil;
+    if (!mirrored) PXLog(@"[BatteryManager] Source committed; legacy mirror failed: %@", failure);
+    return YES;
+}
+
+- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error {
+    if (error) *error = nil;
+    @try {
         NSString *directory = [BATTERY_PLIST_PATH stringByDeletingLastPathComponent];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        
-        if (![fileManager fileExistsAtPath:directory]) {
-            [fileManager createDirectoryAtPath:directory
-                  withIntermediateDirectories:YES
-                                   attributes:nil
-                                        error:nil];
-        }
-        
-        // Write the plist
-        [batteryInfo writeToFile:BATTERY_PLIST_PATH atomically:YES];
-        
-        PXLog(@"[WeaponX] 🔋 Saved battery info to global plist: %@%% LPM=%@",
-              @([_currentBatteryLevel floatValue] * 100),
-              _currentLowPowerMode ? @"YES" : @"NO");
+        if (![NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+        if ([record writeToFile:BATTERY_PLIST_PATH atomically:YES]) return YES;
+        if (error) *error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:102 userInfo:@{NSLocalizedDescriptionKey: @"Could not write legacy battery mirror"}];
+    } @catch (NSException *exception) {
+        if (error) *error = [NSError errorWithDomain:@"com.weaponx.BatteryManager" code:102 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Legacy battery mirror raised an exception"}];
     }
-    @catch (NSException *exception) {
-        // Log the error but don't crash
-        PXLog(@"[WeaponX] ⚠️ Error saving battery info: %@", exception);
-    }
-    
-    // Now also save to the profile-specific plist
-    NSString *batteryInfoPath = [self batteryInfoPathForCurrentProfile];
-    if (batteryInfoPath) {
-        @try {
-            // Create the directory if needed
-            NSString *identityDir = [batteryInfoPath stringByDeletingLastPathComponent];
-            [[NSFileManager defaultManager] createDirectoryAtPath:identityDir
-                                     withIntermediateDirectories:YES
-                                                      attributes:nil
-                                                           error:nil];
-            
-            // Prepare the battery info dictionary
-            NSMutableDictionary *batteryInfo = [NSMutableDictionary dictionary];
-            batteryInfo[kBatteryLevelKey] = _currentBatteryLevel ?: @"0.75";
-            batteryInfo[kLowPowerModeKey] = @(_currentLowPowerMode);
-            batteryInfo[kLastUpdatedKey] = [NSDate date];
-            
-            NSError *error = nil;
-            if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
-                return PXStageRuntimeBattery(tx, identityDir, batteryInfo, writeError);
-            }, &error)) {
-                self.error = error;
-                PXLog(@"[BatteryManager] Failed to commit profile battery info: %@", error);
-            } else self.error = nil;
-        }
-        @catch (NSException *exception) {
-            PXLog(@"[WeaponX] ⚠️ Error saving profile battery info: %@", exception);
-        }
-    }
+    return NO;
 }
 
 @end

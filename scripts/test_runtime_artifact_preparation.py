@@ -24,7 +24,17 @@ WRAPPERS = {
         '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID',
         '- (NSDictionary *)currentWiFiInfo', '- (void)setCurrentWiFiInfo:(NSDictionary *)wifiInfo',
         '- (BOOL)isValidSSID:(NSString *)ssid', '- (BOOL)isValidBSSID:(NSString *)bssid', '- (void)dealloc']),
-    'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp']),
+    'PXPreparedBatteryMethods.inc': ('common/BatteryManager.m', ['- (NSString *)randomizeBatteryLevel', '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo', '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp',
+        '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
+        '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
+    'PXOwnedBatteryMethods.inc': ('common/BatteryManager.m', [
+        '- (NSString *)batteryLevel', '- (void)setBatteryLevel:(NSString *)level', '- (NSString *)generateBatteryLevel',
+        '- (NSString *)randomizeBatteryLevel', '- (BOOL)lowPowerModeEnabled', '- (void)setLowPowerModeEnabled:(BOOL)enabled',
+        '- (NSDictionary *)generateBatteryInfo', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo',
+        '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp', '- (NSError *)lastError',
+        '- (NSString *)batteryInfoPathForCurrentProfile', '- (void)loadBatteryInfoFromDisk', '- (void)saveBatteryInfoToDisk',
+        '- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled',
+        '- (BOOL)persistBatteryRecord:(NSDictionary *)record', '- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error']),
     'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
         '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
@@ -64,8 +74,23 @@ def source_contracts():
 
     battery = identifier.method(read('common/BatteryManager.m'), '- (NSDictionary *)generateBatteryInfo')
     assert 'PXPrepareRuntimeBatteryInfo(_currentLowPowerMode)' in battery
-    assert battery.count('[self saveBatteryInfoToDisk]') == 1 and 'randomizeBatteryLevel' not in battery
-    assert battery.index('[self saveBatteryInfoToDisk]') < battery.index('postNotificationName:')
+    assert battery.count('[self persistBatteryRecord:record]') == 1 and 'randomizeBatteryLevel' not in battery
+    assert battery.index('[self persistBatteryRecord:record]') < battery.index('postNotificationName:')
+    battery_source = read('common/BatteryManager.m')
+    persist_battery = identifier.method(battery_source, '- (BOOL)persistBatteryRecord:(NSDictionary *)record')
+    assert persist_battery.index('acquireInDirectory:PXProfilesPath()') < persist_battery.index('PXRequireNoPendingProfileDeletion') < persist_battery.index('dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()')
+    assert 'borrowWithLifecycleLease:lease' in persist_battery and 'PXStageRuntimeBattery' in persist_battery
+    assert persist_battery.index('[mutation performSourceWrite:') < persist_battery.index('[lease invalidate]') < persist_battery.index('[self mirrorBatteryRecord:')
+    assert 'if (!profileCommitted)' in persist_battery and 'if (!mirrored && !profileCommitted)' in persist_battery
+    assert '@finally' in persist_battery and 'createDirectoryAtPath:' not in persist_battery
+    path_reader = identifier.method(battery_source, '- (NSString *)batteryInfoPathForCurrentProfile')
+    assert 'createDirectoryAtPath:' not in path_reader and 'PXProfileArtifactMutation' not in path_reader and 'PXLog(' not in path_reader
+    level_reader = identifier.method(battery_source, '- (NSString *)batteryLevel')
+    assert 'saveBatteryInfoToDisk' not in level_reader and level_reader.count('[self generateBatteryLevel]') == 2
+    low_power = identifier.method(battery_source, '- (void)setLowPowerModeEnabled:(BOOL)enabled')
+    assert low_power.index('if (![self persistBatteryRecord:record]) return;') < low_power.index('postNotificationName:')
+    assert 'if (![self persistBatteryRecord:record]) return batteryInfo;' in battery
+
     assert 'PXPrepareRuntimeStorage(capacity)' in read('common/StorageManager.m')
     uptime = identifier.method(read('common/UptimeManager.m'), WRAPPERS['PXPreparedUptimeMethod.inc'][1][0])
     assert 'PXPrepareRuntimeUptime(now, realUptime, sysctlResult == 0)' in uptime
@@ -140,16 +165,42 @@ def source_contracts():
                  'WiFi observer does not retain manager and dealloc removes its token',
                  'queued WiFi notification reloads current authority and safely ignores deallocated observer owner'):
         assert case in fixture, case
+    for case in ('battery generation commits once before mirror and both notifications',
+                 'battery profile commit precedes global mirror with the same captured record',
+                 'busy battery leaves profile mirror and notifications untouched while returning legacy candidate',
+                 'pending delete blocks battery source mirror and notifications',
+                 'invalid active battery ID never downgrades into global-only success',
+                 'missing battery identity cannot create directory or update global mirror',
+                 'battery source rollback preserves old mirror and suppresses success notifications',
+                 'profile battery success survives failed legacy mirror without false rollback',
+                 'global-only battery mirror failure is not announced as persisted success',
+                 'no-active battery preserves coordinated global-only save without profile source commit',
+                 'battery read preserves legacy fallback and missing LPM default without directory writes or lease',
+                 'battery captures immutable level once for profile and mirror',
+                 'battery getter repair performs one save instead of duplicate persistence',
+                 'owned battery persistence retains no-new-device-IDs policy',
+                 'missing battery record reports failure without mirror or success notification',
+                 'battery global read fallback works when profiles root is unavailable',
+                 'battery mutation refuses unavailable lifecycle namespace without creating root or changing mirror',
+                 'borrowed artifact invalidation preserves caller lifecycle ownership',
+                 'failed borrowed artifact resolution leaves caller ownership intact',
+                 'throwing borrowed artifact resolver cannot release caller lease',
+                 'nil borrowed capability never silently acquires an owned lease',
+                 'borrowed artifact scope rejects replaced identity while keeping caller lease',
+                 'borrowed artifact scope rejects late deletion before staging',
+                 'wrong-root borrowed artifact capability is rejected without invalidating it',
+                 'released borrowed artifact capability is rejected'):
+        assert case in fixture, case
     assert 'test_runtime_artifact_preparation.py --native' in read('.github/workflows/build-ios-arm.yml')
     # The common glob carries the new factory into both manager app and tweak.
     make = read('Makefile')
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3G-partial'
+    assert manifest['rollout'] == '4C.2H3H-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
-    print('PASS: Artifact preparation and WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')
+    print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')
 
 
 def generate_native_fragments(folder):

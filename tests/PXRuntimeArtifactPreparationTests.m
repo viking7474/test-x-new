@@ -16,7 +16,9 @@
 #include <fcntl.h>
 
 static NSUInteger gChecks, gFailures, gWrites, gBatterySaves, gDarwin, gLocal, gWiFiSaves;
-static NSString *gRoot;
+static NSString *gRoot, *gOwnedBatteryMirrorPath;
+static NSUInteger gOwnedBatteryLocal, gOwnedBatteryDarwin, gOwnedBatteryMirrors;
+static void (^gDuringBatteryMirror)(NSDictionary *), (^gDuringBatteryNotice)(NSDictionary *);
 static PXRuntimeSourceStore *gStore;
 static NSArray<NSNumber *> *gTape;
 static NSUInteger gTapeIndex;
@@ -95,6 +97,9 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 - (void)saveBatteryInfoToDisk;
 - (void)setFixtureLowPowerMode:(BOOL)value;
 - (NSString *)fixtureLevel;
+- (BOOL)persistBatteryRecord:(NSDictionary *)record;
+- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled;
+- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error;
 - (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo;
 - (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp;
 @end
@@ -102,6 +107,11 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 - (void)saveBatteryInfoToDisk { gBatterySaves++; CHECK(_currentBatteryLevel.length > 0, "battery cache ready before legacy save"); }
 - (void)setFixtureLowPowerMode:(BOOL)value { _currentLowPowerMode = value; }
 - (NSString *)fixtureLevel { return _currentBatteryLevel; }
+- (BOOL)persistBatteryRecord:(NSDictionary *)record {
+    gBatterySaves++;
+    CHECK([record[@"BatteryLevel"] isEqual:_currentBatteryLevel] && [record[@"LastUpdated"] isKindOfClass:NSDate.class], "battery wrapper persists captured record once");
+    return YES;
+}
 // Notification delivery is a fixture backend; do not broadcast production IPC.
 #define CFNotificationCenterPostNotification PXFixtureDarwin
 #define CFNotificationCenterGetDarwinNotifyCenter() NULL
@@ -234,6 +244,58 @@ static int PXPreparationFixtureSysctl(int *name, u_int namelen, void *oldp, size
 @implementation PXObservedWiFiFixture
 - (void)loadWiFiInfoForProfileID:(NSString *)profileID {
     gWiFiReloads++; [super loadWiFiInfoForProfileID:profileID];
+}
+@end
+
+static void CheckArtifactLeaseFree(void);
+static void PXOwnedBatteryDarwin(CFNotificationCenterRef center, CFStringRef name, const void *object, CFDictionaryRef info, Boolean immediate) {
+    (void)center; (void)name; (void)object; (void)info; (void)immediate; gOwnedBatteryDarwin++; CheckArtifactLeaseFree();
+}
+@interface PXOwnedBatteryFixture : NSObject {
+    NSString *_currentBatteryLevel;
+    BOOL _currentLowPowerMode, _lowPowerModeLoaded;
+}
+@property (nonatomic, strong) NSError *error;
+- (NSString *)batteryLevel;
+- (void)setBatteryLevel:(NSString *)level;
+- (NSString *)generateBatteryLevel;
+- (NSString *)randomizeBatteryLevel;
+- (BOOL)lowPowerModeEnabled;
+- (void)setLowPowerModeEnabled:(BOOL)enabled;
+- (NSDictionary *)generateBatteryInfo;
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo;
+- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp;
+- (NSError *)lastError;
+- (NSString *)batteryInfoPathForCurrentProfile;
+- (void)loadBatteryInfoFromDisk;
+- (void)saveBatteryInfoToDisk;
+- (NSDictionary *)batteryRecordForLevel:(NSString *)level lowPowerMode:(BOOL)enabled;
+- (BOOL)persistBatteryRecord:(NSDictionary *)record;
+- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error;
+@end
+@implementation PXOwnedBatteryFixture
+- (instancetype)init { if ((self = [super init])) _currentBatteryLevel = @"0.75"; return self; }
+#define CFNotificationCenterPostNotification PXOwnedBatteryDarwin
+#define CFNotificationCenterGetDarwinNotifyCenter() NULL
+#define kBatteryLevelKey @"BatteryLevel"
+#define kLowPowerModeKey @"LowPowerMode"
+#define kLastUpdatedKey @"LastUpdated"
+#define BATTERY_PLIST_PATH gOwnedBatteryMirrorPath
+#include "PXOwnedBatteryMethods.inc"
+#undef BATTERY_PLIST_PATH
+#undef kLastUpdatedKey
+#undef kLowPowerModeKey
+#undef kBatteryLevelKey
+#undef CFNotificationCenterGetDarwinNotifyCenter
+#undef CFNotificationCenterPostNotification
+@end
+@interface PXObservedBatteryFixture : PXOwnedBatteryFixture
+@end
+@implementation PXObservedBatteryFixture
+- (BOOL)mirrorBatteryRecord:(NSDictionary *)record error:(NSError **)error {
+    gOwnedBatteryMirrors++;
+    if (gDuringBatteryMirror) gDuringBatteryMirror(record);
+    return [super mirrorBatteryRecord:record error:error];
 }
 @end
 
@@ -716,6 +778,197 @@ static void TestWiFiLifecycle(void) {
           "queued WiFi notification reloads current authority and safely ignores deallocated observer owner");
 }
 
+
+static BOOL SeedBatteryRecord(NSString *profileID, NSString *level) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXStageRuntimeBattery(tx, PXProfileIdentityPath(profileID),
+            @{ @"BatteryLevel": level, @"LowPowerMode": @YES, @"LastUpdated": NSDate.date }, error);
+    } error:NULL];
+}
+static void TestBatteryLifecycle(void) {
+    Tape(@[]);
+    gOwnedBatteryMirrorPath = Path(gRoot, @"owned-battery-global.plist");
+    PXObservedBatteryFixture *battery = [PXObservedBatteryFixture new];
+    CHECK(SetArtifactSelection(@"a"), "battery active target selected");
+    gDuringBatteryMirror = ^(NSDictionary *record) {
+        CheckArtifactLeaseFree(); CHECK(AllArtifactFiles() != nil, "battery mirror runs outside source gate");
+        NSDictionary *selection = [NSDictionary dictionaryWithContentsOfFile:PXCurrentProfileInfoPath()];
+        NSString *profileID = PXValidatedProfileID(selection[@"ProfileId"]);
+        if (profileID) {
+            NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(profileID), @"battery_info.plist")];
+            CHECK([source isEqual:record], "battery profile commit precedes global mirror with the same captured record");
+        }
+    };
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:@"BatteryInfoUpdated" object:battery queue:nil usingBlock:^(NSNotification *note) {
+        gOwnedBatteryLocal++; CheckArtifactLeaseFree();
+        if (gDuringBatteryNotice) gDuringBatteryNotice(note.userInfo);
+    }];
+    gDuringBatteryNotice = ^(NSDictionary *info) {
+        NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"battery_info.plist")];
+        CHECK([source[@"BatteryLevel"] isEqual:info[@"BatteryLevel"]] &&
+              [source[@"LowPowerMode"] isEqual:info[@"LowPowerMode"]], "battery notifications follow committed profile values");
+    };
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    NSDictionary *generated = [battery generateBatteryInfo];
+    gStore.testCheckpoint = nil;
+    NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"battery_info.plist")];
+    NSDictionary *mirror = [NSDictionary dictionaryWithContentsOfFile:gOwnedBatteryMirrorPath];
+    CHECK(commits == 1 && !battery.error && generated[@"BatteryPercentage"] && [source isEqual:mirror] &&
+          gOwnedBatteryLocal == 1 && gOwnedBatteryDarwin == 1, "battery generation commits once before mirror and both notifications");
+    NSUInteger local = gOwnedBatteryLocal, darwin = gOwnedBatteryDarwin, mirrors = gOwnedBatteryMirrors;
+    NSDictionary *before = AllArtifactFiles();
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "battery competing lifecycle owner acquired");
+    NSDictionary *candidate = [battery generateBatteryInfo]; [battery setLowPowerModeEnabled:YES];
+    CHECK(candidate[@"BatteryPercentage"] && battery.error.code == 12 && mirrors == gOwnedBatteryMirrors &&
+          local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin && [before isEqual:AllArtifactFiles()],
+          "busy battery leaves profile mirror and notifications untouched while returning legacy candidate");
+    [owner invalidate];
+    CHECK(SetArtifactIntent(YES), "battery pending deletion intent seeded"); before = AllArtifactFiles();
+    [battery generateBatteryInfo]; [battery setLowPowerModeEnabled:NO];
+    CHECK(battery.error.code == 27 && mirrors == gOwnedBatteryMirrors && local == gOwnedBatteryLocal &&
+          darwin == gOwnedBatteryDarwin && [before isEqual:AllArtifactFiles()], "pending delete blocks battery source mirror and notifications");
+    CHECK(SetArtifactIntent(NO) && SetArtifactSelection(@7), "battery invalid canonical ID selected"); before = AllArtifactFiles();
+    [battery generateBatteryInfo];
+    CHECK(battery.error.code == 100 && mirrors == gOwnedBatteryMirrors && local == gOwnedBatteryLocal &&
+          [before isEqual:AllArtifactFiles()], "invalid active battery ID never downgrades into global-only success");
+    CHECK(SetArtifactSelection(@"c"), "battery legacy identity-missing target selected"); before = AllArtifactFiles();
+    [battery generateBatteryInfo];
+    CHECK(battery.error && mirrors == gOwnedBatteryMirrors && local == gOwnedBatteryLocal && [before isEqual:AllArtifactFiles()] &&
+          ![NSFileManager.defaultManager fileExistsAtPath:PXProfileIdentityPath(@"c")], "missing battery identity cannot create directory or update global mirror");
+    CHECK(SetArtifactSelection(@"a"), "battery source-fault target restored"); before = AllArtifactFiles();
+    __block BOOL interrupted = NO;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"] && !interrupted) { interrupted = YES; [NSException raise:@"fixture" format:@"battery write failure"]; } };
+    [battery generateBatteryInfo]; gStore.testCheckpoint = nil;
+    CHECK(interrupted && battery.error && [before isEqual:AllArtifactFiles()] && mirrors == gOwnedBatteryMirrors &&
+          local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin, "battery source rollback preserves old mirror and suppresses success notifications"); CheckArtifactLeaseFree();
+    // A legacy mirror error cannot turn an already committed source into a
+    // reported rollback. Exercise the real filesystem failure, not a fake save.
+    NSString *normalMirror = gOwnedBatteryMirrorPath, *blocker = Path(gRoot, @"battery-mirror-blocker");
+    CHECK([[@"file" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:blocker atomically:YES], "battery mirror blocking file created");
+    NSData *oldMirror = [NSData dataWithContentsOfFile:normalMirror];
+    gOwnedBatteryMirrorPath = Path(blocker, @"mirror.plist");
+    [battery generateBatteryInfo];
+    CHECK(!battery.error && gOwnedBatteryLocal == local + 1 && gOwnedBatteryDarwin == darwin + 1 &&
+          [[NSData dataWithContentsOfFile:normalMirror] isEqual:oldMirror], "profile battery success survives failed legacy mirror without false rollback");
+    local = gOwnedBatteryLocal; darwin = gOwnedBatteryDarwin;
+    gDuringBatteryNotice = nil;
+    CHECK(SetArtifactSelection(nil), "battery no-active global-only branch selected");
+    before = AllArtifactFiles();
+    [battery generateBatteryInfo];
+    CHECK(battery.error && local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin && [before isEqual:AllArtifactFiles()],
+          "global-only battery mirror failure is not announced as persisted success");
+    gOwnedBatteryMirrorPath = normalMirror;
+    commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    [battery setLowPowerModeEnabled:YES]; gStore.testCheckpoint = nil;
+    mirror = [NSDictionary dictionaryWithContentsOfFile:normalMirror];
+    CHECK(!battery.error && commits == 0 && [mirror[@"LowPowerMode"] boolValue] &&
+          gOwnedBatteryLocal == local + 1 && gOwnedBatteryDarwin == darwin + 1,
+          "no-active battery preserves coordinated global-only save without profile source commit");
+    local = gOwnedBatteryLocal; darwin = gOwnedBatteryDarwin;
+    // Read helper is pure: preserve pre-identity and global fallback, including
+    // the legacy missing-LPM default, without recreating a directory on read.
+    CHECK(SetArtifactSelection(@"c"), "battery legacy profile selected for read");
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{ @"BatteryLevel": @"0.61" } atPath:Path(PXProfileRootPath(@"c"), @"battery_info.plist") error:error];
+    } error:NULL], "legacy pre-identity battery record seeded");
+    NSUInteger writes = gWrites;
+    CHECK([[battery batteryLevel] isEqual:@"0.61"] && ![battery lowPowerModeEnabled] && gWrites == writes &&
+          ![NSFileManager.defaultManager fileExistsAtPath:PXProfileIdentityPath(@"c")], "battery read preserves legacy fallback and missing LPM default without directory writes or lease");
+    CHECK(SetArtifactSelection(@"a"), "battery captured record target restored");
+    NSMutableString *mutableLevel = [@"0.62" mutableCopy];
+    NSDictionary *record = [battery batteryRecordForLevel:mutableLevel lowPowerMode:YES]; [mutableLevel setString:@"0.10"];
+    CHECK([battery persistBatteryRecord:record] && !battery.error &&
+          [[NSDictionary dictionaryWithContentsOfFile:normalMirror][@"BatteryLevel"] isEqual:@"0.62"], "battery captures immutable level once for profile and mirror");
+    CHECK(local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin, "plain battery persistence does not add batch notifications");
+    for (NSString *invalid in @[@"", @"2.0"]) {
+        CHECK(SeedBatteryRecord(@"a", invalid), "invalid legacy battery level seeded for repair");
+        commits = 0; mirrors = gOwnedBatteryMirrors;
+        gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+        NSString *repaired = [battery batteryLevel]; gStore.testCheckpoint = nil;
+        CHECK(repaired.floatValue >= 0.05 && repaired.floatValue <= 1 && commits == 1 && gOwnedBatteryMirrors == mirrors + 1 &&
+              local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin, "battery getter repair performs one save instead of duplicate persistence");
+    }
+    CHECK(SetArtifactSelection(@"b"), "battery IDs-absence policy target selected");
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:Path(PXProfileIdentityPath(@"b"), @"device_ids.plist") error:error];
+    } error:NULL], "battery target device IDs removed by fixture");
+    CHECK([battery persistBatteryRecord:record] && ![NSFileManager.defaultManager fileExistsAtPath:Path(PXProfileIdentityPath(@"b"), @"device_ids.plist")],
+          "owned battery persistence retains no-new-device-IDs policy");
+    before = AllArtifactFiles(); mirrors = gOwnedBatteryMirrors;
+    [battery setBatteryLevel:nil]; [battery setLowPowerModeEnabled:YES];
+    CHECK(battery.error.code == 103 && mirrors == gOwnedBatteryMirrors && local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin &&
+          [before isEqual:AllArtifactFiles()], "missing battery record reports failure without mirror or success notification");
+    [battery adoptCommittedBatteryInfo:record];
+    NSString *availableRoot = gRoot; oldMirror = [NSData dataWithContentsOfFile:normalMirror];
+    gRoot = Path(availableRoot, @"unavailable-profiles-root");
+    @try {
+        writes = gWrites;
+        CHECK([[battery batteryLevel] isEqual:@"0.62"] && gWrites == writes, "battery global read fallback works when profiles root is unavailable");
+        mirrors = gOwnedBatteryMirrors;
+        [battery generateBatteryInfo];
+        CHECK(battery.error && mirrors == gOwnedBatteryMirrors && local == gOwnedBatteryLocal && darwin == gOwnedBatteryDarwin &&
+              [[NSData dataWithContentsOfFile:normalMirror] isEqual:oldMirror] && ![NSFileManager.defaultManager fileExistsAtPath:gRoot],
+              "battery mutation refuses unavailable lifecycle namespace without creating root or changing mirror");
+    } @finally { gRoot = availableRoot; }
+    CHECK(SetArtifactSelection(@"a"), "battery selection restored after unavailable namespace test");
+    gDuringBatteryMirror = nil; gDuringBatteryNotice = nil;
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
+    CheckArtifactLeaseFree();
+}
+
+static void TestBorrowedArtifactScope(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(lease && !error, "borrowed artifact parent lease acquired");
+    PXProfileArtifactMutation *scope = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ return PXProfileIdentityPath(@"a"); } error:&error];
+    CHECK(scope && !error, "borrowed artifact scope does not recursively acquire lifecycle");
+    CHECK([scope performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return PXStageRuntimeBattery(tx, scope.identityDirectory, @{ @"BatteryLevel": @"0.42", @"LowPowerMode": @NO, @"LastUpdated": NSDate.date }, writeError);
+    } error:&error], "borrowed artifact scope uses real staging and source commit");
+    [scope invalidate];
+    CHECK([lease validateForDirectory:gRoot error:&error], "borrowed artifact invalidation preserves caller lifecycle ownership");
+    __block BOOL entered = NO;
+    CHECK(![scope performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        (void)tx; (void)writeError; entered = YES; return YES;
+    } error:&error] && !entered && [lease validateWithError:NULL], "invalidated borrowed scope rejects work without ending caller lease");
+    scope = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ return nil; } error:&error];
+    CHECK(!scope && error && [lease validateWithError:NULL], "failed borrowed artifact resolution leaves caller ownership intact");
+    BOOL threw = NO;
+    @try { scope = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ [NSException raise:@"fixture" format:@"borrowed resolver exception"]; return nil; } error:&error]; }
+    @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [lease validateWithError:NULL], "throwing borrowed artifact resolver cannot release caller lease");
+    scope = [PXProfileArtifactMutation borrowWithLifecycleLease:nil identityResolver:^NSString *{ return PXProfileIdentityPath(@"a"); } error:&error];
+    CHECK(!scope && error.code == 25 && [lease validateWithError:NULL], "nil borrowed capability never silently acquires an owned lease");
+    scope = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ return PXProfileIdentityPath(@"a"); } error:&error];
+    CHECK(scope != nil, "borrowed scope reacquired for namespace guard");
+    NSString *identity = PXProfileIdentityPath(@"a"), *old = Path(PXProfileRootPath(@"a"), @"old-borrowed-identity");
+    CHECK([NSFileManager.defaultManager moveItemAtPath:identity toPath:old error:NULL] &&
+          [NSFileManager.defaultManager createDirectoryAtPath:identity withIntermediateDirectories:NO attributes:nil error:NULL], "borrowed namespace replacement fixture prepared");
+    NSDictionary *before = AllArtifactFiles(); entered = NO;
+    CHECK(![scope performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        (void)tx; (void)writeError; entered = YES; return YES;
+    } error:&error] && !entered && [before isEqual:AllArtifactFiles()] && [lease validateWithError:NULL],
+          "borrowed artifact scope rejects replaced identity while keeping caller lease");
+    [scope invalidate];
+    CHECK([NSFileManager.defaultManager removeItemAtPath:identity error:NULL] &&
+          [NSFileManager.defaultManager moveItemAtPath:old toPath:identity error:NULL], "borrowed identity fixture restored");
+    scope = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ return PXProfileIdentityPath(@"a"); } error:&error];
+    CHECK(scope && SetArtifactIntent(YES), "borrowed late journal fixture seeded"); entered = NO; before = AllArtifactFiles();
+    CHECK(![scope performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        (void)tx; (void)writeError; entered = YES; return YES;
+    } error:&error] && error.code == 27 && !entered && [before isEqual:AllArtifactFiles()], "borrowed artifact scope rejects late deletion before staging");
+    [scope invalidate]; CHECK(SetArtifactIntent(NO), "borrowed pending journal cleared");
+    PXProfileLifecycleLease *wrong = [PXProfileLifecycleLease acquireInDirectory:PXProfileRootPath(@"c") error:NULL];
+    scope = [PXProfileArtifactMutation borrowWithLifecycleLease:wrong identityResolver:^NSString *{ return PXProfileIdentityPath(@"a"); } error:&error];
+    CHECK(wrong && !scope && error && [wrong validateWithError:NULL], "wrong-root borrowed artifact capability is rejected without invalidating it");
+    [wrong invalidate]; [lease invalidate];
+    scope = [PXProfileArtifactMutation borrowWithLifecycleLease:lease identityResolver:^NSString *{ return PXProfileIdentityPath(@"a"); } error:&error];
+    CHECK(!scope && error, "released borrowed artifact capability is rejected"); CheckArtifactLeaseFree();
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -726,7 +979,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle(); TestWiFiLifecycle();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

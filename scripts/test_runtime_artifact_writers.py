@@ -77,7 +77,7 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3G-partial'
+    assert manifest['rollout'] == '4C.2H3H-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -95,7 +95,7 @@ def source_contracts():
     assert 'timeIntervalSince1970' in helper and 'ids[@"LastUpdated"] = timestamp' in helper
     assert 'writeToFile:' not in network, 'NetworkManager may not bypass source transactions'
     mutation = read('common/PXProfileArtifactMutation.m')
-    acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget error:(NSError **)error')
+    acquire = objc_method(mutation, '+ (instancetype)acquireWithDirectoryResolver:(NSString *(^)(void))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error')
     assert acquire.index('acquireInDirectory:PXProfilesPath()') < acquire.index('PXRequireNoPendingProfileDeletion') < acquire.index('resolver()')
     assert 'NS_RETURNS_RETAINED' in read('common/PXProfileArtifactMutation.h')
     assert 'O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW' in acquire and '@finally' in acquire and 'if (!handedOff)' in acquire
@@ -105,6 +105,12 @@ def source_contracts():
     write = objc_method(mutation, '- (BOOL)performSourceWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
     assert write.index('[self validateWithError:') < write.index('PXProfileDeletionJournalPath()') < write.index('return body(tx, writeError)')
     assert 'close(_directoryFD)' in mutation and '- (void)dealloc { [self invalidate]; }' in mutation
+    assert 'mutation.ownsLease = borrowed == nil;' in acquire
+    assert 'if (self.ownsLease) [self.lease invalidate];' in mutation
+    borrowed = objc_method(mutation, '+ (instancetype)borrowWithLifecycleLease:(PXProfileLifecycleLease *)lease identityResolver:(NSString *(^)(void))resolver error:(NSError **)error')
+    assert 'isKindOfClass:PXProfileLifecycleLease.class' in borrowed and 'lifecycleLease:lease' in borrowed
+    assert 'validateForDirectory:PXProfilesPath()' in acquire
+
     for forbidden in ('dispatch_', 'createDirectory', 'removeItemAtPath:', 'PXActiveProfile', 'PXLog(', 'NSNotification'):
         assert forbidden not in mutation, forbidden
     for signature in (
@@ -144,10 +150,10 @@ def source_contracts():
     assert single.index('PXStageRuntimeIPv4WithExistingPair') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     assert single.index('} error:error]') < single.index('generateSpoofedLocalIPv6AddressFromCurrent')
     for body, helper_name in ((objc_method(wifi, '- (void)saveWiFiInfoToCurrentProfile'), 'WiFi'),
-                              (objc_method(battery, '- (void)saveBatteryInfoToDisk'), 'Battery'),
+                              (objc_method(battery, '- (BOOL)persistBatteryRecord:(NSDictionary *)record'), 'Battery'),
                               (objc_method(uptime, '- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath'), 'Uptime')):
         assert f'PXStageRuntime{helper_name}' in body
-        assert ('[mutation performSourceWrite:' if helper_name in ('Uptime', 'WiFi') else 'PXPerformRuntimeSourceWrite') in body
+        assert '[mutation performSourceWrite:' in body
         assert 'writeToFile:deviceIdsPath' not in body
     assert 'writeToFile:BATTERY_PLIST_PATH' in battery, 'legacy global battery compatibility remains separate'
     storage_save = objc_method(storage, '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error')
