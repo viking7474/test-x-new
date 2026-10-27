@@ -116,6 +116,7 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     PXRuntimeSourceTransaction *_activeTransaction;
     BOOL _inCapture;
 }
+- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body allowNested:(BOOL)allowNested error:(NSError **)error;
 @end
 
 @implementation PXRuntimeSourceStore
@@ -309,6 +310,12 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     }
 }
 - (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error {
+    return [self performWrite:body allowNested:YES error:error];
+}
+- (BOOL)performStandaloneWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error {
+    return [self performWrite:body allowNested:NO error:error];
+}
+- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body allowNested:(BOOL)allowNested error:(NSError **)error {
     if (geteuid() != _owner) { if (error) *error = PXSourceError(@"Only the source owner may write or recover"); return NO; }
     double deadline = PXSourceNow() + 1.0;
     if (!body || ![self enterBefore:deadline error:error]) return NO;
@@ -316,6 +323,11 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     @try {
         if (_inCapture) { if (error) *error = PXSourceError(@"Source write during capture rejected"); return NO; }
         if (_activeTransaction) {
+            if (!allowNested) {
+                _activeTransaction.failure = PXSourceError(@"Standalone source write cannot join an active transaction");
+                if (error) *error = _activeTransaction.failure;
+                return NO;
+            }
             NSError *failure = nil;
             BOOL success = body(_activeTransaction, &failure);
             if (!success) _activeTransaction.failure = failure ?: PXSourceError(@"Nested write aborted");

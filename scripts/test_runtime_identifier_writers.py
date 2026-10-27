@@ -193,12 +193,13 @@ def source_contracts():
         assert 'common/PXRuntimeIdentifierWriter.m' in read('scripts/' + runner), 'new allowlist registry must link transitively'
     assert 'test_runtime_identifier_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3N-partial'
+    assert manifest['rollout'] == '4C.2H3O-partial'
     for name in ('identifier-values', 'identifier-migration', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
-    for name in ('storage-preference', 'security-store', 'security-direct'):
-        assert manifest['writers'][name]['status'] == 'pending'
+    assert manifest['writers']['storage-preference']['status'] == 'pending'
+    for name in ('security-store', 'security-direct'):
+        assert manifest['writers'][name]['status'] == 'partial'
     print('PASS: Runtime identifier writer source contracts (partial rollout; native runtime not implied)')
 
 

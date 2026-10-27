@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H3N-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H3O-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -67,6 +67,13 @@ def source_contracts():
     assert 'recover:' not in capture and 'writeToFile' not in capture and 'removeItem' not in capture
     assert capture.index('NSPropertyListImmutable') < capture.index('flock(_lockFD, LOCK_UN)')
     assert 'transaction.staged' in core and '_activeTransaction.failure' in core
+    regular = method(core, '- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
+    standalone = method(core, '- (BOOL)performStandaloneWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
+    assert 'allowNested:YES' in regular and 'allowNested:NO' in standalone
+    internal = method(core, '- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body allowNested:(BOOL)allowNested error:(NSError **)error')
+    assert internal.index('if (!allowNested)') < internal.index('BOOL success = body(_activeTransaction')
+    assert '_activeTransaction.failure = PXSourceError(@"Standalone source write' in internal
+
     assert 'self.thread != NSThread.currentThread' in core and '!self.active' in core
     assert '[PXValidatedProfileID(parts[0]) isEqualToString:parts[0]]' in paths and 'stringByResolvingSymlinksInPath' in paths
     assert 'owner:501 group:501' in paths and 'RuntimeSource' in paths

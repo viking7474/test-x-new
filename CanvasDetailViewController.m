@@ -3,6 +3,7 @@
 #import "TLinkIOSLogging.h"
 #import "IdentifierManager.h"
 #import "PXPaths.h"
+#import "common/PXSecuritySettingsStore.h"
 #import <notify.h>
 #import <math.h>
 #import <math.h>
@@ -454,20 +455,11 @@
 
 - (BOOL)persistCanvasValues:(NSDictionary<NSString *, id> *)values {
     if (values.count == 0) return YES;
-
-    NSString *settingsPath = PXSecuritySettingsPath();
-    NSMutableDictionary *settings = [NSMutableDictionary dictionaryWithContentsOfFile:settingsPath] ?: [NSMutableDictionary dictionary];
-    [settings addEntriesFromDictionary:values];
-    BOOL success = [settings writeToFile:settingsPath atomically:YES];
-    if (!success) {
-        PXLog(@"[CanvasDetail] Failed to persist Canvas settings at %@", settingsPath);
+    NSError *error = nil;
+    if (!PXWriteSecuritySettings(values, &error)) {
+        PXLog(@"[CanvasDetail] Failed to persist Canvas settings: %@", error);
         return NO;
     }
-
-    [values enumerateKeysAndObjectsUsingBlock:^(NSString *key, id value, BOOL *stop) {
-        [self.securitySettings setObject:value forKey:key];
-    }];
-    [self.securitySettings synchronize];
     PXPostSettingsChangedNotification();
     return YES;
 }

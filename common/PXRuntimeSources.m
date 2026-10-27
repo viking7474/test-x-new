@@ -49,6 +49,9 @@ static PXRuntimeSourceStore *PXProcessSourceStore(NSError **error) {
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
     return [PXProcessSourceStore(error) performWrite:body error:error];
 }
+BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
+    return [PXProcessSourceStore(error) performStandaloneWrite:body error:error];
+}
 NSDictionary *PXCaptureRuntimeSources(NSDictionary *(^loader)(NSError **), NSError **error) {
     return [PXProcessSourceStore(error) capture:loader error:error];
 }

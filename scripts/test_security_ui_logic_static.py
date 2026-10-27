@@ -52,13 +52,14 @@ for symbol in (
     "PXWriteSecurityInteger",
 ):
     require(symbol in store_h and symbol in store_m, f"shared security store exposes and implements {symbol}")
-require("flock(fd, LOCK_EX)" in store_m and "flock(fd, LOCK_UN)" in store_m,
-        "security settings writes are file-lock protected")
-require("NSDataWritingAtomic" in store_m, "security settings authoritative plist uses atomic writes")
-primary_write = store_m.find("writeToFile:path options:NSDataWritingAtomic")
-mirror_loop = store_m.find("for (NSString *suiteName in PXSecuritySuiteNames())")
-require(primary_write >= 0 and mirror_loop > primary_write,
-        "NSUserDefaults mirrors happen only after authoritative plist write")
+require('PXPerformStandaloneRuntimeSourceWrite' in store_m and '[tx setDictionary:candidate atPath:path error:writeError]' in store_m,
+        "security updates use the shared source transaction")
+require('NSDataWritingAtomic' in read('common/PXRuntimeSourceStore.m'), "source engine retains atomic file writes")
+primary_write = store_m.index('BOOL committed = PXPerformStandaloneRuntimeSourceWrite')
+mirror_after_commit = store_m.index('PXMirrorSecurityUpdates(updates);', primary_write)
+require(primary_write < mirror_after_commit and 'if (!committed) return NO;' in store_m[primary_write:mirror_after_commit],
+        "NSUserDefaults mirrors happen only after source commit and unlock")
+require('flock(' not in store_m, "security store no longer creates a separate unbounded lock")
 
 # Parent Security tab must refresh effective state after returning from detail screens.
 refresh = method_body(security, "- (void)refreshSecurityControlsFromAuthoritativeState")

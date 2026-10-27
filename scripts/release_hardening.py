@@ -40,6 +40,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_runtime_device_group_writers.py",
     "scripts/test_runtime_telephony_writers.py",
     "scripts/test_runtime_dashboard_preview.py",
+    "scripts/test_runtime_security_writers.py",
     "scripts/test_runtime_artifact_writers.py",
     "scripts/test_runtime_artifact_preparation.py",
     "scripts/test_runtime_identity_preparation.py",

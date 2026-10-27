@@ -29,6 +29,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Only the configured source owner may write/recover (the root daemon reads).
 - (BOOL)performWrite:(BOOL (^ _Nonnull)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error))body
                error:(NSError * _Nullable * _Nullable)error;
+/// For APIs that publish compatibility effects after return. Reject a nested
+/// invocation and poison its outer transaction so success always means committed.
+- (BOOL)performStandaloneWrite:(BOOL (^ _Nonnull)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error))body
+                        error:(NSError * _Nullable * _Nullable)error;
 /// Holds the source gate through load AND immutable detach, then releases it
 /// before global write/distribution. Uncommitted/corrupt journals reject capture;
 /// a validated journal matching the commit marker needs only later cleanup.
@@ -42,6 +46,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Production singleton uses mobile-owned state and an exact source allowlist.
 /// These functions are cold writer/publisher APIs; never call from hot hooks.
 FOUNDATION_EXPORT BOOL PXPerformRuntimeSourceWrite(
+    BOOL (^ _Nonnull body)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error), NSError * _Nullable * _Nullable error);
+FOUNDATION_EXPORT BOOL PXPerformStandaloneRuntimeSourceWrite(
     BOOL (^ _Nonnull body)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error), NSError * _Nullable * _Nullable error);
 FOUNDATION_EXPORT NSDictionary * _Nullable PXCaptureRuntimeSources(
     NSDictionary * _Nullable (^ _Nonnull loader)(NSError * _Nullable * _Nonnull error), NSError * _Nullable * _Nullable error);

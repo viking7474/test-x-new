@@ -75,6 +75,9 @@ jobs:
           python3 scripts/test_runtime_generation.py
           python3 scripts/test_runtime_device_group_writers.py --native
 
+      - name: Test transactional security and Canvas writers
+        run: python3 scripts/test_runtime_security_writers.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 
