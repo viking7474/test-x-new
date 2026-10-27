@@ -3,6 +3,7 @@
 @interface IPMonitorService : NSObject
 
 + (instancetype)sharedInstance;
+/// Void controls route to the main queue; state reads are main-thread only.
 - (void)startMonitoring;
 - (void)stopMonitoring;
 /// Persist the toggle before changing service state. Call from the UI/main thread.

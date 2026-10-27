@@ -105,6 +105,8 @@ static void PXFixturePostDarwin(CFNotificationCenterRef center, CFStringRef name
 @interface PXIPMonitorFixture : NSObject
 @property (nonatomic, assign) BOOL isMonitoring;
 @property (nonatomic, strong) NSTimer *monitoringTimer;
+@property (nonatomic, strong) NSObject *monitoringToken;
+@property (nonatomic, strong) NSMutableSet<NSURLSession *> *monitoringSessions;
 @property (nonatomic, assign) NSUInteger starts;
 + (instancetype)sharedInstance;
 - (BOOL)isIPMonitoringEnabled;

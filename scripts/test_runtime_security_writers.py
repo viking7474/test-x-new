@@ -57,7 +57,7 @@ def source_contracts():
     assert enabled.index('if (!PXWriteSecurityBool(@"ipMonitorEnabled", enabled, error)) return NO;') < enabled.index('[self startMonitoring]')
     assert '[self stopMonitoring]' in enabled
     assert 'setMonitoringEnabledAndPersist:' in read('common/IPMonitorService.h')
-    assert 'if (!_isMonitoring && !self.monitoringTimer)' in stopped
+    assert 'if (!_isMonitoring && !self.monitoringTimer && !self.monitoringSessions.count && !self.monitoringToken)' in stopped
     assert 'if (!self.isMonitoring)' not in stopped and '[self.monitoringTimer invalidate]' in stopped and 'self.monitoringTimer = nil;' in stopped
     assert 'return active && enabled;' in effective
     assert 'setObject:' not in monitor and 'setBool:' not in monitor and 'synchronize' not in monitor
@@ -93,7 +93,7 @@ def source_contracts():
                  'IP monitor UI success starts and stops only after committed setting'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3P-partial'
+    assert manifest['rollout'] == '4C.2H3Q-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'

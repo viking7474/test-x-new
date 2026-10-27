@@ -78,6 +78,9 @@ jobs:
       - name: Test transactional security and Canvas writers
         run: python3 scripts/test_runtime_security_writers.py --native
 
+      - name: Test native IP Monitor cancellation and callback lifetime
+        run: python3 scripts/test_ip_monitor_lifecycle.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 

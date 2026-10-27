@@ -7,6 +7,12 @@
 #import <netinet/in.h>
 #import <UIKit/UIKit.h>
 
+@interface PXIPMonitorReachabilityOwner : NSObject
+@property (nonatomic, weak) IPMonitorService *service;
+@end
+@implementation PXIPMonitorReachabilityOwner
+@end
+
 @interface IPMonitorService ()
 
 @property (nonatomic, assign) BOOL isMonitoring;
@@ -19,6 +25,9 @@
 @property (nonatomic, assign) NSInteger checkCount;
 @property (nonatomic, assign) NSInteger toggleCount;
 @property (nonatomic, assign) NSInteger consensusCount;
+@property (nonatomic, strong) NSObject *monitoringToken;
+@property (nonatomic, strong) NSMutableSet<NSURLSession *> *monitoringSessions;
+@property (nonatomic, copy) NSString *lastCheckedIP;
 
 @end
 
@@ -48,6 +57,7 @@ static IPMonitorService *sharedInstance = nil;
         self.checkCount = 0;
         self.toggleCount = 0;
         self.consensusCount = 0;
+        self.monitoringSessions = [NSMutableSet set];
         
         // Load cached IP if available
         NSString *cachedIP = [self loadCachedIP];
@@ -59,24 +69,25 @@ static IPMonitorService *sharedInstance = nil;
             PXLog(@"[IPMonitor] Using cached IP: %@", cachedIP);
         }
         
-        // Setup network monitoring
-        [self setupNetworkMonitoring];
-        
-        // Start monitoring if enabled
-        if ([self isIPMonitoringEnabled]) {
-            PXLog(@"[IPMonitor] IP Monitoring enabled at startup");
-            [self startMonitoring];
-        } else {
-            PXLog(@"[IPMonitor] IP Monitoring disabled at startup");
-        }
+        __weak typeof(self) weakSelf = self;
+        void (^begin)(void) = ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            [self setupNetworkMonitoring];
+            if ([self isIPMonitoringEnabled]) [self startMonitoring];
+        };
+        if (NSThread.isMainThread) begin();
+        else dispatch_async(dispatch_get_main_queue(), begin);
     }
     return self;
 }
 
 - (void)dealloc {
     PXLog(@"[IPMonitor] Deallocating IP Monitor Service");
-    [self stopMonitoring];
+    [_monitoringTimer invalidate];
+    for (NSURLSession *session in _monitoringSessions) [session invalidateAndCancel];
     if (self.reachability) {
+        SCNetworkReachabilitySetCallback(self.reachability, NULL, NULL);
         SCNetworkReachabilityUnscheduleFromRunLoop(self.reachability, CFRunLoopGetMain(), kCFRunLoopCommonModes);
         CFRelease(self.reachability);
         self.reachability = NULL;
@@ -120,6 +131,11 @@ static IPMonitorService *sharedInstance = nil;
 }
 
 - (BOOL)setMonitoringEnabledAndPersist:(BOOL)enabled error:(NSError **)error {
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.ip-monitor" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"IP monitoring toggle requires the main thread"}];
+        return NO;
+    }
     if (!PXWriteSecurityBool(@"ipMonitorEnabled", enabled, error)) return NO;
     if (enabled) [self startMonitoring];
     else [self stopMonitoring];
@@ -135,7 +151,8 @@ static IPMonitorService *sharedInstance = nil;
 }
 
 static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags flags, void *info) {
-    IPMonitorService *service = (__bridge IPMonitorService *)info;
+    (void)target;
+    IPMonitorService *service = ((__bridge PXIPMonitorReachabilityOwner *)info).service;
     [service handleReachabilityChange:flags];
 }
 
@@ -151,7 +168,9 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
     
     if (self.reachability) {
         // Set callback
-        SCNetworkReachabilityContext context = {0, (__bridge void *)self, NULL, NULL, NULL};
+        PXIPMonitorReachabilityOwner *owner = [PXIPMonitorReachabilityOwner new];
+        owner.service = self;
+        SCNetworkReachabilityContext context = {0, (__bridge void *)owner, CFRetain, CFRelease, NULL};
         if (SCNetworkReachabilitySetCallback(self.reachability, ReachabilityCallback, &context)) {
             // Schedule on main run loop
             SCNetworkReachabilityScheduleWithRunLoop(self.reachability, CFRunLoopGetMain(), kCFRunLoopCommonModes);
@@ -176,6 +195,12 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (void)startMonitoring {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf startMonitoring]; });
+        return;
+    }
+    if (![self isIPMonitoringEnabled]) return;
     if (self.isMonitoring) {
         PXLog(@"[IPMonitor] Start monitoring called but already monitoring");
         return;
@@ -183,9 +208,13 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
     
     PXLog(@"[IPMonitor] Starting IP monitoring");
     self.isMonitoring = YES;
+    self.monitoringToken = [NSObject new];
     
     // Get initial IP
+    __weak typeof(self) weakSelf = self;
     [self fetchCurrentIPWithConsensus:^(NSString *ip, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
         if (ip) {
             PXLog(@"[IPMonitor] Initial IP fetch successful: %@", ip);
             self.lastKnownIP = ip;
@@ -200,15 +229,24 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (void)stopMonitoring {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf stopMonitoring]; });
+        return;
+    }
     // The effective getter becomes NO as soon as the stored toggle is disabled.
     // Cleanup must inspect the running state/resources independently of that toggle.
-    if (!_isMonitoring && !self.monitoringTimer) {
+    if (!_isMonitoring && !self.monitoringTimer && !self.monitoringSessions.count && !self.monitoringToken) {
         PXLog(@"[IPMonitor] Stop monitoring called but not currently monitoring");
         return;
     }
     
     PXLog(@"[IPMonitor] Stopping IP monitoring");
     self.isMonitoring = NO;
+    self.monitoringToken = nil; // Revoke before cancellation callbacks can run.
+    NSSet<NSURLSession *> *sessions = [self.monitoringSessions copy];
+    [self.monitoringSessions removeAllObjects];
+    for (NSURLSession *session in sessions) [session invalidateAndCancel];
     
     // Invalidate timer
     if (self.monitoringTimer) {
@@ -219,12 +257,14 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (BOOL)isMonitoring {
+    if (!NSThread.isMainThread) return NO;
     BOOL active = _isMonitoring;
     BOOL enabled = [self isIPMonitoringEnabled];
     return active && enabled;
 }
 
 - (void)startAdaptivePolling {
+    if (!NSThread.isMainThread || !self.isMonitoring || !self.monitoringToken) return;
     // Cancel existing timer if any
     if (self.monitoringTimer) {
         [self.monitoringTimer invalidate];
@@ -234,11 +274,10 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
     PXLog(@"[IPMonitor] Starting adaptive polling with interval: %.1f seconds", self.adaptiveInterval);
     
     // Create a new timer with the current adaptive interval
-    self.monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:self.adaptiveInterval 
-                                                          target:self 
-                                                        selector:@selector(adaptiveCheckForIPChange:) 
-                                                        userInfo:nil 
-                                                         repeats:YES];
+    __weak typeof(self) weakSelf = self;
+    self.monitoringTimer = [NSTimer timerWithTimeInterval:self.adaptiveInterval repeats:YES block:^(NSTimer *timer) {
+        [weakSelf adaptiveCheckForIPChange:timer];
+    }];
     
     // Add to common run loop modes to ensure it runs even during scrolling
     [[NSRunLoop mainRunLoop] addTimer:self.monitoringTimer forMode:NSRunLoopCommonModes];
@@ -246,7 +285,7 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (void)adaptiveCheckForIPChange:(NSTimer *)timer {
-    static NSString *lastCheckedIP = nil;
+    if (!NSThread.isMainThread || !self.isMonitoring || timer != self.monitoringTimer) return;
     
     // Implement time-based throttling to prevent excessive checks
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -262,22 +301,26 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
               (long)self.checkCount, self.adaptiveInterval);
     }
     
+    NSObject *token = self.monitoringToken;
+    __weak typeof(self) weakSelf = self;
     [self fetchCurrentIPWithConsensus:^(NSString *ip, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
         if (ip) {
-            if (lastCheckedIP && ![lastCheckedIP isEqualToString:ip]) {
+            if (self.lastCheckedIP && ![self.lastCheckedIP isEqualToString:ip]) {
                 // IP changed, decrease interval (but not below 30 seconds)
                 self.adaptiveInterval = MAX(30.0, self.adaptiveInterval * 0.5);
                 
                 PXLog(@"[IPMonitor] IP CHANGED from %@ to %@, decreasing check interval to %.1f seconds", 
-                      lastCheckedIP, ip, self.adaptiveInterval);
+                      self.lastCheckedIP, ip, self.adaptiveInterval);
                 
                 // Show alert for IP change
-                [self showIPChangeAlertWithOldIP:lastCheckedIP newIP:ip];
+                [self showIPChangeAlertWithOldIP:self.lastCheckedIP newIP:ip];
                 
                 // Save the new IP
                 self.lastKnownIP = ip;
                 [self saveLastKnownIP:ip];
-            } else if (lastCheckedIP && [lastCheckedIP isEqualToString:ip]) {
+            } else if (self.lastCheckedIP && [self.lastCheckedIP isEqualToString:ip]) {
                 // IP unchanged, increase interval (but not above 300 seconds)
                 self.adaptiveInterval = MIN(300.0, self.adaptiveInterval * 1.5);
                 
@@ -287,16 +330,18 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
                 }
             }
             
+            if (token != self.monitoringToken || !self.isMonitoring) return;
             // Update timer interval
             [self startAdaptivePolling];
             
             // Store the current IP for next comparison
-            lastCheckedIP = ip;
+            self.lastCheckedIP = ip;
         }
     }];
 }
 
 - (void)checkForIPChange {
+    if (!NSThread.isMainThread || !self.isMonitoring || !self.monitoringToken) return;
     // Implement time-based throttling to prevent excessive checks
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     if (now - self.lastCheckTime < 5.0) { // Minimum 5 seconds between checks
@@ -308,7 +353,10 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
     
     PXLog(@"[IPMonitor] Manual check for IP change triggered by network change");
     
+    __weak typeof(self) weakSelf = self;
     [self fetchCurrentIPWithConsensus:^(NSString *ip, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
         if (ip) {
             PXLog(@"[IPMonitor] IP fetch result: %@, previous IP: %@", ip, self.lastKnownIP);
             if (self.lastKnownIP && ![self.lastKnownIP isEqualToString:ip]) {
@@ -324,6 +372,8 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 }
 
 - (void)fetchCurrentIPWithConsensus:(void (^)(NSString *ip, NSError *error))completion {
+    if (!NSThread.isMainThread || !self.isMonitoring || !self.monitoringToken) return;
+    NSObject *token = self.monitoringToken;
     PXLog(@"[IPMonitor] Starting IP fetch with consensus from multiple services");
     
     // Define the services to check - prioritize the fastest ones
@@ -357,6 +407,7 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
     
     // Create a shared session
     NSURLSession *session = [NSURLSession sessionWithConfiguration:sharedConfig];
+    [self.monitoringSessions addObject:session];
     
     // Check each service
     for (NSDictionary *service in services) {
@@ -386,7 +437,14 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
     }
     
     // When all requests complete, find the most common IP
+    __weak typeof(self) weakSelf = self;
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if ([self.monitoringSessions containsObject:session]) {
+            [self.monitoringSessions removeObject:session];
+            [session finishTasksAndInvalidate];
+        }
+        if (!self || token != self.monitoringToken || !self.isMonitoring) return;
         // Find the IP with the highest count
         NSString *mostCommonIP = nil;
         NSInteger highestCount = 0;
@@ -440,15 +498,15 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
         }
         
         if (isJSON) {
-            NSError *jsonError;
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+            NSError *jsonError = nil;
+            id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError] : nil;
             if (jsonError) {
                 completion(nil, jsonError);
                 return;
             }
             
-            NSString *ip = json[jsonKey];
-            if (!ip || ip.length == 0) {
+            id ip = [json isKindOfClass:NSDictionary.class] && jsonKey ? json[jsonKey] : nil;
+            if (![ip isKindOfClass:NSString.class] || [ip length] == 0) {
                 PXLog(@"[IPMonitor] IP not found in JSON response from %@", urlString);
                 NSError *missingError = [NSError errorWithDomain:@"com.yourapp.ipconsensus" 
                                                            code:1002 
@@ -460,7 +518,7 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
             PXLog(@"[IPMonitor] Successfully fetched IP from %@: %@", urlString, ip);
             completion(ip, nil);
         } else {
-            NSString *ip = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSString *ip = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
             ip = [ip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             
             if (!ip || ip.length == 0) {
@@ -482,7 +540,11 @@ static void ReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReach
 
 - (void)showIPChangeAlertWithOldIP:(NSString *)oldIP newIP:(NSString *)newIP {
     PXLog(@"[IPMonitor] Attempting to show IP change alert: %@ -> %@", oldIP, newIP);
+    NSObject *token = self.monitoringToken;
+    __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || !token || token != self.monitoringToken || !self.isMonitoring) return;
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"IP Address Changed"
                                                                      message:[NSString stringWithFormat:@"Your IP address has changed from %@ to %@", oldIP, newIP]
                                                               preferredStyle:UIAlertControllerStyleAlert];
