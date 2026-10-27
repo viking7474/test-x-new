@@ -16,10 +16,14 @@ def source_contracts():
     source = read('common/IdentifierManager.m')
     signature = '- (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate'
     body = groups.method(source, signature)
-    assert body.count('[self profileIdentityPath]') == 1
+    assert body.count('[self currentIdentifierMutation]') == 1
+    assert 'NSString *identityDir = mutation.identityDirectory;' in body
+    assert 'PXPerformRuntimeSourceWrite' not in body and '[mutation performSourceWrite:' in body
+    assert '@finally { [mutation invalidate]; }' in body
+    assert body.index('[type copy]') < body.index('[self currentIdentifierMutation]')
     assert body.count('cellularSpecForProductType:') == 1
-    assert body.index('[value copy]') < body.index('[self isValidIMEI:prepared]') < body.index('[self profileIdentityPath]')
-    assert body.index('captureDeviceIDsAtIdentityDirectory:identityDir') < body.index('cellularSpecForProductType:')
+    assert body.index('[value copy]') < body.index('[self isValidIMEI:prepared]') < body.index('[self currentIdentifierMutation]')
+    assert body.index('[self currentIdentifierMutation]') < body.index('captureDeviceIDsAtIdentityDirectory:identityDir') < body.index('cellularSpecForProductType:')
     assert 'if (generate || [productType hasPrefix:@"iPhone"])' in body
     for token in ('if (!productType.length || !regulatoryModelNumber.length)',
                   'if (!enabled || (!isIMEI && !cdma))', 'PXIdentityHasAllowedPrefix(prepared, tacs)',
@@ -54,11 +58,26 @@ def source_contracts():
                  'manual non iPhone compatibility policy preserved', 'telephony counter exhaustion preserves complete pair',
                  'malformed telephony sidecar is never silently replaced'):
         assert case in fixture, case
+    for case in ('all telephony APIs reject busy lifecycle before target and DB lookup',
+                 'all telephony APIs reject pending deletion before target and DB lookup',
+                 'telephony provider reentry fails busy without deadlock',
+                 'telephony owned success clears reentry error and increments once',
+                 'telephony provider exception preserves sources and releases lease',
+                 'late deletion blocks telephony sidecar IDs counter and commit token together',
+                 'telephony rejects missing replaced and symlink identity without touching competitor bytes',
+                 'telephony resolver exception releases acquired ownership',
+                 'telephony missing selection fails before provider and releases lease',
+                 'telephony copies type before provider can mutate caller input'):
+        assert case in fixture, case
+    assert 'TestTelephonyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
+    assert fixture.index('#import "PXProfileArtifactMutation.h"') < fixture.index('#include "PXDeviceGroupDeclarations.inc"')
+    assert '- (PXProfileArtifactMutation *)currentIdentifierMutation' in groups.SIGNATURES
+    assert 'common/PXProfileArtifactMutation.m' in read('scripts/test_runtime_device_group_writers.py')
     assert 'TestTelephony(manager, Identity(@"a"), Identity(@"b"))' in fixture
     workflow = read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_telephony_writers.py' in workflow and 'test_runtime_device_group_writers.py --native' in workflow
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3I-partial'
+    assert manifest['rollout'] == '4C.2H3J-partial'
     assert manifest['writers']['identifier-telephony']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['entryPoints'] == [
         'regenerateAllEnabledIdentifiers', 'regenerateAllEnabledIdentifiersWithError:',
@@ -66,7 +85,7 @@ def source_contracts():
         'commitRuntimeGenerationForProfileID:networkArtifacts:error:',
         'commitRuntimeGenerationForProfileID:networkArtifacts:lifecycleLease:error:']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
-    print('PASS: Standalone telephony source contracts (native runtime not implied; profile workflow pending)')
+    print('PASS: Standalone telephony source contracts (native runtime not implied; lifecycle rollout partial)')
 
 
 if __name__ == '__main__':

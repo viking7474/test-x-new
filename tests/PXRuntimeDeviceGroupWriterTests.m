@@ -7,6 +7,7 @@
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeScalarPreparation.h"
 #import "PXProfileLifecycleLease.h"
+#import "PXProfileArtifactMutation.h"
 #import "PXProfileDeletionJournal.h"
 #include <sys/sysctl.h>
 #import "PXDeviceProfileSchema.h"
@@ -27,6 +28,8 @@ static NSUInteger gBatchNotifications, gArtifactAdoptions, gBatteryNotifications
 static BOOL gFailSerial, gThrowBatteryPublication;
 static void (^gDuringPrepare)(void);
 static void (^gDuringPublication)(void);
+static void (^gDuringResolve)(void);
+static void CheckLeaseFree(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
@@ -35,6 +38,7 @@ BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSEr
 NSString *PXActiveProfileID(void) { return gSelected; }
 NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.class] && [@[@"a", @"b"] containsObject:value] ? [value copy] : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
+NSString *PXProfileRootPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(gRoot, profile) : nil; }
 NSString *PXProfilesPath(void) { return gRoot; }
 NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
@@ -242,7 +246,12 @@ ARTIFACT_SINGLETON
     }
     return self;
 }
-- (NSString *)profileIdentityPath { gSelections++; return gSelected ? Identity(gSelected) : nil; }
+- (NSString *)profileIdentityPath {
+    gSelections++;
+    void (^callback)(void) = gDuringResolve; gDuringResolve = nil;
+    if (callback) callback();
+    return gSelected ? Identity(gSelected) : nil;
+}
 - (BOOL)isIdentifierEnabled:(NSString *)type { return [self.settings[type] boolValue]; }
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity { gMigrations++; CHECK([identity isEqual:Identity(@"a")] || [identity isEqual:Identity(@"b")], "explicit wrapper migrates only supplied target"); return YES; }
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial {
@@ -437,6 +446,7 @@ static void TestTelephony(PXDeviceGroupFixture *manager, NSString *a, NSString *
     CHECK([badBytes writeToFile:Path(a, @"imei.plist") atomically:YES], "malformed telephony sidecar prepared");
     before = Snapshot(a);
     CHECK(![manager setCustomIMEI:imei] && [before isEqual:Snapshot(a)], "malformed telephony sidecar is never silently replaced");
+    CheckLeaseFree();
 }
 static void TestModelPreparation(PXDeviceGroupFixture *manager, NSString *identity) {
     gExpectedIdentity = identity; gSelected = @"a";
@@ -632,6 +642,92 @@ static BOOL ClearDeletionIntent(void) {
         return [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:error];
     } error:NULL];
 }
+static void CheckTelephonyLeaseHeld(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *other = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(!other && error.code == 12, "telephony owns lifecycle throughout target lookup and provider callbacks");
+    [other invalidate];
+    CHECK(Snapshot(gExpectedIdentity) != nil, "telephony lifecycle never holds source gate across provider work");
+}
+static void TestTelephonyLifecycle(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a;
+    NSString *imei = PXGenerateIMEIFromAuthoritativeTACs(@[@"12345678"]);
+    NSString *meid = [PXGenerateMEIDFromAuthoritativePrefixes(@[@"A00000"]) lowercaseString];
+    NSDictionary *baseline = @{ @"DeviceModel": @"iPhone15,4", @"RegulatoryModelNumber": @"A2846", @"IOSBuild": @"B1",
+        @"IMEI": imei, @"MEID": meid, @"GenerationCounter": @12, @"SSID": @"owned" };
+    CHECK(Seed(a, baseline, YES), "owned telephony baseline seeded");
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "competing telephony lifecycle owner acquired");
+    NSUInteger selections = gSelections, preparations = gPreparations, lookups = gTelephonyLookups;
+    NSDictionary *before = BatchSnapshot();
+    for (NSUInteger mode = 0; mode < 4; mode++)
+        CHECK(!InvokeTelephony(manager, mode < 2, mode % 2, mode < 2 ? imei : meid) && manager.error.code == 12,
+              "all telephony APIs reject busy lifecycle before target and DB lookup");
+    CHECK(selections == gSelections && preparations == gPreparations && lookups == gTelephonyLookups && [before isEqual:BatchSnapshot()],
+          "busy telephony preserves every source byte and commit identity");
+    [owner invalidate]; CheckLeaseFree();
+    CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"pending"), "telephony pending delete seeded");
+    before = BatchSnapshot();
+    for (NSUInteger mode = 0; mode < 4; mode++)
+        CHECK(!InvokeTelephony(manager, mode < 2, mode % 2, mode < 2 ? imei : meid) && manager.error.code == 27,
+              "all telephony APIs reject pending deletion before target and DB lookup");
+    CHECK(selections == gSelections && preparations == gPreparations && lookups == gTelephonyLookups && [before isEqual:BatchSnapshot()],
+          "pending telephony preserves source selection and preparation counts");
+    CHECK(ClearDeletionIntent(), "telephony pending delete cleared"); CheckLeaseFree();
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        CHECK(Seed(a, baseline, YES), "owned telephony mode seeded");
+        gDuringResolve = ^{ CheckTelephonyLeaseHeld(); };
+        gDuringPrepare = ^{
+            CheckTelephonyLeaseHeld();
+            CHECK(![manager setCustomIMEI:imei] && manager.error.code == 12, "telephony provider reentry fails busy without deadlock");
+        };
+        CHECK(InvokeTelephony(manager, mode < 2, mode % 2, mode < 2 ? imei : meid) && !manager.error &&
+              [IDs(a)[@"GenerationCounter"] isEqual:@13], "telephony owned success clears reentry error and increments once");
+        CheckLeaseFree();
+        before = BatchSnapshot();
+        gDuringPrepare = ^{ CheckTelephonyLeaseHeld(); [NSException raise:@"fixture" format:@"telephony provider exception"]; };
+        BOOL threw = NO;
+        @try { (void)InvokeTelephony(manager, mode < 2, mode % 2, mode < 2 ? imei : meid); }
+        @catch (NSException *exception) { (void)exception; threw = YES; }
+        CHECK(threw && [before isEqual:BatchSnapshot()], "telephony provider exception preserves sources and releases lease"); CheckLeaseFree();
+        __block NSDictionary *competitor = nil;
+        gDuringPrepare = ^{
+            CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"late"), "telephony late delete committed by bypass writer");
+            competitor = BatchSnapshot();
+        };
+        CHECK(!InvokeTelephony(manager, mode < 2, mode % 2, mode < 2 ? imei : meid) && manager.error.code == 27 && [competitor isEqual:BatchSnapshot()],
+              "late deletion blocks telephony sidecar IDs counter and commit token together");
+        CHECK(ClearDeletionIntent(), "telephony late delete cleared"); CheckLeaseFree();
+        for (NSUInteger kind = 0; kind < 3; kind++) {
+            NSString *old = Path(a.stringByDeletingLastPathComponent, @"owned-old-identity");
+            __block BOOL moved = NO; competitor = nil;
+            gDuringPrepare = ^{
+                moved = [NSFileManager.defaultManager moveItemAtPath:a toPath:old error:NULL];
+                if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:a withIntermediateDirectories:NO attributes:nil error:NULL];
+                if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:a withDestinationPath:b error:NULL];
+                competitor = BatchSnapshot();
+            };
+            CHECK(!InvokeTelephony(manager, mode < 2, mode % 2, mode < 2 ? imei : meid) && manager.error && moved && [competitor isEqual:BatchSnapshot()],
+                  "telephony rejects missing replaced and symlink identity without touching competitor bytes");
+            if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:a error:NULL], "telephony replacement fixture removed");
+            CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:a error:NULL], "telephony original identity restored"); CheckLeaseFree();
+        }
+    }
+    before = BatchSnapshot();
+    gDuringResolve = ^{ CheckTelephonyLeaseHeld(); [NSException raise:@"fixture" format:@"telephony resolver exception"]; };
+    BOOL threw = NO;
+    @try { [manager generateIMEI]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && [before isEqual:BatchSnapshot()], "telephony resolver exception releases acquired ownership"); CheckLeaseFree();
+    gSelected = nil; preparations = gPreparations;
+    CHECK(![manager generateMEID] && manager.error && preparations == gPreparations && [before isEqual:BatchSnapshot()],
+          "telephony missing selection fails before provider and releases lease"); CheckLeaseFree(); gSelected = @"a";
+    CHECK(Seed(a, baseline, YES), "telephony mutable type fixture seeded");
+    NSMutableString *mutableType = [@"IMEI" mutableCopy];
+    gDuringPrepare = ^{ [mutableType setString:@"MEID"]; };
+    CHECK([manager prepareAndPersistTelephonyValue:imei type:mutableType generate:NO] && !manager.error &&
+          [IDs(a)[@"IMEI"] isEqual:imei] && [IDs(a)[@"MEID"] isEqual:meid], "telephony copies type before provider can mutate caller input");
+    CheckLeaseFree();
+}
 static void TestGenerationLifecycle(PXDeviceGroupFixture *manager, NSString *a) {
     gSelected = @"a"; gExpectedIdentity = a;
     manager.settings = [@{ @"DeviceModel": @YES, @"IMEI": @YES, @"MEID": @YES } mutableCopy];
@@ -826,6 +922,7 @@ int main(void) {
         TestGenerationLifecycle(manager, Identity(@"a"));
         TestExplicitCreationGeneration(manager, Identity(@"a"), Identity(@"b"));
         TestDeferredActivation(manager, Identity(@"a"));
+        TestTelephonyLifecycle(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];

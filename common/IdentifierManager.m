@@ -3242,6 +3242,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 
 - (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate {
     self.error = nil;
+    type = [type copy];
     BOOL isIMEI = [type isEqualToString:@"IMEI"];
     if (!isIMEI && ![type isEqualToString:@"MEID"]) return nil;
 
@@ -3253,49 +3254,52 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
             userInfo:@{NSLocalizedDescriptionKey: @"Invalid telephony identifier format"}];
         return nil;
     }
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSDictionary *deviceIds = [self captureDeviceIDsAtIdentityDirectory:identityDir];
-    if (!deviceIds) return nil;
-    NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
-    NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
+    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    if (!mutation) return nil;
+    @try {
+        NSString *identityDir = mutation.identityDirectory;
+        NSDictionary *deviceIds = [self captureDeviceIDsAtIdentityDirectory:identityDir];
+        if (!deviceIds) return nil;
+        NSString *productType = PXProfileString(deviceIds[@"DeviceModel"]);
+        NSString *regulatoryModelNumber = PXProfileString(deviceIds[@"RegulatoryModelNumber"]);
 
-    // Generation always requires a canonical regional slot. Manual values keep
-    // the existing non-iPhone compatibility policy; iPhone writes use the DB.
-    if (generate || [productType hasPrefix:@"iPhone"]) {
-        if (!productType.length || !regulatoryModelNumber.length) {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:2
-                userInfo:@{NSLocalizedDescriptionKey: @"Canonical model and regulatory slot are required"}];
-            return nil;
+        // Generation always requires a canonical regional slot. Manual values keep
+        // the existing non-iPhone compatibility policy; iPhone writes use the DB.
+        if (generate || [productType hasPrefix:@"iPhone"]) {
+            if (!productType.length || !regulatoryModelNumber.length) {
+                self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:2
+                    userInfo:@{NSLocalizedDescriptionKey: @"Canonical model and regulatory slot are required"}];
+                return nil;
+            }
+            NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
+                                                                     regulatoryModelNumber:regulatoryModelNumber];
+            BOOL known = [spec[@"known"] isKindOfClass:NSNumber.class] && [spec[@"known"] boolValue];
+            BOOL enabled = known && [spec[@"enabled"] isKindOfClass:NSNumber.class] && [spec[@"enabled"] boolValue];
+            BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:NSNumber.class] && [spec[@"cdma"] boolValue];
+            NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:NSArray.class] ? spec[@"imeiTACs"] : nil;
+            NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:NSArray.class] ? spec[@"meidPrefixes"] : nil;
+            if (!enabled || (!isIMEI && !cdma)) {
+                self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:3
+                    userInfo:@{NSLocalizedDescriptionKey: @"Regional cellular capability does not permit this identifier"}];
+                return nil;
+            }
+            if (generate) prepared = isIMEI ? PXGenerateIMEIFromAuthoritativeTACs(tacs) : PXGenerateMEIDFromAuthoritativePrefixes(prefixes);
+            if (!prepared.length || (generate && !(isIMEI ? [self isValidIMEI:prepared] : [self isValidMEID:prepared])) ||
+                !(isIMEI ? PXIdentityHasAllowedPrefix(prepared, tacs) : PXIdentityHasAllowedPrefix(prepared, prefixes))) {
+                self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:4
+                    userInfo:@{NSLocalizedDescriptionKey: @"Identifier does not match authoritative regional prefixes"}];
+                return nil;
+            }
         }
-        NSDictionary *spec = [[IPhoneModelDB sharedManager] cellularSpecForProductType:productType
-                                                                 regulatoryModelNumber:regulatoryModelNumber];
-        BOOL known = [spec[@"known"] isKindOfClass:NSNumber.class] && [spec[@"known"] boolValue];
-        BOOL enabled = known && [spec[@"enabled"] isKindOfClass:NSNumber.class] && [spec[@"enabled"] boolValue];
-        BOOL cdma = enabled && [spec[@"cdma"] isKindOfClass:NSNumber.class] && [spec[@"cdma"] boolValue];
-        NSArray *tacs = [spec[@"imeiTACs"] isKindOfClass:NSArray.class] ? spec[@"imeiTACs"] : nil;
-        NSArray *prefixes = [spec[@"meidPrefixes"] isKindOfClass:NSArray.class] ? spec[@"meidPrefixes"] : nil;
-        if (!enabled || (!isIMEI && !cdma)) {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:3
-                userInfo:@{NSLocalizedDescriptionKey: @"Regional cellular capability does not permit this identifier"}];
-            return nil;
-        }
-        if (generate) prepared = isIMEI ? PXGenerateIMEIFromAuthoritativeTACs(tacs) : PXGenerateMEIDFromAuthoritativePrefixes(prefixes);
-        if (!prepared.length || (generate && !(isIMEI ? [self isValidIMEI:prepared] : [self isValidMEID:prepared])) ||
-            !(isIMEI ? PXIdentityHasAllowedPrefix(prepared, tacs) : PXIdentityHasAllowedPrefix(prepared, prefixes))) {
-            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios.telephony" code:4
-                userInfo:@{NSLocalizedDescriptionKey: @"Identifier does not match authoritative regional prefixes"}];
-            return nil;
-        }
-    }
-    NSDictionary *expected = PXCellularPreparationDependencies(deviceIds);
-    NSDate *timestamp = [NSDate date];
-    NSError *sourceError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierValueWithDependencies(tx, identityDir, type, prepared, timestamp, expected, error);
-    }, &sourceError);
-    self.error = success ? nil : sourceError;
-    return success ? prepared : nil;
+        NSDictionary *expected = PXCellularPreparationDependencies(deviceIds);
+        NSDate *timestamp = [NSDate date];
+        NSError *sourceError = nil;
+        BOOL success = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return PXStageRuntimeIdentifierValueWithDependencies(tx, identityDir, type, prepared, timestamp, expected, error);
+        } error:&sourceError];
+        self.error = success ? nil : sourceError;
+        return success ? prepared : nil;
+    } @finally { [mutation invalidate]; }
 }
 
 - (BOOL)setCustomIMEI:(NSString *)value {
