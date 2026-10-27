@@ -81,6 +81,9 @@ jobs:
       - name: Test native IP Monitor cancellation and callback lifetime
         run: python3 scripts/test_ip_monitor_lifecycle.py --native
 
+      - name: Test native pinned timezone cancellation and consumer lifetime
+        run: python3 scripts/test_pinned_timezone_lifecycle.py --native
+
       - name: Test canvas fingerprint protection invariants
         run: node scripts/test_canvas_fingerprint_protection.js
 

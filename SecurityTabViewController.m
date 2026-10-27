@@ -1,6 +1,7 @@
 #import "SecurityTabViewController.h"
 #import "common/PXUIKitCompat.h"
 #import "common/PXSecuritySettingsStore.h"
+#import "common/PXPinnedTimeZoneLookup.h"
 #import "common/PXJailbreakCompat.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
@@ -76,6 +77,7 @@
 @property (nonatomic, strong) NSTimer *timeUpdateTimer;
 @property (nonatomic, strong) UILabel *timeLabel;
 @property (nonatomic, strong) NSString *currentTimeZoneId;
+@property (nonatomic, strong) PXPinnedTimeZoneLookup *pinnedTimeZoneLookup;
 @property (nonatomic, strong) UITextField *localIPv6Field;
 @property (nonatomic, strong) UIButton *localIPv6GenerateButton;
 @property (nonatomic, strong) UIStackView *cardsStack;
@@ -529,6 +531,7 @@
 }
 
 - (void)refreshPinnedCoordinates {
+    [self.pinnedTimeZoneLookup cancel];
     // Set the main title directly
     self.title = @"Security";
     
@@ -603,7 +606,7 @@
     
     // Get pinned location
     NSDictionary *pinnedLocation = [[LocationSpoofingManager sharedManager] loadSpoofingLocation];
-    if (pinnedLocation && pinnedLocation[@"latitude"] && pinnedLocation[@"longitude"]) {
+    if ([pinnedLocation[@"latitude"] isKindOfClass:NSNumber.class] && [pinnedLocation[@"longitude"] isKindOfClass:NSNumber.class]) {
         double lat = [pinnedLocation[@"latitude"] doubleValue];
         double lon = [pinnedLocation[@"longitude"] doubleValue];
         
@@ -614,7 +617,10 @@
         
         // Get timezone and update time
         CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(lat, lon);
+        __weak typeof(self) weakSelf = self;
         [self getTimeZoneForLocation:coordinate completion:^(NSTimeZone *timeZone, NSString *timeZoneId) {
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
             if (timeZone) {
                 self.currentTimeZoneId = timeZoneId;
                 if (timeZoneId.length) {
@@ -4633,19 +4639,20 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
 }
 
 - (void)getTimeZoneForLocation:(CLLocationCoordinate2D)coordinate completion:(void (^)(NSTimeZone *timeZone, NSString *timeZoneId))completion {
-    CLLocation *location = [[CLLocation alloc] initWithLatitude:coordinate.latitude longitude:coordinate.longitude];
-    CLGeocoder *geocoder = [[CLGeocoder alloc] init];
-    
-    [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> * _Nullable placemarks, NSError * _Nullable error) {
-        if (error || placemarks.count == 0) {
-            completion(nil, nil);
-            return;
-        }
-        
-        CLPlacemark *placemark = placemarks.firstObject;
-        NSTimeZone *timeZone = placemark.timeZone;
-        NSString *timeZoneId = timeZone.name;
-        completion(timeZone, timeZoneId);
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf getTimeZoneForLocation:coordinate completion:completion]; });
+        return;
+    }
+    if (!completion) { [self.pinnedTimeZoneLookup cancel]; return; }
+    if (!self.pinnedTimeZoneLookup) self.pinnedTimeZoneLookup = [PXPinnedTimeZoneLookup new];
+    __weak typeof(self) weakSelf = self;
+    [self.pinnedTimeZoneLookup resolveCoordinate:coordinate completion:^(NSTimeZone *zone, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || !completion) return;
+        NSDictionary *current = [[LocationSpoofingManager sharedManager] loadSpoofingLocation];
+        if (!PXPinnedCoordinateMatchesLocation(coordinate, current)) return;
+        completion(error ? nil : zone, error ? nil : zone.name);
     }];
 }
 
