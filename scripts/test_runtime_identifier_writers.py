@@ -46,9 +46,10 @@ def method(source, signature):
 
 def selected_signatures():
     return ['- (NSString *)profileIdentityPath',
+            '- (PXProfileArtifactMutation *)currentIdentifierMutation',
             '- (NSString *)generatePreparedIdentifierForType:(NSString *)type',
             '- (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial',
-            '- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type identityDirectory:(NSString *)identityDir incrementGeneration:(BOOL)increment',
+            '- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type mutation:(PXProfileArtifactMutation *)mutation incrementGeneration:(BOOL)increment',
             *['- (NSString *)' + row[0] for row in GENERATORS], '- (NSString *)generateUDID',
             '- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type',
             '- (void)setATTAuthorizationStatus:(NSInteger)status', '- (BOOL)setCustomDeviceTheme:(NSString *)value',
@@ -66,10 +67,28 @@ def source_contracts():
         assert f'[self generatePreparedIdentifierForType:@"{key}"]' in body
         assert 'profileIdentityPath' not in body and '] ' + generator + ']' not in body
     flow = method(manager, '- (NSString *)generatePreparedIdentifierForType:(NSString *)type')
-    assert flow.count('[self profileIdentityPath]') == 1
-    assert flow.index('[self profileIdentityPath]') < flow.index('PXPrepareRuntimeScalar(type, &prepareError)')
+    acquire = method(manager, '- (PXProfileArtifactMutation *)currentIdentifierMutation')
+    assert acquire.count('[self profileIdentityPath]') == 1 and 'acquireWithIdentityResolver:' in acquire
+    assert flow.index('[self currentIdentifierMutation]') < flow.index('PXPrepareRuntimeScalar(type, &prepareError)')
+    assert '@finally { [mutation invalidate]; }' in flow
+    assert flow.index('[mutation invalidate]') < flow.index('publishPreparedIdentifier:')
     assert flow.index('persistPreparedIdentifier:') < flow.index('publishPreparedIdentifier:')
     assert 'incrementGeneration:NO' in flow and 'prepareSerialNumber' in flow
+    persist = method(manager, '- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type mutation:(PXProfileArtifactMutation *)mutation incrementGeneration:(BOOL)increment')
+    assert '[mutation performSourceWrite:' in persist and 'mutation.identityDirectory' in persist
+    assert 'PXPerformRuntimeSourceWrite' not in persist and 'PXLog(' not in persist
+    for signature in ('- (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type',
+                      '- (void)setATTAuthorizationStatus:(NSInteger)status', '- (BOOL)setCustomDeviceTheme:(NSString *)value'):
+        body = method(manager, signature)
+        assert '[self currentIdentifierMutation]' in body and '@finally { [mutation invalidate]; }' in body
+        assert 'PXPerformRuntimeSourceWrite' not in body
+    assert '#import "PXProfileArtifactMutation.h"' in fixture
+    for header in ('PXProfileLifecycleLease.h', 'PXProfileDeletionJournal.h'):
+        assert f'#import "{header}"' in fixture
+    for source in ('common/PXProfileArtifactMutation.m', 'common/PXProfileLifecycleLease.m',
+                   'common/PXProfileDeletionJournal.m', 'common/PXRuntimeProfileSelection.m'):
+        assert source in read('scripts/test_runtime_identifier_writers.py')
+
     for signature in selected_signatures():
         body = method(manager, signature)
         assert 'writeToFile:' not in body, f'unenrolled direct write: {signature}'
@@ -101,13 +120,26 @@ def source_contracts():
                   'thread-local migration guard resets', 'migration rollback restores all sidecars',
                   'already-current live path never enters writer gate', 'malformed migration input preserves bytes'):
         assert token in fixture, f'missing native case: {token}'
+    for case in ('busy scalar metadata writers never resolve migrate prepare write or publish',
+                 'pending deletion blocks scalar metadata before target and preparation',
+                 'scalar preparation reentry fails busy without deadlock',
+                 'scalar generation owns target across provider and source commit',
+                 'throwing scalar provider preserves files and releases lifecycle ownership',
+                 'late deletion intent rejects scalar sidecar IDs and cache publication',
+                 'scalar commit rejects missing replaced and symlink identity after preparation',
+                 'custom scalar freezes caller value and type before commit and publication',
+                 'owned ATT preserves clamp policy and releases before logging',
+                 'owned theme retains paired state without changing generation policy',
+                 'scalar failure preserves completed schema preflight without claiming whole-operation rollback',
+                 'writer resolver exception releases lifecycle and resets schema reentry guard'):
+        assert case in fixture, case
     make = read('Makefile').split('WeaponXDaemon_FILES =', 1)[1].splitlines()[0]
     assert 'common/PXRuntimeIdentifierWriter.m' in make
     for runner in ('test_runtime_snapshot_publisher.py', 'test_runtime_source_transactions.py'):
         assert 'common/PXRuntimeIdentifierWriter.m' in read('scripts/' + runner), 'new allowlist registry must link transitively'
     assert 'test_runtime_identifier_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3H-partial'
+    assert manifest['rollout'] == '4C.2H3I-partial'
     for name in ('identifier-values', 'identifier-migration', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -149,7 +181,9 @@ def native_tests():
         folder = Path(temp)
         generate_native_fragments(folder)
         sources = ['common/PXRuntimeScalarPreparation.m', 'common/PXIdentityValidator.m', 'common/PXRuntimeIdentifierWriter.m', 'common/PXRuntimeSourceStore.m',
-                   'common/PXRuntimePublisher.m', 'tests/PXRuntimeIdentifierWriterTests.m']
+                   'common/PXRuntimePublisher.m', 'common/PXProfileArtifactMutation.m',
+                   'common/PXProfileLifecycleLease.m', 'common/PXProfileDeletionJournal.m',
+                   'common/PXRuntimeProfileSelection.m', 'tests/PXRuntimeIdentifierWriterTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / ('identifier-' + scheme)
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',

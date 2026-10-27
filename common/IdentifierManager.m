@@ -35,6 +35,7 @@
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeGeneration.h"
 #import "PXProfileLifecycleLease.h"
+#import "PXProfileArtifactMutation.h"
 #import "PXProfileDeletionJournal.h"
 #import <Security/Security.h>
 #import <sys/sysctl.h>
@@ -78,7 +79,8 @@
 - (NSString *)prepareAndPersistTelephonyValue:(NSString *)value type:(NSString *)type generate:(BOOL)generate;
 - (NSString *)regenerateDeviceProfileGroupAtIdentityDirectory:(NSString *)identityDir;
 - (NSDictionary *)captureDeviceIDsAtIdentityDirectory:(NSString *)identityDir;
-- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type identityDirectory:(NSString *)identityDir incrementGeneration:(BOOL)increment;
+- (PXProfileArtifactMutation *)currentIdentifierMutation;
+- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type mutation:(PXProfileArtifactMutation *)mutation incrementGeneration:(BOOL)increment;
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identityDir;
 @end
 
@@ -932,32 +934,45 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 
 #pragma mark - Identifier Management
 
-- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type identityDirectory:(NSString *)identityDir incrementGeneration:(BOOL)increment {
-    if (!identityDir.length) return NO;
+- (PXProfileArtifactMutation *)currentIdentifierMutation {
+    self.error = nil;
+    NSError *error = nil;
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithIdentityResolver:^NSString *{
+        // Preserve the existing path repair/schema migration behavior, but run
+        // it under writer ownership. Already-current reader paths stay unchanged.
+        return [self profileIdentityPath];
+    } error:&error];
+    if (!mutation && !self.error) self.error = error;
+    return mutation;
+}
+
+- (BOOL)persistPreparedIdentifier:(NSString *)value type:(NSString *)type mutation:(PXProfileArtifactMutation *)mutation incrementGeneration:(BOOL)increment {
+    if (!mutation) return NO;
     NSDate *timestamp = [NSDate date];
     NSError *writeError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierValue(tx, identityDir, type, value, timestamp, increment, error);
-    }, &writeError);
+    BOOL success = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return PXStageRuntimeIdentifierValue(tx, mutation.identityDirectory, type, value, timestamp, increment, error);
+    } error:&writeError];
     self.error = success ? nil : writeError;
-    if (!success) PXLog(@"[IdentifierManager] Failed to commit %@ at %@: %@", type, identityDir, writeError);
     return success;
 }
 
 - (NSString *)generatePreparedIdentifierForType:(NSString *)type {
-    self.error = nil;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return nil;
-    NSError *prepareError = nil;
+    type = [type copy];
+    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    if (!mutation) return nil;
     NSString *value = nil;
-    if ([type isEqualToString:@"SerialNumber"]) {
-        value = [[SerialNumberManager sharedManager] prepareSerialNumber];
-        if (!value) prepareError = [[SerialNumberManager sharedManager] lastError];
-    } else value = PXPrepareRuntimeScalar(type, &prepareError);
-    if (!value) { self.error = prepareError; return nil; }
-    if (![self persistPreparedIdentifier:value type:type identityDirectory:identityDir incrementGeneration:NO]) return nil;
+    @try {
+        NSError *prepareError = nil;
+        if ([type isEqualToString:@"SerialNumber"]) {
+            value = [[SerialNumberManager sharedManager] prepareSerialNumber];
+            if (!value) prepareError = [[SerialNumberManager sharedManager] lastError];
+        } else value = PXPrepareRuntimeScalar(type, &prepareError);
+        if (!value) { self.error = prepareError; return nil; }
+        if (![self persistPreparedIdentifier:value type:type mutation:mutation incrementGeneration:NO]) return nil;
+    } @finally { [mutation invalidate]; }
     [self publishPreparedIdentifier:value type:type includeNameAndSerial:YES];
-    if ([type hasSuffix:@"UUID"] || [type isEqualToString:@"UDID"]) PXLog(@"[IdentifierManager] Committed %@ for %@", type, identityDir);
+    if ([type hasSuffix:@"UUID"] || [type isEqualToString:@"UDID"]) PXLog(@"[IdentifierManager] Committed %@ for %@", type, mutation.identityDirectory);
     return value;
 }
 
@@ -3202,14 +3217,18 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (BOOL)saveCustomValue:(NSString *)value forType:(NSString *)type {
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length || !PXRuntimeIdentifierSidecar(type)) return NO;
-    BOOL success = [self persistPreparedIdentifier:value type:type identityDirectory:identityDir incrementGeneration:YES];
+    value = [value copy]; type = [type copy];
+    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    if (!mutation) return NO;
+    BOOL success = NO;
+    @try {
+        if (!PXRuntimeIdentifierSidecar(type)) return NO;
+        success = [self persistPreparedIdentifier:value type:type mutation:mutation incrementGeneration:YES];
+    } @finally { [mutation invalidate]; }
     if (success) {
-        PXLog(@"[WeaponX] Custom %@ committed for %@", type, identityDir);
+        PXLog(@"[WeaponX] Custom %@ committed for %@", type, mutation.identityDirectory);
         [self publishPreparedIdentifier:value type:type includeNameAndSerial:NO];
     }
-    
     return success;
 }
 
@@ -3344,15 +3363,18 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 - (void)setATTAuthorizationStatus:(NSInteger)status {
     if (status < 0) status = 0;
     if (status > 3) status = 3;
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return;
-    NSDictionary *tracking = @{ @"ATTAuthorizationStatus": @(status), @"lastUpdated": [NSDate date] };
-    NSDictionary *updates = @{ @"ATTAuthorizationStatus": @(status) };
-    NSError *writeError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierState(tx, identityDir, updates, @{ @"tracking_info.plist": tracking }, NO, error);
-    }, &writeError);
-    self.error = success ? nil : writeError;
+    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    if (!mutation) return;
+    BOOL success = NO;
+    @try {
+        NSDictionary *tracking = @{ @"ATTAuthorizationStatus": @(status), @"lastUpdated": [NSDate date] };
+        NSDictionary *updates = @{ @"ATTAuthorizationStatus": @(status) };
+        NSError *writeError = nil;
+        success = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return PXStageRuntimeIdentifierState(tx, mutation.identityDirectory, updates, @{ @"tracking_info.plist": tracking }, NO, error);
+        } error:&writeError];
+        self.error = success ? nil : writeError;
+    } @finally { [mutation invalidate]; }
     if (success) PXLog(@"[WeaponX] ATTAuthorizationStatus committed: %ld", (long)status);
 }
 
@@ -3742,18 +3764,22 @@ static NSInteger PXMEIDLuhnCheckDigit(NSString *body) {
 }
 
 - (BOOL)setCustomDeviceTheme:(NSString *)value {
+    value = [value copy];
     if (![value isEqualToString:@"Light"] && ![value isEqualToString:@"Dark"]) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:2004 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Device Theme (must be 'Light' or 'Dark')"}];
         return NO;
     }
-    NSString *identityDir = [self profileIdentityPath];
-    if (!identityDir.length) return NO;
-    NSDictionary *theme = @{ @"value": value, @"lastUpdated": [NSDate date] };
-    NSError *writeError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        return PXStageRuntimeIdentifierState(tx, identityDir, @{ @"DeviceTheme": value }, @{ @"device_theme.plist": theme }, NO, error);
-    }, &writeError);
-    self.error = success ? nil : writeError;
+    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    if (!mutation) return NO;
+    BOOL success = NO;
+    @try {
+        NSDictionary *theme = @{ @"value": value, @"lastUpdated": [NSDate date] };
+        NSError *writeError = nil;
+        success = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return PXStageRuntimeIdentifierState(tx, mutation.identityDirectory, @{ @"DeviceTheme": value }, @{ @"device_theme.plist": theme }, NO, error);
+        } error:&writeError];
+        self.error = success ? nil : writeError;
+    } @finally { [mutation invalidate]; }
     return success;
 }
 

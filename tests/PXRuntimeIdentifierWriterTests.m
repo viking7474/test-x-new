@@ -4,19 +4,27 @@
 #import "PXRuntimeScalarPreparation.h"
 #import "PXRuntimeIdentifierWriter.h"
 #import "PXRuntimePublisher.h"
+#import "PXProfileArtifactMutation.h"
+#import "PXProfileLifecycleLease.h"
+#import "PXProfileDeletionJournal.h"
 #import "PXPaths.h"
 #import "TLinkIOSLogging.h"
 #include <stdatomic.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 
 static NSUInteger gChecks, gFailures, gSelections, gCacheSets;
+static _Atomic NSUInteger gProviderCalls;
+static void CheckIdentifierLeaseFree(void);
+static void (^gDuringLog)(void);
 static _Atomic NSUInteger gWrites;
 static NSString *gRoot, *gSelected, *gExpectedIdentity, *gExpectedKey;
 static PXRuntimeSourceStore *gStore;
 static BOOL gFailGeneration, gCheckCacheCommit;
 static void (^gDuringGeneration)(void);
 static void PXFixturePreparationCallback(void) {
+    gProviderCalls++;
     void (^callback)(void) = gDuringGeneration; gDuringGeneration = nil;
     if (callback) callback();
 }
@@ -30,13 +38,20 @@ OSStatus PXIdentifierFixtureSecure(SecRandomRef random, size_t count, void *byte
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 NSString *PXProfilesPath(void) { return gRoot; }
-NSString *PXProfileRootPath(NSString *profile) { return profile ? Path(gRoot, profile) : nil; }
-NSString *PXProfileIdentityPath(NSString *profile) { return profile ? Path(PXProfileRootPath(profile), @"identity") : nil; }
+NSString *PXValidatedProfileID(id value) {
+    return [value isKindOfClass:NSString.class] && [value length] && ![value containsString:@"/"] &&
+        ![value containsString:@"\\"] && ![value isEqual:@"."] && ![value isEqual:@".."] ? [value copy] : nil;
+}
+NSString *PXProfileRootPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(gRoot, profile) : nil; }
+NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(PXProfileRootPath(profile), @"identity") : nil; }
+NSString *PXCurrentProfileInfoPath(void) { return Path(gRoot, @"current_profile_info.plist"); }
+NSString *PXLegacyActiveProfileInfoPath(void) { return Path(gRoot, @"legacy_active_profile.plist"); }
+NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
     atomic_fetch_add(&gWrites, 1);
     return [gStore performWrite:body error:error];
 }
-void PXLog(NSString *format, ...) { (void)format; }
+void PXLog(NSString *format, ...) { (void)format; if (gDuringLog) gDuringLog(); }
 static NSDictionary *Load(NSString *path) { return [NSDictionary dictionaryWithContentsOfFile:path] ?: @{}; }
 static NSDictionary *Snapshot(NSString *identity) {
     return [gStore capture:^NSDictionary *(NSError **error) {
@@ -84,6 +99,7 @@ static NSString *PXFixtureGenerate(PXGenerator *manager, NSString *key) {
 static void PXFixtureSet(PXGenerator *manager, NSString *key, NSString *value) {
     gCacheSets++;
     if (gCheckCacheCommit) {
+        CheckIdentifierLeaseFree();
         CHECK(Snapshot(gExpectedIdentity) != nil && [IDs(gExpectedIdentity)[gExpectedKey] isEqual:value] && [key isEqual:gExpectedKey],
               "compatibility setter runs after complete commit outside source gate");
     }
@@ -130,7 +146,8 @@ static void TestGeneratedValues(PXIdentifierFixture *manager, NSString *a, NSStr
     CHECK([[manager profileIdentityPath] isEqual:a] && atomic_load(&gWrites) == writes,
           "already-current live path never enters writer gate");
     gSelected = nil;
-    CHECK([manager generateIDFA] == nil && manager.error != nil && atomic_load(&gWrites) == writes,
+    NSDictionary *absentTargetBefore = Snapshot(a); NSUInteger providersBefore = gProviderCalls;
+    CHECK([manager generateIDFA] == nil && manager.error != nil && providersBefore == gProviderCalls && [absentTargetBefore isEqual:Snapshot(a)],
           "missing active target rejects before generation and persistence");
     for (NSArray<NSString *> *row in cases) {
         NSString *selectorName = row[0], *key = row[1], *file = row[2];
@@ -249,10 +266,126 @@ static void TestMigration(PXIdentifierFixture *manager, NSString *identity, NSSt
     @try { [thrower profileIdentityPath]; } @catch (__unused NSException *exception) {}
     CHECK([thrower profileIdentityPath] != nil && thrower.calls == 2 && [IDs(throwIdentity)[@"ProfileSchemaVersion"] isEqual:@2], "thread-local migration guard resets during exception unwinding");
 }
+
+static void CheckIdentifierLeaseFree(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(lease && !error, "identifier writer releases lifecycle before compatibility publication logging and return");
+    [lease invalidate];
+}
+static void CheckIdentifierLeaseHeld(void) {
+    NSError *error = nil;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&error];
+    CHECK(!lease && error.code == 12, "identifier preparation runs with lifecycle ownership");
+    [lease invalidate];
+    CHECK(Snapshot(gExpectedIdentity) != nil, "identifier preparation never runs under source gate");
+}
+static BOOL IdentifierDeleteIntent(BOOL present) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return present ? [tx setDictionary:@{ @"fixture": @YES } atPath:PXProfileDeletionJournalPath() error:error] :
+            [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:error];
+    } error:NULL];
+}
+static NSDictionary *IdentifierAllFiles(void) {
+    return [gStore capture:^NSDictionary *(NSError **error) {
+        (void)error; NSMutableDictionary *files = [NSMutableDictionary dictionary];
+        for (NSString *relative in [NSFileManager.defaultManager subpathsAtPath:gRoot])
+            if (![relative hasPrefix:@"control/"] && [relative hasSuffix:@".plist"])
+                files[relative] = [NSData dataWithContentsOfFile:Path(gRoot, relative)];
+        return @{ @"files": files };
+    } error:NULL];
+}
+static void TestScalarLifecycle(PXIdentifierFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a;
+    CHECK(Seed(a, @{ @"ProfileSchemaVersion": @2, @"GenerationCounter": @8, @"keep": @YES }), "owned scalar target seeded");
+    PXProfileLifecycleLease *owner = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(owner != nil, "competing scalar lifecycle owner acquired");
+    NSUInteger selections = gSelections, providers = gProviderCalls, caches = gCacheSets;
+    NSDictionary *before = IdentifierAllFiles();
+    for (NSArray *row in PXFixtureGeneratorCases()) {
+        SEL selector = NSSelectorFromString(row[0]);
+        NSString *(*invoke)(id, SEL) = (NSString *(*)(id, SEL))[manager methodForSelector:selector];
+        CHECK(!invoke(manager, selector) && manager.error.code == 12, "busy scalar generator rejects before preparation");
+    }
+    CHECK(![manager saveCustomValue:@"busy" forType:@"IDFA"] && manager.error.code == 12, "busy custom scalar rejects source mutation");
+    [manager setATTAuthorizationStatus:3]; CHECK(manager.error.code == 12, "busy ATT rejects source mutation");
+    CHECK(![manager setCustomDeviceTheme:@"Dark"] && manager.error.code == 12, "busy theme rejects source mutation");
+    CHECK(selections == gSelections && providers == gProviderCalls && caches == gCacheSets && [before isEqual:IdentifierAllFiles()],
+          "busy scalar metadata writers never resolve migrate prepare write or publish");
+    [owner invalidate]; CheckIdentifierLeaseFree();
+    CHECK(IdentifierDeleteIntent(YES), "scalar pending delete seeded"); before = IdentifierAllFiles();
+    CHECK(![manager generateSerialNumber] && manager.error.code == 27 &&
+          ![manager saveCustomValue:@"pending" forType:@"IDFA"] && manager.error.code == 27, "pending deletion blocks generated and custom scalars");
+    [manager setATTAuthorizationStatus:0]; CHECK(manager.error.code == 27, "pending deletion blocks ATT state");
+    CHECK(![manager setCustomDeviceTheme:@"Light"] && manager.error.code == 27 && selections == gSelections && providers == gProviderCalls &&
+          caches == gCacheSets && [before isEqual:IdentifierAllFiles()], "pending deletion blocks scalar metadata before target and preparation");
+    CHECK(IdentifierDeleteIntent(NO), "scalar pending delete cleared");
+    gDuringGeneration = ^{ CheckIdentifierLeaseHeld(); CHECK(![manager saveCustomValue:@"reentry" forType:@"IDFV"] && manager.error.code == 12, "scalar preparation reentry fails busy without deadlock"); };
+    gExpectedKey = @"IDFA"; gCheckCacheCommit = YES;
+    CHECK([manager generateIDFA] != nil && manager.error == nil, "scalar generation owns target across provider and source commit");
+    gCheckCacheCommit = NO; CheckIdentifierLeaseFree();
+    before = IdentifierAllFiles(); caches = gCacheSets;
+    gDuringGeneration = ^{ CheckIdentifierLeaseHeld(); [NSException raise:@"fixture" format:@"scalar provider exception"]; };
+    BOOL threw = NO;
+    @try { [manager generateSerialNumber]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && caches == gCacheSets && [before isEqual:IdentifierAllFiles()], "throwing scalar provider preserves files and releases lifecycle ownership"); CheckIdentifierLeaseFree();
+    __block NSDictionary *competitor = nil;
+    gDuringGeneration = ^{ CHECK(IdentifierDeleteIntent(YES), "bypass scalar deletion intent committed"); competitor = IdentifierAllFiles(); };
+    CHECK(![manager generateIDFV] && manager.error.code == 27 && caches == gCacheSets && [competitor isEqual:IdentifierAllFiles()],
+          "late deletion intent rejects scalar sidecar IDs and cache publication");
+    CHECK(IdentifierDeleteIntent(NO), "late scalar intent cleared");
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        NSString *old = Path(a.stringByDeletingLastPathComponent, @"old-scalar-identity"); __block BOOL moved = NO;
+        competitor = nil;
+        gDuringGeneration = ^{
+            moved = [NSFileManager.defaultManager moveItemAtPath:a toPath:old error:NULL];
+            if (kind == 1) moved = moved && [NSFileManager.defaultManager createDirectoryAtPath:a withIntermediateDirectories:NO attributes:nil error:NULL];
+            if (kind == 2) moved = moved && [NSFileManager.defaultManager createSymbolicLinkAtPath:a withDestinationPath:b error:NULL];
+            competitor = IdentifierAllFiles();
+        };
+        CHECK(![manager generateIDFA] && manager.error && moved && caches == gCacheSets && [competitor isEqual:IdentifierAllFiles()],
+              "scalar commit rejects missing replaced and symlink identity after preparation");
+        if (kind != 0) CHECK([NSFileManager.defaultManager removeItemAtPath:a error:NULL], "scalar namespace replacement fixture removed");
+        CHECK([NSFileManager.defaultManager moveItemAtPath:old toPath:a error:NULL], "scalar original identity restored"); CheckIdentifierLeaseFree();
+    }
+    // Source commit callbacks can outlive a mutable caller argument. The value
+    // passed to both persistence and compatibility publication must be detached.
+    NSMutableString *input = [@"copied-custom-value" mutableCopy], *type = [@"IDFA" mutableCopy];
+    __block BOOL changed = NO;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"]) { [input setString:@"changed-value"]; [type setString:@"IDFV"]; changed = YES; }
+    };
+    gExpectedKey = @"IDFA"; gCheckCacheCommit = YES;
+    CHECK([manager saveCustomValue:input forType:type] && changed && [IDs(a)[@"IDFA"] isEqual:@"copied-custom-value"],
+          "custom scalar freezes caller value and type before commit and publication");
+    gStore.testCheckpoint = nil; gCheckCacheCommit = NO;
+    gDuringLog = ^{ CheckIdentifierLeaseFree(); };
+    [manager setATTAuthorizationStatus:99];
+    CHECK(!manager.error && [IDs(a)[@"ATTAuthorizationStatus"] isEqual:@3], "owned ATT preserves clamp policy and releases before logging");
+    CHECK([manager setCustomDeviceTheme:@"Light"] && !manager.error && [IDs(a)[@"DeviceTheme"] isEqual:@"Light"], "owned theme retains paired state without changing generation policy");
+    gDuringLog = nil;
+    // A writer's resolver keeps the legacy schema preflight, but failure later
+    // in scalar preparation must not masquerade as rolling that migration back.
+    NSString *legacy = PXProfileIdentityPath(@"owned-legacy");
+    CHECK(Seed(legacy, @{ @"GenerationCounter": @2 }), "owned legacy migration fixture seeded");
+    gSelected = @"owned-legacy"; gFailGeneration = YES;
+    CHECK(![manager generateIDFA] && manager.error && [IDs(legacy)[@"ProfileSchemaVersion"] isEqual:@2] &&
+          [IDs(legacy)[@"GenerationCounter"] isEqual:@3], "scalar failure preserves completed schema preflight without claiming whole-operation rollback");
+    gFailGeneration = NO; CheckIdentifierLeaseFree();
+    NSString *throwIdentity = PXProfileIdentityPath(@"owned-throw");
+    CHECK(Seed(throwIdentity, @{}), "owned throwing migration fixture seeded"); gSelected = @"owned-throw";
+    PXThrowOnceIdentifier *thrower = [PXThrowOnceIdentifier new]; threw = NO;
+    @try { [thrower generateIDFA]; } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw, "writer schema exception propagates through resolver"); CheckIdentifierLeaseFree();
+    CHECK([thrower generateIDFA] && !thrower.error && thrower.calls == 2 && [IDs(throwIdentity)[@"ProfileSchemaVersion"] isEqual:@2],
+          "writer resolver exception releases lifecycle and resets schema reentry guard");
+    gSelected = @"a";
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
-        for (NSString *profile in @[@"a", @"b", @"custom", @"migration", @"failure", @"corrupt", @"race", @"throw"]) {
+        for (NSString *profile in @[@"a", @"b", @"custom", @"migration", @"failure", @"corrupt", @"race", @"throw", @"owned-legacy", @"owned-throw"]) {
             [NSFileManager.defaultManager createDirectoryAtPath:PXProfileIdentityPath(profile) withIntermediateDirectories:YES attributes:nil error:nil];
         }
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:Path(gRoot, @"control") owner:geteuid() group:getegid()
@@ -265,6 +398,7 @@ int main(void) {
         TestGeneratedValues(manager, PXProfileIdentityPath(@"a"), PXProfileIdentityPath(@"b"));
         TestCustomAndMetadata(manager, PXProfileIdentityPath(@"custom"));
         TestMigration(manager, PXProfileIdentityPath(@"migration"), PXProfileIdentityPath(@"failure"), PXProfileIdentityPath(@"race"), PXProfileIdentityPath(@"throw"));
+        TestScalarLifecycle(manager, PXProfileIdentityPath(@"a"), PXProfileIdentityPath(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime identifier writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
