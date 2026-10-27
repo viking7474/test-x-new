@@ -1,13 +1,13 @@
 #import "TimeSpoofDetailViewController.h"
 #import "common/PXUIKitCompat.h"
 #import "common/PXSecuritySettingsStore.h"
+#import "common/TLinkIOSLogging.h"
 #import "IPStatusCacheManager.h"
 #import "LocationSpoofingManager.h"
 #import "IPMonitorService.h"
 #import <CoreLocation/CoreLocation.h>
 
 @interface TimeSpoofDetailViewController ()
-@property (nonatomic, strong) NSUserDefaults *securitySettings;
 @property (nonatomic, strong) NSMutableArray<UIImageView *> *modeChecks;
 @property (nonatomic, strong) UIView *dataCard;
 @property (nonatomic, strong) UILabel *dataTitleLabel;
@@ -20,6 +20,17 @@
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.hydra.tlinkios.settings.changed"),
                                          NULL, NULL, YES);
+}
+
+- (BOOL)persistLocationTimeZoneName:(NSString *)name {
+    if (![name isKindOfClass:NSString.class] || !name.length) return NO;
+    NSError *error = nil;
+    if (!PXWriteSecuritySetting(@"timeSpoofLocationTimeZoneName", name, &error)) {
+        PXLog(@"[TimeSpoof] Failed to persist location time zone: %@", error);
+        return NO;
+    }
+    [self publishTimeSpoofSettingsChanged];
+    return YES;
 }
 
 - (void)resolvePinnedLocationTimeZone {
@@ -35,16 +46,13 @@
         __strong typeof(weakSelf) self = weakSelf;
         NSString *name = error ? nil : placemarks.firstObject.timeZone.name;
         if (!self || !name.length) return;
-        [self.securitySettings setObject:name forKey:@"timeSpoofLocationTimeZoneName"];
-        [self.securitySettings synchronize];
-        [self publishTimeSpoofSettingsChanged];
+        [self persistLocationTimeZoneName:name];
     }];
 }
 
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _securitySettings = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
         _modeChecks = [NSMutableArray array];
     }
     return self;

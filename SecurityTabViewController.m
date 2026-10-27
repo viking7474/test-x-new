@@ -618,11 +618,7 @@
             if (timeZone) {
                 self.currentTimeZoneId = timeZoneId;
                 if (timeZoneId.length) {
-                    [self.securitySettings setObject:timeZoneId forKey:@"timeSpoofLocationTimeZoneName"];
-                    [self.securitySettings synchronize];
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                                         CFSTR("com.hydra.tlinkios.settings.changed"),
-                                                         NULL, NULL, YES);
+                    [self persistTimeZoneName:timeZoneId forKey:@"timeSpoofLocationTimeZoneName"];
                 }
                 
                 // Update time immediately
@@ -738,11 +734,7 @@
             if (tz) {
                 NSString *savedTimeZone = [self.securitySettings stringForKey:@"timeSpoofIPAddressTimeZoneName"];
                 if (![savedTimeZone isEqualToString:timezoneName]) {
-                    [self.securitySettings setObject:timezoneName forKey:@"timeSpoofIPAddressTimeZoneName"];
-                    [self.securitySettings synchronize];
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                                         CFSTR("com.hydra.tlinkios.settings.changed"),
-                                                         NULL, NULL, YES);
+                    [self persistTimeZoneName:timezoneName forKey:@"timeSpoofIPAddressTimeZoneName"];
                 }
                 // Format current time in the IP's timezone
                 NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
@@ -1226,17 +1218,78 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     };
 }
 
-- (void)targetRegionFollowsIPToggleChanged:(UISwitch *)sender {
-    BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"targetRegionFollowsIPEnabled"];
-    [self.securitySettings synchronize];
+- (BOOL)persistTimeZoneName:(NSString *)name forKey:(NSString *)key {
+    if (![name isKindOfClass:NSString.class] || !name.length) return NO;
+    NSError *error = nil;
+    if (!PXWriteSecuritySetting(key, name, &error)) {
+        PXLog(@"[Security] Failed to persist time zone: %@", error);
+        return NO;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
+    return YES;
+}
 
+- (BOOL)persistPinnedTargetRegionFromResponse:(NSDictionary *)json error:(NSError **)error {
+    if (error) *error = nil;
+    NSString *status = [json isKindOfClass:NSDictionary.class] && [json[@"status"] isKindOfClass:NSString.class] ? json[@"status"] : nil;
+    NSString *cc = [json isKindOfClass:NSDictionary.class] && [json[@"countryCode"] isKindOfClass:NSString.class] ? json[@"countryCode"] : nil;
+    NSNumber *latitude = [json isKindOfClass:NSDictionary.class] && [json[@"lat"] isKindOfClass:NSNumber.class] ? json[@"lat"] : nil;
+    NSNumber *longitude = [json isKindOfClass:NSDictionary.class] && [json[@"lon"] isKindOfClass:NSNumber.class] ? json[@"lon"] : nil;
+    NSString *zone = [json isKindOfClass:NSDictionary.class] && [json[@"timezone"] isKindOfClass:NSString.class] ? json[@"timezone"] : nil;
+    if (![status isEqualToString:@"success"] || !cc.length || !latitude || !longitude || !zone.length) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.target-region" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid TargetRegion fields"}];
+        return NO;
+    }
+    NSDictionary *defaults = [self targetRegionDefaultsForCountryCode:cc];
+    for (NSString *key in @[@"carrierISO", @"mcc", @"mnc", @"carrierName", @"localeIdentifier"]) {
+        if (![defaults[key] isKindOfClass:NSString.class]) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.target-region" code:2
+                userInfo:@{NSLocalizedDescriptionKey: @"Invalid TargetRegion defaults"}];
+            return NO;
+        }
+    }
+    NSMutableDictionary *values = [@{
+        @"targetRegionFollowsIPEnabled": @YES,
+        @"targetRegionPinnedCountryCode": [cc uppercaseString],
+        @"targetRegionPinnedTimeZoneName": zone,
+        @"targetRegionPinnedLocaleIdentifier": defaults[@"localeIdentifier"],
+        @"targetRegionPinnedCarrierISO": defaults[@"carrierISO"],
+        @"targetRegionPinnedCarrierMCC": defaults[@"mcc"],
+        @"targetRegionPinnedCarrierMNC": defaults[@"mnc"],
+        @"targetRegionPinnedCarrierName": defaults[@"carrierName"],
+        @"targetRegionPinnedLatitude": @(latitude.doubleValue),
+        @"targetRegionPinnedLongitude": @(longitude.doubleValue),
+        @"targetRegionPinnedTimestamp": @([NSDate date].timeIntervalSince1970)
+    } mutableCopy];
+    if ([defaults[@"preferredLanguages"] isKindOfClass:NSArray.class])
+        values[@"targetRegionPinnedPreferredLanguages"] = defaults[@"preferredLanguages"];
+    if ([json[@"query"] isKindOfClass:NSString.class] && [json[@"query"] length]) values[@"targetRegionPinnedSourceIP"] = json[@"query"];
+    if ([defaults[@"carrierISO"] length]) values[@"networkISOCountryCode"] = defaults[@"carrierISO"];
+    return PXWriteSecuritySettings(values, error);
+}
+
+- (void)publishTargetRegionChanged {
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
         CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.carrierDetailsChanged"), NULL, NULL, YES);
         CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
     }
+}
+
+- (void)targetRegionFollowsIPToggleChanged:(UISwitch *)sender {
+    BOOL enabled = sender.isOn;
+    BOOL previous = PXReadSecurityBool(@"targetRegionFollowsIPEnabled", NO);
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"targetRegionFollowsIPEnabled", enabled, &error)) {
+        [sender setOn:previous animated:YES];
+        PXLog(@"[Security] Failed to persist TargetRegion toggle: %@", error);
+        [self showToastWithMessage:@"Could not save TargetRegion setting"];
+        return;
+    }
+    [self publishTargetRegionChanged];
 }
 
 - (void)syncTargetRegionFromIPTapped:(id)sender {
@@ -1286,7 +1339,6 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         NSNumber *latN = [json[@"lat"] isKindOfClass:[NSNumber class]] ? json[@"lat"] : nil;
         NSNumber *lonN = [json[@"lon"] isKindOfClass:[NSNumber class]] ? json[@"lon"] : nil;
         NSString *tz = [json[@"timezone"] isKindOfClass:[NSString class]] ? json[@"timezone"] : nil;
-        NSString *ip = [json[@"query"] isKindOfClass:[NSString class]] ? json[@"query"] : nil;
 
         if (!cc.length || !latN || !lonN || !tz.length) {
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1295,46 +1347,14 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
             return;
         }
 
-        NSDictionary *defaults = [self targetRegionDefaultsForCountryCode:cc];
-        NSString *carrierISO = defaults[@"carrierISO"];
-        NSString *mcc = defaults[@"mcc"];
-        NSString *mnc = defaults[@"mnc"];
-        NSString *carrierName = defaults[@"carrierName"];
-        NSString *localeId = defaults[@"localeIdentifier"];
-        NSArray *langs = defaults[@"preferredLanguages"];
-
-        // Persist pinned TargetRegion in security settings.
-        [self.securitySettings setBool:YES forKey:@"targetRegionFollowsIPEnabled"]; 
-        [self.securitySettings setObject:[cc uppercaseString] forKey:@"targetRegionPinnedCountryCode"]; 
-        [self.securitySettings setObject:tz forKey:@"targetRegionPinnedTimeZoneName"]; 
-        [self.securitySettings setObject:localeId forKey:@"targetRegionPinnedLocaleIdentifier"]; 
-        if ([langs isKindOfClass:[NSArray class]]) {
-            [self.securitySettings setObject:langs forKey:@"targetRegionPinnedPreferredLanguages"]; 
+        NSError *writeError = nil;
+        if (![self persistPinnedTargetRegionFromResponse:json error:&writeError]) {
+            PXLog(@"[Security] Failed to persist TargetRegion packet: %@", writeError);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self showToastWithMessage:@"Could not save TargetRegion settings"];
+            });
+            return;
         }
-        [self.securitySettings setObject:carrierISO forKey:@"targetRegionPinnedCarrierISO"]; 
-        [self.securitySettings setObject:mcc forKey:@"targetRegionPinnedCarrierMCC"]; 
-        [self.securitySettings setObject:mnc forKey:@"targetRegionPinnedCarrierMNC"]; 
-        [self.securitySettings setObject:carrierName forKey:@"targetRegionPinnedCarrierName"]; 
-        [self.securitySettings setDouble:[latN doubleValue] forKey:@"targetRegionPinnedLatitude"]; 
-        [self.securitySettings setDouble:[lonN doubleValue] forKey:@"targetRegionPinnedLongitude"]; 
-        [self.securitySettings setDouble:[[NSDate date] timeIntervalSince1970] forKey:@"targetRegionPinnedTimestamp"]; 
-        if (ip.length) {
-            [self.securitySettings setObject:ip forKey:@"targetRegionPinnedSourceIP"]; 
-        }
-
-        // Keep legacy key used by NetworkConnectionTypeHooks, but persist it through
-        // the same authoritative store as the Security network controls.
-        if (carrierISO.length) {
-            NSError *networkISOError = nil;
-            if (!PXWriteSecuritySetting(@"networkISOCountryCode", carrierISO, &networkISOError)) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self showToastWithMessage:@"Could not save TargetRegion network ISO"];
-                });
-                return;
-            }
-        }
-
-        [self.securitySettings synchronize];
 
         // Update pinned GPS location (so CLLocation spoof stays consistent with IP region).
         CLLocationCoordinate2D coord = CLLocationCoordinate2DMake([latN doubleValue], [lonN doubleValue]);
@@ -1349,13 +1369,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
         gpsSettings[@"GPSSpoofingToggleEnabled"] = @YES;
         [gpsSettings writeToFile:gpsPlist atomically:YES];
 
-        // Notify tweak.
-        CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
-        if (darwinCenter) {
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.carrierDetailsChanged"), NULL, NULL, YES);
-            CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"), NULL, NULL, YES);
-        }
+        [self publishTargetRegionChanged];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (self.targetRegionFollowsIPToggleSwitch) {

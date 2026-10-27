@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 static NSUInteger gChecks, gFailures, gMirrors, gSettingsNotices, gResetNotices;
+static NSUInteger gRegionCarrierNotices, gRegionISONotices;
 static _Atomic NSUInteger gAttempts;
 static NSString *gRoot, *gPath, *gThrowMirrorSuite;
 static PXRuntimeSourceStore *gStore;
@@ -78,6 +79,8 @@ static void PXFixturePostDarwin(CFNotificationCenterRef center, CFStringRef name
     (void)center; (void)object; (void)info; (void)immediate;
     if (CFEqual(name, CFSTR("com.hydra.tlinkios.resetCanvasNoise"))) gResetNotices++;
     else if (CFEqual(name, CFSTR("com.hydra.tlinkios.settings.changed"))) gSettingsNotices++;
+    else if (CFEqual(name, CFSTR("com.hydra.tlinkios.carrierDetailsChanged"))) gRegionCarrierNotices++;
+    else if (CFEqual(name, CFSTR("com.hydra.tlinkios.networkISOCountryCodeChanged"))) gRegionISONotices++;
     CHECK(Capture() != nil, "canvas Darwin callback observes released source gate");
 }
 #define PXPostSettingsChangedNotification PXFixturePostSettings
@@ -159,6 +162,43 @@ static BOOL PXManagerReadSecurityBool(NSString *key, BOOL fallback) {
 #undef IPMonitorService
 #undef UISwitch
 @end
+
+// Carrier catalogue and UIKit are fixture boundaries; exact packet, toggle and
+// timezone methods still use the real source store and detached mirror packet.
+static NSDictionary *gRegionDefaults;
+@interface CarrierDB : NSObject
++ (instancetype)sharedManager;
+- (NSDictionary *)regionDefaultsForCountryCode:(NSString *)country;
+@end
+@implementation CarrierDB
++ (instancetype)sharedManager { static id database; static dispatch_once_t once; dispatch_once(&once, ^{ database = [self new]; }); return database; }
+- (NSDictionary *)regionDefaultsForCountryCode:(NSString *)country { (void)country; return gRegionDefaults; }
+@end
+@interface PXRegionFixture : PXIPMonitorUIFixture
+- (NSDictionary *)targetRegionDefaultsForCountryCode:(NSString *)countryCode;
+- (BOOL)persistPinnedTargetRegionFromResponse:(NSDictionary *)json error:(NSError **)error;
+- (BOOL)persistTimeZoneName:(NSString *)name forKey:(NSString *)key;
+- (void)publishTargetRegionChanged;
+- (void)targetRegionFollowsIPToggleChanged:(PXMonitorSwitch *)sender;
+@end
+#define UISwitch PXMonitorSwitch
+#define PXReadSecurityBool PXManagerReadSecurityBool
+#define CFNotificationCenterGetDarwinNotifyCenter() ((CFNotificationCenterRef)(uintptr_t)1)
+#define CFNotificationCenterPostNotification PXFixturePostDarwin
+@implementation PXRegionFixture
+#include "PXRegionSecurityMethods.inc"
+@end
+@interface PXTimeZoneFixture : NSObject
+- (void)publishTimeSpoofSettingsChanged;
+- (BOOL)persistLocationTimeZoneName:(NSString *)name;
+@end
+@implementation PXTimeZoneFixture
+#include "PXTimeZoneSecurityMethods.inc"
+@end
+#undef CFNotificationCenterPostNotification
+#undef CFNotificationCenterGetDarwinNotifyCenter
+#undef PXReadSecurityBool
+#undef UISwitch
 
 static void TestSecurityPackets(void) {
     NSError *error = nil;
@@ -306,6 +346,104 @@ static void TestIPMonitorWriters(void) {
     gCheckMirror = NO;
 }
 
+static NSDictionary *RegionResponse(void) {
+    return @{ @"status": @"success", @"countryCode": @"vn", @"lat": @10.75, @"lon": @106.5,
+        @"timezone": @"Asia/Ho_Chi_Minh", @"query": @"203.0.113.20" };
+}
+static NSDictionary *RegionDefaults(void) {
+    return @{ @"carrierISO": @"vn", @"mcc": @"452", @"mnc": @"04", @"carrierName": @"Viettel",
+        @"localeIdentifier": @"vi_VN", @"preferredLanguages": @[@"vi-VN"] };
+}
+static void TestRegionAndTimeZoneWriters(void) {
+    PXRegionFixture *region = [PXRegionFixture new]; PXTimeZoneFixture *time = [PXTimeZoneFixture new];
+    CHECK(Seed(@{ @"keep": @YES, @"targetRegionFollowsIPEnabled": @NO }), "region primary baseline seeded");
+    NSMutableString *zone = [@"Asia/Ho_Chi_Minh" mutableCopy], *mcc = [@"452" mutableCopy], *ip = [@"203.0.113.20" mutableCopy];
+    NSMutableDictionary *response = [RegionResponse() mutableCopy], *defaults = [RegionDefaults() mutableCopy];
+    response[@"timezone"] = zone; response[@"query"] = ip; defaults[@"mcc"] = mcc; gRegionDefaults = defaults;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"]) { commits++; [zone setString:@"Asia/Tokyo"]; [mcc setString:@"440"]; [ip setString:@"203.0.113.99"]; }
+    };
+    NSError *error = nil;
+    NSUInteger notices = gSettingsNotices, carriers = gRegionCarrierNotices, isos = gRegionISONotices;
+    gCheckMirror = YES;
+    CHECK([region persistPinnedTargetRegionFromResponse:response error:&error] && !error && commits == 1 && [Load()[@"keep"] boolValue] &&
+          [Load()[@"targetRegionFollowsIPEnabled"] boolValue] && [Load()[@"targetRegionPinnedCountryCode"] isEqual:@"VN"] &&
+          [Load()[@"targetRegionPinnedTimeZoneName"] isEqual:@"Asia/Ho_Chi_Minh"] && [Load()[@"targetRegionPinnedCarrierMCC"] isEqual:@"452"] &&
+          [Load()[@"targetRegionPinnedCarrierMNC"] isEqual:@"04"] && [Load()[@"targetRegionPinnedCarrierName"] isEqual:@"Viettel"] &&
+          [Load()[@"targetRegionPinnedLocaleIdentifier"] isEqual:@"vi_VN"] && [Load()[@"targetRegionPinnedCarrierISO"] isEqual:@"vn"] &&
+          [Load()[@"networkISOCountryCode"] isEqual:@"vn"] && [Load()[@"targetRegionPinnedLatitude"] isEqual:@10.75] &&
+          [Load()[@"targetRegionPinnedLongitude"] isEqual:@106.5] && [Load()[@"targetRegionPinnedTimestamp"] isKindOfClass:NSNumber.class] &&
+          [Load()[@"targetRegionPinnedSourceIP"] isEqual:@"203.0.113.20"] && [Load()[@"targetRegionPinnedPreferredLanguages"] isEqual:RegionDefaults()[@"preferredLanguages"]] &&
+          notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
+          "region primary security packet commits all pins and network ISO together once");
+    gStore.testCheckpoint = nil;
+    NSDictionary *legacy = @{ @"keep": @YES, @"targetRegionFollowsIPEnabled": @NO, @"targetRegionPinnedSourceIP": @"keep-ip",
+        @"targetRegionPinnedPreferredLanguages": @[@"keep-language"], @"networkISOCountryCode": @"keep-iso" };
+    CHECK(Seed(legacy), "region optional policy baseline seeded");
+    response = [RegionResponse() mutableCopy]; [response removeObjectForKey:@"query"];
+    defaults = [RegionDefaults() mutableCopy]; defaults[@"preferredLanguages"] = @42; defaults[@"carrierISO"] = @""; gRegionDefaults = defaults;
+    CHECK([region persistPinnedTargetRegionFromResponse:response error:&error] && !error && [Load()[@"targetRegionPinnedSourceIP"] isEqual:@"keep-ip"] &&
+          [Load()[@"targetRegionPinnedPreferredLanguages"] isEqual:legacy[@"targetRegionPinnedPreferredLanguages"]] && [Load()[@"networkISOCountryCode"] isEqual:@"keep-iso"] &&
+          [Load()[@"targetRegionPinnedCarrierISO"] isEqual:@""], "region packet preserves omitted language source IP and legacy ISO policy");
+    NSDictionary *before = Capture(); NSUInteger attempts = atomic_load(&gAttempts);
+    NSMutableDictionary *badLatitude = [RegionResponse() mutableCopy], *badStatus = [RegionResponse() mutableCopy];
+    badLatitude[@"lat"] = @"wrong-type"; badStatus[@"status"] = @"fail";
+    NSArray *invalid = @[@[], @{}, badLatitude, badStatus]; gRegionDefaults = RegionDefaults();
+    for (id candidate in invalid)
+        CHECK(![region persistPinnedTargetRegionFromResponse:candidate error:&error] && error && [before isEqual:Capture()] && attempts == atomic_load(&gAttempts),
+              "invalid region payload and defaults fail before source entry");
+    defaults = [RegionDefaults() mutableCopy]; [defaults removeObjectForKey:@"mnc"]; gRegionDefaults = defaults;
+    CHECK(![region persistPinnedTargetRegionFromResponse:RegionResponse() error:&error] && error.code == 2 && [before isEqual:Capture()] && attempts == atomic_load(&gAttempts),
+          "invalid region payload and defaults fail before source entry");
+    defaults = [RegionDefaults() mutableCopy]; defaults[@"preferredLanguages"] = @[NSObject.new]; gRegionDefaults = defaults;
+    CHECK(![region persistPinnedTargetRegionFromResponse:RegionResponse() error:&error] && error && [before isEqual:Capture()] && attempts == atomic_load(&gAttempts),
+          "non property list region languages reject the whole packet before source entry");
+    gRegionDefaults = nil;
+    CHECK([region persistPinnedTargetRegionFromResponse:RegionResponse() error:&error] && !error && [Load()[@"targetRegionPinnedLocaleIdentifier"] isEqual:@"en_VN"] &&
+          [Load()[@"targetRegionPinnedCarrierMCC"] isEqual:@"310"], "region preparation retains original catalogue fallback policy");
+    gRegionDefaults = RegionDefaults();
+    CHECK(Seed(legacy), "region fault baseline seeded"); before = Capture(); NSUInteger mirrors = gMirrors;
+    PXMonitorSwitch *sender = [PXMonitorSwitch new]; sender.on = YES;
+    __block NSUInteger faults = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) { faults++; [NSException raise:@"fixture" format:@"region or timezone write fault"]; } };
+    BOOL pinned = [region persistPinnedTargetRegionFromResponse:RegionResponse() error:&error];
+    BOOL locationZone = [region persistTimeZoneName:@"Asia/Tokyo" forKey:@"timeSpoofLocationTimeZoneName"];
+    BOOL ipZone = [region persistTimeZoneName:@"Asia/Tokyo" forKey:@"timeSpoofIPAddressTimeZoneName"];
+    BOOL detailZone = [time persistLocationTimeZoneName:@"Asia/Tokyo"];
+    CHECK(!pinned && !locationZone && !ipZone && !detailZone && faults == 4 && [before isEqual:Capture()] && mirrors == gMirrors &&
+          notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
+          "region and timezone source faults preserve bytes token mirrors and notifications");
+    [region targetRegionFollowsIPToggleChanged:sender];
+    CHECK(!sender.isOn && [region.toast hasPrefix:@"Could not"] && [before isEqual:Capture()] && notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
+          "region toggle rolls back failed persistence without publishing success");
+    void (^faultCheckpoint)(NSString *) = gStore.testCheckpoint;
+    gStore.testCheckpoint = nil;
+    NSMutableDictionary *enabledLegacy = [legacy mutableCopy]; enabledLegacy[@"targetRegionFollowsIPEnabled"] = @YES;
+    CHECK(Seed(enabledLegacy), "region failed disable baseline seeded"); before = Capture(); sender.on = NO;
+    gStore.testCheckpoint = faultCheckpoint;
+    [region targetRegionFollowsIPToggleChanged:sender];
+    CHECK(sender.isOn && [before isEqual:Capture()] && notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
+          "region toggle rolls back failed persistence without publishing success");
+    gStore.testCheckpoint = nil;
+    CHECK(Seed(legacy), "region successful toggles baseline seeded");
+    sender.on = YES; [region targetRegionFollowsIPToggleChanged:sender];
+    sender.on = NO; [region targetRegionFollowsIPToggleChanged:sender];
+    CHECK(!sender.isOn && ![Load()[@"targetRegionFollowsIPEnabled"] boolValue] && notices + 2 == gSettingsNotices && carriers + 2 == gRegionCarrierNotices && isos + 2 == gRegionISONotices,
+          "region toggle success retains all three notification topics");
+    notices = gSettingsNotices; carriers = gRegionCarrierNotices; isos = gRegionISONotices;
+    BOOL first = [region persistTimeZoneName:@"Asia/Tokyo" forKey:@"timeSpoofLocationTimeZoneName"];
+    BOOL second = [region persistTimeZoneName:@"Europe/Paris" forKey:@"timeSpoofIPAddressTimeZoneName"];
+    BOOL third = [time persistLocationTimeZoneName:@"Asia/Ho_Chi_Minh"];
+    CHECK(first && second && third && notices + 3 == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices &&
+          [Load()[@"timeSpoofLocationTimeZoneName"] isEqual:@"Asia/Ho_Chi_Minh"] && [Load()[@"timeSpoofIPAddressTimeZoneName"] isEqual:@"Europe/Paris"] && [Load()[@"keep"] boolValue],
+          "timezone adapters notify only after committed source and preserve unrelated values");
+    notices = gSettingsNotices; attempts = atomic_load(&gAttempts);
+    CHECK(![time persistLocationTimeZoneName:nil] && ![region persistTimeZoneName:@"" forKey:@"timeSpoofIPAddressTimeZoneName"] && notices == gSettingsNotices && attempts == atomic_load(&gAttempts),
+          "empty timezone candidates do not write source or publish");
+    gCheckMirror = NO; gRegionDefaults = nil;
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -314,7 +452,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;
