@@ -208,12 +208,45 @@ static void PXCheckConcurrentReaders(void) {
           "concurrent captures never combine profile/artifact/device fields from different views");
 }
 
+static void PXCheckBootstrapPriming(void) {
+    PXFixtureSource *source = [PXFixtureSource new]; source.value = PXFixturePayload(5);
+    __block __weak PXRuntimeSnapshotReader *weakReader;
+    __block BOOL recursiveWaitRejected = NO;
+    PXRuntimeSnapshotReader *reader = [[PXRuntimeSnapshotReader alloc] initWithLoader:^NSDictionary *{
+        recursiveWaitRejected = ![weakReader waitForPendingRefresh:0];
+        return [source load];
+    } refreshInterval:3600];
+    weakReader = reader;
+    errno = EDOM;
+    CHECK([reader primeSynchronouslyIfIdle] && errno == EDOM, "bootstrap primes inline and preserves errno");
+    CHECK(source.loaderThread == NSThread.currentThread && recursiveWaitRejected,
+          "bootstrap requires no worker and rejects recursive inline wait");
+    NSUInteger calls = source.calls;
+    CHECK([reader primeSynchronouslyIfIdle] && source.calls == calls, "repeated ctor priming reuses completed view");
+    __block PXRuntimeReadSnapshot *prepared;
+    [reader setBootstrapPreparationHandler:^(PXRuntimeReadSnapshot *view) { prepared = view; }];
+    CHECK([reader capture] == prepared && prepared.valid && source.loaderThread == NSThread.currentThread,
+          "bootstrap preparation is published before the next ctor gate");
+    source.blockNext = YES;
+    [reader invalidateAndRefresh];
+    CHECK(PXWait(source.entered), "background refresh entered after inline bootstrap");
+    CHECK(![reader primeSynchronouslyIfIdle], "bootstrap never steals or waits for an active producer");
+    dispatch_semaphore_signal(source.proceed);
+    CHECK([reader waitForPendingRefresh:3] && [reader capture].valid &&
+          source.loaderThread != NSThread.currentThread, "later refresh stays asynchronous");
+    PXRuntimeSnapshotReader *invalid = [[PXRuntimeSnapshotReader alloc] initWithLoader:^NSDictionary *{ return @{}; }
+        refreshInterval:3600];
+    CHECK(![invalid primeSynchronouslyIfIdle] && ![invalid capture].valid,
+          "completed bootstrap is not success when publication is invalid");
+}
+
 int main(void) {
     @autoreleasepool {
         PXCheckValueValidation();
         PXCheckCoalescingAndCapture();
         PXCheckIdentityAndFallback();
         PXCheckConcurrentReaders();
+        PXCheckBootstrapPriming();
         fprintf(stderr, "Runtime snapshot reader: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;
     }

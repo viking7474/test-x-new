@@ -47,7 +47,7 @@ def source_contracts():
     require("PXPrimeRuntimeSnapshotReader();" in scope and "PXProcessSystemDaemon || gPXProcessRole == PXProcessUnknown" in scope,
             "classification must filter denied process roles before cold priming")
     require("return [PXWebKitMetadataReader() capture].profileID;" in scope and "PXPrimeWebKitMetadataReader();" in scope,
-            "RootHide WebKit metadata must load on a worker after cold bootstrap, never parse on a hot lookup")
+            "RootHide WebKit metadata must use captured lookups after explicit cold priming")
     require("PXIdentitySnapshotStartObserving();" in scope and "if (result.capabilities) {" in scope,
             "allowed WebKit helpers must prepare identity even when native-only ctors are denied")
     require("PXRuntimeSnapshotRegisterPreparation" in identity and "PXBuildIdentitySnapshot(runtime)" in identity and

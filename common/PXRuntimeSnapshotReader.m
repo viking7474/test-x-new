@@ -78,6 +78,16 @@ static NSDictionary *PXRuntimeViewDictionary(NSDictionary *root, NSString *key) 
 @end
 
 static char kPXRuntimeReaderQueue;
+typedef struct PXRuntimeReaderFrame {
+    void *reader;
+    struct PXRuntimeReaderFrame *previous;
+} PXRuntimeReaderFrame;
+static __thread PXRuntimeReaderFrame *gPXRuntimeReaderFrame;
+static BOOL PXRuntimeReaderIsDraining(void *reader) {
+    for (PXRuntimeReaderFrame *frame = gPXRuntimeReaderFrame; frame; frame = frame->previous)
+        if (frame->reader == reader) return YES;
+    return NO;
+}
 static NSTimeInterval PXRuntimeReaderNow(void) {
     struct timespec now = {0};
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
@@ -96,7 +106,7 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
     BOOL _dirty;
     NSTimeInterval _refreshInterval;
     NSTimeInterval _nextRefresh;
-    // Worker-only metadata: keep identity for anti-rollback without keeping any
+    // Single-producer metadata: keep identity for anti-rollback without keeping any
     // old enabled fields available to captures after invalidation/failure.
     NSString *_lastEpoch;
     uint64_t _lastRevision;
@@ -130,6 +140,8 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
 }
 
 - (void)drainRefreshes {
+    PXRuntimeReaderFrame frame = { (__bridge void *)self, gPXRuntimeReaderFrame };
+    gPXRuntimeReaderFrame = &frame;
     @try {
         for (;;) {
             uint64_t generation;
@@ -153,23 +165,27 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
                 }
             }
             __attribute__((objc_precise_lifetime)) PXRuntimeReadSnapshot *previous = nil;
+            __attribute__((objc_precise_lifetime)) NSString *previousEpoch = nil;
             os_unfair_lock_lock(&_lock);
             if (generation == _requestedGeneration) {
                 previous = _snapshot;
                 _snapshot = candidate;
+                // Finish metadata before releasing the producer slot. Inline
+                // priming and the serial queue must never overlap producers.
+                if (candidate.hasPublicationIdentity) {
+                    previousEpoch = _lastEpoch;
+                    _lastEpoch = candidate.publisherEpoch;
+                    _lastRevision = candidate.revision;
+                }
             }
-            BOOL accepted = generation == _requestedGeneration;
             BOOL again = _dirty || generation != _requestedGeneration;
             if (!again) _queued = NO;
             os_unfair_lock_unlock(&_lock);
-            (void)previous;
-            if (accepted && candidate.hasPublicationIdentity) {
-                _lastEpoch = candidate.publisherEpoch;
-                _lastRevision = candidate.revision;
-            }
+            (void)previous; (void)previousEpoch;
             if (!again) break;
         }
     } @finally {
+        gPXRuntimeReaderFrame = frame.previous;
         dispatch_group_leave(_pending);
     }
 }
@@ -191,6 +207,23 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
     return snapshot;
 }
 
+- (BOOL)primeSynchronouslyIfIdle {
+    int savedErrno = errno;
+    os_unfair_lock_lock(&_lock);
+    PXRuntimeReadSnapshot *snapshot = _snapshot;
+    BOOL load = !snapshot && !_queued;
+    if (load) (void)[self markRefreshLocked:NO now:PXRuntimeReaderNow()];
+    os_unfair_lock_unlock(&_lock);
+    if (load) {
+        [self drainRefreshes];
+        os_unfair_lock_lock(&_lock);
+        snapshot = _snapshot;
+        os_unfair_lock_unlock(&_lock);
+    }
+    errno = savedErrno;
+    return snapshot.valid;
+}
+
 - (void)requestRefreshInvalidating:(BOOL)invalidate {
     int savedErrno = errno;
     NSTimeInterval now = PXRuntimeReaderNow();
@@ -205,7 +238,7 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
 }
 - (void)invalidateAndRefresh { [self requestRefreshInvalidating:YES]; }
 - (void)requestRefresh { [self requestRefreshInvalidating:NO]; }
-- (void)setPreparationHandler:(void (^)(PXRuntimeReadSnapshot *))handler {
+- (void)updatePreparationHandler:(void (^)(PXRuntimeReadSnapshot *))handler bootstrap:(BOOL)bootstrap {
     void (^copy)(PXRuntimeReadSnapshot *) = [handler copy];
     __attribute__((objc_precise_lifetime)) id previous = nil;
     __attribute__((objc_precise_lifetime)) PXRuntimeReadSnapshot *previousView = nil;
@@ -217,10 +250,18 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
     BOOL schedule = [self markRefreshLocked:YES now:now];
     os_unfair_lock_unlock(&_lock);
     (void)previous; (void)previousView;
-    [self enqueueWorker:schedule];
+    if (schedule && bootstrap) [self drainRefreshes];
+    else [self enqueueWorker:schedule];
+}
+- (void)setPreparationHandler:(void (^)(PXRuntimeReadSnapshot *))handler {
+    [self updatePreparationHandler:handler bootstrap:NO];
+}
+- (void)setBootstrapPreparationHandler:(void (^)(PXRuntimeReadSnapshot *))handler {
+    [self updatePreparationHandler:handler bootstrap:YES];
 }
 - (BOOL)waitForPendingRefresh:(NSTimeInterval)timeout {
-    if (dispatch_get_specific(&kPXRuntimeReaderQueue) == (__bridge void *)self) return NO;
+    if (dispatch_get_specific(&kPXRuntimeReaderQueue) == (__bridge void *)self ||
+        PXRuntimeReaderIsDraining((__bridge void *)self)) return NO;
     if (!isfinite(timeout) || timeout < 0 || timeout > 60) return NO;
     return dispatch_group_wait(_pending, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC))) == 0;
 }

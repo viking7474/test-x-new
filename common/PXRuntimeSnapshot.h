@@ -13,11 +13,13 @@ FOUNDATION_EXPORT NSDictionary *PXLoadRuntimeSnapshot(void);
 /// a non-nil invalid view means the last read failed validation or was absent.
 /// RootHide consumers use a lexical operation so policy and data share this view.
 FOUNDATION_EXPORT PXRuntimeReadSnapshot * _Nullable PXCaptureRuntimeSnapshot(void);
-/// Scoped bootstrap only: register lazy observers, request the first load and
-/// wait at most one second. Hot hooks must only capture, never call this function.
+/// Scoped bootstrap only: register lazy observers and prime inline if idle.
+/// Never waits for a worker. Hot hooks must only capture, never call this function.
 FOUNDATION_EXPORT BOOL PXPrepareRuntimeSnapshotReader(void);
 /// Cold process classification only; no observers are installed for denied roles.
 FOUNDATION_EXPORT BOOL PXPrimeRuntimeSnapshotReader(void);
+/// Allowed bootstrap only: prepare inline if idle, otherwise let the active
+/// worker finish. Never synchronously wait for a different thread.
 FOUNDATION_EXPORT void PXRuntimeSnapshotRegisterPreparation(void (^handler)(PXRuntimeReadSnapshot *view));
 FOUNDATION_EXPORT void PXInvalidateRuntimeSnapshotReader(void);
 FOUNDATION_EXPORT void PXBeginRuntimeSnapshotOperation(PXRuntimeReadScope *scope);

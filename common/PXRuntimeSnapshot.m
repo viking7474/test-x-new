@@ -4,7 +4,6 @@
 #import "PXRuntimeSourceStore.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
-#import <os/lock.h>
 #import <sys/stat.h>
 #import <errno.h>
 #import <string.h>
@@ -40,25 +39,13 @@ void PXBeginRuntimeSnapshotOperation(PXRuntimeReadScope *scope) {
 }
 
 void PXRuntimeSnapshotRegisterPreparation(void (^handler)(PXRuntimeReadSnapshot *)) {
-    [PXProcessRuntimeReader() setPreparationHandler:handler];
+    [PXProcessRuntimeReader() setBootstrapPreparationHandler:handler];
 }
 
 void PXInvalidateRuntimeSnapshotReader(void) { [PXProcessRuntimeReader() invalidateAndRefresh]; }
 
 BOOL PXPrimeRuntimeSnapshotReader(void) {
-    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
-    static BOOL primed;
-    os_unfair_lock_lock(&lock);
-    BOOL ready = primed;
-    os_unfair_lock_unlock(&lock);
-    if (ready) return YES;
-    PXRuntimeSnapshotReader *reader = PXProcessRuntimeReader();
-    (void)[reader capture];
-    BOOL completed = [reader waitForPendingRefresh:1.0];
-    if (completed) {
-        os_unfair_lock_lock(&lock); primed = YES; os_unfair_lock_unlock(&lock);
-    }
-    return completed;
+    return [PXProcessRuntimeReader() primeSynchronouslyIfIdle];
 }
 
 static void PXRuntimeReaderNotification(CFNotificationCenterRef center, void *observer,
@@ -82,9 +69,7 @@ BOOL PXPrepareRuntimeSnapshotReader(void) {
             }
         }
     });
-    PXRuntimeSnapshotReader *reader = PXProcessRuntimeReader();
-    (void)[reader capture];
-    return [reader waitForPendingRefresh:1.0];
+    return [PXProcessRuntimeReader() primeSynchronouslyIfIdle];
 }
 
 static NSDictionary *PXRuntimeDictionaryAtPath(NSString *path) {

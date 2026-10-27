@@ -31,7 +31,8 @@ FOUNDATION_EXPORT BOOL PXRuntimeReadBool(id _Nullable value);
 
 typedef NSDictionary * _Nullable (^ _Nonnull PXRuntimeSnapshotLoader)(void);
 
-/// Loader runs only on the reader's serial queue. Captures never wait for I/O.
+/// Refreshes run on the reader's serial queue, except explicit bootstrap priming.
+/// Captures never wait for I/O.
 /// Callers keep one strong view and pass it to related field readers/helpers.
 /// A loader that needs the reader must capture it weakly to avoid a cycle.
 @interface PXRuntimeSnapshotReader : NSObject
@@ -40,14 +41,22 @@ typedef NSDictionary * _Nullable (^ _Nonnull PXRuntimeSnapshotLoader)(void);
 - (instancetype)initWithLoader:(PXRuntimeSnapshotLoader)loader
               refreshInterval:(NSTimeInterval)refreshInterval NS_DESIGNATED_INITIALIZER;
 - (nullable PXRuntimeReadSnapshot *)capture;
+/// Constructor/bootstrap only: load inline if no view or worker exists. Never
+/// wait for another thread (which may need a dyld/ObjC initialization lock held
+/// by the caller). Returns NO for pending/invalid data; does not bypass validation.
+- (BOOL)primeSynchronouslyIfIdle;
 /// Clear the current publication immediately before asynchronous reload.
 - (void)invalidateAndRefresh;
 /// Slow fallback refresh retains the current view only while loading; failure
 /// publishes an invalid/empty view rather than preserving enablement indefinitely.
 - (void)requestRefresh;
-/// Runs on the loader queue before publication; changing it invalidates current
-/// views. Handler must not mutate/re-publish a view after this callback returns.
+/// Runs before publication on the loader queue (or the explicit bootstrap
+/// caller); changing it invalidates current views. Handler must not mutate or
+/// re-publish a view after this callback returns.
 - (void)setPreparationHandler:(void (^ _Nullable)(PXRuntimeReadSnapshot *view))handler;
+/// Bootstrap variant: reprepare inline if idle; an existing worker owns reload
+/// otherwise. Must not be called by a hot getter or by a preparation callback.
+- (void)setBootstrapPreparationHandler:(void (^ _Nullable)(PXRuntimeReadSnapshot *view))handler;
 /// Bootstrap/tests only. Never use this on a hot hook or from the loader queue.
 - (BOOL)waitForPendingRefresh:(NSTimeInterval)timeout;
 @end

@@ -10,6 +10,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def bootstrap_fragment() -> str:
+    source = (ROOT / "common/PXRuntimeSnapshot.m").read_text(encoding="utf-8")
+    start = source.index("static NSDictionary *PXRuntimeCapturedSource(void);")
+    end = source.index("static NSDictionary *PXRuntimeDictionaryAtPath(", start)
+    return source[start:end]
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -41,6 +48,10 @@ def source_contracts() -> None:
             "fallback is monotonic/on-demand and must not restart an already running load")
     require("dispatch_get_specific" in reader and "return NO;" in reader,
             "bootstrap wait must reject calls from the loader queue")
+    require("primeSynchronouslyIfIdle" in header and "PXRuntimeReaderIsDraining" in reader and
+            "setBootstrapPreparationHandler:handler" in runtime and
+            "waitForPendingRefresh:" not in runtime,
+            "constructor bootstrap must not depend on worker progress or mark a timed-out load primed")
     require("objc_precise_lifetime" in reader and "errno = savedErrno;" in capture,
             "old snapshot destruction must occur outside publication lock; capture preserves errno")
     require("PXRuntimeCapturedSource" in runtime and "PXRuntimeReaderNotification" in runtime and
@@ -56,10 +67,20 @@ def source_contracts() -> None:
     require(boot.index("if (!allowed)") < boot.index("PXPrepareRuntimeSnapshotReader();"),
             "unscoped constructors must not start the reader")
     for token in ("deep immutable copy", "burst coalesced", "concurrent captures never combine",
-                  "missing source does not retain", "epoch switch accepts lower revision"):
+                  "missing source does not retain", "epoch switch accepts lower revision",
+                  "bootstrap requires no worker", "later refresh stays asynchronous",
+                  "completed bootstrap is not success"):
         require(token in fixture, f"native reader contract missing: {token}")
     require("common/PXRuntimeSnapshotReader.m" in (ROOT / "Makefile").read_text(encoding="utf-8"),
             "explicit daemon target must link the new reader")
+    fragment = bootstrap_fragment()
+    require("PXPrimeRuntimeSnapshotReader" in fragment and "PXPrepareRuntimeSnapshotReader" in fragment and
+            "primeSynchronouslyIfIdle" in fragment and "waitForPendingRefresh:" not in fragment,
+            "cold integration fixture must extract the production bootstrap wrappers")
+    cold = (ROOT / "tests/PXRootHideBootstrapTests.m").read_text(encoding="utf-8")
+    require('__attribute__((constructor))' in cold and '../TLinkIOSTweak/PXScope.m' in cold and
+            "disabled target remains denied" in cold and "disabled master remains denied" in cold,
+            "RootHide constructor integration must cover actual scope and revocation")
     print("PASS: Runtime captured-reader source contracts (native runtime not implied)")
 
 
@@ -77,6 +98,18 @@ def native_tests() -> None:
         ], check=True, cwd=ROOT, timeout=60)
         for _ in range(3):
             subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=45)
+        (Path(folder) / "PXRuntimeBootstrap.inc").write_text(bootstrap_fragment(), encoding="utf-8")
+        cold_binary = Path(folder) / "roothide-cold-bootstrap"
+        subprocess.run([
+            "xcrun", "clang", "-fobjc-arc", "-fblocks", "-fexceptions", "-fobjc-exceptions",
+            "-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1", "-Wall", "-Wextra", "-Werror=implicit-function-declaration",
+            "-I", str(ROOT / "common"), "-I", folder,
+            str(ROOT / "common/PXRuntimeSnapshotReader.m"), str(ROOT / "common/PXRuntimeReadScope.m"),
+            str(ROOT / "tests/PXRootHideBootstrapTests.m"),
+            "-framework", "Foundation", "-framework", "CoreFoundation", "-o", str(cold_binary),
+        ], check=True, cwd=ROOT, timeout=60)
+        for _ in range(3):
+            subprocess.run([str(cold_binary)], check=True, cwd=ROOT, timeout=45)
 
 
 if __name__ == "__main__":

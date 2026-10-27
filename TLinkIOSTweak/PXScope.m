@@ -615,9 +615,7 @@ static void PXPrimeWebKitMetadataReader(void) {
     attempted = YES;
     os_unfair_lock_unlock(&lock);
     if (!first) return;
-    PXRuntimeSnapshotReader *reader = PXWebKitMetadataReader();
-    (void)[reader capture];
-    (void)[reader waitForPendingRefresh:1.0];
+    (void)[PXWebKitMetadataReader() primeSynchronouslyIfIdle];
 }
 #endif
 
