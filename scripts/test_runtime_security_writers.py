@@ -39,12 +39,27 @@ def source_contracts():
         assert ': defaultValue;' in reader
     assert 'PXPerformStandaloneRuntimeSourceWrite' in store and '[tx dictionaryAtPath:path error:writeError]' in store
     assert 'if (!existing) return NO;' in store and 'NSPropertyListImmutable' in store
-    assert store.index('if (!committed) return NO;') < store.index('PXMirrorSecurityUpdates(updates);')
+    assert store.index('if (!committed) return NO;') < store.index('PXMirrorSecurityUpdates(updates, mirrorSuites);')
     for forbidden in ('flock(', 'open(', 'writeToFile:', 'NSDataWritingAtomic'):
         assert forbidden not in store, forbidden
     assert 'value == UINT32_MAX ? 1 : value + 1' in store
     assert 'if (committed && committedValue) *committedValue = next;' in store
     assert 'respondsToSelector:@selector(unsignedIntValue)' in store
+    metric = identifier.method(store, 'BOOL PXRecordClearAttempt(BOOL firstAttemptSuccess, NSUInteger *totalAttempts, NSUInteger *firstAttemptSuccesses, NSError **error)')
+    assert 'existing[@"clearAttemptCount"]' in metric and 'existing[@"clearFirstAttemptSuccessCount"]' in metric
+    assert 'successes > attempts' in metric and 'attempts == (NSUInteger)NSIntegerMax' in metric
+    assert '@[@"com.weaponx.securitySettings"]' in metric
+    for signature in ('BOOL PXWriteSecuritySettings(NSDictionary<NSString *, id> *values, NSError **error)',
+                      'BOOL PXAdvanceSecurityNonce(NSString *key, uint32_t *committedValue, NSError **error)'):
+        assert '}, PXSecuritySuiteNames(), error);' in identifier.method(store, signature)
+    assert 'if (committed)' in metric and '*totalAttempts = nextAttempts' in metric and '*firstAttemptSuccesses = nextSuccesses' in metric
+    cleaner = read('AppDataCleaner.m')
+    assert cleaner.count('PXRecordClearAttempt(') == 1
+    assert 'PXRecordClearAttempt(success && pxTimeoutFallbackCount == 0,' in cleaner
+    assert 'counter_persistence_failed error=%@' in cleaner and 'counter_persisted=0' in cleaner and 'counter_persisted=1' in cleaner
+    metric_log = cleaner[cleaner.index('BOOL pxCountersPersisted = PXRecordClearAttempt('):cleaner.index('if ([operationContext isCancellationRequested])', cleaner.index('BOOL pxCountersPersisted = PXRecordClearAttempt('))]
+    assert metric_log.index('if (pxCountersPersisted)') < metric_log.index('first_attempt_success_pct=%.1f')
+    assert 'pxMetricStore' not in cleaner
     core = read('common/PXRuntimeSourceStore.m')
     assert 'allowNested:YES' in core and 'allowNested:NO' in core
     assert 'if (!allowNested)' in core and '_activeTransaction.failure = PXSourceError(@"Standalone source write' in core
@@ -168,12 +183,25 @@ def source_contracts():
                  'valid security number and string conversions remain unchanged',
                  'rootful live scalar reader rejects malformed on-disk field types'):
         assert case in fixture, case
+    for case in ('clear metric pair commits once before mirrors without runtime notifications',
+                 'clear metrics preserve canonical-only legacy mirror scope',
+                 'first-attempt success increments both counters together',
+                 'legacy decimal metric strings are accepted and canonicalized',
+                 'metric source failure preserves bytes outputs mirrors and notifications',
+                 'malformed metric counters fail without rewriting source or outputs',
+                 'embedded NUL metric text cannot truncate into a valid count',
+                 'inconsistent metric pair is preserved instead of silently repaired',
+                 'exhausted metrics reject increment without integer wrap',
+                 'metric recording never replaces corrupt security root with empty defaults',
+                 'concurrent cooperating metric writers preserve all increments and paired totals'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3W-partial'
+    assert manifest['rollout'] == '4C.2H3X-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
     assert manifest['writers']['security-region-timezone']['status'] == 'enrolled'
+    assert manifest['writers']['clear-metrics']['status'] == 'enrolled'
     assert 'ip-monitor' in manifest['sources'][4]['writers']
     assert manifest['writers']['preferences-daemon']['status'] == 'external'
     assert manifest['sources'][4]['field'] == 'securitySettings' and manifest['sources'][4]['status'] == 'partial'

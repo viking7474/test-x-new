@@ -505,6 +505,75 @@ static void TestRegionAndTimeZoneWriters(void) {
     gCheckMirror = NO; gRegionDefaults = nil;
 }
 
+static void TestClearMetricWriters(void) {
+    NSError *error = nil; NSUInteger attempts = 91, successes = 92;
+    CHECK(Seed(@{ @"keep": @"preserved" }), "clear metric baseline seeded");
+    NSUInteger notices = gSettingsNotices, mirrors = gMirrors;
+    __block NSUInteger commits = 0;
+    gCheckMirror = YES;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    CHECK(PXRecordClearAttempt(NO, &attempts, &successes, &error) && !error && attempts == 1 && successes == 0 && commits == 1 &&
+        gMirrors == mirrors + 2 && gSettingsNotices == notices && [Load()[@"keep"] isEqual:@"preserved"],
+        "clear metric pair commits once before mirrors without runtime notifications");
+    CHECK(gSuites[@"com.hydra.tlinkios.SecuritySettings"][@"clearAttemptCount"] == nil &&
+        gSuites[@"com.hydra.tlinkios"][@"clearAttemptCount"] == nil,
+        "clear metrics preserve canonical-only legacy mirror scope");
+    CHECK(PXRecordClearAttempt(YES, &attempts, &successes, &error) && attempts == 2 && successes == 1,
+        "first-attempt success increments both counters together");
+    gStore.testCheckpoint = nil; gCheckMirror = NO;
+    CHECK(Seed(@{ @"clearAttemptCount": @"  +7 ", @"clearFirstAttemptSuccessCount": @"3" }) &&
+        PXRecordClearAttempt(YES, &attempts, &successes, &error) && attempts == 8 && successes == 4,
+        "legacy decimal metric strings are accepted and canonicalized");
+    CHECK(Seed(@{ @"clearAttemptCount": @YES, @"clearFirstAttemptSuccessCount": @NO }) &&
+        PXRecordClearAttempt(NO, &attempts, &successes, &error) && attempts == 2 && successes == 0,
+        "legacy numeric boolean metric conversion is preserved");
+    CHECK(Seed(@{ @"clearAttemptCount": @4, @"clearFirstAttemptSuccessCount": @2, @"keep": @YES }), "metric fault baseline seeded");
+    NSDictionary *before = Capture(); mirrors = gMirrors; attempts = 91; successes = 92;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"metric source fault"]; };
+    CHECK(!PXRecordClearAttempt(YES, &attempts, &successes, &error) && error && attempts == 91 && successes == 92 &&
+        [before isEqual:Capture()] && gMirrors == mirrors && gSettingsNotices == notices,
+        "metric source failure preserves bytes outputs mirrors and notifications"); gStore.testCheckpoint = nil;
+    NSArray *badCounters = @[@(-1), @1.5, @"-1", @"1.5", @"1tail", @"", @[], @{}, @"18446744073709551615"];
+    for (id value in badCounters) {
+        CHECK(Seed(@{ @"clearAttemptCount": value }), "invalid metric counter baseline seeded");
+        before = Capture(); mirrors = gMirrors; attempts = 91; successes = 92;
+        CHECK(!PXRecordClearAttempt(NO, &attempts, &successes, &error) && error && attempts == 91 && successes == 92 &&
+            [before isEqual:Capture()] && mirrors == gMirrors, "malformed metric counters fail without rewriting source or outputs");
+    }
+    unichar embeddedNull[] = { '1', 0, '2' };
+    NSString *nullText = [[NSString alloc] initWithCharacters:embeddedNull length:3];
+    CHECK(!PXClearMetricCount(nullText, &attempts), "embedded NUL metric text cannot truncate into a valid count");
+    CHECK(Seed(@{ @"clearAttemptCount": @2, @"clearFirstAttemptSuccessCount": @3 }), "inconsistent metric baseline seeded"); before = Capture();
+    CHECK(!PXRecordClearAttempt(NO, NULL, NULL, &error) && error && [before isEqual:Capture()], "inconsistent metric pair is preserved instead of silently repaired");
+    CHECK(Seed(@{ @"clearAttemptCount": @(NSIntegerMax - 1), @"clearFirstAttemptSuccessCount": @(NSIntegerMax - 1) }) &&
+        PXRecordClearAttempt(YES, &attempts, &successes, &error) && attempts == (NSUInteger)NSIntegerMax && successes == attempts,
+        "metric boundary remains representable by legacy signed integer readers");
+    before = Capture(); attempts = 91; successes = 92;
+    CHECK(!PXRecordClearAttempt(NO, &attempts, &successes, &error) && error && attempts == 91 && successes == 92 && [before isEqual:Capture()],
+        "exhausted metrics reject increment without integer wrap");
+    CHECK([[@"bad security source" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:gPath atomically:YES], "corrupt metric source installed");
+    before = Capture(); mirrors = gMirrors;
+    CHECK(!PXRecordClearAttempt(NO, &attempts, &successes, &error) && error && [before isEqual:Capture()] && mirrors == gMirrors,
+        "metric recording never replaces corrupt security root with empty defaults");
+    CHECK([NSFileManager.defaultManager removeItemAtPath:gPath error:NULL] && Seed(@{ @"keep": @YES }), "concurrent metric baseline restored");
+    dispatch_group_t group = dispatch_group_create(); NSMutableSet *returnedAttempts = [NSMutableSet new];
+    static _Atomic NSUInteger metricFailures; atomic_store(&metricFailures, 0);
+    for (NSUInteger worker = 0; worker < 4; worker++) dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            for (NSUInteger iteration = 0; iteration < 6; iteration++) {
+                NSUInteger count = 0, first = 0; NSError *failure = nil;
+                if (!PXRecordClearAttempt(worker % 2 == 0, &count, &first, &failure) || failure || first > count)
+                    atomic_fetch_add(&metricFailures, 1);
+                else @synchronized(returnedAttempts) { [returnedAttempts addObject:@(count)]; }
+            }
+        }
+    });
+    CHECK(dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) == 0 && !atomic_load(&metricFailures) &&
+        returnedAttempts.count == 24 && [Load()[@"clearAttemptCount"] unsignedIntegerValue] == 24 &&
+        [Load()[@"clearFirstAttemptSuccessCount"] unsignedIntegerValue] == 12 && [Load()[@"keep"] boolValue],
+        "concurrent cooperating metric writers preserve all increments and paired totals");
+}
+
 static void TestSecurityScalarReaderTypes(void) {
     NSArray *invalid = @[@[], @{}, NSNull.null, NSDate.date, [NSData data], NSObject.new];
     for (id value in invalid) {
@@ -613,7 +682,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

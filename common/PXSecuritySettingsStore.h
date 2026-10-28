@@ -13,6 +13,13 @@ FOUNDATION_EXPORT NSInteger PXReadSecurityInteger(NSString *key, NSInteger defau
 FOUNDATION_EXPORT BOOL PXWriteSecuritySettings(NSDictionary<NSString *, id> *values, NSError **error);
 /// Advance a uint32 nonce atomically, wrapping UINT32_MAX to 1. Output changes only on success.
 FOUNDATION_EXPORT BOOL PXAdvanceSecurityNonce(NSString *key, uint32_t * _Nullable committedValue, NSError **error);
+/// Increment the legacy clear counters as one source mutation. Nonnegative
+/// integer/string counts must fit NSInteger and successes <= attempts. Outputs
+/// change only after commit; telemetry failure must not fail the clear operation.
+FOUNDATION_EXPORT BOOL PXRecordClearAttempt(BOOL firstAttemptSuccess,
+                                           NSUInteger * _Nullable totalAttempts,
+                                           NSUInteger * _Nullable firstAttemptSuccesses,
+                                           NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecuritySetting(NSString *key, id value, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecurityInteger(NSString *key, NSInteger value, NSError **error);

@@ -3,6 +3,9 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXRuntimeSourceStore.h"
 #include <stdint.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 
 static NSArray<NSString *> *PXSecuritySuiteNames(void) {
     static NSArray<NSString *> *names;
@@ -47,10 +50,10 @@ static BOOL PXSecurityWriteError(NSError **error, NSString *message) {
     return NO;
 }
 
-static void PXMirrorSecurityUpdates(NSDictionary *updates) {
+static void PXMirrorSecurityUpdates(NSDictionary *updates, NSArray<NSString *> *suiteNames) {
     // Legacy domains still share physical files with defaults persistence. These
     // are post-commit compatibility effects, not a complete authority contract.
-    for (NSString *suiteName in PXSecuritySuiteNames()) {
+    for (NSString *suiteName in suiteNames) {
         @try {
             NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suiteName];
             for (NSString *key in updates) [defaults setObject:updates[key] forKey:key];
@@ -61,19 +64,24 @@ static void PXMirrorSecurityUpdates(NSDictionary *updates) {
     }
 }
 
-static BOOL PXCommitSecurityMutation(NSDictionary *(^makeUpdates)(NSDictionary *existing), NSError **error) {
+static BOOL PXCommitSecurityMutation(NSDictionary *(^makeUpdates)(NSDictionary *existing, NSError **mutationError),
+                                     NSArray<NSString *> *mirrorSuites, NSError **error) {
     NSString *path = PXSecuritySettingsPath();
     __block NSDictionary *updates = nil;
     BOOL committed = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
         NSDictionary *existing = [tx dictionaryAtPath:path error:writeError];
         if (!existing) return NO; // Never replace a corrupt source with an empty dictionary.
-        updates = makeUpdates(existing);
+        updates = makeUpdates(existing, writeError);
+        if (![updates isKindOfClass:NSDictionary.class]) {
+            if (writeError && !*writeError) PXSecurityWriteError(writeError, @"Invalid security mutation packet");
+            return NO;
+        }
         NSMutableDictionary *candidate = [existing mutableCopy];
         [candidate addEntriesFromDictionary:updates];
         return [tx setDictionary:candidate atPath:path error:writeError];
     }, error);
     if (!committed) return NO;
-    PXMirrorSecurityUpdates(updates);
+    PXMirrorSecurityUpdates(updates, mirrorSuites);
     return YES;
 }
 
@@ -95,7 +103,9 @@ BOOL PXWriteSecuritySettings(NSDictionary<NSString *, id> *values, NSError **err
         if (error) *error = serializationError;
         return NO;
     }
-    return PXCommitSecurityMutation(^NSDictionary *(NSDictionary *existing) { (void)existing; return updates; }, error);
+    return PXCommitSecurityMutation(^NSDictionary *(NSDictionary *existing, NSError **mutationError) {
+        (void)existing; (void)mutationError; return updates;
+    }, PXSecuritySuiteNames(), error);
 }
 
 BOOL PXAdvanceSecurityNonce(NSString *key, uint32_t *committedValue, NSError **error) {
@@ -103,14 +113,62 @@ BOOL PXAdvanceSecurityNonce(NSString *key, uint32_t *committedValue, NSError **e
     if (![key isKindOfClass:NSString.class] || !key.length) return PXSecurityWriteError(error, @"Invalid security nonce key");
     key = [key copy];
     __block uint32_t next = 0;
-    BOOL committed = PXCommitSecurityMutation(^NSDictionary *(NSDictionary *existing) {
+    BOOL committed = PXCommitSecurityMutation(^NSDictionary *(NSDictionary *existing, NSError **mutationError) {
+        (void)mutationError;
         id previous = existing[key];
         uint32_t value = [previous respondsToSelector:@selector(unsignedIntValue)] ? [previous unsignedIntValue] : 0;
         next = value == UINT32_MAX ? 1 : value + 1;
         if (!next) next = 1;
         return @{key: @(next)};
-    }, error);
+    }, PXSecuritySuiteNames(), error);
     if (committed && committedValue) *committedValue = next;
+    return committed;
+}
+
+static BOOL PXClearMetricCount(id raw, NSUInteger *count) {
+    if (!raw) { *count = 0; return YES; }
+    NSString *text = nil;
+    if ([raw isKindOfClass:NSNumber.class]) {
+        const char *type = [raw objCType];
+        if (!type || !type[0] || !strchr("BcCsSiIlLqQ", type[0])) return NO;
+        text = [raw stringValue];
+    } else if ([raw isKindOfClass:NSString.class]) {
+        text = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    } else return NO;
+    const char *start = text.UTF8String;
+    const char *bytes = start;
+    if (bytes && bytes[0] == '+') bytes++;
+    if (!bytes || bytes[0] < '0' || bytes[0] > '9') return NO;
+    int savedErrno = errno; errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(bytes, &end, 10);
+    BOOL valid = errno != ERANGE && end && (NSUInteger)(end - start) == [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] &&
+        value <= (unsigned long long)NSIntegerMax;
+    errno = savedErrno;
+    if (valid) *count = (NSUInteger)value;
+    return valid;
+}
+
+BOOL PXRecordClearAttempt(BOOL firstAttemptSuccess, NSUInteger *totalAttempts, NSUInteger *firstAttemptSuccesses, NSError **error) {
+    if (error) *error = nil;
+    __block NSUInteger nextAttempts = 0, nextSuccesses = 0;
+    // These legacy telemetry keys belonged only to the canonical suite. Do not
+    // broaden their mirror domains or add extra defaults work on every clear.
+    BOOL committed = PXCommitSecurityMutation(^NSDictionary *(NSDictionary *existing, NSError **mutationError) {
+        NSUInteger attempts = 0, successes = 0;
+        if (!PXClearMetricCount(existing[@"clearAttemptCount"], &attempts) ||
+            !PXClearMetricCount(existing[@"clearFirstAttemptSuccessCount"], &successes) ||
+            successes > attempts || attempts == (NSUInteger)NSIntegerMax) {
+            PXSecurityWriteError(mutationError, @"Invalid or exhausted clear metric counters"); return nil;
+        }
+        nextAttempts = attempts + 1;
+        nextSuccesses = successes + (firstAttemptSuccess ? 1 : 0);
+        return @{ @"clearAttemptCount": @(nextAttempts), @"clearFirstAttemptSuccessCount": @(nextSuccesses) };
+    }, @[@"com.weaponx.securitySettings"], error);
+    if (committed) {
+        if (totalAttempts) *totalAttempts = nextAttempts;
+        if (firstAttemptSuccesses) *firstAttemptSuccesses = nextSuccesses;
+    }
     return committed;
 }
 

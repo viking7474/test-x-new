@@ -56,7 +56,7 @@ require('PXPerformStandaloneRuntimeSourceWrite' in store_m and '[tx setDictionar
         "security updates use the shared source transaction")
 require('NSDataWritingAtomic' in read('common/PXRuntimeSourceStore.m'), "source engine retains atomic file writes")
 primary_write = store_m.index('BOOL committed = PXPerformStandaloneRuntimeSourceWrite')
-mirror_after_commit = store_m.index('PXMirrorSecurityUpdates(updates);', primary_write)
+mirror_after_commit = store_m.index('PXMirrorSecurityUpdates(updates, mirrorSuites);', primary_write)
 require(primary_write < mirror_after_commit and 'if (!committed) return NO;' in store_m[primary_write:mirror_after_commit],
         "NSUserDefaults mirrors happen only after source commit and unlock")
 require('flock(' not in store_m, "security store no longer creates a separate unbounded lock")

@@ -3500,20 +3500,21 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                 uint_fast64_t pxShellProcesses = atomic_load(&gPXClearShellProcessCount) - pxMetricShellAtStart;
                 uint_fast64_t pxPathsScanned = atomic_load(&gPXClearPathsScannedCount) - pxMetricPathsAtStart;
                 double pxSqliteMs = (double)(atomic_load(&gPXClearSqliteNanos) - pxMetricSqliteNanosAtStart) / 1e6;
-                NSUserDefaults *pxMetricStore = [[NSUserDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"];
                 NSUInteger pxTotalAttempts = 0;
                 NSUInteger pxFirstAttemptSuccesses = 0;
-                if (pxMetricStore) {
-                    pxTotalAttempts = (NSUInteger)[pxMetricStore integerForKey:@"clearAttemptCount"] + 1;
-                    pxFirstAttemptSuccesses = (NSUInteger)[pxMetricStore integerForKey:@"clearFirstAttemptSuccessCount"];
-                    if (success && pxTimeoutFallbackCount == 0) {
-                        pxFirstAttemptSuccesses += 1;
-                    }
-                    [pxMetricStore setInteger:(NSInteger)pxTotalAttempts forKey:@"clearAttemptCount"];
-                    [pxMetricStore setInteger:(NSInteger)pxFirstAttemptSuccesses forKey:@"clearFirstAttemptSuccessCount"];
+                NSError *pxMetricError = nil;
+                BOOL pxCountersPersisted = PXRecordClearAttempt(success && pxTimeoutFallbackCount == 0,
+                    &pxTotalAttempts, &pxFirstAttemptSuccesses, &pxMetricError);
+                if (!pxCountersPersisted) {
+                    // Telemetry is best-effort: preserve the actual clear result.
+                    [weakSelf logMessage:@"[AppDataCleaner][metric] counter_persistence_failed error=%@", pxMetricError];
                 }
-                double pxFirstAttemptSuccessPct = pxTotalAttempts > 0 ? ((double)pxFirstAttemptSuccesses / (double)pxTotalAttempts) * 100.0 : 0.0;
-                [weakSelf logMessage:@"[AppDataCleaner][metric] mode=%@ resolve_container_ms=%.0f sqlite_ms=%.0f shell_processes=%llu paths_scanned=%llu timeout_fallback_count=%llu first_attempt_success=%d first_attempt_success_pct=%.1f",
+                NSString *pxCounterSummary = @" counter_persisted=0";
+                if (pxCountersPersisted) {
+                    double pxFirstAttemptSuccessPct = pxTotalAttempts > 0 ? ((double)pxFirstAttemptSuccesses / (double)pxTotalAttempts) * 100.0 : 0.0;
+                    pxCounterSummary = [NSString stringWithFormat:@" first_attempt_success_pct=%.1f counter_persisted=1", pxFirstAttemptSuccessPct];
+                }
+                [weakSelf logMessage:@"[AppDataCleaner][metric] mode=%@ resolve_container_ms=%.0f sqlite_ms=%.0f shell_processes=%llu paths_scanned=%llu timeout_fallback_count=%llu first_attempt_success=%d%@",
                     PXClearModeName(mode),
                     pxResolveContainerMs,
                     pxSqliteMs,
@@ -3521,7 +3522,7 @@ static NSString *PXKeychainWipeGroupsKey(NSString *bundleID) {
                     (unsigned long long)pxPathsScanned,
                     (unsigned long long)pxTimeoutFallbackCount,
                     (success && pxTimeoutFallbackCount == 0),
-                    pxFirstAttemptSuccessPct];
+                    pxCounterSummary];
             }
             if ([operationContext isCancellationRequested]) {
                 [weakSelf logMessage:@"[AppDataCleaner][metric] cancellation reason=%@ operation=%@ error_domain=%@ error_code=%ld",
