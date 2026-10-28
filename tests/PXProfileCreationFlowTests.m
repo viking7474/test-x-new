@@ -8,6 +8,7 @@
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
 #import "PXProfileMetadataWriter.h"
+#import "PXDefaultProfileSeed.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -793,6 +794,114 @@ static void TestProfileMetadataUpdates(void) {
     CHECK([manager.fileManager moveItemAtPath:heldIdentity toPath:identity error:NULL], "metadata identity fixture restored");
 }
 
+static NSDictionary *PXCaptureDefaultSeedFixture(void) {
+    return [gStore capture:^NSDictionary *(NSError **error) {
+        NSMutableDictionary *files = [NSMutableDictionary dictionary];
+        NSArray *paths = @[Path(PXProfileRootPath(@"0"), @"identifiers.plist"), Path(Identity(@"0"), @"device_ids.plist")];
+        for (NSString *path in paths) {
+            BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:path];
+            NSData *bytes = exists ? [NSData dataWithContentsOfFile:path options:0 error:error] : NSData.data;
+            if (!bytes) return nil;
+            files[path] = @{ @"exists": @(exists), @"bytes": bytes };
+        }
+        return files;
+    } error:NULL];
+}
+@interface PXDefaultSeedControlFixture : PXProfileCreationFixture
+@property (nonatomic) NSUInteger seedBootstrapCalls;
+@property (nonatomic) NSUInteger seedLoadCalls;
+@end
+@implementation PXDefaultSeedControlFixture
+- (BOOL)bootstrapProfileSelectionWithError:(NSError **)error { self.seedBootstrapCalls++; return [super bootstrapProfileSelectionWithError:error]; }
+- (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion { self.seedLoadCalls++; [super loadProfilesWithCompletion:completion]; }
+@end
+static void TestDefaultProfileSeeding(void) {
+    PXProfileCreationFixture *manager = NewManager(); NSFileManager *fm = manager.fileManager;
+    NSString *profile = PXProfileRootPath(@"0"), *identity = Identity(@"0");
+    NSString *display = Path(profile, @"identifiers.plist"), *ids = Path(identity, @"device_ids.plist");
+    NSDictionary *selection = ActiveFiles(); NSData *archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    NSData *idsBefore = [NSData dataWithContentsOfFile:ids];
+    NSUInteger notices = gNotices, mirrors = gMirrors, settingsNotices = gSettingsNotices, terminations = gTerminations;
+    __block NSUInteger commits = 0; NSError *error = nil;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    CHECK([manager createProfileZeroWithError:&error] && !error && commits == 1 && [idsBefore isEqual:[NSData dataWithContentsOfFile:ids]] &&
+        [Record(display)[@"DisplayName"] isEqual:@"Default"] && [Record(display)[@"Description"] isEqual:@"Default Profile"] &&
+        [Record(display)[@"Identifier"] isEqual:@"0"], "default seed commits display while preserving existing identity bytes");
+    gStore.testCheckpoint = nil;
+    NSUInteger baselineDescriptors = PXMetadataFixtureDescriptorCount();
+    NSData *savedDisplay = [NSData dataWithContentsOfFile:display], *savedIDs = [NSData dataWithContentsOfFile:ids];
+    CHECK([fm removeItemAtPath:display error:NULL] && [fm removeItemAtPath:ids error:NULL], "default seed absence fixture prepared");
+    NSDictionary *before = PXCaptureDefaultSeedFixture();
+    CHECK(before != nil && ![before[display][@"exists"] boolValue] && ![before[ids][@"exists"] boolValue],
+        "default seed absence oracle is plist-safe and nonnil");
+    for (NSUInteger failAfter = 1; failAfter <= 2; failAfter++) {
+        __block NSUInteger writes = 0;
+        gStore.testCheckpoint = ^(NSString *phase) {
+            if ([phase isEqual:@"source-written"] && ++writes == failAfter) [NSException raise:@"fixture.seed" format:@"default seed partial fault"];
+        };
+        BOOL success = [manager createProfileZeroWithError:&error]; gStore.testCheckpoint = nil;
+        CHECK(!success && error && writes == failAfter && [before isEqual:PXCaptureDefaultSeedFixture()],
+            "default seed failure after each file restores paired original absence");
+    }
+    CHECK([manager createProfileZeroWithError:&error] && !error && [NSDictionary dictionaryWithContentsOfFile:ids] != nil && Record(ids).count == 0 &&
+        [Record(display)[@"Identifier"] isEqual:@"0"], "default seed creates empty identity only when missing");
+    CHECK([savedIDs writeToFile:ids atomically:YES] && [savedDisplay writeToFile:display atomically:YES], "default seed originals restored");
+
+    NSData *corrupt = [@"corrupt seed source" dataUsingEncoding:NSUTF8StringEncoding];
+    for (NSString *path in @[display, ids]) {
+        NSData *original = [NSData dataWithContentsOfFile:path]; CHECK([corrupt writeToFile:path atomically:YES], "corrupt default seed source installed");
+        before = PXCaptureDefaultSeedFixture();
+        CHECK(![manager createProfileZeroWithError:&error] && error && [before isEqual:PXCaptureDefaultSeedFixture()],
+            "default seed rejects corrupt display or identity without partial repair");
+        CHECK([original writeToFile:path atomically:YES], "corrupt default seed source restored");
+    }
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+    before = PXCaptureDefaultSeedFixture(); NSUInteger descriptors = PXMetadataFixtureDescriptorCount();
+    CHECK(lease && ![manager createProfileZeroWithError:&error] && error.code == 12 && [lease validateWithError:NULL] &&
+        [before isEqual:PXCaptureDefaultSeedFixture()] && descriptors == PXMetadataFixtureDescriptorCount(),
+        "busy default seed rejects before namespace or source effects and releases failed acquire descriptors");
+    CHECK(PXSeedDefaultProfile(lease, &error) && !error && [lease validateWithError:NULL] && descriptors == PXMetadataFixtureDescriptorCount(),
+        "default seed borrowed lifecycle remains owned and closes every helper descriptor");
+    [lease invalidate]; before = PXCaptureDefaultSeedFixture();
+    CHECK(!PXSeedDefaultProfile(lease, &error) && error && [before isEqual:PXCaptureDefaultSeedFixture()], "default seed rejects expired lifecycle capability");
+
+    CHECK(SaveRecord(PXProfileDeletionJournalPath(), @{ @"fixture": @YES }), "default seed pending deletion installed"); before = PXCaptureDefaultSeedFixture();
+    CHECK(![manager createProfileZeroWithError:&error] && error && [before isEqual:PXCaptureDefaultSeedFixture()],
+        "default seed pending deletion rejects before changing either source file");
+    PXDefaultSeedControlFixture *control = [PXDefaultSeedControlFixture new]; [control createProfileZero];
+    CHECK(control.seedBootstrapCalls == 0 && control.seedLoadCalls == 0, "explicit default create stops before bootstrap or reload when seed fails");
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:writeError];
+    } error:NULL], "default seed pending deletion cleared");
+
+    NSString *heldIdentity = [identity stringByAppendingString:@".seed-held"];
+    CHECK([fm moveItemAtPath:identity toPath:heldIdentity error:NULL] && [fm createSymbolicLinkAtPath:identity withDestinationPath:heldIdentity error:NULL],
+        "default seed identity symlink prepared");
+    before = PXCaptureDefaultSeedFixture();
+    CHECK(![manager createProfileZeroWithError:&error] && error && [before isEqual:PXCaptureDefaultSeedFixture()],
+        "default seed rejects identity symlink without changing its target");
+    CHECK([fm removeItemAtPath:identity error:NULL] && [fm moveItemAtPath:heldIdentity toPath:identity error:NULL], "default seed identity restored");
+    NSString *heldProfile = [profile stringByAppendingString:@".seed-held"];
+    CHECK([fm moveItemAtPath:profile toPath:heldProfile error:NULL] && [fm createSymbolicLinkAtPath:profile withDestinationPath:heldProfile error:NULL],
+        "default seed profile symlink prepared");
+    before = PXCaptureDefaultSeedFixture();
+    CHECK(![manager createProfileZeroWithError:&error] && error && [before isEqual:PXCaptureDefaultSeedFixture()],
+        "default seed rejects profile symlink without changing its target");
+    CHECK([fm removeItemAtPath:profile error:NULL] && [fm moveItemAtPath:heldProfile toPath:profile error:NULL], "default seed profile restored");
+
+    CHECK([fm moveItemAtPath:profile toPath:heldProfile error:NULL], "default seed missing root prepared");
+    CHECK([manager createProfileZeroWithError:&error] && !error && [fm fileExistsAtPath:identity] &&
+        [NSDictionary dictionaryWithContentsOfFile:ids] != nil && Record(ids).count == 0 &&
+        [Record(display)[@"Identifier"] isEqual:@"0"] && ![fm fileExistsAtPath:Path(profile, @"appdata")] &&
+        ![fm fileExistsAtPath:Path(profile, @"scoped-apps.plist")], "default seed creates only legacy directories and source files for missing zero");
+    CHECK([fm removeItemAtPath:profile error:NULL] && [fm moveItemAtPath:heldProfile toPath:profile error:NULL], "default seed original root restored");
+    CHECK([selection isEqual:ActiveFiles()] && [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] &&
+        notices == gNotices && mirrors == gMirrors && settingsNotices == gSettingsNotices && terminations == gTerminations,
+        "default seed never changes selection registry memory notifications or app termination policy");
+    CHECK(manager.mutableProfiles.count == 0 && manager.mutableCurrentProfile == nil && baselineDescriptors == PXMetadataFixtureDescriptorCount(),
+        "default seed leaves manager slots unchanged and closes descriptors on every tested return");
+}
+
 static void TestRegistryAndDeletion(void) {
     PXProfileCreationFixture *manager = NewManager(); manager.fileManager = [PXProfileFileManagerFixture new];
     CHECK(Reload(manager), "deletion manager reloads current registry basis");
@@ -1053,7 +1162,7 @@ int main(int argc, const char *argv[]) {
         }];
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager);
-        TestProfileMetadataUpdates(); TestRegistryAndDeletion();
+        TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");

@@ -39,7 +39,7 @@ METHODS = [CREATE, SWITCH,
     '- (Profile *)loadCurrentProfileInfoFromCentralStore',
     '- (Profile *)currentProfile',
     '- (void)updateCurrentProfileInfoWithProfile:(Profile *)profile',
-    '- (void)createProfileZeroImmediately',
+    '- (void)createProfileZeroImmediately', '- (void)createProfileZero', '- (BOOL)createProfileZeroWithError:(NSError **)error',
     '- (BOOL)refreshCurrentProfileFromCommittedSelectionWithError:(NSError **)error']
 METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void)endProfileOperation',
     '- (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion',
@@ -88,6 +88,42 @@ def source_contracts():
     for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m', 'tests/PXRuntimeArtifactWriterTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXRuntimeIdentifierWriterTests.m', 'tests/PXRuntimeSecurityWriterTests.m', 'tests/PXIPMonitorLifecycleTests.m', 'tests/PXPinnedTimeZoneLifecycleTests.m', 'tests/PXPinnedCountryLifecycleTests.m', 'tests/PXIPDisplayLifecycleTests.m', 'tests/PXTargetRegionLifecycleTests.m'):
         check_macro_arity(read(path), path)
     source = read('common/ProfileManager.m')
+    seed_owner = writers.method(source, '- (BOOL)createProfileZeroWithError:(NSError **)error')
+    immediate_seed = writers.method(source, '- (void)createProfileZeroImmediately')
+    explicit_seed = writers.method(source, '- (void)createProfileZero')
+    assert 'acquireInDirectory:self.profilesDirectory' in seed_owner and 'PXSeedDefaultProfile(lease, error)' in seed_owner
+    assert '@finally { [lease invalidate]; }' in seed_owner
+    assert seed_owner.index('if (!PXSeedDefaultProfile') < seed_owner.index('seed committed')
+    assert 'createProfileZeroWithError:&error' in immediate_seed and 'writeToFile:' not in immediate_seed
+    assert explicit_seed.index('if (![self createProfileZeroWithError:') < explicit_seed.index('bootstrapProfileSelectionWithError:')
+    seed = read('common/PXDefaultProfileSeed.m')
+    assert 'validateForDirectory:PXProfilesPath()' in seed and 'PXRequireNoPendingProfileDeletion' in seed
+    assert 'directoryProofForProfileID:@"0"' in seed and 'mkdirat(rootFD, "0", 0755)' in seed
+    assert 'openat(rootFD, "0"' in seed and 'openat(profileFD, "identity"' in seed and 'AT_SYMLINK_NOFOLLOW' in seed
+    assert 'PXPerformStandaloneRuntimeSourceWrite' in seed and '[scope performSourceWrite:' in seed
+    assert 'dictionaryAtPath:idsPath exists:&exists' in seed and '(exists || [staging setDictionary:@{}' in seed
+    assert 'PXDefaultSeedDirectoryMatches(profileFD' in seed and 'PXDefaultSeedDirectoryMatches(identityFD' in seed
+    assert 'if (committed)' in seed and '@0644' in seed and 'close(identityFD)' in seed and 'close(profileFD)' in seed and 'close(rootFD)' in seed
+    for forbidden in ('PXActiveProfileID', 'createDirectoryAtPath:', 'mutableProfiles', 'PostNotification', 'dispatch_'):
+        assert forbidden not in seed, forbidden
+    fixture = read('tests/PXProfileCreationFlowTests.m')
+    assert '#import "PXDefaultProfileSeed.h"' in source and '#import "PXDefaultProfileSeed.h"' in fixture
+    seed_capture = fixture[fixture.index('static NSDictionary *PXCaptureDefaultSeedFixture('):fixture.index('@interface PXDefaultSeedControlFixture')]
+    assert 'NSNull' not in seed_capture and '@"exists": @(exists)' in seed_capture and '@"bytes": bytes' in seed_capture
+    for case in ('default seed commits display while preserving existing identity bytes',
+                 'default seed absence oracle is plist-safe and nonnil',
+                 'default seed failure after each file restores paired original absence',
+                 'default seed creates empty identity only when missing',
+                 'default seed rejects corrupt display or identity without partial repair',
+                 'busy default seed rejects before namespace or source effects and releases failed acquire descriptors',
+                 'default seed borrowed lifecycle remains owned and closes every helper descriptor',
+                 'default seed pending deletion rejects before changing either source file',
+                 'explicit default create stops before bootstrap or reload when seed fails',
+                 'default seed rejects identity symlink without changing its target',
+                 'default seed rejects profile symlink without changing its target',
+                 'default seed creates only legacy directories and source files for missing zero',
+                 'default seed leaves manager slots unchanged and closes descriptors on every tested return'):
+        assert case in fixture, case
     update = writers.method(source, '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error')
     assert 'writeToFile:' not in update and 'createDirectoryIfNeeded:' not in update and 'saveProfilesWithCompletion:' not in update
     assert update.index('archivedDataWithRootObject:candidate') < update.index('PXWriteProfileDisplayMetadata(') < update.index('writeRegistryData:archive') < update.index('self.mutableProfiles = candidate')
@@ -294,7 +330,9 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4A-partial'
+    assert manifest['rollout'] == '4C.2H4B-partial'
+    assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
+    assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')
@@ -321,7 +359,7 @@ def native_tests():
         generate_native_fragments(folder)
         sources = ['common/PXProfileDeletionJournal.m', 'common/PXProfileLifecycleLease.m', 'common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeIdentifierWriter.m',
-                   'common/PXProfileArtifactMutation.m', 'common/PXProfileMetadataWriter.m',
+                   'common/PXProfileArtifactMutation.m', 'common/PXProfileMetadataWriter.m', 'common/PXDefaultProfileSeed.m',
                    'tests/PXProfileCreationFlowTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / scheme

@@ -8,6 +8,7 @@
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
 #import "PXProfileMetadataWriter.h"
+#import "PXDefaultProfileSeed.h"
 #import "NetworkManager.h"
 #import <spawn.h>
 #import <sys/wait.h>
@@ -78,6 +79,7 @@
 - (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error;
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error;
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error;
+- (BOOL)createProfileZeroWithError:(NSError **)error;
 - (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
 - (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 
@@ -1623,57 +1625,27 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 - (void)createProfileZero {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self createProfileZero]; }); return; }
     if (self.creationInProgress) return;
-    [self createProfileZeroImmediately];
     NSError *error = nil;
+    if (![self createProfileZeroWithError:&error]) { NSLog(@"[ProfileManager] Profile zero seed deferred: %@", error); return; }
     if ([self bootstrapProfileSelectionWithError:&error]) [self loadProfilesWithCompletion:nil];
     else NSLog(@"[ProfileManager] Legacy bootstrap deferred: %@", error);
 }
 
-// Immediate profile creation without waiting for loadProfiles
+// Retain the synchronous compatibility entry for init and legacy callers.
 - (void)createProfileZeroImmediately {
-    NSError *leaseError = nil;
-    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:&leaseError];
-    if (!lease || !PXRequireNoPendingProfileDeletion(&leaseError)) { NSLog(@"[ProfileManager] Profile zero seed deferred: %@", leaseError); return; }
-    // Create profile directory
-    NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:@"0"];
-    [self createDirectoryIfNeeded:profileDir];
-    
-    // Create identity directory for device IDs
-    NSString *identityDir = [profileDir stringByAppendingPathComponent:@"identity"];
-    [self createDirectoryIfNeeded:identityDir];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:identityDir error:nil];
-    
-    // Create profile object for internal use
-    Profile *defaultProfile = [[Profile alloc] initWithName:@"Default" iconName:@"default_profile"];
-    [defaultProfile setValue:@"0" forKey:@"profileId"];
-    
-    NSDate *now = [NSDate date];
-    defaultProfile.createdAt = now;
-    defaultProfile.lastUsed = now;
-    
-    // Create identifiers.plist (kept: used for profile display name in the UI)
-    NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
-    NSDictionary *identifiersDict = @{
-        @"DisplayName": @"Default",
-        @"Description": @"Default Profile",
-        @"Identifier": @"0"
-    };
-    [identifiersDict writeToFile:identifiersPath atomically:YES];
-    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644} ofItemAtPath:identifiersPath error:nil];
-    
-    // NOTE: appdata.plist and per-profile scoped-apps.plist are intentionally no
-    // longer created here (write-only / always-empty; scope lives in global_scope.plist).
-    
-    // Create device_ids.plist in identity directory for immediate identifier storage
-    NSString *deviceIdsPath = [identityDir stringByAppendingPathComponent:@"device_ids.plist"];
-    NSError *seedError = nil;
-    if (!PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        BOOL exists = NO;
-        NSDictionary *ids = [tx dictionaryAtPath:deviceIdsPath exists:&exists error:error];
-        return ids && (exists || [tx setDictionary:@{} atPath:deviceIdsPath error:error]);
-    }, &seedError)) NSLog(@"[ProfileManager] Profile 0 seed failed: %@", seedError);
-    
-    NSLog(@"[WeaponX] ✅ Immediately created profile '0' directory structure");
+    NSError *error = nil;
+    if (![self createProfileZeroWithError:&error]) NSLog(@"[ProfileManager] Profile zero seed deferred: %@", error);
+}
+
+- (BOOL)createProfileZeroWithError:(NSError **)error {
+    if (error) *error = nil;
+    __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+    if (!lease) return NO;
+    @try {
+        if (!PXSeedDefaultProfile(lease, error)) return NO;
+    } @finally { [lease invalidate]; }
+    NSLog(@"[WeaponX] Default profile display and identity seed committed");
+    return YES;
 }
 
 @end

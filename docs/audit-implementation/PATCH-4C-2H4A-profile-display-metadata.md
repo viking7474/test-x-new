@@ -119,3 +119,5 @@ Chỉ fixture và source guards thay đổi, production code giữ nguyên; cùn
 được dùng cho rootful và RootHide. Local profile/macro/source transaction/hardening
 gates và 33-method extraction pass. Native rerun sau fix vẫn chờ macOS CI; không
 báo 366/366 hoặc rootful/RootHide runtime pass từ Windows.
+
+Người dùng đã xác nhận build bản sửa fixture H4A pass trước khi chuyển sang H4B.

@@ -222,7 +222,7 @@ def source_contracts():
                  'queued indicator save does not retain UI owner', 'explicit indicator save survives UI owner release'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4A-partial'
+    assert manifest['rollout'] == '4C.2H4B-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
