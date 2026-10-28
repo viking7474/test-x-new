@@ -14,7 +14,8 @@ static PXRuntimeSourceStore *PXProcessSourceStore(NSError **error) {
             // system alias still rejects a per-profile/file symlink escape.
             NSSet<NSString *> *globalPaths = [NSSet setWithArray:@[
                 PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), PXProfileDeletionJournalPath(),
-                PXTLinkIOSSettingsPath(), PXGlobalScopePath(), PXSecuritySettingsPath() ]];
+                PXTLinkIOSSettingsPath(), PXGlobalScopePath(), PXSecuritySettingsPath(),
+                PXProfileIndicatorPositionPath() ]];
             NSMutableDictionary<NSString *, NSString *> *canonicalGlobals = [NSMutableDictionary dictionary];
             for (NSString *path in globalPaths) {
                 canonicalGlobals[path] = [path.stringByDeletingLastPathComponent.stringByResolvingSymlinksInPath

@@ -8,6 +8,8 @@
 #import "PXSecuritySettingsStore.h"
 #import <notify.h>
 #import <CoreFoundation/CoreFoundation.h>
+#include <math.h>
+#include <float.h>
 
 // Forward declaration for static callbacks
 static void toggleIndicatorCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
@@ -59,6 +61,17 @@ static BOOL PXWriteProfileIndicatorSetting(BOOL enabled) {
     return success;
 }
 
+// Keep legacy float conversion and zero sentinel policy in this writer patch.
+// Malformed/nonfinite values must never become a floating-window CGRect.
+static BOOL PXIndicatorDecodePosition(id rawX, id rawY, CGPoint *point) {
+    if ((rawX && ![rawX isKindOfClass:NSNumber.class] && ![rawX isKindOfClass:NSString.class]) ||
+        (rawY && ![rawY isKindOfClass:NSNumber.class] && ![rawY isKindOfClass:NSString.class])) return NO;
+    float x = [rawX floatValue], y = [rawY floatValue];
+    if (!isfinite(x) || !isfinite(y)) return NO;
+    *point = CGPointMake(x, y);
+    return YES;
+}
+
 /// Real lock state via notify (lockstate Darwin fires for both lock and unlock).
 static BOOL PXSpringBoardIsLocked(void) {
     int token = 0;
@@ -79,6 +92,11 @@ static BOOL PXSpringBoardIsLocked(void) {
 @property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
 @property (nonatomic, assign) CGPoint initialCenter;
 @property (nonatomic, strong) NSUserDefaults *profileSettings;
+@property (nonatomic, strong) dispatch_queue_t positionPersistenceQueue;
+@property (nonatomic, strong) NSObject *positionWriteToken;
+@property (nonatomic, assign) CGPoint pendingPosition;
+- (CGPoint)restoredPositionWithDefault:(CGPoint)fallback;
+
 
 @end
 
@@ -267,36 +285,10 @@ static BOOL PXSpringBoardIsLocked(void) {
     CGFloat initialX = screenBounds.size.width - 60;
     CGFloat initialY = 100;
     
-    // Load saved position from both NSUserDefaults and file storage
-    CGFloat savedX = 0;
-    CGFloat savedY = 0;
-    
-    // First try dedicated file storage
-    NSString *positionPath = [self getPositionFilePath];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:positionPath]) {
-        NSDictionary *positionDict = [NSDictionary dictionaryWithContentsOfFile:positionPath];
-        if (positionDict) {
-            savedX = [(NSNumber *)[positionDict objectForKey:@"X"] floatValue];
-            savedY = [(NSNumber *)[positionDict objectForKey:@"Y"] floatValue];
-            PXLog(@"ProfileIndicator: Loaded position from file: (%.1f, %.1f)", savedX, savedY);
-        }
-    }
-    
-    // If file storage failed, try NSUserDefaults as fallback
-    if (savedX == 0 && savedY == 0) {
-        savedX = [self.profileSettings floatForKey:@"ProfileIndicatorX"];
-        savedY = [self.profileSettings floatForKey:@"ProfileIndicatorY"];
-        if (savedX > 0 && savedY > 0) {
-            PXLog(@"ProfileIndicator: Loaded position from NSUserDefaults: (%.1f, %.1f)", savedX, savedY);
-        }
-    }
-    
-    // Use saved position if available, otherwise use initial values
-    if (savedX > 0 && savedY > 0) {
-        initialX = savedX;
-        initialY = savedY;
-    }
-    
+    CGPoint restored = [self restoredPositionWithDefault:CGPointMake(initialX, initialY)];
+    initialX = restored.x;
+    initialY = restored.y;
+
     // Use a fixed window size that's slightly larger than the circle to accommodate shadow
     CGRect windowFrame = CGRectMake(initialX, initialY, 60, 60);
     
@@ -378,18 +370,9 @@ static BOOL PXSpringBoardIsLocked(void) {
             frame.origin.y = screenBounds.size.height - frame.size.height;
         }
         
-        // Save position for persistence - save window position directly
-        // 1. Save to NSUserDefaults
-        [self.profileSettings setFloat:frame.origin.x forKey:@"ProfileIndicatorX"];
-        [self.profileSettings setFloat:frame.origin.y forKey:@"ProfileIndicatorY"];
-        [self.profileSettings synchronize];
-        
-        // 2. Save to dedicated file for extra persistence
+        // Queue the pair once at drag end; never wait for the source gate on UI.
         [self savePositionToFile:frame.origin.x y:frame.origin.y];
-        
-        PXLog(@"ProfileIndicator: Saved position to persistent storage: (%.1f, %.1f)", 
-              frame.origin.x, frame.origin.y);
-        
+
         // Animate to valid position if needed
         if (!CGRectEqualToRect(self.floatingWindow.frame, frame)) {
             [UIView animateWithDuration:0.3 animations:^{
@@ -399,39 +382,62 @@ static BOOL PXSpringBoardIsLocked(void) {
     }
 }
 
-// Return path to dedicated position file
-- (NSString *)getPositionFilePath {
-    NSString *libraryDir = @"/var/mobile/Library/WeaponX";
-    // Create directory if it doesn't exist
-    if (![[NSFileManager defaultManager] fileExistsAtPath:libraryDir]) {
-        [[NSFileManager defaultManager] createDirectoryAtPath:libraryDir
-                                 withIntermediateDirectories:YES
-                                                  attributes:nil
-                                                       error:nil];
+- (CGPoint)restoredPositionWithDefault:(CGPoint)fallback {
+    if (self.positionWriteToken) {
+        // A synchronous legacy save would already be visible here. Preserve that
+        // visible result without blocking hide/show on a pending worker write.
+        CGPoint pending = CGPointMake((float)self.pendingPosition.x, (float)self.pendingPosition.y);
+        return pending.x > 0 && pending.y > 0 ? pending : fallback;
     }
-    return [libraryDir stringByAppendingPathComponent:@"indicator_position.plist"];
+    CGPoint saved = CGPointZero;
+    NSDictionary *position = [NSDictionary dictionaryWithContentsOfFile:[self getPositionFilePath]];
+    if ([position isKindOfClass:NSDictionary.class]) (void)PXIndicatorDecodePosition(position[@"X"], position[@"Y"], &saved);
+    if (saved.x == 0 && saved.y == 0) {
+        (void)PXIndicatorDecodePosition([self.profileSettings objectForKey:@"ProfileIndicatorX"],
+            [self.profileSettings objectForKey:@"ProfileIndicatorY"], &saved);
+    }
+    return saved.x > 0 && saved.y > 0 ? saved : fallback;
 }
 
-// Save position to dedicated file
-- (void)savePositionToFile:(CGFloat)x y:(CGFloat)y {
-    NSDictionary *positionDict = @{
-        @"X": @(x),
-        @"Y": @(y),
-        @"Timestamp": [NSDate date]
-    };
-    
-    NSString *positionPath = [self getPositionFilePath];
-    BOOL success = [positionDict writeToFile:positionPath atomically:YES];
-    
-    if (success) {
-        // Set proper file permissions
-        [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0644}
-                                        ofItemAtPath:positionPath
-                                               error:nil];
-        PXLog(@"ProfileIndicator: Successfully saved position to file: %@", positionPath);
-    } else {
-        PXLog(@"ProfileIndicator: Failed to save position to file");
+// Preserve the historical path accessor and read-time directory creation.
+- (NSString *)getPositionFilePath {
+    NSString *positionPath = PXProfileIndicatorPositionPath();
+    NSString *libraryDir = positionPath.stringByDeletingLastPathComponent;
+    if (![NSFileManager.defaultManager fileExistsAtPath:libraryDir]) {
+        [NSFileManager.defaultManager createDirectoryAtPath:libraryDir withIntermediateDirectories:YES attributes:nil error:NULL];
     }
+    return positionPath;
+}
+
+// Keep the legacy void selector; it now commits prefs and preferred file together.
+- (void)savePositionToFile:(CGFloat)x y:(CGFloat)y {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf savePositionToFile:x y:y]; });
+        return;
+    }
+    if (!isfinite(x) || !isfinite(y) || fabs(x) > FLT_MAX || fabs(y) > FLT_MAX) {
+        PXLog(@"ProfileIndicator: Invalid position was not queued"); return;
+    }
+    if (!self.positionPersistenceQueue) self.positionPersistenceQueue = dispatch_queue_create("com.hydra.tlinkios.indicator-position", DISPATCH_QUEUE_SERIAL);
+    NSObject *token = [NSObject new];
+    self.pendingPosition = CGPointMake(x, y); self.positionWriteToken = token;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(self.positionPersistenceQueue, ^{
+        @autoreleasepool {
+            NSError *error = nil;
+            BOOL success = PXWriteProfileIndicatorPosition(x, y, &error);
+            if (success) {
+                [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions: @0644}
+                    ofItemAtPath:PXProfileIndicatorPositionPath() error:NULL];
+                PXLog(@"ProfileIndicator: Position committed: (%.1f, %.1f)", x, y);
+            } else PXLog(@"ProfileIndicator: Failed to persist position: %@", error);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (self.positionWriteToken == token) self.positionWriteToken = nil;
+            });
+        }
+    });
 }
 
 - (void)updateProfileIndicator {

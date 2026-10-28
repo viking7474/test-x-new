@@ -20,6 +20,10 @@ FOUNDATION_EXPORT BOOL PXRecordClearAttempt(BOOL firstAttemptSuccess,
                                            NSUInteger * _Nullable totalAttempts,
                                            NSUInteger * _Nullable firstAttemptSuccesses,
                                            NSError **error);
+/// Commit legacy float preference coordinates and the preferred full-precision
+/// position plist together. Parent creation is a preflight outside rollback.
+/// Mirroring remains canonical-only after the primary source commit.
+FOUNDATION_EXPORT BOOL PXWriteProfileIndicatorPosition(double x, double y, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecuritySetting(NSString *key, id value, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecurityInteger(NSString *key, NSInteger value, NSError **error);

@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <dispatch/dispatch.h>
 #import "PXSecuritySettingsStore.h"
 #import "PXRuntimeSourceStore.h"
@@ -9,11 +10,13 @@
 #import "VersionCompare.h"
 #include <stdatomic.h>
 #include <unistd.h>
+#include <math.h>
+#include <float.h>
 
 static NSUInteger gChecks, gFailures, gMirrors, gSettingsNotices, gResetNotices;
 static NSUInteger gRegionCarrierNotices, gRegionISONotices;
 static _Atomic NSUInteger gAttempts;
-static NSString *gRoot, *gPath, *gThrowMirrorSuite;
+static NSString *gRoot, *gPath, *gIndicatorPath, *gThrowMirrorSuite;
 static PXRuntimeSourceStore *gStore;
 static NSObject *gMirrorGuard;
 static NSMutableDictionary *gSuites;
@@ -21,6 +24,7 @@ static BOOL gCheckMirror;
 static void (^gDuringMirror)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 NSString *PXSecuritySettingsPath(void) { return gPath; }
+NSString *PXProfileIndicatorPositionPath(void) { return gIndicatorPath; }
 PXRuntimeReadSnapshot *PXCaptureRuntimeSnapshot(void) { return nil; }
 BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
     atomic_fetch_add(&gAttempts, 1);
@@ -259,6 +263,80 @@ static NSUInteger gDisplayPolicyVersionReads;
 #undef PXReadSecurityBool
 #undef IdentifierManager
 #undef UISwitch
+
+// Real CoreGraphics values/geometry; UIKit window, gesture and animation adapters
+// are controlled. Exact production persistence/restore methods are included below.
+typedef NS_ENUM(NSInteger, PXIndicatorGestureState) { PXIndicatorBegan = 1, PXIndicatorChanged = 2, PXIndicatorEnded = 3 };
+@interface PXIndicatorTestWindow : NSObject
+@property (nonatomic) CGRect frame;
+@property (nonatomic) CGPoint center;
+@end
+@implementation PXIndicatorTestWindow
+- (CGPoint)center { return CGPointMake(CGRectGetMidX(self.frame), CGRectGetMidY(self.frame)); }
+- (void)setCenter:(CGPoint)center { CGRect frame = self.frame; frame.origin = CGPointMake(center.x - frame.size.width / 2, center.y - frame.size.height / 2); self.frame = frame; }
+@end
+@interface PXIndicatorTestGesture : NSObject
+@property (nonatomic) PXIndicatorGestureState state;
+@property (nonatomic) CGPoint translation;
+- (CGPoint)translationInView:(id)view;
+@end
+@implementation PXIndicatorTestGesture
+- (CGPoint)translationInView:(id)view { (void)view; return self.translation; }
+@end
+@interface PXIndicatorTestScreen : NSObject
+@property (nonatomic) CGRect bounds;
++ (instancetype)mainScreen;
+@end
+@implementation PXIndicatorTestScreen
++ (instancetype)mainScreen { static PXIndicatorTestScreen *screen; static dispatch_once_t once; dispatch_once(&once, ^{ screen = [self new]; screen.bounds = CGRectMake(0, 0, 320, 480); }); return screen; }
+@end
+static NSUInteger gIndicatorAnimations, gIndicatorFences;
+@interface PXIndicatorTestAnimation : NSObject
++ (void)animateWithDuration:(NSTimeInterval)duration animations:(void (^)(void))animations;
+@end
+@implementation PXIndicatorTestAnimation
++ (void)animateWithDuration:(NSTimeInterval)duration animations:(void (^)(void))animations { (void)duration; CHECK(NSThread.isMainThread, "indicator animation stays on main"); gIndicatorAnimations++; animations(); }
+@end
+@interface PXIndicatorPositionFixture : NSObject
+@property (nonatomic, strong) PXFixtureDefaults *profileSettings;
+@property (nonatomic, strong) PXIndicatorTestWindow *floatingWindow;
+@property (nonatomic) CGPoint initialCenter;
+@property (nonatomic, strong) dispatch_queue_t positionPersistenceQueue;
+@property (nonatomic, strong) NSObject *positionWriteToken;
+@property (nonatomic) CGPoint pendingPosition;
+- (id)superview;
+- (void)handlePan:(PXIndicatorTestGesture *)gesture;
+- (NSString *)getPositionFilePath;
+- (void)savePositionToFile:(CGFloat)x y:(CGFloat)y;
+- (CGPoint)restoredPositionWithDefault:(CGPoint)fallback;
+@end
+#include "PXIndicatorPositionDecode.inc"
+#define UIPanGestureRecognizer PXIndicatorTestGesture
+#define UIGestureRecognizerStateBegan PXIndicatorBegan
+#define UIGestureRecognizerStateChanged PXIndicatorChanged
+#define UIGestureRecognizerStateEnded PXIndicatorEnded
+#define UIScreen PXIndicatorTestScreen
+#define UIView PXIndicatorTestAnimation
+@implementation PXIndicatorPositionFixture
+- (instancetype)init { if ((self = [super init])) { _profileSettings = [[PXFixtureDefaults alloc] initWithSuiteName:@"com.weaponx.securitySettings"]; _floatingWindow = [PXIndicatorTestWindow new]; } return self; }
+- (id)superview { return nil; }
+#include "PXIndicatorPositionMethods.inc"
+@end
+#undef UIView
+#undef UIScreen
+#undef UIGestureRecognizerStateEnded
+#undef UIGestureRecognizerStateChanged
+#undef UIGestureRecognizerStateBegan
+#undef UIPanGestureRecognizer
+
+static void FlushIndicatorQueue(dispatch_queue_t queue) {
+    NSUInteger before = gIndicatorFences;
+    dispatch_async(queue, ^{ dispatch_async(dispatch_get_main_queue(), ^{ gIndicatorFences++; }); });
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+    while (gIndicatorFences == before && deadline.timeIntervalSinceNow > 0)
+        @autoreleasepool { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, YES); }
+    CHECK(gIndicatorFences == before + 1, "indicator worker and token acknowledgements drain");
+}
 
 static void TestSecurityPackets(void) {
     NSError *error = nil;
@@ -574,6 +652,117 @@ static void TestClearMetricWriters(void) {
         "concurrent cooperating metric writers preserve all increments and paired totals");
 }
 
+static NSDictionary *CaptureIndicatorPair(void) {
+    return [gStore capture:^NSDictionary *(NSError **error) {
+        (void)error;
+        return @{ @"security": [NSData dataWithContentsOfFile:gPath] ?: NSData.data,
+            @"positionExists": @([NSFileManager.defaultManager fileExistsAtPath:gIndicatorPath]),
+            @"position": [NSData dataWithContentsOfFile:gIndicatorPath] ?: NSData.data };
+    } error:NULL];
+}
+
+static void TestIndicatorPositionWriters(void) {
+    CHECK(Seed(@{ @"keep": @"unchanged" }), "indicator pair baseline seeded");
+    NSError *error = nil; double x = 10.123456789, y = 100.987654321;
+    NSUInteger notices = gSettingsNotices, mirrors = gMirrors;
+    __block NSUInteger commits = 0; gCheckMirror = YES;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    CHECK(PXWriteProfileIndicatorPosition(x, y, &error) && !error, "indicator pair save succeeds");
+    NSDictionary *position = [NSDictionary dictionaryWithContentsOfFile:gIndicatorPath];
+    CHECK(commits == 1 && gMirrors == mirrors + 2 && gSettingsNotices == notices && [Load()[@"keep"] isEqual:@"unchanged"] &&
+        [Load()[@"ProfileIndicatorX"] doubleValue] == (double)(float)x && [Load()[@"ProfileIndicatorY"] doubleValue] == (double)(float)y &&
+        [position[@"X"] doubleValue] == x && [position[@"Y"] doubleValue] == y && [position[@"Timestamp"] isKindOfClass:NSDate.class],
+        "indicator file and float preference pair share one commit before canonical mirrors");
+    CHECK(gSuites[@"com.hydra.tlinkios"][@"ProfileIndicatorX"] == nil, "indicator keeps canonical-only mirror scope");
+    gStore.testCheckpoint = nil; gCheckMirror = NO;
+    // Real production path order writes Preferences before WeaponX; the test
+    // names security/z_indicator preserve that order for the partial-write fault.
+    for (NSUInteger failureAfter = 1; failureAfter <= 2; failureAfter++) {
+        NSDictionary *before = CaptureIndicatorPair(); mirrors = gMirrors;
+        __block NSUInteger writes = 0;
+        gStore.testCheckpoint = ^(NSString *phase) {
+            if ([phase isEqual:@"source-written"] && ++writes == failureAfter) [NSException raise:@"fixture" format:@"indicator pair fault"];
+        };
+        CHECK(!PXWriteProfileIndicatorPosition(20, 200, &error) && error && [before isEqual:CaptureIndicatorPair()] && mirrors == gMirrors,
+            "indicator partial write fault rolls back both files and suppresses mirrors"); gStore.testCheckpoint = nil;
+    }
+    CHECK([NSFileManager.defaultManager removeItemAtPath:gIndicatorPath error:NULL], "indicator absence fixture prepared");
+    NSDictionary *before = CaptureIndicatorPair();
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"indicator absent file fault"]; };
+    CHECK(!PXWriteProfileIndicatorPosition(30, 300, &error) && error && [before isEqual:CaptureIndicatorPair()], "indicator failure preserves original file absence");
+    gStore.testCheckpoint = nil;
+    CHECK([[@"corrupt position" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:gIndicatorPath atomically:YES], "corrupt indicator position installed"); before = CaptureIndicatorPair();
+    CHECK(!PXWriteProfileIndicatorPosition(30, 300, &error) && error && [before isEqual:CaptureIndicatorPair()], "corrupt indicator root is preserved without committing preferences");
+    CHECK([NSFileManager.defaultManager removeItemAtPath:gIndicatorPath error:NULL], "indicator corruption fixture removed");
+    NSUInteger attempts = atomic_load(&gAttempts);
+    CHECK(!PXWriteProfileIndicatorPosition(NAN, 10, &error) && !PXWriteProfileIndicatorPosition(10, INFINITY, &error) &&
+        !PXWriteProfileIndicatorPosition(DBL_MAX, 10, &error) && attempts == atomic_load(&gAttempts), "invalid indicator geometry fails before source entry");
+    CHECK(PXWriteProfileIndicatorPosition(0, -10, &error), "finite zero and negative position persistence policy preserved");
+
+    PXIndicatorPositionFixture *view = [PXIndicatorPositionFixture new];
+    CGPoint fallback = CGPointMake(260, 100);
+    NSDictionary *preferred = @{ @"X": @25, @"Y": @125 };
+    CHECK([preferred writeToFile:gIndicatorPath atomically:YES], "preferred indicator read fixture installed");
+    [view.profileSettings setObject:@90 forKey:@"ProfileIndicatorX"]; [view.profileSettings setObject:@190 forKey:@"ProfileIndicatorY"];
+    CHECK(CGPointEqualToPoint([view restoredPositionWithDefault:fallback], CGPointMake(25, 125)), "indicator restore preserves preferred-file precedence");
+    NSDictionary *malformed = @{ @"X": @[], @"Y": @125 };
+    CHECK([malformed writeToFile:gIndicatorPath atomically:YES], "malformed indicator read fixture installed");
+    CHECK(CGPointEqualToPoint([view restoredPositionWithDefault:fallback], CGPointMake(90, 190)), "malformed indicator fields safely use legacy preferences fallback");
+    NSDictionary *zeroCoordinate = @{ @"X": @0, @"Y": @125 };
+    CHECK([zeroCoordinate writeToFile:gIndicatorPath atomically:YES] &&
+        CGPointEqualToPoint([view restoredPositionWithDefault:fallback], fallback), "legacy zero-coordinate sentinel remains unchanged in writer patch");
+    CGPoint decoded = CGPointMake(1, 1);
+    CHECK(!PXIndicatorDecodePosition(@(NAN), @5, &decoded) && !PXIndicatorDecodePosition(NSNull.null, @5, &decoded) &&
+        PXIndicatorDecodePosition(@"12.5", @"150.5", &decoded) && CGPointEqualToPoint(decoded, CGPointMake(12.5, 150.5)), "indicator decoder guards types and nonfinite values preserving float strings");
+
+    view.positionPersistenceQueue = dispatch_queue_create("fixture.indicator-queue", DISPATCH_QUEUE_SERIAL);
+    dispatch_suspend(view.positionPersistenceQueue);
+    [view savePositionToFile:40 y:140];
+    // Hold the second write until the first main acknowledgement has run. It
+    // must not clear the newer pending point even while that point is uncommitted.
+    dispatch_semaphore_t continueSecond = dispatch_semaphore_create(0);
+    __block BOOL firstAcknowledged = NO;
+    dispatch_async(view.positionPersistenceQueue, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{ firstAcknowledged = YES; });
+        dispatch_semaphore_wait(continueSecond, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    });
+    [view savePositionToFile:50 y:150]; NSObject *latestToken = view.positionWriteToken;
+    CHECK(CGPointEqualToPoint([view restoredPositionWithDefault:fallback], CGPointMake(50, 150)), "hide show uses latest pending position without waiting for disk");
+    dispatch_resume(view.positionPersistenceQueue);
+    NSDate *ackDeadline = [NSDate dateWithTimeIntervalSinceNow:3];
+    while (!firstAcknowledged && ackDeadline.timeIntervalSinceNow > 0)
+        @autoreleasepool { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, YES); }
+    CHECK(firstAcknowledged && view.positionWriteToken == latestToken &&
+        CGPointEqualToPoint([view restoredPositionWithDefault:fallback], CGPointMake(50, 150)), "old indicator acknowledgement preserves newer pending save");
+    dispatch_semaphore_signal(continueSecond); FlushIndicatorQueue(view.positionPersistenceQueue);
+    position = [NSDictionary dictionaryWithContentsOfFile:gIndicatorPath];
+    CHECK(!view.positionWriteToken && [position[@"X"] doubleValue] == 50 && [position[@"Y"] doubleValue] == 150,
+        "serial indicator writes preserve latest point and clear only matching pending token");
+    view.floatingWindow.frame = CGRectMake(10, 100, 60, 60);
+    PXIndicatorTestGesture *pan = [PXIndicatorTestGesture new]; attempts = atomic_load(&gAttempts);
+    pan.state = PXIndicatorBegan; [view handlePan:pan]; pan.state = PXIndicatorChanged; pan.translation = CGPointMake(500, 500); [view handlePan:pan];
+    CHECK(attempts == atomic_load(&gAttempts), "indicator pan began and changed never persist on hot path");
+    dispatch_suspend(view.positionPersistenceQueue); NSUInteger animations = gIndicatorAnimations;
+    pan.state = PXIndicatorEnded; [view handlePan:pan];
+    CHECK(CGRectEqualToRect(view.floatingWindow.frame, CGRectMake(260, 420, 60, 60)) && gIndicatorAnimations == animations + 1 &&
+        attempts == atomic_load(&gAttempts) && view.positionWriteToken, "drag end clamps and animates while persistence worker is blocked");
+    dispatch_resume(view.positionPersistenceQueue); FlushIndicatorQueue(view.positionPersistenceQueue);
+    before = CaptureIndicatorPair();
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"indicator queued failure"]; };
+    [view savePositionToFile:60 y:160]; FlushIndicatorQueue(view.positionPersistenceQueue);
+    CHECK(!view.positionWriteToken && [before isEqual:CaptureIndicatorPair()], "queued failure clears pending state without claiming a persisted position"); gStore.testCheckpoint = nil;
+    __weak PXIndicatorPositionFixture *weakView; dispatch_queue_t pendingQueue;
+    @autoreleasepool {
+        PXIndicatorPositionFixture *owner = [PXIndicatorPositionFixture new]; weakView = owner;
+        owner.positionPersistenceQueue = dispatch_queue_create("fixture.indicator-owner", DISPATCH_QUEUE_SERIAL);
+        pendingQueue = owner.positionPersistenceQueue; dispatch_suspend(pendingQueue); [owner savePositionToFile:70 y:170];
+    }
+    CHECK(!weakView, "queued indicator save does not retain UI owner");
+    dispatch_resume(pendingQueue); FlushIndicatorQueue(pendingQueue);
+    CHECK([[NSDictionary dictionaryWithContentsOfFile:gIndicatorPath][@"X"] doubleValue] == 70,
+        "explicit indicator save survives UI owner release");
+}
+
 static void TestSecurityScalarReaderTypes(void) {
     NSArray *invalid = @[@[], @{}, NSNull.null, NSDate.date, [NSData data], NSObject.new];
     for (id value in invalid) {
@@ -678,11 +867,12 @@ int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         CHECK([NSFileManager.defaultManager createDirectoryAtPath:gRoot withIntermediateDirectories:YES attributes:nil error:NULL], "security test root created");
-        gPath = [gRoot stringByAppendingPathComponent:@"security.plist"]; gMirrorGuard = NSObject.new; gSuites = NSMutableDictionary.new;
+        gPath = [gRoot stringByAppendingPathComponent:@"security.plist"]; gIndicatorPath = [gRoot stringByAppendingPathComponent:@"z_indicator_position.plist"];
+        gMirrorGuard = NSObject.new; gSuites = NSMutableDictionary.new;
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
-            allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath]; } error:NULL];
+            allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath] || [path isEqual:gIndicatorPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

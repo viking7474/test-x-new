@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <float.h>
 
 static NSArray<NSString *> *PXSecuritySuiteNames(void) {
     static NSArray<NSString *> *names;
@@ -170,6 +172,31 @@ BOOL PXRecordClearAttempt(BOOL firstAttemptSuccess, NSUInteger *totalAttempts, N
         if (firstAttemptSuccesses) *firstAttemptSuccesses = nextSuccesses;
     }
     return committed;
+}
+
+BOOL PXWriteProfileIndicatorPosition(double x, double y, NSError **error) {
+    if (error) *error = nil;
+    if (!isfinite(x) || !isfinite(y) || fabs(x) > FLT_MAX || fabs(y) > FLT_MAX)
+        return PXSecurityWriteError(error, @"Invalid indicator position");
+    // setFloat was the legacy fallback writer; retain that precision. The
+    // preferred dedicated file keeps the original CGFloat/double coordinates.
+    NSDictionary *updates = @{ @"ProfileIndicatorX": @((float)x), @"ProfileIndicatorY": @((float)y) };
+    NSDictionary *position = @{ @"X": @(x), @"Y": @(y), @"Timestamp": [NSDate date] };
+    NSString *settingsPath = PXSecuritySettingsPath();
+    NSString *positionPath = PXProfileIndicatorPositionPath();
+    if (![NSFileManager.defaultManager createDirectoryAtPath:positionPath.stringByDeletingLastPathComponent
+        withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+    BOOL committed = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        NSDictionary *existing = [tx dictionaryAtPath:settingsPath error:writeError];
+        if (!existing) return NO;
+        NSMutableDictionary *candidate = [existing mutableCopy];
+        [candidate addEntriesFromDictionary:updates];
+        return [tx setDictionary:candidate atPath:settingsPath error:writeError] &&
+               [tx setDictionary:position atPath:positionPath error:writeError];
+    }, error);
+    if (!committed) return NO;
+    PXMirrorSecurityUpdates(updates, @[@"com.weaponx.securitySettings"]);
+    return YES;
 }
 
 BOOL PXWriteSecuritySetting(NSString *key, id value, NSError **error) {

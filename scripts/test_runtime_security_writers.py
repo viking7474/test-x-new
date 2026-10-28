@@ -29,6 +29,8 @@ DISPLAY_METHODS = ['- (void)webCompatIOSRangeToggleChanged:(UISwitch *)sender',
                    '- (void)displayUIScaleSpoofToggleChanged:(UISwitch *)sender']
 SCALAR_READERS = ['BOOL PXReadSecurityBool(NSString *key, BOOL defaultValue)',
                   'NSInteger PXReadSecurityInteger(NSString *key, NSInteger defaultValue)']
+INDICATOR_METHODS = ['- (void)handlePan:(UIPanGestureRecognizer *)gesture', '- (NSString *)getPositionFilePath',
+                     '- (void)savePositionToFile:(CGFloat)x y:(CGFloat)y', '- (CGPoint)restoredPositionWithDefault:(CGPoint)fallback']
 
 
 def source_contracts():
@@ -60,6 +62,19 @@ def source_contracts():
     metric_log = cleaner[cleaner.index('BOOL pxCountersPersisted = PXRecordClearAttempt('):cleaner.index('if ([operationContext isCancellationRequested])', cleaner.index('BOOL pxCountersPersisted = PXRecordClearAttempt('))]
     assert metric_log.index('if (pxCountersPersisted)') < metric_log.index('first_attempt_success_pct=%.1f')
     assert 'pxMetricStore' not in cleaner
+    position = identifier.method(store, 'BOOL PXWriteProfileIndicatorPosition(double x, double y, NSError **error)')
+    assert 'PXPerformStandaloneRuntimeSourceWrite' in position and 'atPath:settingsPath' in position and 'atPath:positionPath' in position
+    assert position.index('if (!committed) return NO;') < position.index('PXMirrorSecurityUpdates')
+    assert '@[@"com.weaponx.securitySettings"]' in position and '@((float)x)' in position and '@"Timestamp"' in position
+    indicator = read('common/ProfileIndicatorView.m')
+    pan, path, save, restore = [identifier.method(indicator, method) for method in INDICATOR_METHODS]
+    assert 'setFloat:' not in pan and 'synchronize' not in pan
+    assert pan.index('UIGestureRecognizerStateEnded') < pan.index('savePositionToFile:')
+    assert 'DISPATCH_QUEUE_SERIAL' in save and '__weak typeof(self) weakSelf' in save and '@autoreleasepool' in save
+    assert save.index('dispatch_async(self.positionPersistenceQueue') < save.index('PXWriteProfileIndicatorPosition')
+    assert 'self.positionWriteToken == token' in save and 'self.pendingPosition = CGPointMake(x, y)' in save
+    assert 'dispatch_sync' not in save and 'writeToFile:' not in save and 'PXIndicatorDecodePosition' in restore
+    assert 'PXProfileIndicatorPositionPath()' in path and 'PXProfileIndicatorPositionPath()' in read('common/PXRuntimeSources.m')
     core = read('common/PXRuntimeSourceStore.m')
     assert 'allowNested:YES' in core and 'allowNested:NO' in core
     assert 'if (!allowNested)' in core and '_activeTransaction.failure = PXSourceError(@"Standalone source write' in core
@@ -195,13 +210,25 @@ def source_contracts():
                  'metric recording never replaces corrupt security root with empty defaults',
                  'concurrent cooperating metric writers preserve all increments and paired totals'):
         assert case in fixture, case
+    for case in ('indicator file and float preference pair share one commit before canonical mirrors',
+                 'indicator partial write fault rolls back both files and suppresses mirrors',
+                 'indicator failure preserves original file absence', 'corrupt indicator root is preserved without committing preferences',
+                 'invalid indicator geometry fails before source entry', 'indicator restore preserves preferred-file precedence',
+                 'malformed indicator fields safely use legacy preferences fallback',
+                 'hide show uses latest pending position without waiting for disk',
+                 'serial indicator writes preserve latest point and clear only matching pending token',
+                 'indicator pan began and changed never persist on hot path',
+                 'drag end clamps and animates while persistence worker is blocked',
+                 'queued indicator save does not retain UI owner', 'explicit indicator save survives UI owner release'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3X-partial'
+    assert manifest['rollout'] == '4C.2H3Y-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
     assert manifest['writers']['security-region-timezone']['status'] == 'enrolled'
     assert manifest['writers']['clear-metrics']['status'] == 'enrolled'
+    assert manifest['writers']['indicator-position']['status'] == 'enrolled'
     assert 'ip-monitor' in manifest['sources'][4]['writers']
     assert manifest['writers']['preferences-daemon']['status'] == 'external'
     assert manifest['sources'][4]['field'] == 'securitySettings' and manifest['sources'][4]['status'] == 'partial'
@@ -221,6 +248,9 @@ def generate_native_fragments(folder):
     (folder / 'PXTimeZoneSecurityMethods.inc').write_text('\n\n'.join(identifier.method(read('TimeSpoofDetailViewController.m'), signature) for signature in TIME_METHODS), encoding='utf-8')
     (folder / 'PXDisplayPolicyMethods.inc').write_text('\n\n'.join(identifier.method(read('SecurityTabViewController.m'), signature) for signature in DISPLAY_METHODS), encoding='utf-8')
     (folder / 'PXSecurityScalarReaders.inc').write_text('\n\n'.join(identifier.method(read('common/PXSecuritySettingsStore.m'), signature) for signature in SCALAR_READERS), encoding='utf-8')
+    indicator = read('common/ProfileIndicatorView.m')
+    (folder / 'PXIndicatorPositionDecode.inc').write_text(identifier.method(indicator, 'static BOOL PXIndicatorDecodePosition(id rawX, id rawY, CGPoint *point)'), encoding='utf-8')
+    (folder / 'PXIndicatorPositionMethods.inc').write_text('\n\n'.join(identifier.method(indicator, signature) for signature in INDICATOR_METHODS), encoding='utf-8')
 
 
 def native_tests():
@@ -234,7 +264,7 @@ def native_tests():
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
                             '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                             '-I', str(ROOT / 'common'), '-I', str(folder), *defines,
-                            *[str(ROOT / source) for source in sources], '-framework', 'Foundation', '-framework', 'CoreFoundation',
+                            *[str(ROOT / source) for source in sources], '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'CoreGraphics',
                             '-o', str(binary)], cwd=ROOT, check=True, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], cwd=ROOT, check=True, timeout=90)

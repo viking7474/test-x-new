@@ -114,6 +114,10 @@ NSString *PXSecuritySettingsPath(void) {
     return [PXPreferencesPath() stringByAppendingPathComponent:@"com.weaponx.securitySettings.plist"];
 }
 
+NSString *PXProfileIndicatorPositionPath(void) {
+    return [PXWeaponXBasePath() stringByAppendingPathComponent:@"indicator_position.plist"];
+}
+
 void PXPostSettingsChangedNotification(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.hydra.tlinkios.settings.changed"),
