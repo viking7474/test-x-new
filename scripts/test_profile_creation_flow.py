@@ -163,6 +163,27 @@ def source_contracts():
     assert 'reserveProfileID:creationProfile.profileId' in create and 'self.creationReservation = reservation;' in create
     assert 'createDirectoryIfNeeded:' not in create and 'writeToFile:' not in create
     assert create.count('[reservation validateWithError:&generationError]') == 2
+    detach = writers.method(source, '- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error')
+    assert 'requiringSecureCoding:YES' in detach and 'decoder.requiresSecureCoding = YES' in detach
+    assert 'decodeObjectOfClasses:PXProfileArchiveClasses()' in detach and 'decoder.error' in detach and 'decoded != profile' in detach
+    assert '[[decoded profileId] isEqual:expectedID]' in detach and '@catch' in detach
+    assert create.index('detachedProfileForCreation:profile') < create.index('reserveProfileID:creationProfile.profileId')
+    assert 'finishProfileCreation:creationProfile' in create and 'finishProfileCreation:profile ' not in create
+    worker = create[create.index('dispatch_async(dispatch_get_global_queue'):]
+    assert 'profile.' not in worker
+    switch = writers.method(source, SWITCH)
+    assert 'profile = registeredProfile;' in switch and 'PXValidatedProfileID(rawID)' in switch
+    assert switch.index('profile = registeredProfile;') < switch.index('profile.lastUsed = NSDate.date')
+    for case in ('owned creation completes once despite later caller model mutation',
+                 'creation owns a deep secure snapshot including nested mutable settings and allowed Profile values',
+                 'creation display registry selection and generation agree without overwriting later caller edits',
+                 'switch resolves registered model by ID and persists canonical lastUsed without adopting alias fields',
+                 'unregistered switch alias has no persistence effects',
+                 'queued creation does not retain the caller input model',
+                 'owned creation survives caller model deallocation',
+                 'failed creation capture releases ownership before completion',
+                 'uncapturable creation input fails before reservation providers registry or publication'):
+        assert case in fixture, case
     for signature in METHODS[:4]:
         body = writers.method(source, signature)
         assert 'if (!NSThread.isMainThread)' in body and 'if (self.creationInProgress)' in body
@@ -351,7 +372,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4C-partial'
+    assert manifest['rollout'] == '4C.2H4D-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

@@ -887,7 +887,9 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     if (self.creationInProgress) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12 userInfo:@{NSLocalizedDescriptionKey: @"Another profile change is in progress"}]); return;
     }
-    NSString *requestedID = PXValidatedProfileID(profile.profileId);
+    NSString *rawID = [profile isKindOfClass:Profile.class] ? [profile.profileId copy] : nil;
+    NSString *requestedID = PXValidatedProfileID(rawID);
+    if (![requestedID isEqual:rawID]) requestedID = nil;
     Profile *registeredProfile = nil;
     for (Profile *candidate in self.mutableProfiles) if ([candidate.profileId isEqual:requestedID]) { registeredProfile = candidate; break; }
     if (!registeredProfile) {

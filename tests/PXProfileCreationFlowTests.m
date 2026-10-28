@@ -295,6 +295,90 @@ static void TestCreation(PXProfileCreationFixture *manager, Profile *zero) {
     CHECK(callbacks == 1 && !success && failure && !manager.creationInProgress && !manager.lifecycleLease && [before isEqual:ActiveFiles()],
           "synchronous preparation exception releases lifecycle ownership before failure completion");
 }
+static Profile *PXFindFixtureProfile(NSArray<Profile *> *profiles, NSString *profileID) {
+    for (Profile *profile in profiles) if ([profile.profileId isEqual:profileID]) return profile;
+    return nil;
+}
+static void TestCreationOwnedModel(PXProfileCreationFixture *manager) {
+    ResetWorker();
+    NSMutableString *name = [@"owned-input" mutableCopy], *description = [@"description-before" mutableCopy], *icon = [@"icon-before" mutableCopy];
+    NSMutableArray *steps = [NSMutableArray arrayWithObject:@"step-before"];
+    NSMutableDictionary *nested = [@{ @"steps": steps } mutableCopy];
+    NSMutableData *blob = [[@"bytes-before" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    Profile *child = New(@"child-before");
+    Profile *input = [[Profile alloc] initWithName:name shortDescription:description iconName:icon];
+    input.settings = @{ @"nested": nested, @"blob": blob, @"child": child };
+    __block NSUInteger callbacks = 0; __block BOOL success = NO; __block NSError *failure = nil;
+    [manager createProfile:input completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    NSString *acceptedID = [input.profileId copy]; NSDate *acceptedCreated = input.createdAt, *acceptedUsed = input.lastUsed;
+    CHECK(Pump(^BOOL { return atomic_load(&gEntered); }), "owned creation worker pauses after model admission");
+    [name setString:@"caller-renamed"]; [description setString:@"caller-description"]; [icon setString:@"caller-icon"];
+    [steps addObject:@"later-step"]; nested[@"late"] = @YES; [blob appendData:[@"later" dataUsingEncoding:NSUTF8StringEncoding]];
+    child.name = @"caller-child"; input.settings = @{ @"replacement": @YES };
+    input.createdAt = [NSDate dateWithTimeIntervalSince1970:1]; input.lastUsed = [NSDate dateWithTimeIntervalSince1970:2];
+    [input setValue:@"caller-retarget" forKey:@"profileId"];
+    dispatch_semaphore_signal(gRelease);
+    CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && success && !failure && !manager.creationInProgress && !manager.lifecycleLease,
+        "owned creation completes once despite later caller model mutation");
+    Profile *owned = manager.mutableCurrentProfile, *ownedChild = owned.settings[@"child"];
+    NSData *expectedBytes = [@"bytes-before" dataUsingEncoding:NSUTF8StringEncoding];
+    CHECK(owned != input && [owned.profileId isEqual:acceptedID] && [owned.name isEqual:@"owned-input"] &&
+        [owned.shortDescription isEqual:@"description-before"] && [owned.iconName isEqual:@"icon-before"] &&
+        [owned.createdAt isEqual:acceptedCreated] && [owned.lastUsed isEqual:acceptedUsed] &&
+        [owned.settings[@"nested"][@"steps"] count] == 1 && !owned.settings[@"nested"][@"late"] &&
+        [owned.settings[@"blob"] isEqual:expectedBytes] && ownedChild != child && [ownedChild.name isEqual:@"child-before"],
+        "creation owns a deep secure snapshot including nested mutable settings and allowed Profile values");
+    NSError *decodeError = nil;
+    Profile *archived = PXFindFixtureProfile([manager decodeRegistryRecord:manager.registryRecord error:&decodeError], acceptedID);
+    CHECK(archived && !decodeError && [archived.name isEqual:owned.name] && [archived.settings[@"blob"] isEqual:expectedBytes] &&
+        [Record(Path(PXProfileRootPath(acceptedID), @"identifiers.plist"))[@"DisplayName"] isEqual:owned.name] &&
+        [Record(PXCurrentProfileInfoPath())[@"ProfileName"] isEqual:owned.name] && [gRequested isEqual:acceptedID] &&
+        [input.profileId isEqual:@"caller-retarget"] && [input.name isEqual:@"caller-renamed"],
+        "creation display registry selection and generation agree without overwriting later caller edits");
+
+    Profile *alias = New(@"alias-untrusted-name"); [alias setValue:acceptedID forKey:@"profileId"];
+    alias.settings = @{ @"alias-only": @YES }; alias.lastUsed = [NSDate dateWithTimeIntervalSince1970:123];
+    NSDate *aliasUsed = alias.lastUsed; NSUInteger terminations = gTerminations; callbacks = 0;
+    [manager switchToProfile:alias completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    archived = PXFindFixtureProfile([manager decodeRegistryRecord:manager.registryRecord error:&decodeError], acceptedID);
+    CHECK(callbacks == 1 && success && !failure && manager.mutableCurrentProfile == owned && [owned.name isEqual:@"owned-input"] &&
+        [archived.lastUsed isEqual:owned.lastUsed] && ![owned.lastUsed isEqual:aliasUsed] && [alias.lastUsed isEqual:aliasUsed] &&
+        !owned.settings[@"alias-only"] && terminations == gTerminations,
+        "switch resolves registered model by ID and persists canonical lastUsed without adopting alias fields");
+    NSDictionary *before = ActiveFiles(); NSData *archiveBefore = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    [alias setValue:@"unregistered-alias" forKey:@"profileId"]; callbacks = 0;
+    [manager switchToProfile:alias completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && !success && failure.code == 21 && [before isEqual:ActiveFiles()] &&
+        [archiveBefore isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]], "unregistered switch alias has no persistence effects");
+
+    ResetWorker(); callbacks = 0; __weak Profile *weakInput; NSString *temporaryID;
+    @autoreleasepool {
+        Profile *temporary = New(@"owned-lifetime"); weakInput = temporary;
+        [manager createProfile:temporary completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+        temporaryID = [temporary.profileId copy];
+    }
+    CHECK(Pump(^BOOL { return atomic_load(&gEntered); }) && !weakInput, "queued creation does not retain the caller input model");
+    dispatch_semaphore_signal(gRelease);
+    CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && success && !failure &&
+        [manager.mutableCurrentProfile.profileId isEqual:temporaryID] && [manager.mutableCurrentProfile.name isEqual:@"owned-lifetime"],
+        "owned creation survives caller model deallocation");
+
+    ResetWorker(); Profile *invalid = New(@"uncapturable-input"); invalid.settings = @{ @"unsupported": NSObject.new };
+    before = ActiveFiles(); archiveBefore = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    NSUInteger count = manager.mutableProfiles.count, notices = gNotices, mirrors = gMirrors, caches = gCachePublications;
+    callbacks = 0;
+    [manager createProfile:invalid completion:^(BOOL ok, NSError *error) {
+        callbacks++; success = ok; failure = error;
+        PXProfileLifecycleLease *available = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+        CHECK(available && !manager.creationInProgress && !manager.lifecycleLease, "failed creation capture releases ownership before completion"); [available invalidate];
+    }];
+    CHECK(callbacks == 1 && !success && failure && !atomic_load(&gEntered) && manager.mutableProfiles.count == count &&
+        ![manager.fileManager fileExistsAtPath:PXProfileRootPath(invalid.profileId)] && [before isEqual:ActiveFiles()] &&
+        [archiveBefore isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] &&
+        notices == gNotices && mirrors == gMirrors && caches == gCachePublications,
+        "uncapturable creation input fails before reservation providers registry or publication");
+}
+
 static void TestConflicts(PXProfileCreationFixture *manager) {
     for (NSUInteger mode = 0; mode < 3; mode++) {
         ResetWorker(); __block NSUInteger callbacks = 0; __block BOOL success = YES; __block NSError *failure;
@@ -1255,7 +1339,7 @@ int main(int argc, const char *argv[]) {
                 committedID.UTF8String ?: "nil", memoryID.UTF8String ?: "nil", gMirroredID.UTF8String ?: "nil", gMemoryAtLastMirrorID.UTF8String ?: "nil");
             if (gThrowObserver) [NSException raise:@"fixture" format:@"observer failed after commit"];
         }];
-        TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
+        TestCreation(manager, zero); TestCreationOwnedModel(manager); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager); TestCreationDisplayDrift(manager);
         TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
