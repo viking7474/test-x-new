@@ -6,6 +6,7 @@
 #import "PXRuntimeSnapshot.h"
 #import "PXPaths.h"
 #import "TLinkIOSLogging.h"
+#import "VersionCompare.h"
 #include <stdatomic.h>
 #include <unistd.h>
 
@@ -198,6 +199,65 @@ static NSDictionary *gRegionDefaults;
 #undef CFNotificationCenterPostNotification
 #undef CFNotificationCenterGetDarwinNotifyCenter
 #undef PXReadSecurityBool
+#undef UISwitch
+
+// Exact scalar readers with a raw getter seam in both host compilation lanes.
+static id gScalarReaderValue;
+static id PXFixtureScalarInput(NSString *key) { (void)key; return gScalarReaderValue; }
+#define PXReadSecuritySetting PXFixtureScalarInput
+#define PXReadSecurityBool PXFixtureScalarBool
+#define PXReadSecurityInteger PXFixtureScalarInteger
+#include "PXSecurityScalarReaders.inc"
+#undef PXReadSecurityInteger
+#undef PXReadSecurityBool
+#undef PXReadSecuritySetting
+
+// UIKit/manager boundaries only. The two actual UI actions, version comparison,
+// source transaction, byte rollback, compatibility mirrors and notices are real.
+static NSString *gDisplayPolicyVersion;
+static NSUInteger gDisplayPolicyVersionReads;
+@interface PXDisplayPolicyManager : NSObject
++ (instancetype)sharedManager;
+- (NSString *)currentValueForIdentifier:(NSString *)identifier;
+@end
+@implementation PXDisplayPolicyManager
++ (instancetype)sharedManager { static id manager; static dispatch_once_t once; dispatch_once(&once, ^{ manager = [self new]; }); return manager; }
+- (NSString *)currentValueForIdentifier:(NSString *)identifier {
+    (void)identifier; gDisplayPolicyVersionReads++;
+    CHECK(NSThread.isMainThread && Capture() != nil, "WebCompat version read follows source commit on main outside gate");
+    return gDisplayPolicyVersion;
+}
+@end
+@interface PXSecurityWarningLabel : NSObject
+@property (nonatomic, getter=isHidden) BOOL hidden;
+@end
+@implementation PXSecurityWarningLabel
+@synthesize hidden = _hidden;
+- (void)setHidden:(BOOL)hidden { CHECK(NSThread.isMainThread, "WebCompat warning mutates only on main"); _hidden = hidden; }
+@end
+@interface PXSecurityWarningConstraint : NSObject
+@property (nonatomic) double constant;
+@end
+@implementation PXSecurityWarningConstraint
+@end
+@interface PXDisplayPolicyFixture : PXIPMonitorUIFixture
+@property (nonatomic, strong) PXSecurityWarningLabel *webCompatIOSRangeWarningLabel;
+@property (nonatomic, strong) PXSecurityWarningConstraint *webCompatIOSRangeWarningHeightConstraint;
+- (void)webCompatIOSRangeToggleChanged:(PXMonitorSwitch *)sender;
+- (void)displayUIScaleSpoofToggleChanged:(PXMonitorSwitch *)sender;
+@end
+#define UISwitch PXMonitorSwitch
+#define IdentifierManager PXDisplayPolicyManager
+#define PXReadSecurityBool PXManagerReadSecurityBool
+#define CFNotificationCenterGetDarwinNotifyCenter() ((CFNotificationCenterRef)(uintptr_t)1)
+#define CFNotificationCenterPostNotification PXFixturePostDarwin
+@implementation PXDisplayPolicyFixture
+#include "PXDisplayPolicyMethods.inc"
+@end
+#undef CFNotificationCenterPostNotification
+#undef CFNotificationCenterGetDarwinNotifyCenter
+#undef PXReadSecurityBool
+#undef IdentifierManager
 #undef UISwitch
 
 static void TestSecurityPackets(void) {
@@ -445,6 +505,106 @@ static void TestRegionAndTimeZoneWriters(void) {
     gCheckMirror = NO; gRegionDefaults = nil;
 }
 
+static void TestSecurityScalarReaderTypes(void) {
+    NSArray *invalid = @[@[], @{}, NSNull.null, NSDate.date, [NSData data], NSObject.new];
+    for (id value in invalid) {
+        gScalarReaderValue = value;
+        CHECK(PXFixtureScalarBool(@"fixture", YES) && !PXFixtureScalarBool(@"fixture", NO) &&
+            PXFixtureScalarInteger(@"fixture", 17) == 17 && PXFixtureScalarInteger(@"fixture", -3) == -3,
+            "malformed security scalar types preserve supplied defaults without unsafe selectors");
+    }
+    for (id value in @[@0, @1, @(-3), @"0", @"YES", @"42", @"invalid"]) {
+        gScalarReaderValue = value;
+        CHECK(PXFixtureScalarBool(@"fixture", NO) == [value boolValue] && PXFixtureScalarInteger(@"fixture", 19) == [value integerValue],
+            "valid security number and string conversions remain unchanged");
+    }
+    gScalarReaderValue = nil;
+    CHECK(PXFixtureScalarBool(@"fixture", YES) && PXFixtureScalarInteger(@"fixture", 17) == 17, "missing scalar uses caller defaults");
+#if !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    CHECK(Seed(@{ @"badBool": @[], @"badInteger": @{} }) && PXReadSecurityBool(@"badBool", YES) && PXReadSecurityInteger(@"badInteger", 23) == 23,
+        "rootful live scalar reader rejects malformed on-disk field types");
+#endif
+}
+
+static void TestDisplayPolicyWriters(void) {
+    PXDisplayPolicyFixture *ui = [PXDisplayPolicyFixture new]; PXMonitorSwitch *sender = [PXMonitorSwitch new];
+    ui.webCompatIOSRangeWarningLabel = [PXSecurityWarningLabel new];
+    ui.webCompatIOSRangeWarningHeightConstraint = [PXSecurityWarningConstraint new];
+    gDisplayPolicyVersion = @"17.0"; gCheckMirror = YES;
+    for (NSUInteger policy = 0; policy < 2; policy++) {
+        NSString *key = policy == 0 ? @"webCompatIOSRangeEnabled" : @"displayUIScaleSpoofEnabled";
+        for (NSUInteger stored = 0; stored < 2; stored++) {
+            NSDictionary *baseline = @{ key: @(stored), @"deviceSpoofingEnabled": @YES, @"keep": @"untouched" };
+            CHECK(Seed(baseline), "display policy failure baseline seeded");
+            NSDictionary *before = Capture(); NSUInteger notices = gSettingsNotices, mirrors = gMirrors, reads = gDisplayPolicyVersionReads;
+            ui.webCompatIOSRangeWarningLabel.hidden = YES; ui.webCompatIOSRangeWarningHeightConstraint.constant = 7;
+            sender.on = !stored; ui.toast = nil;
+            gStore.testCheckpoint = ^(NSString *phase) {
+                if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"display policy source failure"];
+            };
+            if (policy == 0) [ui webCompatIOSRangeToggleChanged:sender];
+            else [ui displayUIScaleSpoofToggleChanged:sender];
+            CHECK(sender.isOn == (BOOL)stored && [before isEqual:Capture()] && notices == gSettingsNotices && mirrors == gMirrors &&
+                [ui.toast hasPrefix:@"Could not save"], "failed display policy write restores persisted switch without mirrors or notifications");
+            CHECK(ui.webCompatIOSRangeWarningLabel.isHidden && ui.webCompatIOSRangeWarningHeightConstraint.constant == 7 && reads == gDisplayPolicyVersionReads,
+                "failed display policy write leaves warning and version lookup untouched");
+            gStore.testCheckpoint = nil;
+        }
+        // Missing keys keep legacy defaults (WebCompat OFF, configured UI Scale ON).
+        CHECK(Seed(@{ @"keep": @YES }), "missing display policy key baseline seeded");
+        sender.on = policy == 0;
+        gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"missing key fault"]; };
+        if (policy == 0) [ui webCompatIOSRangeToggleChanged:sender]; else [ui displayUIScaleSpoofToggleChanged:sender];
+        CHECK(sender.isOn == (policy == 1) && Load()[key] == nil, "failed display toggle preserves missing-key defaults and absence");
+        gStore.testCheckpoint = nil;
+        for (NSUInteger enabled = 0; enabled < 2; enabled++) {
+            CHECK(Seed(@{ @"keep": @"untouched", @"deviceSpoofingEnabled": @YES }), "display policy success baseline seeded");
+            NSUInteger attempts = atomic_load(&gAttempts), notices = gSettingsNotices, mirrors = gMirrors;
+            __block NSUInteger commits = 0;
+            gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+            sender.on = (BOOL)enabled; ui.toast = nil;
+            if (policy == 0) [ui webCompatIOSRangeToggleChanged:sender]; else [ui displayUIScaleSpoofToggleChanged:sender];
+            CHECK([Load()[key] boolValue] == (BOOL)enabled && [Load()[@"keep"] isEqual:@"untouched"] &&
+                atomic_load(&gAttempts) == attempts + 1 && commits == 1 && gSettingsNotices == notices + 1 && gMirrors == mirrors + 3 && !ui.toast,
+                "display policy success commits once before all mirrors and one settings notification");
+            gStore.testCheckpoint = nil;
+        }
+    }
+    // Rollback follows source state even when sender is already stale/idempotent.
+    CHECK(Seed(@{ @"webCompatIOSRangeEnabled": @YES }), "stale display sender baseline seeded"); sender.on = YES;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"stale sender fault"]; };
+    [ui webCompatIOSRangeToggleChanged:sender]; CHECK(sender.isOn, "display rollback uses stored value rather than inverse sender state"); gStore.testCheckpoint = nil;
+
+    NSArray *versions = @[@"16.3.1", @"16.3.2", @""];
+    for (NSString *version in versions) {
+        for (NSUInteger master = 0; master < 2; master++) {
+            CHECK(Seed(@{ @"deviceSpoofingEnabled": @(master) }), "WebCompat warning baseline seeded");
+            gDisplayPolicyVersion = version; sender.on = YES;
+            [ui webCompatIOSRangeToggleChanged:sender];
+            BOOL expected = master && [version isEqual:@"16.3.2"];
+            CHECK(ui.webCompatIOSRangeWarningLabel.isHidden == !expected && ui.webCompatIOSRangeWarningHeightConstraint.constant == (expected ? 24 : 0),
+                "WebCompat warning preserves strict version threshold and master dependency");
+        }
+    }
+    ui.webCompatIOSRangeWarningHeightConstraint = nil; gDisplayPolicyVersion = nil;
+    sender.on = YES; [ui webCompatIOSRangeToggleChanged:sender];
+    CHECK(ui.webCompatIOSRangeWarningLabel.isHidden, "missing version and warning constraint are safe");
+    __block NSUInteger controlsReturned = 0;
+    for (NSUInteger policy = 0; policy < 2; policy++) {
+        gDuringMirror = ^{ CHECK(NSThread.isMainThread, "background display action persists only after main handoff"); };
+        sender.on = YES; NSUInteger notices = gSettingsNotices;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            if (policy == 0) [ui webCompatIOSRangeToggleChanged:sender]; else [ui displayUIScaleSpoofToggleChanged:sender];
+            dispatch_async(dispatch_get_main_queue(), ^{ controlsReturned++; });
+        });
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+        while (controlsReturned < policy + 1 && deadline.timeIntervalSinceNow > 0)
+            @autoreleasepool { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, YES); }
+        CHECK(controlsReturned == policy + 1 && gSettingsNotices == notices + 1, "background display action completes on main without synchronous dispatch");
+    }
+    gDuringMirror = nil; gCheckMirror = NO; gDisplayPolicyVersion = nil;
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -453,7 +613,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

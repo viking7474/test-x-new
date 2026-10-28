@@ -25,10 +25,18 @@ REGION_METHODS = ['- (NSDictionary *)targetRegionDefaultsForCountryCode:(NSStrin
                   '- (BOOL)persistTimeZoneName:(NSString *)name forKey:(NSString *)key',
                   '- (void)publishTargetRegionChanged']
 TIME_METHODS = ['- (void)publishTimeSpoofSettingsChanged', '- (BOOL)persistLocationTimeZoneName:(NSString *)name']
+DISPLAY_METHODS = ['- (void)webCompatIOSRangeToggleChanged:(UISwitch *)sender',
+                   '- (void)displayUIScaleSpoofToggleChanged:(UISwitch *)sender']
+SCALAR_READERS = ['BOOL PXReadSecurityBool(NSString *key, BOOL defaultValue)',
+                  'NSInteger PXReadSecurityInteger(NSString *key, NSInteger defaultValue)']
 
 
 def source_contracts():
     store = read('common/PXSecuritySettingsStore.m')
+    for signature in SCALAR_READERS:
+        reader = identifier.method(store, signature)
+        assert '[value isKindOfClass:NSNumber.class]' in reader and '[value isKindOfClass:NSString.class]' in reader
+        assert ': defaultValue;' in reader
     assert 'PXPerformStandaloneRuntimeSourceWrite' in store and '[tx dictionaryAtPath:path error:writeError]' in store
     assert 'if (!existing) return NO;' in store and 'NSPropertyListImmutable' in store
     assert store.index('if (!committed) return NO;') < store.index('PXMirrorSecurityUpdates(updates);')
@@ -103,6 +111,18 @@ def source_contracts():
     assert 'securitySettings' not in time_ui and 'synchronize' not in time_ui
     for body in (region, zone, time_zone):
         assert 'writeToFile:' not in body and 'setObject:' not in body and 'synchronize' not in body
+    for signature, key, fallback in zip(DISPLAY_METHODS, ('webCompatIOSRangeEnabled', 'displayUIScaleSpoofEnabled'), ('NO', 'YES')):
+        body = identifier.method(security, signature)
+        assert f'PXReadSecurityBool(@"{key}", {fallback})' in body
+        assert body.count(f'PXWriteSecurityBool(@"{key}", enabled, &error)') == 1
+        assert '[sender setOn:previous animated:YES]' in body
+        assert body.index('if (!NSThread.isMainThread)') < body.index('PXWriteSecurityBool')
+        assert body.index('[sender setOn:previous animated:YES]') < body.index('CFNotificationCenterPostNotification')
+        assert body.count('CFNotificationCenterPostNotification') == 1
+        assert 'self.securitySettings' not in body and 'synchronize' not in body and 'setBool:' not in body
+    web = identifier.method(security, DISPLAY_METHODS[0])
+    assert 'PXReadSecurityBool(@"deviceSpoofingEnabled", NO)' in web
+    assert web.index('PXWriteSecurityBool') < web.index('currentValueForIdentifier:') < web.index('WarningLabel.hidden')
     fixture = read('tests/PXRuntimeSecurityWriterTests.m')
     assert fixture.index('#define NSUserDefaults PXFixtureDefaults') < fixture.index('#include "../common/PXSecuritySettingsStore.m"')
     for case in ('empty security packet is a no-op without source or compatibility effects',
@@ -136,8 +156,20 @@ def source_contracts():
                  'IP monitor UI rolls back failed enable without starting service',
                  'IP monitor UI success starts and stops only after committed setting'):
         assert case in fixture, case
+    for case in ('failed display policy write restores persisted switch without mirrors or notifications',
+                 'failed display policy write leaves warning and version lookup untouched',
+                 'failed display toggle preserves missing-key defaults and absence',
+                 'display policy success commits once before all mirrors and one settings notification',
+                 'display rollback uses stored value rather than inverse sender state',
+                 'WebCompat warning preserves strict version threshold and master dependency',
+                 'background display action completes on main without synchronous dispatch'):
+        assert case in fixture, case
+    for case in ('malformed security scalar types preserve supplied defaults without unsafe selectors',
+                 'valid security number and string conversions remain unchanged',
+                 'rootful live scalar reader rejects malformed on-disk field types'):
+        assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3V-partial'
+    assert manifest['rollout'] == '4C.2H3W-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
@@ -159,6 +191,8 @@ def generate_native_fragments(folder):
     (folder / 'PXRegionSecurityHelpers.inc').write_text('\n\n'.join(identifier.method(read('SecurityTabViewController.m'), signature) for signature in ['static void PXPublishTargetRegionSettings(void)', 'static NSDictionary *PXCommitTargetRegionToggle(BOOL enabled)']), encoding='utf-8')
     (folder / 'PXRegionSecurityMethods.inc').write_text('\n\n'.join(identifier.method(read('SecurityTabViewController.m'), signature) for signature in REGION_METHODS), encoding='utf-8')
     (folder / 'PXTimeZoneSecurityMethods.inc').write_text('\n\n'.join(identifier.method(read('TimeSpoofDetailViewController.m'), signature) for signature in TIME_METHODS), encoding='utf-8')
+    (folder / 'PXDisplayPolicyMethods.inc').write_text('\n\n'.join(identifier.method(read('SecurityTabViewController.m'), signature) for signature in DISPLAY_METHODS), encoding='utf-8')
+    (folder / 'PXSecurityScalarReaders.inc').write_text('\n\n'.join(identifier.method(read('common/PXSecuritySettingsStore.m'), signature) for signature in SCALAR_READERS), encoding='utf-8')
 
 
 def native_tests():
@@ -166,7 +200,7 @@ def native_tests():
     with tempfile.TemporaryDirectory(prefix='px-security-writers-') as temp:
         folder = Path(temp)
         generate_native_fragments(folder)
-        sources = ['common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m', 'tests/PXRuntimeSecurityWriterTests.m']
+        sources = ['common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m', 'common/VersionCompare.m', 'tests/PXRuntimeSecurityWriterTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / scheme
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',

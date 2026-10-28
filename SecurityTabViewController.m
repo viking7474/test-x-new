@@ -3417,13 +3417,23 @@ static NSString *PXTargetRegionGPSPath(void) {
 }
 
 - (void)webCompatIOSRangeToggleChanged:(UISwitch *)sender {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf webCompatIOSRangeToggleChanged:sender]; });
+        return;
+    }
     BOOL enabled = sender.isOn;
-
-    [self.securitySettings setBool:enabled forKey:@"webCompatIOSRangeEnabled"];
-    [self.securitySettings synchronize];
+    BOOL previous = PXReadSecurityBool(@"webCompatIOSRangeEnabled", NO);
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"webCompatIOSRangeEnabled", enabled, &error)) {
+        [sender setOn:previous animated:YES];
+        PXLog(@"[Security] Failed to persist WebCompat iOS Range: %@", error);
+        [self showToastWithMessage:@"Could not save WebCompat iOS Range"];
+        return;
+    }
 
     NSString *currentIOSVersion = [[IdentifierManager sharedManager] currentValueForIdentifier:@"IOSVersion"];
-    BOOL deviceSpoofingEnabled = [self.securitySettings boolForKey:@"deviceSpoofingEnabled"];
+    BOOL deviceSpoofingEnabled = PXReadSecurityBool(@"deviceSpoofingEnabled", NO);
     BOOL showWarning = deviceSpoofingEnabled && enabled && currentIOSVersion.length && (PXCompareVersions(currentIOSVersion, @"16.3.1") == NSOrderedDescending);
     self.webCompatIOSRangeWarningLabel.hidden = !showWarning;
     if (self.webCompatIOSRangeWarningHeightConstraint) {
@@ -3460,9 +3470,21 @@ static NSString *PXTargetRegionGPSPath(void) {
 }
 
 - (void)displayUIScaleSpoofToggleChanged:(UISwitch *)sender {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf displayUIScaleSpoofToggleChanged:sender]; });
+        return;
+    }
     BOOL enabled = sender.isOn;
-    [self.securitySettings setBool:enabled forKey:@"displayUIScaleSpoofEnabled"];
-    [self.securitySettings synchronize];
+    // Preserve the configured default used by setup and runtime scope policy.
+    BOOL previous = PXReadSecurityBool(@"displayUIScaleSpoofEnabled", YES);
+    NSError *error = nil;
+    if (!PXWriteSecurityBool(@"displayUIScaleSpoofEnabled", enabled, &error)) {
+        [sender setOn:previous animated:YES];
+        PXLog(@"[Security] Failed to persist Display UI Scale: %@", error);
+        [self showToastWithMessage:@"Could not save Display UI Scale"];
+        return;
+    }
 
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {

@@ -34,12 +34,12 @@ id PXReadSecuritySetting(NSString *key) {
 
 BOOL PXReadSecurityBool(NSString *key, BOOL defaultValue) {
     id value = PXReadSecuritySetting(key);
-    return value == nil ? defaultValue : [value boolValue];
+    return ([value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]) ? [value boolValue] : defaultValue;
 }
 
 NSInteger PXReadSecurityInteger(NSString *key, NSInteger defaultValue) {
     id value = PXReadSecuritySetting(key);
-    return value == nil ? defaultValue : [value integerValue];
+    return ([value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]) ? [value integerValue] : defaultValue;
 }
 
 static BOOL PXSecurityWriteError(NSError **error, NSString *message) {

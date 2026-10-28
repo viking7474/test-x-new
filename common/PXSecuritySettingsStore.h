@@ -4,6 +4,8 @@
 NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT id _Nullable PXReadSecuritySetting(NSString *key);
+/// NSNumber/NSString retain their legacy conversions; missing or malformed
+/// scalar types use the caller's default rather than sending unsafe selectors.
 FOUNDATION_EXPORT BOOL PXReadSecurityBool(NSString *key, BOOL defaultValue);
 FOUNDATION_EXPORT NSInteger PXReadSecurityInteger(NSString *key, NSInteger defaultValue);
 /// Merge one detached update packet in the shared source transaction. Empty is a no-op.
