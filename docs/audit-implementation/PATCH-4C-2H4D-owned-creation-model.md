@@ -81,3 +81,41 @@ Directory/artifact/registry/selection vẫn là các phases có receipts riêng.
 rollback registered inactive profiles hoặc orphan reservations. Defaults authority,
 post-registration mutable state, archive/source crash atomicity và rootful reader
 rollout vẫn partial. Manifest `4C.2H4D-partial`; toàn Patch 4 chưa hoàn tất.
+
+## Follow-up — deletion archive value comparison
+
+CI compile thành công nhưng native rootful chỉ đạt 423/451. Fail đầu tiên ở inactive
+deletion, sau đó active delete, drift/recovery và legacy timestamps bị kéo theo.
+Không phải lỗi nullability warning hay package scheme.
+
+H4D giữ một legal nested Profile trong registry settings để kiểm tra secure class
+compatibility. Deletion validator decode Before/After riêng, rồi dùng NSArray/
+NSDictionary.isEqual cho settings. Profile không override isEqual/hash, nên nested
+instances có cùng persisted fields vẫn bị coi là khác do object identity. Prepare
+deletion bị reject trước checkpoint mong đợi, gây các failure/callback lệch nhịp sau
+đó. Đây là bug production của validator được fixture mới làm lộ, không sửa bằng cách
+xóa nested Profile test hoặc thu hẹp allowed secure classes.
+
+Thêm private registry value comparer: giữ Foundation primitive/key equality và
+ordered-array/dictionary-value rules, nhưng so sánh Profile theo ID, name, description,
+icon, settings và dates. Nested Profile dùng cùng before-missing/after-present timestamp
+provenance policy như root validator. Object-pair memo dùng pointer personality để
+tránh collection hash recursion và terminate value/container cycles. Memo chỉ thuộc
+một comparison; không override global Profile equality hoặc tạo cache lâu dài.
+
+Giữ nguyên exact one-profile removal, selected target presence, top-level metadata/
+dates, raw archive CAS, journal schema và recovery ownership checks. Không thay Before/
+After bytes hoặc replay authority. Dictionary key semantics vẫn theo NSDictionary;
+đây là sửa value comparison, không thêm một normalized-key policy.
+
+Native regression gọi actual validator với hai archive chứa cùng nested values,
+rồi thay lần lượt bảy nested fields (ID/name/description/icon/createdAt/lastUsed/
+settings) và yêu cầu reject. Thêm memo reset và cyclic container equality/inequality
+cases; giữ nguyên toàn bộ integration delete/recovery fixtures đã fail. Comparator
+work/allocation tăng theo visited graph pairs ở cold delete/recovery, chưa benchmark;
+không chạy trên hook hot path hoặc dưới source gate của commit/notification.
+
+Host: 62/63 Python + 4/4 Node pass, lỗi còn lại là bridge-shell Windows permission
+như trước; source hardening, RootHide build/package, macro/diff và 37-method extraction
+pass. Native rerun sau fix vẫn chờ macOS CI; không báo native delete/recovery pass từ
+Windows.

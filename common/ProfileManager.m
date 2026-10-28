@@ -78,6 +78,7 @@
 - (void)endProfileOperation;
 - (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error;
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error;
+- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen;
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error;
 - (BOOL)createProfileZeroWithError:(NSError **)error;
 - (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error;
@@ -1159,6 +1160,51 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     return nil;
 }
 
+- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen {
+    if (before == after) return YES;
+    if (!before || !after) return NO;
+    BOOL arrays = [before isKindOfClass:NSArray.class] && [after isKindOfClass:NSArray.class];
+    BOOL dictionaries = [before isKindOfClass:NSDictionary.class] && [after isKindOfClass:NSDictionary.class];
+    BOOL profiles = [before isKindOfClass:Profile.class] && [after isKindOfClass:Profile.class];
+    if (!arrays && !dictionaries && !profiles) return [before isEqual:after];
+    // Private decoded graphs may share nodes or contain cycles. Track pairs by
+    // pointer identity, without invoking a collection's recursive hash/isEqual.
+    if (!seen) seen = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality
+        valueOptions:NSPointerFunctionsStrongMemory];
+    NSHashTable *matches = [seen objectForKey:before];
+    if ([matches containsObject:after]) return YES;
+    if (!matches) {
+        matches = [NSHashTable hashTableWithOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
+        [seen setObject:matches forKey:before];
+    }
+    [matches addObject:after];
+    if (arrays) {
+        NSArray *left = before, *right = after;
+        if (left.count != right.count) return NO;
+        for (NSUInteger index = 0; index < left.count; index++)
+            if (![self registryValue:left[index] matchesValue:right[index] seen:seen]) return NO;
+        return YES;
+    }
+    if (dictionaries) {
+        NSDictionary *left = before, *right = after;
+        if (left.count != right.count) return NO;
+        // Retain NSDictionary's key-equality policy; values include Profile,
+        // which has no value-based isEqual implementation of its own.
+        for (id key in left)
+            if (!right[key] || ![self registryValue:left[key] matchesValue:right[key] seen:seen]) return NO;
+        return YES;
+    }
+    Profile *left = before, *right = after;
+    NSArray *leftFields = @[left.profileId ?: NSNull.null, left.name ?: NSNull.null,
+        left.shortDescription ?: NSNull.null, left.iconName ?: NSNull.null, left.settings ?: NSNull.null];
+    NSArray *rightFields = @[right.profileId ?: NSNull.null, right.name ?: NSNull.null,
+        right.shortDescription ?: NSNull.null, right.iconName ?: NSNull.null, right.settings ?: NSNull.null];
+    return [self registryValue:leftFields matchesValue:rightFields seen:seen] &&
+        !right.pxDecodedMissingCreatedAt && !right.pxDecodedMissingLastUsed &&
+        (left.pxDecodedMissingCreatedAt || [left.createdAt isEqual:right.createdAt]) &&
+        (left.pxDecodedMissingLastUsed || [left.lastUsed isEqual:right.lastUsed]);
+}
+
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error {
     NSArray *before = [self decodeRegistryRecord:intent[@"registryBefore"] error:error];
     NSArray *after = before ? [self decodeRegistryRecord:intent[@"registryAfter"] error:error] : nil;
@@ -1178,7 +1224,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         BOOL datesValid = !profile.pxDecodedMissingCreatedAt && !profile.pxDecodedMissingLastUsed &&
             (original.pxDecodedMissingCreatedAt || [original.createdAt isEqual:profile.createdAt]) &&
             (original.pxDecodedMissingLastUsed || [original.lastUsed isEqual:profile.lastUsed]);
-        if (![oldFields isEqual:newFields] || !datesValid) { valid = NO; break; }
+        if (![self registryValue:oldFields matchesValue:newFields seen:nil] || !datesValid) { valid = NO; break; }
     }
     NSDictionary *pair = intent[@"selectionAfter"];
     NSDictionary *record = [pair[PXCurrentProfileInfoPath()][@"exists"] boolValue] ? pair[PXCurrentProfileInfoPath()] : pair[PXLegacyActiveProfileInfoPath()];

@@ -47,6 +47,7 @@ METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void
     '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error']
 METHODS += ['- (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error',
             '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error',
+            '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen',
             '- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error']
 
 
@@ -326,6 +327,20 @@ def source_contracts():
     for signature in METHODS[:4]:
         assert 'beginProfileOperationWithError:' in writers.method(source, signature)
     delete = writers.method(source, '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error')
+    compare = writers.method(source, '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen')
+    archive_validation = writers.method(source, '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error')
+    assert 'registryValue:oldFields matchesValue:newFields seen:nil' in archive_validation
+    assert '[oldFields isEqual:newFields]' not in archive_validation and '|| !datesValid' in archive_validation
+    for token in ('Profile.class', 'NSArray.class', 'NSDictionary.class', 'NSPointerFunctionsObjectPointerPersonality',
+                  'left.profileId', 'left.name', 'left.shortDescription', 'left.iconName', 'left.settings',
+                  'right.pxDecodedMissingCreatedAt', 'right.pxDecodedMissingLastUsed', '[before isEqual:after]'):
+        assert token in compare, token
+    for case in ('deletion archive validation preserves equal nested Profile values across separate decodes',
+                 'deletion archive validation rejects changes to every nested Profile identity metadata date or settings field',
+                 'nested archive comparison has no persistent memo state and preserves original before bytes',
+                 'registry value comparison terminates for equivalent cyclic containers',
+                 'registry value comparison still rejects mismatched values inside cycles'):
+        assert case in fixture, case
     assert delete.index('PXPrepareProfileDeletion(') < delete.index('PXCommitProfileDeletion(') < delete.index('writeRegistryData:afterBytes') < delete.index('removeDirectoryForProfileID:')
     assert 'PXMarkProfileDeletionArchiveWritten(' in delete and 'PXRecoverProfileDeletion(' in delete
     for signature in ('- (BOOL)bootstrapProfileSelectionWithError:(NSError **)error',

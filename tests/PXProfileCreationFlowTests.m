@@ -379,6 +379,49 @@ static void TestCreationOwnedModel(PXProfileCreationFixture *manager) {
         "uncapturable creation input fails before reservation providers registry or publication");
 }
 
+static void TestNestedProfileArchiveValidation(PXProfileCreationFixture *manager) {
+    Profile *retained = New(@"nested-retained"), *removed = New(@"nested-removed"), *child = New(@"nested-child");
+    [retained setValue:@"nested-retained" forKey:@"profileId"]; [removed setValue:@"nested-removed" forKey:@"profileId"];
+    retained.settings = @{ @"nested": @{ @"children": @[child] }, @"bytes": [@"value" dataUsingEncoding:NSUTF8StringEncoding] };
+    NSArray *beforeModels = @[retained, removed], *afterModels = @[retained]; NSError *error = nil;
+    NSData *beforeBytes = [NSKeyedArchiver archivedDataWithRootObject:beforeModels requiringSecureCoding:YES error:&error];
+    NSData *afterBytes = [NSKeyedArchiver archivedDataWithRootObject:afterModels requiringSecureCoding:YES error:&error];
+    NSDictionary *selected = @{ @"exists": @YES, @"info": @{ @"ProfileId": retained.profileId } };
+    NSDictionary *pair = @{ PXCurrentProfileInfoPath(): selected, PXLegacyActiveProfileInfoPath(): selected };
+    NSDictionary *beforeRecord = @{ @"exists": @YES, @"bytes": beforeBytes ?: NSData.data };
+    NSDictionary *afterRecord = @{ @"exists": @YES, @"bytes": afterBytes ?: NSData.data };
+    NSMutableDictionary *intent = [@{ @"registryBefore": beforeRecord, @"registryAfter": afterRecord,
+        @"targetID": removed.profileId, @"selectionAfter": pair } mutableCopy];
+    CHECK(beforeBytes && afterBytes && !error && [manager validateDeletionArchives:intent error:&error] && !error,
+        "deletion archive validation preserves equal nested Profile values across separate decodes");
+    for (NSUInteger field = 0; field < 7; field++) {
+        Profile *changed = [manager detachedProfileForCreation:retained expectedID:retained.profileId error:NULL];
+        Profile *changedChild = [changed.settings[@"nested"][@"children"] firstObject];
+        if (field == 0) [changedChild setValue:@"different-child-id" forKey:@"profileId"];
+        else if (field == 1) changedChild.name = @"changed child";
+        else if (field == 2) changedChild.shortDescription = @"changed description";
+        else if (field == 3) changedChild.iconName = @"changed icon";
+        else if (field == 4) changedChild.createdAt = [changedChild.createdAt dateByAddingTimeInterval:10];
+        else if (field == 5) changedChild.lastUsed = [changedChild.lastUsed dateByAddingTimeInterval:10];
+        else changedChild.settings = @{ @"changed": @YES };
+        NSArray *changedModels = changed ? @[changed] : @[];
+        NSData *changedBytes = [NSKeyedArchiver archivedDataWithRootObject:changedModels requiringSecureCoding:YES error:NULL];
+        intent[@"registryAfter"] = @{ @"exists": @YES, @"bytes": changedBytes ?: NSData.data }; error = nil;
+        CHECK(changed && changedChild && changedBytes && ![manager validateDeletionArchives:intent error:&error] && error.code == 27,
+            "deletion archive validation rejects changes to every nested Profile identity metadata date or settings field");
+    }
+    intent[@"registryAfter"] = afterRecord; error = nil;
+    CHECK([manager validateDeletionArchives:intent error:&error] && !error && [intent[@"registryBefore"] isEqual:beforeRecord],
+        "nested archive comparison has no persistent memo state and preserves original before bytes");
+    NSMutableArray *left = [NSMutableArray array], *right = [NSMutableArray array];
+    [left addObject:left]; [left addObject:@"same"];
+    [right addObject:right]; [right addObject:@"same"];
+    CHECK([manager registryValue:left matchesValue:right seen:nil], "registry value comparison terminates for equivalent cyclic containers");
+    right[1] = @"different";
+    CHECK(![manager registryValue:left matchesValue:right seen:nil], "registry value comparison still rejects mismatched values inside cycles");
+    [left removeAllObjects]; [right removeAllObjects];
+}
+
 static void TestConflicts(PXProfileCreationFixture *manager) {
     for (NSUInteger mode = 0; mode < 3; mode++) {
         ResetWorker(); __block NSUInteger callbacks = 0; __block BOOL success = YES; __block NSError *failure;
@@ -1339,7 +1382,7 @@ int main(int argc, const char *argv[]) {
                 committedID.UTF8String ?: "nil", memoryID.UTF8String ?: "nil", gMirroredID.UTF8String ?: "nil", gMemoryAtLastMirrorID.UTF8String ?: "nil");
             if (gThrowObserver) [NSException raise:@"fixture" format:@"observer failed after commit"];
         }];
-        TestCreation(manager, zero); TestCreationOwnedModel(manager); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
+        TestCreation(manager, zero); TestCreationOwnedModel(manager); TestNestedProfileArchiveValidation(manager); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager); TestCreationDisplayDrift(manager);
         TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
