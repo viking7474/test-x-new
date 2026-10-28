@@ -23,7 +23,7 @@ IP_UI = '- (void)ipMonitorToggleChanged:(UISwitch *)sender'
 REGION_METHODS = ['- (NSDictionary *)targetRegionDefaultsForCountryCode:(NSString *)countryCode',
                   '- (BOOL)persistPinnedTargetRegionFromResponse:(NSDictionary *)json error:(NSError **)error',
                   '- (BOOL)persistTimeZoneName:(NSString *)name forKey:(NSString *)key',
-                  '- (void)publishTargetRegionChanged', '- (void)targetRegionFollowsIPToggleChanged:(UISwitch *)sender']
+                  '- (void)publishTargetRegionChanged']
 TIME_METHODS = ['- (void)publishTimeSpoofSettingsChanged', '- (BOOL)persistLocationTimeZoneName:(NSString *)name']
 
 
@@ -73,7 +73,10 @@ def source_contracts():
     assert 'setBool:' not in ui and 'synchronize' not in ui and 'startMonitoring]' not in ui and 'stopMonitoring]' not in ui
     assert ui.index('return;') < ui.index('[self updateSecurityHeroCount]')
     security = read('SecurityTabViewController.m')
-    defaults, region, zone, publish, toggle = [identifier.method(security, signature) for signature in REGION_METHODS]
+    defaults, region, zone, publish = [identifier.method(security, signature) for signature in REGION_METHODS]
+    toggle = identifier.method(security, '- (void)targetRegionFollowsIPToggleChanged:(UISwitch *)sender')
+    toggle_commit = identifier.method(security, 'static NSDictionary *PXCommitTargetRegionToggle(BOOL enabled)')
+    publisher = identifier.method(security, 'static void PXPublishTargetRegionSettings(void)')
     assert region.count('PXWriteSecuritySettings(values, error)') == 1
     for token in ('targetRegionPinnedCountryCode', 'targetRegionPinnedTimeZoneName', 'targetRegionPinnedCarrierISO',
                   'targetRegionPinnedCarrierMCC', 'targetRegionPinnedCarrierMNC', 'targetRegionPinnedCarrierName',
@@ -81,13 +84,14 @@ def source_contracts():
                   'targetRegionPinnedLongitude', 'targetRegionPinnedTimestamp', 'targetRegionPinnedSourceIP', 'networkISOCountryCode'):
         assert token in region, token
     assert 'if ([defaults[@"carrierISO"] length])' in region and 'preferredLanguages"] isKindOfClass:NSArray.class' in region
-    assert 'if (!PXWriteSecurityBool(@"targetRegionFollowsIPEnabled", enabled, &error))' in toggle
-    assert toggle.index('[sender setOn:previous animated:YES]') < toggle.index('return;') < toggle.index('[self publishTargetRegionChanged]')
-    assert publish.count('CFNotificationCenterPostNotification') == 3
-    sync = identifier.method(security, '- (void)syncTargetRegionFromIPTapped:(id)sender')
+    assert 'if (!PXWriteSecurityBool(@"targetRegionFollowsIPEnabled", enabled, &error))' in toggle_commit
+    assert 'performChange:^NSDictionary *' in toggle and 'PXCommitTargetRegionToggle(enabled)' in toggle
+    assert toggle_commit.index('return @{ @"success": @NO') < toggle_commit.index('PXPublishTargetRegionSettings();')
+    assert publisher.count('CFNotificationCenterPostNotification') == 3 and 'PXPublishTargetRegionSettings();' in publish
+    sync = identifier.method(security, '- (NSDictionary *)applyTargetRegionResponse:(NSDictionary *)json')
     assert 'PXWriteSecuritySetting(' not in sync and 'synchronize' not in sync and 'self.securitySettings set' not in sync
     assert sync.index('if (![self persistPinnedTargetRegionFromResponse:json error:&writeError])') < sync.index('[IPStatusCacheManager savePinnedLocation:') < sync.index('[self publishTargetRegionChanged]')
-    assert 'return;' in sync[sync.index('persistPinnedTargetRegionFromResponse:'):sync.index('[IPStatusCacheManager savePinnedLocation:')]
+    assert 'return @{ @"success": @NO' in sync[sync.index('persistPinnedTargetRegionFromResponse:'):sync.index('[IPStatusCacheManager savePinnedLocation:')]
     assert 'persistTimeZoneName:timeZoneId forKey:@"timeSpoofLocationTimeZoneName"' in security
     assert 'persistTimeZoneName:timezoneName forKey:@"timeSpoofIPAddressTimeZoneName"' in security
     assert zone.index('return NO;') < zone.index('CFNotificationCenterPostNotification')
@@ -118,7 +122,7 @@ def source_contracts():
                  'region packet preserves omitted language source IP and legacy ISO policy',
                  'invalid region payload and defaults fail before source entry',
                  'region and timezone source faults preserve bytes token mirrors and notifications',
-                 'region toggle rolls back failed persistence without publishing success',
+                 'region toggle commit returns previous state on failure without publishing success',
                  'region toggle success retains all three notification topics',
                  'timezone adapters notify only after committed source and preserve unrelated values'):
         assert case in fixture, case
@@ -133,7 +137,7 @@ def source_contracts():
                  'IP monitor UI success starts and stops only after committed setting'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3U-partial'
+    assert manifest['rollout'] == '4C.2H3V-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
@@ -152,6 +156,7 @@ def generate_native_fragments(folder):
     (folder / 'PXCanvasDetailMethod.inc').write_text(identifier.method(read('CanvasDetailViewController.m'), DETAIL), encoding='utf-8')
     (folder / 'PXIPMonitorMethods.inc').write_text('\n\n'.join(identifier.method(read('common/IPMonitorService.m'), signature) for signature in IP_METHODS), encoding='utf-8')
     (folder / 'PXIPMonitorUIMethod.inc').write_text(identifier.method(read('SecurityTabViewController.m'), IP_UI), encoding='utf-8')
+    (folder / 'PXRegionSecurityHelpers.inc').write_text('\n\n'.join(identifier.method(read('SecurityTabViewController.m'), signature) for signature in ['static void PXPublishTargetRegionSettings(void)', 'static NSDictionary *PXCommitTargetRegionToggle(BOOL enabled)']), encoding='utf-8')
     (folder / 'PXRegionSecurityMethods.inc').write_text('\n\n'.join(identifier.method(read('SecurityTabViewController.m'), signature) for signature in REGION_METHODS), encoding='utf-8')
     (folder / 'PXTimeZoneSecurityMethods.inc').write_text('\n\n'.join(identifier.method(read('TimeSpoofDetailViewController.m'), signature) for signature in TIME_METHODS), encoding='utf-8')
 

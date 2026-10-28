@@ -179,12 +179,12 @@ static NSDictionary *gRegionDefaults;
 - (BOOL)persistPinnedTargetRegionFromResponse:(NSDictionary *)json error:(NSError **)error;
 - (BOOL)persistTimeZoneName:(NSString *)name forKey:(NSString *)key;
 - (void)publishTargetRegionChanged;
-- (void)targetRegionFollowsIPToggleChanged:(PXMonitorSwitch *)sender;
 @end
 #define UISwitch PXMonitorSwitch
 #define PXReadSecurityBool PXManagerReadSecurityBool
 #define CFNotificationCenterGetDarwinNotifyCenter() ((CFNotificationCenterRef)(uintptr_t)1)
 #define CFNotificationCenterPostNotification PXFixturePostDarwin
+#include "PXRegionSecurityHelpers.inc"
 @implementation PXRegionFixture
 #include "PXRegionSecurityMethods.inc"
 @end
@@ -414,22 +414,23 @@ static void TestRegionAndTimeZoneWriters(void) {
     CHECK(!pinned && !locationZone && !ipZone && !detailZone && faults == 4 && [before isEqual:Capture()] && mirrors == gMirrors &&
           notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
           "region and timezone source faults preserve bytes token mirrors and notifications");
-    [region targetRegionFollowsIPToggleChanged:sender];
-    CHECK(!sender.isOn && [region.toast hasPrefix:@"Could not"] && [before isEqual:Capture()] && notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
-          "region toggle rolls back failed persistence without publishing success");
+    NSDictionary *toggleResult = PXCommitTargetRegionToggle(sender.isOn);
+    CHECK(![toggleResult[@"enabled"] boolValue] && [toggleResult[@"message"] hasPrefix:@"Could not"] && [before isEqual:Capture()] && notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
+          "region toggle commit returns previous state on failure without publishing success");
     void (^faultCheckpoint)(NSString *) = gStore.testCheckpoint;
     gStore.testCheckpoint = nil;
     NSMutableDictionary *enabledLegacy = [legacy mutableCopy]; enabledLegacy[@"targetRegionFollowsIPEnabled"] = @YES;
     CHECK(Seed(enabledLegacy), "region failed disable baseline seeded"); before = Capture(); sender.on = NO;
     gStore.testCheckpoint = faultCheckpoint;
-    [region targetRegionFollowsIPToggleChanged:sender];
-    CHECK(sender.isOn && [before isEqual:Capture()] && notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
-          "region toggle rolls back failed persistence without publishing success");
+    toggleResult = PXCommitTargetRegionToggle(sender.isOn);
+    CHECK([toggleResult[@"enabled"] boolValue] && [before isEqual:Capture()] && notices == gSettingsNotices && carriers == gRegionCarrierNotices && isos == gRegionISONotices,
+          "region toggle commit returns previous state on failure without publishing success");
     gStore.testCheckpoint = nil;
     CHECK(Seed(legacy), "region successful toggles baseline seeded");
-    sender.on = YES; [region targetRegionFollowsIPToggleChanged:sender];
-    sender.on = NO; [region targetRegionFollowsIPToggleChanged:sender];
-    CHECK(!sender.isOn && ![Load()[@"targetRegionFollowsIPEnabled"] boolValue] && notices + 2 == gSettingsNotices && carriers + 2 == gRegionCarrierNotices && isos + 2 == gRegionISONotices,
+    sender.on = YES; toggleResult = PXCommitTargetRegionToggle(sender.isOn);
+    CHECK([toggleResult[@"success"] boolValue] && [toggleResult[@"enabled"] boolValue], "region successful enable commit returns enabled state");
+    sender.on = NO; toggleResult = PXCommitTargetRegionToggle(sender.isOn);
+    CHECK([toggleResult[@"success"] boolValue] && ![toggleResult[@"enabled"] boolValue] && ![Load()[@"targetRegionFollowsIPEnabled"] boolValue] && notices + 2 == gSettingsNotices && carriers + 2 == gRegionCarrierNotices && isos + 2 == gRegionISONotices,
           "region toggle success retains all three notification topics");
     notices = gSettingsNotices; carriers = gRegionCarrierNotices; isos = gRegionISONotices;
     BOOL first = [region persistTimeZoneName:@"Asia/Tokyo" forKey:@"timeSpoofLocationTimeZoneName"];

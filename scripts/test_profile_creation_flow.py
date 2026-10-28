@@ -85,7 +85,7 @@ def source_contracts():
         raise AssertionError('macro checker missed an unprotected dictionary comma')
     check_macro_arity('CHECK(([tx write:@{ @"first": @1, @"second": @2 }]), "literal, message()");', 'protected-literal')
     check_macro_arity('/* CHECK(not, an, invocation) */ CHECK(ok && (a, b), "escaped \\\"quote");', 'comments-and-strings')
-    for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m', 'tests/PXRuntimeArtifactWriterTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXRuntimeIdentifierWriterTests.m', 'tests/PXRuntimeSecurityWriterTests.m', 'tests/PXIPMonitorLifecycleTests.m', 'tests/PXPinnedTimeZoneLifecycleTests.m', 'tests/PXPinnedCountryLifecycleTests.m', 'tests/PXIPDisplayLifecycleTests.m'):
+    for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m', 'tests/PXRuntimeArtifactWriterTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXRuntimeIdentifierWriterTests.m', 'tests/PXRuntimeSecurityWriterTests.m', 'tests/PXIPMonitorLifecycleTests.m', 'tests/PXPinnedTimeZoneLifecycleTests.m', 'tests/PXPinnedCountryLifecycleTests.m', 'tests/PXIPDisplayLifecycleTests.m', 'tests/PXTargetRegionLifecycleTests.m'):
         check_macro_arity(read(path), path)
     source = read('common/ProfileManager.m')
     create = writers.method(source, CREATE)
@@ -260,7 +260,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3U-partial'
+    assert manifest['rollout'] == '4C.2H3V-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')

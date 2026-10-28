@@ -4,6 +4,7 @@
 #import "common/PXPinnedTimeZoneLookup.h"
 #import "common/PXPinnedCountryLookup.h"
 #import "common/PXIPDisplayLookup.h"
+#import "common/PXTargetRegionSync.h"
 #import "common/PXJailbreakCompat.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
@@ -82,6 +83,8 @@
 @property (nonatomic, strong) PXPinnedTimeZoneLookup *pinnedTimeZoneLookup;
 @property (nonatomic, strong) PXPinnedCountryLookup *pinnedCountryLookup;
 @property (nonatomic, strong) PXIPDisplayLookup *ipDisplayLookup;
+@property (nonatomic, strong) PXTargetRegionSync *targetRegionSync;
+- (NSDictionary *)applyTargetRegionResponse:(NSDictionary *)json;
 - (void)fetchIPDisplayUsingFallback:(BOOL)fallback;
 @property (nonatomic, strong) UITextField *localIPv6Field;
 @property (nonatomic, strong) UIButton *localIPv6GenerateButton;
@@ -1173,7 +1176,7 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     return PXWriteSecuritySettings(values, error);
 }
 
-- (void)publishTargetRegionChanged {
+static void PXPublishTargetRegionSettings(void) {
     CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
     if (darwinCenter) {
         CFNotificationCenterPostNotification(darwinCenter, CFSTR("com.hydra.tlinkios.settings.changed"), NULL, NULL, YES);
@@ -1182,105 +1185,88 @@ static NSString *PXFlagEmojiFromCountryCode(NSString *cc) {
     }
 }
 
-- (void)targetRegionFollowsIPToggleChanged:(UISwitch *)sender {
-    BOOL enabled = sender.isOn;
+static NSDictionary *PXCommitTargetRegionToggle(BOOL enabled) {
+    // Read rollback state on the ordered worker, after any admitted sync write.
     BOOL previous = PXReadSecurityBool(@"targetRegionFollowsIPEnabled", NO);
     NSError *error = nil;
     if (!PXWriteSecurityBool(@"targetRegionFollowsIPEnabled", enabled, &error)) {
-        [sender setOn:previous animated:YES];
         PXLog(@"[Security] Failed to persist TargetRegion toggle: %@", error);
-        [self showToastWithMessage:@"Could not save TargetRegion setting"];
+        return @{ @"success": @NO, @"enabled": @(previous), @"message": @"Could not save TargetRegion setting" };
+    }
+    PXPublishTargetRegionSettings();
+    return @{ @"success": @YES, @"enabled": @(enabled) };
+}
+
+static NSString *PXTargetRegionGPSPath(void) {
+    return @"/var/mobile/Library/Preferences/com.weaponx.gpsspoofing.plist";
+}
+
+- (void)publishTargetRegionChanged {
+    PXPublishTargetRegionSettings();
+}
+
+- (void)targetRegionFollowsIPToggleChanged:(UISwitch *)sender {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf targetRegionFollowsIPToggleChanged:sender]; });
         return;
     }
+    BOOL enabled = sender.isOn;
+    if (!self.targetRegionSync) self.targetRegionSync = [PXTargetRegionSync new];
+    __weak typeof(self) weakSelf = self;
+    __weak UISwitch *weakSender = sender;
+    // Detached explicit setting change survives a popped/deallocated controller.
+    [self.targetRegionSync performChange:^NSDictionary *{ return PXCommitTargetRegionToggle(enabled); }
+        completion:^(NSDictionary *result) {
+        __strong typeof(weakSelf) self = weakSelf;
+        UISwitch *current = weakSender;
+        if (!self || !current) return;
+        [current setOn:[result[@"enabled"] boolValue] animated:YES];
+        if (![result[@"success"] boolValue]) [self showToastWithMessage:result[@"message"]];
+    }];
+}
+
+- (NSDictionary *)applyTargetRegionResponse:(NSDictionary *)json {
+    NSString *cc = json[@"countryCode"], *tz = json[@"timezone"];
+    NSNumber *latN = json[@"lat"], *lonN = json[@"lon"];
+    NSError *writeError = nil;
+    if (![self persistPinnedTargetRegionFromResponse:json error:&writeError]) {
+        PXLog(@"[Security] Failed to persist TargetRegion packet: %@", writeError);
+        return @{ @"success": @NO, @"message": @"Could not save TargetRegion settings" };
+    }
+    // These compatibility writes remain separate from the primary security commit.
+    CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(latN.doubleValue, lonN.doubleValue);
+    NSString *flag = PXFlagEmojiFromCountryCode(cc);
+    [IPStatusCacheManager savePinnedLocation:coord countryCode:[cc uppercaseString] flagEmoji:flag timestamp:[NSDate date]];
+    NSString *gpsPlist = PXTargetRegionGPSPath();
+    NSMutableDictionary *gpsSettings = [NSMutableDictionary dictionaryWithContentsOfFile:gpsPlist];
+    if (!gpsSettings) gpsSettings = [NSMutableDictionary dictionary];
+    gpsSettings[@"PinnedLocation"] = @{ @"latitude": @(latN.doubleValue), @"longitude": @(lonN.doubleValue) };
+    gpsSettings[@"GPSSpoofingToggleEnabled"] = @YES;
+    [gpsSettings writeToFile:gpsPlist atomically:YES];
     [self publishTargetRegionChanged];
+    return @{ @"success": @YES, @"message": [NSString stringWithFormat:@"Pinned %@ (%@)", [cc uppercaseString], tz] };
 }
 
 - (void)syncTargetRegionFromIPTapped:(id)sender {
-    // Fetch geo from IP and pin it. We intentionally do NOT auto-update on IP change.
-    NSURL *url = [NSURL URLWithString:@"https://ip-api.com/json/?fields=status,message,countryCode,lat,lon,timezone,query"];
-    if (!url) {
-        [self showToastWithMessage:@"Invalid IP API URL"]; 
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf syncTargetRegionFromIPTapped:sender]; });
         return;
     }
-
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    cfg.timeoutIntervalForRequest = 10.0;
-    cfg.timeoutIntervalForResource = 15.0;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-
+    // Explicit sync only: same endpoint/pinning policy, no automatic IP polling.
+    if (!self.targetRegionSync) self.targetRegionSync = [PXTargetRegionSync new];
     [self showToastWithMessage:@"Syncing TargetRegion from IP..."];
-    [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data.length) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToastWithMessage:@"IP geo fetch failed"]; 
-            });
-            return;
-        }
-
-        NSDictionary *json = nil;
-        @try {
-            json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        } @catch (__unused NSException *e) {
-        }
-
-        if (![json isKindOfClass:[NSDictionary class]]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToastWithMessage:@"IP geo parse failed"]; 
-            });
-            return;
-        }
-
-        NSString *status = [json[@"status"] isKindOfClass:[NSString class]] ? json[@"status"] : @"";
-        if (![status isEqualToString:@"success"]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToastWithMessage:@"IP geo service error"]; 
-            });
-            return;
-        }
-
-        NSString *cc = [json[@"countryCode"] isKindOfClass:[NSString class]] ? json[@"countryCode"] : nil;
-        NSNumber *latN = [json[@"lat"] isKindOfClass:[NSNumber class]] ? json[@"lat"] : nil;
-        NSNumber *lonN = [json[@"lon"] isKindOfClass:[NSNumber class]] ? json[@"lon"] : nil;
-        NSString *tz = [json[@"timezone"] isKindOfClass:[NSString class]] ? json[@"timezone"] : nil;
-
-        if (!cc.length || !latN || !lonN || !tz.length) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToastWithMessage:@"IP geo missing fields"]; 
-            });
-            return;
-        }
-
-        NSError *writeError = nil;
-        if (![self persistPinnedTargetRegionFromResponse:json error:&writeError]) {
-            PXLog(@"[Security] Failed to persist TargetRegion packet: %@", writeError);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToastWithMessage:@"Could not save TargetRegion settings"];
-            });
-            return;
-        }
-
-        // Update pinned GPS location (so CLLocation spoof stays consistent with IP region).
-        CLLocationCoordinate2D coord = CLLocationCoordinate2DMake([latN doubleValue], [lonN doubleValue]);
-        NSString *flag = PXFlagEmojiFromCountryCode(cc);
-        [IPStatusCacheManager savePinnedLocation:coord countryCode:[cc uppercaseString] flagEmoji:flag timestamp:[NSDate date]];
-
-        // Also write to the GPS spoofing plist used by LocationSpoofingManager.
-        NSString *gpsPlist = @"/var/mobile/Library/Preferences/com.weaponx.gpsspoofing.plist";
-        NSMutableDictionary *gpsSettings = [NSMutableDictionary dictionaryWithContentsOfFile:gpsPlist];
-        if (!gpsSettings) gpsSettings = [NSMutableDictionary dictionary];
-        gpsSettings[@"PinnedLocation"] = @{ @"latitude": @([latN doubleValue]), @"longitude": @([lonN doubleValue]) };
-        gpsSettings[@"GPSSpoofingToggleEnabled"] = @YES;
-        [gpsSettings writeToFile:gpsPlist atomically:YES];
-
-        [self publishTargetRegionChanged];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (self.targetRegionFollowsIPToggleSwitch) {
-                [self.targetRegionFollowsIPToggleSwitch setOn:YES animated:YES];
-            }
-            [self showToastWithMessage:[NSString stringWithFormat:@"Pinned %@ (%@)", [cc uppercaseString], tz]];
-        });
-    }] resume];
+    __weak typeof(self) weakSelf = self;
+    [self.targetRegionSync syncWithApply:^NSDictionary *(NSDictionary *json) {
+        __strong typeof(weakSelf) self = weakSelf;
+        return self ? [self applyTargetRegionResponse:json] : nil;
+    } completion:^(NSDictionary *result) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if ([result[@"success"] boolValue]) [self.targetRegionFollowsIPToggleSwitch setOn:YES animated:YES];
+        [self showToastWithMessage:result[@"message"]];
+    }];
 }
 
 - (void)fixVersionAppsChanged:(NSNotification *)note {
