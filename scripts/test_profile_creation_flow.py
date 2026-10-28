@@ -88,6 +88,31 @@ def source_contracts():
     for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m', 'tests/PXRuntimeArtifactWriterTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXRuntimeIdentifierWriterTests.m', 'tests/PXRuntimeSecurityWriterTests.m', 'tests/PXIPMonitorLifecycleTests.m', 'tests/PXPinnedTimeZoneLifecycleTests.m', 'tests/PXPinnedCountryLifecycleTests.m', 'tests/PXIPDisplayLifecycleTests.m', 'tests/PXTargetRegionLifecycleTests.m'):
         check_macro_arity(read(path), path)
     source = read('common/ProfileManager.m')
+    update = writers.method(source, '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error')
+    assert 'writeToFile:' not in update and 'createDirectoryIfNeeded:' not in update and 'saveProfilesWithCompletion:' not in update
+    assert update.index('archivedDataWithRootObject:candidate') < update.index('PXWriteProfileDisplayMetadata(') < update.index('writeRegistryData:archive') < update.index('self.mutableProfiles = candidate')
+    assert 'expected:self.registryRecord' in update and 'self.registryRecord =' in update
+    assert '#import "PXProfileMetadataWriter.h"' in source
+    fixture = read('tests/PXProfileCreationFlowTests.m')
+    assert '#import "PXProfileMetadataWriter.h"' in fixture and 'PXPerformStandaloneRuntimeSourceWrite(' in fixture
+    metadata = read('common/PXProfileMetadataWriter.m')
+    assert 'borrowWithLifecycleLease:lease profileID:targetID' in metadata
+    assert 'PXPerformStandaloneRuntimeSourceWrite' in metadata and '[scope performSourceWrite:' in metadata
+    assert metadata.count('[staging setDictionary:') == 4 and 'dictionaryAtPath:scopedPath' in metadata
+    assert 'if (!existing) return NO;' in metadata and 'if (!scoped[@"Apps"])' in metadata
+    assert 'mkdirat(rootFD, "appdata", 0755)' in metadata and 'openat(rootFD, "appdata"' in metadata
+    assert 'O_NOFOLLOW' in metadata and 'held.st_ino != current.st_ino' in metadata
+    assert '@finally' in metadata and 'close(appDataFD)' in metadata and 'close(rootFD)' in metadata and '[scope invalidate]' in metadata
+    for case in ('metadata fault after each file rolls back bytes and absence before registry memory or notification',
+                 'metadata update commits all display files once before registry adoption and preserves scoped extras and selection',
+                 'registry failure after metadata commit reports partial failure without memory adoption or success notification',
+                 'corrupt scoped metadata rejects entire edit without silent repair',
+                 'metadata registry encoding failure stops before any display file write',
+                 'metadata writer rejects appdata symlink without writing its target or registry',
+                 'metadata borrowed root supports legacy profile without creating identity or releasing parent lease',
+                 'metadata high-level writer cannot acknowledge an uncommitted outer transaction',
+                 'metadata writer rejects expired caller lease'):
+        assert case in fixture, case
     create = writers.method(source, CREATE)
     assert 'reserveProfileID:profile.profileId' in create and 'self.creationReservation = reservation;' in create
     assert 'createDirectoryIfNeeded:' not in create and 'writeToFile:' not in create
@@ -260,7 +285,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3Z-partial'
+    assert manifest['rollout'] == '4C.2H4A-partial'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['profile-create-completion']['status'] == 'partial'
     assert 'test_profile_creation_flow.py --native' in read('.github/workflows/build-ios-arm.yml')
@@ -287,6 +312,7 @@ def native_tests():
         generate_native_fragments(folder)
         sources = ['common/PXProfileDeletionJournal.m', 'common/PXProfileLifecycleLease.m', 'common/PXProfileCreationReservation.m', 'common/PXRuntimeProfileSelection.m', 'common/PXRuntimeSourceStore.m', 'common/PXRuntimePublisher.m',
                    'common/PXRuntimeGeneration.m', 'common/PXRuntimeArtifactWriter.m', 'common/PXRuntimeIdentifierWriter.m',
+                   'common/PXProfileArtifactMutation.m', 'common/PXProfileMetadataWriter.m',
                    'tests/PXProfileCreationFlowTests.m']
         for scheme, defines in (('rootful', []), ('roothide', ['-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1'])):
             binary = folder / scheme

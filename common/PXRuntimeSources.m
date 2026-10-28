@@ -35,7 +35,8 @@ static PXRuntimeSourceStore *PXProcessSourceStore(NSError **error) {
                 if (![path hasPrefix:prefix]) return NO;
                 NSArray<NSString *> *parts = [[path substringFromIndex:prefix.length] componentsSeparatedByString:@"/"];
                 if (!parts.count || ![PXValidatedProfileID(parts[0]) isEqualToString:parts[0]]) return NO;
-                BOOL valid = (parts.count == 2 && [@[@"settings.plist", @"storage.plist", @"battery_info.plist"] containsObject:parts[1]]) ||
+                BOOL valid = (parts.count == 2 && [@[@"settings.plist", @"storage.plist", @"battery_info.plist", @"Info.plist", @"identifiers.plist", @"scoped-apps.plist"] containsObject:parts[1]]) ||
+                    (parts.count == 3 && [parts[1] isEqual:@"appdata"] && [parts[2] isEqual:@"Info.plist"]) ||
                     (parts.count == 3 && [parts[1] isEqual:@"identity"] && [artifacts containsObject:parts[2]]);
                 NSString *relative = [parts componentsJoinedByString:@"/"];
                 return valid && [path.stringByResolvingSymlinksInPath isEqual:[canonicalProfiles stringByAppendingPathComponent:relative]];

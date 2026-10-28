@@ -7,6 +7,7 @@
 #import "PXProfileCreationReservation.h"
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
+#import "PXProfileMetadataWriter.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -44,11 +45,13 @@ NSString *PXValidatedProfileID(id value) {
 }
 static NSString *Identity(NSString *profile) { return Path(Path(PXProfilesPath(), profile), @"identity"); }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
+NSString *PXProfileRootPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(PXProfilesPath(), profile) : nil; }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
 NSString *PXGlobalScopePath(void) { return Path(gRoot, @"scope.plist"); }
 void PXPostSettingsChangedNotification(void) { gSettingsNotices++; }
 static NSDictionary *Record(NSString *path) { return [NSDictionary dictionaryWithContentsOfFile:path] ?: @{}; }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performWrite:body error:error]; }
+BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performStandaloneWrite:body error:error]; }
 static BOOL Pump(BOOL (^done)(void)) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
     while (!done() && [deadline timeIntervalSinceNow] > 0)
@@ -646,6 +649,122 @@ static void Select(PXProfileCreationFixture *manager, Profile *profile) {
     [manager switchToProfile:profile completion:^(BOOL ok, NSError *error) { done = YES; success = ok && error == nil; }];
     CHECK(done && success, "deletion fixture selection committed");
 }
+static NSArray<NSString *> *PXMetadataFixturePaths(NSString *profileID) {
+    NSString *root = PXProfileRootPath(profileID);
+    return @[Path(root, @"Info.plist"), Path(Path(root, @"appdata"), @"Info.plist"),
+        Path(root, @"identifiers.plist"), Path(root, @"scoped-apps.plist")];
+}
+static NSDictionary *PXCaptureMetadataFixture(NSString *profileID) {
+    return [gStore capture:^NSDictionary *(NSError **error) {
+        (void)error; NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        for (NSString *path in PXMetadataFixturePaths(profileID))
+            result[path] = [NSData dataWithContentsOfFile:path] ?: (id)NSNull.null;
+        return result;
+    } error:NULL];
+}
+static NSUInteger PXMetadataFixtureDescriptorCount(void) {
+    NSUInteger count = 0;
+    for (int fd = 0; fd < 1024; fd++) if (fcntl(fd, F_GETFD) != -1) count++;
+    return count;
+}
+static void TestProfileMetadataUpdates(void) {
+    PXProfileCreationFixture *manager = NewManager(); CHECK(Reload(manager), "metadata manager loads registry basis");
+    Profile *previous = SeedRegistered(manager, @"metadata-before");
+    Profile *edit = New(@"metadata-after"); [edit setValue:previous.profileId forKey:@"profileId"];
+    edit.shortDescription = @"edited description"; edit.createdAt = previous.createdAt; edit.lastUsed = previous.lastUsed;
+    NSString *target = edit.profileId, *archivePath = Path(PXProfilesPath(), @"profiles.plist");
+    NSString *scopedPath = PXMetadataFixturePaths(target).lastObject;
+    NSDictionary *scoped = @{ @"Apps": @[@"fixture.app"], @"keep": @YES };
+    CHECK([scoped writeToFile:scopedPath atomically:YES], "metadata scoped extras seeded");
+    NSDictionary *before = PXCaptureMetadataFixture(target), *selection = ActiveFiles();
+    NSData *archiveBefore = [NSData dataWithContentsOfFile:archivePath];
+    NSUInteger notices = gNotices, terminations = gTerminations;
+    for (NSUInteger failAfter = 1; failAfter <= 4; failAfter++) {
+        __block NSUInteger writes = 0, callbacks = 0; __block BOOL success = YES; __block NSError *failure = nil;
+        gStore.testCheckpoint = ^(NSString *phase) {
+            if ([phase isEqual:@"source-written"] && ++writes == failAfter) [NSException raise:@"fixture.metadata" format:@"partial metadata fault"];
+        };
+        [manager updateProfile:edit completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+        gStore.testCheckpoint = nil;
+        CHECK(callbacks == 1 && !success && failure && [before isEqual:PXCaptureMetadataFixture(target)] &&
+            [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]] && manager.mutableProfiles.lastObject == previous &&
+            notices == gNotices && !manager.lifecycleLease && !manager.creationInProgress,
+            "metadata fault after each file rolls back bytes and absence before registry memory or notification");
+    }
+    __block NSUInteger commits = 0, callbacks = 0; __block BOOL success = NO; __block NSError *failure = nil;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    [manager updateProfile:edit completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gStore.testCheckpoint = nil;
+    NSArray *paths = PXMetadataFixturePaths(target);
+    CHECK(callbacks == 1 && success && !failure && commits == 1 && manager.mutableProfiles.lastObject == edit &&
+        [Record(paths[0])[@"Name"] isEqual:edit.name] && [Record(paths[1])[@"ProfileName"] isEqual:edit.name] &&
+        [Record(paths[2])[@"DisplayName"] isEqual:edit.name] && [Record(paths[3])[@"ProfileName"] isEqual:edit.name] &&
+        [Record(paths[3])[@"Apps"] isEqual:scoped[@"Apps"]] && [Record(paths[3])[@"keep"] boolValue] &&
+        notices + 1 == gNotices && [selection isEqual:ActiveFiles()] && terminations == gTerminations,
+        "metadata update commits all display files once before registry adoption and preserves scoped extras and selection");
+    CHECK([manager.registryRecord[@"bytes"] isEqual:[NSData dataWithContentsOfFile:archivePath]], "metadata registry receipt matches persisted archive");
+
+    // A bypass writer changes the archive between display commit and registry
+    // CAS. Report partial failure without adopting the candidate or notifying.
+    Profile *later = New(@"metadata-later"); [later setValue:target forKey:@"profileId"];
+    archiveBefore = [NSData dataWithContentsOfFile:archivePath]; notices = gNotices; __block NSUInteger writes = 0;
+    NSData *drift = [@"unknown bypass archive" dataUsingEncoding:NSUTF8StringEncoding];
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"source-written"] && ++writes == 4) CHECK([drift writeToFile:archivePath atomically:YES], "metadata registry drift installed");
+    };
+    callbacks = 0; [manager updateProfile:later completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gStore.testCheckpoint = nil;
+    CHECK(callbacks == 1 && !success && failure && manager.mutableProfiles.lastObject == edit && notices == gNotices &&
+        [Record(paths[0])[@"Name"] isEqual:later.name] && [drift isEqual:[NSData dataWithContentsOfFile:archivePath]],
+        "registry failure after metadata commit reports partial failure without memory adoption or success notification");
+    CHECK([archiveBefore writeToFile:archivePath atomically:YES], "metadata registry drift restored");
+
+    NSData *scopedBefore = [NSData dataWithContentsOfFile:scopedPath];
+    CHECK([[@"bad scoped root" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:scopedPath atomically:YES], "corrupt metadata source seeded");
+    before = PXCaptureMetadataFixture(target); callbacks = 0;
+    [manager updateProfile:edit completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && !success && failure && [before isEqual:PXCaptureMetadataFixture(target)] && notices == gNotices,
+        "corrupt scoped metadata rejects entire edit without silent repair");
+    CHECK([scopedBefore writeToFile:scopedPath atomically:YES], "metadata scoped source restored");
+
+    Profile *invalid = New(@"metadata-invalid-archive"); [invalid setValue:target forKey:@"profileId"];
+    invalid.settings = @{ @"unsupported": NSObject.new }; before = PXCaptureMetadataFixture(target); callbacks = 0;
+    [manager updateProfile:invalid completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && !success && failure && [before isEqual:PXCaptureMetadataFixture(target)] &&
+        [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]] && notices == gNotices,
+        "metadata registry encoding failure stops before any display file write");
+
+    NSString *appDataPath = Path(PXProfileRootPath(target), @"appdata"), *movedAppData = [appDataPath stringByAppendingString:@".held"];
+    CHECK([manager.fileManager moveItemAtPath:appDataPath toPath:movedAppData error:NULL] &&
+        [manager.fileManager createSymbolicLinkAtPath:appDataPath withDestinationPath:movedAppData error:NULL], "metadata appdata symlink fixture installed");
+    NSData *appDataBefore = [NSData dataWithContentsOfFile:Path(movedAppData, @"Info.plist")]; callbacks = 0;
+    [manager updateProfile:edit completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && !success && failure && [appDataBefore isEqual:[NSData dataWithContentsOfFile:Path(movedAppData, @"Info.plist")]] &&
+        [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]], "metadata writer rejects appdata symlink without writing its target or registry");
+    CHECK([manager.fileManager removeItemAtPath:appDataPath error:NULL] &&
+        [manager.fileManager moveItemAtPath:movedAppData toPath:appDataPath error:NULL], "metadata appdata restored");
+
+    NSString *identity = Identity(target), *heldIdentity = [identity stringByAppendingString:@".held"];
+    CHECK([manager.fileManager moveItemAtPath:identity toPath:heldIdentity error:NULL], "metadata legacy root without identity prepared");
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+    NSDictionary *fields = @{ @"Name": edit.name, @"Description": edit.shortDescription, @"CreatedAt": edit.createdAt, @"LastUsed": edit.lastUsed };
+    NSError *error = nil; NSUInteger descriptors = PXMetadataFixtureDescriptorCount();
+    CHECK(lease && PXWriteProfileDisplayMetadata(lease, target, fields, &error) && !error && [lease validateWithError:NULL] &&
+        ![manager.fileManager fileExistsAtPath:identity] && descriptors == PXMetadataFixtureDescriptorCount(),
+        "metadata borrowed root supports legacy profile without creating identity or releasing parent lease");
+    before = PXCaptureMetadataFixture(target);
+    CHECK(![gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        (void)tx; return PXWriteProfileDisplayMetadata(lease, target, fields, writeError);
+    } error:&error] && error && [before isEqual:PXCaptureMetadataFixture(target)] && descriptors == PXMetadataFixtureDescriptorCount(),
+        "metadata high-level writer cannot acknowledge an uncommitted outer transaction");
+    CHECK(!PXWriteProfileDisplayMetadata(lease, @"metadata-missing", fields, &error) && error &&
+        ![manager.fileManager fileExistsAtPath:PXProfileRootPath(@"metadata-missing")] && descriptors == PXMetadataFixtureDescriptorCount(),
+        "metadata writer rejects missing root without recreating it or leaking descriptors");
+    [lease invalidate];
+    CHECK(!PXWriteProfileDisplayMetadata(lease, target, fields, &error) && error, "metadata writer rejects expired caller lease");
+    CHECK([manager.fileManager moveItemAtPath:heldIdentity toPath:identity error:NULL], "metadata identity fixture restored");
+}
+
 static void TestRegistryAndDeletion(void) {
     PXProfileCreationFixture *manager = NewManager(); manager.fileManager = [PXProfileFileManagerFixture new];
     CHECK(Reload(manager), "deletion manager reloads current registry basis");
@@ -906,7 +1025,7 @@ int main(int argc, const char *argv[]) {
         }];
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager);
-        TestRegistryAndDeletion();
+        TestProfileMetadataUpdates(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");

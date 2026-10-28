@@ -7,6 +7,7 @@
 #import "PXProfileCreationReservation.h"
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
+#import "PXProfileMetadataWriter.h"
 #import "NetworkManager.h"
 #import <spawn.h>
 #import <sys/wait.h>
@@ -622,78 +623,36 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error {
-    // Get the profile directory
-    NSString *profileDir = [self.profilesDirectory stringByAppendingPathComponent:profile.profileId];
-    NSString *appDataDir = [profileDir stringByAppendingPathComponent:@"appdata"];
-    
-    // Make sure appdata directory exists
-    [self createDirectoryIfNeeded:appDataDir];
-    
-    // Update Info.plist in profile directory
-    NSString *infoPath = [profileDir stringByAppendingPathComponent:@"Info.plist"];
-    NSDictionary *infoDict = @{
+    if (error) *error = nil;
+    NSString *targetID = PXValidatedProfileID(profile.profileId);
+    if (!targetID || index >= self.mutableProfiles.count ||
+        ![self.mutableProfiles[index].profileId isEqual:targetID]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Profile update target changed"}];
+        return NO;
+    }
+    // Freeze the archive before changing any display file or manager-owned slot.
+    // Encoding failure is a preflight failure, not a partially saved edit.
+    NSMutableArray<Profile *> *candidate = [self.mutableProfiles mutableCopy];
+    candidate[index] = profile;
+    NSData *archive = [NSKeyedArchiver archivedDataWithRootObject:candidate requiringSecureCoding:YES error:error];
+    if (!archive) return NO;
+    NSDictionary *fields = @{
         @"Name": profile.name,
-        @"ProfileId": profile.profileId,
-        @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
+        @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", targetID],
         @"CreatedAt": profile.createdAt ?: [NSDate date],
         @"LastUsed": profile.lastUsed ?: [NSDate date]
     };
-    [infoDict writeToFile:infoPath atomically:YES];
-    
-    // Update Info.plist in appdata directory
-    NSString *appDataInfoPath = [appDataDir stringByAppendingPathComponent:@"Info.plist"];
-    NSDictionary *appDataInfoDict = @{
-        @"ProfileName": profile.name,
-        @"ProfileID": profile.profileId,
-        @"ShortDescription": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
-        @"Creation": profile.createdAt ?: [NSDate date],
-        @"LastUsed": profile.lastUsed ?: [NSDate date]
-    };
-    [appDataInfoDict writeToFile:appDataInfoPath atomically:YES];
-    
-    // Update identifiers.plist
-    NSString *identifiersPath = [profileDir stringByAppendingPathComponent:@"identifiers.plist"];
-    NSDictionary *identifiersDict = @{
-        @"DisplayName": profile.name,
-        @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId],
-        @"Identifier": profile.profileId
-    };
-    [identifiersDict writeToFile:identifiersPath atomically:YES];
-    
-    // Update scoped-apps.plist
-    NSString *scopedAppsPath = [profileDir stringByAppendingPathComponent:@"scoped-apps.plist"];
-    
-    // Try to preserve existing contents if the file exists
-    NSMutableDictionary *scopedAppsDict;
-    if ([self.fileManager fileExistsAtPath:scopedAppsPath]) {
-        scopedAppsDict = [NSMutableDictionary dictionaryWithContentsOfFile:scopedAppsPath];
-    } else {
-        scopedAppsDict = [NSMutableDictionary dictionary];
-    }
-    
-    // Update only the profile info fields
-    [scopedAppsDict setObject:profile.name forKey:@"ProfileName"];
-    [scopedAppsDict setObject:(profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profile.profileId]) forKey:@"ProfileDescription"];
-    if (![scopedAppsDict objectForKey:@"Apps"]) {
-        [scopedAppsDict setObject:@[] forKey:@"Apps"];
-    }
-    
-    [scopedAppsDict writeToFile:scopedAppsPath atomically:YES];
-    
-    NSLog(@"[WeaponX] Updated profile information files in: %@", profileDir);
-    
-    // Update the profile
-    self.mutableProfiles[index] = profile;
-    
-    // If this is the current profile, update it
-    if ([self.mutableCurrentProfile.profileId isEqualToString:profile.profileId]) {
-        self.mutableCurrentProfile = profile;
-    }
-    
-    __block BOOL success = NO; __block NSError *failure = nil;
-    [self saveProfilesWithCompletion:^(BOOL ok, NSError *saveError) { success = ok; failure = saveError; }];
-    if (!success && error) *error = failure;
-    return success;
+    if (!PXWriteProfileDisplayMetadata(self.lifecycleLease, targetID, fields, error)) return NO;
+    // The registry remains a separate CAS phase. Never report success or adopt
+    // the candidate when it fails; committed display files are not rolled back.
+    if (![self.lifecycleLease writeRegistryData:archive expected:self.registryRecord error:error]) return NO;
+    self.registryRecord = @{ @"exists": @YES, @"bytes": archive };
+    self.mutableProfiles = candidate;
+    if ([self.mutableCurrentProfile.profileId isEqual:targetID]) self.mutableCurrentProfile = profile;
+    [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644}
+        ofItemAtPath:[self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"] error:NULL];
+    NSLog(@"[WeaponX] Updated profile information and registry for %@", targetID);
+    return YES;
 }
 
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {

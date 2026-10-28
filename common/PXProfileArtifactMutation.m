@@ -52,6 +52,16 @@ static BOOL PXArtifactMutationError(NSError **error, NSString *message) {
         (void)held; return resolver ? resolver() : nil;
     } identityTarget:YES lifecycleLease:lease error:error];
 }
++ (instancetype)borrowWithLifecycleLease:(PXProfileLifecycleLease *)lease profileID:(NSString *)profileID error:(NSError **)error {
+    if (error) *error = nil;
+    if (![lease isKindOfClass:PXProfileLifecycleLease.class]) {
+        PXArtifactMutationError(error, @"Missing borrowed profile lifecycle capability"); return nil;
+    }
+    NSString *targetID = PXValidatedProfileID(profileID);
+    return [self acquireWithDirectoryResolver:^NSString *(PXProfileLifecycleLease *held) {
+        (void)held; return PXProfileRootPath(targetID);
+    } identityTarget:NO lifecycleLease:lease error:error];
+}
 + (instancetype)acquireWithDirectoryResolver:(NSString *(^)(PXProfileLifecycleLease *))resolver identityTarget:(BOOL)identityTarget lifecycleLease:(PXProfileLifecycleLease *)borrowed error:(NSError **)error {
     if (error) *error = nil;
     PXProfileArtifactMutation *mutation = [[self alloc] initForMutation];

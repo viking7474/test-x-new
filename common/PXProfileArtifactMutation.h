@@ -26,6 +26,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// directory FD. The caller must retain/hold the lease until this scope ends.
 + (nullable instancetype)borrowWithLifecycleLease:(PXProfileLifecycleLease * _Nullable)lease
     identityResolver:(NSString * _Nullable (^)(void))resolver error:(NSError * _Nullable * _Nullable)error NS_RETURNS_RETAINED;
+/// Borrow ownership for files directly under an existing profile, without
+/// requiring an identity child or invalidating the caller's lease.
++ (nullable instancetype)borrowWithLifecycleLease:(PXProfileLifecycleLease * _Nullable)lease
+    profileID:(NSString *)profileID error:(NSError * _Nullable * _Nullable)error NS_RETURNS_RETAINED;
 /// Body stages source data only; no providers, notifications or cache callbacks.
 - (BOOL)performSourceWrite:(BOOL (^)(PXRuntimeSourceTransaction *transaction, NSError * _Nullable * _Nullable error))body
     error:(NSError * _Nullable * _Nullable)error;

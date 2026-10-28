@@ -31,6 +31,10 @@ NS_ASSUME_NONNULL_BEGIN
 // Completion runs on main; activation follows committed generation and metadata.
 // Failure may leave inactive artifacts or a ready registered profile for recovery.
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+// Display plist group commits before registry archive. Failure after that commit
+// can leave new display metadata with the previous registry; reload/retry is
+// explicit. Manager slot adoption/notification require registry persistence;
+// caller mutations of an already shared Profile object cannot be undone here.
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 // Active deletion selects a valid fallback before unregistering/removing files.
 // Encoding fails before activation. An I/O failure after the journal decision

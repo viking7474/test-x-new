@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H3Z-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4A-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -81,7 +81,11 @@ def source_contracts():
     path_impl = read('common/PXPaths.m')
     assert 'NSString *PXProfileIndicatorPositionPath(void)' in path_impl and '@"indicator_position.plist"' in path_impl
     ancillary = manifest['ancillaryArtifacts']
-    assert len(ancillary) == 1 and ancillary[0]['writer'] == 'indicator-position' and ancillary[0]['status'] == 'enrolled'
+    assert len(ancillary) == 2 and ancillary[0]['writer'] == 'indicator-position' and ancillary[0]['status'] == 'enrolled'
+    assert ancillary[1]['writer'] == 'profile-display-metadata' and ancillary[1]['status'] == 'partial'
+    for name in ('@"Info.plist"', '@"identifiers.plist"', '@"scoped-apps.plist"'):
+        assert name in paths
+    assert 'parts.count == 3 && [parts[1] isEqual:@"appdata"] && [parts[2] isEqual:@"Info.plist"]' in paths
     assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-telephony-partial"' in runtime
     save = method(manager, '- (void)saveSettings')
     scope = method(manager, '- (void)saveScopedApps')
