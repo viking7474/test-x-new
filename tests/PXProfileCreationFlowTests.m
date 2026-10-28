@@ -411,6 +411,76 @@ static NSUInteger OpenDescriptorCount(void) {
     for (int fd = 0; fd < 1024; fd++) if (fcntl(fd, F_GETFD) != -1) count++;
     return count;
 }
+static void PXCorruptReservationDisplay(NSString *path, BOOL atEnd) {
+    NSMutableData *bytes = [[NSData dataWithContentsOfFile:path] mutableCopy];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!bytes.length || !handle) [NSException raise:@"fixture.metadata" format:@"Missing display file for same-inode corruption"];
+    ((uint8_t *)bytes.mutableBytes)[atEnd ? bytes.length - 1 : 0] ^= 1;
+    [handle writeData:bytes]; [handle closeFile];
+}
+static void TestReservationMetadata(NSString *root) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSUInteger mode = 0; mode < 9; mode++) {
+        NSString *profileID = [NSString stringWithFormat:@"invalid-meta-%lu", (unsigned long)mode];
+        NSMutableDictionary *fields = [@{ @"DisplayName": @"preflight", @"Identifier": profileID } mutableCopy];
+        id record = fields;
+        if (mode == 0) record = NSNull.null;
+        else if (mode == 1) record = @[];
+        else if (mode == 2) [fields removeObjectForKey:@"DisplayName"];
+        else if (mode == 3) fields[@"DisplayName"] = @[];
+        else if (mode == 4) fields[@"Identifier"] = @"different-id";
+        else if (mode == 5) fields[@"Description"] = @[];
+        else if (mode == 6) fields[@"extra"] = NSObject.new;
+        else if (mode == 7) fields[@"extra"] = NSNull.null;
+        else fields[@"Identifier"] = @1;
+        NSError *stale = [NSError errorWithDomain:@"fixture.stale" code:1 userInfo:nil], *error = stale;
+        CHECK(![PXProfileCreationReservation reserveProfileID:profileID inProfilesDirectory:root metadata:record error:&error] &&
+            error && error != stale && ![fm fileExistsAtPath:Path(root, profileID)],
+            "invalid reservation metadata fails before creating a directory or orphan marker");
+    }
+    @autoreleasepool {
+        NSMutableString *profileID = [@"mutable-metadata" mutableCopy], *name = [@"name-before" mutableCopy], *description = [@"description-before" mutableCopy];
+        NSMutableArray *extras = [NSMutableArray arrayWithObject:@"extra-before"];
+        NSMutableDictionary *record = [@{ @"DisplayName": name, @"Identifier": profileID, @"Description": description, @"extra": extras } mutableCopy];
+        NSError *error = [NSError errorWithDomain:@"fixture.stale" code:1 userInfo:nil];
+        PXProfileCreationReservation *reservation = [PXProfileCreationReservation reserveProfileID:profileID inProfilesDirectory:root metadata:record error:&error];
+        NSString *display = Path(Path(root, @"mutable-metadata"), @"identifiers.plist");
+        NSData *original = [NSData dataWithContentsOfFile:display];
+        [profileID setString:@"changed-id"]; [name setString:@"changed-name"]; [description setString:@"changed-description"]; [extras addObject:@"later"]; [record removeAllObjects];
+        CHECK(reservation && !error && [reservation validateWithError:&error] && !error &&
+            [reservation.profileID isEqual:@"mutable-metadata"] && [Record(display)[@"DisplayName"] isEqual:@"name-before"] &&
+            [Record(display)[@"Description"] isEqual:@"description-before"] && [Record(display)[@"extra"] count] == 1 &&
+            [original isEqual:[NSData dataWithContentsOfFile:display]], "reservation freezes actual XML bytes independently of mutable caller metadata");
+    }
+    for (NSUInteger mode = 0; mode < 7; mode++) {
+        @autoreleasepool {
+            NSString *profileID = [NSString stringWithFormat:@"display-proof-%lu", (unsigned long)mode];
+            PXProfileCreationReservation *reservation = Reserve(root, profileID, NULL);
+            NSString *display = Path(Path(root, profileID), @"identifiers.plist"), *old = [display stringByAppendingString:@".old"];
+            CHECK(reservation && [reservation validateWithError:NULL], "display provenance fixture starts valid");
+            if (!reservation) continue;
+            if (mode == 0) CHECK([fm removeItemAtPath:display error:NULL], "display deletion fixture installed");
+            else if (mode == 1) CHECK([fm moveItemAtPath:display toPath:old error:NULL] && [fm copyItemAtPath:old toPath:display error:NULL], "display same-byte inode replacement installed");
+            else if (mode == 2) CHECK([fm moveItemAtPath:display toPath:old error:NULL] && [fm createSymbolicLinkAtPath:display withDestinationPath:old error:NULL], "display symlink fixture installed");
+            else if (mode == 3) PXCorruptReservationDisplay(display, NO);
+            else if (mode == 4) { NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:display]; [handle truncateFileAtOffset:0]; [handle closeFile]; }
+            else if (mode == 5) CHECK(link(display.fileSystemRepresentation, old.fileSystemRepresentation) == 0, "display hardlink fixture installed");
+            else { NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:display]; [handle seekToEndOfFile]; [handle writeData:[@"x" dataUsingEncoding:NSUTF8StringEncoding]]; [handle closeFile]; }
+            NSError *error = nil;
+            CHECK(![reservation validateWithError:&error] && [error.domain isEqual:@"WeaponXProfileDirectoryError"] && error.code == ESTALE,
+                "reservation rejects missing replaced symlink mutated truncated hardlinked or extended display metadata");
+        }
+    }
+    @autoreleasepool {
+        NSString *profileID = @"large-display-proof";
+        NSString *large = [@"description" stringByPaddingToLength:20000 withString:@"x" startingAtIndex:0];
+        NSDictionary *record = @{ @"DisplayName": @"large", @"Identifier": profileID, @"Description": large };
+        PXProfileCreationReservation *reservation = [PXProfileCreationReservation reserveProfileID:profileID inProfilesDirectory:root metadata:record error:NULL];
+        CHECK(reservation && [reservation validateWithError:NULL], "multi-chunk reservation display starts valid");
+        if (reservation) PXCorruptReservationDisplay(Path(Path(root, profileID), @"identifiers.plist"), YES);
+        CHECK(![reservation validateWithError:NULL], "streaming display comparison detects corruption beyond the first buffer");
+    }
+}
 static void TestReservation(NSString *executable) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *root = Path(gRoot, @"reservation-fixtures");
@@ -458,6 +528,8 @@ static void TestReservation(NSString *executable) {
         }
     }
     CHECK(OpenDescriptorCount() == descriptors, "success and failure reservations close every held descriptor");
+    @autoreleasepool { TestReservationMetadata(root); }
+    CHECK(OpenDescriptorCount() == descriptors, "metadata reservation success and rejection release every descriptor");
     for (NSUInteger mode = 0; mode < 5; mode++) {
         NSString *profileID = [NSString stringWithFormat:@"proof-%lu", (unsigned long)mode];
         PXProfileCreationReservation *reservation = Reserve(root, profileID, NULL);
@@ -512,6 +584,29 @@ static void TestCreationDirectoryDrift(PXProfileCreationFixture *manager) {
         if (mode < 3) CHECK(terminations == gTerminations && [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
             "ownership loss after generation preserves registry and never invokes termination");
         else CHECK(gTerminations == terminations + 1, "directory change in termination adapter is rechecked before activation");
+    }
+}
+static void TestCreationDisplayDrift(PXProfileCreationFixture *manager) {
+    for (NSUInteger phase = 0; phase < 2; phase++) {
+        ResetWorker(); gPause = NO;
+        Profile *candidate = New([NSString stringWithFormat:@"display-drift-%lu", (unsigned long)phase]);
+        __block NSUInteger callbacks = 0; __block BOOL success = YES, corrupted = NO; __block NSError *failure = nil;
+        NSDictionary *before = ActiveFiles(); NSData *archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+        NSUInteger notices = gNotices, caches = gCachePublications, mirrors = gMirrors, terminations = gTerminations;
+        void (^corrupt)(void) = ^{
+            PXCorruptReservationDisplay(Path(PXProfileRootPath(candidate.profileId), @"identifiers.plist"), NO); corrupted = YES;
+        };
+        if (phase == 0) gAfterGeneration = corrupt; else gDuringTermination = corrupt;
+        [manager createProfile:candidate completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+        CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && corrupted && !success && failure &&
+            !manager.creationInProgress && !manager.creationReservation && !manager.lifecycleLease && [before isEqual:ActiveFiles()] &&
+            notices == gNotices && caches == gCachePublications && mirrors == gMirrors,
+            "display ownership loss never activates or publishes creation success");
+        if (phase == 0) CHECK(terminations == gTerminations && [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
+            "display corruption after generation rejects before registry or termination");
+        else CHECK(terminations + 1 == gTerminations && ![archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]],
+            "display corruption during termination leaves inactive registration without activating it");
+        CHECK([manager.fileManager fileExistsAtPath:PXProfileRootPath(candidate.profileId)], "display rejection retains reserved directory without automatic cleanup");
     }
 }
 static int TryLeaseInChild(NSString *executable, NSString *directory) {
@@ -1161,7 +1256,7 @@ int main(int argc, const char *argv[]) {
             if (gThrowObserver) [NSException raise:@"fixture" format:@"observer failed after commit"];
         }];
         TestCreation(manager, zero); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
-        TestCreationDirectoryDrift(manager);
+        TestCreationDirectoryDrift(manager); TestCreationDisplayDrift(manager);
         TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });

@@ -263,8 +263,28 @@ def source_contracts():
         assert token in reservation, token
     for forbidden in ('removeItemAtPath:', 'unlink(', 'rmdir(', 'dispatch_', 'PXPerformRuntimeSourceWrite'):
         assert forbidden not in reservation, forbidden
-    for fd in ('_rootFD', '_profileFD', '_identityFD', '_markerFD'):
+    for fd in ('_rootFD', '_profileFD', '_identityFD', '_markerFD', '_metadataFD'):
         assert f'if ({fd} >= 0) close({fd});' in reservation
+    reserve = writers.method(reservation, '+ (instancetype)reserveProfileID:(NSString *)profileID inProfilesDirectory:(NSString *)directory metadata:(NSDictionary *)metadata error:(NSError **)error')
+    assert reserve.index('dataWithPropertyList:metadata') < reserve.index('mkdirat(')
+    assert reserve.index('propertyListWithData:metadataData') < reserve.index('mkdirat(')
+    assert 'frozenMetadata[@"Identifier"] isEqual:profileID' in reserve and '@catch' in reserve
+    assert 'PXWriteNewProfileData' in reserve and 'reservation.metadataData = metadataData' in reserve
+    validate = writers.method(reservation, '- (BOOL)validateWithError:(NSError **)error')
+    assert 'PXReservationDataMatches(_metadataFD, self.metadataData)' in validate and 'PXReservationDataMatches(_markerFD, self.markerData)' in validate
+    assert 'metadata.st_nlink != 1' in validate and 'metadata.st_ino != metadataPath.st_ino' in validate
+    assert '#include <string.h>' in reservation and 'uint8_t buffer[4096]' in reservation and 'memcmp(' in reservation and 'return tail == 0;' in reservation
+    assert 'NSMutableData' not in validate
+    for case in ('invalid reservation metadata fails before creating a directory or orphan marker',
+                 'reservation freezes actual XML bytes independently of mutable caller metadata',
+                 'reservation rejects missing replaced symlink mutated truncated hardlinked or extended display metadata',
+                 'streaming display comparison detects corruption beyond the first buffer',
+                 'metadata reservation success and rejection release every descriptor',
+                 'display ownership loss never activates or publishes creation success',
+                 'display corruption after generation rejects before registry or termination',
+                 'display corruption during termination leaves inactive registration without activating it',
+                 'display rejection retains reserved directory without automatic cleanup'):
+        assert case in fixture, case
     for case in ('exactly one process exclusively reserves the same profile ID',
                  'exited creator leaves an untouched reservation and restart cannot adopt it',
                  'success and failure reservations close every held descriptor',
@@ -330,7 +350,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4B-partial'
+    assert manifest['rollout'] == '4C.2H4C-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
