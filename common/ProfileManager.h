@@ -31,6 +31,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Completion runs on main; activation follows committed generation and metadata.
 // ID/timestamps are assigned to the caller as before, then create owns a secure
 // detached model. Later caller edits are not edits of that pending operation.
+// Activation rechecks model values against the saved registry around callbacks;
+// an already registered inactive candidate may remain when that check fails.
 // Failure may leave inactive artifacts or a ready registered profile for recovery.
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 // Display plist group commits before registry archive. Failure after that commit

@@ -119,3 +119,8 @@ Host: 62/63 Python + 4/4 Node pass, lỗi còn lại là bridge-shell Windows pe
 như trước; source hardening, RootHide build/package, macro/diff và 37-method extraction
 pass. Native rerun sau fix vẫn chờ macOS CI; không báo native delete/recovery pass từ
 Windows.
+
+Người dùng xác nhận build deletion-comparer follow-up pass ngày 2026-10-28.
+Selected-model proof sau registration được triển khai riêng tại
+[H4E](PATCH-4C-2H4E-activation-model-proof.md); giới hạn thread-safety và tổng
+source/defaults/durability model vẫn partial.

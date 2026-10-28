@@ -1124,6 +1124,78 @@ static void TestDefaultProfileSeeding(void) {
         "default seed leaves manager slots unchanged and closes descriptors on every tested return");
 }
 
+static void TestActivationModelPolicy(void) {
+    PXProfileCreationFixture *manager = NewManager();
+    Profile *model = New(@"activation-proof"), *child = New(@"activation-child");
+    model.settings = @{ @"child": child };
+    NSArray *models = @[model]; NSError *error = nil;
+    NSData *bytes = [NSKeyedArchiver archivedDataWithRootObject:models requiringSecureCoding:YES error:&error];
+    NSDictionary *record = @{ @"exists": @YES, @"bytes": bytes ?: NSData.data };
+    model.pxDecodedMissingCreatedAt = YES; model.pxDecodedMissingLastUsed = YES;
+    child.pxDecodedMissingCreatedAt = YES; child.pxDecodedMissingLastUsed = YES;
+    CHECK(bytes && !error && [manager activationProfile:model matchesRegistry:record error:&error] && !error,
+        "activation accepts equal persisted date values despite transient legacy provenance flags");
+    Profile *persisted = [[manager decodeRegistryRecord:record error:NULL] firstObject];
+    model.createdAt = [model.createdAt dateByAddingTimeInterval:10]; error = nil;
+    CHECK([manager registryValue:model matchesValue:persisted seen:nil] &&
+        ![manager activationProfile:model matchesRegistry:record error:&error] && error.code == 31,
+        "activation strict date matching does not inherit deletion legacy timestamp relaxation");
+    for (NSUInteger field = 0; field < 8; field++) {
+        Profile *changed = [[manager decodeRegistryRecord:record error:NULL] firstObject];
+        Profile *changedChild = changed.settings[@"child"];
+        if (field == 0) [changed setValue:@"activation-unknown" forKey:@"profileId"];
+        else if (field == 1) changed.name = @"different name";
+        else if (field == 2) changed.shortDescription = @"different description";
+        else if (field == 3) changed.iconName = @"different icon";
+        else if (field == 4) changed.createdAt = [changed.createdAt dateByAddingTimeInterval:10];
+        else if (field == 5) changed.lastUsed = [changed.lastUsed dateByAddingTimeInterval:10];
+        else if (field == 6) changed.settings = @{ @"different": @YES };
+        else { changedChild.pxDecodedMissingCreatedAt = YES; changedChild.createdAt = [changedChild.createdAt dateByAddingTimeInterval:10]; }
+        error = nil;
+        CHECK(changed && changedChild && ![manager activationProfile:changed matchesRegistry:record error:&error] && error.code == 31,
+            "activation model proof rejects target metadata dates settings and nested date drift");
+    }
+}
+static void TestActivationCallbackDrift(void) {
+    for (NSUInteger operation = 0; operation < 2; operation++) for (NSUInteger phase = 0; phase < 2; phase++) {
+        ResetWorker(); gPause = NO; gAfterArchive = nil;
+        PXProfileCreationFixture *manager = NewManager(); manager.fileManager = [PXProfileFileManagerFixture new];
+        CHECK(Reload(manager), "activation callback fixture loads committed registry");
+        __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+        CHECK(Pump(^BOOL { return drained; }), "activation fixture drains deferred startup mirror before baseline");
+        Profile *input = operation == 0 ? New([NSString stringWithFormat:@"create-model-drift-%lu", (unsigned long)phase]) :
+            SeedRegistered(manager, [NSString stringWithFormat:@"switch-model-drift-%lu", (unsigned long)phase]);
+        NSString *acceptedName = [input.name copy];
+        NSDictionary *before = ActiveFiles(); Profile *previousCurrent = manager.mutableCurrentProfile;
+        NSUInteger notices = gNotices, mirrors = gMirrors, caches = gCachePublications, settingsNotices = gSettingsNotices, terminations = gTerminations;
+        __block BOOL changed = NO, success = YES; __block NSUInteger callbacks = 0; __block NSError *failure = nil;
+        void (^mutate)(void) = ^{
+            Profile *live = PXFindFixtureProfile(manager.mutableProfiles, input.profileId);
+            if (!live) [NSException raise:@"fixture.activation" format:@"Registered target missing during model drift"];
+            if (phase == 0) live.name = @"callback model drift";
+            else { live.pxDecodedMissingLastUsed = YES; live.lastUsed = [NSDate dateWithTimeIntervalSince1970:1]; }
+            changed = YES;
+        };
+        if (phase == 0) gAfterArchive = mutate; else gDuringTermination = mutate;
+        void (^completion)(BOOL, NSError *) = ^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; };
+        if (operation == 0) [manager createProfile:input completion:completion]; else [manager switchToProfile:input completion:completion];
+        CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && changed && !success && failure.code == 31 &&
+            [before isEqual:ActiveFiles()] && manager.mutableCurrentProfile == previousCurrent &&
+            notices == gNotices && mirrors == gMirrors && caches == gCachePublications && settingsNotices == gSettingsNotices &&
+            !manager.creationInProgress && !manager.lifecycleLease && !manager.creationReservation,
+            "create and switch reject callback model drift without activating or publishing success");
+        gAfterArchive = nil; gDuringTermination = nil;
+        CHECK(gTerminations == terminations + phase, "post-archive model drift rejects before termination and post-termination drift is not repeated");
+        Profile *committed = PXFindFixtureProfile([manager decodeRegistryRecord:manager.registryRecord error:NULL], input.profileId);
+        CHECK(committed && [committed.name isEqual:acceptedName] && ![committed.lastUsed isEqual:[NSDate dateWithTimeIntervalSince1970:1]],
+            "callback model drift does not rewrite the acknowledged registry archive");
+        CHECK(Reload(manager) && [PXFindFixtureProfile(manager.mutableProfiles, input.profileId).name isEqual:acceptedName],
+            "explicit reload replaces callback-mutated slots with committed registry values");
+        drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+        CHECK(Pump(^BOOL { return drained; }), "activation drift reload mirror drains before next lifecycle fixture");
+    }
+}
+
 static void TestRegistryAndDeletion(void) {
     PXProfileCreationFixture *manager = NewManager(); manager.fileManager = [PXProfileFileManagerFixture new];
     CHECK(Reload(manager), "deletion manager reloads current registry basis");
@@ -1384,7 +1456,7 @@ int main(int argc, const char *argv[]) {
         }];
         TestCreation(manager, zero); TestCreationOwnedModel(manager); TestNestedProfileArchiveValidation(manager); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager); TestCreationDisplayDrift(manager);
-        TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryAndDeletion();
+        TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestActivationModelPolicy(); TestActivationCallbackDrift(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");

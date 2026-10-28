@@ -48,6 +48,8 @@ METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void
 METHODS += ['- (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error',
             '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error',
             '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen',
+            '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates',
+            '- (BOOL)activationProfile:(Profile *)profile matchesRegistry:(NSDictionary *)record error:(NSError **)error',
             '- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error']
 
 
@@ -327,7 +329,9 @@ def source_contracts():
     for signature in METHODS[:4]:
         assert 'beginProfileOperationWithError:' in writers.method(source, signature)
     delete = writers.method(source, '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error')
-    compare = writers.method(source, '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen')
+    legacy_compare = writers.method(source, '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen')
+    assert 'allowLegacyDates:YES' in legacy_compare
+    compare = writers.method(source, '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates')
     archive_validation = writers.method(source, '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error')
     assert 'registryValue:oldFields matchesValue:newFields seen:nil' in archive_validation
     assert '[oldFields isEqual:newFields]' not in archive_validation and '|| !datesValid' in archive_validation
@@ -335,6 +339,23 @@ def source_contracts():
                   'left.profileId', 'left.name', 'left.shortDescription', 'left.iconName', 'left.settings',
                   'right.pxDecodedMissingCreatedAt', 'right.pxDecodedMissingLastUsed', '[before isEqual:after]'):
         assert token in compare, token
+    model_proof = writers.method(source, '- (BOOL)activationProfile:(Profile *)profile matchesRegistry:(NSDictionary *)record error:(NSError **)error')
+    assert 'decodeRegistryRecord:record' in model_proof and 'allowLegacyDates:NO' in model_proof and 'code:31' in model_proof
+    assert 'left.createdAt matchesValue:right.createdAt' in compare and 'left.lastUsed matchesValue:right.lastUsed' in compare
+    activate = writers.method(source, '- (BOOL)activateProfile:(Profile *)profile expectedSelection:(NSDictionary *)expected generation:(PXCommittedRuntimeGeneration *)generation error:(NSError **)error')
+    assert activate.count('readRegistryWithError:') == 1
+    assert activate.index('activationProfile:profile matchesRegistry:observedRegistry') < activate.index('PXPerformRuntimeSourceWrite(')
+    assert '[profile.name copy]' in activate and '[profile.shortDescription copy]' in activate
+    for body in (finish, switch):
+        assert body.index('activationProfile:profile matchesRegistry:self.registryRecord') < body.index('terminateEnabledScopedApps')
+    for case in ('activation accepts equal persisted date values despite transient legacy provenance flags',
+                 'activation strict date matching does not inherit deletion legacy timestamp relaxation',
+                 'activation model proof rejects target metadata dates settings and nested date drift',
+                 'create and switch reject callback model drift without activating or publishing success',
+                 'post-archive model drift rejects before termination and post-termination drift is not repeated',
+                 'callback model drift does not rewrite the acknowledged registry archive',
+                 'explicit reload replaces callback-mutated slots with committed registry values'):
+        assert case in fixture, case
     for case in ('deletion archive validation preserves equal nested Profile values across separate decodes',
                  'deletion archive validation rejects changes to every nested Profile identity metadata date or settings field',
                  'nested archive comparison has no persistent memo state and preserves original before bytes',
@@ -387,7 +408,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4D-partial'
+    assert manifest['rollout'] == '4C.2H4E-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

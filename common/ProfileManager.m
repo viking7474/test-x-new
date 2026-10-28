@@ -79,6 +79,8 @@
 - (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error;
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error;
 - (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen;
+- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates;
+- (BOOL)activationProfile:(Profile *)profile matchesRegistry:(NSDictionary *)record error:(NSError **)error;
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error;
 - (BOOL)createProfileZeroWithError:(NSError **)error;
 - (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error;
@@ -490,7 +492,8 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         }
         NSError *activationError = nil; BOOL activated = NO;
         @try {
-            if ([self validateActivationForProfile:profile expectedSelection:expected generation:generation error:&activationError]) {
+            if ([self activationProfile:profile matchesRegistry:self.registryRecord error:&activationError] &&
+                [self validateActivationForProfile:profile expectedSelection:expected generation:generation error:&activationError]) {
                 [self terminateEnabledScopedApps]; // Never hold a source lock across this adapter.
                 activated = [self activateProfile:profile expectedSelection:expected generation:generation error:&activationError];
             }
@@ -558,14 +561,17 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     }
     __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = self.lifecycleLease ?: [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
     if (!lease || ![lease validateWithError:error] || !PXRequireNoPendingProfileDeletion(error)) return NO;
-    if (self.registryRecord && ![[lease readRegistryWithError:error] isEqual:self.registryRecord]) {
+    NSDictionary *observedRegistry = [lease readRegistryWithError:error];
+    if (!observedRegistry) return NO;
+    if (self.registryRecord && ![observedRegistry isEqual:self.registryRecord]) {
         if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed before activation"}]; return NO;
     }
+    if (![self activationProfile:profile matchesRegistry:observedRegistry error:error]) return NO;
     // Revalidate after any external termination callback. A preflight alone
     // cannot protect the later commit against reentry/another source writer.
     if (![self identityForActivationProfile:profile generation:generation error:error]) return NO;
-    NSDictionary *info = @{ @"ProfileId": [profile.profileId copy], @"ProfileName": profile.name ?: @"",
-        @"Description": profile.shortDescription ?: @"", @"LastSelected": NSDate.date, @"SelectionRevision": NSUUID.UUID.UUIDString };
+    NSDictionary *info = @{ @"ProfileId": [profile.profileId copy], @"ProfileName": [profile.name copy] ?: @"",
+        @"Description": [profile.shortDescription copy] ?: @"", @"LastSelected": NSDate.date, @"SelectionRevision": NSUUID.UUID.UUIDString };
     BOOL committed = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
         if (generation && ![self.creationReservation validateWithError:writeError]) return NO;
         if (generation && !PXRuntimeGenerationMatchesProof(tx, generation.proof, writeError)) return NO;
@@ -921,7 +927,8 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         }
         NSError *activationError = nil; BOOL activated = NO;
         @try {
-            if ([self validateActivationForProfile:profile expectedSelection:expected generation:nil error:&activationError]) {
+            if ([self activationProfile:profile matchesRegistry:self.registryRecord error:&activationError] &&
+                [self validateActivationForProfile:profile expectedSelection:expected generation:nil error:&activationError]) {
                 if (!same) [self terminateEnabledScopedApps];
                 if ([profile.profileId isEqualToString:targetID])
                     activated = [self activateProfile:profile expectedSelection:expected generation:nil error:&activationError];
@@ -1161,6 +1168,11 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen {
+    // Deletion retains its directional legacy timestamp compatibility policy.
+    return [self registryValue:before matchesValue:after seen:seen allowLegacyDates:YES];
+}
+
+- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates {
     if (before == after) return YES;
     if (!before || !after) return NO;
     BOOL arrays = [before isKindOfClass:NSArray.class] && [after isKindOfClass:NSArray.class];
@@ -1182,7 +1194,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         NSArray *left = before, *right = after;
         if (left.count != right.count) return NO;
         for (NSUInteger index = 0; index < left.count; index++)
-            if (![self registryValue:left[index] matchesValue:right[index] seen:seen]) return NO;
+            if (![self registryValue:left[index] matchesValue:right[index] seen:seen allowLegacyDates:allowLegacyDates]) return NO;
         return YES;
     }
     if (dictionaries) {
@@ -1191,7 +1203,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         // Retain NSDictionary's key-equality policy; values include Profile,
         // which has no value-based isEqual implementation of its own.
         for (id key in left)
-            if (!right[key] || ![self registryValue:left[key] matchesValue:right[key] seen:seen]) return NO;
+            if (!right[key] || ![self registryValue:left[key] matchesValue:right[key] seen:seen allowLegacyDates:allowLegacyDates]) return NO;
         return YES;
     }
     Profile *left = before, *right = after;
@@ -1199,10 +1211,29 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         left.shortDescription ?: NSNull.null, left.iconName ?: NSNull.null, left.settings ?: NSNull.null];
     NSArray *rightFields = @[right.profileId ?: NSNull.null, right.name ?: NSNull.null,
         right.shortDescription ?: NSNull.null, right.iconName ?: NSNull.null, right.settings ?: NSNull.null];
-    return [self registryValue:leftFields matchesValue:rightFields seen:seen] &&
-        !right.pxDecodedMissingCreatedAt && !right.pxDecodedMissingLastUsed &&
+    if (![self registryValue:leftFields matchesValue:rightFields seen:seen allowLegacyDates:allowLegacyDates]) return NO;
+    if (allowLegacyDates) return !right.pxDecodedMissingCreatedAt && !right.pxDecodedMissingLastUsed &&
         (left.pxDecodedMissingCreatedAt || [left.createdAt isEqual:right.createdAt]) &&
         (left.pxDecodedMissingLastUsed || [left.lastUsed isEqual:right.lastUsed]);
+    // Activation compares persisted values. Decode provenance may remain set on
+    // a loaded model even after saving its fallback dates into a valid archive.
+    return [self registryValue:left.createdAt matchesValue:right.createdAt seen:seen allowLegacyDates:NO] &&
+        [self registryValue:left.lastUsed matchesValue:right.lastUsed seen:seen allowLegacyDates:NO];
+}
+
+- (BOOL)activationProfile:(Profile *)profile matchesRegistry:(NSDictionary *)record error:(NSError **)error {
+    if (error) *error = nil;
+    // Callback boundaries can expose the registered model after archive commit.
+    // Decode outside the source gate; a byte CAS alone cannot detect model edits.
+    NSArray<Profile *> *committed = [self decodeRegistryRecord:record error:error];
+    if (!committed) return NO;
+    if ([profile isKindOfClass:Profile.class]) for (Profile *candidate in committed) {
+        if ([candidate.profileId isEqual:profile.profileId] &&
+            [self registryValue:profile matchesValue:candidate seen:nil allowLegacyDates:NO]) return YES;
+    }
+    if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:31
+        userInfo:@{NSLocalizedDescriptionKey: @"Activation model changed after registry persistence; reload before retrying"}];
+    return NO;
 }
 
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error {
