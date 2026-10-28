@@ -87,3 +87,7 @@ directory/defaults authority/durability và daemon distribution acknowledgement
 vẫn riêng. Clear/app/profile/toggle effects đã commit trước lỗi không bị rollback.
 Manifest `4C.2H4L-partial`; whole Reset và toàn Patch 4 vẫn partial, Patch 5–8 chưa
 triển khai.
+
+Người dùng xác nhận build H4L pass ngày 2026-10-28. Per-controller admission và
+phase callbacks được triển khai tiếp tại [H4M](PATCH-4C-2H4M-reset-run-admission.md);
+full UIKit/device và whole Reset workflow vẫn partial.

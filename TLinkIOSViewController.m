@@ -584,6 +584,8 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 @property (nonatomic, strong) UITextField *rrsNoteTextField;
 @property (nonatomic, strong) NSDictionary *nextFakeOptions;
 @property (nonatomic, strong) NSDictionary *nextFakePreview;
+@property (nonatomic, strong) NSObject *dashboardResetToken;
+@property (nonatomic, copy) NSString *dashboardResetPhase;
 @property (nonatomic, copy) NSString *rrsRestoreOrder;
 
 // Modify setupUI method to add a "Show Advanced" button and initially hide the advanced identifier sections
@@ -601,6 +603,9 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent;
+- (NSObject *)beginDashboardResetInPhase:(NSString *)phase;
+- (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase;
+- (BOOL)finishDashboardReset:(NSObject *)token;
 @end
 
 @interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
@@ -7535,31 +7540,51 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)saveRRSThenResetTapped {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf saveRRSThenResetTapped]; }); return;
+    }
+    if (self.dashboardResetToken) return;
     if (!self.selectedRRSAppIDs.count) { [self showDashboardMessage:@"Thiếu app lưu RRS" message:@"Hãy chọn ít nhất một app trong Chọn App lưu RRS."]; return; }
+    NSObject *token = [self beginDashboardResetInPhase:@"backup"];
+    if (!token) return;
     [self showProgressHUDWithTitle:@"Lưu RRS..."];
     NSArray<NSString *> *apps = [self.selectedRRSAppIDs copy];
     [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
-        if (savedCount != apps.count) {
-            [self hideProgressHUD];
-            NSString *detail = warnings.count ? [warnings componentsJoinedByString:@"\n"] : @"Không tạo được file RRS hợp lệ.";
-            [self showDashboardMessage:@"Lưu RRS thất bại"
-                               message:[NSString stringWithFormat:@"Đã lưu %lu/%lu app. Reset Data đã được hủy để tránh mất dữ liệu.\n\n%@",
-                                        (unsigned long)savedCount,
-                                        (unsigned long)apps.count,
-                                        detail]];
-            return;
-        }
-        [self performResetAndPrepareNextProfileWithWarnings:warnings];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self advanceDashboardReset:token fromPhase:@"backup" toPhase:@"clear"]) return;
+            if (savedCount != apps.count) {
+                [self finishDashboardReset:token];
+                [self hideProgressHUD];
+                NSString *detail = warnings.count ? [warnings componentsJoinedByString:@"\n"] : @"Không tạo được file RRS hợp lệ.";
+                [self showDashboardMessage:@"Lưu RRS thất bại"
+                                   message:[NSString stringWithFormat:@"Đã lưu %lu/%lu app. Reset Data đã được hủy để tránh mất dữ liệu.\n\n%@",
+                                            (unsigned long)savedCount,
+                                            (unsigned long)apps.count,
+                                            detail]];
+                return;
+            }
+            [self performResetAndPrepareNextProfileWithWarnings:warnings];
+        });
     }];
 }
 
 - (void)resetDataTapped {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf resetDataTapped]; }); return;
+    }
+    if (![self beginDashboardResetInPhase:@"clear"]) return;
     [self showProgressHUDWithTitle:@"Reset Data..."];
     [self performResetAndPrepareNextProfileWithWarnings:@[]];
 }
 
 - (void)performResetAndPrepareNextProfileWithWarnings:(NSArray<NSString *> *)warnings {
+    if (!NSThread.isMainThread) return;
+    NSObject *token = self.dashboardResetToken;
+    if (![self advanceDashboardReset:token fromPhase:@"clear" toPhase:@"clearing"]) return;
     if (!self.selectedResetAppIDs.count) {
+        [self finishDashboardReset:token];
         [self hideProgressHUD];
         [self showDashboardMessage:@"Thiếu app reset" message:@"Hãy chọn ít nhất một app trong Chọn App RESET!."];
         return;
@@ -7569,6 +7594,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     // removes previously persisted clear-only system targets (notably MobileMail)
     // from the spoof scope before AppDataCleaner kills/relaunches the target process.
     if (![self syncHookScopeToResetApps]) {
+        [self finishDashboardReset:token];
         [self hideProgressHUD];
         NSDictionary *syncDebug = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/filter_sync_debug.plist"];
         NSString *status = [syncDebug[@"syncStatus"] isKindOfClass:[NSString class]] ? syncDebug[@"syncStatus"] : @"unknown";
@@ -7608,7 +7634,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }
 
     [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] completion:^(NSArray<NSString *> *allWarnings) {
-        [self createNextProfileAndRandomizeWithWarnings:allWarnings];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self advanceDashboardReset:token fromPhase:@"clearing" toPhase:@"preparing"]) return;
+            [self createNextProfileAndRandomizeWithWarnings:allWarnings];
+        });
     }];
 }
 
@@ -7743,14 +7772,40 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return YES;
 }
 
+- (NSObject *)beginDashboardResetInPhase:(NSString *)phase {
+    // Main-thread admission for this controller. Keep ownership through the
+    // scheduled restart; ProfileManager's create gate starts too late for clear.
+    if (!NSThread.isMainThread || self.dashboardResetToken || !phase.length) return nil;
+    NSObject *token = [NSObject new];
+    self.dashboardResetToken = token;
+    self.dashboardResetPhase = phase;
+    return token;
+}
+
+- (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase {
+    if (!NSThread.isMainThread || !token || self.dashboardResetToken != token ||
+        ![self.dashboardResetPhase isEqual:phase] || !nextPhase.length) return NO;
+    self.dashboardResetPhase = nextPhase;
+    return YES;
+}
+
+- (BOOL)finishDashboardReset:(NSObject *)token {
+    if (!NSThread.isMainThread || !token || self.dashboardResetToken != token) return NO;
+    self.dashboardResetPhase = nil;
+    self.dashboardResetToken = nil;
+    return YES;
+}
+
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
     if (!NSThread.isMainThread) {
         NSArray *capturedWarnings = [warnings copy];
         dispatch_async(dispatch_get_main_queue(), ^{ [self createNextProfileAndRandomizeWithWarnings:capturedWarnings]; }); return;
     }
+    NSObject *token = self.dashboardResetToken;
+    if (![self advanceDashboardReset:token fromPhase:@"preparing" toPhase:@"preflight"]) return;
     NSError *intentError = nil;
     NSDictionary *submittedIntent = [self captureResetIntentWithOptions:self.nextFakeOptions preview:self.nextFakePreview error:&intentError];
-    if (!submittedIntent) { [self hideProgressHUD]; [self showError:intentError]; return; }
+    if (!submittedIntent) { [self finishDashboardReset:token]; [self hideProgressHUD]; [self showError:intentError]; return; }
     NSDictionary *fakeOptions = submittedIntent[@"options"];
     BOOL fakeIOS = fakeOptions[@"fakeIOSVersionEnabled"] ? [fakeOptions[@"fakeIOSVersionEnabled"] boolValue] : YES;
     BOOL fakeModel = fakeOptions[@"fakeModelEnabled"] ? [fakeOptions[@"fakeModelEnabled"] boolValue] : YES;
@@ -7788,6 +7843,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }
 
     if (!preparedPreview.count) {
+        [self finishDashboardReset:token];
         [self hideProgressHUD];
         [self showDashboardMessage:@"Không thể tạo profile fake"
                            message:@"Không có tổ hợp model/iOS hợp lệ trong dữ liệu hiện tại cho phạm vi đã chọn. Profile mới chưa được tạo."];
@@ -7797,55 +7853,69 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     // Providers and the hardware-preservation step can return mutable payloads.
     // Freeze the final request before reserving a profile or dispatching create.
     NSDictionary *preparedIntent = [self captureResetIntentWithOptions:fakeOptions preview:preparedPreview error:&intentError];
-    if (!preparedIntent) { [self hideProgressHUD]; [self showError:intentError]; return; }
+    if (!preparedIntent) { [self finishDashboardReset:token]; [self hideProgressHUD]; [self showError:intentError]; return; }
     fakeOptions = preparedIntent[@"options"];
     preparedPreview = preparedIntent[@"preview"];
     ProfileManager *pm = [ProfileManager sharedManager];
     NSError *allocationError = nil;
     NSString *candidateID = [pm generateProfileIDWithError:&allocationError];
     if (!candidateID) {
+        [self finishDashboardReset:token];
         [self hideProgressHUD]; [self showError:allocationError]; return;
     }
     NSString *profileName = [NSString stringWithFormat:@"Auto %@", candidateID];
     Profile *newProfile = [[Profile alloc] initWithName:profileName shortDescription:@"Auto-created after Reset Data" iconName:@"person.crop.circle.badge.plus"];
+    if (![self advanceDashboardReset:token fromPhase:@"preflight" toPhase:@"create"]) return;
     [pm createProfile:newProfile completion:^(BOOL success, NSError *error) {
-        if (!success) {
-            [self hideProgressHUD];
-            [self showError:error];
-            return;
-        }
-        [pm switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError *switchError) {
-            if (!switchSuccess) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![self advanceDashboardReset:token fromPhase:@"create" toPhase:@"switch"]) return;
+            if (!success) {
+                [self finishDashboardReset:token];
                 [self hideProgressHUD];
-                [self showError:switchError];
+                [self showError:error];
                 return;
             }
-            NSError *preparationError = nil;
-            if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError]) {
-                [self hideProgressHUD];
-                [self showError:preparationError];
-                return;
-            }
-            [self discardConsumedResetPreviewForIntent:submittedIntent];
-            [self persistDashboardSelections];
+            [pm switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError *switchError) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (![self advanceDashboardReset:token fromPhase:@"switch" toPhase:@"apply"]) return;
+                    if (!switchSuccess) {
+                        [self finishDashboardReset:token];
+                        [self hideProgressHUD];
+                        [self showError:switchError];
+                        return;
+                    }
+                    NSError *preparationError = nil;
+                    if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError]) {
+                        [self finishDashboardReset:token];
+                        [self hideProgressHUD];
+                        [self showError:preparationError];
+                        return;
+                    }
+                    [self discardConsumedResetPreviewForIntent:submittedIntent];
+                    [self persistDashboardSelections];
 
-            // Reset Data just cleared the target app container. Notify the root
-            // daemon only after the new profile/device_ids are fully written so
-            // it can republish both the global RootHide snapshot and each scoped
-            // app's local-container mirror before the app is relaunched.
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                                 CFSTR("com.hydra.tlinkios.profileChanged"),
-                                                 NULL, NULL, true);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self hideProgressHUD];
-                [self refreshDashboardSelectionLabels];
-                NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", newProfile.profileId, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
-                [self showDashboardMessage:@"Hoàn tất" message:msg];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [self killEnabledAppsAndRespring];
+                    // Reset Data just cleared the target app container. Notify the root
+                    // daemon only after the new profile/device_ids are fully written so
+                    // it can republish both the global RootHide snapshot and each scoped
+                    // app's local-container mirror before the app is relaunched.
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                         CFSTR("com.hydra.tlinkios.profileChanged"),
+                                                         NULL, NULL, true);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (![self advanceDashboardReset:token fromPhase:@"apply" toPhase:@"restart"]) return;
+                        [self hideProgressHUD];
+                        [self refreshDashboardSelectionLabels];
+                        NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", newProfile.profileId, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+                        [self showDashboardMessage:@"Hoàn tất" message:msg];
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            if (![self advanceDashboardReset:token fromPhase:@"restart" toPhase:@"restarting"]) return;
+                            @try { [self killEnabledAppsAndRespring]; }
+                            @finally { [self finishDashboardReset:token]; }
+                        });
+                    });
                 });
-            });
-        }];
+            }];
+        });
     }];
 }
 

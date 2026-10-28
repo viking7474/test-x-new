@@ -74,6 +74,13 @@ UI_ADAPTERS = {
         '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
         '- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
         '- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent']),
+    'PXResetWorkflowUI.inc': ('TLinkIOSViewController.m', [
+        '- (NSObject *)beginDashboardResetInPhase:(NSString *)phase',
+        '- (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase',
+        '- (BOOL)finishDashboardReset:(NSObject *)token',
+        '- (void)saveRRSThenResetTapped', '- (void)resetDataTapped',
+        '- (void)performResetAndPrepareNextProfileWithWarnings:(NSArray<NSString *> *)warnings',
+        '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings']),
 }
 
 
@@ -284,7 +291,7 @@ def source_contracts():
     assert auto.index('if (!NSThread.isMainThread)') < auto.index('generateProfileIDWithError:&allocationError')
     assert auto.index('if (!candidateID)') < auto.index('[pm createProfile:') and '[pm generateProfileID]' not in auto
     for filename, (path, signatures) in UI_ADAPTERS.items():
-        if filename == 'PXResetPreparationUI.inc':
+        if filename.startswith('PXReset'):
             continue  # Reset intentionally retains its extra enabled-group generation.
         for signature in signatures:
             adapter = writers.method(read(path), signature)
@@ -336,6 +343,28 @@ def source_contracts():
                  'reset final provider preview is detached before asynchronous creation',
                  'reset pending preparation uses the captured options after the caller edits its packet',
                  'off-main reset preview consumption preserves current pending intent'):
+        assert case in fixture, case
+    reset_source = read('TLinkIOSViewController.m')
+    reset_begin, reset_advance, reset_finish, backup_entry, reset_entry, clear_entry, _ = [writers.method(reset_source, s) for s in UI_ADAPTERS['PXResetWorkflowUI.inc'][1]]
+    assert 'NSThread.isMainThread' in reset_begin and 'self.dashboardResetToken' in reset_begin
+    for helper in (reset_advance, reset_finish):
+        assert '!NSThread.isMainThread' in helper and 'self.dashboardResetToken != token' in helper
+    for entry in (backup_entry, reset_entry):
+        assert 'if (!NSThread.isMainThread)' in entry and 'weakSelf' in entry and 'beginDashboardResetInPhase:' in entry
+    assert 'fromPhase:@"backup" toPhase:@"clear"' in backup_entry
+    assert 'fromPhase:@"clear" toPhase:@"clearing"' in clear_entry
+    assert 'fromPhase:@"clearing" toPhase:@"preparing"' in clear_entry
+    for old, new in (('preparing','preflight'), ('preflight','create'), ('create','switch'), ('switch','apply'), ('apply','restart'), ('restart','restarting')):
+        assert f'fromPhase:@"{old}" toPhase:@"{new}"' in auto
+    assert '@finally { [self finishDashboardReset:token]; }' in auto
+    for case in ('reset admission excludes both buttons before clear through scheduled restart',
+                 'duplicate phase callbacks produce one create switch apply notification and restart',
+                 'old reset callbacks and delayed restart cannot affect a newer run',
+                 'reset terminal preparation failures release admission and skip success tail',
+                 'backup failure and missing selections release reset admission without clearing',
+                 'backup success advances once and filter failure permits a later reset',
+                 'restart exception releases only its own reset token',
+                 'off-main reset entries admit one run and keep UI effects on main'):
         assert case in fixture, case
     for case in ('reset required identifier defaults and option matrix preserve enable-only policy',
                  'reset stops at each failed required identifier before generation and preview',
@@ -628,7 +657,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4L-partial'
+    assert manifest['rollout'] == '4C.2H4M-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

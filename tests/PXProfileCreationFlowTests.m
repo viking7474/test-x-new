@@ -2027,6 +2027,8 @@ static void TestCurrentProfileCheckpoint(void) {
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier;
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
 - (NSError *)lastError;
+- (NSString *)currentValueForIdentifier:(NSString *)identifier;
+- (NSString *)profileIdentityPath;
 @end
 @implementation PXResetIdentifierFixture
 - (instancetype)init { if ((self = [super init])) { _enabled = [NSMutableDictionary dictionary]; _events = [NSMutableArray array]; } return self; }
@@ -2042,6 +2044,8 @@ static void TestCurrentProfileCheckpoint(void) {
     if (error) *error = self.failGeneration ? self.failure : nil; return !self.failGeneration;
 }
 - (NSError *)lastError { return self.failure; }
+- (NSString *)currentValueForIdentifier:(NSString *)identifier { (void)identifier; return @"iPhone15,4"; }
+- (NSString *)profileIdentityPath { return nil; }
 @end
 @interface PXResetPreparationUIFixture : NSObject
 @property (nonatomic, strong) PXResetIdentifierFixture *manager;
@@ -2198,6 +2202,168 @@ static void TestResetIntentSnapshots(void) {
         "off-main reset preview consumption preserves current pending intent");
 }
 
+@interface PXResetRunProfileManager : PXControlledCreationManager
+@property (nonatomic) BOOL allocationFails;
+@property (nonatomic) NSUInteger switches;
+@property (nonatomic, copy) void (^pendingSwitch)(BOOL, NSError *);
+@end
+@implementation PXResetRunProfileManager
+- (NSString *)generateProfileIDWithError:(NSError **)error {
+    if (error) *error = self.allocationFails ? [NSError errorWithDomain:@"fixture.allocation" code:9 userInfo:nil] : nil;
+    return self.allocationFails ? nil : @"42";
+}
+- (void)switchToProfile:(Profile *)profile completion:(void (^)(BOOL, NSError *))completion {
+    CHECK(NSThread.isMainThread && profile == self.requestedInput, "reset switch uses the created input on main"); self.switches++; self.pendingSwitch = completion;
+}
+@end
+static dispatch_block_t gResetRestart;
+static NSUInteger gResetRestartSchedules, gResetFinalNotifications;
+static void PXResetWorkflowSchedule(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block) {
+    (void)when; CHECK(NSThread.isMainThread && queue == dispatch_get_main_queue(), "reset restart scheduled on main");
+    gResetRestartSchedules++; gResetRestart = [block copy];
+}
+static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "reset final notice on main"); gResetFinalNotifications++; }
+@interface PXResetRunUIFixture : PXResetPreparationUIFixture
+@property (nonatomic, strong) NSObject *dashboardResetToken;
+@property (nonatomic, copy) NSString *dashboardResetPhase;
+@property (nonatomic, strong) NSArray *selectedRRSAppIDs, *selectedResetAppIDs;
+@property (nonatomic) NSUInteger backups, clears, filters, shows, hides, errors, messages, successes, persists, refreshes, restarts;
+@property (nonatomic) BOOL filterFails, throwRestart;
+@property (nonatomic) NSUInteger previewMode;
+@property (nonatomic, copy) void (^backupCompletion)(NSArray *, NSUInteger);
+@property (nonatomic, copy) void (^clearCompletion)(NSArray *);
+- (NSObject *)beginDashboardResetInPhase:(NSString *)phase;
+- (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase;
+- (BOOL)finishDashboardReset:(NSObject *)token;
+- (void)saveRRSThenResetTapped; - (void)resetDataTapped;
+- (void)performResetAndPrepareNextProfileWithWarnings:(NSArray<NSString *> *)warnings;
+- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings;
+- (void)showProgressHUDWithTitle:(NSString *)title; - (void)hideProgressHUD;
+- (void)showError:(NSError *)error; - (void)showDashboardMessage:(NSString *)title message:(NSString *)message;
+- (BOOL)syncHookScopeToResetApps;
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion;
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *))completion;
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options;
+- (void)persistDashboardSelections; - (void)refreshDashboardSelectionLabels; - (void)killEnabledAppsAndRespring;
+@end
+#define ProfileManager PXProfileCreationFixture
+#define dispatch_after PXResetWorkflowSchedule
+#define CFNotificationCenterPostNotification(...) PXResetWorkflowNotification()
+@implementation PXResetRunUIFixture
+- (instancetype)init {
+    if ((self = [super init])) { _selectedRRSAppIDs = @[@"test.rrs"]; _selectedResetAppIDs = @[@"test.reset"];
+        self.nextFakeOptions = @{ @"fakeModelEnabled": @YES, @"fakeIOSVersionEnabled": @YES };
+        self.nextFakePreview = [self generateFakePreviewFromOptions:self.nextFakeOptions]; }
+    return self;
+}
+- (void)showProgressHUDWithTitle:(NSString *)title { (void)title; CreationUIEvent(); self.shows++; }
+- (void)hideProgressHUD { CreationUIEvent(); self.hides++; }
+- (void)showError:(NSError *)error { CreationUIEvent(); CHECK(error != nil, "reset failure presents an error"); self.errors++; }
+- (void)showDashboardMessage:(NSString *)title message:(NSString *)message { (void)message; CreationUIEvent(); if ([title isEqual:@"Hoàn tất"]) self.successes++; else self.messages++; }
+- (BOOL)syncHookScopeToResetApps { CreationUIEvent(); self.filters++; return !self.filterFails; }
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion {
+    (void)apps; (void)index; (void)saved; (void)warnings; CreationUIEvent(); self.backups++; self.backupCompletion = completion;
+}
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *))completion {
+    (void)apps; (void)index; (void)warnings; CreationUIEvent(); self.clears++; self.clearCompletion = completion;
+}
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options {
+    (void)options;
+    if (self.previewMode == 1) return nil;
+    if (self.previewMode == 2) return @{ @"DeviceModel": NSObject.new };
+    return @{ @"DeviceModel": @"iPhone15,4", @"IOSVersion": @"16.0", @"IOSProductType": @"iPhone15,4" };
+}
+- (void)persistDashboardSelections { CreationUIEvent(); self.persists++; }
+- (void)refreshDashboardSelectionLabels { CreationUIEvent(); self.refreshes++; }
+- (void)killEnabledAppsAndRespring { CreationUIEvent(); self.restarts++; if (self.throwRestart) [NSException raise:@"fixture.restart" format:@"restart failed"]; }
+#include "PXResetWorkflowUI.inc"
+@end
+#undef CFNotificationCenterPostNotification
+#undef dispatch_after
+#undef ProfileManager
+static PXResetRunProfileManager *ResetRunManager(void) {
+    gResetRestart = nil; gResetRestartSchedules = gResetFinalNotifications = 0;
+    PXResetRunProfileManager *manager = [PXResetRunProfileManager new]; gControllerManager = manager; return manager;
+}
+static void ResetRunRelease(PXResetRunUIFixture *view, PXResetRunProfileManager *manager) {
+    view.backupCompletion = nil; view.clearCompletion = nil; manager.pendingCreation = nil; manager.pendingSwitch = nil;
+    gResetRestart = nil; gControllerManager = nil;
+}
+static void DrainResetUI(void) {
+    __block BOOL done = NO; dispatch_async(dispatch_get_main_queue(), ^{ done = YES; }); CHECK(Pump(^BOOL { return done; }), "reset UI callbacks drain");
+}
+static void TestResetRunAdmission(void) {
+    PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
+    [view resetDataTapped]; NSObject *token = view.dashboardResetToken;
+    [view resetDataTapped]; [view saveRRSThenResetTapped];
+    CHECK(token && [view.dashboardResetPhase isEqual:@"clearing"] && view.shows == 1 && view.clears == 1 && !view.backups,
+        "reset admission excludes both buttons before clear through scheduled restart");
+    void (^cleared)(NSArray *) = view.clearCompletion;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ cleared(@[]); cleared(@[]); });
+    CHECK(Pump(^BOOL { return manager.requests == 1; }), "reset clear completion reaches one create");
+    void (^created)(BOOL, NSError *) = manager.pendingCreation;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ created(YES, nil); created(YES, nil); });
+    CHECK(Pump(^BOOL { return manager.switches == 1; }), "reset create completion reaches one switch");
+    void (^switched)(BOOL, NSError *) = manager.pendingSwitch;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ switched(YES, nil); switched(YES, nil); });
+    CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }) && view.manager.generations == 1 && view.previews == 1 && gResetFinalNotifications == 1 && view.successes == 1 && view.persists == 1,
+        "duplicate phase callbacks produce one create switch apply notification and restart");
+    [view resetDataTapped]; [view saveRRSThenResetTapped];
+    CHECK(view.clears == 1 && view.dashboardResetToken == token && [view.dashboardResetPhase isEqual:@"restart"], "reset keeps admission while waiting for restart");
+    dispatch_block_t restarted = gResetRestart; restarted(); restarted();
+    CHECK(view.restarts == 1 && !view.dashboardResetToken, "reset restart executes once and releases admission when it returns");
+    [view resetDataTapped]; NSObject *newToken = view.dashboardResetToken;
+    cleared(@[]); created(YES, nil); switched(YES, nil); restarted(); DrainResetUI();
+    CHECK(newToken && newToken != token && view.dashboardResetToken == newToken && manager.requests == 1 && manager.switches == 1 && view.restarts == 1 && view.clears == 2,
+        "old reset callbacks and delayed restart cannot affect a newer run");
+    CHECK(![view finishDashboardReset:token] && view.dashboardResetToken == newToken && [view finishDashboardReset:newToken], "stale reset finish never clears the newer token");
+    ResetRunRelease(view, manager);
+    for (NSUInteger mode = 0; mode < 8; mode++) {
+        manager = ResetRunManager(); view = [PXResetRunUIFixture new];
+        if (mode == 0) view.nextFakeOptions = @{ @"fakeModelEnabled": @[] };
+        if (mode == 1 || mode == 2) { view.nextFakePreview = nil; view.previewMode = mode; }
+        if (mode == 3) manager.allocationFails = YES;
+        if (mode == 6) view.manager.failGeneration = YES;
+        if (mode == 7) view.failPreview = YES;
+        [view resetDataTapped]; view.clearCompletion(@[]);
+        CHECK(Pump(^BOOL { return !view.dashboardResetToken || manager.requests; }), "reset failure matrix reaches create or terminal preflight");
+        NSError *failure = [NSError errorWithDomain:@"fixture.reset.phase" code:9 userInfo:nil];
+        if (mode >= 4) {
+            manager.pendingCreation(mode != 4, mode == 4 ? failure : nil);
+            CHECK(Pump(^BOOL { return !view.dashboardResetToken || manager.switches; }), "reset failure matrix reaches switch or terminal create");
+        }
+        if (mode >= 5) manager.pendingSwitch(mode != 5, mode == 5 ? failure : nil);
+        CHECK(Pump(^BOOL { return !view.dashboardResetToken; }) && view.errors + view.messages == 1 && !view.successes && !gResetRestartSchedules && !gResetFinalNotifications && !view.persists,
+            "reset terminal preparation failures release admission and skip success tail");
+        [view resetDataTapped]; CHECK(view.dashboardResetToken && view.clears == 2, "reset can be retried explicitly after terminal failure");
+        [view finishDashboardReset:view.dashboardResetToken]; ResetRunRelease(view, manager);
+    }
+    manager = ResetRunManager(); view = [PXResetRunUIFixture new]; view.selectedRRSAppIDs = @[]; [view saveRRSThenResetTapped];
+    CHECK(!view.dashboardResetToken && !view.backups && !view.shows, "missing RRS selection never admits a reset");
+    view.selectedRRSAppIDs = @[@"test.rrs"]; [view saveRRSThenResetTapped]; void (^backed)(NSArray *, NSUInteger) = view.backupCompletion;
+    backed(@[], 0); CHECK(Pump(^BOOL { return !view.dashboardResetToken; }) && !view.clears, "backup failure and missing selections release reset admission without clearing");
+    view.selectedResetAppIDs = @[]; [view resetDataTapped]; CHECK(!view.dashboardResetToken && !view.clears, "missing clear selection releases reset admission");
+    view.selectedResetAppIDs = @[@"test.reset"]; [view saveRRSThenResetTapped]; view.filterFails = YES;
+    void (^backupOK)(NSArray *, NSUInteger) = view.backupCompletion; backupOK(@[], 1); backupOK(@[], 1);
+    CHECK(Pump(^BOOL { return !view.dashboardResetToken; }) && view.filters == 1 && !view.clears, "backup success advances once and filter failure permits a later reset");
+    view.filterFails = NO; [view resetDataTapped]; NSObject *retry = view.dashboardResetToken; backed(@[], 1); DrainResetUI();
+    CHECK(view.dashboardResetToken == retry && view.clears == 1, "late backup completion cannot advance a newer clear run");
+    [view finishDashboardReset:retry]; ResetRunRelease(view, manager);
+    manager = ResetRunManager(); view = [PXResetRunUIFixture new]; [view resetDataTapped]; view.clearCompletion(@[]);
+    CHECK(Pump(^BOOL { return manager.requests == 1; }), "restart exception case creates"); manager.pendingCreation(YES, nil);
+    CHECK(Pump(^BOOL { return manager.switches == 1; }), "restart exception case switches"); manager.pendingSwitch(YES, nil);
+    CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }), "restart exception case schedules");
+    view.throwRestart = YES; BOOL threw = NO; @try { gResetRestart(); } @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && !view.dashboardResetToken && view.restarts == 1, "restart exception releases only its own reset token"); ResetRunRelease(view, manager);
+    manager = ResetRunManager(); view = [PXResetRunUIFixture new]; __block BOOL submitted = NO;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [view resetDataTapped]; [view saveRRSThenResetTapped]; dispatch_async(dispatch_get_main_queue(), ^{ submitted = YES; });
+    });
+    CHECK(Pump(^BOOL { return submitted; }) && view.dashboardResetToken && view.clears == 1 && !view.backups && view.shows == 1,
+        "off-main reset entries admit one run and keep UI effects on main");
+    [view finishDashboardReset:view.dashboardResetToken]; ResetRunRelease(view, manager);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2257,7 +2423,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
-        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;
