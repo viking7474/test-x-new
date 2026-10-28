@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
+#import "../AppDataBackupManager.h"
 #import "ProfileManager.h"
 #import "PXRuntimeProfileSelection.h"
 #import "PXRuntimeGeneration.h"
@@ -2243,6 +2244,8 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (BOOL)syncHookScopeToResetApps;
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion;
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *))completion;
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion;
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *))completion;
 - (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options;
 - (void)persistDashboardSelections; - (void)refreshDashboardSelectionLabels; - (void)killEnabledAppsAndRespring;
 @end
@@ -2272,6 +2275,12 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
     if (self.previewMode == 1) return nil;
     if (self.previewMode == 2) return @{ @"DeviceModel": NSObject.new };
     return @{ @"DeviceModel": @"iPhone15,4", @"IOSVersion": @"16.0", @"IOSProductType": @"iPhone15,4" };
+}
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion {
+    (void)token; [self backupApps:apps index:index savedCount:saved warnings:warnings completion:completion];
+}
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *))completion {
+    (void)token; [self clearApps:apps index:index warnings:warnings completion:completion];
 }
 - (void)persistDashboardSelections { CreationUIEvent(); self.persists++; }
 - (void)refreshDashboardSelectionLabels { CreationUIEvent(); self.refreshes++; }
@@ -2364,6 +2373,145 @@ static void TestResetRunAdmission(void) {
     [view finishDashboardReset:view.dashboardResetToken]; ResetRunRelease(view, manager);
 }
 
+@implementation PXBackupResult
+@end
+static PXBackupResult *BatchBackupResult(NSString *bundleID) {
+    PXBackupResult *result = [PXBackupResult new]; result.backupDirectory = [@"fixture-backup/" stringByAppendingString:bundleID]; result.warnings = @[]; return result;
+}
+@interface PXBatchBackupProducer : NSObject
+@property (nonatomic, strong) NSMutableArray *requests, *callbacks;
+@property (nonatomic) BOOL synchronous;
+@property (nonatomic) NSUInteger depth, maxDepth;
++ (instancetype)shared;
+- (void)createBackupForBundleID:(NSString *)bundleID appName:(NSString *)name options:(PXBackupOptions)options completion:(void (^)(PXBackupResult *, NSError *))completion;
+@end
+@interface PXBatchClearProducer : NSObject
+@property (nonatomic, strong) NSMutableArray *requests, *callbacks;
+@property (nonatomic) BOOL synchronous;
+@property (nonatomic) NSUInteger depth, maxDepth;
++ (instancetype)sharedManager;
+- (void)clearDataForBundleID:(NSString *)bundleID completion:(void (^)(BOOL, NSError *))completion;
+@end
+static PXBatchBackupProducer *gBatchBackup;
+static PXBatchClearProducer *gBatchClear;
+@implementation PXBatchBackupProducer
++ (instancetype)shared { return gBatchBackup; }
+- (instancetype)init { if ((self = [super init])) { _requests = [NSMutableArray array]; _callbacks = [NSMutableArray array]; } return self; }
+- (void)createBackupForBundleID:(NSString *)bundleID appName:(NSString *)name options:(PXBackupOptions)options completion:(void (^)(PXBackupResult *, NSError *))completion {
+    CHECK(NSThread.isMainThread && name.length && options == (PXBackupOptionIncludeAppGroups | PXBackupOptionIncludePreferences), "backup batch submits legacy options on main");
+    [self.requests addObject:bundleID]; [self.callbacks addObject:[completion copy]];
+    if (self.synchronous) { self.depth++; self.maxDepth = MAX(self.maxDepth, self.depth); completion(BatchBackupResult(bundleID), nil); completion(nil, nil); self.depth--; }
+}
+@end
+@implementation PXBatchClearProducer
++ (instancetype)sharedManager { return gBatchClear; }
+- (instancetype)init { if ((self = [super init])) { _requests = [NSMutableArray array]; _callbacks = [NSMutableArray array]; } return self; }
+- (void)clearDataForBundleID:(NSString *)bundleID completion:(void (^)(BOOL, NSError *))completion {
+    CHECK(NSThread.isMainThread, "clear batch submits on main"); [self.requests addObject:bundleID]; [self.callbacks addObject:[completion copy]];
+    if (self.synchronous) { self.depth++; self.maxDepth = MAX(self.maxDepth, self.depth); completion(YES, nil); completion(NO, nil); self.depth--; }
+}
+@end
+@interface PXResetBatchUIFixture : PXResetRunUIFixture
+@property (nonatomic, strong) UITextField *rrsNoteTextField;
+@property (nonatomic) NSUInteger metadataWrites, progressUpdates;
+@property (nonatomic) BOOL metadataFails;
+@property (nonatomic, strong) NSMutableArray *notes;
+- (BOOL)isDashboardReset:(NSObject *)token inPhase:(NSString *)phase;
+- (NSString *)displayNameForBundleID:(NSString *)bundleID;
+- (void)updateProgress:(float)progress detail:(NSString *)detail;
+- (BOOL)updateRRSMetadataAtBackupDirectory:(NSString *)directory bundleID:(NSString *)bundleID appName:(NSString *)name note:(NSString *)note;
+@end
+#define AppDataBackupManager PXBatchBackupProducer
+#define AppDataCleaner PXBatchClearProducer
+@implementation PXResetBatchUIFixture
+- (instancetype)init { if ((self = [super init])) { _rrsNoteTextField = [UITextField new]; _rrsNoteTextField.text = @"note"; _notes = [NSMutableArray array]; } return self; }
+- (NSString *)displayNameForBundleID:(NSString *)bundleID { CreationUIEvent(); return bundleID; }
+- (void)updateProgress:(float)progress detail:(NSString *)detail { (void)progress; (void)detail; CreationUIEvent(); self.progressUpdates++; }
+- (BOOL)updateRRSMetadataAtBackupDirectory:(NSString *)directory bundleID:(NSString *)bundleID appName:(NSString *)name note:(NSString *)note {
+    (void)directory; (void)bundleID; (void)name; CreationUIEvent(); self.metadataWrites++; [self.notes addObject:note]; return !self.metadataFails;
+}
+#include "PXResetBatchUI.inc"
+@end
+#undef AppDataCleaner
+#undef AppDataBackupManager
+static PXResetBatchUIFixture *NewBatchUI(void) {
+    gBatchBackup = [PXBatchBackupProducer new]; gBatchClear = [PXBatchClearProducer new]; return [PXResetBatchUIFixture new];
+}
+static void TestResetPerAppCallbacks(void) {
+    PXResetBatchUIFixture *view = NewBatchUI(); NSArray *apps = @[@"app.A", @"app.B"]; NSMutableArray *warnings = [NSMutableArray array];
+    __block NSUInteger completions = 0, saved = 0;
+    [view backupApps:apps index:0 savedCount:0 warnings:warnings completion:^(NSArray *result, NSUInteger count) { CHECK(NSThread.isMainThread && result == warnings, "backup terminal callback preserves warning accumulator on main"); completions++; saved = count; }];
+    void (^firstBackup)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ firstBackup(BatchBackupResult(@"app.A"), nil); firstBackup(nil, nil); });
+    CHECK(Pump(^BOOL { return gBatchBackup.requests.count == 2; }) && view.metadataWrites == 1 && !completions && !warnings.count,
+        "backup per-app callbacks advance once with one metadata write on main");
+    view.metadataFails = YES; view.rrsNoteTextField.text = @"later note";
+    PXBackupResult *result = BatchBackupResult(@"app.B"); result.warnings = @[@"provider warning"];
+    void (^secondBackup)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[1]; secondBackup(result, nil); secondBackup(result, nil);
+    CHECK(Pump(^BOOL { return completions == 1; }) && saved == 1 && view.metadataWrites == 2 && warnings.count == 2 && [view.notes.lastObject isEqual:@"later note"] && view.progressUpdates == 2,
+        "backup batch keeps metadata success count provider warnings and live note policy");
+    firstBackup(result, nil); secondBackup(result, nil); DrainResetUI(); CHECK(completions == 1 && view.metadataWrites == 2, "replayed backup callbacks cannot repeat terminal or metadata effects");
+    view = NewBatchUI(); warnings = [NSMutableArray array]; completions = 0;
+    [view clearApps:apps index:0 warnings:warnings completion:^(NSArray *allWarnings) { CHECK(NSThread.isMainThread && allWarnings == warnings, "clear terminal on main preserves accumulator"); completions++; }];
+    void (^firstClear)(BOOL, NSError *) = gBatchClear.callbacks[0];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ firstClear(NO, nil); firstClear(YES, nil); });
+    CHECK(Pump(^BOOL { return gBatchClear.requests.count == 2; }) && warnings.count == 1 && !completions && view.progressUpdates == 2,
+        "clear per-app callbacks append one failure and advance once on main");
+    void (^secondClear)(BOOL, NSError *) = gBatchClear.callbacks[1]; secondClear(YES, nil); secondClear(NO, nil);
+    CHECK(Pump(^BOOL { return completions == 1; }) && warnings.count == 1 && gBatchClear.requests.count == 2, "clear continues after a failed app and completes once after the full list");
+    firstClear(NO, nil); secondClear(NO, nil); DrainResetUI(); CHECK(completions == 1 && warnings.count == 1, "replayed clear callbacks have no late warning or terminal effects");
+    for (NSUInteger backup = 0; backup < 2; backup++) {
+        view = NewBatchUI(); warnings = [NSMutableArray array]; completions = 0;
+        NSString *phase = backup ? @"backup" : @"clearing"; NSObject *token = [view beginDashboardResetInPhase:phase];
+        if (backup) [view backupApps:apps index:0 savedCount:0 warnings:warnings resetToken:token completion:^(NSArray *w, NSUInteger count) { (void)w; (void)count; completions++; }];
+        else [view clearApps:apps index:0 warnings:warnings resetToken:token completion:^(NSArray *w) { (void)w; completions++; }];
+        [view finishDashboardReset:token]; NSObject *newToken = [view beginDashboardResetInPhase:phase];
+        if (backup) { void (^callback)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0]; callback(BatchBackupResult(@"app.A"), nil); }
+        else { void (^callback)(BOOL, NSError *) = gBatchClear.callbacks[0]; callback(NO, nil); }
+        DrainResetUI();
+        CHECK(!view.metadataWrites && !warnings.count && !completions && gBatchBackup.requests.count + gBatchClear.requests.count == 1 && view.dashboardResetToken == newToken,
+            "retired reset batches ignore metadata warnings and remaining app submissions");
+        [view advanceDashboardReset:newToken fromPhase:phase toPhase:@"apply"];
+        [view backupApps:apps index:0 savedCount:0 warnings:warnings resetToken:newToken completion:nil];
+        [view clearApps:apps index:0 warnings:warnings resetToken:newToken completion:nil];
+        CHECK(gBatchBackup.requests.count + gBatchClear.requests.count == 1, "wrong-phase reset batches submit no service requests");
+        [view finishDashboardReset:newToken];
+    }
+    view = NewBatchUI(); NSObject *unrelated = [view beginDashboardResetInPhase:@"clearing"]; gBatchBackup.synchronous = YES; gBatchClear.synchronous = YES;
+    NSMutableArray *many = [NSMutableArray array]; for (NSUInteger i = 0; i < 64; i++) [many addObject:[NSString stringWithFormat:@"app.%lu", (unsigned long)i]];
+    warnings = [NSMutableArray array]; completions = 0; saved = 0;
+    [view backupApps:many index:0 savedCount:0 warnings:warnings completion:^(NSArray *w, NSUInteger count) { (void)w; saved = count; completions++; }];
+    CHECK(Pump(^BOOL { return completions == 1; }) && saved == many.count && view.dashboardResetToken == unrelated && view.metadataWrites == many.count,
+        "generic backup keeps nil-token behavior during an unrelated reset");
+    [view clearApps:many index:0 warnings:warnings completion:^(NSArray *w) { (void)w; completions++; }];
+    CHECK(Pump(^BOOL { return completions == 2; }) && gBatchBackup.maxDepth == 1 && gBatchClear.maxDepth == 1 && gBatchBackup.requests.count == many.count && gBatchClear.requests.count == many.count && !warnings.count,
+        "synchronous duplicate service results stay sequential without recursive stack growth");
+    [view finishDashboardReset:unrelated];
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        view = NewBatchUI(); warnings = [NSMutableArray array]; completions = 0; saved = 99;
+        [view backupApps:@[@"app.A"] index:0 savedCount:0 warnings:warnings completion:^(NSArray *w, NSUInteger count) { (void)w; completions++; saved = count; }];
+        PXBackupResult *backupResult = mode < 2 ? nil : BatchBackupResult(@"app.A");
+        if (mode == 2) backupResult.backupDirectory = @"";
+        if (mode == 3) view.metadataFails = YES;
+        NSError *failure = mode == 0 ? [NSError errorWithDomain:@"fixture.backup" code:9 userInfo:nil] : nil;
+        void (^callback)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0]; callback(backupResult, failure);
+        CHECK(Pump(^BOOL { return completions == 1; }) && saved == 0 && warnings.count == 1, "backup error nil result missing directory and metadata failure keep unsuccessful saved count");
+    }
+    view = NewBatchUI(); completions = 0; saved = 0;
+    [view backupApps:apps index:apps.count savedCount:5 warnings:[NSMutableArray array] completion:^(NSArray *w, NSUInteger count) { (void)w; completions++; saved = count; }];
+    [view clearApps:@[] index:0 warnings:[NSMutableArray array] completion:^(NSArray *w) { (void)w; completions++; }];
+    [view backupApps:@[] index:0 savedCount:0 warnings:[NSMutableArray array] completion:nil]; [view clearApps:@[] index:0 warnings:[NSMutableArray array] completion:nil];
+    CHECK(completions == 2 && saved == 5 && !gBatchBackup.requests.count && !gBatchClear.requests.count, "batch empty suffix and null completion preserve terminal behavior");
+    gBatchClear.synchronous = YES; __block BOOL handedOff = NO;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [view clearApps:@[@"app.A"] index:0 warnings:[NSMutableArray array] completion:^(NSArray *w) {
+            (void)w; CHECK(NSThread.isMainThread, "off-main batch entry delivers completion on main"); handedOff = YES;
+        }];
+    });
+    CHECK(Pump(^BOOL { return handedOff; }) && gBatchClear.requests.count == 1, "off-main batch entry reaches one main-thread service submission");
+    gBatchBackup = nil; gBatchClear = nil;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2423,7 +2571,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
-        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

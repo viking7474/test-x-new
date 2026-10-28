@@ -606,6 +606,9 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (NSObject *)beginDashboardResetInPhase:(NSString *)phase;
 - (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase;
 - (BOOL)finishDashboardReset:(NSObject *)token;
+- (BOOL)isDashboardReset:(NSObject *)token inPhase:(NSString *)phase;
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion;
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings))completion;
 @end
 
 @interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
@@ -7550,7 +7553,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (!token) return;
     [self showProgressHUDWithTitle:@"Lưu RRS..."];
     NSArray<NSString *> *apps = [self.selectedRRSAppIDs copy];
-    [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
+    [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] resetToken:token completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![self advanceDashboardReset:token fromPhase:@"backup" toPhase:@"clear"]) return;
             if (savedCount != apps.count) {
@@ -7633,7 +7636,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         return;
     }
 
-    [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] completion:^(NSArray<NSString *> *allWarnings) {
+    [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] resetToken:token completion:^(NSArray<NSString *> *allWarnings) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![self advanceDashboardReset:token fromPhase:@"clearing" toPhase:@"preparing"]) return;
             [self createNextProfileAndRandomizeWithWarnings:allWarnings];
@@ -7641,48 +7644,73 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }];
 }
 
-- (void)backupApps:(NSArray<NSString *> *)apps
-             index:(NSUInteger)index
-        savedCount:(NSUInteger)savedCount
-          warnings:(NSMutableArray<NSString *> *)warnings
-        completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion {
-    if (index >= apps.count) { completion(warnings, savedCount); return; }
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion {
+    [self backupApps:apps index:index savedCount:savedCount warnings:warnings resetToken:nil completion:completion];
+}
+
+- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self backupApps:apps index:index savedCount:savedCount warnings:warnings resetToken:resetToken completion:completion]; }); return;
+    }
+    if (resetToken && ![self isDashboardReset:resetToken inPhase:@"backup"]) return;
+    if (index >= apps.count) { if (completion) completion(warnings, savedCount); return; }
     NSString *bundleID = apps[index];
     NSString *name = [self displayNameForBundleID:bundleID];
     [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Backup %@", name]];
     PXBackupOptions options = PXBackupOptionIncludeAppGroups | PXBackupOptionIncludePreferences;
+    __block BOOL completed = NO; // Access only in the main-queue delivery below.
     [[AppDataBackupManager shared] createBackupForBundleID:bundleID appName:name options:options completion:^(PXBackupResult *result, NSError *error) {
-        BOOL saved = NO;
-        if (error) {
-            [warnings addObject:[NSString stringWithFormat:@"Backup %@: %@", name, error.localizedDescription ?: @"failed"]];
-        } else if (!result.backupDirectory.length) {
-            [warnings addObject:[NSString stringWithFormat:@"Backup %@: không nhận được thư mục backup đã publish", name]];
-        } else {
-            saved = [self updateRRSMetadataAtBackupDirectory:result.backupDirectory
-                                                    bundleID:bundleID
-                                                     appName:name
-                                                        note:self.rrsNoteTextField.text ?: @""];
-            if (!saved) {
-                [warnings addObject:[NSString stringWithFormat:@"Backup %@: không thể lưu metadata RRS", name]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completed) return;
+            completed = YES;
+            if (resetToken && ![self isDashboardReset:resetToken inPhase:@"backup"]) return;
+            BOOL saved = NO;
+            if (error) {
+                [warnings addObject:[NSString stringWithFormat:@"Backup %@: %@", name, error.localizedDescription ?: @"failed"]];
+            } else if (!result.backupDirectory.length) {
+                [warnings addObject:[NSString stringWithFormat:@"Backup %@: không nhận được thư mục backup đã publish", name]];
+            } else {
+                saved = [self updateRRSMetadataAtBackupDirectory:result.backupDirectory
+                                                        bundleID:bundleID
+                                                         appName:name
+                                                            note:self.rrsNoteTextField.text ?: @""];
+                if (!saved) {
+                    [warnings addObject:[NSString stringWithFormat:@"Backup %@: không thể lưu metadata RRS", name]];
+                }
             }
-        }
-        if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
-        [self backupApps:apps
-                   index:index + 1
-              savedCount:savedCount + (saved ? 1 : 0)
-                warnings:warnings
-              completion:completion];
+            if (result.warnings.count) [warnings addObjectsFromArray:result.warnings];
+            [self backupApps:apps
+                       index:index + 1
+                  savedCount:savedCount + (saved ? 1 : 0)
+                    warnings:warnings
+                  resetToken:resetToken
+                  completion:completion];
+        });
     }];
 }
 
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings))completion {
-    if (index >= apps.count) { completion(warnings); return; }
+    [self clearApps:apps index:index warnings:warnings resetToken:nil completion:completion];
+}
+
+- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self clearApps:apps index:index warnings:warnings resetToken:resetToken completion:completion]; }); return;
+    }
+    if (resetToken && ![self isDashboardReset:resetToken inPhase:@"clearing"]) return;
+    if (index >= apps.count) { if (completion) completion(warnings); return; }
     NSString *bundleID = apps[index];
     NSString *name = [self displayNameForBundleID:bundleID];
     [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Clear %@", name]];
+    __block BOOL completed = NO; // One accepted result per submitted app.
     [[AppDataCleaner sharedManager] clearDataForBundleID:bundleID completion:^(BOOL success, NSError *error) {
-        if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", name, error.localizedDescription ?: @"failed"]];
-        [self clearApps:apps index:index + 1 warnings:warnings completion:completion];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completed) return;
+            completed = YES;
+            if (resetToken && ![self isDashboardReset:resetToken inPhase:@"clearing"]) return;
+            if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", name, error.localizedDescription ?: @"failed"]];
+            [self clearApps:apps index:index + 1 warnings:warnings resetToken:resetToken completion:completion];
+        });
     }];
 }
 
@@ -7794,6 +7822,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     self.dashboardResetPhase = nil;
     self.dashboardResetToken = nil;
     return YES;
+}
+
+- (BOOL)isDashboardReset:(NSObject *)token inPhase:(NSString *)phase {
+    return NSThread.isMainThread && token && self.dashboardResetToken == token && [self.dashboardResetPhase isEqual:phase];
 }
 
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {

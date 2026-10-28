@@ -81,6 +81,12 @@ UI_ADAPTERS = {
         '- (void)saveRRSThenResetTapped', '- (void)resetDataTapped',
         '- (void)performResetAndPrepareNextProfileWithWarnings:(NSArray<NSString *> *)warnings',
         '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings']),
+    'PXResetBatchUI.inc': ('TLinkIOSViewController.m', [
+        '- (BOOL)isDashboardReset:(NSObject *)token inPhase:(NSString *)phase',
+        '- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion',
+        '- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion',
+        '- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings))completion',
+        '- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings))completion']),
 }
 
 
@@ -354,6 +360,8 @@ def source_contracts():
     assert 'fromPhase:@"backup" toPhase:@"clear"' in backup_entry
     assert 'fromPhase:@"clear" toPhase:@"clearing"' in clear_entry
     assert 'fromPhase:@"clearing" toPhase:@"preparing"' in clear_entry
+    assert 'warnings:[NSMutableArray array] resetToken:token completion:' in backup_entry
+    assert 'warnings:[warnings mutableCopy] resetToken:token completion:' in clear_entry
     for old, new in (('preparing','preflight'), ('preflight','create'), ('create','switch'), ('switch','apply'), ('apply','restart'), ('restart','restarting')):
         assert f'fromPhase:@"{old}" toPhase:@"{new}"' in auto
     assert '@finally { [self finishDashboardReset:token]; }' in auto
@@ -365,6 +373,21 @@ def source_contracts():
                  'backup success advances once and filter failure permits a later reset',
                  'restart exception releases only its own reset token',
                  'off-main reset entries admit one run and keep UI effects on main'):
+        assert case in fixture, case
+    batch_helpers = [writers.method(reset_source, s) for s in UI_ADAPTERS['PXResetBatchUI.inc'][1]]
+    for batch, phase in ((batch_helpers[2], 'backup'), (batch_helpers[4], 'clearing')):
+        assert 'if (!NSThread.isMainThread)' in batch and '__block BOOL completed = NO;' in batch
+        assert batch.count(f'isDashboardReset:resetToken inPhase:@"{phase}"') == 2
+        assert batch.index('if (completed) return;') < batch.index('completed = YES;') < batch.rindex('isDashboardReset:resetToken')
+        assert 'resetToken:resetToken' in batch and 'dispatch_async(dispatch_get_main_queue()' in batch
+    assert 'resetToken:nil' in batch_helpers[1] and 'resetToken:nil' in batch_helpers[3]
+    for case in ('backup per-app callbacks advance once with one metadata write on main',
+                 'clear per-app callbacks append one failure and advance once on main',
+                 'retired reset batches ignore metadata warnings and remaining app submissions',
+                 'wrong-phase reset batches submit no service requests',
+                 'generic backup keeps nil-token behavior during an unrelated reset',
+                 'synchronous duplicate service results stay sequential without recursive stack growth',
+                 'batch empty suffix and null completion preserve terminal behavior'):
         assert case in fixture, case
     for case in ('reset required identifier defaults and option matrix preserve enable-only policy',
                  'reset stops at each failed required identifier before generation and preview',
@@ -657,7 +680,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4M-partial'
+    assert manifest['rollout'] == '4C.2H4N-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

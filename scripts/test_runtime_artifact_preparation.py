@@ -253,7 +253,7 @@ def source_contracts():
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4M-partial'
+    assert manifest['rollout'] == '4C.2H4N-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')

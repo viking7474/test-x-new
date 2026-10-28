@@ -99,3 +99,7 @@ Service không callback hoặc unexpected exception ngoài restart có thể gi�
 không tự timeout rồi admit destructive overlap. Crash recovery, cancellation và
 cross-phase target pinning cần riêng. Whole Reset và toàn Patch 4 vẫn partial,
 manifest `4C.2H4M-partial`; Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4M pass ngày 2026-10-28. Per-app callback delivery và
+explicit child-batch token checks được triển khai tiếp tại
+[H4N](PATCH-4C-2H4N-reset-per-app-callbacks.md); whole Reset và device matrix vẫn partial.
