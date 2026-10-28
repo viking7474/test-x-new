@@ -655,12 +655,22 @@ static NSArray<NSString *> *PXMetadataFixturePaths(NSString *profileID) {
         Path(root, @"identifiers.plist"), Path(root, @"scoped-apps.plist")];
 }
 static NSDictionary *PXCaptureMetadataFixture(NSString *profileID) {
-    return [gStore capture:^NSDictionary *(NSError **error) {
-        (void)error; NSMutableDictionary *result = [NSMutableDictionary dictionary];
-        for (NSString *path in PXMetadataFixturePaths(profileID))
-            result[path] = [NSData dataWithContentsOfFile:path] ?: (id)NSNull.null;
+    NSError *captureError = nil;
+    NSDictionary *captured = [gStore capture:^NSDictionary *(NSError **error) {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        // capture deep-copies through plist serialization. NSNull is not a
+        // valid absence marker here; preserve presence separately from bytes,
+        // including the distinction between an absent and an empty file.
+        for (NSString *path in PXMetadataFixturePaths(profileID)) {
+            BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:path];
+            NSData *bytes = exists ? [NSData dataWithContentsOfFile:path options:0 error:error] : NSData.data;
+            if (!bytes) return nil;
+            result[path] = @{ @"exists": @(exists), @"bytes": bytes };
+        }
         return result;
-    } error:NULL];
+    } error:&captureError];
+    if (!captured) fprintf(stderr, "Metadata snapshot failed: %s\n", captureError.description.UTF8String ?: "unknown error");
+    return captured;
 }
 static NSUInteger PXMetadataFixtureDescriptorCount(void) {
     NSUInteger count = 0;
@@ -677,6 +687,18 @@ static void TestProfileMetadataUpdates(void) {
     NSDictionary *scoped = @{ @"Apps": @[@"fixture.app"], @"keep": @YES };
     CHECK([scoped writeToFile:scopedPath atomically:YES], "metadata scoped extras seeded");
     NSDictionary *before = PXCaptureMetadataFixture(target), *selection = ActiveFiles();
+    NSArray *initialPaths = PXMetadataFixturePaths(target);
+    CHECK(before && ![before[initialPaths[0]][@"exists"] boolValue] && ![before[initialPaths[1]][@"exists"] boolValue] &&
+        ![before[initialPaths[2]][@"exists"] boolValue] && [before[initialPaths[3]][@"exists"] boolValue] &&
+        [before[initialPaths[0]][@"bytes"] length] == 0 && [before[initialPaths[3]][@"bytes"] length] > 0 &&
+        [NSPropertyListSerialization propertyList:before isValidForFormat:NSPropertyListBinaryFormat_v1_0],
+        "metadata absence snapshot is nonnil plist-safe and preserves file presence separately from bytes");
+    CHECK([NSData.data writeToFile:initialPaths[0] atomically:YES], "metadata empty file oracle seeded");
+    NSDictionary *emptyFile = PXCaptureMetadataFixture(target);
+    CHECK(emptyFile && [emptyFile[initialPaths[0]][@"exists"] boolValue] && [emptyFile[initialPaths[0]][@"bytes"] length] == 0 &&
+        ![emptyFile isEqual:before], "metadata snapshot distinguishes empty file from absence");
+    CHECK([manager.fileManager removeItemAtPath:initialPaths[0] error:NULL] && [before isEqual:PXCaptureMetadataFixture(target)],
+        "metadata empty file oracle restores original absence");
     NSData *archiveBefore = [NSData dataWithContentsOfFile:archivePath];
     NSUInteger notices = gNotices, terminations = gTerminations;
     for (NSUInteger failAfter = 1; failAfter <= 4; failAfter++) {
@@ -686,10 +708,16 @@ static void TestProfileMetadataUpdates(void) {
         };
         [manager updateProfile:edit completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
         gStore.testCheckpoint = nil;
-        CHECK(callbacks == 1 && !success && failure && [before isEqual:PXCaptureMetadataFixture(target)] &&
-            [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]] && manager.mutableProfiles.lastObject == previous &&
-            notices == gNotices && !manager.lifecycleLease && !manager.creationInProgress,
-            "metadata fault after each file rolls back bytes and absence before registry memory or notification");
+        NSDictionary *after = PXCaptureMetadataFixture(target);
+        BOOL filesRestored = before && after && [before isEqual:after];
+        BOOL archiveRestored = [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]];
+        BOOL rollbackOK = callbacks == 1 && writes == failAfter && !success && failure && filesRestored && archiveRestored &&
+            manager.mutableProfiles.lastObject == previous && notices == gNotices && !manager.lifecycleLease && !manager.creationInProgress;
+        CHECK(rollbackOK, "metadata fault after each file rolls back bytes and absence before registry memory or notification");
+        if (!rollbackOK) fprintf(stderr, "Metadata rollback: fault=%lu writes=%lu callbacks=%lu success=%d before=%d after=%d files=%d archive=%d memory=%d notices=%lu/%lu lease=%d busy=%d error=%s\n",
+            (unsigned long)failAfter, (unsigned long)writes, (unsigned long)callbacks, success, before != nil, after != nil, filesRestored,
+            archiveRestored, manager.mutableProfiles.lastObject == previous, (unsigned long)notices, (unsigned long)gNotices,
+            manager.lifecycleLease != nil, manager.creationInProgress, failure.description.UTF8String ?: "nil");
     }
     __block NSUInteger commits = 0, callbacks = 0; __block BOOL success = NO; __block NSError *failure = nil;
     gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };

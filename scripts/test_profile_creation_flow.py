@@ -94,6 +94,15 @@ def source_contracts():
     assert 'expected:self.registryRecord' in update and 'self.registryRecord =' in update
     assert '#import "PXProfileMetadataWriter.h"' in source
     fixture = read('tests/PXProfileCreationFlowTests.m')
+    capture_start = fixture.index('static NSDictionary *PXCaptureMetadataFixture(')
+    capture_end = fixture.index('static NSUInteger PXMetadataFixtureDescriptorCount(', capture_start)
+    metadata_capture = fixture[capture_start:capture_end]
+    assert 'NSNull.null' not in metadata_capture and 'error:&captureError' in metadata_capture
+    assert '@"exists": @(exists)' in metadata_capture and '@"bytes": bytes' in metadata_capture
+    assert 'if (!bytes) return nil;' in metadata_capture
+    assert 'metadata absence snapshot is nonnil plist-safe and preserves file presence separately from bytes' in fixture
+    assert 'metadata snapshot distinguishes empty file from absence' in fixture
+    assert 'writes == failAfter' in fixture and 'Metadata rollback: fault=' in fixture
     assert '#import "PXProfileMetadataWriter.h"' in fixture and 'PXPerformStandaloneRuntimeSourceWrite(' in fixture
     metadata = read('common/PXProfileMetadataWriter.m')
     assert 'borrowWithLifecycleLease:lease profileID:targetID' in metadata

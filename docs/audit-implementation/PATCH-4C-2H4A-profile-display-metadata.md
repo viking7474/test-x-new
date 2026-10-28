@@ -92,3 +92,30 @@ trên main theo policy cũ; chưa benchmark latency, không gọi đây là perf
 optimization. Không thêm timer/network/queue hoặc hot hook work. Manifest rollout
 `4C.2H4A-partial`; preferences authority, directory/registry durability, remaining
 metadata producers, rootful reader rollout và toàn Patch 4 vẫn chưa hoàn tất.
+
+## Follow-up — native rollback oracle, 2026-10-28
+
+CI rootful đã compile và chạy 362/366 checks; cả bốn failures là cùng assertion
+`metadata fault after each file rolls back bytes and absence before registry memory
+or notification`. Các nullability warnings và legacy timestamp fallback logs không
+phải failed assertions.
+
+Fixture H4A sai ở `PXCaptureMetadataFixture`: dùng NSNull cho missing file, rồi trả
+dictionary đó qua SourceStore.capture. Capture deep-copy bằng property-list
+serialization nên NSNull làm nó trả nil. Baseline có ba files chưa tồn tại; sau
+mỗi fault rollback vẫn giữ absence, vì vậy cả before/after snapshot đều nil và phép
+so sánh luôn false. Sau successful save mọi file tồn tại, nên lỗi không xuất hiện
+ở các cases phía sau. Đây là lỗi oracle do fixture mới thêm, không phải bằng chứng
+production rollback thất bại.
+
+Sửa snapshot thành mỗi path có `exists` NSNumber và `bytes` NSData. Read failure
+không bị đổi thành absence; capture error có diagnostic. Bổ sung native canary
+baseline phải nonnil/plist-safe, phân biệt present empty file với absent file, và
+restore absence trước fault matrix. Giữ nguyên toàn bộ byte/archive/memory/notice/
+ownership assertions, đồng thời yêu cầu fault checkpoint thực sự chạy đúng ordinal
+và in per-condition diagnostic khi fail. Không bỏ test hoặc nới rollback contract.
+
+Chỉ fixture và source guards thay đổi, production code giữ nguyên; cùng fixture
+được dùng cho rootful và RootHide. Local profile/macro/source transaction/hardening
+gates và 33-method extraction pass. Native rerun sau fix vẫn chờ macOS CI; không
+báo 366/366 hoặc rootful/RootHide runtime pass từ Windows.
