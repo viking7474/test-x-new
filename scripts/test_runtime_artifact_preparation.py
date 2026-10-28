@@ -38,7 +38,9 @@ WRAPPERS = {
     'PXPreparedStorageMethod.inc': ('common/StorageManager.m', ['- (NSDictionary *)generateStorageForCapacity:(NSString *)capacity', '- (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo', '- (NSDictionary *)currentStorageInfo',
         '- (void)saveToCurrentProfile', '- (void)saveToProfile:(NSString *)profileId',
         '- (BOOL)persistStorageToProfile:(NSString *)profileID current:(BOOL)current error:(NSError **)error',
-        '- (void)setTotalStorageCapacity:(NSString *)capacity', '- (void)setFreeStorageSpace:(NSString *)freeSpace', '- (void)setFilesystemType:(NSString *)fsType']),
+        '- (void)setTotalStorageCapacity:(NSString *)capacity', '- (void)setFreeStorageSpace:(NSString *)freeSpace', '- (void)setFilesystemType:(NSString *)fsType',
+        '- (BOOL)isStorageSpoofingEnabled', '- (void)setStorageSpoofingEnabled:(BOOL)enabled',
+        '- (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError **)error']),
     'PXPreparedUptimeMethod.inc': ('common/UptimeManager.m', ['- (void)generateConsistentUptimeAndBootTimeForProfile:(NSString *)profilePath', '- (void)adoptCommittedUptimeInfo:(NSDictionary *)uptimeInfo timestamp:(NSDate *)timestamp',
         '- (NSDictionary *)prepareConsistentUptimeInfo',
         '- (NSTimeInterval)currentUptimeForProfile:(NSString *)profilePath',
@@ -123,6 +125,31 @@ def source_contracts():
     assert 'PXActiveProfileID()' not in persist and 'PXLegacyActiveProfileInfoPath()' not in persist
     assert 'current:YES' in identifier.method(storage, '- (void)saveToCurrentProfile')
     assert 'current:NO' in identifier.method(storage, '- (void)saveToProfile:(NSString *)profileId')
+    flag = identifier.method(storage, '- (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError **)error')
+    legacy_flag = identifier.method(storage, '- (void)setStorageSpoofingEnabled:(BOOL)enabled')
+    assert '[self setStorageSpoofingEnabled:enabled error:&error]' in legacy_flag and 'Failed to commit storage enable flag' in legacy_flag
+    assert 'PXPerformStandaloneRuntimeSourceWrite' in flag and 'dictionaryAtPath:path' in flag and 'PXTLinkIOSSettingsPath()' in flag
+    assert 'candidate[@"StorageSystemEnabled"] = @(enabled)' in flag and 'EnabledIdentifiers' not in flag
+    assert flag.index('if (!committed) return NO;') < flag.index('_isEnabled = enabled') < flag.index('setBool:enabled')
+    assert '@finally' in flag and '_storagePreferenceWriteInFlight = NO' in flag and '_storagePreferenceWriteInFlight = YES' in flag
+    assert '@catch (NSException *exception)' in flag and '@"com.hydra.tlinkios.settings"' in flag
+    assert 'PostNotification' not in flag and 'dispatch_' not in flag and 'writeToFile:' not in flag
+    assert '@synchronized (self)' in identifier.method(storage, '- (BOOL)isStorageSpoofingEnabled')
+    fixture = read('tests/PXRuntimeArtifactPreparationTests.m')
+    assert 'gWrites++; return [gStore performStandaloneWrite:body error:error];' in fixture
+    assert '#define NSUserDefaults PXStoragePreferenceDefaultsFixture' in fixture
+    for case in ('storage flag mirror observes committed source and cache after source unlock',
+                 'storage mirror reentry fails busy before source entry without deadlock',
+                 'storage flag commit preserves unrelated primary toggle and legacy mirror scope without notifications',
+                 'failed storage flag commit preserves source cache and mirrors',
+                 'storage writer admission is released after source failure',
+                 'storage mirror exception does not negate primary commit or cache adoption',
+                 'nested storage high-level writer rejects before cache and mirror effects',
+                 'storage flag rollback preserves original source absence',
+                 'void storage setter preserves corrupt source and prior cache on failure',
+                 'concurrent storage flag writer fails busy while getter remains available',
+                 'storage flag writer accepts a later request after completion'):
+        assert case in fixture, case
     mutation = read('common/PXProfileArtifactMutation.m')
     root = identifier.method(mutation, '+ (instancetype)acquireWithProfileIDResolver:(NSString *(^)(void))resolver error:(NSError **)error')
     assert 'PXProfileRootPath(PXValidatedProfileID(' in root and 'identityTarget:NO' in root
@@ -226,7 +253,7 @@ def source_contracts():
     assert 'TLinkIOS_FILES = $(wildcard *.m) $(wildcard common/*.m)' in make
     assert 'TLinkIOSTweak_FILES =' in make and '$(wildcard common/*.m)' in make
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3Y-partial'
+    assert manifest['rollout'] == '4C.2H3Z-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Artifact preparation and battery/WiFi/storage/uptime ownership contracts (remaining writers partial; native runtime not implied)')

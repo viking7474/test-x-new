@@ -94,11 +94,11 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3Y-partial'
+    assert manifest['rollout'] == '4C.2H3Z-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'
-    assert manifest['writers']['storage-preference']['status'] == 'pending'
+    assert manifest['writers']['storage-preference']['status'] == 'enrolled'
     for pending in ('security-store', 'security-direct'):
         assert manifest['writers'][pending]['status'] == 'partial'
     print('PASS: Whole-regenerate source contracts (partial enrollment; native runtime not implied)')

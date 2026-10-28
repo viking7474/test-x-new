@@ -3,6 +3,7 @@
 #import <dispatch/dispatch.h>
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeArtifactWriter.h"
+#import "PXRuntimeSourceStore.h"
 #import "PXProfileArtifactMutation.h"
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileDeletionJournal.h"
@@ -44,6 +45,7 @@ static void Tape(NSArray<NSNumber *> *values) { gTape = values; gTapeIndex = 0; 
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 NSString *PXProfilesPath(void) { return gRoot; }
 NSString *PXCurrentProfileInfoPath(void) { return Path(gRoot, @"current_profile_info.plist"); }
+NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"tlink_settings.plist"); }
 NSString *PXLegacyActiveProfileInfoPath(void) { return Path(gRoot, @"legacy_selection.plist"); }
 NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
 NSString *PXValidatedProfileID(id value) {
@@ -56,6 +58,9 @@ NSString *PXProfileIdentityPath(NSString *profile) {
 }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
     gWrites++; return [gStore performWrite:body error:error];
+}
+BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
+    gWrites++; return [gStore performStandaloneWrite:body error:error];
 }
 void PXLog(NSString *format, ...) { (void)format; if (gDuringLog) gDuringLog(); }
 static NSDictionary *IDs(void) { return [NSDictionary dictionaryWithContentsOfFile:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist")] ?: @{}; }
@@ -141,8 +146,34 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 }
 @end
 
+// Storage flag mirrors never reach the host user's preferences service.
+static NSUInteger gStoragePreferenceMirrors, gStoragePreferenceFlushes;
+static BOOL gStoragePreferenceMirrorThrows;
+static NSString *gStoragePreferenceMirrorSuite, *gStoragePreferenceMirrorKey;
+static NSNumber *gStoragePreferenceMirrorValue;
+static void (^gDuringStoragePreferenceMirror)(void);
+@interface PXStoragePreferenceDefaultsFixture : NSObject
+- (instancetype)initWithSuiteName:(NSString *)suite;
+- (void)setBool:(BOOL)value forKey:(NSString *)key;
+- (BOOL)synchronize;
+@end
+@implementation PXStoragePreferenceDefaultsFixture
+- (instancetype)initWithSuiteName:(NSString *)suite {
+    if ((self = [super init])) gStoragePreferenceMirrorSuite = [suite copy]; return self;
+}
+- (void)setBool:(BOOL)value forKey:(NSString *)key {
+    gStoragePreferenceMirrors++; gStoragePreferenceMirrorKey = [key copy]; gStoragePreferenceMirrorValue = @(value);
+    void (^callback)(void) = gDuringStoragePreferenceMirror; gDuringStoragePreferenceMirror = nil;
+    if (callback) callback();
+    if (gStoragePreferenceMirrorThrows) [NSException raise:@"fixture.storage-mirror" format:@"mirror failure"];
+}
+- (BOOL)synchronize { gStoragePreferenceFlushes++; return YES; }
+@end
+
 @interface PXPreparedStorageFixture : NSObject {
     NSMutableDictionary *_storageSettings;
+    BOOL _isEnabled;
+    BOOL _storagePreferenceWriteInFlight;
 }
 - (NSDictionary *)generateStorageForCapacity:(NSString *)capacity;
 - (void)adoptCommittedStorageInfo:(NSDictionary *)storageInfo;
@@ -155,7 +186,11 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 - (void)setTotalStorageCapacity:(NSString *)capacity;
 - (void)setFreeStorageSpace:(NSString *)freeSpace;
 - (void)setFilesystemType:(NSString *)fsType;
+- (BOOL)isStorageSpoofingEnabled;
+- (void)setStorageSpoofingEnabled:(BOOL)enabled;
+- (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError **)error;
 @end
+#define NSUserDefaults PXStoragePreferenceDefaultsFixture
 @implementation PXPreparedStorageFixture
 - (NSDictionary *)fixtureStorage { return _storageSettings; }
 - (void)setFixtureSnapshot:(NSDictionary *)record {
@@ -163,6 +198,7 @@ static void PXFixtureDarwin(CFNotificationCenterRef center, CFStringRef name, co
 }
 #include "PXPreparedStorageMethod.inc"
 @end
+#undef NSUserDefaults
 
 @interface PXPreparedUptimeFixture : NSObject
 @property (nonatomic, strong) NSError *error;
@@ -433,6 +469,92 @@ static NSDictionary *AllArtifactFiles(void) {
         return @{ @"files": files };
     } error:NULL];
 }
+static BOOL PXSeedStoragePreferences(NSDictionary *settings) {
+    return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error];
+    } error:NULL];
+}
+static NSDictionary *PXStoragePreferences(void) { return [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()]; }
+
+static void TestStoragePreferenceWriters(void) {
+    PXPreparedStorageFixture *manager = [PXPreparedStorageFixture new]; NSError *error = nil;
+    NSDictionary *baseline = @{ @"keep": @YES, @"EnabledIdentifiers": @{ @"StorageSystem": @NO } };
+    CHECK(PXSeedStoragePreferences(baseline) && ![manager isStorageSpoofingEnabled], "storage preference baseline and cache seeded");
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"commit-written"]) commits++; };
+    gDuringStoragePreferenceMirror = ^{
+        CHECK(AllArtifactFiles() && [manager isStorageSpoofingEnabled] && [PXStoragePreferences()[@"StorageSystemEnabled"] boolValue],
+            "storage flag mirror observes committed source and cache after source unlock");
+        NSError *busy = nil; NSUInteger writes = gWrites;
+        CHECK(![manager setStorageSpoofingEnabled:NO error:&busy] && busy.code == 1 && writes == gWrites,
+            "storage mirror reentry fails busy before source entry without deadlock");
+    };
+    NSUInteger notices = gDarwin + gLocal, mirrors = gStoragePreferenceMirrors, flushes = gStoragePreferenceFlushes;
+    CHECK([manager setStorageSpoofingEnabled:YES error:&error] && !error && commits == 1 && gStoragePreferenceMirrors == mirrors + 1 &&
+        gStoragePreferenceFlushes == flushes + 1 && [gStoragePreferenceMirrorSuite isEqual:@"com.hydra.tlinkios.settings"] &&
+        [gStoragePreferenceMirrorKey isEqual:@"StorageSystemEnabled"] && gStoragePreferenceMirrorValue.boolValue &&
+        [PXStoragePreferences()[@"keep"] boolValue] && ![PXStoragePreferences()[@"EnabledIdentifiers"][@"StorageSystem"] boolValue] &&
+        notices == gDarwin + gLocal, "storage flag commit preserves unrelated primary toggle and legacy mirror scope without notifications");
+    gStore.testCheckpoint = nil;
+
+    NSDictionary *before = AllArtifactFiles(); mirrors = gStoragePreferenceMirrors;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"storage preference fault"]; };
+    CHECK(![manager setStorageSpoofingEnabled:NO error:&error] && error && [manager isStorageSpoofingEnabled] &&
+        mirrors == gStoragePreferenceMirrors && [before isEqual:AllArtifactFiles()], "failed storage flag commit preserves source cache and mirrors");
+    gStore.testCheckpoint = nil;
+    CHECK([manager setStorageSpoofingEnabled:NO error:&error] && !error && ![manager isStorageSpoofingEnabled],
+        "storage writer admission is released after source failure");
+    [manager setStorageSpoofingEnabled:YES];
+    CHECK([manager isStorageSpoofingEnabled] && [PXStoragePreferences()[@"StorageSystemEnabled"] boolValue], "legacy void storage setter uses verified commit");
+
+    gStoragePreferenceMirrorThrows = YES;
+    CHECK([manager setStorageSpoofingEnabled:NO error:&error] && !error && ![manager isStorageSpoofingEnabled] &&
+        ![PXStoragePreferences()[@"StorageSystemEnabled"] boolValue], "storage mirror exception does not negate primary commit or cache adoption");
+    gStoragePreferenceMirrorThrows = NO;
+    CHECK([manager setStorageSpoofingEnabled:YES error:&error], "storage admission is released after mirror exception");
+
+    before = AllArtifactFiles(); mirrors = gStoragePreferenceMirrors;
+    CHECK(![gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        (void)tx; return [manager setStorageSpoofingEnabled:NO error:writeError];
+    } error:&error] && error && mirrors == gStoragePreferenceMirrors && [manager isStorageSpoofingEnabled] &&
+        [before isEqual:AllArtifactFiles()], "nested storage high-level writer rejects before cache and mirror effects");
+
+    CHECK([NSFileManager.defaultManager removeItemAtPath:PXTLinkIOSSettingsPath() error:NULL], "missing storage preference source prepared");
+    before = AllArtifactFiles(); mirrors = gStoragePreferenceMirrors;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture" format:@"storage preference absence"]; };
+    CHECK(![manager setStorageSpoofingEnabled:NO error:&error] && error && [before isEqual:AllArtifactFiles()] &&
+        [manager isStorageSpoofingEnabled] && mirrors == gStoragePreferenceMirrors, "storage flag rollback preserves original source absence");
+    gStore.testCheckpoint = nil;
+    CHECK([manager setStorageSpoofingEnabled:NO error:&error] && !error && PXStoragePreferences().count == 1 && ![manager isStorageSpoofingEnabled],
+        "missing storage preference source commits only the legacy key");
+    NSData *corrupt = [@"not a plist" dataUsingEncoding:NSUTF8StringEncoding];
+    CHECK([corrupt writeToFile:PXTLinkIOSSettingsPath() atomically:YES], "corrupt storage preference source installed");
+    mirrors = gStoragePreferenceMirrors; before = AllArtifactFiles();
+    [manager setStorageSpoofingEnabled:YES];
+    CHECK(![manager isStorageSpoofingEnabled] && mirrors == gStoragePreferenceMirrors && [before isEqual:AllArtifactFiles()],
+        "void storage setter preserves corrupt source and prior cache on failure");
+    CHECK([NSFileManager.defaultManager removeItemAtPath:PXTLinkIOSSettingsPath() error:NULL] && PXSeedStoragePreferences(baseline), "storage preference source restored");
+
+    // Block the first call after commit without holding the object's monitor.
+    // Main can read the cache and reject a competing call while this mirror waits.
+    dispatch_semaphore_t enteredMirror = dispatch_semaphore_create(0), releaseMirror = dispatch_semaphore_create(0);
+    dispatch_group_t group = dispatch_group_create(); __block BOOL firstResult = NO;
+    gDuringStoragePreferenceMirror = ^{
+        dispatch_semaphore_signal(enteredMirror);
+        dispatch_semaphore_wait(releaseMirror, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    };
+    dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{ firstResult = [manager setStorageSpoofingEnabled:YES error:NULL]; });
+    CHECK(dispatch_semaphore_wait(enteredMirror, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) == 0, "storage concurrent fixture reaches mirror");
+    NSUInteger writes = gWrites;
+    CHECK([manager isStorageSpoofingEnabled] && ![manager setStorageSpoofingEnabled:NO error:&error] && error.code == 1 && writes == gWrites,
+        "concurrent storage flag writer fails busy while getter remains available");
+    dispatch_semaphore_signal(releaseMirror);
+    CHECK(dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0 && firstResult,
+        "admitted storage flag writer completes after competing caller rejection");
+    CHECK([manager setStorageSpoofingEnabled:NO error:&error] && !error && ![manager isStorageSpoofingEnabled],
+        "storage flag writer accepts a later request after completion");
+}
+
 static BOOL SetArtifactSelection(id profileID) {
     return [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         NSDictionary *selection = profileID ? @{ @"ProfileId": profileID } : @{};
@@ -1083,7 +1205,7 @@ int main(void) {
         CHECK(gStore != nil && [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
             return [tx setDictionary:@{ @"keep": @YES } atPath:Path(PXProfileIdentityPath(@"a"), @"device_ids.plist") error:error];
         } error:NULL], "preparation source backend seeded");
-        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
+        TestPurePreparation(); TestManagerWrappers(); TestCompositionAndUptime(); TestStorageLifecycle(); TestStoragePreferenceWriters(); TestUptimeLifecycle(); TestWiFiLifecycle(); TestBatteryLifecycle(); TestBorrowedArtifactScope(); TestUptimeReadOnly();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime artifact preparation: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

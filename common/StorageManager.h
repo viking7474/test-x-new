@@ -139,5 +139,9 @@
  * @param enabled YES to enable, NO to disable
  */
 - (void)setStorageSpoofingEnabled:(BOOL)enabled;
+/// Verified legacy flag write. Cache changes only after source commit; mirrors
+/// follow unlock. Concurrent/reentrant writes on the same instance fail busy.
+/// This secondary flag does not change EnabledIdentifiers.StorageSystem.
+- (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError * _Nullable * _Nullable)error;
 
 @end

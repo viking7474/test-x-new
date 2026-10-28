@@ -77,11 +77,11 @@ def source_contracts():
     core = read('common/PXRuntimeSourceStore.m')
     fixture = read('tests/PXRuntimeArtifactWriterTests.m')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3Y-partial'
+    assert manifest['rollout'] == '4C.2H3Z-partial'
     for name in ('network', 'wifi', 'battery', 'uptime', 'storage', 'identifier-artifacts'):
         assert manifest['writers'][name]['status'] == 'enrolled', name
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
-    assert manifest['writers']['storage-preference']['status'] == 'pending'
+    assert manifest['writers']['storage-preference']['status'] == 'enrolled'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial', f'cannot claim full coverage of {name}'
     for forbidden in ('PXActiveProfile', 'PXPerformRuntimeSourceWrite', 'writeToFile:', 'createDirectory', 'PXLog(',

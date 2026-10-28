@@ -4,6 +4,7 @@
 #import "TLinkIOSLogging.h"
 #import "PXPaths.h"
 #import "PXProfileArtifactMutation.h"
+#import "PXRuntimeSourceStore.h"
 #import "DeviceModelManager.h"
 #import "IPhoneModelDB.h"
 
@@ -24,6 +25,7 @@
 @implementation StorageManager {
     NSMutableDictionary *_storageSettings;
     BOOL _isEnabled;
+    BOOL _storagePreferenceWriteInFlight;
 }
 
 + (instancetype)sharedManager {
@@ -301,17 +303,51 @@
 #pragma mark - Status Control
 
 - (BOOL)isStorageSpoofingEnabled {
-    return _isEnabled;
+    @synchronized (self) { return _isEnabled; }
 }
 
 - (void)setStorageSpoofingEnabled:(BOOL)enabled {
-    _isEnabled = enabled;
-    
-    // Save to settings
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] 
-                               initWithSuiteName:@"com.hydra.tlinkios.settings"];
-    [defaults setBool:enabled forKey:@"StorageSystemEnabled"];
-    [defaults synchronize];
+    NSError *error = nil;
+    if (![self setStorageSpoofingEnabled:enabled error:&error])
+        PXLog(@"[StorageManager] Failed to commit storage enable flag: %@", error);
+}
+
+- (BOOL)setStorageSpoofingEnabled:(BOOL)enabled error:(NSError **)error {
+    if (error) *error = nil;
+    // Admit one writer without holding an object monitor across source I/O or
+    // compatibility callbacks. Reentry must fail instead of waiting on itself.
+    @synchronized (self) {
+        if (_storagePreferenceWriteInFlight) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.storage-preference" code:1
+                userInfo:@{NSLocalizedDescriptionKey: @"Storage preference write is busy"}];
+            return NO;
+        }
+        _storagePreferenceWriteInFlight = YES;
+    }
+    @try {
+        NSString *path = PXTLinkIOSSettingsPath();
+        BOOL committed = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            NSDictionary *existing = [tx dictionaryAtPath:path error:writeError];
+            if (!existing) return NO;
+            NSMutableDictionary *candidate = [existing mutableCopy];
+            candidate[@"StorageSystemEnabled"] = @(enabled);
+            return [tx setDictionary:candidate atPath:path error:writeError];
+        }, error);
+        if (!committed) return NO;
+        @synchronized (self) { _isEnabled = enabled; }
+        // Preserve the old suite and key. A mirror exception cannot turn an
+        // acknowledged primary commit into an aborted source operation.
+        @try {
+            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.hydra.tlinkios.settings"];
+            [defaults setBool:enabled forKey:@"StorageSystemEnabled"];
+            [defaults synchronize];
+        } @catch (NSException *exception) {
+            PXLog(@"[StorageManager] Storage flag committed; defaults mirror failed: %@", exception);
+        }
+        return YES;
+    } @finally {
+        @synchronized (self) { _storagePreferenceWriteInFlight = NO; }
+    }
 }
 
 @end
