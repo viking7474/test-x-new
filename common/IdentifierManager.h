@@ -58,6 +58,8 @@
 /// One owned source commit for dashboard overrides and optional storage.
 /// YES acknowledges committed source even if a compatibility cache callback fails.
 - (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error;
+/// Non-nil expected ID pins selection admission and commit; nil preserves legacy current-target behavior.
+- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString * _Nullable)profileID error:(NSError **)error;
 
 // Device Theme
 - (BOOL)setCustomDeviceTheme:(NSString *)value;

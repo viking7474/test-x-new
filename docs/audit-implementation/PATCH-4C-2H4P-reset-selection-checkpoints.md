@@ -88,3 +88,7 @@ Original-hardware capture trước create, backup/clear metadata target, global 
 ordering, cross-instance admission, owner teardown/missing callback, source/defaults/
 directory durability và daemon acknowledgement vẫn riêng. Manifest `4C.2H4P-partial`;
 whole Reset và toàn Patch 4 chưa hoàn tất, Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4P pass ngày 2026-10-28. Expected-active admission và
+selection receipt tại source owners được triển khai tiếp tại
+[H4Q](PATCH-4C-2H4Q-expected-active-source-owners.md); whole Reset/device vẫn partial.

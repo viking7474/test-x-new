@@ -46,6 +46,11 @@ SIGNATURES = [
     '- (BOOL)validateCustomDeviceModel:(NSString *)value error:(NSError **)error',
     '- (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error',
     '- (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error',
+    '- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error',
+    '- (NSDictionary *)captureExpectedActiveSelection:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error',
+    '- (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection',
+    '- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error',
+    '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -148,7 +153,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4P-partial'
+    assert manifest['rollout'] == '4C.2H4Q-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

@@ -7773,19 +7773,23 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }
     // These remain separate commits. A later failure must stop the reset tail;
     // it cannot undo app clearing, profile activation or an earlier toggle write.
-    // Checkpoints observe selection; the following writer still acquires its
-    // own ownership. They do not pin a target across those separate operations.
+    // Each targeted writer validates selection again under its own ownership.
+    // Checkpoints still cover publication/feedback gaps between those operations.
     if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;
     if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     NSError *generationError = nil;
-    if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError]) {
+    BOOL generated = profileID ? [self.manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:&generationError] :
+        [self.manager regenerateAllEnabledIdentifiersWithError:&generationError];
+    if (!generated) {
         if (error) *error = generationError ?: [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Không thể tạo lại identifiers cho profile mới"}];
         return NO;
     }
     if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
-    if (![self applyFakePreviewToCurrentProfile:preview]) {
-        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Không thể áp dụng model, iOS hoặc dung lượng cho profile mới"}];
+    NSError *previewError = nil;
+    BOOL applied = profileID ? [self.manager applyDashboardPreview:preview expectedActiveProfileID:profileID error:&previewError] : [self applyFakePreviewToCurrentProfile:preview];
+    if (!applied) {
+        if (error) *error = previewError ?: [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Không thể áp dụng model, iOS hoặc dung lượng cho profile mới"}];
         return NO;
     }
     if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;

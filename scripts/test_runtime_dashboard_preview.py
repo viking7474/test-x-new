@@ -14,7 +14,7 @@ spec.loader.exec_module(groups)
 
 def source_contracts():
     source = read('common/IdentifierManager.m')
-    signature = '- (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error'
+    signature = '- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error'
     body = groups.method(source, signature)
     ui = groups.method(read('TLinkIOSViewController.m'), '- (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview')
     assert 'applyDashboardPreview:preview error:&error' in ui
@@ -31,6 +31,17 @@ def source_contracts():
     assert body.index('[mutation invalidate]') < body.index('setCurrentDeviceModel:') < body.index('adoptCommittedStorageInfo:')
     assert '@finally' in body and 'if (!committed && error) *error = self.error;' in body
     assert 'if (!committed) return NO;' in body and '@catch' in body
+    assert 'identifierMutationForExpectedProfileID:profileID selection:&selection' in body
+    assert body.index('PXRuntimeProfileSelectionMatches(') < body.index('PXStageRuntimeIdentifierReplacement(')
+    expected_owner = groups.method(source, '- (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection')
+    assert expected_owner.index('acquireWithIdentityResolverUsingLease:') < expected_owner.index('captureExpectedActiveSelection:') < expected_owner.index('existingGenerationIdentityForProfileID:')
+    assert 'profileIdentityPath' not in expected_owner
+    capture = groups.method(source, '- (NSDictionary *)captureExpectedActiveSelection:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error')
+    assert capture.index('validateForDirectory:') < capture.index('PXReadRuntimeProfileSelection(')
+    for forbidden in ('PXStage', 'writeToFile:', 'PXActiveProfileID()', 'profileIdentityPath'):
+        assert forbidden not in capture
+    legacy = groups.method(source, '- (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error')
+    assert 'expectedActiveProfileID:nil' in legacy
     builder = groups.method(source, '- (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error')
     for forbidden in ('self.error', 'performSourceWrite:', 'profileIdentityPath', 'setCurrentDeviceModel:'):
         assert forbidden not in builder
@@ -60,7 +71,7 @@ def source_contracts():
     assert 'otherBefore = Snapshot(b)[@"files"]' in fixture, 'a successful A commit changes the global token; compare only B file bytes'
     assert 'TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"))' in fixture
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4P-partial'
+    assert manifest['rollout'] == '4C.2H4Q-partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert 'test_runtime_dashboard_preview.py' in read('.github/workflows/build-ios-arm.yml')

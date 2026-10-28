@@ -35,6 +35,7 @@
 #import "PXRuntimeArtifactPreparation.h"
 #import "PXRuntimeArtifactWriter.h"
 #import "PXRuntimeGeneration.h"
+#import "PXRuntimeProfileSelection.h"
 #import "PXProfileLifecycleLease.h"
 #import "PXProfileArtifactMutation.h"
 #import "PXProfileDeletionJournal.h"
@@ -81,6 +82,9 @@
 - (PXPreparedDeviceProfileGroup *)commitDeviceProfileGroupWithMutation:(PXProfileArtifactMutation *)mutation;
 - (NSDictionary *)captureDeviceIDsAtIdentityDirectory:(NSString *)identityDir;
 - (PXProfileArtifactMutation *)currentIdentifierMutation;
+- (NSDictionary *)captureExpectedActiveSelection:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
+- (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection;
+- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
 - (BOOL)validateCustomDeviceModel:(NSString *)value error:(NSError **)error;
 - (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error;
 - (NSString *)generateUptimeCompatibilityForBootTime:(BOOL)isBoot;
@@ -858,6 +862,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 
 
 - (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error {
+    return [self applyDashboardPreview:preview expectedActiveProfileID:nil error:error];
+}
+
+- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
     if (error) *error = nil;
     self.error = nil;
     if (![preview isKindOfClass:NSDictionary.class] || !preview.count) {
@@ -873,7 +881,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         id value = preview[key];
         if ([value isKindOfClass:NSString.class]) resolved[key] = [value copy];
     }
-    PXProfileArtifactMutation *mutation = [self currentIdentifierMutation];
+    NSDictionary *selection = nil;
+    PXProfileArtifactMutation *mutation = profileID ? [self identifierMutationForExpectedProfileID:profileID selection:&selection] : [self currentIdentifierMutation];
     BOOL committed = NO;
     NSString *model = nil;
     StorageManager *storageManager = nil;
@@ -944,6 +953,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         NSDate *timestamp = packet[@"updates"][@"CommittedAt"];
         NSError *writeError = nil;
         committed = [mutation performSourceWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **stageError) {
+            if (selection && !PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), stageError)) return NO;
             NSString *identity = mutation.identityDirectory;
             if (!PXStageRuntimeIdentifierReplacement(tx, identity, @{}, @[], expected, NO, NO, stageError)) return NO;
             if (preparedModel && !PXStageRuntimeIdentifierReplacement(tx, identity, preparedModel.updates, preparedModel.replacedKeys, nil, NO, YES, stageError)) return NO;
@@ -1077,6 +1087,47 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         return [self profileIdentityPathWithLifecycleLease:lease];
     } error:&error];
     if (!mutation && !self.error) self.error = error;
+    return mutation;
+}
+
+- (NSDictionary *)captureExpectedActiveSelection:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error {
+    // Called under lifecycle ownership, before any current-target resolver can
+    // migrate/repair a profile chosen after the UI checkpoint.
+    if (error) *error = nil;
+    NSString *expected = PXValidatedProfileID(profileID);
+    if (![expected isEqual:profileID]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid expected active profile ID"}]; return nil;
+    }
+    if (![lease validateForDirectory:PXProfilesPath() error:error]) return nil;
+    __block NSDictionary *selection = nil;
+    BOOL captured = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        NSDictionary *pair = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), readError);
+        if (!pair) return NO;
+        NSDictionary *central = pair[PXCurrentProfileInfoPath()], *legacy = pair[PXLegacyActiveProfileInfoPath()];
+        NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+        if (![PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]) isEqual:expected]) {
+            if (readError) *readError = [NSError errorWithDomain:@"WeaponXProfileError" code:20 userInfo:@{NSLocalizedDescriptionKey: @"Expected active profile changed before artifact ownership"}]; return NO;
+        }
+        selection = pair; return YES;
+    }, error);
+    return captured ? selection : nil;
+}
+
+- (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection {
+    self.error = nil; if (selection) *selection = nil;
+    NSString *expected = PXValidatedProfileID(profileID);
+    if (![expected isEqual:profileID]) {
+        self.error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid expected active profile ID"}]; return nil;
+    }
+    __block NSDictionary *captured = nil;
+    __block NSError *failure = nil;
+    NSError *ownershipError = nil;
+    PXProfileArtifactMutation *mutation = [PXProfileArtifactMutation acquireWithIdentityResolverUsingLease:^NSString *(PXProfileLifecycleLease *lease) {
+        captured = [self captureExpectedActiveSelection:expected lifecycleLease:lease error:&failure];
+        return captured ? [self existingGenerationIdentityForProfileID:expected lifecycleLease:lease error:&failure] : nil;
+    } error:&ownershipError];
+    if (!mutation) self.error = failure ?: ownershipError ?: self.error;
+    else if (selection) *selection = captured;
     return mutation;
 }
 
@@ -1431,6 +1482,18 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return YES;
 }
 
+- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
+    NSString *expected = PXValidatedProfileID(profileID);
+    if (![expected isEqual:profileID]) {
+        self.error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid expected active profile ID"}];
+        if (error) *error = self.error; return NO;
+    }
+    PXCommittedRuntimeGeneration *receipt = [self ownedRuntimeGenerationForProfileID:expected currentProfile:YES networkArtifacts:nil deferSettings:NO error:error];
+    if (!receipt) return NO;
+    [self publishCommittedRuntimeGeneration:receipt];
+    return YES;
+}
+
 - (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error {
     if (error) *error = nil;
     NSError *failure = nil;
@@ -1438,8 +1501,14 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&failure];
     @try {
         if (lease && [lease validateForDirectory:PXProfilesPath() error:&failure] && PXRequireNoPendingProfileDeletion(&failure)) {
-            NSString *identity = current ? [[self profileIdentityPathWithLifecycleLease:lease] copy] : [self existingGenerationIdentityForProfileID:profileID lifecycleLease:lease error:&failure];
-            if (identity.length) [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts lifecycleLease:lease deferSettings:deferSettings receipt:&receipt error:&failure];
+            BOOL checksSelection = current && profileID != nil;
+            NSDictionary *selection = checksSelection ? [self captureExpectedActiveSelection:profileID lifecycleLease:lease error:&failure] : nil;
+            NSString *identity = nil;
+            if (!checksSelection || selection) {
+                identity = current && !profileID ? [[self profileIdentityPathWithLifecycleLease:lease] copy] :
+                    [self existingGenerationIdentityForProfileID:profileID lifecycleLease:lease error:&failure];
+            }
+            if (identity.length) [self commitRuntimeGenerationAtIdentityDirectory:identity networkArtifacts:networkArtifacts lifecycleLease:lease expectedSelection:selection deferSettings:deferSettings receipt:&receipt error:&failure];
             else if (!failure) failure = self.error;
         }
     } @catch (NSException *exception) {
@@ -1511,6 +1580,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error {
+    return [self commitRuntimeGenerationAtIdentityDirectory:identityDir networkArtifacts:networkArtifacts lifecycleLease:lease expectedSelection:nil deferSettings:deferSettings receipt:receipt error:error];
+}
+
+- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error {
     if (error) *error = nil;
     if (receipt) *receipt = nil;
     self.error = nil;
@@ -1565,6 +1638,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     __block NSMutableDictionary *basis = [NSMutableDictionary dictionary];
     __block NSMutableDictionary *present = [NSMutableDictionary dictionary];
     BOOL captured = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        if (selection && !PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), readError)) return NO;
         NSMutableArray *paths = [@[idsPath, settingsPath, scopePath] mutableCopy];
         if (network.count) [paths addObject:networkPath];
         if ([flags[@"StorageSystem"] boolValue]) [paths addObject:storagePath];
@@ -1697,6 +1771,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         if (deletionPending) {
             if (writeError) *writeError = [NSError errorWithDomain:@"WeaponXProfileError" code:27 userInfo:@{NSLocalizedDescriptionKey: @"Deletion recovery started during runtime generation"}]; return NO;
         }
+        if (selection && !PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError)) return NO;
         if (!PXStageRuntimeGeneration(tx, identityDir, payload, conditions, writeError)) return NO;
         NSDictionary *proof = PXReadRuntimeGenerationProof(tx, identityDir, payload, writeError);
         if (!proof) return NO;

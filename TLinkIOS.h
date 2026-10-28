@@ -30,6 +30,8 @@
 - (void)regenerateAllEnabledIdentifiers;
 // Reports source commit failure. Compatibility cache/mirror effects are best effort after commit.
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
+// Requires this profile to remain the active selection through source commit.
+- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
 // Cold creation workflow: explicit existing profile directory, optional prepared
 // network artifacts; never resolve the active profile as the write target.
 - (BOOL)regenerateAllEnabledIdentifiersForProfileID:(NSString *)profileID networkArtifacts:(NSDictionary *)networkArtifacts error:(NSError **)error;

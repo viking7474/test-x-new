@@ -2025,9 +2025,12 @@ static void TestCurrentProfileCheckpoint(void) {
 @property (nonatomic) BOOL failGeneration;
 @property (nonatomic, strong) NSError *failure;
 @property (nonatomic, copy) dispatch_block_t afterToggle, afterGeneration;
+@property (nonatomic, copy) BOOL (^expectedPreview)(NSDictionary *);
 - (BOOL)isIdentifierEnabled:(NSString *)identifier;
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier;
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
+- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
+- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
 - (NSError *)lastError;
 - (NSString *)currentValueForIdentifier:(NSString *)identifier;
 - (NSString *)profileIdentityPath;
@@ -2048,6 +2051,14 @@ static void TestCurrentProfileCheckpoint(void) {
     if (error) *error = self.failGeneration ? self.failure : nil; return !self.failGeneration;
 }
 - (NSError *)lastError { return self.failure; }
+- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
+    CHECK([profileID isEqual:@"controller-target"], "reset passes frozen target to generation owner"); return [self regenerateAllEnabledIdentifiersWithError:error];
+}
+- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
+    CHECK([profileID isEqual:@"controller-target"], "reset passes frozen target to preview owner");
+    BOOL applied = self.expectedPreview ? self.expectedPreview(preview) : NO;
+    if (error) *error = applied ? nil : [NSError errorWithDomain:@"fixture.preview" code:9 userInfo:nil]; return applied;
+}
 - (NSString *)currentValueForIdentifier:(NSString *)identifier { (void)identifier; return @"iPhone15,4"; }
 - (NSString *)profileIdentityPath { return nil; }
 @end
@@ -2068,7 +2079,11 @@ static void TestCurrentProfileCheckpoint(void) {
 @end
 #define ProfileManager PXProfileCreationFixture
 @implementation PXResetPreparationUIFixture
-- (instancetype)init { if ((self = [super init])) _manager = [PXResetIdentifierFixture new]; return self; }
+- (instancetype)init {
+    if ((self = [super init])) { _manager = [PXResetIdentifierFixture new]; __weak typeof(self) weakSelf = self;
+        _manager.expectedPreview = ^BOOL(NSDictionary *preview) { return [weakSelf applyFakePreviewToCurrentProfile:preview]; }; }
+    return self;
+}
 - (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview {
     CHECK(NSThread.isMainThread, "reset preview on main"); self.previews++; self.seenPreview = preview;
     [self.manager.events addObject:@"preview"];

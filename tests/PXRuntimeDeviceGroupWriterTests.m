@@ -1230,6 +1230,95 @@ static void TestDeferredActivation(PXDeviceGroupFixture *manager, NSString *a) {
           "receipt rejects malformed payload without throwing");
 }
 
+static BOOL SelectExpectedSource(NSString *profileID, NSString *revision) {
+    return PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSDictionary *info = @{ @"ProfileId": profileID, @"SelectionRevision": revision };
+        return PXStageRuntimeProfileSelection(tx, info, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
+    }, NULL);
+}
+static BOOL ApplyExpectedOwner(PXDeviceGroupFixture *manager, BOOL preview, NSString *profileID, NSError **error) {
+    return preview ? [manager applyDashboardPreview:DashboardPreview() expectedActiveProfileID:profileID error:error] :
+        [manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:error];
+}
+static void TestExpectedActiveOwners(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    gSelected = @"a"; gExpectedIdentity = a; gBuild = @"B1"; gFailDB = gNoHardware = gNoFirmware = NO;
+    gUnknownCellular = gDisabledCellular = gNoCDMA = gNoTACs = gNoMEIDPrefixes = NO;
+    gFailSerial = gBadDashboardStorage = gFailDashboardTuple = gIncompleteDashboardTuple = NO;
+    gCheckDashboardPublication = gCheckDependencyPublication = gThrowDependencyPublication = NO;
+    gDuringPublication = gDuringDependencyPublication = nil; gThrowBatteryPublication = NO;
+    manager.settings = [@{ @"DeviceModel": @YES, @"StorageSystem": @YES } mutableCopy]; manager.scopedApps = [NSMutableDictionary dictionary];
+    CHECK(SeedDashboard(a, 3) && SeedDashboard(b, 8) && SelectExpectedSource(@"b", @"admission-newer"), "expected owners seed independent targets and newer selection");
+    for (NSUInteger preview = 0; preview < 2; preview++) {
+        NSDictionary *before = BatchSnapshot(); NSUInteger resolve = gSelections, prepare = gPreparations, migrate = gMigrations;
+        NSUInteger caches = gCacheChanges, notices = gBatchNotifications, adoptions = gArtifactAdoptions; NSError *error = nil;
+        CHECK(!ApplyExpectedOwner(manager, preview, @"a", &error) && error.code == 20 && resolve == gSelections && prepare == gPreparations && migrate == gMigrations &&
+            caches == gCacheChanges && notices == gBatchNotifications && adoptions == gArtifactAdoptions && [before isEqual:BatchSnapshot()],
+            "expected active mismatch rejects before target lookup migration providers writes or caches");
+        CheckLeaseFree();
+        PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+        CHECK(lease && !ApplyExpectedOwner(manager, preview, @"a", &error) && error.code == 12 && [before isEqual:BatchSnapshot()], "expected owners reject busy lifecycle before resolving target"); [lease invalidate];
+        CHECK(!ApplyExpectedOwner(manager, preview, @"../a", &error) && error.code == 10 && [before isEqual:BatchSnapshot()], "expected owners reject invalid IDs without selection repair");
+        CHECK(!ApplyExpectedOwner(manager, preview, @"../a", NULL), "expected owners support null error output on failure");
+    }
+    for (NSUInteger missing = 0; missing < 2; missing++) {
+        CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            if (missing) return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:error] && [tx removeDictionaryAtPath:PXLegacyActiveProfileInfoPath() error:error];
+            return [tx setDictionary:@{ @"ProfileId": @7 } atPath:PXCurrentProfileInfoPath() error:error];
+        }, NULL), "expected owner fixture seeds invalid or absent selection");
+        NSDictionary *before = BatchSnapshot(); NSUInteger migrations = gMigrations, resolves = gSelections;
+        for (NSUInteger preview = 0; preview < 2; preview++) {
+            NSError *error = nil;
+            CHECK(!ApplyExpectedOwner(manager, preview, @"a", &error) && error.code == 20 && migrations == gMigrations && resolves == gSelections && [before isEqual:BatchSnapshot()],
+                "expected owners preserve invalid or absent selection instead of defaulting to another profile");
+        }
+    }
+    for (NSUInteger preview = 0; preview < 2; preview++) {
+        CHECK(SelectExpectedSource(@"a", @"matching"), "expected target selected independently of stale resolver cache");
+        gSelected = @"b"; NSDictionary *other = Snapshot(b); NSUInteger resolve = gSelections; NSError *error = nil;
+        NSMutableString *expectedID = [@"a" mutableCopy];
+        gDuringPrepare = ^{ [expectedID setString:@"b"]; };
+        CHECK(ApplyExpectedOwner(manager, preview, expectedID, &error) && !error && resolve == gSelections && [other isEqual:Snapshot(b)] && [expectedID isEqual:@"b"],
+            "expected owners freeze caller ID and never resolve the stale current profile");
+        CheckLeaseFree();
+    }
+    gSelected = @"a";
+    for (NSUInteger preview = 0; preview < 2; preview++) {
+        CHECK(SelectExpectedSource(@"a", @"fault-rollback"), "expected selection before fault fixture");
+        NSDictionary *before = BatchSnapshot(); NSUInteger caches = gCacheChanges, notices = gBatchNotifications, adoptions = gArtifactAdoptions;
+        __block NSUInteger writes = 0;
+        gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"] && ++writes == 2) [NSException raise:@"fixture.expected" format:@"expected target commit fault"]; };
+        NSError *failure = nil; BOOL committed = ApplyExpectedOwner(manager, preview, @"a", &failure); gStore.testCheckpoint = nil;
+        CHECK(!committed && failure && writes == 2 && [before isEqual:BatchSnapshot()] && caches == gCacheChanges && notices == gBatchNotifications && adoptions == gArtifactAdoptions,
+            "expected owner source fault rolls back artifacts without cache or notification effects"); CheckLeaseFree();
+    }
+    gSelected = @"a";
+    for (NSUInteger preview = 0; preview < 2; preview++) for (NSUInteger drift = 0; drift < 4; drift++) {
+        CHECK(SelectExpectedSource(@"a", @"before-preparation"), "expected selection receipt seeded");
+        NSUInteger caches = gCacheChanges, notices = gBatchNotifications, adoptions = gArtifactAdoptions;
+        __block NSDictionary *competitor = nil;
+        gDuringPrepare = ^{
+            NSError *busy = nil; PXProfileLifecycleLease *probe = [PXProfileLifecycleLease acquireInDirectory:gRoot error:&busy];
+            CHECK(!probe && busy.code == 12, "expected owner retains lifecycle through provider preparation"); [probe invalidate];
+            if (drift == 0) CHECK(SelectExpectedSource(@"b", @"changed-target"), "raw target change seeded under source gate");
+            else if (drift == 1) CHECK(SelectExpectedSource(@"a", @"changed-same-id"), "same ID new selection revision seeded");
+            else if (drift == 2) { CHECK(SelectExpectedSource(@"b", @"away") && SelectExpectedSource(@"a", @"back-with-new-revision"), "selection ABA with new revision seeded"); }
+            else CHECK(SetSource(PXLegacyActiveProfileInfoPath(), @"SelectionRevision", @"legacy-only-change"), "legacy-only selection drift seeded");
+            competitor = BatchSnapshot();
+        };
+        NSError *error = nil;
+        CHECK(!ApplyExpectedOwner(manager, preview, @"a", &error) && error.code == 20 && competitor && [competitor isEqual:BatchSnapshot()] && caches == gCacheChanges && notices == gBatchNotifications && adoptions == gArtifactAdoptions,
+            "expected selection receipt drift aborts complete generation or preview before source commit and publication");
+        CheckLeaseFree();
+    }
+    CHECK(SelectExpectedSource(@"a", @"legacy-fallback") && PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:error];
+    }, NULL), "expected owner fixture removes canonical selection for legacy fallback");
+    NSError *error = nil;
+    CHECK([manager applyDashboardPreview:DashboardPreview() expectedActiveProfileID:@"a" error:&error] && !error && ![NSFileManager.defaultManager fileExistsAtPath:PXCurrentProfileInfoPath()],
+        "expected owners preserve legacy fallback without creating or repairing canonical selection");
+    CHECK(SelectExpectedSource(@"a", @"restored"), "expected owner fixture restores selection");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1250,6 +1339,7 @@ int main(void) {
         TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"));
         TestTelephonyLifecycle(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
+        TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

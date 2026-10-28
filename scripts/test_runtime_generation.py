@@ -15,7 +15,7 @@ spec.loader.exec_module(groups)
 def source_contracts():
     manager = read('common/IdentifierManager.m')
     current = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error')
-    flow = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
+    flow = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
     publisher_wrapper = groups.method(manager, '- (PXCommittedRuntimeGeneration *)ownedRuntimeGenerationForProfileID:(NSString *)profileID currentProfile:(BOOL)current networkArtifacts:(NSDictionary *)networkArtifacts deferSettings:(BOOL)deferSettings error:(NSError **)error')
     wrapper = groups.method(manager, '- (void)regenerateAllEnabledIdentifiers')
     assert 'regenerateAllEnabledIdentifiersWithError:&error' in wrapper
@@ -36,6 +36,22 @@ def source_contracts():
     assert flow.index('initWithIdentityDirectory:') < flow.index('if (!committed)')
     assert 'return committedGeneration != nil;' in flow
     assert 'publishRuntimeGeneration:' not in flow
+    expected_api = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error')
+    assert 'PXValidatedProfileID(profileID)' in expected_api and 'ownedRuntimeGenerationForProfileID:expected currentProfile:YES' in expected_api
+    assert publisher_wrapper.index('captureExpectedActiveSelection:') < publisher_wrapper.index('existingGenerationIdentityForProfileID:')
+    assert flow.count('PXRuntimeProfileSelectionMatches(') == 2
+    assert flow.index('PXRuntimeProfileSelectionMatches(') < flow.index('prepareDeviceProfileGroupWithOptions:')
+    assert flow.rindex('PXRuntimeProfileSelectionMatches(') < flow.index('PXStageRuntimeGeneration(')
+    legacy_core = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
+    assert 'expectedSelection:nil' in legacy_core
+    expected_api = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error')
+    assert 'PXValidatedProfileID(profileID)' in expected_api and 'ownedRuntimeGenerationForProfileID:expected currentProfile:YES' in expected_api
+    assert publisher_wrapper.index('captureExpectedActiveSelection:') < publisher_wrapper.index('existingGenerationIdentityForProfileID:')
+    assert flow.count('PXRuntimeProfileSelectionMatches(') == 2
+    assert flow.index('PXRuntimeProfileSelectionMatches(') < flow.index('prepareDeviceProfileGroupWithOptions:')
+    assert flow.rindex('PXRuntimeProfileSelectionMatches(') < flow.index('PXStageRuntimeGeneration(')
+    legacy_core = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
+    assert 'expectedSelection:nil' in legacy_core
     for forbidden in ('[self saveSettings]', 'generateWiFiInfo]', 'generateBootTimeForProfile:',
                       'setTotalStorageCapacity:', 'generateDeviceTheme]', 'setCustomValue:', 'dispatch_'):
         assert forbidden not in flow, forbidden
@@ -60,6 +76,24 @@ def source_contracts():
     battery = groups.method(read('common/BatteryManager.m'), '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp')
     assert 'saveBatteryInfoToDisk' not in battery and 'PXPerformRuntimeSourceWrite' not in battery
     fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    for case in ('expected active mismatch rejects before target lookup migration providers writes or caches',
+                 'expected owners reject busy lifecycle before resolving target',
+                 'expected owners reject invalid IDs without selection repair',
+                 'expected owners freeze caller ID and never resolve the stale current profile',
+                 'expected selection receipt drift aborts complete generation or preview before source commit and publication',
+                 'expected owner source fault rolls back artifacts without cache or notification effects',
+                 'expected owners preserve legacy fallback without creating or repairing canonical selection'):
+        assert case in fixture, case
+    assert 'TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"))' in fixture
+    for case in ('expected active mismatch rejects before target lookup migration providers writes or caches',
+                 'expected owners reject busy lifecycle before resolving target',
+                 'expected owners reject invalid IDs without selection repair',
+                 'expected owners freeze caller ID and never resolve the stale current profile',
+                 'expected selection receipt drift aborts complete generation or preview before source commit and publication',
+                 'expected owner source fault rolls back artifacts without cache or notification effects',
+                 'expected owners preserve legacy fallback without creating or repairing canonical selection'):
+        assert case in fixture, case
+    assert 'TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"))' in fixture
     for case in ('whole regenerate commits once at one captured target',
                  'whole batch rollback restores artifacts settings scope',
                  'batch scalar preparation failure leaves all source and caches intact',
@@ -94,7 +128,7 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4P-partial'
+    assert manifest['rollout'] == '4C.2H4Q-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'

@@ -247,7 +247,7 @@ require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
 reset_prepare = method(view_controller, '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error')
 reset_flow = method(view_controller, '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
 require('if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare and
-        'if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError])' in reset_prepare and
+        'regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:&generationError' in reset_prepare and 'if (!generated)' in reset_prepare and
         reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') <
         reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview') and
         'if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview expectedProfileID:createdProfileID error:&preparationError])' in reset_flow,
@@ -345,7 +345,7 @@ reset_profile_end = view_controller.index("- (NSString *)currentProfileRestoreIn
 reset_profile_method = view_controller[reset_profile_start:reset_profile_end]
 apply_profile_marker = "[self prepareResetProfileWithOptions:"
 profile_notification_marker = 'CFSTR("com.hydra.tlinkios.profileChanged")'
-require('if (![self applyFakePreviewToCurrentProfile:preview])' in reset_prepare and
+require('applyDashboardPreview:preview expectedActiveProfileID:profileID error:&previewError' in reset_prepare and 'if (!applied)' in reset_prepare and
         apply_profile_marker in reset_profile_method and
         profile_notification_marker in reset_profile_method and
         "CFNotificationCenterPostNotification" in reset_profile_method and

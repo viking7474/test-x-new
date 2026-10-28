@@ -16,7 +16,7 @@ def reset_storage_contract(dashboard: str, manager: str) -> bool:
     """Follow the UI adapter into the owned coordinator, not an old UI body."""
     try:
         ui = method(dashboard, '- (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview')
-        apply = method(manager, '- (BOOL)applyDashboardPreview:(NSDictionary *)preview error:(NSError **)error')
+        apply = method(manager, '- (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error')
     except (ValueError, AssertionError):
         return False
     if '[self.manager applyDashboardPreview:preview error:&error]' not in ui:

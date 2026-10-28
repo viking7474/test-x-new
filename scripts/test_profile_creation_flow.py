@@ -328,7 +328,8 @@ def source_contracts():
     assert 'if (error) *error = nil;' in reset_prepare and 'if (!NSThread.isMainThread)' in reset_prepare
     assert 'if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare
     assert reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') < reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview')
-    assert 'if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError])' in reset_prepare
+    assert 'regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:&generationError' in reset_prepare and 'if (!generated)' in reset_prepare
+    assert 'applyDashboardPreview:preview expectedActiveProfileID:profileID error:&previewError' in reset_prepare and 'if (!applied)' in reset_prepare
     assert 'generationError ?: [NSError' in reset_prepare and reset_prepare.count('validateDashboardResetProfileID:profileID error:error') == 4
     assert 'expectedProfileID:nil error:error' in reset_wrapper
     assert '*stop = YES;' in required and 'return failure == nil;' in required and 'NSUnderlyingErrorKey' in required
@@ -440,7 +441,7 @@ def source_contracts():
     assert 'captureProfileSelectionWithError:error' in current_check and 'code:20' in current_check
     for forbidden in ('mutableCurrentProfile =', 'PXStage', 'mirrorCurrentProfileID:', 'writeRegistryData:'):
         assert forbidden not in current_check, forbidden
-    generation = writers.method(read('common/IdentifierManager.m'), '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
+    generation = writers.method(read('common/IdentifierManager.m'), '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
     assert 'BOOL needsBaseline = !PXProfileString(ids[@"DeviceModel"]).length' in generation and 'candidate[@"theme"] = ' in generation
     for case in ('device creation adapter waits for completion and rejects duplicate submission',
                  'device creation adapter refreshes only committed current success and reports failure or supersession',
@@ -719,7 +720,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4P-partial'
+    assert manifest['rollout'] == '4C.2H4Q-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

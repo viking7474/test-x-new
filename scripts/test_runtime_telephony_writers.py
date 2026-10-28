@@ -77,13 +77,14 @@ def source_contracts():
     workflow = read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_telephony_writers.py' in workflow and 'test_runtime_device_group_writers.py --native' in workflow
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4P-partial'
+    assert manifest['rollout'] == '4C.2H4Q-partial'
     assert manifest['writers']['identifier-telephony']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['entryPoints'] == [
         'regenerateAllEnabledIdentifiers', 'regenerateAllEnabledIdentifiersWithError:',
         'regenerateAllEnabledIdentifiersForProfileID:networkArtifacts:error:',
         'commitRuntimeGenerationForProfileID:networkArtifacts:error:',
-        'commitRuntimeGenerationForProfileID:networkArtifacts:lifecycleLease:error:']
+        'commitRuntimeGenerationForProfileID:networkArtifacts:lifecycleLease:error:',
+        'regenerateAllEnabledIdentifiersForExpectedActiveProfileID:error:']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Standalone telephony source contracts (native runtime not implied; lifecycle rollout partial)')
 
