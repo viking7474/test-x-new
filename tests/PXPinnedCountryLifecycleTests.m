@@ -58,7 +58,8 @@ static BOOL Wait(BOOL (^condition)(void)) {
         @autoreleasepool { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, YES); }
     return condition();
 }
-static CLLocationCoordinate2D Point(void) { return CLLocationCoordinate2DMake(10.75, 106.5); }
+// MacTypes.h declares Point; fixture helpers must not reuse SDK type names.
+static CLLocationCoordinate2D PXCountryFixtureCoordinate(void) { return CLLocationCoordinate2DMake(10.75, 106.5); }
 static NSData *JSON(id value) { return [NSJSONSerialization dataWithJSONObject:value options:NSJSONWritingFragmentsAllowed error:NULL]; }
 static void ReplyData(PXCountryTask *task, NSData *data, NSError *error) {
     NSUInteger before = gDeliveries;
@@ -77,8 +78,8 @@ static void TestLatestAndReentry(void) {
     PXPinnedCountryCompletion completion = ^(NSString *code) {
         CHECK(NSThread.isMainThread, "current result arrives on main"); replies++; result = code;
     };
-    [lookup resolveCoordinate:Point() completion:completion]; PXCountryTask *old = gTasks.lastObject;
-    [lookup resolveCoordinate:Point() completion:completion]; PXCountryTask *current = gTasks.lastObject;
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion]; PXCountryTask *old = gTasks.lastObject;
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion]; PXCountryTask *current = gTasks.lastObject;
     CHECK(old.cancellations == 1 && old.resumes == 1 && current.resumes == 1, "supersession cancels only old task");
     CHECK([current.request.URL.host isEqual:@"nominatim.openstreetmap.org"] && current.request.timeoutInterval == 10 &&
         [[current.request valueForHTTPHeaderField:@"User-Agent"] isEqual:@"WeaponX iOS App"], "endpoint timeout and user agent preserved");
@@ -89,12 +90,12 @@ static void TestLatestAndReentry(void) {
     Reply(current, @{ @"address": @{ @"country_code": @"us" } });
     CHECK(replies == 1 && [result isEqual:@"VN"], "current country delivered once and normalized");
     [lookup cancel]; CHECK(current.cancellations == 0, "completed task released before cancellation");
-    [lookup resolveCoordinate:Point() completion:completion]; current = gTasks.lastObject; [lookup cancel];
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion]; current = gTasks.lastObject; [lookup cancel];
     ReplyData(current, nil, [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
     CHECK(replies == 1 && current.cancellations == 1, "cancelled late error is suppressed");
     __weak PXPinnedCountryLookup *weakLookup = lookup;
-    [lookup resolveCoordinate:Point() completion:^(NSString *code) {
-        (void)code; [weakLookup resolveCoordinate:Point() completion:completion];
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:^(NSString *code) {
+        (void)code; [weakLookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion];
     }];
     current = gTasks.lastObject; Reply(current, @{ @"address": @{ @"country_code": @"vn" } });
     PXCountryTask *reentrant = gTasks.lastObject;
@@ -111,20 +112,20 @@ static void TestInvalidAndLifetime(void) {
         @{ @"address": @{ @"country_code": @1 } }, @{ @"address": @{ @"country_code": NSNull.null } },
         @{ @"address": @{ @"country_code": @"" } }, @{ @"address": @{ @"country_code": @"123" } },
         @{ @"address": @{ @"country_code": @"1!" } }];
-    for (id value in bad) { [lookup resolveCoordinate:Point() completion:completion]; Reply(gTasks.lastObject, value); }
-    [lookup resolveCoordinate:Point() completion:completion]; ReplyData(gTasks.lastObject, [@"invalid JSON" dataUsingEncoding:NSUTF8StringEncoding], nil);
-    [lookup resolveCoordinate:Point() completion:completion]; ReplyData(gTasks.lastObject, nil, [NSError errorWithDomain:NSURLErrorDomain code:-1 userInfo:nil]);
+    for (id value in bad) { [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion]; Reply(gTasks.lastObject, value); }
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion]; ReplyData(gTasks.lastObject, [@"invalid JSON" dataUsingEncoding:NSUTF8StringEncoding], nil);
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:completion]; ReplyData(gTasks.lastObject, nil, [NSError errorWithDomain:NSURLErrorDomain code:-1 userInfo:nil]);
     CHECK(replies == bad.count + 2, "wrong JSON shapes missing fields and transport errors return nil once");
     NSUInteger tasks = gTasks.count;
     [lookup resolveCoordinate:CLLocationCoordinate2DMake(NAN, 2) completion:completion];
     [lookup resolveCoordinate:CLLocationCoordinate2DMake(91, 2) completion:completion];
-    [lookup resolveCoordinate:Point() completion:nil];
+    [lookup resolveCoordinate:PXCountryFixtureCoordinate() completion:nil];
     CHECK(gTasks.count == tasks && replies == bad.count + 4, "invalid coordinates and nil completion launch no transport");
     __weak PXPinnedCountryLookup *weak;
     PXCountryTask *pending;
     @autoreleasepool {
         PXPinnedCountryLookup *owner = [PXPinnedCountryLookup new]; weak = owner;
-        [owner resolveCoordinate:Point() completion:^(NSString *code) { (void)code; replies++; }]; pending = gTasks.lastObject;
+        [owner resolveCoordinate:PXCountryFixtureCoordinate() completion:^(NSString *code) { (void)code; replies++; }]; pending = gTasks.lastObject;
     }
     CHECK(!weak && pending.cancellations == 1, "pending transport does not retain lookup and dealloc cancels task");
     NSUInteger before = replies; Reply(pending, @{ @"address": @{ @"country_code": @"vn" } });

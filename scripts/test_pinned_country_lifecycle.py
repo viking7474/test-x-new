@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,8 @@ def source_contracts():
     assert consumer.index('__strong typeof(weakSelf) self = weakSelf;') < consumer.index('PXPinnedCoordinateMatchesLocation')
     assert consumer.index('PXPinnedCoordinateMatchesLocation') < consumer.index('coordsLabel.attributedText') < consumer.index('savePinnedLocation:')
     fixture = read('tests/PXPinnedCountryLifecycleTests.m')
+    assert 'PXCountryFixtureCoordinate(void)' in fixture and not re.search(r'\bPoint\s*\(', fixture), \
+        'fixture helper must not collide with the macOS SDK Point typedef'
     for case in ('late superseded result has no consumer effects', 'current country delivered once and normalized',
                  'consumer reentry keeps newly started request', 'invalid coordinates and nil completion launch no transport',
                  'pending transport does not retain lookup and dealloc cancels task', 'network adapter does not retain controller',

@@ -60,6 +60,14 @@ này; không ghi nhận full release gate pass.
 
 ## Performance và phần còn lại
 
+CI follow-up: log người dùng cung cấp cho thấy cả rootful/RootHide-defined lane
+không compile fixture vì helper `Point()` trùng typedef `Point` từ macOS
+`MacTypes.h`. Đổi helper và mọi call site thành `PXCountryFixtureCoordinate`;
+timezone fixture có cùng pattern được đổi thành `PXTimeZoneFixtureCoordinate`.
+Hai source gates bảo vệ lỗi trùng tên này. Không đổi production lookup hay bỏ
+SDK imports/test cases. Native CI cần chạy lại sau sửa; source pass không xác nhận
+native runtime pass.
+
 Tối đa một task tracked cho mỗi lookup owner, một token cho mỗi cache miss. Cancel
 là yêu cầu tới transport; không chứng minh server hay socket dừng ngay. Expected
 cost thấp trên UI action; không có số benchmark CPU/latency. Cache hit không tạo

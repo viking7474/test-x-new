@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,8 @@ def source_contracts():
     assert '__strong typeof(weakSelf) self = weakSelf;' in refresh
     assert 'CLGeocoder *' not in time and 'CLGeocoder *' not in adapter
     fixture = read('tests/PXPinnedTimeZoneLifecycleTests.m')
+    assert 'PXTimeZoneFixtureCoordinate(void)' in fixture and not re.search(r'\bPoint\s*\(', fixture), \
+        'fixture helper must not collide with the macOS SDK Point typedef'
     for case in ('superseded and cancelled lookups drop late geocoder results',
                  'lookup delivers current zone once on main thread',
                  'consumer reentry preserves its newly started lookup',
