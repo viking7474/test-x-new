@@ -77,6 +77,7 @@
 - (BOOL)beginProfileOperationWithError:(NSError **)error;
 - (void)endProfileOperation;
 - (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error;
+- (NSDictionary *)preparedRegistryRecordForProfiles:(NSArray<Profile *> *)profiles error:(NSError **)error;
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error;
 - (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen;
 - (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates;
@@ -659,6 +660,72 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     if (completion) completion(success, success ? nil : failure);
 }
 
+- (void)editProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self editProfileID:profileID name:name shortDescription:shortDescription completion:completion]; }); return;
+    }
+    NSString *targetID = [PXValidatedProfileID(profileID) copy];
+    if (![targetID isEqual:profileID] || (!name && !shortDescription) ||
+        (name && (![name isKindOfClass:NSString.class] || !name.length)) ||
+        (shortDescription && ![shortDescription isKindOfClass:NSString.class])) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile metadata edit"}]); return;
+    }
+    NSString *requestedName = [name copy], *requestedDescription = [shortDescription copy];
+    if (self.selectionUnavailable || self.registryUnavailable) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Reload a valid profile selection and registry before editing"}]); return;
+    }
+    NSUInteger index = NSNotFound;
+    for (NSUInteger i = 0; i < self.mutableProfiles.count; i++)
+        if ([self.mutableProfiles[i].profileId isEqual:targetID]) { index = i; break; }
+    if (index == NSNotFound) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Profile not found"}]); return;
+    }
+    NSError *failure = nil;
+    if (![self beginProfileOperationWithError:&failure]) { if (completion) completion(NO, failure); return; }
+    BOOL success = NO, mirroredSelection = NO;
+    @try {
+        // Copy only this registered graph; dialog objects never mutate manager
+        // slots before persistence. Keep the reader's legal nested class policy.
+        NSArray *models = @[self.mutableProfiles[index]];
+        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:models requiringSecureCoding:YES error:&failure];
+        NSDictionary *record = data ? @{ @"exists": @YES, @"bytes": data } : nil;
+        Profile *edit = record ? [[self decodeRegistryRecord:record error:&failure] firstObject] : nil;
+        if (edit) {
+            if (requestedName) edit.name = requestedName;
+            if (requestedDescription) edit.shortDescription = requestedDescription;
+            NSDictionary *expected = [self captureProfileSelectionWithError:&failure];
+            NSDictionary *central = expected[PXCurrentProfileInfoPath()], *legacy = expected[PXLegacyActiveProfileInfoPath()];
+            NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+            NSString *selectedID = PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]);
+            if (expected && selectedID && [edit.name isKindOfClass:NSString.class]) {
+                success = [self updateProfileUnderLease:edit index:index error:&failure];
+                if (success && [selectedID isEqual:targetID]) {
+                    NSDictionary *label = @{ @"ProfileId": targetID, @"ProfileName": [edit.name copy],
+                        @"Description": [edit.shortDescription copy] ?: @"", @"LastSelected": NSDate.date,
+                        @"SelectionRevision": NSUUID.UUID.UUIDString };
+                    // Registry persistence precedes labels. A conflict/fault here
+                    // is partial failure, never compensation of a newer selection.
+                    success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                        return PXStageRuntimeProfileSelectionIfUnchanged(tx, label, expected, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError);
+                    }, &failure);
+                    mirroredSelection = success;
+                    if (success) self.mutableCurrentProfile = edit;
+                }
+            }
+        }
+    } @catch (NSException *exception) {
+        success = NO;
+        failure = [NSError errorWithDomain:@"WeaponXProfileError" code:17 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile metadata edit failed"}];
+    } @finally { [self endProfileOperation]; }
+    if (!success && !failure) failure = [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Profile metadata edit could not complete; reload before retrying"}];
+    if (mirroredSelection) {
+        @try { [self mirrorCurrentProfileID:targetID]; }
+        @catch (NSException *exception) { NSLog(@"[ProfileManager] Metadata committed; defaults mirror failed: %@", exception); }
+    }
+    if (success) [self publishProfileChangedNotification];
+    if (completion) completion(success, success ? nil : failure);
+}
+
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error {
     if (error) *error = nil;
     NSString *targetID = PXValidatedProfileID(profile.profileId);
@@ -668,11 +735,12 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         return NO;
     }
     // Freeze the archive before changing any display file or manager-owned slot.
-    // Encoding failure is a preflight failure, not a partially saved edit.
+    // Encoding/reader validation failure is preflight, not a partially saved edit.
     NSMutableArray<Profile *> *candidate = [self.mutableProfiles mutableCopy];
     candidate[index] = profile;
-    NSData *archive = [NSKeyedArchiver archivedDataWithRootObject:candidate requiringSecureCoding:YES error:error];
-    if (!archive) return NO;
+    NSDictionary *record = [self preparedRegistryRecordForProfiles:candidate error:error];
+    if (!record) return NO;
+    NSData *archive = record[@"bytes"];
     NSDictionary *fields = @{
         @"Name": profile.name,
         @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", targetID],
@@ -683,7 +751,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     // The registry remains a separate CAS phase. Never report success or adopt
     // the candidate when it fails; committed display files are not rolled back.
     if (![self.lifecycleLease writeRegistryData:archive expected:self.registryRecord error:error]) return NO;
-    self.registryRecord = @{ @"exists": @YES, @"bytes": archive };
+    self.registryRecord = record;
     self.mutableProfiles = candidate;
     if ([self.mutableCurrentProfile.profileId isEqual:targetID]) self.mutableCurrentProfile = profile;
     [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644}
@@ -1167,6 +1235,22 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     return nil;
 }
 
+- (NSDictionary *)preparedRegistryRecordForProfiles:(NSArray<Profile *> *)profiles error:(NSError **)error {
+    if (error) *error = nil;
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:profiles requiringSecureCoding:YES error:error];
+    if (!data) return nil;
+    NSDictionary *record = @{ @"exists": @YES, @"bytes": data };
+    // Encoding only proves that the objects support coding. Before replacing a
+    // readable registry, require these exact bytes to pass the load-time policy
+    // too (typed fields, root members, valid unique IDs and legacy fallbacks).
+    NSError *failure = nil; BOOL readable = NO;
+    @autoreleasepool {
+        readable = [self decodeRegistryRecord:record error:&failure] != nil;
+    }
+    if (!readable && error) *error = failure;
+    return readable ? record : nil;
+}
+
 - (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen {
     // Deletion retains its directional legacy timestamp compatibility policy.
     return [self registryValue:before matchesValue:after seen:seen allowLegacyDates:YES];
@@ -1491,10 +1575,10 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     if (ownsOperation && ![self beginProfileOperationWithError:&error]) { if (completion) completion(NO, error); return; }
     @try {
         if (NSThread.isMainThread && [self.lifecycleLease validateWithError:&error] && PXRequireNoPendingProfileDeletion(&error)) {
-            NSData *data = [NSKeyedArchiver archivedDataWithRootObject:self.mutableProfiles requiringSecureCoding:YES error:&error];
-            success = data && [self.lifecycleLease writeRegistryData:data expected:self.registryRecord error:&error];
+            NSDictionary *record = [self preparedRegistryRecordForProfiles:self.mutableProfiles error:&error];
+            success = record && [self.lifecycleLease writeRegistryData:record[@"bytes"] expected:self.registryRecord error:&error];
             if (success) {
-                self.registryRecord = @{ @"exists": @YES, @"bytes": data };
+                self.registryRecord = record;
                 [self.fileManager setAttributes:@{NSFilePosixPermissions: @0644}
                     ofItemAtPath:[self.profilesDirectory stringByAppendingPathComponent:@"profiles.plist"] error:NULL];
             }
@@ -1543,6 +1627,9 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (void)renameProfile:(NSString *)oldName to:(NSString *)newName {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self renameProfile:oldName to:newName]; }); return;
+    }
     // Find profile with matching name
     Profile *profileToRename = nil;
     for (Profile *profile in self.mutableProfiles) {
@@ -1553,8 +1640,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     }
     
     if (profileToRename) {
-        profileToRename.name = newName;
-        [self updateProfile:profileToRename completion:^(BOOL success, NSError * _Nullable error) {
+        [self editProfileID:profileToRename.profileId name:newName shortDescription:nil completion:^(BOOL success, NSError * _Nullable error) {
             if (!success) {
                 NSLog(@"[WeaponX] ❌ Failed to rename profile from %@ to %@: %@", oldName, newName, error);
             }

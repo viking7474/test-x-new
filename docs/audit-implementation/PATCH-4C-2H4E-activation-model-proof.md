@@ -87,3 +87,7 @@ Directory/artifact/archive/selection vẫn nhiều phases; defaults/security aut
 raw-reader/cross-process atomicity, cleanup/durability và rootful reader rollout còn
 partial. Giữ bootstrap priming đã xác nhận trên RootHide iOS 15.8.8/AIDA64. Manifest
 `4C.2H4E-partial`; toàn Patch 4 chưa hoàn tất, Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4E pass ngày 2026-10-28. Pre-write reader validation
+được triển khai riêng tại [H4F](PATCH-4C-2H4F-registry-encoding-preflight.md);
+không coi build confirmation là full device/runtime matrix.

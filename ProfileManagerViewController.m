@@ -44,6 +44,8 @@
 @property (nonatomic, strong) UIDocumentInteractionController *documentInteractionController;
 @property (nonatomic, strong) UIActivityIndicatorView *switchBackupIndicator;
 
+- (void)saveMetadataForProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription successTitle:(NSString *)successTitle successMessage:(NSString *)successMessage notifyDelegate:(BOOL)notifyDelegate;
+
 @end
 
 @implementation ProfileManagerViewController
@@ -1621,154 +1623,45 @@
     }];
 }
 
-- (void)showRenameDialogForProfile:(Profile *)profile {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Rename Profile"
-                                                                 message:@"Enter new name for the profile"
-                                                          preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.text = profile.name;
-        textField.placeholder = @"Profile Name";
+- (void)saveMetadataForProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription successTitle:(NSString *)successTitle successMessage:(NSString *)successMessage notifyDelegate:(BOOL)notifyDelegate {
+    UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
+    indicator.center = self.view.center; indicator.hidesWhenStopped = YES;
+    [self.view addSubview:indicator]; [indicator startAnimating];
+    __weak typeof(self) weakSelf = self;
+    [[ProfileManager sharedManager] editProfileID:profileID name:name shortDescription:shortDescription completion:^(BOOL success, NSError *error) {
+        // Let the input alert finish dismissing before presenting the result.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [indicator stopAnimating]; [indicator removeFromSuperview];
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            NSString *message = success ? successMessage : [NSString stringWithFormat:@"%@\nSome changes may already be saved. Reload and retry.", error.localizedDescription ?: @"Could not finish the profile update."];
+            UIAlertController *result = [UIAlertController alertControllerWithTitle:success ? successTitle : @"Update Failed"
+                message:message preferredStyle:UIAlertControllerStyleAlert];
+            [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:result animated:YES completion:nil];
+            [self loadProfilesFromDisk];
+            if (success && notifyDelegate && [self.delegate respondsToSelector:@selector(profileManagerViewController:didUpdateProfiles:)])
+                [self.delegate profileManagerViewController:self didUpdateProfiles:self.isSearchActive ? self.filteredProfiles : self.profiles];
+        });
     }];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                            style:UIAlertActionStyleCancel
-                                          handler:nil]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Rename"
-                                            style:UIAlertActionStyleDefault
-                                          handler:^(UIAlertAction * _Nonnull action) {
-        NSString *newName = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (newName.length > 0) {
-            // Show loading indicator
-            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
-            loadingIndicator.center = self.view.center;
-            loadingIndicator.hidesWhenStopped = YES;
-            [self.view addSubview:loadingIndicator];
-            [loadingIndicator startAnimating];
-            
-            // Get profile directory
-            NSString *profilesDirectory = PXProfilesPath();
-            NSString *profilePath = [profilesDirectory stringByAppendingPathComponent:profile.profileId];
-            
-            // Update profile name in memory
-            profile.name = newName;
-            
-            // Direct file updates - update name in all possible plist files
-            BOOL didUpdateAnyFile = NO;
-            NSFileManager *fileManager = [NSFileManager defaultManager];
-            
-            // 1. Update identifiers.plist if it exists
-            NSString *identifiersPath = [profilePath stringByAppendingPathComponent:@"identifiers.plist"];
-            if ([fileManager fileExistsAtPath:identifiersPath]) {
-                NSMutableDictionary *identifiers = [NSMutableDictionary dictionaryWithContentsOfFile:identifiersPath];
-                if (identifiers) {
-                    identifiers[@"DisplayName"] = newName;
-                    BOOL success = [identifiers writeToFile:identifiersPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated display name in identifiers.plist: %@", identifiersPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated identifiers.plist: %@", identifiersPath);
-                    }
-                }
-            }
-            
-            // 2. Update scoped-apps.plist if it exists
-            NSString *scopedAppsPath = [profilePath stringByAppendingPathComponent:@"scoped-apps.plist"];
-            if ([fileManager fileExistsAtPath:scopedAppsPath]) {
-                NSMutableDictionary *scopedApps = [NSMutableDictionary dictionaryWithContentsOfFile:scopedAppsPath];
-                if (scopedApps) {
-                    scopedApps[@"ProfileName"] = newName;
-                    BOOL success = [scopedApps writeToFile:scopedAppsPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated profile name in scoped-apps.plist: %@", scopedAppsPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated scoped-apps.plist: %@", scopedAppsPath);
-                    }
-                }
-            }
-            
-            // 3. Update Info.plist if it exists
-            NSString *infoPath = [profilePath stringByAppendingPathComponent:@"Info.plist"];
-            if ([fileManager fileExistsAtPath:infoPath]) {
-                NSMutableDictionary *info = [NSMutableDictionary dictionaryWithContentsOfFile:infoPath];
-                if (info) {
-                    info[@"Name"] = newName;
-                    BOOL success = [info writeToFile:infoPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated name in Info.plist: %@", infoPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated Info.plist: %@", infoPath);
-                    }
-                }
-            }
-            
-            // 4. Update appdata/Info.plist if it exists
-            NSString *appDataPath = [profilePath stringByAppendingPathComponent:@"appdata/Info.plist"];
-            if ([fileManager fileExistsAtPath:appDataPath]) {
-                NSMutableDictionary *appInfo = [NSMutableDictionary dictionaryWithContentsOfFile:appDataPath];
-                if (appInfo) {
-                    appInfo[@"ProfileName"] = newName;
-                    BOOL success = [appInfo writeToFile:appDataPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated profile name in appdata/Info.plist: %@", appDataPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated appdata/Info.plist: %@", appDataPath);
-                    }
-                }
-            }
-            
-            // 5. Update the current profile info if this is the current profile
-            ProfileManager *manager = [ProfileManager sharedManager];
-            if ([manager.currentProfile.profileId isEqualToString:profile.profileId]) {
-                // Update central profile info
-                [manager updateCurrentProfileInfoWithProfile:profile];
-                NSLog(@"[WeaponX] Updated current profile info with new name");
-                didUpdateAnyFile = YES;
-            }
-            
-            // Use the ProfileManager to ensure any in-memory caches are updated
-            [[ProfileManager sharedManager] renameProfile:profile.name to:newName];
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [loadingIndicator stopAnimating];
-                [loadingIndicator removeFromSuperview];
-                
-                if (didUpdateAnyFile) {
-                    // Show success message
-                    UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Profile Renamed"
-                                                                                      message:[NSString stringWithFormat:@"Profile successfully renamed to '%@'", newName]
-                                                                               preferredStyle:UIAlertControllerStyleAlert];
-                    [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    [self presentViewController:successAlert animated:YES completion:nil];
-                } else {
-                    // Show warning message - changes may not persist
-                    UIAlertController *warningAlert = [UIAlertController alertControllerWithTitle:@"Warning"
-                                                                                      message:@"Profile was renamed in memory but changes may not persist between restarts. No profile files could be updated."
-                                                                               preferredStyle:UIAlertControllerStyleAlert];
-                    [warningAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    [self presentViewController:warningAlert animated:YES completion:nil];
-                }
-                
-                // Load profiles from disk to ensure UI is in sync
-                [self loadProfilesFromDisk];
-                
-                // Notify delegate
-                if ([self.delegate respondsToSelector:@selector(profileManagerViewController:didUpdateProfiles:)]) {
-                    if (self.isSearchActive) {
-                        [self.delegate profileManagerViewController:self didUpdateProfiles:self.filteredProfiles];
-                    } else {
-                        [self.delegate profileManagerViewController:self didUpdateProfiles:self.profiles];
-                    }
-                }
-            });
-        }
+}
+
+- (void)showRenameDialogForProfile:(Profile *)profile {
+    NSString *profileID = [profile.profileId copy];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Rename Profile"
+        message:@"Enter new name for the profile" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.text = profile.name; textField.placeholder = @"Profile Name";
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Rename" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        NSString *name = [weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (name.length) [weakSelf saveMetadataForProfileID:profileID name:name shortDescription:nil successTitle:@"Profile Renamed"
+            successMessage:[NSString stringWithFormat:@"Profile successfully renamed to '%@'", name] notifyDelegate:YES];
     }]];
-    
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -1879,152 +1772,26 @@
 }
 
 - (void)infoTapped:(UIButton *)sender {
-    NSInteger index = sender.tag;
-    Profile *profile = self.isSearchActive ? self.filteredProfiles[index] : self.profiles[index];
-    
-    // Show info/description dialog
+    NSArray<Profile *> *shown = self.isSearchActive ? self.filteredProfiles : self.profiles;
+    if (sender.tag < 0 || (NSUInteger)sender.tag >= shown.count) return;
+    Profile *profile = shown[(NSUInteger)sender.tag];
+    NSString *profileID = [profile.profileId copy], *previousDescription = [profile.shortDescription copy];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Profile Information"
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-        textField.placeholder = @"Description";
-        textField.text = profile.shortDescription;
+        message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"Description"; textField.text = previousDescription;
         textField.clearButtonMode = UITextFieldViewModeWhileEditing;
     }];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" 
-                                             style:UIAlertActionStyleCancel 
-                                           handler:nil]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Update" 
-                                             style:UIAlertActionStyleDefault 
-                                           handler:^(UIAlertAction * _Nonnull action) {
-        NSString *newDescription = alert.textFields.firstObject.text;
-        if (newDescription && ![newDescription isEqualToString:profile.shortDescription]) {
-            // Show loading indicator
-            UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
-            loadingIndicator.center = self.view.center;
-            loadingIndicator.hidesWhenStopped = YES;
-            [self.view addSubview:loadingIndicator];
-            [loadingIndicator startAnimating];
-            
-            // Update profile description in memory
-            profile.shortDescription = newDescription;
-            
-            // Get profile directory
-            NSString *profilesDirectory = PXProfilesPath();
-            NSString *profilePath = [profilesDirectory stringByAppendingPathComponent:profile.profileId];
-            
-            // Direct file updates - update description in all possible plist files
-            BOOL didUpdateAnyFile = NO;
-            NSFileManager *fileManager = [NSFileManager defaultManager];
-            
-            // 1. Update identifiers.plist if it exists
-            NSString *identifiersPath = [profilePath stringByAppendingPathComponent:@"identifiers.plist"];
-            if ([fileManager fileExistsAtPath:identifiersPath]) {
-                NSMutableDictionary *identifiers = [NSMutableDictionary dictionaryWithContentsOfFile:identifiersPath];
-                if (identifiers) {
-                    identifiers[@"Description"] = newDescription;
-                    BOOL success = [identifiers writeToFile:identifiersPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated description in identifiers.plist: %@", identifiersPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated identifiers.plist: %@", identifiersPath);
-                    }
-                }
-            }
-            
-            // 2. Update scoped-apps.plist if it exists
-            NSString *scopedAppsPath = [profilePath stringByAppendingPathComponent:@"scoped-apps.plist"];
-            if ([fileManager fileExistsAtPath:scopedAppsPath]) {
-                NSMutableDictionary *scopedApps = [NSMutableDictionary dictionaryWithContentsOfFile:scopedAppsPath];
-                if (scopedApps) {
-                    scopedApps[@"Description"] = newDescription;
-                    scopedApps[@"ProfileDescription"] = newDescription;
-                    BOOL success = [scopedApps writeToFile:scopedAppsPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated description in scoped-apps.plist: %@", scopedAppsPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated scoped-apps.plist: %@", scopedAppsPath);
-                    }
-                }
-            }
-            
-            // 3. Update Info.plist if it exists
-            NSString *infoPath = [profilePath stringByAppendingPathComponent:@"Info.plist"];
-            if ([fileManager fileExistsAtPath:infoPath]) {
-                NSMutableDictionary *info = [NSMutableDictionary dictionaryWithContentsOfFile:infoPath];
-                if (info) {
-                    info[@"Description"] = newDescription;
-                    info[@"ShortDescription"] = newDescription;
-                    BOOL success = [info writeToFile:infoPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated description in Info.plist: %@", infoPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated Info.plist: %@", infoPath);
-                    }
-                }
-            }
-            
-            // 4. Update appdata/Info.plist if it exists
-            NSString *appDataPath = [profilePath stringByAppendingPathComponent:@"appdata/Info.plist"];
-            if ([fileManager fileExistsAtPath:appDataPath]) {
-                NSMutableDictionary *appInfo = [NSMutableDictionary dictionaryWithContentsOfFile:appDataPath];
-                if (appInfo) {
-                    appInfo[@"ProfileDescription"] = newDescription;
-                    appInfo[@"Description"] = newDescription;
-                    BOOL success = [appInfo writeToFile:appDataPath atomically:YES];
-                    if (success) {
-                        NSLog(@"[WeaponX] Updated description in appdata/Info.plist: %@", appDataPath);
-                        didUpdateAnyFile = YES;
-                    } else {
-                        NSLog(@"[WeaponX] Failed to write updated appdata/Info.plist: %@", appDataPath);
-                    }
-                }
-            }
-            
-            // 5. Update the current profile info if this is the current profile
-            ProfileManager *manager = [ProfileManager sharedManager];
-            if ([manager.currentProfile.profileId isEqualToString:profile.profileId]) {
-                // Update central profile info
-                [manager updateCurrentProfileInfoWithProfile:profile];
-                NSLog(@"[WeaponX] Updated current profile info with new description");
-                didUpdateAnyFile = YES;
-            }
-            
-            // Use the ProfileManager to ensure any in-memory caches are updated
-            [manager updateProfile:profile completion:^(BOOL success, NSError * _Nullable error) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [loadingIndicator stopAnimating];
-                    [loadingIndicator removeFromSuperview];
-                    
-                    if (didUpdateAnyFile) {
-                        // Show success message
-                        UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Description Updated"
-                                                                                          message:@"Profile description successfully updated"
-                                                                                   preferredStyle:UIAlertControllerStyleAlert];
-                        [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                        [self presentViewController:successAlert animated:YES completion:nil];
-                    } else {
-                        // Show warning message - changes may not persist
-                        UIAlertController *warningAlert = [UIAlertController alertControllerWithTitle:@"Warning"
-                                                                                          message:@"Description was updated in memory but changes may not persist between restarts. No profile files could be updated."
-                                                                                   preferredStyle:UIAlertControllerStyleAlert];
-                        [warningAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                        [self presentViewController:warningAlert animated:YES completion:nil];
-                    }
-                    
-                    // Reload profiles to update UI
-                    [self loadProfilesFromDisk];
-                });
-            }];
-        }
+    __weak UIAlertController *weakAlert = alert;
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Update" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        NSString *description = weakAlert.textFields.firstObject.text;
+        if (description && ![description isEqualToString:previousDescription])
+            [weakSelf saveMetadataForProfileID:profileID name:nil shortDescription:description successTitle:@"Description Updated"
+                successMessage:@"Profile description successfully updated" notifyDelegate:NO];
     }]];
-    
     [self presentViewController:alert animated:YES completion:nil];
 }
 

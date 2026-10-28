@@ -46,11 +46,14 @@ METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void
     '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error',
     '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error']
 METHODS += ['- (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error',
+            '- (NSDictionary *)preparedRegistryRecordForProfiles:(NSArray<Profile *> *)profiles error:(NSError **)error',
             '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error',
             '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen',
             '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates',
             '- (BOOL)activationProfile:(Profile *)profile matchesRegistry:(NSDictionary *)record error:(NSError **)error',
             '- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error']
+EDIT = '- (void)editProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription completion:(void (^)(BOOL success, NSError * _Nullable error))completion'
+METHODS += [EDIT, '- (void)renameProfile:(NSString *)oldName to:(NSString *)newName']
 
 
 def check_macro_arity(source, label):
@@ -130,7 +133,8 @@ def source_contracts():
         assert case in fixture, case
     update = writers.method(source, '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error')
     assert 'writeToFile:' not in update and 'createDirectoryIfNeeded:' not in update and 'saveProfilesWithCompletion:' not in update
-    assert update.index('archivedDataWithRootObject:candidate') < update.index('PXWriteProfileDisplayMetadata(') < update.index('writeRegistryData:archive') < update.index('self.mutableProfiles = candidate')
+    assert update.index('preparedRegistryRecordForProfiles:candidate') < update.index('PXWriteProfileDisplayMetadata(') < update.index('writeRegistryData:archive') < update.index('self.mutableProfiles = candidate')
+    assert 'if (!record) return NO;' in update and 'NSData *archive = record[@"bytes"]' in update
     assert 'expected:self.registryRecord' in update and 'self.registryRecord =' in update
     assert '#import "PXProfileMetadataWriter.h"' in source
     fixture = read('tests/PXProfileCreationFlowTests.m')
@@ -209,7 +213,20 @@ def source_contracts():
         assert forbidden not in network, forbidden
     assert 'generateSpoofedLocalIPAddressFromCurrent' in network and 'generateSpoofedLocalIPv6AddressFromCurrent' in network
     archive = writers.method(source, METHODS[8])
-    assert 'writeRegistryData:data expected:self.registryRecord' in archive and '@catch' in archive
+    assert 'preparedRegistryRecordForProfiles:self.mutableProfiles' in archive and '@catch' in archive
+    assert 'success = record && [self.lifecycleLease writeRegistryData:record[@"bytes"] expected:self.registryRecord' in archive
+    preparation = writers.method(source, '- (NSDictionary *)preparedRegistryRecordForProfiles:(NSArray<Profile *> *)profiles error:(NSError **)error')
+    assert preparation.index('archivedDataWithRootObject:profiles') < preparation.index('decodeRegistryRecord:record error:&failure')
+    assert '@"bytes": data' in preparation and 'return readable ? record : nil' in preparation
+    assert '@autoreleasepool' in preparation and 'if (!readable && error) *error = failure' in preparation
+    for forbidden in ('writeToFile:', 'writeRegistryData:', 'PXWriteProfileDisplayMetadata(', 'mutableProfiles =', 'publishProfileChangedNotification'):
+        assert forbidden not in preparation, forbidden
+    for case in ('registry preflight rejects securely encodable records that the reader cannot load',
+                 'rejected registry save preserves acknowledged bytes receipt and publication state',
+                 'invalid edit archive fails before display writes registry adoption or notification',
+                 'registry preflight preserves optional field and legacy timestamp fallbacks',
+                 'valid edit still saves exact validated bytes and keeps legal nested Profile values'):
+        assert case in fixture, case
     assert 'removeItemAtPath:' not in archive and 'temp_profiles.plist' not in source
     assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 4
     coding = writers.method(source, '- (instancetype)initWithCoder:(NSCoder *)coder')
@@ -243,7 +260,34 @@ def source_contracts():
     assert 'registryUnavailable' in source
     ui = read('ProfileManagerViewController.m')
     assert ui.count('refreshCurrentProfileFromCommittedSelectionWithError:NULL') == 4
-    assert ui.count('updateCurrentProfileInfoWithProfile:profile]') == 2, 'only explicit metadata edits retain the guarded helper'
+    edit = writers.method(source, EDIT)
+    assert edit.index('beginProfileOperationWithError:') < edit.index('archivedDataWithRootObject:models') < edit.index('updateProfileUnderLease:edit') < edit.index('PXStageRuntimeProfileSelectionIfUnchanged')
+    assert '@finally { [self endProfileOperation]; }' in edit
+    assert edit.index('[self endProfileOperation];') < edit.index('if (mirroredSelection)') < edit.index('if (success) [self publishProfileChangedNotification]')
+    assert 'requestedName = [name copy]' in edit and 'requestedDescription = [shortDescription copy]' in edit
+    compatibility_rename = writers.method(source, '- (void)renameProfile:(NSString *)oldName to:(NSString *)newName')
+    assert 'editProfileID:profileToRename.profileId' in compatibility_rename and 'profileToRename.name =' not in compatibility_rename
+    rename_ui = writers.method(ui, '- (void)showRenameDialogForProfile:(Profile *)profile')
+    description_ui = writers.method(ui, '- (void)infoTapped:(UIButton *)sender')
+    edit_ui = writers.method(ui, '- (void)saveMetadataForProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription successTitle:(NSString *)successTitle successMessage:(NSString *)successMessage notifyDelegate:(BOOL)notifyDelegate')
+    for body in (rename_ui, description_ui, edit_ui):
+        for forbidden in ('writeToFile:', 'dictionaryWithContentsOfFile:', 'updateCurrentProfileInfoWithProfile:', 'profile.name =', 'profile.shortDescription =', 'didUpdateAnyFile'):
+            assert forbidden not in body, forbidden
+        assert 'weakSelf' in body
+    assert 'weakAlert' in rename_ui and 'weakAlert' in description_ui
+    assert 'editProfileID:profileID' in edit_ui and 'success ? successTitle' in edit_ui and 'if (success && notifyDelegate' in edit_ui
+    assert 'scoped[@"Description"] = description' in read('common/PXProfileMetadataWriter.m')
+    for case in ('owned metadata edit faults preserve caller model archive display absence and selection',
+                 'inactive metadata edit owns the graph preserves empty description and leaves active selection unchanged',
+                 'active metadata edit commits registry before selection labels and publishes only after both phases',
+                 'label failure reports partial metadata commit without overwriting selection or publishing success',
+                 'post-registry edit exception clears success and releases lifecycle before completion',
+                 'metadata edit selection CAS preserves a newer target after registry commit',
+                 'metadata edit rejects invalid unknown and busy requests before persistence',
+                 'background metadata edit delivers on main after releasing ownership',
+                 'ID-based edits do not select another profile with the same display name',
+                 'legacy rename routes through the owned metadata edit API'):
+        assert case in fixture, case
     metadata = writers.method(source, '- (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError **)error')
     assert 'observed isEqualToString:info[@"ProfileId"]' in metadata and 'PXStageRuntimeProfileSelectionIfUnchanged' in metadata
     getter = writers.method(source, '- (Profile *)currentProfile')
@@ -408,7 +452,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4E-partial'
+    assert manifest['rollout'] == '4C.2H4G-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

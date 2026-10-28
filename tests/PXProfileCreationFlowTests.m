@@ -1124,6 +1124,191 @@ static void TestDefaultProfileSeeding(void) {
         "default seed leaves manager slots unchanged and closes descriptors on every tested return");
 }
 
+static void TestRegistryEncodingPreflight(void) {
+    PXProfileCreationFixture *manager = NewManager(); CHECK(Reload(manager), "registry preflight fixture loads committed basis");
+    Profile *previous = SeedRegistered(manager, @"registry-preflight-target");
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "registry preflight fixture drains startup mirror before baseline");
+    NSArray *basis = [manager.mutableProfiles copy]; Profile *current = manager.mutableCurrentProfile;
+    NSString *target = previous.profileId, *archivePath = Path(PXProfilesPath(), @"profiles.plist");
+    NSData *archiveBefore = [NSData dataWithContentsOfFile:archivePath]; NSDictionary *receipt = manager.registryRecord;
+    NSDictionary *displayBefore = PXCaptureMetadataFixture(target), *active = ActiveFiles();
+    NSUInteger notices = gNotices, mirrors = gMirrors, caches = gCachePublications, settingsNotices = gSettingsNotices, terminations = gTerminations;
+    for (NSUInteger mode = 0; mode < 10; mode++) {
+        Profile *bad = New(@"registry-preflight-edit"); [bad setValue:target forKey:@"profileId"];
+        NSArray *keys = @[@"name", @"shortDescription", @"iconName", @"createdAt", @"lastUsed", @"settings"];
+        if (mode < keys.count) [bad setValue:@[@"wrong field type"] forKey:keys[mode]];
+        else if (mode == 6) [bad setValue:@1 forKey:@"profileId"];
+        else if (mode == 7) {
+            Profile *child = New(@"registry-invalid-child"); [child setValue:@[@"wrong icon type"] forKey:@"iconName"];
+            bad.settings = @{ @"child": child };
+        }
+        NSMutableArray *candidate = [basis mutableCopy]; candidate[candidate.count - 1] = bad;
+        if (mode == 8) [candidate addObject:bad];
+        if (mode == 9) [candidate addObject:@"unexpected root member"];
+        NSError *encodeError = nil, *error = nil;
+        NSData *encodable = [NSKeyedArchiver archivedDataWithRootObject:candidate requiringSecureCoding:YES error:&encodeError];
+        CHECK(encodable && !encodeError && ![manager preparedRegistryRecordForProfiles:candidate error:&error] && error.localizedDescription.length > 0,
+            "registry preflight rejects securely encodable records that the reader cannot load");
+
+        manager.mutableProfiles = candidate;
+        __block NSUInteger callbacks = 0, writes = 0; __block BOOL success = YES; __block NSError *failure = nil;
+        gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) writes++; };
+        [manager saveProfilesWithCompletion:^(BOOL ok, NSError *saveError) { callbacks++; success = ok; failure = saveError; }];
+        gStore.testCheckpoint = nil;
+        BOOL preserved = [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]] && [receipt isEqual:manager.registryRecord];
+        CHECK(callbacks == 1 && !success && failure && preserved && writes == 0 &&
+            [displayBefore isEqual:PXCaptureMetadataFixture(target)] && [active isEqual:ActiveFiles()] &&
+            manager.mutableCurrentProfile == current && notices == gNotices && mirrors == gMirrors && caches == gCachePublications &&
+            settingsNotices == gSettingsNotices && terminations == gTerminations && !manager.lifecycleLease && !manager.creationInProgress,
+            "rejected registry save preserves acknowledged bytes receipt and publication state");
+        manager.mutableProfiles = [basis mutableCopy];
+        if (!preserved) { [archiveBefore writeToFile:archivePath atomically:YES]; manager.registryRecord = receipt; }
+
+        if (mode < 8) {
+            callbacks = 0; writes = 0; success = YES; failure = nil;
+            gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) writes++; };
+            [manager updateProfile:bad completion:^(BOOL ok, NSError *updateError) { callbacks++; success = ok; failure = updateError; }];
+            gStore.testCheckpoint = nil;
+            CHECK(callbacks == 1 && !success && failure && writes == 0 && manager.mutableProfiles.lastObject == previous &&
+                manager.mutableCurrentProfile == current && [displayBefore isEqual:PXCaptureMetadataFixture(target)] &&
+                [archiveBefore isEqual:[NSData dataWithContentsOfFile:archivePath]] && [receipt isEqual:manager.registryRecord] &&
+                notices == gNotices && [active isEqual:ActiveFiles()] && !manager.lifecycleLease && !manager.creationInProgress,
+                "invalid edit archive fails before display writes registry adoption or notification");
+        }
+    }
+    Profile *legacy = New(@"registry-legacy-defaults"); legacy.createdAt = nil; legacy.lastUsed = nil; legacy.settings = nil;
+    NSArray *legacyModels = @[legacy]; NSError *error = nil;
+    NSDictionary *legacyRecord = [manager preparedRegistryRecordForProfiles:legacyModels error:&error];
+    Profile *decoded = [[manager decodeRegistryRecord:legacyRecord error:&error] firstObject];
+    CHECK(legacyRecord && !error && decoded.createdAt && decoded.lastUsed && decoded.settings.count == 0 && !decoded.shortDescription,
+        "registry preflight preserves optional field and legacy timestamp fallbacks");
+
+    Profile *valid = New(@"registry-preflight-valid"), *child = New(@"registry-valid-child");
+    [valid setValue:target forKey:@"profileId"]; valid.settings = @{ @"child": child };
+    __block BOOL accepted = NO; [manager updateProfile:valid completion:^(BOOL ok, NSError *updateError) { accepted = ok && !updateError; }];
+    Profile *saved = PXFindFixtureProfile([manager decodeRegistryRecord:manager.registryRecord error:NULL], target);
+    Profile *savedChild = saved.settings[@"child"];
+    CHECK(accepted && manager.mutableProfiles.lastObject == valid && [manager.registryRecord[@"bytes"] isEqual:[NSData dataWithContentsOfFile:archivePath]] &&
+        [savedChild.name isEqual:child.name] && [active isEqual:ActiveFiles()] && notices + 1 == gNotices,
+        "valid edit still saves exact validated bytes and keeps legal nested Profile values");
+}
+
+static void TestOwnedMetadataEdits(void) {
+    ResetWorker(); gPause = NO;
+    PXProfileCreationFixture *manager = NewManager(); manager.fileManager = [PXProfileFileManagerFixture new];
+    CHECK(Reload(manager), "metadata edit API fixture loads committed registry");
+    Profile *original = SeedRegistered(manager, @"edit-api-before"), *child = New(@"edit-api-child");
+    original.settings = @{ @"child": child };
+    [manager saveProfilesWithCompletion:^(BOOL ok, NSError *error) { CHECK(ok && !error, "metadata edit nested basis saved"); }];
+    NSString *target = [original.profileId copy], *archivePath = Path(PXProfilesPath(), @"profiles.plist");
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "metadata edit startup mirror drains before baseline");
+    NSData *archive = [NSData dataWithContentsOfFile:archivePath]; NSDictionary *receipt = manager.registryRecord;
+    NSDictionary *display = PXCaptureMetadataFixture(target), *active = ActiveFiles();
+    NSUInteger notices = gNotices, mirrors = gMirrors, terminations = gTerminations, caches = gCachePublications;
+    for (NSUInteger failAfter = 1; failAfter <= 4; failAfter++) {
+        __block NSUInteger writes = 0, callbacks = 0; __block BOOL success = YES; __block NSError *failure = nil;
+        gStore.testCheckpoint = ^(NSString *phase) {
+            if ([phase isEqual:@"source-written"] && ++writes == failAfter) [NSException raise:@"fixture.edit" format:@"metadata edit source fault"];
+        };
+        [manager editProfileID:target name:@"edit-api-after" shortDescription:@"new description" completion:^(BOOL ok, NSError *error) {
+            callbacks++; success = ok; failure = error;
+            CHECK(NSThread.isMainThread && !manager.lifecycleLease && !manager.creationInProgress, "metadata edit failure callback runs after main lifecycle release");
+        }];
+        gStore.testCheckpoint = nil;
+        CHECK(callbacks == 1 && writes == failAfter && !success && failure && [original.name isEqual:@"edit-api-before"] &&
+            !original.shortDescription && manager.mutableProfiles.lastObject == original && [receipt isEqual:manager.registryRecord] &&
+            [archive isEqual:[NSData dataWithContentsOfFile:archivePath]] && [display isEqual:PXCaptureMetadataFixture(target)] &&
+            [active isEqual:ActiveFiles()] && notices == gNotices && mirrors == gMirrors,
+            "owned metadata edit faults preserve caller model archive display absence and selection");
+    }
+    __block NSUInteger callbacks = 0; __block BOOL success = NO; __block NSError *failure = nil;
+    [manager editProfileID:target name:@"edit-api-after" shortDescription:@"" completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    Profile *owned = manager.mutableProfiles.lastObject, *ownedChild = owned.settings[@"child"];
+    NSArray *paths = PXMetadataFixturePaths(target);
+    CHECK(callbacks == 1 && success && !failure && owned != original && [owned.name isEqual:@"edit-api-after"] &&
+        [owned.shortDescription isEqual:@""] && [original.name isEqual:@"edit-api-before"] && !original.shortDescription &&
+        ownedChild != child && [ownedChild.name isEqual:child.name] && notices + 1 == gNotices && mirrors == gMirrors &&
+        [Record(paths[3])[@"Description"] isEqual:@""] && [Record(paths[3])[@"ProfileDescription"] isEqual:@""] &&
+        [active isEqual:ActiveFiles()] && terminations == gTerminations && caches == gCachePublications,
+        "inactive metadata edit owns the graph preserves empty description and leaves active selection unchanged");
+
+    Select(manager, owned); active = ActiveFiles(); notices = gNotices; mirrors = gMirrors; terminations = gTerminations;
+    NSUInteger settingsNotices = gSettingsNotices; __block NSUInteger commits = 0; __block NSData *archiveAtLabelCommit = nil;
+    gStore.testCheckpoint = ^(NSString *phase) {
+        if ([phase isEqual:@"commit-written"] && ++commits == 2) archiveAtLabelCommit = [NSData dataWithContentsOfFile:archivePath];
+    };
+    callbacks = 0; [manager editProfileID:target name:@"edit-active-after" shortDescription:@"active description" completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gStore.testCheckpoint = nil;
+    CHECK(callbacks == 1 && success && !failure && commits == 2 && [archiveAtLabelCommit isEqual:manager.registryRecord[@"bytes"]] &&
+        [Record(PXCurrentProfileInfoPath())[@"ProfileName"] isEqual:@"edit-active-after"] &&
+        [Record(PXCurrentProfileInfoPath()) isEqual:Record(PXLegacyActiveProfileInfoPath())] &&
+        [manager.mutableCurrentProfile.shortDescription isEqual:@"active description"] && notices + 1 == gNotices && mirrors + 1 == gMirrors &&
+        terminations == gTerminations && caches == gCachePublications && settingsNotices == gSettingsNotices,
+        "active metadata edit commits registry before selection labels and publishes only after both phases");
+
+    for (NSUInteger failAfter = 5; failAfter <= 6; failAfter++) {
+        active = ActiveFiles(); notices = gNotices; mirrors = gMirrors; __block NSUInteger writes = 0;
+        NSString *name = [NSString stringWithFormat:@"edit-label-fault-%lu", (unsigned long)failAfter];
+        gStore.testCheckpoint = ^(NSString *phase) {
+            if ([phase isEqual:@"source-written"] && ++writes == failAfter) [NSException raise:@"fixture.edit" format:@"metadata edit label fault"];
+        };
+        callbacks = 0; [manager editProfileID:target name:name shortDescription:nil completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+        gStore.testCheckpoint = nil;
+        Profile *saved = PXFindFixtureProfile([manager decodeRegistryRecord:manager.registryRecord error:NULL], target);
+        CHECK(callbacks == 1 && writes == failAfter && !success && failure && [saved.name isEqual:name] &&
+            [Record(paths[0])[@"Name"] isEqual:name] && [active isEqual:ActiveFiles()] && notices == gNotices && mirrors == gMirrors &&
+            !manager.lifecycleLease && !manager.creationInProgress,
+            "label failure reports partial metadata commit without overwriting selection or publishing success");
+    }
+    active = ActiveFiles(); notices = gNotices; mirrors = gMirrors;
+    gAfterArchive = ^{ PXFindFixtureProfile(manager.mutableProfiles, target).name = nil; };
+    callbacks = 0; [manager editProfileID:target name:@"edit-post-commit-exception" shortDescription:nil completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gAfterArchive = nil;
+    CHECK(callbacks == 1 && !success && failure.code == 17 && [active isEqual:ActiveFiles()] && notices == gNotices && mirrors == gMirrors &&
+        !manager.lifecycleLease && !manager.creationInProgress,
+        "post-registry edit exception clears success and releases lifecycle before completion");
+    CHECK(Reload(manager), "post-registry edit exception reloads saved values");
+    drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "post-exception edit mirror drains before selection conflict");
+    notices = gNotices; mirrors = gMirrors;
+    __block NSDictionary *newer = nil;
+    gAfterArchive = ^{ CHECK(ExternalSelectionWrite(@{ @"ProfileId": @"0" }), "metadata edit bypass selection installed"); newer = ActiveFiles(); };
+    callbacks = 0; [manager editProfileID:target name:@"edit-selection-conflict" shortDescription:nil completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gAfterArchive = nil;
+    CHECK(callbacks == 1 && !success && failure.code == 20 && [newer isEqual:ActiveFiles()] && notices == gNotices && mirrors == gMirrors,
+        "metadata edit selection CAS preserves a newer target after registry commit");
+    CHECK(Reload(manager), "metadata edit partial failure supports explicit reload");
+    drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "metadata edit reload mirror drains before admission tests");
+    active = ActiveFiles(); archive = [NSData dataWithContentsOfFile:archivePath]; notices = gNotices;
+    callbacks = 0;
+    [manager editProfileID:@"missing-edit-id" name:@"missing" shortDescription:nil completion:^(BOOL ok, NSError *error) { if (!ok && error.code == 3) callbacks++; }];
+    [manager editProfileID:target name:@"" shortDescription:nil completion:^(BOOL ok, NSError *error) { if (!ok && error.code == 1) callbacks++; }];
+    [manager editProfileID:target name:nil shortDescription:nil completion:^(BOOL ok, NSError *error) { if (!ok && error.code == 1) callbacks++; }];
+    PXProfileLifecycleLease *other = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+    [manager editProfileID:target name:@"busy" shortDescription:nil completion:^(BOOL ok, NSError *error) { if (!ok && error.code == 12) callbacks++; }];
+    [other invalidate];
+    CHECK(other && callbacks == 4 && [active isEqual:ActiveFiles()] && [archive isEqual:[NSData dataWithContentsOfFile:archivePath]] && notices == gNotices,
+        "metadata edit rejects invalid unknown and busy requests before persistence");
+    __block BOOL done = NO;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [manager editProfileID:target name:@"edit-background" shortDescription:nil completion:^(BOOL ok, NSError *error) {
+            success = ok; failure = error; done = NSThread.isMainThread && !manager.lifecycleLease;
+        }];
+    });
+    CHECK(Pump(^BOOL { return done; }) && success && !failure && [active isEqual:ActiveFiles()], "background metadata edit delivers on main after releasing ownership");
+    [manager renameProfile:@"edit-background" to:@"edit-compatibility"];
+    CHECK([PXFindFixtureProfile(manager.mutableProfiles, target).name isEqual:@"edit-compatibility"], "legacy rename routes through the owned metadata edit API");
+    Profile *first = SeedRegistered(manager, @"edit-duplicate-label"), *second = SeedRegistered(manager, @"edit-duplicate-label");
+    callbacks = 0;
+    [manager editProfileID:second.profileId name:@"edit-exact-target" shortDescription:nil completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && success && !failure && [PXFindFixtureProfile(manager.mutableProfiles, first.profileId).name isEqual:@"edit-duplicate-label"] &&
+        [PXFindFixtureProfile(manager.mutableProfiles, second.profileId).name isEqual:@"edit-exact-target"] && [second.name isEqual:@"edit-duplicate-label"],
+        "ID-based edits do not select another profile with the same display name");
+}
+
 static void TestActivationModelPolicy(void) {
     PXProfileCreationFixture *manager = NewManager();
     Profile *model = New(@"activation-proof"), *child = New(@"activation-child");
@@ -1456,7 +1641,7 @@ int main(int argc, const char *argv[]) {
         }];
         TestCreation(manager, zero); TestCreationOwnedModel(manager); TestNestedProfileArchiveValidation(manager); TestConflicts(manager); TestSelectionFailure(manager, zero); TestBackgroundAndPolicy(manager); TestRestart(manager, zero);
         TestCreationDirectoryDrift(manager); TestCreationDisplayDrift(manager);
-        TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestActivationModelPolicy(); TestActivationCallbackDrift(); TestRegistryAndDeletion();
+        TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryEncodingPreflight(); TestOwnedMetadataEdits(); TestActivationModelPolicy(); TestActivationCallbackDrift(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");

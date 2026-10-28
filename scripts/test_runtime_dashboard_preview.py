@@ -60,7 +60,7 @@ def source_contracts():
     assert 'otherBefore = Snapshot(b)[@"files"]' in fixture, 'a successful A commit changes the global token; compare only B file bytes'
     assert 'TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"))' in fixture
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4E-partial'
+    assert manifest['rollout'] == '4C.2H4G-partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert 'test_runtime_dashboard_preview.py' in read('.github/workflows/build-ios-arm.yml')

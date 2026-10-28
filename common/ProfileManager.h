@@ -39,7 +39,14 @@ NS_ASSUME_NONNULL_BEGIN
 // can leave new display metadata with the previous registry; reload/retry is
 // explicit. Manager slot adoption/notification require registry persistence;
 // caller mutations of an already shared Profile object cannot be undone here.
+// Proposed registry bytes must pass the load-time decoder before display writes;
+// secure coding alone does not validate typed fields or unique profile IDs.
 - (void)updateProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+// Edit a registered profile by ID using an owned candidate; nil fields keep
+// registered values. Active labels commit after registry persistence.
+// A later selection conflict can return failure after metadata was saved; reload
+// before retrying. Completion runs on main after lifecycle ownership is released.
+- (void)editProfileID:(NSString *)profileID name:(NSString * _Nullable)name shortDescription:(NSString * _Nullable)shortDescription completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 // Active deletion selects a valid fallback before unregistering/removing files.
 // Encoding fails before activation. An I/O failure after the journal decision
 // commits leaves recovery pending; reload completes/cancels it from known state.

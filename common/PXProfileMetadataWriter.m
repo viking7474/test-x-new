@@ -56,6 +56,7 @@ BOOL PXWriteProfileDisplayMetadata(PXProfileLifecycleLease *lease, NSString *pro
                 if (!existing) return NO;
                 NSMutableDictionary *scoped = [existing mutableCopy];
                 scoped[@"ProfileName"] = name; scoped[@"ProfileDescription"] = description;
+                scoped[@"Description"] = description; // Legacy description editor alias.
                 if (!scoped[@"Apps"]) scoped[@"Apps"] = @[];
                 return [staging setDictionary:info atPath:[scope.profileDirectory stringByAppendingPathComponent:@"Info.plist"] error:stageError] &&
                     [staging setDictionary:appInfo atPath:[appDataPath stringByAppendingPathComponent:@"Info.plist"] error:stageError] &&
