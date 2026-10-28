@@ -80,6 +80,7 @@
 - (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error;
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error;
 - (BOOL)createProfileZeroWithError:(NSError **)error;
+- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error;
 - (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
 - (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 
@@ -348,6 +349,29 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     self.creationInProgress = NO;
 }
 
+- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error {
+    if (error) *error = nil;
+    @try {
+        if ([profile isKindOfClass:Profile.class]) {
+            NSData *data = [NSKeyedArchiver archivedDataWithRootObject:profile requiringSecureCoding:YES error:error];
+            if (!data) return nil;
+            NSKeyedUnarchiver *decoder = [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:error];
+            if (!decoder) return nil;
+            decoder.requiresSecureCoding = YES;
+            id decoded = [decoder decodeObjectOfClasses:PXProfileArchiveClasses() forKey:NSKeyedArchiveRootObjectKey];
+            [decoder finishDecoding];
+            if (decoder.error) { if (error) *error = decoder.error; return nil; }
+            if ([decoded isKindOfClass:Profile.class] && decoded != profile &&
+                [[decoded profileId] isEqual:expectedID] && [[decoded name] isKindOfClass:NSString.class] && [[decoded name] length]) return decoded;
+        }
+    } @catch (NSException *exception) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:30 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not capture creation profile"}];
+        return nil;
+    }
+    if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:30 userInfo:@{NSLocalizedDescriptionKey: @"Creation profile could not be detached or its target changed"}];
+    return nil;
+}
+
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self createProfile:profile completion:completion]; });
@@ -362,14 +386,13 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         return;
     }
 
-    NSLog(@"[WeaponX] 📝 Creating new profile: %@", profile.name);
-    
     // Validate profile name
-    if (![profile.name isKindOfClass:NSString.class] || profile.name.length == 0) {
+    if (![profile isKindOfClass:Profile.class] || ![profile.name isKindOfClass:NSString.class] || profile.name.length == 0) {
         NSError *error = [NSError errorWithDomain:@"WeaponXProfileError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Profile name cannot be empty"}];
         if (completion) completion(NO, error);
         return;
     }
+    NSLog(@"[WeaponX] 📝 Creating new profile: %@", profile.name);
     
     // Check for duplicate names
     for (Profile *existingProfile in self.mutableProfiles) {
@@ -383,6 +406,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     NSError *operationError = nil;
     if (![self beginProfileOperationWithError:&operationError]) { if (completion) completion(NO, operationError); return; }
     PXProfileCreationReservation *reservation = nil;
+    Profile *creationProfile = nil;
     NSDictionary *expected = nil, *networkOptions = nil;
     NSString *targetID = nil;
     NSError *preparationError = nil;
@@ -390,29 +414,33 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         NSString *profileID = [self generateProfileID];
         [profile setValue:profileID forKey:@"profileId"];
         profile.createdAt = profile.lastUsed = NSDate.date;
-        NSDictionary *identifiers = @{ @"DisplayName": profile.name,
-            @"Description": profile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profileID], @"Identifier": profileID };
-        NSError *reservationError = nil;
-        reservation = [PXProfileCreationReservation reserveProfileID:profile.profileId
-            inProfilesDirectory:self.profilesDirectory metadata:identifiers error:&reservationError];
-        if (!reservation) {
-            BOOL conflict = [reservationError.domain isEqualToString:@"WeaponXProfileDirectoryError"] &&
-                (reservationError.code == EEXIST || reservationError.code == EINVAL);
-            NSMutableDictionary *info = [@{NSLocalizedDescriptionKey: conflict ?
-                @"New profile ID is invalid or its directory already exists" : @"Could not initialize the new profile directory"} mutableCopy];
-            if (reservationError) info[NSUnderlyingErrorKey] = reservationError;
-            preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:(conflict ? 13 : 11) userInfo:info];
-        } else {
-            expected = [self captureProfileSelectionWithError:&preparationError];
-            if (expected) {
-                targetID = [profile.profileId copy];
-                networkOptions = [self captureProfileNetworkOptions];
+        creationProfile = [self detachedProfileForCreation:profile expectedID:profileID error:&preparationError];
+        // Do not reserve a path or start providers for an uncapturable model.
+        if (creationProfile) {
+            NSDictionary *identifiers = @{ @"DisplayName": creationProfile.name,
+                @"Description": creationProfile.shortDescription ?: [NSString stringWithFormat:@"Profile ID: %@", profileID], @"Identifier": profileID };
+            NSError *reservationError = nil;
+            reservation = [PXProfileCreationReservation reserveProfileID:creationProfile.profileId
+                inProfilesDirectory:self.profilesDirectory metadata:identifiers error:&reservationError];
+            if (!reservation) {
+                BOOL conflict = [reservationError.domain isEqualToString:@"WeaponXProfileDirectoryError"] &&
+                    (reservationError.code == EEXIST || reservationError.code == EINVAL);
+                NSMutableDictionary *info = [@{NSLocalizedDescriptionKey: conflict ?
+                    @"New profile ID is invalid or its directory already exists" : @"Could not initialize the new profile directory"} mutableCopy];
+                if (reservationError) info[NSUnderlyingErrorKey] = reservationError;
+                preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:(conflict ? 13 : 11) userInfo:info];
+            } else {
+                expected = [self captureProfileSelectionWithError:&preparationError];
+                if (expected) {
+                    targetID = [creationProfile.profileId copy];
+                    networkOptions = [self captureProfileNetworkOptions];
+                }
             }
         }
     } @catch (NSException *exception) {
         preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:15 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile preparation raised an exception"}];
     }
-    if (preparationError || !reservation || !expected || !networkOptions || !targetID) {
+    if (preparationError || !creationProfile || !reservation || !expected || !networkOptions || !targetID) {
         [self endProfileOperation];
         if (!preparationError) preparationError = [NSError errorWithDomain:@"WeaponXProfileError" code:11 userInfo:@{NSLocalizedDescriptionKey: @"Profile preparation did not complete"}];
         if (completion) completion(NO, preparationError); return;
@@ -438,7 +466,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
                     userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile generation raised an exception"}];
             }
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self finishProfileCreation:profile targetID:targetID generation:generation expectedSelection:expected error:generationError completion:completion];
+                [self finishProfileCreation:creationProfile targetID:targetID generation:generation expectedSelection:expected error:generationError completion:completion];
             });
         }
     });
@@ -859,11 +887,15 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     if (self.creationInProgress) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12 userInfo:@{NSLocalizedDescriptionKey: @"Another profile change is in progress"}]); return;
     }
-    BOOL registered = NO;
-    for (Profile *candidate in self.mutableProfiles) if ([candidate.profileId isEqualToString:profile.profileId]) { registered = YES; break; }
-    if (!registered) {
+    NSString *requestedID = PXValidatedProfileID(profile.profileId);
+    Profile *registeredProfile = nil;
+    for (Profile *candidate in self.mutableProfiles) if ([candidate.profileId isEqual:requestedID]) { registeredProfile = candidate; break; }
+    if (!registeredProfile) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"Profile is not registered"}]); return;
     }
+    // UI callers may pass the original create input or another alias. Only the
+    // registered model may supply fields that are archived and activated.
+    profile = registeredProfile;
     NSError *operationError = nil;
     if (![self beginProfileOperationWithError:&operationError]) { if (completion) completion(NO, operationError); return; }
     NSString *targetID = [profile.profileId copy];

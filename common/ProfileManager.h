@@ -29,6 +29,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)sharedManager;
 
 // Completion runs on main; activation follows committed generation and metadata.
+// ID/timestamps are assigned to the caller as before, then create owns a secure
+// detached model. Later caller edits are not edits of that pending operation.
 // Failure may leave inactive artifacts or a ready registered profile for recovery.
 - (void)createProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 // Display plist group commits before registry archive. Failure after that commit
@@ -40,6 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Encoding fails before activation. An I/O failure after the journal decision
 // commits leaves recovery pending; reload completes/cancels it from known state.
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+// Resolve the registered record by ID; alias object fields are not authoritative.
 - (void)switchToProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 

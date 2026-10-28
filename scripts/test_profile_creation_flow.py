@@ -46,7 +46,8 @@ METHODS += ['- (BOOL)beginProfileOperationWithError:(NSError **)error', '- (void
     '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error',
     '- (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error']
 METHODS += ['- (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record error:(NSError **)error',
-            '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error']
+            '- (BOOL)validateDeletionArchives:(NSDictionary *)intent error:(NSError **)error',
+            '- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error']
 
 
 def check_macro_arity(source, label):
@@ -159,14 +160,14 @@ def source_contracts():
                  'metadata writer rejects expired caller lease'):
         assert case in fixture, case
     create = writers.method(source, CREATE)
-    assert 'reserveProfileID:profile.profileId' in create and 'self.creationReservation = reservation;' in create
+    assert 'reserveProfileID:creationProfile.profileId' in create and 'self.creationReservation = reservation;' in create
     assert 'createDirectoryIfNeeded:' not in create and 'writeToFile:' not in create
     assert create.count('[reservation validateWithError:&generationError]') == 2
     for signature in METHODS[:4]:
         body = writers.method(source, signature)
         assert 'if (!NSThread.isMainThread)' in body and 'if (self.creationInProgress)' in body
     finish = writers.method(source, '- (void)finishProfileCreation:(Profile *)profile targetID:(NSString *)targetID generation:(PXCommittedRuntimeGeneration *)generation expectedSelection:(NSDictionary *)expected error:(NSError *)generationError completion:(void (^)(BOOL success, NSError * _Nullable error))completion')
-    assert create.index('targetID = [profile.profileId copy]') < create.index('dispatch_get_global_queue')
+    assert create.index('targetID = [creationProfile.profileId copy]') < create.index('dispatch_get_global_queue')
     assert 'commitRuntimeGenerationForProfileID:targetID' in create
     assert 'networkArtifacts:network lifecycleLease:generationLease error:' in create
     assert create.index('generationLease = self.lifecycleLease') < create.index('dispatch_get_global_queue')
@@ -186,7 +187,7 @@ def source_contracts():
     archive = writers.method(source, METHODS[8])
     assert 'writeRegistryData:data expected:self.registryRecord' in archive and '@catch' in archive
     assert 'removeItemAtPath:' not in archive and 'temp_profiles.plist' not in source
-    assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 3
+    assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 4
     coding = writers.method(source, '- (instancetype)initWithCoder:(NSCoder *)coder')
     for key in ('shortDescription', 'createdAt', 'lastUsed', 'settings'):
         assert f'[coder containsValueForKey:@"{key}"] ? [coder decodeObjectOfClass' in coding, f'optional {key} must not request an absent key'
