@@ -2045,12 +2045,15 @@ static void TestCurrentProfileCheckpoint(void) {
 @end
 @interface PXResetPreparationUIFixture : NSObject
 @property (nonatomic, strong) PXResetIdentifierFixture *manager;
+@property (nonatomic, strong) NSDictionary *nextFakeOptions, *nextFakePreview;
 @property (nonatomic) BOOL failPreview;
 @property (nonatomic) NSUInteger previews;
 @property (nonatomic, strong) NSDictionary *seenPreview;
 - (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent;
 @end
 @implementation PXResetPreparationUIFixture
 - (instancetype)init { if ((self = [super init])) _manager = [PXResetIdentifierFixture new]; return self; }
@@ -2112,6 +2115,89 @@ static void TestResetPreparationStatus(void) {
         "off-main reset preparation rejects before providers or persistence");
 }
 
+static void TestResetIntentSnapshots(void) {
+    PXResetPreparationUIFixture *view = [PXResetPreparationUIFixture new];
+    NSMutableString *model = [@"iPhone15,4" mutableCopy], *range = [@"15.0" mutableCopy], *nested = [@"before" mutableCopy];
+    NSMutableArray *array = [NSMutableArray arrayWithObject:[NSMutableDictionary dictionaryWithObject:nested forKey:@"label"]];
+    NSMutableDictionary *options = [@{ @"fakeIOSVersionEnabled": @"0", @"fakeModelEnabled": @YES, @"modelMinIndex": @"1", @"iosMin": range, @"extra": array } mutableCopy];
+    NSMutableDictionary *preview = [@{ @"DeviceModel": model, @"extra": array } mutableCopy];
+    NSError *error = [NSError errorWithDomain:@"old" code:1 userInfo:nil];
+    NSDictionary *captured = [view captureResetIntentWithOptions:options preview:preview error:&error];
+    [model setString:@"later model"]; [range setString:@"18.0"]; [nested setString:@"after"]; [array addObject:@"later item"]; options[@"fakeModelEnabled"] = @NO;
+    NSArray *savedArray = captured[@"preview"][@"extra"];
+    CHECK(captured && !error && [captured[@"preview"][@"DeviceModel"] isEqual:@"iPhone15,4"] && [captured[@"options"][@"iosMin"] isEqual:@"15.0"] &&
+        [captured[@"options"][@"fakeModelEnabled"] boolValue] && [captured[@"options"][@"fakeIOSVersionEnabled"] isEqual:@"0"] &&
+        savedArray.count == 1 && [savedArray[0][@"label"] isEqual:@"before"] && [captured[@"options"][@"extra"] isEqual:savedArray],
+        "reset request deeply detaches mutable options preview strings and nested containers");
+    NSDictionary *empty = [view captureResetIntentWithOptions:nil preview:nil error:&error];
+    CHECK(empty && !error && [empty[@"options"] count] == 0 && [empty[@"preview"] count] == 0 && !view.manager.reads && !view.manager.writes && !view.manager.generations && !view.previews,
+        "reset nil request keeps defaults and capture has no persistence or provider effects");
+    for (NSString *key in @[@"fakeIOSVersionEnabled", @"fakeModelEnabled", @"fakeNameEnabled", @"modelMinIndex", @"modelMaxIndex"]) {
+        for (id invalid in @[@[], @{}, NSDate.date, NSData.data]) {
+            NSDictionary *bad = @{ key: invalid }; error = nil;
+            CHECK(![view captureResetIntentWithOptions:bad preview:nil error:&error] && error,
+                "reset malformed option scalars and invalid property lists fail with an error");
+        }
+    }
+    for (id invalid in @[@[], @"wrong root", NSNull.null]) {
+        error = nil; CHECK(![view captureResetIntentWithOptions:invalid preview:nil error:&error] && error, "reset wrong options root rejects capture");
+        error = nil; CHECK(![view captureResetIntentWithOptions:nil preview:invalid error:&error] && error, "reset wrong preview root rejects capture");
+    }
+    NSDictionary *notPlist = @{ @"DeviceModel": NSObject.new };
+    error = nil; CHECK(![view captureResetIntentWithOptions:nil preview:notPlist error:&error] && error, "reset unsupported preview objects fail before async creation");
+    CHECK(![view captureResetIntentWithOptions:nil preview:notPlist error:NULL], "reset invalid capture supports null error output");
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:100]; NSData *data = [@"extra" dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *extras = @{ @"date": date, @"data": data };
+    NSDictionary *withExtras = [view captureResetIntentWithOptions:extras preview:extras error:NULL];
+    CHECK([withExtras[@"options"] isEqual:extras] && [withExtras[@"preview"] isEqual:extras], "reset capture preserves unrecognized property list fields without schema rewriting");
+    NSDictionary *baseOptions = @{ @"fakeModelEnabled": @YES }, *basePreview = @{ @"DeviceModel": @"iPhone15,4" };
+    NSDictionary *intent = [view captureResetIntentWithOptions:baseOptions preview:basePreview error:NULL];
+    view.nextFakeOptions = [baseOptions mutableCopy]; view.nextFakePreview = [basePreview mutableCopy];
+    CHECK([view discardConsumedResetPreviewForIntent:intent] && !view.nextFakePreview && [view.nextFakeOptions isEqual:baseOptions],
+        "reset consumes only an unchanged options and preview packet");
+    for (NSUInteger mode = 0; mode < 4; mode++) {
+        NSMutableString *liveModel = [@"iPhone15,4" mutableCopy];
+        NSMutableDictionary *liveOptions = [baseOptions mutableCopy], *livePreview = [@{ @"DeviceModel": liveModel } mutableCopy];
+        view.nextFakeOptions = liveOptions; view.nextFakePreview = livePreview;
+        if (mode == 0) view.nextFakePreview = @{ @"DeviceModel": @"new choice" };
+        else if (mode == 1) view.nextFakeOptions = @{ @"fakeModelEnabled": @NO };
+        else if (mode == 2) [liveModel setString:@"mutated choice"];
+        else liveOptions[@"fakeModelEnabled"] = @NO;
+        NSDictionary *newPreview = view.nextFakePreview, *newOptions = view.nextFakeOptions;
+        CHECK(![view discardConsumedResetPreviewForIntent:intent] && view.nextFakePreview == newPreview && view.nextFakeOptions == newOptions,
+            "reset completion preserves a replaced or mutated newer preview or options");
+    }
+    view.nextFakeOptions = nil; view.nextFakePreview = nil;
+    CHECK([view discardConsumedResetPreviewForIntent:empty] && !view.nextFakePreview && ![view discardConsumedResetPreviewForIntent:nil], "reset nil normalization and missing consumed intent are safe");
+    view.nextFakePreview = basePreview;
+    CHECK(![view discardConsumedResetPreviewForIntent:empty] && view.nextFakePreview == basePreview, "reset generated preview does not consume a new preview selected after an empty submitted packet");
+    view = [PXResetPreparationUIFixture new];
+    options = [@{ @"fakeModelEnabled": @YES, @"fakeIOSVersionEnabled": @NO, @"fakeNameEnabled": @NO } mutableCopy];
+    NSDictionary *submitted = [view captureResetIntentWithOptions:options preview:nil error:NULL];
+    NSMutableString *providerModel = [@"iPhone16,1" mutableCopy];
+    NSMutableDictionary *providerPreview = [@{ @"DeviceModel": providerModel } mutableCopy];
+    NSDictionary *prepared = [view captureResetIntentWithOptions:submitted[@"options"] preview:providerPreview error:NULL];
+    __block BOOL done = NO, preparedOK = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        preparedOK = [view prepareResetProfileWithOptions:prepared[@"options"] preview:prepared[@"preview"] error:NULL]; done = YES;
+    });
+    options[@"fakeModelEnabled"] = @NO; options[@"fakeIOSVersionEnabled"] = @YES;
+    [providerModel setString:@"later provider edit"]; providerPreview[@"DeviceName"] = @"later name";
+    BOOL delivered = Pump(^BOOL { return done; });
+    CHECK(delivered && preparedOK && [view.seenPreview[@"DeviceModel"] isEqual:@"iPhone16,1"] && !view.seenPreview[@"DeviceName"],
+        "reset final provider preview is detached before asynchronous creation");
+    CHECK(delivered && [view.manager.enabled[@"DeviceModel"] boolValue] && [view.manager.enabled[@"StorageSystem"] boolValue] && !view.manager.enabled[@"IOSVersion"],
+        "reset pending preparation uses the captured options after the caller edits its packet");
+    view.nextFakeOptions = baseOptions; view.nextFakePreview = basePreview;
+    __block BOOL offMainDone = NO, consumed = YES;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        BOOL result = [view discardConsumedResetPreviewForIntent:intent];
+        dispatch_async(dispatch_get_main_queue(), ^{ consumed = result; offMainDone = YES; });
+    });
+    CHECK(Pump(^BOOL { return offMainDone; }) && !consumed && view.nextFakePreview == basePreview,
+        "off-main reset preview consumption preserves current pending intent");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2171,7 +2257,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
-        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

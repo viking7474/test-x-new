@@ -71,7 +71,9 @@ UI_ADAPTERS = {
     'PXFormCreateUI.inc': ('ProfileCreationViewController.m', ['- (void)createButtonTapped', '- (void)cancelButtonTapped', '- (void)textFieldDidChangeSelection:(UITextField *)textField']),
     'PXResetPreparationUI.inc': ('TLinkIOSViewController.m', [
         '- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error',
-        '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error']),
+        '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
+        '- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
+        '- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent']),
 }
 
 
@@ -312,8 +314,29 @@ def source_contracts():
     assert '*stop = YES;' in required and 'return failure == nil;' in required and 'NSUnderlyingErrorKey' in required
     assert '[self.manager regenerateAllEnabledIdentifiers];' not in auto
     assert 'prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError' in auto
-    failure_tail = auto.split('if (![self prepareResetProfileWithOptions:', 1)[1].split('self.nextFakePreview = nil;', 1)[0]
+    failure_tail = auto.split('if (![self prepareResetProfileWithOptions:', 1)[1].split('[self discardConsumedResetPreviewForIntent:submittedIntent];', 1)[0]
     assert '[self hideProgressHUD];' in failure_tail and '[self showError:preparationError];' in failure_tail and 'return;' in failure_tail
+    capture = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][2])
+    consume = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][3])
+    for token in ('dataWithPropertyList:payload', 'NSPropertyListImmutable', '@catch', 'fakeIOSVersionEnabled', 'modelMinIndex'):
+        assert token in capture, token
+    for forbidden in ('writeToFile:', 'setObject:', 'NSUserDefaults', 'dispatch_', 'self.manager'):
+        assert forbidden not in capture, forbidden
+    assert auto.index('captureResetIntentWithOptions:self.nextFakeOptions') < auto.index('BOOL fakeIOS =')
+    assert auto.index('captureResetIntentWithOptions:fakeOptions preview:preparedPreview') < auto.index('generateProfileIDWithError:') < auto.index('[pm createProfile:')
+    assert 'NSDictionary *preparedPreview = submittedIntent[@"preview"];' in auto and 'preparedPreview = preparedIntent[@"preview"];' in auto
+    assert 'self.nextFakePreview = nil;' not in auto
+    assert 'NSThread.isMainThread' in consume and consume.index('isEqual:intent[@"options"]') < consume.index('self.nextFakePreview = nil;')
+    assert consume.index('isEqual:intent[@"preview"]') < consume.index('self.nextFakePreview = nil;')
+    for case in ('reset request deeply detaches mutable options preview strings and nested containers',
+                 'reset nil request keeps defaults and capture has no persistence or provider effects',
+                 'reset malformed option scalars and invalid property lists fail with an error',
+                 'reset consumes only an unchanged options and preview packet',
+                 'reset completion preserves a replaced or mutated newer preview or options',
+                 'reset final provider preview is detached before asynchronous creation',
+                 'reset pending preparation uses the captured options after the caller edits its packet',
+                 'off-main reset preview consumption preserves current pending intent'):
+        assert case in fixture, case
     for case in ('reset required identifier defaults and option matrix preserve enable-only policy',
                  'reset stops at each failed required identifier before generation and preview',
                  'reset preserves earlier verified toggles when a later toggle fails',
@@ -605,7 +628,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4K-partial'
+    assert manifest['rollout'] == '4C.2H4L-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

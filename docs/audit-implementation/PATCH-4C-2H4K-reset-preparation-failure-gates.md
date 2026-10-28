@@ -88,3 +88,8 @@ notification/timer không phải daemon distribution acknowledgement. Giữ Root
 cold bootstrap đã xác nhận; không đổi snapshot priming hoặc package runtime.
 Manifest `4C.2H4K-partial`; whole Reset và toàn Patch 4 vẫn partial, Patch 5–8 chưa
 triển khai.
+
+Người dùng xác nhận build H4K pass ngày 2026-10-28. Profile-phase request isolation
+và conditional preview consumption được triển khai tiếp tại
+[H4L](PATCH-4C-2H4L-reset-request-snapshots.md); full UIKit/device và whole Reset
+workflow vẫn partial.

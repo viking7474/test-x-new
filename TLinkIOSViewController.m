@@ -599,6 +599,8 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent;
 @end
 
 @interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
@@ -7707,16 +7709,53 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return YES;
 }
 
+- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error {
+    if (error) *error = nil;
+    NSDictionary *captured = nil;
+    NSError *failure = nil;
+    @try {
+        if ((!options || [options isKindOfClass:NSDictionary.class]) && (!preview || [preview isKindOfClass:NSDictionary.class])) {
+            // Defaults payloads are property lists. An immutable container copy
+            // alone would still share mutable strings, arrays and dictionaries.
+            NSDictionary *payload = @{ @"options": options ?: @{}, @"preview": preview ?: @{} };
+            NSData *data = [NSPropertyListSerialization dataWithPropertyList:payload format:NSPropertyListBinaryFormat_v1_0 options:0 error:&failure];
+            if (data) captured = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&failure];
+            for (NSString *key in @[@"fakeIOSVersionEnabled", @"fakeModelEnabled", @"fakeNameEnabled", @"modelMinIndex", @"modelMaxIndex"]) {
+                id value = captured[@"options"][key];
+                if (value && ![value isKindOfClass:NSNumber.class] && ![value isKindOfClass:NSString.class]) { captured = nil; break; }
+            }
+        }
+    } @catch (NSException *exception) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:5 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Invalid Reset Data options or preview"}];
+    }
+    if (!captured && error) *error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:5 userInfo:@{NSLocalizedDescriptionKey: @"Invalid Reset Data options or preview"}];
+    return captured;
+}
+
+- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent {
+    if (!NSThread.isMainThread || ![intent isKindOfClass:NSDictionary.class]) return NO;
+    NSDictionary *options = self.nextFakeOptions ?: @{}, *preview = self.nextFakePreview ?: @{};
+    if (![options isKindOfClass:NSDictionary.class] || ![preview isKindOfClass:NSDictionary.class] ||
+        ![options isEqual:intent[@"options"]] || ![preview isEqual:intent[@"preview"]]) return NO;
+    // Preserve a newer preview/options packet; completion consumes only the
+    // values it observed before preparation, not whichever preview is now live.
+    self.nextFakePreview = nil;
+    return YES;
+}
+
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
     if (!NSThread.isMainThread) {
         NSArray *capturedWarnings = [warnings copy];
         dispatch_async(dispatch_get_main_queue(), ^{ [self createNextProfileAndRandomizeWithWarnings:capturedWarnings]; }); return;
     }
-    NSDictionary *fakeOptions = self.nextFakeOptions ?: @{};
+    NSError *intentError = nil;
+    NSDictionary *submittedIntent = [self captureResetIntentWithOptions:self.nextFakeOptions preview:self.nextFakePreview error:&intentError];
+    if (!submittedIntent) { [self hideProgressHUD]; [self showError:intentError]; return; }
+    NSDictionary *fakeOptions = submittedIntent[@"options"];
     BOOL fakeIOS = fakeOptions[@"fakeIOSVersionEnabled"] ? [fakeOptions[@"fakeIOSVersionEnabled"] boolValue] : YES;
     BOOL fakeModel = fakeOptions[@"fakeModelEnabled"] ? [fakeOptions[@"fakeModelEnabled"] boolValue] : YES;
 
-    NSDictionary *preparedPreview = self.nextFakePreview;
+    NSDictionary *preparedPreview = submittedIntent[@"preview"];
     NSString *previewModel = [preparedPreview[@"DeviceModel"] isKindOfClass:NSString.class] ? preparedPreview[@"DeviceModel"] : nil;
     NSString *previewIOS = [preparedPreview[@"IOSVersion"] isKindOfClass:NSString.class] ? preparedPreview[@"IOSVersion"] : nil;
     NSString *previewIOSProductType = [preparedPreview[@"IOSProductType"] isKindOfClass:NSString.class] ? preparedPreview[@"IOSProductType"] : nil;
@@ -7755,6 +7794,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         return;
     }
 
+    // Providers and the hardware-preservation step can return mutable payloads.
+    // Freeze the final request before reserving a profile or dispatching create.
+    NSDictionary *preparedIntent = [self captureResetIntentWithOptions:fakeOptions preview:preparedPreview error:&intentError];
+    if (!preparedIntent) { [self hideProgressHUD]; [self showError:intentError]; return; }
+    fakeOptions = preparedIntent[@"options"];
+    preparedPreview = preparedIntent[@"preview"];
     ProfileManager *pm = [ProfileManager sharedManager];
     NSError *allocationError = nil;
     NSString *candidateID = [pm generateProfileIDWithError:&allocationError];
@@ -7781,7 +7826,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self showError:preparationError];
                 return;
             }
-            self.nextFakePreview = nil;
+            [self discardConsumedResetPreviewForIntent:submittedIntent];
             [self persistDashboardSelections];
 
             // Reset Data just cleared the target app container. Notify the root
