@@ -87,3 +87,7 @@ hoặc whole-run scope lock. Cross-instance admission, cancellation/owner teardo
 defaults/directory durability, crash recovery và daemon acknowledgement vẫn riêng.
 Manifest `4C.2H4O-partial`; whole Reset và toàn Patch 4 vẫn partial, Patch 5–8 chưa
 triển khai.
+
+Người dùng xác nhận build H4O pass ngày 2026-10-28. Reset selection checkpoint
+hardening được triển khai tiếp tại [H4P](PATCH-4C-2H4P-reset-selection-checkpoints.md);
+atomic target pinning và whole Reset/device matrix vẫn partial.

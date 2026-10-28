@@ -73,7 +73,9 @@ UI_ADAPTERS = {
         '- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error',
         '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
         '- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
-        '- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent']),
+        '- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent',
+        '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error',
+        '- (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error']),
     'PXResetWorkflowUI.inc': ('TLinkIOSViewController.m', [
         '- (NSObject *)beginDashboardResetInPhase:(NSString *)phase',
         '- (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase',
@@ -320,16 +322,29 @@ def source_contracts():
     assert 'addProfileWithName:' not in read('DeviceSpecificSpoofingViewController.m')
     form = read('ProfileCreationViewController.m')
     assert '!self.profileCreationInProgress && trimmedText.length > 0' in form
-    reset_prepare = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][1])
+    reset_wrapper = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][1])
+    reset_prepare = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][4])
     required = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][0])
     assert 'if (error) *error = nil;' in reset_prepare and 'if (!NSThread.isMainThread)' in reset_prepare
     assert 'if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare
     assert reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') < reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview')
     assert 'if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError])' in reset_prepare
-    assert 'generationError ?: [NSError' in reset_prepare and reset_prepare.count('return NO;') == 4
+    assert 'generationError ?: [NSError' in reset_prepare and reset_prepare.count('validateDashboardResetProfileID:profileID error:error') == 4
+    assert 'expectedProfileID:nil error:error' in reset_wrapper
     assert '*stop = YES;' in required and 'return failure == nil;' in required and 'NSUnderlyingErrorKey' in required
     assert '[self.manager regenerateAllEnabledIdentifiers];' not in auto
-    assert 'prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError' in auto
+    assert 'prepareResetProfileWithOptions:fakeOptions preview:preparedPreview expectedProfileID:createdProfileID error:&preparationError' in auto
+    checkpoint = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][5])
+    assert 'validateCurrentProfileID:profileID error:error' in checkpoint
+    assert auto.index('NSString *createdProfileID = [newProfile.profileId copy];') < auto.index('[pm switchToProfile:newProfile')
+    assert auto.count('validateDashboardResetProfileID:createdProfileID') == 3
+    assert 'Skipping Reset restart after selection checkpoint failure' in auto
+    for case in ('reset selection change after create never switches back to the old request',
+                 'reset selection checkpoints stop after toggle generation or preview supersession',
+                 'queued reset feedback rejects a selection changed after persistence',
+                 'delayed reset restart is skipped after another profile becomes active',
+                 'reset feedback uses the frozen created ID after caller model edits'):
+        assert case in fixture, case
     failure_tail = auto.split('if (![self prepareResetProfileWithOptions:', 1)[1].split('[self discardConsumedResetPreviewForIntent:submittedIntent];', 1)[0]
     assert '[self hideProgressHUD];' in failure_tail and '[self showError:preparationError];' in failure_tail and 'return;' in failure_tail
     capture = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][2])
@@ -704,7 +719,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4O-partial'
+    assert manifest['rollout'] == '4C.2H4P-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

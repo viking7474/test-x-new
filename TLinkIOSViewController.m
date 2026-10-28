@@ -603,6 +603,8 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error;
+- (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error;
 - (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent;
 - (NSObject *)beginDashboardResetInPhase:(NSString *)phase;
@@ -7756,6 +7758,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error {
+    return [self prepareResetProfileWithOptions:options preview:preview expectedProfileID:nil error:error];
+}
+
+- (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error {
+    return [[ProfileManager sharedManager] validateCurrentProfileID:profileID error:error];
+}
+
+- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error {
     if (error) *error = nil;
     if (!NSThread.isMainThread) {
         if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:4 userInfo:@{NSLocalizedDescriptionKey: @"Reset profile preparation requires the main thread"}];
@@ -7763,16 +7773,22 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }
     // These remain separate commits. A later failure must stop the reset tail;
     // it cannot undo app clearing, profile activation or an earlier toggle write.
+    // Checkpoints observe selection; the following writer still acquires its
+    // own ownership. They do not pin a target across those separate operations.
+    if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;
+    if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     NSError *generationError = nil;
     if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError]) {
         if (error) *error = generationError ?: [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Không thể tạo lại identifiers cho profile mới"}];
         return NO;
     }
+    if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     if (![self applyFakePreviewToCurrentProfile:preview]) {
         if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Không thể áp dụng model, iOS hoặc dung lượng cho profile mới"}];
         return NO;
     }
+    if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     return YES;
 }
 
@@ -7955,6 +7971,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self showError:error];
                 return;
             }
+            NSString *createdProfileID = [newProfile.profileId copy];
+            NSError *selectionError = nil;
+            if (![self validateDashboardResetProfileID:createdProfileID error:&selectionError]) {
+                [self finishDashboardReset:token]; [self hideProgressHUD]; [self showError:selectionError]; return;
+            }
             [pm switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError *switchError) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (![self advanceDashboardReset:token fromPhase:@"switch" toPhase:@"apply"]) return;
@@ -7965,7 +7986,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                         return;
                     }
                     NSError *preparationError = nil;
-                    if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError]) {
+                    if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview expectedProfileID:createdProfileID error:&preparationError]) {
                         [self finishDashboardReset:token];
                         [self hideProgressHUD];
                         [self showError:preparationError];
@@ -7983,12 +8004,22 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                                                          NULL, NULL, true);
                     dispatch_async(dispatch_get_main_queue(), ^{
                         if (![self advanceDashboardReset:token fromPhase:@"apply" toPhase:@"restart"]) return;
+                        NSError *feedbackError = nil;
+                        if (![self validateDashboardResetProfileID:createdProfileID error:&feedbackError]) {
+                            [self finishDashboardReset:token]; [self hideProgressHUD]; [self showError:feedbackError]; return;
+                        }
                         [self hideProgressHUD];
                         [self refreshDashboardSelectionLabels];
-                        NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", newProfile.profileId, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
+                        NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", createdProfileID, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
                         [self showDashboardMessage:@"Hoàn tất" message:msg];
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                             if (![self advanceDashboardReset:token fromPhase:@"restart" toPhase:@"restarting"]) return;
+                            NSError *restartError = nil;
+                            if (![self validateDashboardResetProfileID:createdProfileID error:&restartError]) {
+                                [self finishDashboardReset:token];
+                                NSLog(@"[Dashboard] Skipping Reset restart after selection checkpoint failure: %@", restartError);
+                                return;
+                            }
                             @try { [self killEnabledAppsAndRespring]; }
                             @finally { [self finishDashboardReset:token]; }
                         });

@@ -244,13 +244,13 @@ require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
         'updatedSettings[@"canvasNoiseSeedNonce"]' not in identifier_manager and
         'updatedSettings[@"canvasFingerprintingEnabled"]' not in identifier_manager,
         "Identifier settings persistence can still corrupt EnabledIdentifiers or clobber suite-level feature flags")
-reset_prepare = method(view_controller, '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error')
+reset_prepare = method(view_controller, '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error')
 reset_flow = method(view_controller, '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
 require('if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare and
         'if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError])' in reset_prepare and
         reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') <
         reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview') and
-        'if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError])' in reset_flow,
+        'if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview expectedProfileID:createdProfileID error:&preparationError])' in reset_flow,
         "Dashboard Reset Data must stop after required identifier or regeneration failure before applying the preview")
 require('primaryStorageEnabled != nil' in storage_hooks and
         'secondaryStorageEnabled != nil' in storage_hooks and

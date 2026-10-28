@@ -2024,6 +2024,7 @@ static void TestCurrentProfileCheckpoint(void) {
 @property (nonatomic) NSUInteger writes, reads, generations, failWriteOrdinal;
 @property (nonatomic) BOOL failGeneration;
 @property (nonatomic, strong) NSError *failure;
+@property (nonatomic, copy) dispatch_block_t afterToggle, afterGeneration;
 - (BOOL)isIdentifierEnabled:(NSString *)identifier;
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier;
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
@@ -2038,10 +2039,12 @@ static void TestCurrentProfileCheckpoint(void) {
     CHECK(NSThread.isMainThread && enabled, "reset only enables requested identifiers on main");
     self.writes++; [self.events addObject:identifier];
     if ([identifier isEqual:self.failKey] || (self.failWriteOrdinal && self.writes == self.failWriteOrdinal)) return NO;
-    self.enabled[identifier] = @(enabled); return YES;
+    self.enabled[identifier] = @(enabled);
+    dispatch_block_t callback = self.afterToggle; self.afterToggle = nil; if (callback) callback(); return YES;
 }
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error {
     CHECK(NSThread.isMainThread, "reset generation on main"); self.generations++; [self.events addObject:@"generation"];
+    dispatch_block_t callback = self.afterGeneration; self.afterGeneration = nil; if (callback) callback();
     if (error) *error = self.failGeneration ? self.failure : nil; return !self.failGeneration;
 }
 - (NSError *)lastError { return self.failure; }
@@ -2054,20 +2057,26 @@ static void TestCurrentProfileCheckpoint(void) {
 @property (nonatomic) BOOL failPreview;
 @property (nonatomic) NSUInteger previews;
 @property (nonatomic, strong) NSDictionary *seenPreview;
+@property (nonatomic, copy) dispatch_block_t afterPreview;
 - (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error;
+- (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error;
 - (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent;
 @end
+#define ProfileManager PXProfileCreationFixture
 @implementation PXResetPreparationUIFixture
 - (instancetype)init { if ((self = [super init])) _manager = [PXResetIdentifierFixture new]; return self; }
 - (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview {
     CHECK(NSThread.isMainThread, "reset preview on main"); self.previews++; self.seenPreview = preview;
-    [self.manager.events addObject:@"preview"]; return !self.failPreview;
+    [self.manager.events addObject:@"preview"];
+    dispatch_block_t callback = self.afterPreview; self.afterPreview = nil; if (callback) callback(); return !self.failPreview;
 }
 #include "PXResetPreparationUI.inc"
 @end
+#undef ProfileManager
 static void TestResetPreparationStatus(void) {
     NSDictionary *preview = @{ @"DeviceModel": @"iPhone15,4" };
     for (NSUInteger bits = 0; bits < 9; bits++) {
@@ -2230,6 +2239,8 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 @property (nonatomic, strong) NSDictionary *dashboardResetInputs;
 @property (nonatomic, strong) UITextField *rrsNoteTextField;
 @property (nonatomic, copy) NSArray *lastScopeApps, *lastBackupApps, *lastClearApps;
+@property (nonatomic, copy) NSString *lastDashboardMessage;
+@property (nonatomic, copy) dispatch_block_t afterPersist;
 @property (nonatomic, strong) NSArray *selectedRRSAppIDs, *selectedResetAppIDs;
 @property (nonatomic) NSUInteger backups, clears, filters, shows, hides, errors, messages, successes, persists, refreshes, restarts;
 @property (nonatomic) BOOL filterFails, throwRestart;
@@ -2269,7 +2280,7 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (void)showProgressHUDWithTitle:(NSString *)title { (void)title; CreationUIEvent(); self.shows++; }
 - (void)hideProgressHUD { CreationUIEvent(); self.hides++; }
 - (void)showError:(NSError *)error { CreationUIEvent(); CHECK(error != nil, "reset failure presents an error"); self.errors++; }
-- (void)showDashboardMessage:(NSString *)title message:(NSString *)message { (void)message; CreationUIEvent(); if ([title isEqual:@"Hoàn tất"]) self.successes++; else self.messages++; }
+- (void)showDashboardMessage:(NSString *)title message:(NSString *)message { self.lastDashboardMessage = message; CreationUIEvent(); if ([title isEqual:@"Hoàn tất"]) self.successes++; else self.messages++; }
 - (BOOL)syncHookScopeToResetApps { CreationUIEvent(); self.filters++; return !self.filterFails; }
 - (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon {
     CHECK(waitForDaemon, "reset waits for the selected injection filter"); self.lastScopeApps = bundleIDs; return [self syncHookScopeToResetApps];
@@ -2292,7 +2303,7 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *))completion {
     (void)token; [self clearApps:apps index:index warnings:warnings completion:completion];
 }
-- (void)persistDashboardSelections { CreationUIEvent(); self.persists++; }
+- (void)persistDashboardSelections { CreationUIEvent(); self.persists++; dispatch_block_t callback = self.afterPersist; self.afterPersist = nil; if (callback) callback(); }
 - (void)refreshDashboardSelectionLabels { CreationUIEvent(); self.refreshes++; }
 - (void)killEnabledAppsAndRespring { CreationUIEvent(); self.restarts++; if (self.throwRestart) [NSException raise:@"fixture.restart" format:@"restart failed"]; }
 #include "PXResetInputsUI.inc"
@@ -2303,7 +2314,7 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 #undef ProfileManager
 static PXResetRunProfileManager *ResetRunManager(void) {
     gResetRestart = nil; gResetRestartSchedules = gResetFinalNotifications = 0;
-    PXResetRunProfileManager *manager = [PXResetRunProfileManager new]; gControllerManager = manager; return manager;
+    PXResetRunProfileManager *manager = [PXResetRunProfileManager new]; manager.activeID = @"controller-target"; gControllerManager = manager; return manager;
 }
 static void ResetRunRelease(PXResetRunUIFixture *view, PXResetRunProfileManager *manager) {
     view.backupCompletion = nil; view.clearCompletion = nil; manager.pendingCreation = nil; manager.pendingSwitch = nil;
@@ -2577,6 +2588,50 @@ static void TestResetAdmittedInputs(void) {
     CHECK(Pump(^BOOL { return rejected; }) && !view.dashboardResetToken && !view.errors && !view.shows, "off-main input capture fails without reading mutable UI state");
 }
 
+static void TestResetSelectionCheckpoints(void) {
+    for (NSUInteger mode = 0; mode < 7; mode++) {
+        PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
+        [view resetDataTapped]; view.clearCompletion(@[]);
+        CHECK(Pump(^BOOL { return manager.requests == 1; }), "reset selection fixture reaches pending create");
+        if (mode == 0) manager.activeID = @"newer-profile";
+        manager.pendingCreation(YES, nil);
+        if (mode == 0) {
+            CHECK(Pump(^BOOL { return !view.dashboardResetToken; }) && !manager.switches && !view.manager.writes && !view.manager.generations && !view.previews && view.errors == 1 && [manager.activeID isEqual:@"newer-profile"],
+                "reset selection change after create never switches back to the old request");
+            ResetRunRelease(view, manager); continue;
+        }
+        CHECK(Pump(^BOOL { return manager.switches == 1; }), "reset selection fixture reaches pending switch");
+        if (mode == 1) manager.activeID = @"newer-profile";
+        if (mode == 2) view.manager.afterToggle = ^{ manager.activeID = @"newer-profile"; };
+        if (mode == 3) view.manager.afterGeneration = ^{ manager.activeID = @"newer-profile"; };
+        if (mode == 4) view.afterPreview = ^{ manager.activeID = @"newer-profile"; };
+        if (mode == 5) view.afterPersist = ^{ manager.activeID = @"newer-profile"; };
+        manager.pendingSwitch(YES, nil);
+        if (mode <= 5) {
+            BOOL stopped = Pump(^BOOL { return !view.dashboardResetToken; });
+            CHECK(stopped && view.errors == 1 && !view.successes && !gResetRestartSchedules && [manager.activeID isEqual:@"newer-profile"] &&
+                view.manager.generations == (mode >= 3 ? 1 : 0) && view.previews == (mode >= 4 ? 1 : 0) && (mode != 1 || !view.manager.writes),
+                "reset selection checkpoints stop after toggle generation or preview supersession");
+            if (mode == 5) CHECK(view.persists == 1 && gResetFinalNotifications == 1 && !view.refreshes,
+                "queued reset feedback rejects a selection changed after persistence");
+            else CHECK(!view.persists && !gResetFinalNotifications, "failed reset checkpoint stops before final persistence and notice");
+        } else {
+            CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }) && view.successes == 1 && view.dashboardResetToken, "matching reset selection reaches delayed restart");
+            manager.activeID = @"newer-profile"; dispatch_block_t restart = gResetRestart; restart(); restart();
+            CHECK(!view.restarts && !view.dashboardResetToken && !view.dashboardResetInputs && view.successes == 1 && !view.errors && [manager.activeID isEqual:@"newer-profile"],
+                "delayed reset restart is skipped after another profile becomes active");
+        }
+        ResetRunRelease(view, manager);
+    }
+    PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
+    [view resetDataTapped]; view.clearCompletion(@[]); CHECK(Pump(^BOOL { return manager.requests == 1; }), "frozen reset ID fixture creates");
+    manager.pendingCreation(YES, nil); CHECK(Pump(^BOOL { return manager.switches == 1; }), "frozen reset ID captured before switch");
+    [manager.requestedInput setValue:@"later-input-edit" forKey:@"profileId"]; manager.pendingSwitch(YES, nil);
+    CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }) && [view.lastDashboardMessage containsString:@"controller-target"] && ![view.lastDashboardMessage containsString:@"later-input-edit"],
+        "reset feedback uses the frozen created ID after caller model edits");
+    gResetRestart(); CHECK(view.restarts == 1 && !view.dashboardResetToken, "matching frozen reset ID permits one normal restart"); ResetRunRelease(view, manager);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2636,7 +2691,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
-        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks(); TestResetAdmittedInputs();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks(); TestResetAdmittedInputs(); TestResetSelectionCheckpoints();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;
