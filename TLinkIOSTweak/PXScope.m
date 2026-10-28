@@ -725,6 +725,10 @@ PXBootstrapDecision PXBootstrapDecisionForCurrentProcess(void) {
                 result = PXBootstrapEvaluate(gPXProcessRole, false, false, false, 0);
             } else {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+                // Prime BEFORE the lexical capture: nested reads inherit even
+                // a nil view, so priming after capture cannot repair this gate.
+                // These decisions govern one-shot ctor installation; a later
+                // background refresh cannot reinstall a module that returned.
                 (void)PXPrimeRuntimeSnapshotReader();
 #endif
                 PX_RUNTIME_READ_OPERATION;

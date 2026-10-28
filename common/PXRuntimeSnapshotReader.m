@@ -208,6 +208,10 @@ static NSTimeInterval PXRuntimeReaderNow(void) {
 }
 
 - (BOOL)primeSynchronouslyIfIdle {
+    // Claim the same producer slot as async refresh, then load outside _lock.
+    // Do not enqueue-and-wait here: bootstrap can hold initialization locks
+    // needed by the worker. An already active producer remains authoritative;
+    // pending/invalid data must still fail closed, not enable hooks by timeout.
     int savedErrno = errno;
     os_unfair_lock_lock(&_lock);
     PXRuntimeReadSnapshot *snapshot = _snapshot;

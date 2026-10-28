@@ -44,6 +44,9 @@ jobs:
       - name: Test native captured runtime snapshot reader
         run: python3 scripts/test_runtime_snapshot_reader.py --native
 
+      - name: Test native pinned country callback lifecycle
+        run: python3 scripts/test_pinned_country_lifecycle.py --native
+
       - name: Test native captured runtime consumer operations
         run: python3 scripts/test_runtime_snapshot_consumers.py --native
 

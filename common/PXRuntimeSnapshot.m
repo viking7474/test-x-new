@@ -39,12 +39,21 @@ void PXBeginRuntimeSnapshotOperation(PXRuntimeReadScope *scope) {
 }
 
 void PXRuntimeSnapshotRegisterPreparation(void (^handler)(PXRuntimeReadSnapshot *)) {
+    // First registration invalidates the unprepared view. During bootstrap,
+    // prepare inline if idle so later ctor gates do not see a pending nil view.
     [PXProcessRuntimeReader() setBootstrapPreparationHandler:handler];
 }
 
 void PXInvalidateRuntimeSnapshotReader(void) { [PXProcessRuntimeReader() invalidateAndRefresh]; }
 
 BOOL PXPrimeRuntimeSnapshotReader(void) {
+    // RootHide regression: async first load + a one-second ctor wait could
+    // leave scope denied permanently for hook modules that returned early.
+    // Prime on the initializer thread before capturing the bootstrap operation;
+    // worker progress may depend on initialization owned by this very thread.
+    // User confirmed recovery on iOS 15.8.8/AIDA64 (2026-10-27); the exact
+    // dyld/ObjC lock involved was not traced. Keep hot captures/refreshes async.
+    // See docs/audit-implementation/ROOTHIDE-cold-bootstrap-regression.md.
     return [PXProcessRuntimeReader() primeSynchronouslyIfIdle];
 }
 

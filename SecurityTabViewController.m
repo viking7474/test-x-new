@@ -2,6 +2,7 @@
 #import "common/PXUIKitCompat.h"
 #import "common/PXSecuritySettingsStore.h"
 #import "common/PXPinnedTimeZoneLookup.h"
+#import "common/PXPinnedCountryLookup.h"
 #import "common/PXJailbreakCompat.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
@@ -78,6 +79,7 @@
 @property (nonatomic, strong) UILabel *timeLabel;
 @property (nonatomic, strong) NSString *currentTimeZoneId;
 @property (nonatomic, strong) PXPinnedTimeZoneLookup *pinnedTimeZoneLookup;
+@property (nonatomic, strong) PXPinnedCountryLookup *pinnedCountryLookup;
 @property (nonatomic, strong) UITextField *localIPv6Field;
 @property (nonatomic, strong) UIButton *localIPv6GenerateButton;
 @property (nonatomic, strong) UIStackView *cardsStack;
@@ -179,78 +181,28 @@
 }
 
 - (void)fetchCountryForCoordinates:(double)lat longitude:(double)lon completion:(void (^)(NSString *countryCode, NSString *flag))completion {
-    // Create cache key
-    NSString *cacheKey = [NSString stringWithFormat:@"%.4f,%.4f", lat, lon];
-    
-    // Check cache first
-    NSDictionary *cachedInfo = [self.countryCache objectForKey:cacheKey];
-    if (cachedInfo) {
-        completion(cachedInfo[@"countryCode"], cachedInfo[@"flag"]);
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf fetchCountryForCoordinates:lat longitude:lon completion:completion]; });
         return;
     }
-    
-    // Create URL for OpenStreetMap Nominatim reverse geocoding
-    NSString *urlString = [NSString stringWithFormat:@"https://nominatim.openstreetmap.org/reverse?format=json&lat=%.6f&lon=%.6f&zoom=18&addressdetails=1", lat, lon];
-    NSURL *url = [NSURL URLWithString:urlString];
-    
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setValue:@"WeaponX iOS App" forHTTPHeaderField:@"User-Agent"]; // Required by Nominatim
-    [request setTimeoutInterval:10.0]; // Add timeout
-    
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, nil);
-            });
-            return;
-        }
-        
-        NSError *jsonError;
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-        
-        if (jsonError || !json || ![json isKindOfClass:[NSDictionary class]]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, nil);
-            });
-            return;
-        }
-        
-        NSDictionary *address = json[@"address"];
-        NSString *countryCode = address[@"country_code"];
-        
-        if (!countryCode) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, nil);
-            });
-            return;
-        }
-        
-        // Convert country code to uppercase for flag emoji
-        countryCode = [countryCode uppercaseString];
-        
-        // Convert country code to flag emoji
-        NSString *flag = [self flagEmojiForCountryCode:countryCode];
-        
-        // Verify flag emoji was created successfully
-        if (flag && flag.length > 0) {
-            // Cache the result
-            [self.countryCache setObject:@{
-                @"countryCode": countryCode,
-                @"flag": flag
-            } forKey:cacheKey];
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(countryCode, flag);
-            });
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(countryCode, nil);
-            });
-        }
+    [self.pinnedCountryLookup cancel];
+    if (!completion) return;
+    CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(lat, lon);
+    if (!CLLocationCoordinate2DIsValid(coordinate)) { completion(nil, nil); return; }
+    // Preserve the existing four-decimal cache key and 50-entry owner cache.
+    NSString *cacheKey = [NSString stringWithFormat:@"%.4f,%.4f", lat, lon];
+    NSDictionary *cachedInfo = [self.countryCache objectForKey:cacheKey];
+    if (cachedInfo) { completion(cachedInfo[@"countryCode"], cachedInfo[@"flag"]); return; }
+    if (!self.pinnedCountryLookup) self.pinnedCountryLookup = [PXPinnedCountryLookup new];
+    __weak typeof(self) weakSelf = self;
+    [self.pinnedCountryLookup resolveCoordinate:coordinate completion:^(NSString *countryCode) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        NSString *flag = countryCode ? [self flagEmojiForCountryCode:countryCode] : nil;
+        if (flag.length) [self.countryCache setObject:@{ @"countryCode": countryCode, @"flag": flag } forKey:cacheKey];
+        completion(countryCode, flag);
     }];
-    
-    [task resume];
 }
 
 - (void)ipMonitorCheckTapped:(id)sender {
@@ -532,6 +484,7 @@
 
 - (void)refreshPinnedCoordinates {
     [self.pinnedTimeZoneLookup cancel];
+    [self.pinnedCountryLookup cancel];
     // Set the main title directly
     self.title = @"Security";
     
@@ -645,6 +598,9 @@
         
         // Fetch country info and update label
         [self fetchCountryForCoordinates:lat longitude:lon completion:^(NSString *countryCode, NSString *flag) {
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self || !PXPinnedCoordinateMatchesLocation(coordinate,
+                [[LocationSpoofingManager sharedManager] loadSpoofingLocation])) return;
             if (flag) {
                 NSAttributedString *attributedText = [[NSAttributedString alloc] initWithString:
                     [NSString stringWithFormat:@"%@ %.4f, %.4f", flag, lat, lon]

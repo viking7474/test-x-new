@@ -43,6 +43,7 @@ EXTENDED_PYTHON_TESTS = [
     "scripts/test_runtime_security_writers.py",
     "scripts/test_ip_monitor_lifecycle.py",
     "scripts/test_pinned_timezone_lifecycle.py",
+    "scripts/test_pinned_country_lifecycle.py",
     "scripts/test_runtime_artifact_writers.py",
     "scripts/test_runtime_artifact_preparation.py",
     "scripts/test_runtime_identity_preparation.py",

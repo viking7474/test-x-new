@@ -133,7 +133,7 @@ def source_contracts():
                  'IP monitor UI success starts and stops only after committed setting'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H3S-partial'
+    assert manifest['rollout'] == '4C.2H3T-partial'
     for name in ('security-store', 'security-direct'):
         assert manifest['writers'][name]['status'] == 'partial'
     assert manifest['writers']['ip-monitor']['status'] == 'enrolled'
