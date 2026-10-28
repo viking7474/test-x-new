@@ -110,3 +110,7 @@ trong H4J. Generic void convenience selectors còn giữ compatibility; manual U
 dùng chúng như completion API. Remaining producers, defaults/security authority,
 directory durability và rootful reader rollout vẫn partial. Manifest
 `4C.2H4J-partial`; toàn Patch 4 chưa hoàn tất, Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4J pass ngày 2026-10-28. Reset Data failure gates được
+triển khai tiếp tại [H4K](PATCH-4C-2H4K-reset-preparation-failure-gates.md); UIKit/device
+matrix và toàn Patch 4 vẫn partial.

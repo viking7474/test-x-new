@@ -69,6 +69,9 @@ UI_ADAPTERS = {
     'PXDeviceCreateUI.inc': ('DeviceSpecificSpoofingViewController.m', ['- (void)createDeviceProfileWithName:(NSString *)name shortDescription:(NSString *)shortDescription']),
     'PXManualCreateUI.inc': ('TLinkIOSViewController.m', ['- (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription']),
     'PXFormCreateUI.inc': ('ProfileCreationViewController.m', ['- (void)createButtonTapped', '- (void)cancelButtonTapped', '- (void)textFieldDidChangeSelection:(UITextField *)textField']),
+    'PXResetPreparationUI.inc': ('TLinkIOSViewController.m', [
+        '- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error',
+        '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error']),
 }
 
 
@@ -278,7 +281,9 @@ def source_contracts():
     auto = writers.method(read('TLinkIOSViewController.m'), '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
     assert auto.index('if (!NSThread.isMainThread)') < auto.index('generateProfileIDWithError:&allocationError')
     assert auto.index('if (!candidateID)') < auto.index('[pm createProfile:') and '[pm generateProfileID]' not in auto
-    for _, (path, signatures) in UI_ADAPTERS.items():
+    for filename, (path, signatures) in UI_ADAPTERS.items():
+        if filename == 'PXResetPreparationUI.inc':
+            continue  # Reset intentionally retains its extra enabled-group generation.
         for signature in signatures:
             adapter = writers.method(read(path), signature)
             for forbidden in ('switchToProfile:', 'regenerateAllEnabledIdentifiers', 'regenerateDeviceProfileGroup', 'generateDeviceTheme', 'dispatch_after'):
@@ -297,6 +302,26 @@ def source_contracts():
     assert 'addProfileWithName:' not in read('DeviceSpecificSpoofingViewController.m')
     form = read('ProfileCreationViewController.m')
     assert '!self.profileCreationInProgress && trimmedText.length > 0' in form
+    reset_prepare = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][1])
+    required = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][0])
+    assert 'if (error) *error = nil;' in reset_prepare and 'if (!NSThread.isMainThread)' in reset_prepare
+    assert 'if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare
+    assert reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') < reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview')
+    assert 'if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError])' in reset_prepare
+    assert 'generationError ?: [NSError' in reset_prepare and reset_prepare.count('return NO;') == 4
+    assert '*stop = YES;' in required and 'return failure == nil;' in required and 'NSUnderlyingErrorKey' in required
+    assert '[self.manager regenerateAllEnabledIdentifiers];' not in auto
+    assert 'prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError' in auto
+    failure_tail = auto.split('if (![self prepareResetProfileWithOptions:', 1)[1].split('self.nextFakePreview = nil;', 1)[0]
+    assert '[self hideProgressHUD];' in failure_tail and '[self showError:preparationError];' in failure_tail and 'return;' in failure_tail
+    for case in ('reset required identifier defaults and option matrix preserve enable-only policy',
+                 'reset stops at each failed required identifier before generation and preview',
+                 'reset preserves earlier verified toggles when a later toggle fails',
+                 'reset generation failure never applies preview and always returns an error',
+                 'reset preview failure is reported after one successful generation',
+                 'reset full preparation preserves ordering and skips already enabled identifiers',
+                 'off-main reset preparation rejects before providers or persistence'):
+        assert case in fixture, case
     current_check = writers.method(source, '- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError **)error')
     assert 'captureProfileSelectionWithError:error' in current_check and 'code:20' in current_check
     for forbidden in ('mutableCurrentProfile =', 'PXStage', 'mirrorCurrentProfileID:', 'writeRegistryData:'):
@@ -580,7 +605,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4J-partial'
+    assert manifest['rollout'] == '4C.2H4K-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

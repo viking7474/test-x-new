@@ -597,7 +597,8 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
 // Handle toggle of advanced identifiers
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
-- (void)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options;
+- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
+- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 @end
 
 @interface PXFakeModelRangeViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
@@ -7654,7 +7655,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }];
 }
 
-- (void)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options {
+- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error {
+    if (error) *error = nil;
     NSDictionary *resolved = [options isKindOfClass:NSDictionary.class] ? options : @{};
     BOOL fakeIOS = resolved[@"fakeIOSVersionEnabled"] ? [resolved[@"fakeIOSVersionEnabled"] boolValue] : YES;
     BOOL fakeModel = resolved[@"fakeModelEnabled"] ? [resolved[@"fakeModelEnabled"] boolValue] : YES;
@@ -7668,15 +7670,41 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         @"StorageSystem": @(fakeModel),
         @"DeviceName": @(fakeName)
     };
+    __block NSError *failure = nil;
     [required enumerateKeysAndObjectsUsingBlock:^(NSString *identifier, NSNumber *needed, BOOL *stop) {
-        (void)stop;
         if (![needed boolValue] || [self.manager isIdentifierEnabled:identifier]) return;
         if (![self.manager setIdentifierEnabledAndPersist:YES forType:identifier]) {
-            NSError *error = [self.manager lastError];
-            NSLog(@"[Dashboard] Failed to enable required identifier %@ before Reset Data profile generation: %@",
-                  identifier, error.localizedDescription ?: @"unknown");
+            NSMutableDictionary *info = [@{NSLocalizedDescriptionKey:
+                [NSString stringWithFormat:@"Không thể bật identifier cần thiết: %@", identifier]} mutableCopy];
+            NSError *cause = [self.manager lastError];
+            if (cause) info[NSUnderlyingErrorKey] = cause;
+            failure = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:1 userInfo:info];
+            *stop = YES;
         }
     }];
+    if (error) *error = failure;
+    return failure == nil;
+}
+
+- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:4 userInfo:@{NSLocalizedDescriptionKey: @"Reset profile preparation requires the main thread"}];
+        return NO;
+    }
+    // These remain separate commits. A later failure must stop the reset tail;
+    // it cannot undo app clearing, profile activation or an earlier toggle write.
+    if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;
+    NSError *generationError = nil;
+    if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError]) {
+        if (error) *error = generationError ?: [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Không thể tạo lại identifiers cho profile mới"}];
+        return NO;
+    }
+    if (![self applyFakePreviewToCurrentProfile:preview]) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Không thể áp dụng model, iOS hoặc dung lượng cho profile mới"}];
+        return NO;
+    }
+    return YES;
 }
 
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
@@ -7747,12 +7775,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 [self showError:switchError];
                 return;
             }
-            [self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];
-            [self.manager regenerateAllEnabledIdentifiers];
-            if (![self applyFakePreviewToCurrentProfile:preparedPreview]) {
+            NSError *preparationError = nil;
+            if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError]) {
                 [self hideProgressHUD];
-                [self showDashboardMessage:@"Không thể áp dụng profile fake"
-                                   message:@"Model, iOS hoặc dung lượng không tạo được thành một profile đồng bộ. Không phát hành snapshot mới."];
+                [self showError:preparationError];
                 return;
             }
             self.nextFakePreview = nil;

@@ -3,6 +3,7 @@
 
 from pathlib import Path
 from test_roothide_package_metadata import source_contracts as package_metadata_contracts
+from test_runtime_identifier_writers import method
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -243,11 +244,14 @@ require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
         'updatedSettings[@"canvasNoiseSeedNonce"]' not in identifier_manager and
         'updatedSettings[@"canvasFingerprintingEnabled"]' not in identifier_manager,
         "Identifier settings persistence can still corrupt EnabledIdentifiers or clobber suite-level feature flags")
-require('ensureDashboardFakeOptionsEnableRequiredIdentifiers' in view_controller and
-        '[self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];' in view_controller and
-        view_controller.index('[self ensureDashboardFakeOptionsEnableRequiredIdentifiers:fakeOptions];') <
-        view_controller.index('[self.manager regenerateAllEnabledIdentifiers];', view_controller.index('- (void)createNextProfileAndRandomizeWithWarnings:')),
-        "Dashboard Reset Data does not persist fake-option identifier gates before profile regeneration")
+reset_prepare = method(view_controller, '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error')
+reset_flow = method(view_controller, '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
+require('if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare and
+        'if (![self.manager regenerateAllEnabledIdentifiersWithError:&generationError])' in reset_prepare and
+        reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') <
+        reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview') and
+        'if (![self prepareResetProfileWithOptions:fakeOptions preview:preparedPreview error:&preparationError])' in reset_flow,
+        "Dashboard Reset Data must stop after required identifier or regeneration failure before applying the preview")
 require('primaryStorageEnabled != nil' in storage_hooks and
         'secondaryStorageEnabled != nil' in storage_hooks and
         'runtimeStorage[@"TotalStorage"] != nil && runtimeStorage[@"FreeStorage"] != nil' in storage_hooks and
@@ -339,9 +343,10 @@ require("if (![self syncHookScopeToResetApps])" in view_controller and
 reset_profile_start = view_controller.index("- (void)createNextProfileAndRandomizeWithWarnings:")
 reset_profile_end = view_controller.index("- (NSString *)currentProfileRestoreIndexKey", reset_profile_start)
 reset_profile_method = view_controller[reset_profile_start:reset_profile_end]
-apply_profile_marker = "[self applyFakePreviewToCurrentProfile:"
+apply_profile_marker = "[self prepareResetProfileWithOptions:"
 profile_notification_marker = 'CFSTR("com.hydra.tlinkios.profileChanged")'
-require(apply_profile_marker in reset_profile_method and
+require('if (![self applyFakePreviewToCurrentProfile:preview])' in reset_prepare and
+        apply_profile_marker in reset_profile_method and
         profile_notification_marker in reset_profile_method and
         "CFNotificationCenterPostNotification" in reset_profile_method and
         reset_profile_method.index(apply_profile_marker) <

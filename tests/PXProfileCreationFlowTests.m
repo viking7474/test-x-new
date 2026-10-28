@@ -2016,6 +2016,102 @@ static void TestCurrentProfileCheckpoint(void) {
     CHECK(ExternalSelectionWrite(info), "current profile checkpoint original target restored explicitly by fixture");
 }
 
+@interface PXResetIdentifierFixture : NSObject
+@property (nonatomic, strong) NSMutableDictionary *enabled;
+@property (nonatomic, strong) NSMutableArray *events;
+@property (nonatomic, copy) NSString *failKey;
+@property (nonatomic) NSUInteger writes, reads, generations, failWriteOrdinal;
+@property (nonatomic) BOOL failGeneration;
+@property (nonatomic, strong) NSError *failure;
+- (BOOL)isIdentifierEnabled:(NSString *)identifier;
+- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier;
+- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
+- (NSError *)lastError;
+@end
+@implementation PXResetIdentifierFixture
+- (instancetype)init { if ((self = [super init])) { _enabled = [NSMutableDictionary dictionary]; _events = [NSMutableArray array]; } return self; }
+- (BOOL)isIdentifierEnabled:(NSString *)identifier { CHECK(NSThread.isMainThread, "reset enable read on main"); self.reads++; return [self.enabled[identifier] boolValue]; }
+- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier {
+    CHECK(NSThread.isMainThread && enabled, "reset only enables requested identifiers on main");
+    self.writes++; [self.events addObject:identifier];
+    if ([identifier isEqual:self.failKey] || (self.failWriteOrdinal && self.writes == self.failWriteOrdinal)) return NO;
+    self.enabled[identifier] = @(enabled); return YES;
+}
+- (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error {
+    CHECK(NSThread.isMainThread, "reset generation on main"); self.generations++; [self.events addObject:@"generation"];
+    if (error) *error = self.failGeneration ? self.failure : nil; return !self.failGeneration;
+}
+- (NSError *)lastError { return self.failure; }
+@end
+@interface PXResetPreparationUIFixture : NSObject
+@property (nonatomic, strong) PXResetIdentifierFixture *manager;
+@property (nonatomic) BOOL failPreview;
+@property (nonatomic) NSUInteger previews;
+@property (nonatomic, strong) NSDictionary *seenPreview;
+- (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview;
+- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
+- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
+@end
+@implementation PXResetPreparationUIFixture
+- (instancetype)init { if ((self = [super init])) _manager = [PXResetIdentifierFixture new]; return self; }
+- (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview {
+    CHECK(NSThread.isMainThread, "reset preview on main"); self.previews++; self.seenPreview = preview;
+    [self.manager.events addObject:@"preview"]; return !self.failPreview;
+}
+#include "PXResetPreparationUI.inc"
+@end
+static void TestResetPreparationStatus(void) {
+    NSDictionary *preview = @{ @"DeviceModel": @"iPhone15,4" };
+    for (NSUInteger bits = 0; bits < 9; bits++) {
+        BOOL ios = bits == 8 || (bits & 1), model = bits == 8 || (bits & 2), name = bits != 8 && (bits & 4);
+        NSDictionary *options = bits == 8 ? nil : @{ @"fakeIOSVersionEnabled": @(ios), @"fakeModelEnabled": @(model), @"fakeNameEnabled": @(name) };
+        PXResetPreparationUIFixture *view = [PXResetPreparationUIFixture new]; NSError *error = [NSError errorWithDomain:@"old" code:9 userInfo:nil];
+        NSDictionary *expected = @{ @"IOSVersion": @(ios), @"DeviceModel": @(model), @"StorageSystem": @(model), @"DeviceName": @(name) };
+        BOOL prepared = [view prepareResetProfileWithOptions:options preview:preview error:&error];
+        BOOL matches = YES; for (NSString *key in expected) if ([view.manager.enabled[key] boolValue] != [expected[key] boolValue]) matches = NO;
+        CHECK(prepared && !error && matches && view.manager.writes == (NSUInteger)ios + 2 * (NSUInteger)model + (NSUInteger)name && view.manager.generations == 1 && view.previews == 1,
+            "reset required identifier defaults and option matrix preserve enable-only policy");
+    }
+    NSDictionary *all = @{ @"fakeIOSVersionEnabled": @YES, @"fakeModelEnabled": @YES, @"fakeNameEnabled": @YES };
+    NSError *cause = [NSError errorWithDomain:@"fixture.reset" code:91 userInfo:nil];
+    for (NSString *key in @[@"IOSVersion", @"DeviceModel", @"StorageSystem", @"DeviceName"]) {
+        PXResetPreparationUIFixture *view = [PXResetPreparationUIFixture new]; view.manager.failKey = key; view.manager.failure = cause; NSError *error = nil;
+        BOOL prepared = [view prepareResetProfileWithOptions:all preview:preview error:&error];
+        CHECK(!prepared && error.code == 1 && error.userInfo[NSUnderlyingErrorKey] == cause && !view.manager.generations && !view.previews &&
+            [view.manager.events.lastObject isEqual:key] && !view.manager.enabled[key], "reset stops at each failed required identifier before generation and preview");
+    }
+    PXResetPreparationUIFixture *view = [PXResetPreparationUIFixture new]; view.manager.failWriteOrdinal = 2; NSError *error = nil;
+    CHECK(![view prepareResetProfileWithOptions:all preview:preview error:&error] && error.code == 1 && view.manager.writes == 2 &&
+        view.manager.enabled.count == 1 && !view.manager.generations && !view.previews, "reset preserves earlier verified toggles when a later toggle fails");
+    for (NSUInteger withError = 0; withError < 2; withError++) {
+        view = [PXResetPreparationUIFixture new]; view.manager.failGeneration = YES; view.manager.failure = withError ? cause : nil; error = nil;
+        CHECK(![view prepareResetProfileWithOptions:all preview:preview error:&error] && error && (withError ? error == cause : error.code == 2) &&
+            view.manager.generations == 1 && !view.previews && view.manager.enabled.count == 4, "reset generation failure never applies preview and always returns an error");
+    }
+    view = [PXResetPreparationUIFixture new]; view.failPreview = YES; error = nil;
+    CHECK(![view prepareResetProfileWithOptions:all preview:preview error:&error] && error.code == 3 && view.manager.generations == 1 && view.previews == 1,
+        "reset preview failure is reported after one successful generation");
+    view = [PXResetPreparationUIFixture new]; [view.manager.enabled addEntriesFromDictionary:@{ @"IOSVersion": @YES, @"DeviceModel": @YES, @"StorageSystem": @YES, @"DeviceName": @YES, @"IDFA": @YES }]; error = cause;
+    NSArray *ordered = @[@"generation", @"preview"];
+    CHECK([view prepareResetProfileWithOptions:all preview:preview error:&error] && !error && view.manager.writes == 0 && view.manager.generations == 1 && view.previews == 1 &&
+        view.seenPreview == preview && [view.manager.events isEqual:ordered] && [view.manager.enabled[@"IDFA"] boolValue],
+        "reset full preparation preserves ordering and skips already enabled identifiers");
+    NSDictionary *disabledOptions = @{ @"fakeIOSVersionEnabled": @NO, @"fakeModelEnabled": @NO, @"fakeNameEnabled": @NO };
+    NSDictionary *alreadyEnabled = [view.manager.enabled copy];
+    CHECK([view prepareResetProfileWithOptions:disabledOptions preview:preview error:NULL] && [alreadyEnabled isEqual:view.manager.enabled] && view.manager.writes == 0,
+        "reset disabled fake options never turn off previously enabled identifiers and allow null error output");
+    view = [PXResetPreparationUIFixture new]; view.manager.failGeneration = YES;
+    CHECK(![view prepareResetProfileWithOptions:all preview:preview error:NULL] && !view.previews,
+        "reset preparation failure supports null error output without continuing");
+    view = [PXResetPreparationUIFixture new]; __block BOOL rejected = NO;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSError *threadError = nil; BOOL prepared = [view prepareResetProfileWithOptions:all preview:preview error:&threadError];
+        dispatch_async(dispatch_get_main_queue(), ^{ rejected = !prepared && threadError.code == 4; });
+    });
+    CHECK(Pump(^BOOL { return rejected; }) && !view.manager.reads && !view.manager.writes && !view.manager.generations && !view.previews,
+        "off-main reset preparation rejects before providers or persistence");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2075,7 +2171,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
-        TestCurrentProfileCheckpoint(); TestCreationUIAdapters();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;
