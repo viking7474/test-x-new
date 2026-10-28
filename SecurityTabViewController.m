@@ -3,6 +3,7 @@
 #import "common/PXSecuritySettingsStore.h"
 #import "common/PXPinnedTimeZoneLookup.h"
 #import "common/PXPinnedCountryLookup.h"
+#import "common/PXIPDisplayLookup.h"
 #import "common/PXJailbreakCompat.h"
 #import "WeaponXTheme.h"
 #import "FixVersionAppsViewController.h"
@@ -80,6 +81,8 @@
 @property (nonatomic, strong) NSString *currentTimeZoneId;
 @property (nonatomic, strong) PXPinnedTimeZoneLookup *pinnedTimeZoneLookup;
 @property (nonatomic, strong) PXPinnedCountryLookup *pinnedCountryLookup;
+@property (nonatomic, strong) PXIPDisplayLookup *ipDisplayLookup;
+- (void)fetchIPDisplayUsingFallback:(BOOL)fallback;
 @property (nonatomic, strong) UITextField *localIPv6Field;
 @property (nonatomic, strong) UIButton *localIPv6GenerateButton;
 @property (nonatomic, strong) UIStackView *cardsStack;
@@ -646,110 +649,48 @@
 }
 
 - (void)fetchCurrentIP {
-    // Create a URL session with timeout
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    config.timeoutIntervalForRequest = 8.0;
-    config.timeoutIntervalForResource = 15.0;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
-    
-    // Use ipwhois.app to get additional country info
-    NSString *ipwhoisURL = @"https://ipwhois.app/json/";
-    NSURL *url = [NSURL URLWithString:ipwhoisURL];
-    
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setValue:@"WeaponX iOS App" forHTTPHeaderField:@"User-Agent"];
-    
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            // Fallback to simpler IP services if ipwhois fails
-            PXLog(@"[IPDisplay] ipwhois.app request failed: %@", error);
-            [self fetchSimpleIP];
-            return;
-        }
-        
-        NSError *jsonError;
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-        if (jsonError || !json) {
-            PXLog(@"[IPDisplay] JSON parsing failed: %@", jsonError);
-            [self fetchSimpleIP];
-            return;
-        }
-        
-        // Debug to see all fields
-        PXLog(@"[IPDisplay] ipwhois response: %@", json);
-        
-        NSString *ip = json[@"ip"];
-        NSString *countryCode = json[@"country_code"];
-        
-        // Get timezone info and format current time
-        NSString *currentTime = nil;
-        id rawTimeZone = json[@"timezone"];
-        NSString *timezoneName = [rawTimeZone isKindOfClass:[NSString class]] ? rawTimeZone : nil;
-        if ([rawTimeZone isKindOfClass:[NSDictionary class]]) {
-            id identifier = rawTimeZone[@"id"] ?: rawTimeZone[@"name"];
-            if ([identifier isKindOfClass:[NSString class]]) timezoneName = identifier;
-        }
-        
-        if (timezoneName) {
-            // Create timezone from name (e.g., "America/New_York")
-            NSTimeZone *tz = [NSTimeZone timeZoneWithName:timezoneName];
-            if (tz) {
-                NSString *savedTimeZone = [self.securitySettings stringForKey:@"timeSpoofIPAddressTimeZoneName"];
-                if (![savedTimeZone isEqualToString:timezoneName]) {
-                    [self persistTimeZoneName:timezoneName forKey:@"timeSpoofIPAddressTimeZoneName"];
-                }
-                // Format current time in the IP's timezone
-                NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-                formatter.timeZone = tz;
-                formatter.dateFormat = @"h:mm a"; // 12-hour format with AM/PM
-                currentTime = [formatter stringFromDate:[NSDate date]];
-                PXLog(@"[IPDisplay] Formatted current time for %@: %@", timezoneName, currentTime);
-            }
-        }
-        
-        // If we couldn't format the time, fall back to timezone_gmt
-        if (!currentTime) {
-            currentTime = json[@"timezone_gmt"];
-        }
-        
-        PXLog(@"[IPDisplay] IP: %@, Country: %@, Time: %@", ip, countryCode, currentTime);
-        
-        if (ip) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self updateIPLabelWithIP:ip countryCode:countryCode currentTime:currentTime];
-            });
-        } else {
-            [self fetchSimpleIP];
-        }
-    }];
-    
-    [task resume];
+    [self fetchIPDisplayUsingFallback:NO];
 }
 
 - (void)fetchSimpleIP {
-    // Fallback to simpler IP service without country info
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
-    config.timeoutIntervalForRequest = 5.0;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
-    
-    NSURL *url = [NSURL URLWithString:@"https://api.ipify.org"];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:[NSURLRequest requestWithURL:url] 
-                                            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            return;
+    [self fetchIPDisplayUsingFallback:YES];
+}
+
+- (void)fetchIPDisplayUsingFallback:(BOOL)fallback {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf fetchIPDisplayUsingFallback:fallback]; });
+        return;
+    }
+    if (!self.ipDisplayLookup) self.ipDisplayLookup = [PXIPDisplayLookup new];
+    __weak typeof(self) weakSelf = self;
+    [self.ipDisplayLookup resolveUsingFallback:fallback prepare:^NSDictionary *(NSDictionary *payload) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return nil;
+        // Ordered worker, as with the previous transport callback: keep source
+        // writes/formatting off main. Already admitted writes are not rollbackable.
+        NSMutableDictionary *display = [payload mutableCopy];
+        NSString *timezoneName = payload[@"timeZoneName"];
+        NSTimeZone *zone = timezoneName ? [NSTimeZone timeZoneWithName:timezoneName] : nil;
+        NSString *currentTime = nil;
+        if (zone) {
+            NSString *saved = [self.securitySettings stringForKey:@"timeSpoofIPAddressTimeZoneName"];
+            if (![saved isEqualToString:timezoneName]) {
+                [self persistTimeZoneName:timezoneName forKey:@"timeSpoofIPAddressTimeZoneName"];
+            }
+            NSDateFormatter *formatter = [NSDateFormatter new];
+            formatter.timeZone = zone;
+            formatter.dateFormat = @"h:mm a";
+            currentTime = [formatter stringFromDate:[NSDate date]];
         }
-        
-        NSString *ip = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        ip = [ip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        
-        if (ip && ip.length > 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self updateIPLabelWithIP:ip countryCode:nil currentTime:nil];
-            });
-        }
+        if (!currentTime) currentTime = payload[@"timeZoneGMT"];
+        if (currentTime) display[@"currentTime"] = currentTime;
+        return [display copy];
+    } completion:^(NSDictionary *display) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || !display) return;
+        [self updateIPLabelWithIP:display[@"ip"] countryCode:display[@"countryCode"] currentTime:display[@"currentTime"]];
     }];
-    
-    [task resume];
 }
 
 - (void)updateIPLabelWithIP:(NSString *)ip countryCode:(NSString *)countryCode currentTime:(NSString *)currentTime {
