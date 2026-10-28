@@ -5166,10 +5166,11 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     }];
     
     // Generate a sample profile ID
-    NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileID];
+    NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileIDWithError:NULL];
     
     // Set the message to include the profile ID
-    alertController.message = [NSString stringWithFormat:@"NEW Profile ID: %@", sampleProfileID];
+    alertController.message = sampleProfileID.length ? [NSString stringWithFormat:@"Next Profile ID (preview): %@", sampleProfileID] :
+        @"Profile ID will be assigned when creation starts.";
     
     // Add cancel action
     UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
@@ -7832,6 +7833,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
+    if (!NSThread.isMainThread) {
+        NSArray *capturedWarnings = [warnings copy];
+        dispatch_async(dispatch_get_main_queue(), ^{ [self createNextProfileAndRandomizeWithWarnings:capturedWarnings]; }); return;
+    }
     NSDictionary *fakeOptions = self.nextFakeOptions ?: @{};
     BOOL fakeIOS = fakeOptions[@"fakeIOSVersionEnabled"] ? [fakeOptions[@"fakeIOSVersionEnabled"] boolValue] : YES;
     BOOL fakeModel = fakeOptions[@"fakeModelEnabled"] ? [fakeOptions[@"fakeModelEnabled"] boolValue] : YES;
@@ -7876,7 +7881,12 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     }
 
     ProfileManager *pm = [ProfileManager sharedManager];
-    NSString *profileName = [NSString stringWithFormat:@"Auto %@", [pm generateProfileID]];
+    NSError *allocationError = nil;
+    NSString *candidateID = [pm generateProfileIDWithError:&allocationError];
+    if (!candidateID) {
+        [self hideProgressHUD]; [self showError:allocationError]; return;
+    }
+    NSString *profileName = [NSString stringWithFormat:@"Auto %@", candidateID];
     Profile *newProfile = [[Profile alloc] initWithName:profileName shortDescription:@"Auto-created after Reset Data" iconName:@"person.crop.circle.badge.plus"];
     [pm createProfile:newProfile completion:^(BOOL success, NSError *error) {
         if (!success) {

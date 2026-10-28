@@ -105,3 +105,7 @@ không loại TOCTOU với non-cooperating rename/write sau check. Mutable model
 other defaults/security writers, full directory durability, raw runtime readers và
 rootful captured-reader rollout còn riêng. Manifest `4C.2H4H-partial`; toàn Patch 4
 chưa hoàn tất, Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4H pass ngày 2026-10-28. ID allocation được harden
+riêng tại [H4I](PATCH-4C-2H4I-verified-profile-id-allocation.md); full UIKit/device
+runtime matrix và toàn Patch 4 vẫn partial.

@@ -5,6 +5,8 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <string.h>
 
 static BOOL PXProfileLeaseError(NSError **error, NSInteger code, NSString *message) {
     if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:code userInfo:@{NSLocalizedDescriptionKey: message}];
@@ -82,6 +84,49 @@ static BOOL PXProfileLeaseError(NSError **error, NSInteger code, NSString *messa
         return PXProfileLeaseError(error, 25, @"Lifecycle capability belongs to a different profiles root");
     return YES;
 }
+- (NSDictionary *)allocationInventoryWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (![self validateWithError:error]) return nil;
+    // dup would share the root's directory offset across repeated inventories.
+    int fd = openat(_rootFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) { PXProfileLeaseError(error, 25, @"Cannot enumerate the profile namespace"); return nil; }
+    DIR *directory = fdopendir(fd);
+    if (!directory) { close(fd); PXProfileLeaseError(error, 25, @"Cannot enumerate the profile namespace"); return nil; }
+    @try {
+        NSMutableArray *names = [NSMutableArray array], *directories = [NSMutableArray array];
+        for (;;) {
+            errno = 0;
+            struct dirent *entry = readdir(directory);
+            if (!entry) {
+                if (errno) { PXProfileLeaseError(error, 25, @"Profile namespace enumeration failed"); return nil; }
+                break;
+            }
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            NSString *name = [NSString stringWithUTF8String:entry->d_name];
+            struct stat item;
+            if (!name || fstatat(_rootFD, entry->d_name, &item, AT_SYMLINK_NOFOLLOW) != 0) {
+                PXProfileLeaseError(error, 25, @"Profile namespace changed or has an unreadable entry"); return nil;
+            }
+            [names addObject:name];
+            if (S_ISDIR(item.st_mode)) [directories addObject:name];
+        }
+        NSDictionary *registry = [self readRegistryWithError:error];
+        if (!registry) return nil;
+        return @{ @"registry": registry, @"directories": [directories copy], @"occupied": [names copy] };
+    } @finally { closedir(directory); }
+}
+
+- (BOOL)profileLeafExistsForID:(NSString *)profileID exists:(BOOL *)exists error:(NSError **)error {
+    if (error) *error = nil;
+    if (exists) *exists = NO;
+    if (!exists || ![PXValidatedProfileID(profileID) isEqual:profileID]) return PXProfileLeaseError(error, 25, @"Invalid allocation candidate");
+    if (![self validateWithError:error]) return NO;
+    struct stat item;
+    if (fstatat(_rootFD, profileID.fileSystemRepresentation, &item, AT_SYMLINK_NOFOLLOW) == 0) *exists = YES;
+    else if (errno != ENOENT) return PXProfileLeaseError(error, 25, @"Cannot inspect allocation candidate");
+    return [self validateWithError:error];
+}
+
 - (BOOL)writeRegistryData:(NSData *)data expected:(NSDictionary *)expected error:(NSError **)error {
     NSDictionary *observed = [self readRegistryWithError:error];
     if (!observed) return NO;

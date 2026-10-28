@@ -84,6 +84,9 @@
 - (BOOL)activationProfile:(Profile *)profile matchesRegistry:(NSDictionary *)record error:(NSError **)error;
 - (BOOL)updateProfileUnderLease:(Profile *)profile index:(NSUInteger)index error:(NSError **)error;
 - (BOOL)createProfileZeroWithError:(NSError **)error;
+- (NSUInteger)allocationOrdinalForID:(NSString *)profileID;
+- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied error:(NSError **)error;
+- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied probe:(BOOL (^)(NSString *, BOOL *, NSError **))probe error:(NSError **)error;
 - (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error;
 - (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
 - (BOOL)deleteRegisteredProfileID:(NSString *)targetID requireInactive:(BOOL)requireInactive selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
@@ -418,10 +421,12 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     NSString *targetID = nil;
     NSError *preparationError = nil;
     @try {
-        NSString *profileID = [self generateProfileID];
-        [profile setValue:profileID forKey:@"profileId"];
-        profile.createdAt = profile.lastUsed = NSDate.date;
-        creationProfile = [self detachedProfileForCreation:profile expectedID:profileID error:&preparationError];
+        NSString *profileID = [self generateProfileIDWithError:&preparationError];
+        if (profileID) {
+            [profile setValue:profileID forKey:@"profileId"];
+            profile.createdAt = profile.lastUsed = NSDate.date;
+            creationProfile = [self detachedProfileForCreation:profile expectedID:profileID error:&preparationError];
+        }
         // Do not reserve a path or start providers for an uncapturable model.
         if (creationProfile) {
             NSDictionary *identifiers = @{ @"DisplayName": creationProfile.name,
@@ -1481,156 +1486,104 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 
 #pragma mark - Private Methods
 
-// Generates profile IDs in the sequence: 1, 2, ... 99, 100, ..., 999, A01, A02, ... A99, B01, ...
+// Keep numeric precedence through 999, then A01..Z99; never guess on I/O failure.
 - (NSString *)generateProfileID {
-    @try {
-        // Get all existing profile IDs directly from the file system
-        NSMutableArray *existingIDs = [NSMutableArray array];
-        
-        // Get profiles directory path
-        NSString *profilesDirectory = PXProfilesPath();
-        
-        // Get file manager
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        
-        // Check if directory exists
-        if (![fileManager fileExistsAtPath:profilesDirectory]) {
-            NSLog(@"[WeaponX] ⚠️ Profiles directory does not exist for ID generation!");
-            return @"1";
-        }
-        
-        // First try to get all profile IDs from profiles.plist
-        NSString *profilesPath = [profilesDirectory stringByAppendingPathComponent:@"profiles.plist"];
-        if ([fileManager fileExistsAtPath:profilesPath]) {
-            NSLog(@"[WeaponX] Found profiles.plist at: %@ for ID generation", profilesPath);
-            NSData *data = [NSData dataWithContentsOfFile:profilesPath];
-            if (data) {
-                NSError *error = nil;
-                
-                // Use the modern non-deprecated API for iOS 15+
-                NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:&error];
-                if (error) {
-                    NSLog(@"[WeaponX] ❌ Failed to initialize unarchiver for ID generation: %@", error);
-                } else {
-                    unarchiver.requiresSecureCoding = YES;
-                    NSArray *loadedProfiles = [unarchiver decodeObjectOfClasses:PXProfileArchiveClasses() forKey:NSKeyedArchiveRootObjectKey];
-                    
-                    if ([loadedProfiles isKindOfClass:NSArray.class]) {
-                        for (Profile *profile in loadedProfiles) {
-                            if ([profile isKindOfClass:Profile.class] && PXValidatedProfileID(profile.profileId)) {
-                                [existingIDs addObject:profile.profileId];
-                            }
-                        }
-                        NSLog(@"[WeaponX] ✅ Successfully loaded %lu profile IDs from plist", (unsigned long)existingIDs.count);
-                    }
-                }
-            }
-        }
-        
-        // If loading from plist failed or we got no IDs, scan directory for profile folders
-        {
-            NSError *error = nil;
-            NSArray *contents = [fileManager contentsOfDirectoryAtPath:profilesDirectory error:&error];
-            
-            if (error) {
-                NSLog(@"[WeaponX] ❌ Failed to read profiles directory for ID generation: %@", error);
-                return @"1";
-            }
-            
-            for (NSString *item in contents) {
-                NSString *itemPath = [profilesDirectory stringByAppendingPathComponent:item];
-                BOOL isDirectory = NO;
-                
-                // Skip non-directories and the profiles.plist file
-                if (![fileManager fileExistsAtPath:itemPath isDirectory:&isDirectory] || !isDirectory || [item isEqualToString:@"profiles.plist"]) {
-                    continue;
-                }
-                
-                // Add profile ID to the list
-                [existingIDs addObject:item];
-            }
-            
-            NSLog(@"[WeaponX] ✅ Found %lu profile IDs from directory scan", (unsigned long)existingIDs.count);
-        }
-        
-        // If no existing IDs, start with "1"
-        if (existingIDs.count == 0) {
-            return @"1";
-        }
-        
-        // Find the highest numeric ID (for IDs that are just numbers)
-        NSMutableArray *numericIDs = [NSMutableArray array];
-        NSMutableArray *alphaIDs = [NSMutableArray array];
-        
-        for (NSString *profileId in existingIDs) {
-            if (!profileId) continue; // Skip nil values
-            
-            if ([self isNumericString:profileId]) {
-                [numericIDs addObject:profileId];
-            } else if (profileId.length > 0) { // Make sure the string is not empty
-                [alphaIDs addObject:profileId];
-            }
-        }
-        
-        // If we have numeric IDs and haven't reached 999 yet, increment the highest one
-        if (numericIDs.count > 0) {
-            NSArray *sortedNumericIDs = [numericIDs sortedArrayUsingComparator:^NSComparisonResult(NSString *id1, NSString *id2) {
-                return [@([id1 intValue]) compare:@([id2 intValue])];
-            }];
-            
-            NSString *highestID = [sortedNumericIDs lastObject];
-            if (!highestID) return @"1"; // Safeguard
-            
-            int highestValue = [highestID intValue];
-            
-            // If we haven't reached 999 yet, increment
-            if (highestValue < 999) {
-                return [NSString stringWithFormat:@"%d", highestValue + 1];
-            }
-            // Otherwise we'll move to alpha IDs below
-        }
-        
-        // If we've reached 999 or have no numeric IDs but have alpha IDs, find the highest alpha ID
-        if (alphaIDs.count > 0) {
-            // Sort alphabetically
-            NSArray *sortedAlphaIDs = [alphaIDs sortedArrayUsingSelector:@selector(compare:)];
-            NSString *highestID = [sortedAlphaIDs lastObject];
-            if (!highestID || highestID.length < 3) return @"A01"; // Safeguard
-            
-            // Parse letter and number parts from the ID (e.g., "A01" -> "A" and 01)
-            unichar letter = [highestID characterAtIndex:0];
-            
-            // Extract the number part safely
-            NSString *numberPart = [highestID substringFromIndex:1];
-            if (![self isNumericString:numberPart]) return @"A01"; // If not a valid format, reset
-            
-            int number = [numberPart intValue];
-            
-            // Increment (max 2 digits to keep total length at 3 chars)
-            if (number < 99) {
-                number++;
-                return [NSString stringWithFormat:@"%c%02d", letter, number];
-            } else {
-                // Move to next letter and reset number to 01
-                unichar nextLetter = letter + 1;
-                return [NSString stringWithFormat:@"%c01", nextLetter];
-            }
-        }
-        
-        // If we've reached 999 and have no alpha IDs yet, start with "A01"
-        return @"A01";
+    NSError *error = nil;
+    NSString *candidate = [self generateProfileIDWithError:&error];
+    if (!candidate) NSLog(@"[ProfileManager] Profile ID allocation failed: %@", error);
+    return candidate;
+}
+
+- (NSString *)generateProfileIDWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Profile ID allocation requires main"}]; return nil;
     }
-    @catch (NSException *exception) {
-        NSLog(@"[WeaponX] ❌ Exception in generateProfileID: %@", exception);
-        return @"1"; // Safe fallback
+    @try {
+        __attribute__((objc_precise_lifetime)) PXProfileLifecycleLease *lease = self.lifecycleLease ?:
+            [PXProfileLifecycleLease acquireInDirectory:self.profilesDirectory error:error];
+        if (!lease || ![lease validateForDirectory:PXProfilesPath() error:error] || !PXRequireNoPendingProfileDeletion(error)) return nil;
+        NSDictionary *inventory = [lease allocationInventoryWithError:error];
+        if (!inventory) return nil;
+        NSDictionary *registry = inventory[@"registry"];
+        if (self.registryRecord && ![self.registryRecord isEqual:registry]) {
+            if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Profile registry changed; reload before allocating an ID"}]; return nil;
+        }
+        NSArray<Profile *> *profiles = [self decodeRegistryRecord:registry error:error];
+        if (!profiles) return nil;
+        NSMutableSet *existing = [NSMutableSet setWithArray:inventory[@"directories"]];
+        NSMutableSet *occupied = [NSMutableSet setWithArray:inventory[@"occupied"]];
+        for (Profile *profile in profiles) {
+            NSString *profileID = [profile.profileId copy];
+            [existing addObject:profileID]; [occupied addObject:profileID];
+        }
+        // String equality alone cannot model filesystem case/normalization
+        // aliases. Probe each remaining candidate once, without rescanning IDs.
+        return [self nextProfileIDForExistingIDs:existing occupied:occupied probe:^BOOL(NSString *candidate, BOOL *exists, NSError **probeError) {
+            return [lease profileLeafExistsForID:candidate exists:exists error:probeError];
+        } error:error];
+    } @catch (NSException *exception) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:33 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not allocate a profile ID"}];
+        return nil;
     }
 }
 
-// Helper method to check if a string is numeric
+- (NSUInteger)allocationOrdinalForID:(NSString *)profileID {
+    if ([self isNumericString:profileID]) {
+        // Preserve legacy leading-zero/large ASCII-number precedence, but cap
+        // before multiplication; intValue overflow must not reset allocation.
+        NSUInteger value = 0;
+        for (NSUInteger i = 0; i < profileID.length; i++) value = MIN((NSUInteger)999, value * 10 + [profileID characterAtIndex:i] - '0');
+        return value;
+    }
+    if (![profileID isKindOfClass:NSString.class] || profileID.length != 3) return NSNotFound;
+    unichar letter = [profileID characterAtIndex:0], first = [profileID characterAtIndex:1], second = [profileID characterAtIndex:2];
+    if (letter < 'A' || letter > 'Z' || first < '0' || first > '9' || second < '0' || second > '9') return NSNotFound;
+    NSUInteger suffix = (first - '0') * 10 + second - '0';
+    return suffix ? 999 + (letter - 'A') * 99 + suffix : NSNotFound;
+}
+
+- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied error:(NSError **)error {
+    return [self nextProfileIDForExistingIDs:existing occupied:occupied probe:nil error:error];
+}
+
+- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied probe:(BOOL (^)(NSString *, BOOL *, NSError **))probe error:(NSError **)error {
+    if (error) *error = nil;
+    NSUInteger numericMax = 0, alphaMax = 999; BOOL hasNumeric = NO;
+    for (NSString *profileID in existing) {
+        NSUInteger ordinal = [self allocationOrdinalForID:profileID];
+        if (ordinal == NSNotFound) continue;
+        if (ordinal <= 999) { hasNumeric = YES; numericMax = MAX(numericMax, ordinal); }
+        else alphaMax = MAX(alphaMax, ordinal);
+    }
+    if (hasNumeric || alphaMax == 999) {
+        for (NSUInteger value = numericMax + 1; value <= 999; value++) {
+            NSString *candidate = [NSString stringWithFormat:@"%lu", (unsigned long)value];
+            if ([occupied containsObject:candidate] || [existing containsObject:candidate]) continue;
+            BOOL exists = NO;
+            if (probe && !probe(candidate, &exists, error)) return nil;
+            if (!exists) return candidate;
+        }
+    }
+    for (NSUInteger ordinal = alphaMax + 1; ordinal <= 999 + 26 * 99; ordinal++) {
+        NSUInteger offset = ordinal - 1000;
+        NSString *candidate = [NSString stringWithFormat:@"%c%02lu", (int)('A' + offset / 99), (unsigned long)(1 + offset % 99)];
+        if ([occupied containsObject:candidate] || [existing containsObject:candidate]) continue;
+        BOOL exists = NO;
+        if (probe && !probe(candidate, &exists, error)) return nil;
+        if (!exists) return candidate;
+    }
+    if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:33 userInfo:@{NSLocalizedDescriptionKey: @"Generated profile ID sequence is exhausted; existing profiles were preserved"}];
+    return nil;
+}
+
 - (BOOL)isNumericString:(NSString *)string {
-    if (!string) return NO;
-    NSCharacterSet *nonNumericSet = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
-    return [string rangeOfCharacterFromSet:nonNumericSet].location == NSNotFound;
+    if (![string isKindOfClass:NSString.class] || !string.length) return NO;
+    for (NSUInteger i = 0; i < string.length; i++) {
+        unichar character = [string characterAtIndex:i];
+        if (character < '0' || character > '9') return NO;
+    }
+    return YES;
 }
 
 - (void)createDefaultProfile {

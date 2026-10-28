@@ -68,8 +68,9 @@
             textField.placeholder = @"Short Description (optional)";
             textField.clearButtonMode = UITextFieldViewModeWhileEditing;
         }];
-        NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileID];
-        alertController.message = [NSString stringWithFormat:@"NEW Profile ID: %@", sampleProfileID];
+        NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileIDWithError:NULL];
+        alertController.message = sampleProfileID.length ? [NSString stringWithFormat:@"Next Profile ID (preview): %@", sampleProfileID] :
+            @"Profile ID will be assigned when creation starts.";
         UIAlertAction *createAction = [UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             NSString *profileName = alertController.textFields.firstObject.text;
             NSString *profileDesc = alertController.textFields.count > 1 ? alertController.textFields[1].text : @"";

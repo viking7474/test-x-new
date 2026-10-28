@@ -60,6 +60,10 @@ METHODS += ['- (NSArray<Profile *> *)profiles', DELETE_ID, DELETE_CORE,
             '- (void)deleteInactiveProfileID:(NSString *)profileID completion:(void (^)(BOOL success, NSError * _Nullable error))completion',
             '- (void)deleteInactiveProfilesWithCompletion:(void (^)(NSDictionary *result))completion',
             '- (void)deleteInactiveProfileIDs:(NSArray<NSString *> *)profileIDs index:(NSUInteger)index result:(NSMutableDictionary *)result completion:(void (^)(NSDictionary *result))completion']
+METHODS += ['- (NSString *)generateProfileIDWithError:(NSError **)error',
+            '- (NSUInteger)allocationOrdinalForID:(NSString *)profileID',
+            '- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied error:(NSError **)error',
+            '- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied probe:(BOOL (^)(NSString *, BOOL *, NSError **))probe error:(NSError **)error']
 
 
 def check_macro_arity(source, label):
@@ -234,7 +238,7 @@ def source_contracts():
                  'valid edit still saves exact validated bytes and keeps legal nested Profile values'):
         assert case in fixture, case
     assert 'removeItemAtPath:' not in archive and 'temp_profiles.plist' not in source
-    assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 4
+    assert source.count('decodeObjectOfClasses:PXProfileArchiveClasses()') == 3, 'ID allocation must reuse the registry decoder'
     coding = writers.method(source, '- (instancetype)initWithCoder:(NSCoder *)coder')
     for key in ('shortDescription', 'createdAt', 'lastUsed', 'settings'):
         assert f'[coder containsValueForKey:@"{key}"] ? [coder decodeObjectOfClass' in coding, f'optional {key} must not request an absent key'
@@ -242,7 +246,47 @@ def source_contracts():
     assert '[coder failWithError:' in coding and 'failure = failure ?: decoder.error;' in source
 
     allocation = writers.method(source, '- (NSString *)generateProfileID')
-    assert 'if (existingIDs.count == 0) {\n            NSError *error' not in allocation
+    assert 'generateProfileIDWithError:&error' in allocation and 'return @"1"' not in allocation
+    verified_allocation = writers.method(source, '- (NSString *)generateProfileIDWithError:(NSError **)error')
+    assert 'self.lifecycleLease ?:' in verified_allocation and 'allocationInventoryWithError:error' in verified_allocation
+    assert 'validateForDirectory:PXProfilesPath()' in verified_allocation and 'PXRequireNoPendingProfileDeletion' in verified_allocation
+    assert 'decodeRegistryRecord:registry' in verified_allocation and 'self.registryRecord isEqual:registry' in verified_allocation
+    assert 'profileLeafExistsForID:candidate exists:exists error:probeError' in verified_allocation and 'return nil;' in verified_allocation
+    assert 'generateProfileIDWithError:&preparationError' in create and 'if (profileID)' in create
+    assert create.index('if (profileID)') < create.index('[profile setValue:profileID') < create.index('reserveProfileID:')
+    ordering = writers.method(source, '- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied probe:(BOOL (^)(NSString *, BOOL *, NSError **))probe error:(NSError **)error')
+    for forbidden in ('sortedArray', 'intValue', 'contentsOfDirectoryAtPath:', 'writeToFile:'):
+        assert forbidden not in ordering, forbidden
+    assert '26 * 99' in ordering and 'code:33' in ordering and 'occupied containsObject:candidate' in ordering
+    lease_inventory = writers.method(read('common/PXProfileLifecycleLease.m'), '- (NSDictionary *)allocationInventoryWithError:(NSError **)error')
+    for token in ('openat(_rootFD, "."', 'fdopendir(fd)', 'readdir(directory)', 'AT_SYMLINK_NOFOLLOW', 'S_ISDIR(item.st_mode)', '@finally { closedir(directory); }'):
+        assert token in lease_inventory, token
+    assert 'dup(_rootFD)' not in lease_inventory and 'removeItemAtPath:' not in lease_inventory
+    leaf_probe = writers.method(read('common/PXProfileLifecycleLease.m'), '- (BOOL)profileLeafExistsForID:(NSString *)profileID exists:(BOOL *)exists error:(NSError **)error')
+    assert 'AT_SYMLINK_NOFOLLOW' in leaf_probe and 'errno != ENOENT' in leaf_probe
+    assert leaf_probe.count('validateWithError:error') == 2
+    for file in ('TLinkIOSViewController.m', 'DeviceSpecificSpoofingViewController.m'):
+        preview = read(file)
+        assert 'generateProfileIDWithError:NULL' in preview and 'sampleProfileID.length ?' in preview
+        assert 'Profile ID will be assigned when creation starts.' in preview
+    auto = writers.method(read('TLinkIOSViewController.m'), '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
+    assert auto.index('if (!NSThread.isMainThread)') < auto.index('generateProfileIDWithError:&allocationError')
+    assert auto.index('if (!candidateID)') < auto.index('[pm createProfile:') and '[pm generateProfileID]' not in auto
+    for case in ('ID ordering preserves normal numeric and alpha progression without overflow or foreign-name poisoning',
+                 'allocation grammar is nonempty ASCII with bounded canonical alpha suffixes',
+                 'namespace probing advances each candidate once without redoing sequence discovery',
+                 'namespace probe errors stop allocation without fallback or retry',
+                 'verified allocation skips occupied leaves without following symlinks or modifying files',
+                 'registered IDs remain occupied even when their directories are missing',
+                 'repeated borrowed allocation inventories reset directory offsets retain ownership and close descriptors',
+                 'busy allocation reports failure without a guessed legacy fallback',
+                 'allocation rejects stale registry receipts instead of guessing an ID',
+                 'allocation rejects unreadable registry bytes through the shared decoder',
+                 'allocation failure stops create before caller mutation reservation provider or selection effects',
+                 'exclusive reservation remains authoritative when a leaf appears after allocation',
+                 'allocation respects the actual filesystem case-alias policy without assuming case sensitivity',
+                 'sequence exhaustion preserves occupied namespace instead of inventing an invalid next prefix'):
+        assert case in fixture, case
     manager = read('common/IdentifierManager.m')
     explicit = writers.method(manager, '- (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error')
     assert 'PXProfileIdentityPath(PXValidatedProfileID(profileID))' in explicit
@@ -493,7 +537,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4H-partial'
+    assert manifest['rollout'] == '4C.2H4I-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

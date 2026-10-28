@@ -78,7 +78,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)addProfileWithName:(NSString *)profileName shortDescription:(NSString *)shortDescription;
 
 // Profile ID generation
-- (NSString *)generateProfileID;
+// Read-only candidates, not reservations. Errors/exhaustion return nil; create
+// still reserves exclusively. ASCII numbers and A01..Z99 define ordering; other
+// custom IDs stay valid. Requires main; unreadable sources never get a fallback ID.
+- (nullable NSString *)generateProfileID;
+- (nullable NSString *)generateProfileIDWithError:(NSError * _Nullable * _Nullable)error;
 
 @end
 

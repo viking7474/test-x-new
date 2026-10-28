@@ -1699,6 +1699,136 @@ static void TestUIDeletionAuthority(void) {
     [fm removeItemAtPath:gRoot error:NULL]; gRoot = previousRoot; gStore = previousStore;
 }
 
+@interface PXAllocationRaceFixture : Profile
+@end
+@implementation PXAllocationRaceFixture
+- (Class)classForKeyedArchiver { return Profile.class; }
+- (void)setValue:(id)value forKey:(NSString *)key {
+    if ([key isEqual:@"profileId"]) CHECK([NSData.data writeToFile:Path(PXProfilesPath(), value) atomically:NO], "allocation race blocker installed after discovery");
+    [super setValue:value forKey:key];
+}
+@end
+static void TestProfileIDAllocation(void) {
+    PXProfileCreationFixture *pure = NewManager();
+    NSArray *cases = @[
+        @{ @"ids": @[], @"blocked": @[], @"next": @"1" },
+        @{ @"ids": @[@"0", @"17", @"A77"], @"blocked": @[], @"next": @"18" },
+        @{ @"ids": @[@"999", @"A01", @"z-foreign", @"profile_0"], @"blocked": @[], @"next": @"A02" },
+        @{ @"ids": @[@"999", @"A99"], @"blocked": @[], @"next": @"B01" },
+        @{ @"ids": @[@"999", @"Z98"], @"blocked": @[], @"next": @"Z99" },
+        @{ @"ids": @[@"999", @"Z99"], @"blocked": @[], @"next": NSNull.null },
+        @{ @"ids": @[@"000998"], @"blocked": @[], @"next": @"999" },
+        @{ @"ids": @[@"184467440737095516160000000000000"], @"blocked": @[], @"next": @"A01" },
+        @{ @"ids": @[@"A05"], @"blocked": @[], @"next": @"A06" },
+        @{ @"ids": @[@"0", @"998", @"B99"], @"blocked": @[@"999", @"C01"], @"next": @"C02" },
+        @{ @"ids": @[@"0"], @"blocked": @[@"1", @"2", @"3"], @"next": @"4" },
+        @{ @"ids": @[@"0", @"١٧", @"foreign-uuid", @"A099"], @"blocked": @[], @"next": @"1" }
+    ];
+    for (NSDictionary *row in cases) {
+        NSError *error = nil;
+        NSString *candidate = [pure nextProfileIDForExistingIDs:[NSSet setWithArray:row[@"ids"]] occupied:[NSSet setWithArray:row[@"blocked"]] error:&error];
+        BOOL exhausted = row[@"next"] == NSNull.null;
+        CHECK(exhausted ? (!candidate && error.code == 33) : ([candidate isEqual:row[@"next"]] && !error),
+            "ID ordering preserves normal numeric and alpha progression without overflow or foreign-name poisoning");
+    }
+    CHECK(![pure isNumericString:@""] && ![pure isNumericString:@"١٧"] && [pure isNumericString:@"0017"] &&
+        [pure allocationOrdinalForID:@"A00"] == NSNotFound && [pure allocationOrdinalForID:@"a01"] == NSNotFound,
+        "allocation grammar is nonempty ASCII with bounded canonical alpha suffixes");
+    NSSet *zeroIDs = [NSSet setWithObject:@"0"]; NSMutableSet *probed = [NSMutableSet set]; __block NSUInteger probes = 0; NSError *probeError = nil;
+    NSString *probedID = [pure nextProfileIDForExistingIDs:zeroIDs occupied:NSSet.set probe:^BOOL(NSString *candidate, BOOL *exists, NSError **error) {
+        (void)error; probes++; [probed addObject:candidate]; *exists = ![candidate isEqual:@"3"]; return YES;
+    } error:&probeError];
+    CHECK([probedID isEqual:@"3"] && !probeError && probes == 3 && probed.count == 3, "namespace probing advances each candidate once without redoing sequence discovery");
+    probes = 0;
+    probedID = [pure nextProfileIDForExistingIDs:zeroIDs occupied:NSSet.set probe:^BOOL(NSString *candidate, BOOL *exists, NSError **error) {
+        (void)candidate; (void)exists; probes++; if (error) *error = [NSError errorWithDomain:@"fixture.probe" code:55 userInfo:nil]; return NO;
+    } error:&probeError];
+    CHECK(!probedID && probes == 1 && probeError.code == 55, "namespace probe errors stop allocation without fallback or retry");
+
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "allocation fixture drains previous namespace callbacks");
+    NSString *previousRoot = gRoot; PXRuntimeSourceStore *previousStore = gStore;
+    gRoot = Path(previousRoot, @"allocation-fixture"); NSFileManager *fm = NSFileManager.defaultManager;
+    [fm createDirectoryAtPath:Identity(@"0") withIntermediateDirectories:YES attributes:nil error:NULL]; SetupStore();
+    PXProfileCreationFixture *manager = NewManager(); Profile *zero = New(@"allocation-zero"); [zero setValue:@"0" forKey:@"profileId"];
+    [manager.mutableProfiles addObject:zero]; manager.mutableCurrentProfile = zero;
+    CHECK(gStore && [manager updateCurrentProfileInfoWithProfile:zero error:NULL], "allocation namespace initial selection committed");
+    [manager saveProfilesWithCompletion:^(BOOL ok, NSError *error) { CHECK(ok && !error, "allocation namespace initial registry saved"); }];
+    for (NSString *name in @[@"999", @"A01", @"z-foreign", @"A099"]) [manager createDirectoryIfNeeded:Path(PXProfilesPath(), name)];
+    NSData *blocker = [@"keep this file" dataUsingEncoding:NSUTF8StringEncoding];
+    CHECK([blocker writeToFile:Path(PXProfilesPath(), @"A02") atomically:YES] &&
+        [fm createSymbolicLinkAtPath:Path(PXProfilesPath(), @"A03") withDestinationPath:@"missing-target" error:NULL], "allocation file and dangling symlink blockers created");
+    NSString *outside = Path(gRoot, @"unrelated-tree"); [manager createDirectoryIfNeeded:outside];
+    CHECK([blocker writeToFile:Path(outside, @"sentinel") atomically:YES] &&
+        [fm createSymbolicLinkAtPath:Path(PXProfilesPath(), @"Z99") withDestinationPath:outside error:NULL], "allocation live directory symlink blocker created");
+    NSError *error = nil;
+    CHECK([[manager generateProfileIDWithError:&error] isEqual:@"A04"] && !error && [blocker isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"A02")]] &&
+        [blocker isEqual:[NSData dataWithContentsOfFile:Path(outside, @"sentinel")]], "verified allocation skips occupied leaves without following symlinks or modifying files");
+    Profile *registered = New(@"allocation-missing-directory"); [registered setValue:@"A08" forKey:@"profileId"];
+    [manager.mutableProfiles addObject:registered];
+    [manager saveProfilesWithCompletion:^(BOOL ok, NSError *failure) { CHECK(ok && !failure, "allocation missing-directory record saved"); }];
+    CHECK([[manager generateProfileIDWithError:&error] isEqual:@"A09"] && !error && ![fm fileExistsAtPath:Identity(@"A08")],
+        "registered IDs remain occupied even when their directories are missing");
+
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL]; manager.lifecycleLease = lease;
+    NSUInteger descriptors = OpenDescriptorCount();
+    NSDictionary *first = [lease allocationInventoryWithError:&error], *second = [lease allocationInventoryWithError:&error];
+    NSSet *firstNames = [NSSet setWithArray:first[@"occupied"] ?: @[]], *secondNames = [NSSet setWithArray:second[@"occupied"] ?: @[]];
+    CHECK(first && second && !error && [firstNames isEqual:secondNames] && [firstNames containsObject:@"Z99"] &&
+        ![first[@"directories"] containsObject:@"Z99"] && ![first[@"directories"] containsObject:@"A03"] &&
+        [[manager generateProfileIDWithError:&error] isEqual:@"A09"] && [lease validateWithError:NULL] && descriptors == OpenDescriptorCount(),
+        "repeated borrowed allocation inventories reset directory offsets retain ownership and close descriptors");
+    [lease invalidate]; descriptors = OpenDescriptorCount();
+    CHECK(![manager generateProfileIDWithError:&error] && error && descriptors == OpenDescriptorCount(), "expired allocation capability fails without leaking descriptors");
+    manager.lifecycleLease = nil;
+    PXProfileLifecycleLease *other = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+    CHECK(other && ![manager generateProfileIDWithError:&error] && error.code == 12 && ![manager generateProfileID] && [other validateWithError:NULL],
+        "busy allocation reports failure without a guessed legacy fallback"); [other invalidate];
+
+    NSString *archivePath = Path(PXProfilesPath(), @"profiles.plist"); NSData *archive = [NSData dataWithContentsOfFile:archivePath]; NSDictionary *receipt = manager.registryRecord;
+    NSData *bad = [@"invalid registry bytes" dataUsingEncoding:NSUTF8StringEncoding];
+    CHECK([bad writeToFile:archivePath atomically:YES] && ![manager generateProfileIDWithError:&error] && error.code == 25,
+        "allocation rejects stale registry receipts instead of guessing an ID");
+    manager.registryRecord = @{ @"exists": @YES, @"bytes": bad };
+    CHECK(![manager generateProfileIDWithError:&error] && error, "allocation rejects unreadable registry bytes through the shared decoder");
+    Profile *input = New(@"allocation-failure-before-input-edit"); NSString *inputID = [input.profileId copy]; NSDate *created = input.createdAt, *used = input.lastUsed;
+    NSDictionary *active = ActiveFiles(); NSSet *leaves = [NSSet setWithArray:[fm contentsOfDirectoryAtPath:PXProfilesPath() error:NULL]];
+    ResetWorker(); gPause = NO; __block NSUInteger callbacks = 0; __block BOOL success = YES; __block NSError *failure = nil;
+    [manager createProfile:input completion:^(BOOL ok, NSError *value) { callbacks++; success = ok; failure = value; }];
+    CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && !success && failure && [inputID isEqual:input.profileId] && [created isEqual:input.createdAt] && [used isEqual:input.lastUsed] &&
+        !atomic_load(&gEntered) && !manager.lifecycleLease && !manager.creationInProgress && [active isEqual:ActiveFiles()] &&
+        [leaves isEqual:[NSSet setWithArray:[fm contentsOfDirectoryAtPath:PXProfilesPath() error:NULL]]],
+        "allocation failure stops create before caller mutation reservation provider or selection effects");
+    CHECK([archive writeToFile:archivePath atomically:YES], "allocation valid registry restored"); manager.registryRecord = receipt;
+    NSString *heldRoot = [PXProfilesPath() stringByAppendingString:@".held"];
+    CHECK([fm moveItemAtPath:PXProfilesPath() toPath:heldRoot error:NULL] && ![manager generateProfileIDWithError:&error] && error &&
+        ![fm fileExistsAtPath:PXProfilesPath()], "missing allocation root is not recreated or replaced by fallback");
+    CHECK([fm moveItemAtPath:heldRoot toPath:PXProfilesPath() error:NULL], "allocation namespace root restored");
+    __block BOOL offMainDone = NO; __block NSString *offCandidate = nil; __block NSInteger offCode = 0;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSError *workerError = nil; NSString *candidate = [manager generateProfileIDWithError:&workerError];
+        dispatch_async(dispatch_get_main_queue(), ^{ offCandidate = candidate; offCode = workerError.code; offMainDone = YES; });
+    });
+    CHECK(Pump(^BOOL { return offMainDone; }) && !offCandidate && offCode == 23, "off-main allocation rejects before namespace access");
+
+    PXAllocationRaceFixture *race = [[PXAllocationRaceFixture alloc] initWithName:@"allocation-reservation-race" iconName:@"default_profile"];
+    callbacks = 0; ResetWorker(); gPause = NO;
+    [manager createProfile:race completion:^(BOOL ok, NSError *value) { callbacks++; success = ok; failure = value; }];
+    CHECK(Pump(^BOOL { return callbacks > 0; }) && callbacks == 1 && !success && failure.code == 13 && !atomic_load(&gEntered) && ![fm fileExistsAtPath:Identity(race.profileId)] &&
+        [fm fileExistsAtPath:Path(PXProfilesPath(), race.profileId)] && [archive isEqual:[NSData dataWithContentsOfFile:archivePath]],
+        "exclusive reservation remains authoritative when a leaf appears after allocation");
+    CHECK([blocker writeToFile:Path(PXProfilesPath(), @"a10") atomically:YES], "filesystem alias blocker created");
+    NSString *expected = [fm fileExistsAtPath:Path(PXProfilesPath(), @"A10")] ? @"A11" : @"A10";
+    CHECK([[manager generateProfileIDWithError:&error] isEqual:expected] && !error && [blocker isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"a10")]],
+        "allocation respects the actual filesystem case-alias policy without assuming case sensitivity");
+    CHECK([fm removeItemAtPath:Path(PXProfilesPath(), @"Z99") error:NULL] && [fm createDirectoryAtPath:Path(PXProfilesPath(), @"Z99") withIntermediateDirectories:NO attributes:nil error:NULL] &&
+        ![manager generateProfileIDWithError:&error] && error.code == 33 && [blocker isEqual:[NSData dataWithContentsOfFile:Path(outside, @"sentinel")]],
+        "sequence exhaustion preserves occupied namespace instead of inventing an invalid next prefix");
+    drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "allocation isolated callbacks drained before root restore");
+    [fm removeItemAtPath:gRoot error:NULL]; gRoot = previousRoot; gStore = previousStore;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -1757,6 +1887,7 @@ int main(int argc, const char *argv[]) {
         TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryEncodingPreflight(); TestOwnedMetadataEdits(); TestActivationModelPolicy(); TestActivationCallbackDrift(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
+        TestProfileIDAllocation();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;
