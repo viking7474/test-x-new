@@ -51,6 +51,13 @@ NS_ASSUME_NONNULL_BEGIN
 // Encoding fails before activation. An I/O failure after the journal decision
 // commits leaves recovery pending; reload completes/cancels it from known state.
 - (void)deleteProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+// UI deletion rechecks committed active selection under lifecycle ownership.
+// Success acknowledges logical unregistering; best-effort file cleanup may remain.
+- (void)deleteInactiveProfileID:(NSString *)profileID completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+// Capture registered IDs once, preserving 0/profile_0; recheck each active target.
+// Main-thread result contains immutable deleted/skipped ID arrays, failed ID->
+// message dictionary and error string. One attempt per ID; no orphan enumeration.
+- (void)deleteInactiveProfilesWithCompletion:(void (^)(NSDictionary *result))completion;
 // Resolve the registered record by ID; alias object fields are not authoritative.
 - (void)switchToProfile:(Profile *)profile completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 - (void)loadProfilesWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;

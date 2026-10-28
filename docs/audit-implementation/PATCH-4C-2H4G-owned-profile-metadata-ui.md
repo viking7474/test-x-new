@@ -92,3 +92,7 @@ direct writers, defaults/security authority và full directory durability còn r
 Ownership snapshot diễn ra khi admission trên main, không đồng bộ mọi nonatomic property
 của caller. UIKit deallocation/presentation và device runtime matrix vẫn cần kiểm tra.
 Manifest `4C.2H4G-partial`; toàn Patch 4 chưa hoàn tất, Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4G pass ngày 2026-10-28. Verified UI list và
+UI delete producers được chuyển tại [H4H](PATCH-4C-2H4H-verified-profile-ui-deletion.md);
+full device/runtime matrix và toàn Patch 4 vẫn partial.

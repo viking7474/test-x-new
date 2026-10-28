@@ -45,6 +45,7 @@
 @property (nonatomic, strong) UIActivityIndicatorView *switchBackupIndicator;
 
 - (void)saveMetadataForProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription successTitle:(NSString *)successTitle successMessage:(NSString *)successMessage notifyDelegate:(BOOL)notifyDelegate;
+- (void)confirmDeletionOfProfileID:(NSString *)profileID showResult:(BOOL)showResult completion:(void (^)(BOOL))completion;
 
 @end
 
@@ -145,182 +146,29 @@
 }
 
 - (void)loadProfilesFromDisk {
-    // Get active profile ID directly from central info store first
     ProfileManager *manager = [ProfileManager sharedManager];
-    NSDictionary *centralInfo = [manager loadCentralProfileInfo];
-    NSString *activeProfileId = nil;
-    
-    if (centralInfo && centralInfo[@"ProfileId"]) {
-        activeProfileId = centralInfo[@"ProfileId"];
-    } else if (manager.currentProfile) {
-        activeProfileId = manager.currentProfile.profileId;
-    }
-    
-    // Get profiles directory path
-    NSString *profilesDirectory = PXProfilesPath();
-    
-    // Get file manager
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    
-    // Check if directory exists
-    if (![fileManager fileExistsAtPath:profilesDirectory]) {
-        self.profiles = [NSMutableArray array];
-        self.allProfiles = [NSMutableArray array];
-        self.displayedProfilesCount = 0;
-        [self.tableView reloadData];
-        [self updateProfileCount];
-        return;
-    }
-    
-    // First try to load from profiles.plist
-    NSString *profilesPath = [profilesDirectory stringByAppendingPathComponent:@"profiles.plist"];
-    if ([fileManager fileExistsAtPath:profilesPath]) {
-        NSData *data = [NSData dataWithContentsOfFile:profilesPath];
-        if (data) {
-            NSError *error = nil;
-            
-            // Use the modern non-deprecated API for iOS 15+
-            NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:&error];
-            if (error) {
-                // Handle error silently
-            } else {
-                unarchiver.requiresSecureCoding = YES;
-                NSArray *loadedProfiles = [unarchiver decodeObjectOfClass:[NSArray class] forKey:NSKeyedArchiveRootObjectKey];
-                
-                if (loadedProfiles) {
-                    // Filter out profiles with ID 0
-                    NSMutableArray *filteredProfiles = [NSMutableArray array];
-                    for (Profile *profile in loadedProfiles) {
-                        // Skip profiles with ID 0, "0", "profile_0", or missing profileId
-                        if (!profile.profileId || 
-                            [profile.profileId isEqualToString:@"0"] || 
-                            [profile.profileId isEqualToString:@"profile_0"] ||
-                            [profile.profileId intValue] == 0) {
-                            NSLog(@"[WeaponX] Filtering out profile with ID 0: %@", profile.name);
-                            continue;
-                        }
-                        [filteredProfiles addObject:profile];
-                    }
-                    
-                    self.allProfiles = filteredProfiles;
-                    
-                    // Get first 10 profiles or all if less than 10
-                    NSInteger initialCount = MIN(10, self.allProfiles.count);
-                    NSRange initialRange = NSMakeRange(0, initialCount);
-                    self.profiles = [[self.allProfiles subarrayWithRange:initialRange] mutableCopy];
-                    self.displayedProfilesCount = initialCount;
-                    
-                    self.filteredProfiles = [self.profiles mutableCopy];
-                    
-                    // Make sure each profile has a proper display name and ensure shortDescription is set
-                    [self enrichProfilesWithAdditionalInfo];
-                    
-                    [self.tableView reloadData];
-                    [self updateProfileCount];
-                    return;
-                } else {
-                    // Failed to decode profiles: nil result
-                }
+    __weak typeof(self) weakSelf = self;
+    [manager loadProfilesWithCompletion:^(BOOL success, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        NSMutableArray<Profile *> *visible = [NSMutableArray array];
+        if (success) {
+            for (Profile *profile in manager.profiles) {
+                if (![profile.profileId isEqualToString:@"0"] && ![profile.profileId isEqualToString:@"profile_0"])
+                    [visible addObject:profile];
             }
-        }
-    }
-    
-    // If profiles.plist couldn't be loaded, scan directory for profile folders
-    NSError *error = nil;
-    NSArray *contents = [fileManager contentsOfDirectoryAtPath:profilesDirectory error:&error];
-    
-    if (error) {
-        self.profiles = [NSMutableArray array];
-        self.allProfiles = [NSMutableArray array];
-        self.displayedProfilesCount = 0;
-        [self.tableView reloadData];
-        [self updateProfileCount];
-        return;
-    }
-    
-    NSMutableArray *allProfilesFound = [NSMutableArray array];
-    for (NSString *item in contents) {
-        NSString *itemPath = [profilesDirectory stringByAppendingPathComponent:item];
-        BOOL isDirectory = NO;
-        
-        // Skip non-directories, the profiles.plist file, profiles with ID 0 or profile_0
-        if (![fileManager fileExistsAtPath:itemPath isDirectory:&isDirectory] || 
-            !isDirectory || 
-            [item isEqualToString:@"profiles.plist"] ||
-            [item isEqualToString:@"0"] ||
-            [item isEqualToString:@"profile_0"] ||
-            [item intValue] == 0) {
-            continue;
-        }
-        
-        // Extract additional profile info from plists within the profile directory
-        NSString *displayName = [self extractProfileDisplayNameFromDirectory:itemPath withFolderName:item];
-        NSString *shortDesc = [self extractProfileShortDescriptionFromDirectory:itemPath withFolderName:item];
-        
-        // Create a profile object with the discovered information
-        Profile *profile = [[Profile alloc] initWithName:displayName ? displayName : item 
-                                        shortDescription:shortDesc ? shortDesc : @""
-                                               iconName:@"default_profile"];
-        
-        // Make sure the profileId is set to the folder name for accuracy
-        [profile setValue:item forKey:@"profileId"];
-        
-        // Set timestamps
-        NSDate *creationDate = nil;
-        NSDate *modificationDate = nil;
-        NSDictionary *attributes = [fileManager attributesOfItemAtPath:itemPath error:nil];
-        if (attributes) {
-            creationDate = attributes[NSFileCreationDate];
-            modificationDate = attributes[NSFileModificationDate];
-        }
-        
-        if (creationDate) {
-            [profile setValue:creationDate forKey:@"createdAt"];
-        }
-        
-        if (modificationDate) {
-            [profile setValue:modificationDate forKey:@"lastUsed"];
-        }
-        
-        [allProfilesFound addObject:profile];
-    }
-    
-    self.allProfiles = allProfilesFound;
-    
-    // Get first 10 profiles or all if less than 10
-    NSInteger initialCount = MIN(10, self.allProfiles.count);
-    if (initialCount > 0) {
-        NSRange initialRange = NSMakeRange(0, initialCount);
-        self.profiles = [[self.allProfiles subarrayWithRange:initialRange] mutableCopy];
-    } else {
-        self.profiles = [NSMutableArray array];
-    }
-    self.displayedProfilesCount = initialCount;
-    
-    self.filteredProfiles = [self.profiles mutableCopy];
-    
-    // If we have an active profile ID, ensure it's correctly updated
-    if (activeProfileId) {
-        for (Profile *profile in self.allProfiles) {
-            if ([profile.profileId isEqualToString:activeProfileId]) {
-                [manager refreshCurrentProfileFromCommittedSelectionWithError:NULL];
-                
-                // If active profile isn't in the first set of displayed profiles,
-                // make sure it's included by adding it to the beginning
-                if (![self.profiles containsObject:profile]) {
-                    [self.profiles insertObject:profile atIndex:0];
-                    self.displayedProfilesCount = MIN(self.allProfiles.count, self.displayedProfilesCount + 1);
-                }
-                break;
-            }
-        }
-    }
-    
-    [self.tableView reloadData];
-    [self updateProfileCount];
+        } else NSLog(@"[ProfileManagerUI] Registry list unavailable: %@", error);
+        // A directory or reservation is not evidence of a registered profile.
+        // Do not enrich/mutate manager models from independent display files.
+        self.allProfiles = visible;
+        self.displayedProfilesCount = MIN((NSUInteger)10, visible.count);
+        self.profiles = [[visible subarrayWithRange:NSMakeRange(0, self.displayedProfilesCount)] mutableCopy];
+        self.filteredProfiles = [self.profiles mutableCopy];
+        if (self.isSearchActive) [self performSearch];
+        [self.tableView reloadData]; [self updateProfileCount];
+    }];
 }
 
-// New method to extract the display name from profile directory plists
 - (NSString *)extractProfileDisplayNameFromDirectory:(NSString *)directoryPath withFolderName:(NSString *)folderName {
     NSFileManager *fileManager = [NSFileManager defaultManager];
     
@@ -1388,11 +1236,11 @@
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    // Only allow editing profile cells, not storage or search
-    return indexPath.section == 2;
+    (void)tableView;
+    NSArray *shown = self.isSearchActive ? self.filteredProfiles : self.profiles;
+    return indexPath.section == 3 && indexPath.row >= 0 && (NSUInteger)indexPath.row < shown.count;
 }
 
-// Leading swipe actions (swipe from left to right) - Switch profile action
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     // Only add actions for profile cells
     if (indexPath.section != 2) {
@@ -1436,127 +1284,23 @@
 
 // Trailing swipe actions (swipe from right to left) - Delete action
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    // Only add actions for profile cells
-    if (indexPath.section != 2) {
-        return nil;
-    }
-    
-    // Get the profile at this row
-    Profile *profile = self.isSearchActive ? self.filteredProfiles[indexPath.row] : self.profiles[indexPath.row];
-    
-    // Check if this is the current profile
-    BOOL isCurrentProfile = NO;
-    ProfileManager *manager = [ProfileManager sharedManager];
-    if ([manager.currentProfile.profileId isEqualToString:profile.profileId]) {
-        isCurrentProfile = YES;
-    }
-    
-    // Create delete action
-    UIContextualAction *deleteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
-                                                                               title:@"Delete"
-                                                                             handler:^(UIContextualAction * _Nonnull action, __kindof UIView * _Nonnull sourceView, void (^ _Nonnull completionHandler)(BOOL)) {
-        // Check if we can delete this profile (not the last one and not the current one)
-        if (self.profiles.count <= 1) {
-            // Show error - can't delete last profile
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cannot Delete"
-                                                                       message:@"You cannot delete the last profile. At least one profile must remain."
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-            
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
-            completionHandler(NO);
-            return;
-        }
-        
-        // Check if this is the current active profile
-        if (isCurrentProfile) {
-            // Show error - can't delete current profile
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cannot Delete"
-                                                                           message:@"You cannot delete the currently active profile. Please switch to another profile first."
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-            
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
-            completionHandler(NO);
-            return;
-        }
-        
-        // Confirm deletion
-        UIAlertController *confirmAlert = [UIAlertController alertControllerWithTitle:@"Delete Profile"
-                                                                           message:@"Are you sure you want to delete this profile? This action cannot be undone."
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
-        
-        [confirmAlert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                                    style:UIAlertActionStyleCancel
-                                                    handler:^(UIAlertAction * _Nonnull action) {
-            completionHandler(NO);
-        }]];
-        
-        [confirmAlert addAction:[UIAlertAction actionWithTitle:@"Delete"
-                                                    style:UIAlertActionStyleDestructive
-                                                    handler:^(UIAlertAction * _Nonnull action) {
-            // Direct approach: Delete the profile folder from the filesystem
-            NSString *profilesDirectory = PXProfilesPath();
-            NSString *profilePath = [profilesDirectory stringByAppendingPathComponent:profile.profileId];
-            
-            NSFileManager *fileManager = [NSFileManager defaultManager];
-            NSError *error = nil;
-            BOOL success = [fileManager removeItemAtPath:profilePath error:&error];
-            
-            if (success) {
-                NSLog(@"[WeaponX] Successfully deleted profile folder: %@", profilePath);
-                
-                // Update local arrays and table view
-                if (self.isSearchActive) {
-                    [self.filteredProfiles removeObjectAtIndex:indexPath.row];
-                    
-                    // Also remove from main profiles array
-                    NSInteger mainIndex = [self.profiles indexOfObject:profile];
-                    if (mainIndex != NSNotFound) {
-                        [self.profiles removeObjectAtIndex:mainIndex];
-                    }
-                } else {
-                    [self.profiles removeObjectAtIndex:indexPath.row];
-                }
-                
-                [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
-                [self updateProfileCount];
-                
-                // Notify delegate
-                if ([self.delegate respondsToSelector:@selector(profileManagerViewController:didUpdateProfiles:)]) {
-                    [self.delegate profileManagerViewController:self didUpdateProfiles:self.profiles];
-                }
-            } else {
-                NSLog(@"[WeaponX] Failed to delete profile folder: %@, Error: %@", profilePath, error);
-                
-                // Show error alert
-                UIAlertController *errorAlert = [UIAlertController alertControllerWithTitle:@"Error"
-                                                                           message:[NSString stringWithFormat:@"Failed to delete profile: %@", error.localizedDescription ?: @"Unknown error"]
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
-                [errorAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:errorAlert animated:YES completion:nil];
-                
-                // Reload profiles from disk to ensure UI is in sync
-                [self loadProfilesFromDisk];
-            }
-            
-            completionHandler(YES);
-        }]];
-        
-        [self presentViewController:confirmAlert animated:YES completion:nil];
-    }];
-    
-    // Set delete action image
+    (void)tableView;
+    NSArray<Profile *> *shown = self.isSearchActive ? self.filteredProfiles : self.profiles;
+    if (indexPath.section != 3 || indexPath.row < 0 || (NSUInteger)indexPath.row >= shown.count) return nil;
+    NSString *profileID = [shown[(NSUInteger)indexPath.row].profileId copy];
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *deleteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:@"Delete"
+        handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            (void)action; (void)sourceView;
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) { completionHandler(NO); return; }
+            [self confirmDeletionOfProfileID:profileID showResult:NO completion:completionHandler];
+        }];
     deleteAction.image = PXSystemImageNamed(@"trash");
-    
-    // Create swipe action configuration
     UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[deleteAction]];
-    configuration.performsFirstActionWithFullSwipe = NO; // Require confirmation for delete
-    
+    configuration.performsFirstActionWithFullSwipe = NO;
     return configuration;
 }
-
-#pragma mark - UITableViewDelegate
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -1666,108 +1410,46 @@
 }
 
 - (void)showDeleteConfirmationForProfile:(Profile *)profile {
-    // Verify we have more than one profile
-    if (self.profiles.count <= 1) {
-        // Show error - can't delete last profile
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cannot Delete"
-                                                                 message:@"You cannot delete the last profile. At least one profile must remain."
-                                                              preferredStyle:UIAlertControllerStyleAlert];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-    
-    // Check if this is the current active profile
-    ProfileManager *manager = [ProfileManager sharedManager];
-    if ([manager.currentProfile.profileId isEqualToString:profile.profileId]) {
-        // Show error - can't delete current profile
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cannot Delete"
-                                                                     message:@"You cannot delete the currently active profile. Please switch to another profile first."
-                                                              preferredStyle:UIAlertControllerStyleAlert];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-    
+    [self confirmDeletionOfProfileID:[profile.profileId copy] showResult:YES completion:nil];
+}
+
+- (void)confirmDeletionOfProfileID:(NSString *)profileID showResult:(BOOL)showResult completion:(void (^)(BOOL))completion {
+    NSString *targetID = [profileID copy];
+    __block BOOL finished = NO;
+    void (^finish)(BOOL) = ^(BOOL ok) { if (!finished) { finished = YES; if (completion) completion(ok); } };
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete Profile"
-                                                                 message:@"Are you sure you want to delete this profile? This action cannot be undone."
-                                                          preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                            style:UIAlertActionStyleCancel
-                                          handler:nil]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Delete"
-                                            style:UIAlertActionStyleDestructive
-                                          handler:^(UIAlertAction * _Nonnull action) {
-        // Show loading indicator
-        UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
-        loadingIndicator.center = self.view.center;
-        loadingIndicator.hidesWhenStopped = YES;
-        [self.view addSubview:loadingIndicator];
-        [loadingIndicator startAnimating];
-        
-        // Direct approach: Delete the profile folder from the filesystem
-        NSString *profilesDirectory = PXProfilesPath();
-        NSString *profilePath = [profilesDirectory stringByAppendingPathComponent:profile.profileId];
-        
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        NSError *error = nil;
-        BOOL success = [fileManager removeItemAtPath:profilePath error:&error];
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [loadingIndicator stopAnimating];
-            [loadingIndicator removeFromSuperview];
-            
-            if (success) {
-                NSLog(@"[WeaponX] Successfully deleted profile folder: %@", profilePath);
-                
-                // Remove profile from local array
-                NSInteger index = [self.profiles indexOfObject:profile];
-                if (index != NSNotFound) {
-                    [self.profiles removeObjectAtIndex:index];
-                }
-                
-                if (self.isSearchActive) {
-                    NSInteger searchIndex = [self.filteredProfiles indexOfObject:profile];
-                    if (searchIndex != NSNotFound) {
-                        [self.filteredProfiles removeObjectAtIndex:searchIndex];
-                    }
-                }
-                
-                // Reload the table view
-                [self.tableView reloadData];
-                [self updateProfileCount];
-                
-                // Notify delegate
-                if ([self.delegate respondsToSelector:@selector(profileManagerViewController:didUpdateProfiles:)]) {
-                    [self.delegate profileManagerViewController:self didUpdateProfiles:self.profiles];
-                }
-                
-                // Show success alert
-                UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"Success"
-                                                                                    message:@"Profile deleted successfully"
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-                [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:successAlert animated:YES completion:nil];
-            } else {
-                NSLog(@"[WeaponX] Failed to delete profile folder: %@, Error: %@", profilePath, error);
-                
-                // Show error alert
-                UIAlertController *errorAlert = [UIAlertController alertControllerWithTitle:@"Error"
-                                                                                   message:[NSString stringWithFormat:@"Failed to delete profile: %@", error.localizedDescription ?: @"Unknown error"]
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-                [errorAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:errorAlert animated:YES completion:nil];
-            }
-            
-            // Reload profiles from disk to ensure UI is in sync
-            [self loadProfilesFromDisk];
-        });
+        message:[NSString stringWithFormat:@"Remove registered profile %@? This action cannot be undone. Active profiles cannot be removed.", targetID]
+        preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        (void)action; finish(NO);
     }]];
-    
+    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        (void)action;
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) { finish(NO); return; }
+        UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
+        indicator.center = self.view.center; indicator.hidesWhenStopped = YES;
+        [self.view addSubview:indicator]; [indicator startAnimating];
+        [[ProfileManager sharedManager] deleteInactiveProfileID:targetID completion:^(BOOL success, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [indicator stopAnimating]; [indicator removeFromSuperview]; finish(success);
+                __strong typeof(weakSelf) owner = weakSelf;
+                if (!owner) return;
+                [owner loadProfilesFromDisk];
+                if (success && [owner.delegate respondsToSelector:@selector(profileManagerViewController:didUpdateProfiles:)])
+                    [owner.delegate profileManagerViewController:owner didUpdateProfiles:owner.profiles];
+                if (!success || showResult) {
+                    NSString *message = success ? @"Profile removed from the registered list." :
+                        [NSString stringWithFormat:@"%@\nReload before retrying; a previous step may already have completed.", error.localizedDescription ?: @"Could not remove the profile."];
+                    UIAlertController *result = [UIAlertController alertControllerWithTitle:success ? @"Profile Removed" : @"Delete Failed"
+                        message:message preferredStyle:UIAlertControllerStyleAlert];
+                    [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    [owner presentViewController:result animated:YES completion:nil];
+                }
+            });
+        }];
+    }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -2216,9 +1898,9 @@
 }
 
 - (void)deleteTapped:(UIButton *)sender {
-    NSInteger index = sender.tag;
-    Profile *profile = self.isSearchActive ? self.filteredProfiles[index] : self.profiles[index];
-    [self showDeleteConfirmationForProfile:profile];
+    NSArray<Profile *> *shown = self.isSearchActive ? self.filteredProfiles : self.profiles;
+    if (sender.tag < 0 || (NSUInteger)sender.tag >= shown.count) return;
+    [self showDeleteConfirmationForProfile:shown[(NSUInteger)sender.tag]];
 }
 
 - (void)loadMoreProfiles {
@@ -2267,139 +1949,39 @@
 }
 
 - (void)trashAllButtonTapped:(UIButton *)sender {
-    // Show confirmation alert
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete All Profiles"
-                                                               message:@"Are you sure you want to delete all profiles? This action cannot be undone. The current active profile and profile '0' will be preserved."
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    
+    (void)sender;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete Inactive Profiles"
+        message:@"Remove inactive registered profiles? The active profile, 0/profile_0 and unregistered folders will be kept. This action cannot be undone."
+        preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Delete All" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        [self deleteAllProfiles];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Delete All" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        (void)action; [weakSelf deleteAllProfiles];
     }]];
-    
     [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)deleteAllProfiles {
-    // Show loading indicator
-    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
-    loadingIndicator.center = self.view.center;
-    loadingIndicator.hidesWhenStopped = YES;
-    [self.view addSubview:loadingIndicator];
-    [loadingIndicator startAnimating];
-    
-    // Get the profiles directory
-    NSString *profilesDirectory = PXProfilesPath();
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    
-    // Get current profile ID to preserve it - use the central profile info which is more reliable
-    ProfileManager *manager = [ProfileManager sharedManager];
-    NSDictionary *centralInfo = [manager loadCentralProfileInfo];
-    NSString *currentProfileId = nil;
-    
-    // First try to get the profile ID from central info
-    if (centralInfo && centralInfo[@"ProfileId"]) {
-        currentProfileId = centralInfo[@"ProfileId"];
-        NSLog(@"[WeaponX] Using central profile info ID for preservation: %@", currentProfileId);
-    } 
-    // Fallback to manager's currentProfile if central info doesn't exist
-    else if (manager.currentProfile) {
-        currentProfileId = manager.currentProfile.profileId;
-        NSLog(@"[WeaponX] Using manager's current profile ID for preservation: %@", currentProfileId);
-    }
-    
-    // If we still don't have a profile ID, log the issue
-    if (!currentProfileId) {
-        NSLog(@"[WeaponX] Warning: No current profile ID found for preservation");
-    }
-    
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSError *error = nil;
-        NSArray *contents = [fileManager contentsOfDirectoryAtPath:profilesDirectory error:&error];
-        
-        if (error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [loadingIndicator stopAnimating];
-                [loadingIndicator removeFromSuperview];
-                
-                UIAlertController *errorAlert = [UIAlertController alertControllerWithTitle:@"Error"
-                                                                                   message:[NSString stringWithFormat:@"Failed to access profiles directory: %@", error.localizedDescription]
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-                [errorAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:errorAlert animated:YES completion:nil];
-            });
-            return;
-        }
-        
-        NSInteger deletedCount = 0;
-        NSMutableArray *failedItems = [NSMutableArray array];
-        NSMutableArray *skippedItems = [NSMutableArray array];
-        
-        for (NSString *item in contents) {
-            // Skip profiles.plist file and folder named "0" or "profile_0"
-            if ([item isEqualToString:@"profiles.plist"] || 
-                [item isEqualToString:@"0"] || 
-                [item isEqualToString:@"profile_0"]) {
-                [skippedItems addObject:item];
-                NSLog(@"[WeaponX] Skipping system profile: %@", item);
-                continue;
-            }
-            
-            // Skip the current profile
-            if (currentProfileId && [item isEqualToString:currentProfileId]) {
-                [skippedItems addObject:item];
-                NSLog(@"[WeaponX] Skipping current profile: %@", item);
-                continue;
-            }
-            
-            NSString *itemPath = [profilesDirectory stringByAppendingPathComponent:item];
-            BOOL isDirectory = NO;
-            
-            // Skip non-directories
-            if (![fileManager fileExistsAtPath:itemPath isDirectory:&isDirectory] || !isDirectory) {
-                NSLog(@"[WeaponX] Skipping non-directory: %@", item);
-                continue;
-            }
-            
-            // Try to delete the folder
-            NSError *deleteError = nil;
-            BOOL success = [fileManager removeItemAtPath:itemPath error:&deleteError];
-            
-            if (success) {
-                deletedCount++;
-                NSLog(@"[WeaponX] Successfully deleted profile: %@", item);
-            } else {
-                [failedItems addObject:item];
-                NSLog(@"[WeaponX] Failed to delete profile %@: %@", item, deleteError.localizedDescription);
-            }
-        }
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [loadingIndicator stopAnimating];
-            [loadingIndicator removeFromSuperview];
-            
-            // Reload profiles from disk
-            [self loadProfilesFromDisk];
-            
-            // Show results
-            NSString *resultMessage;
-            if (failedItems.count == 0) {
-                resultMessage = [NSString stringWithFormat:@"Successfully deleted %ld profiles. Current active profile was preserved.", (long)deletedCount];
-            } else {
-                resultMessage = [NSString stringWithFormat:@"Deleted %ld profiles. Failed to delete %ld profiles. Current active profile was preserved.", (long)deletedCount, (long)failedItems.count];
-            }
-            
-            // Log skipped profiles
-            NSLog(@"[WeaponX] Profiles skipped during delete all: %@", skippedItems);
-            
-            UIAlertController *resultAlert = [UIAlertController alertControllerWithTitle:@"Delete Complete"
-                                                                              message:resultMessage
-                                                                       preferredStyle:UIAlertControllerStyleAlert];
-            [resultAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:resultAlert animated:YES completion:nil];
-        });
-    });
+    UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXLargeActivityIndicatorStyle()];
+    indicator.center = self.view.center; indicator.hidesWhenStopped = YES;
+    [self.view addSubview:indicator]; [indicator startAnimating];
+    __weak typeof(self) weakSelf = self;
+    [[ProfileManager sharedManager] deleteInactiveProfilesWithCompletion:^(NSDictionary *report) {
+        [indicator stopAnimating]; [indicator removeFromSuperview];
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [self loadProfilesFromDisk];
+        NSUInteger removed = [report[@"deleted"] count], skipped = [report[@"skipped"] count], failed = [report[@"failed"] count];
+        if (removed && [self.delegate respondsToSelector:@selector(profileManagerViewController:didUpdateProfiles:)])
+            [self.delegate profileManagerViewController:self didUpdateProfiles:self.profiles];
+        NSString *message = [report[@"error"] length] ? report[@"error"] :
+            [NSString stringWithFormat:@"Removed %lu registered profiles; kept %lu; failed %lu. Unregistered folders were preserved.",
+                (unsigned long)removed, (unsigned long)skipped, (unsigned long)failed];
+        UIAlertController *result = [UIAlertController alertControllerWithTitle:failed || [report[@"error"] length] ? @"Delete Incomplete" : @"Delete Complete"
+            message:message preferredStyle:UIAlertControllerStyleAlert];
+        [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:result animated:YES completion:nil];
+    }];
 }
 
 - (void)exportTapped:(UIButton *)sender {

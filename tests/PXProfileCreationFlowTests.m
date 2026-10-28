@@ -1586,6 +1586,119 @@ static void TestDeletionRecovery(NSString *executable) {
     CHECK([gMirroredID isEqual:manager.mutableCurrentProfile.profileId],
           "queued defaults mirror eventually adopts the committed profile after inactive deletion");
 }
+@interface PXUIDeletionFixture : PXObservedProfileCreationFixture
+@property (nonatomic, copy) void (^afterInactiveAttempt)(NSString *profileID, BOOL success);
+@end
+@implementation PXUIDeletionFixture
+- (void)deleteInactiveProfileID:(NSString *)profileID completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    [super deleteInactiveProfileID:profileID completion:^(BOOL ok, NSError *error) {
+        if (completion) completion(ok, error);
+        if (self.afterInactiveAttempt) self.afterInactiveAttempt(profileID, ok);
+    }];
+}
+@end
+static void TestUIDeletionAuthority(void) {
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "UI deletion fixture drains previous namespace callbacks");
+    NSString *previousRoot = gRoot; PXRuntimeSourceStore *previousStore = gStore;
+    gRoot = Path(previousRoot, @"ui-delete-authority");
+    NSFileManager *fm = NSFileManager.defaultManager;
+    CHECK([fm createDirectoryAtPath:Identity(@"0") withIntermediateDirectories:YES attributes:nil error:NULL], "UI deletion isolated root created");
+    SetupStore(); ResetWorker(); gPause = NO;
+    PXUIDeletionFixture *manager = [PXUIDeletionFixture new];
+    Profile *zero = New(@"ui-zero"); [zero setValue:@"0" forKey:@"profileId"];
+    [manager.mutableProfiles addObject:zero]; manager.mutableCurrentProfile = zero;
+    CHECK(gStore && [manager updateCurrentProfileInfoWithProfile:zero error:NULL], "UI deletion initial selection committed");
+    [manager saveProfilesWithCompletion:^(BOOL ok, NSError *error) { CHECK(ok && !error, "UI deletion initial registry saved"); }];
+    Profile *one = SeedRegistered(manager, @"ui-delete-one"), *two = SeedRegistered(manager, @"ui-delete-two");
+    Profile *protected = New(@"ui-protected"); [protected setValue:@"profile_0" forKey:@"profileId"];
+    [manager createDirectoryIfNeeded:Identity(protected.profileId)]; [manager.mutableProfiles addObject:protected];
+    [manager saveProfilesWithCompletion:^(BOOL ok, NSError *error) { CHECK(ok && !error, "UI deletion protected alias saved"); }];
+    [manager createDirectoryIfNeeded:Identity(@"orphan-only")];
+    PXProfileCreationReservation *reservation = Reserve(PXProfilesPath(), @"reserved-only", NULL);
+    NSArray *published = manager.profiles;
+    CHECK(reservation && published.count == 4 && !PXFindFixtureProfile(published, @"orphan-only") && !PXFindFixtureProfile(published, @"reserved-only"),
+        "verified list exposes registered models without adopting orphan or reserved directories");
+    NSData *archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]; NSDictionary *active = ActiveFiles();
+    NSUInteger notices = gNotices; __block NSUInteger callbacks = 0; __block BOOL success = YES; __block NSError *failure = nil;
+    manager.mutableCurrentProfile = one;
+    [manager deleteInactiveProfileID:@"0" completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && !success && failure.code == 32 && [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] &&
+        [active isEqual:ActiveFiles()] && notices == gNotices && [fm fileExistsAtPath:Identity(@"0")],
+        "inactive-only delete checks committed active ID instead of stale UI memory");
+    manager.mutableCurrentProfile = zero;
+    Select(manager, one); archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]; active = ActiveFiles(); notices = gNotices;
+    callbacks = 0; [manager deleteInactiveProfileID:one.profileId completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && !success && failure.code == 32 && [active isEqual:ActiveFiles()] && notices == gNotices &&
+        [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && [fm fileExistsAtPath:Identity(one.profileId)],
+        "profile activated after confirmation cannot be removed through UI deletion");
+    Select(manager, zero); archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]; active = ActiveFiles(); notices = gNotices;
+    gStore.testCheckpoint = ^(NSString *phase) { if ([phase isEqual:@"source-written"]) [NSException raise:@"fixture.ui-delete" format:@"delete decision fault"]; };
+    callbacks = 0; [manager deleteInactiveProfileID:one.profileId completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    gStore.testCheckpoint = nil;
+    CHECK(callbacks == 1 && !success && failure && [active isEqual:ActiveFiles()] && [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] &&
+        [fm fileExistsAtPath:Identity(one.profileId)] && notices == gNotices && !manager.lifecycleLease && !manager.creationInProgress,
+        "UI delete decision failure preserves registry directory and callback lifecycle");
+    callbacks = 0; [manager deleteInactiveProfileID:one.profileId completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    CHECK(callbacks == 1 && success && !failure && !PXFindFixtureProfile(manager.profiles, one.profileId) && ![fm fileExistsAtPath:Identity(one.profileId)] &&
+        published.count == 4 && notices + 1 == gNotices, "UI delete success unregisters before file cleanup without mutating a captured list");
+
+    notices = gNotices;
+    PXProfileDeletionTestCheckpoint = ^(NSString *stage) {
+        if ([stage isEqual:@"settled"]) CHECK(ExternalSelectionWrite(@{ @"ProfileId": two.profileId }), "post-settlement active selection installed");
+    };
+    callbacks = 0; [manager deleteInactiveProfileID:two.profileId completion:^(BOOL ok, NSError *error) { callbacks++; success = ok; failure = error; }];
+    PXProfileDeletionTestCheckpoint = nil;
+    CHECK(callbacks == 1 && !success && failure.code == 20 && manager.registryUnavailable && [fm fileExistsAtPath:Identity(two.profileId)] &&
+        [Record(PXCurrentProfileInfoPath())[@"ProfileId"] isEqual:two.profileId] && notices == gNotices,
+        "source drift after logical deletion preserves newly active files and reports partial failure");
+    CHECK(Reload(manager), "post-settlement drift reload restores the explicit committed target without cleanup retry");
+    drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "UI deletion recovery mirror drains before bulk fixture");
+    Select(manager, zero);
+    Profile *three = SeedRegistered(manager, @"bulk-becomes-active");
+    __block NSString *lateID = nil; NSMutableArray *attempts = [NSMutableArray array];
+    __weak PXUIDeletionFixture *weakManager = manager;
+    manager.afterInactiveAttempt = ^(NSString *profileID, BOOL ok) {
+        [attempts addObject:profileID];
+        PXUIDeletionFixture *owner = weakManager;
+        if (ok && [profileID isEqual:two.profileId] && !lateID) {
+            Select(owner, three); lateID = [SeedRegistered(owner, @"created-between-bulk-items").profileId copy];
+        }
+    };
+    __block NSDictionary *report = nil; callbacks = 0;
+    [manager deleteInactiveProfilesWithCompletion:^(NSDictionary *value) { callbacks++; report = value; CHECK(NSThread.isMainThread && !manager.lifecycleLease, "bulk completion runs on main outside lifecycle ownership"); }];
+    CHECK(Pump(^BOOL { return report != nil; }) && callbacks == 1 && [report[@"deleted"] count] == 1 && [report[@"deleted"] containsObject:two.profileId] &&
+        [report[@"skipped"] containsObject:@"0"] && [report[@"skipped"] containsObject:@"profile_0"] && [report[@"skipped"] containsObject:three.profileId] &&
+        [report[@"failed"] count] == 0 && lateID && attempts.count == 2 && [fm fileExistsAtPath:Identity(three.profileId)] &&
+        [fm fileExistsAtPath:Identity(lateID)] && [fm fileExistsAtPath:Identity(@"orphan-only")] && [fm fileExistsAtPath:Identity(@"reserved-only")] &&
+        [fm fileExistsAtPath:Identity(@"profile_0")], "bulk delete preserves live active protected orphan reserved and newly created profiles");
+    manager.afterInactiveAttempt = nil;
+    Profile *blocked = SeedRegistered(manager, @"bulk-busy"); (void)blocked;
+    active = ActiveFiles(); archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]; notices = gNotices;
+    PXProfileLifecycleLease *other = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:NULL];
+    report = nil; callbacks = 0;
+    [manager deleteInactiveProfilesWithCompletion:^(NSDictionary *value) { callbacks++; report = value; }];
+    CHECK(Pump(^BOOL { return report != nil; }) && other && callbacks == 1 && [report[@"failed"] count] == 3 && [report[@"deleted"] count] == 0 &&
+        [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && [active isEqual:ActiveFiles()] && notices == gNotices,
+        "busy bulk deletion reports one bounded failure per captured candidate without retry or mutation");
+    [other invalidate];
+    __block BOOL delivered = NO;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [manager deleteInactiveProfileID:blocked.profileId completion:^(BOOL ok, NSError *error) {
+            success = ok; failure = error; delivered = NSThread.isMainThread && !manager.lifecycleLease && !manager.creationInProgress;
+        }];
+    });
+    CHECK(Pump(^BOOL { return delivered; }) && success && !failure && ![fm fileExistsAtPath:Identity(blocked.profileId)],
+        "background inactive delete completes on main after releasing lifecycle ownership");
+    manager.registryUnavailable = YES; report = nil; callbacks = 0;
+    [manager deleteInactiveProfilesWithCompletion:^(NSDictionary *value) { callbacks++; report = value; }];
+    CHECK(callbacks == 1 && [report[@"error"] length] && [report[@"deleted"] count] == 0, "invalid registry stops bulk deletion before any namespace cleanup");
+    drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+    CHECK(Pump(^BOOL { return drained; }), "UI deletion isolated callbacks drained before root restore");
+    [fm removeItemAtPath:gRoot error:NULL]; gRoot = previousRoot; gStore = previousStore;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -1643,6 +1756,7 @@ int main(int argc, const char *argv[]) {
         TestCreationDirectoryDrift(manager); TestCreationDisplayDrift(manager);
         TestProfileMetadataUpdates(); TestDefaultProfileSeeding(); TestRegistryEncodingPreflight(); TestOwnedMetadataEdits(); TestActivationModelPolicy(); TestActivationCallbackDrift(); TestRegistryAndDeletion();
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
+        TestUIDeletionAuthority();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

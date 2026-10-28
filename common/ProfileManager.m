@@ -86,6 +86,9 @@
 - (BOOL)createProfileZeroWithError:(NSError **)error;
 - (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error;
 - (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
+- (BOOL)deleteRegisteredProfileID:(NSString *)targetID requireInactive:(BOOL)requireInactive selectionChanged:(BOOL *)selectionChanged error:(NSError **)error;
+- (void)deleteProfileID:(NSString *)profileID requireInactive:(BOOL)requireInactive completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
+- (void)deleteInactiveProfileIDs:(NSArray<NSString *> *)profileIDs index:(NSUInteger)index result:(NSMutableDictionary *)result completion:(void (^)(NSDictionary *result))completion;
 - (void)loadProfilesUnderLeaseWithCompletion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 
 @end
@@ -764,16 +767,28 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self deleteProfile:profile completion:completion]; }); return;
     }
+    NSString *profileID = [profile isKindOfClass:Profile.class] ? [profile.profileId copy] : nil;
+    [self deleteProfileID:profileID requireInactive:NO completion:completion];
+}
+
+- (void)deleteInactiveProfileID:(NSString *)profileID completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    [self deleteProfileID:profileID requireInactive:YES completion:completion];
+}
+
+- (void)deleteProfileID:(NSString *)profileID requireInactive:(BOOL)requireInactive completion:(void (^)(BOOL success, NSError * _Nullable error))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self deleteProfileID:profileID requireInactive:requireInactive completion:completion]; }); return;
+    }
     if (self.selectionUnavailable || self.registryUnavailable) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"Reload a valid profile selection and registry before changing profiles"}]); return;
     }
     if (self.creationInProgress) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:12 userInfo:@{NSLocalizedDescriptionKey: @"Another profile change is in progress"}]); return;
     }
-    NSString *targetID = [PXValidatedProfileID(profile.profileId) copy];
+    NSString *targetID = [PXValidatedProfileID(profileID) copy];
     Profile *registered = nil;
     for (Profile *candidate in self.mutableProfiles) if ([candidate.profileId isEqualToString:targetID]) { registered = candidate; break; }
-    if (!registered || ![registered.profileId isEqualToString:profile.profileId]) {
+    if (!registered || ![targetID isEqual:profileID]) {
         if (completion) completion(NO, [NSError errorWithDomain:@"WeaponXProfileError" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Profile not found"}]); return;
     }
     if (self.mutableProfiles.count <= 1) {
@@ -782,7 +797,7 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     NSError *failure = nil;
     if (![self beginProfileOperationWithError:&failure]) { if (completion) completion(NO, failure); return; }
     BOOL success = NO, selectionChanged = NO;
-    @try { success = [self deleteRegisteredProfileID:targetID selectionChanged:&selectionChanged error:&failure]; }
+    @try { success = [self deleteRegisteredProfileID:targetID requireInactive:requireInactive selectionChanged:&selectionChanged error:&failure]; }
     @catch (NSException *exception) {
         self.registryUnavailable = YES;
         failure = [NSError errorWithDomain:@"WeaponXProfileError" code:26 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Profile deletion did not finish; reload the registry"}];
@@ -793,6 +808,10 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
 }
 
 - (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error {
+    return [self deleteRegisteredProfileID:targetID requireInactive:NO selectionChanged:selectionChanged error:error];
+}
+
+- (BOOL)deleteRegisteredProfileID:(NSString *)targetID requireInactive:(BOOL)requireInactive selectionChanged:(BOOL *)selectionChanged error:(NSError **)error {
     NSArray *original = [self.mutableProfiles copy];
     NSDictionary *proof = [self.lifecycleLease directoryProofForProfileID:targetID error:error];
     NSDictionary *expected = proof ? [self captureProfileSelectionWithError:error] : nil;
@@ -810,6 +829,9 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
         }
     }
     BOOL active = [selectedID isEqualToString:targetID];
+    if (requireInactive && active) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:32 userInfo:@{NSLocalizedDescriptionKey: @"Cannot delete the active profile; switch to another profile first"}]; return NO;
+    }
     if (!selected || ![self identityForActivationProfile:selected generation:nil error:NULL] || !remaining.count || (active && !fallback)) {
         if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:21 userInfo:@{NSLocalizedDescriptionKey: @"A valid committed selection and fallback profile are required for deletion"}]; return NO;
     }
@@ -868,13 +890,62 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     PXProfileDeletionCheckpoint(@"settled");
     NSError *cleanupError = nil;
     @try {
-        if (![self.lifecycleLease removeDirectoryForProfileID:targetID proof:proof error:&cleanupError])
+        // A bypass writer can change selection/registry even while this lease is
+        // held. Preserve files when the settled receipts no longer match. This
+        // checkpoint is not an atomic barrier against non-cooperating writers.
+        NSDictionary *registry = [self.lifecycleLease readRegistryWithError:&cleanupError];
+        BOOL unchanged = [registry isEqual:intent[@"registryAfter"]] && PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            return PXRuntimeProfileSelectionMatches(tx, intent[@"selectionAfter"], PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError);
+        }, &cleanupError);
+        if (!unchanged) {
+            self.registryUnavailable = YES;
+            if (error) *error = cleanupError ?: [NSError errorWithDomain:@"WeaponXProfileError" code:25 userInfo:@{NSLocalizedDescriptionKey: @"Sources changed after logical deletion; files preserved, reload before retrying"}];
+            return NO;
+        }
+        else if (![self.lifecycleLease removeDirectoryForProfileID:targetID proof:proof error:&cleanupError])
             NSLog(@"[ProfileManager] Logical deletion committed; inactive cleanup incomplete: %@", cleanupError);
     } @catch (NSException *exception) {
         NSLog(@"[ProfileManager] Logical deletion committed; inactive cleanup raised: %@", exception);
     }
     // A reload replays registry decisions only. It never retries this path.
     return YES;
+}
+
+- (void)deleteInactiveProfilesWithCompletion:(void (^)(NSDictionary *result))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self deleteInactiveProfilesWithCompletion:completion]; }); return;
+    }
+    NSMutableArray *ids = [NSMutableArray array]; NSMutableSet *seen = [NSMutableSet set];
+    BOOL valid = !self.selectionUnavailable && !self.registryUnavailable;
+    if (valid) for (Profile *profile in self.mutableProfiles) {
+        NSString *profileID = [profile isKindOfClass:Profile.class] ? [PXValidatedProfileID(profile.profileId) copy] : nil;
+        if (!profileID || ![profileID isEqual:profile.profileId] || [seen containsObject:profileID]) { valid = NO; break; }
+        [ids addObject:profileID]; [seen addObject:profileID];
+    }
+    if (!valid) {
+        if (completion) completion(@{ @"deleted": @[], @"skipped": @[], @"failed": @{}, @"error": @"Reload a valid profile registry before deleting profiles" }); return;
+    }
+    NSMutableDictionary *result = [@{ @"deleted": [NSMutableArray array], @"skipped": [NSMutableArray array], @"failed": [NSMutableDictionary dictionary] } mutableCopy];
+    [self deleteInactiveProfileIDs:[ids copy] index:0 result:result completion:completion];
+}
+
+- (void)deleteInactiveProfileIDs:(NSArray<NSString *> *)profileIDs index:(NSUInteger)index result:(NSMutableDictionary *)result completion:(void (^)(NSDictionary *result))completion {
+    if (index == profileIDs.count) {
+        if (completion) completion(@{ @"deleted": [result[@"deleted"] copy], @"skipped": [result[@"skipped"] copy], @"failed": [result[@"failed"] copy], @"error": @"" }); return;
+    }
+    NSString *profileID = profileIDs[index];
+    void (^next)(void) = ^{
+        // Yield between items; each item reacquires ownership and rechecks the
+        // current active selection. Newly registered IDs are outside this batch.
+        dispatch_async(dispatch_get_main_queue(), ^{ [self deleteInactiveProfileIDs:profileIDs index:index + 1 result:result completion:completion]; });
+    };
+    if ([profileID isEqual:@"0"] || [profileID isEqual:@"profile_0"]) { [result[@"skipped"] addObject:profileID]; next(); return; }
+    [self deleteInactiveProfileID:profileID completion:^(BOOL success, NSError *error) {
+        if (success) [result[@"deleted"] addObject:profileID];
+        else if ([error.domain isEqual:@"WeaponXProfileError"] && (error.code == 3 || error.code == 4 || error.code == 32)) [result[@"skipped"] addObject:profileID];
+        else result[@"failed"][profileID] = [error.localizedDescription copy] ?: @"Profile deletion did not complete; reload before retrying";
+        next();
+    }];
 }
 
 - (void)terminateEnabledScopedApps {

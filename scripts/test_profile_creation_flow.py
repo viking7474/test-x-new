@@ -54,6 +54,12 @@ METHODS += ['- (NSArray<Profile *> *)decodeRegistryRecord:(NSDictionary *)record
             '- (Profile *)detachedProfileForCreation:(Profile *)profile expectedID:(NSString *)expectedID error:(NSError **)error']
 EDIT = '- (void)editProfileID:(NSString *)profileID name:(NSString *)name shortDescription:(NSString *)shortDescription completion:(void (^)(BOOL success, NSError * _Nullable error))completion'
 METHODS += [EDIT, '- (void)renameProfile:(NSString *)oldName to:(NSString *)newName']
+DELETE_ID = '- (void)deleteProfileID:(NSString *)profileID requireInactive:(BOOL)requireInactive completion:(void (^)(BOOL success, NSError * _Nullable error))completion'
+DELETE_CORE = '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID requireInactive:(BOOL)requireInactive selectionChanged:(BOOL *)selectionChanged error:(NSError **)error'
+METHODS += ['- (NSArray<Profile *> *)profiles', DELETE_ID, DELETE_CORE,
+            '- (void)deleteInactiveProfileID:(NSString *)profileID completion:(void (^)(BOOL success, NSError * _Nullable error))completion',
+            '- (void)deleteInactiveProfilesWithCompletion:(void (^)(NSDictionary *result))completion',
+            '- (void)deleteInactiveProfileIDs:(NSArray<NSString *> *)profileIDs index:(NSUInteger)index result:(NSMutableDictionary *)result completion:(void (^)(NSDictionary *result))completion']
 
 
 def check_macro_arity(source, label):
@@ -191,7 +197,7 @@ def source_contracts():
                  'failed creation capture releases ownership before completion',
                  'uncapturable creation input fails before reservation providers registry or publication'):
         assert case in fixture, case
-    for signature in METHODS[:4]:
+    for signature in METHODS[:3] + [DELETE_ID]:
         body = writers.method(source, signature)
         assert 'if (!NSThread.isMainThread)' in body and 'if (self.creationInProgress)' in body
     finish = writers.method(source, '- (void)finishProfileCreation:(Profile *)profile targetID:(NSString *)targetID generation:(PXCommittedRuntimeGeneration *)generation expectedSelection:(NSDictionary *)expected error:(NSError *)generationError completion:(void (^)(BOOL success, NSError * _Nullable error))completion')
@@ -259,7 +265,25 @@ def source_contracts():
     assert 'SelectionRevision' in source and 'selectionUnavailable' in source
     assert 'registryUnavailable' in source
     ui = read('ProfileManagerViewController.m')
-    assert ui.count('refreshCurrentProfileFromCommittedSelectionWithError:NULL') == 4
+    assert ui.count('refreshCurrentProfileFromCommittedSelectionWithError:NULL') == 3
+    list_ui = writers.method(ui, '- (void)loadProfilesFromDisk')
+    assert 'loadProfilesWithCompletion:' in list_ui and 'manager.profiles' in list_ui and 'performSearch' in list_ui
+    for forbidden in ('contentsOfDirectoryAtPath:', 'NSKeyedUnarchiver', 'enrichProfilesWithAdditionalInfo', 'intValue'):
+        assert forbidden not in list_ui, forbidden
+    for signature in ('- (void)deleteAllProfiles', '- (void)showDeleteConfirmationForProfile:(Profile *)profile',
+                      '- (void)confirmDeletionOfProfileID:(NSString *)profileID showResult:(BOOL)showResult completion:(void (^)(BOOL))completion',
+                      '- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath'):
+        body = writers.method(ui, signature)
+        for forbidden in ('removeItemAtPath:', 'contentsOfDirectoryAtPath:', 'removeObjectAtIndex:', 'deleteRowsAtIndexPaths:'):
+            assert forbidden not in body, forbidden
+    confirmation = writers.method(ui, '- (void)confirmDeletionOfProfileID:(NSString *)profileID showResult:(BOOL)showResult completion:(void (^)(BOOL))completion')
+    assert 'deleteInactiveProfileID:targetID' in confirmation and 'finish(success)' in confirmation and 'if (!finished)' in confirmation
+    bulk = writers.method(source, '- (void)deleteInactiveProfilesWithCompletion:(void (^)(NSDictionary *result))completion')
+    step = writers.method(source, '- (void)deleteInactiveProfileIDs:(NSArray<NSString *> *)profileIDs index:(NSUInteger)index result:(NSMutableDictionary *)result completion:(void (^)(NSDictionary *result))completion')
+    assert 'self.mutableProfiles' in bulk and '[ids copy]' in bulk
+    assert 'dispatch_get_main_queue()' in step and 'deleteInactiveProfileID:profileID' in step
+    assert '@"0"' in step and '@"profile_0"' in step and 'error.code == 32' in step
+    assert 'removeItemAtPath:' not in bulk + step and 'contentsOfDirectoryAtPath:' not in bulk + step
     edit = writers.method(source, EDIT)
     assert edit.index('beginProfileOperationWithError:') < edit.index('archivedDataWithRootObject:models') < edit.index('updateProfileUnderLease:edit') < edit.index('PXStageRuntimeProfileSelectionIfUnchanged')
     assert '@finally { [self endProfileOperation]; }' in edit
@@ -370,9 +394,26 @@ def source_contracts():
     assert 'expected isEqual:observed' in begin and 'self.lifecycleLease = lease;' in begin
     assert '[self.lifecycleLease invalidate];' in writers.method(source, '- (void)endProfileOperation')
     assert 'NS_RETURNS_RETAINED' in read('common/PXProfileLifecycleLease.h')
-    for signature in METHODS[:4]:
+    for signature in METHODS[:3] + [DELETE_ID]:
         assert 'beginProfileOperationWithError:' in writers.method(source, signature)
-    delete = writers.method(source, '- (BOOL)deleteRegisteredProfileID:(NSString *)targetID selectionChanged:(BOOL *)selectionChanged error:(NSError **)error')
+    delete = writers.method(source, DELETE_CORE)
+    delete_entry = writers.method(source, DELETE_ID)
+    assert '@finally { [self endProfileOperation]; }' in delete_entry
+    assert 'requireInactive:NO' in writers.method(source, METHODS[3])
+    assert 'requireInactive:YES' in writers.method(source, '- (void)deleteInactiveProfileID:(NSString *)profileID completion:(void (^)(BOOL success, NSError * _Nullable error))completion')
+    assert delete.index('if (requireInactive && active)') < delete.index('archivedDataWithRootObject:remaining')
+    assert delete.index('PXProfileDeletionCheckpoint(@"settled")') < delete.index('PXRuntimeProfileSelectionMatches') < delete.index('removeDirectoryForProfileID:')
+    for case in ('verified list exposes registered models without adopting orphan or reserved directories',
+                 'inactive-only delete checks committed active ID instead of stale UI memory',
+                 'profile activated after confirmation cannot be removed through UI deletion',
+                 'UI delete decision failure preserves registry directory and callback lifecycle',
+                 'UI delete success unregisters before file cleanup without mutating a captured list',
+                 'source drift after logical deletion preserves newly active files and reports partial failure',
+                 'bulk delete preserves live active protected orphan reserved and newly created profiles',
+                 'busy bulk deletion reports one bounded failure per captured candidate without retry or mutation',
+                 'background inactive delete completes on main after releasing lifecycle ownership',
+                 'invalid registry stops bulk deletion before any namespace cleanup'):
+        assert case in fixture, case
     legacy_compare = writers.method(source, '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen')
     assert 'allowLegacyDates:YES' in legacy_compare
     compare = writers.method(source, '- (BOOL)registryValue:(id)before matchesValue:(id)after seen:(NSMapTable *)seen allowLegacyDates:(BOOL)allowLegacyDates')
@@ -452,7 +493,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4G-partial'
+    assert manifest['rollout'] == '4C.2H4H-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
