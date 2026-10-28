@@ -66,6 +66,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)updateCurrentProfileInfoWithProfile:(Profile *)profile;
 - (BOOL)updateCurrentProfileInfoWithProfile:(Profile *)profile error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)refreshCurrentProfileFromCommittedSelectionWithError:(NSError * _Nullable * _Nullable)error;
+// Read-only UI checkpoint after completion; never reselect a target that was
+// superseded by a notification observer or another writer.
+- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError * _Nullable * _Nullable)error;
 - (Profile *)loadCurrentProfileInfoFromCentralStore;
 - (BOOL)saveCentralProfileInfo:(NSDictionary *)infoDict;
 - (NSDictionary *)loadCentralProfileInfo;

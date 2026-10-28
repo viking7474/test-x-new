@@ -3,6 +3,7 @@
 #import "ProfileManager.h"
 
 @interface ProfileCreationViewController ()
+@property (nonatomic) BOOL profileCreationInProgress;
 
 @property (nonatomic, strong) UITextField *nameTextField;
 @property (nonatomic, strong) UIButton *createButton;
@@ -94,6 +95,11 @@
 #pragma mark - Actions
 
 - (void)createButtonTapped {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf createButtonTapped]; }); return;
+    }
+    if (self.profileCreationInProgress) return;
     NSString *profileName = [self.nameTextField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     
     if (profileName.length == 0) {
@@ -101,16 +107,20 @@
         return;
     }
     
+    self.profileCreationInProgress = YES;
     [self.activityIndicator startAnimating];
     self.createButton.enabled = NO;
     self.cancelButton.enabled = NO;
     
     // Create profile using ProfileManager
     Profile *newProfile = [[Profile alloc] initWithName:profileName iconName:@"default_profile"];
+    __weak typeof(self) weakSelf = self;
     [[ProfileManager sharedManager] createProfile:newProfile completion:^(BOOL success, NSError * _Nullable error) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
+            self.profileCreationInProgress = NO;
             [self.activityIndicator stopAnimating];
-            self.createButton.enabled = YES;
+            self.createButton.enabled = [self.nameTextField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length > 0;
             self.cancelButton.enabled = YES;
             
             if (success) {
@@ -126,6 +136,7 @@
 }
 
 - (void)cancelButtonTapped {
+    if (self.profileCreationInProgress) return;
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
@@ -137,7 +148,7 @@
 
 - (void)textFieldDidChangeSelection:(UITextField *)textField {
     NSString *trimmedText = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    self.createButton.enabled = trimmedText.length > 0;
+    self.createButton.enabled = !self.profileCreationInProgress && trimmedText.length > 0;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -163,4 +174,4 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-@end 
+@end

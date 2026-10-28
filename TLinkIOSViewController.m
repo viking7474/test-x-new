@@ -472,6 +472,10 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 }
 
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
+@property (nonatomic) BOOL manualProfileCreationInProgress;
+- (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription;
+- (void)presentManualProfileCreationWithPreview:(BOOL)preview roundedFields:(BOOL)rounded;
+- (void)showManualProfileCreationUnconfirmed:(NSError *)error;
 @property (nonatomic, strong) ProgressHUDView *progressHUD;
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *mainStackView;
@@ -5149,128 +5153,78 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
 
 - (void)showProfileCreation {
-    // Create alert controller
-    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Create New Profile"
-                                                                             message:@"Enter a name and optional description for the new profile."
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-    
-    // Add text fields for profile name and description
-    [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.placeholder = @"Profile Name";
-        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    }];
-    
-    [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.placeholder = @"Short Description (optional)";
-        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    }];
-    
-    // Generate a sample profile ID
-    NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileIDWithError:NULL];
-    
-    // Set the message to include the profile ID
-    alertController.message = sampleProfileID.length ? [NSString stringWithFormat:@"Next Profile ID (preview): %@", sampleProfileID] :
-        @"Profile ID will be assigned when creation starts.";
-    
-    // Add cancel action
-    UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-    [alertController addAction:cancelAction];
-    
-    // Add create action
-    UIAlertAction *createAction = [UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        UITextField *nameField = alertController.textFields.firstObject;
-        UITextField *descriptionField = alertController.textFields.lastObject;
-        
-        NSString *profileName = [nameField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        NSString *profileDescription = [descriptionField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        
-        if (profileName.length == 0) {
-            [self showError:[NSError errorWithDomain:@"WeaponXError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Profile name cannot be empty"}]];
-            return;
-        }
-        
-        // Create profile
-        Profile *newProfile = [[Profile alloc] initWithName:profileName 
-                                            shortDescription:profileDescription 
-                                                iconName:@"default_profile"];
-        
-        // Show loading indicator
-        [self showLoadingIndicator];
-        
-        // Save profile
-        [[ProfileManager sharedManager] createProfile:newProfile completion:^(BOOL success, NSError * _Nullable error) {
-            if (success) {
-                // Update profiles array
-                self.profiles = [[ProfileManager sharedManager].profiles mutableCopy];
-                
-                // Auto-switch to the newly created profile
-                [[ProfileManager sharedManager] switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError * _Nullable switchError) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        // First update the profile indicator
-                        [self updateProfileIndicator];
-                        
-                        // Then force regenerate all identifiers
-                        [self.manager regenerateAllEnabledIdentifiers];
-                        
-                        // Explicitly seed a coherent canonical profile if missing.
-                        if (![self.manager currentValueForIdentifier:@"DeviceModel"]) {
-                            [self.manager regenerateDeviceProfileGroup];
-                        }
-                        
-                        // Explicitly generate device theme if it's not already set
-                        if (![self.manager currentValueForIdentifier:@"DeviceTheme"] && 
-                            [self.manager respondsToSelector:@selector(generateDeviceTheme)]) {
-                            NSString *deviceTheme = [self.manager generateDeviceTheme];
-                            if (deviceTheme && [self.manager respondsToSelector:@selector(setCustomDeviceTheme:)]) {
-                                [self.manager setCustomDeviceTheme:deviceTheme];
-                                NSLog(@"[TLinkIOSViewController] Generated device theme for new profile: %@", deviceTheme);
-                            }
-                        }
-                        
-                        // Add a delay to ensure all values are generated and stored
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            // Update UI with new identifiers
-                            Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
-                            if (identifierManagerClass) {
-                                id identifierManager = [identifierManagerClass sharedManager];
-                                if ([identifierManager respondsToSelector:@selector(currentValueForIdentifier:)] &&
-                                    [identifierManager respondsToSelector:@selector(isIdentifierEnabled:)]) {
-                                    // Refresh UI with generated identifiers
-                                    [self refreshIdentifierValuesInUI];
-                                }
-                            }
-                            
-                            [self hideLoadingIndicator];
-                            
-                            if (switchSuccess) {
-                                // Show success message with the profile ID and mention that the profile is now active
-                                NSString *profileID = newProfile.profileId;
-                                NSString *successMessage = [NSString stringWithFormat:@"Profile created successfully.\nID: %@\n\nProfile is now active.", profileID];
-                                [self showSuccessMessage:successMessage];
-                            } else {
-                                // Profile created but switch failed
-                                NSString *profileID = newProfile.profileId;
-                                NSString *successMessage = [NSString stringWithFormat:@"Profile created successfully.\nID: %@\n\nFailed to switch to profile: %@", profileID, switchError.localizedDescription];
-                                [self showSuccessMessage:successMessage];
-                            }
-                        });
-                    });
-                }];
-            } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self hideLoadingIndicator];
-                    [self showError:error];
-                });
-            }
-        }];
-    }];
-    [alertController addAction:createAction];
-    
-    // Present the alert controller
-    [self presentViewController:alertController animated:YES completion:nil];
+    [self presentManualProfileCreationWithPreview:YES roundedFields:NO];
 }
 
-// Helper methods for the profile creation popup
+- (void)presentManualProfileCreationWithPreview:(BOOL)preview roundedFields:(BOOL)rounded {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf presentManualProfileCreationWithPreview:preview roundedFields:rounded]; }); return;
+    }
+    if (self.manualProfileCreationInProgress) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Create New Profile" message:@"Enter a name and optional description for the new profile." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = @"Profile Name"; field.clearButtonMode = UITextFieldViewModeWhileEditing;
+        if (rounded) field.borderStyle = UITextBorderStyleRoundedRect;
+    }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = preview ? @"Short Description (optional)" : @"Description (optional)"; field.clearButtonMode = UITextFieldViewModeWhileEditing;
+        if (rounded) field.borderStyle = UITextBorderStyleRoundedRect;
+    }];
+    if (preview) {
+        NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileIDWithError:NULL];
+        alert.message = sampleProfileID.length ? [NSString stringWithFormat:@"Next Profile ID (preview): %@", sampleProfileID] :
+            @"Profile ID will be assigned when creation starts.";
+    }
+    __weak UIAlertController *weakAlert = alert; __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        NSString *name = [weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *description = [weakAlert.textFields.lastObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        [weakSelf submitManualProfileName:name shortDescription:description];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription {
+    if (!NSThread.isMainThread) {
+        NSString *capturedName = [name copy], *capturedDescription = [shortDescription copy]; __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf submitManualProfileName:capturedName shortDescription:capturedDescription]; }); return;
+    }
+    if (self.manualProfileCreationInProgress) return;
+    if (![name isKindOfClass:NSString.class] || !name.length) {
+        [self showError:[NSError errorWithDomain:@"WeaponXError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Profile name cannot be empty"}]]; return;
+    }
+    self.manualProfileCreationInProgress = YES; [self showLoadingIndicator];
+    Profile *input = [[Profile alloc] initWithName:[name copy] shortDescription:[shortDescription copy] iconName:@"default_profile"];
+    __weak typeof(self) weakSelf = self;
+    [[ProfileManager sharedManager] createProfile:input completion:^(BOOL success, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
+            self.manualProfileCreationInProgress = NO; [self hideLoadingIndicator];
+            if (!success) { [self showError:error]; return; }
+            ProfileManager *manager = [ProfileManager sharedManager];
+            self.profiles = [manager.profiles mutableCopy];
+            NSError *selectionError = nil;
+            if (![manager validateCurrentProfileID:input.profileId error:&selectionError]) {
+                [self showManualProfileCreationUnconfirmed:selectionError]; return;
+            }
+            [self updateProfileIndicator]; [self refreshIdentifierValuesInUI];
+            [self showSuccessMessage:[NSString stringWithFormat:@"Profile created successfully.\nID: %@\n\nProfile is now active.", input.profileId]];
+        });
+    }];
+}
+
+- (void)showManualProfileCreationUnconfirmed:(NSError *)error {
+    (void)error;
+    if (!self.view.window) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Profile Created"
+        message:@"The profile was created. Its active selection could not be confirmed; refresh before continuing." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)showLoadingIndicator {
     if (!self.loadingIndicator) {
         self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:PXMediumActivityIndicatorStyle()];
@@ -5690,117 +5644,10 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 }
 
 - (void)createProfileTapped:(id)sender {
-    NSLog(@"[WeaponX] Create profile tapped");
-    
-    // Create alert controller for profile creation
-    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Create New Profile"
-                                                                             message:@"Enter a name and optional description for the new profile."
-                                                                      preferredStyle:UIAlertControllerStyleAlert];
-    
-    // Add text fields for name and description
-    [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.placeholder = @"Profile Name";
-        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        textField.borderStyle = UITextBorderStyleRoundedRect;
-    }];
-    
-    [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.placeholder = @"Description (optional)";
-        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        textField.borderStyle = UITextBorderStyleRoundedRect;
-    }];
-    
-    // Add cancel action
-    UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-    [alertController addAction:cancelAction];
-    
-    // Add create action
-    UIAlertAction *createAction = [UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        UITextField *nameField = alertController.textFields.firstObject;
-        UITextField *descriptionField = alertController.textFields.lastObject;
-        
-        NSString *profileName = [nameField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        NSString *profileDescription = [descriptionField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        
-        if (profileName.length == 0) {
-            [self showError:[NSError errorWithDomain:@"WeaponXError" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Profile name cannot be empty"}]];
-            return;
-        }
-        
-        // Create profile
-        Profile *newProfile = [[Profile alloc] initWithName:profileName 
-                                            shortDescription:profileDescription 
-                                                iconName:@"default_profile"];
-        
-        // Show loading indicator
-        [self showLoadingIndicator];
-        
-        // Save profile
-        [[ProfileManager sharedManager] createProfile:newProfile completion:^(BOOL success, NSError * _Nullable error) {
-            if (success) {
-                // Update profiles array
-                self.profiles = [[ProfileManager sharedManager].profiles mutableCopy];
-                
-                // Auto-switch to the newly created profile
-                [[ProfileManager sharedManager] switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError * _Nullable switchError) {
-                    // Add a small delay to ensure identifier generation completes
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        // Update UI with new identifiers
-                        Class identifierManagerClass = NSClassFromString(@"IdentifierManager");
-                        if (identifierManagerClass) {
-                            id identifierManager = [identifierManagerClass sharedManager];
-                            if ([identifierManager respondsToSelector:@selector(currentValueForIdentifier:)] &&
-                                [identifierManager respondsToSelector:@selector(isIdentifierEnabled:)]) {
-                                // Refresh UI with generated identifiers
-                                [self refreshIdentifierValuesInUI];
-                                
-                                // Also generate Device Theme if missing for the new profile
-                                if ([identifierManager respondsToSelector:@selector(currentValueForIdentifier:)] &&
-                                    ![identifierManager currentValueForIdentifier:@"DeviceTheme"]) {
-                                    if ([identifierManager respondsToSelector:@selector(generateDeviceTheme)]) {
-                                        NSString *deviceTheme = [identifierManager generateDeviceTheme];
-                                        if (deviceTheme && [identifierManager respondsToSelector:@selector(setCustomDeviceTheme:)]) {
-                                            [identifierManager setCustomDeviceTheme:deviceTheme];
-                                            NSLog(@"[TLinkIOSViewController] Generated device theme for new profile: %@", deviceTheme);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
-                        [self hideLoadingIndicator];
-                        
-                        // Update the profile indicator
-                        [self updateProfileIndicator];
-                        
-                        if (switchSuccess) {
-                            // Show success message with the profile ID and mention that the profile is now active
-                            NSString *profileID = newProfile.profileId;
-                            NSString *successMessage = [NSString stringWithFormat:@"Profile created successfully.\nID: %@\n\nProfile is now active.", profileID];
-                            [self showSuccessMessage:successMessage];
-                        } else {
-                            // Profile created but switch failed
-                            NSString *profileID = newProfile.profileId;
-                            NSString *successMessage = [NSString stringWithFormat:@"Profile created successfully.\nID: %@\n\nFailed to switch to profile: %@", profileID, switchError.localizedDescription];
-                            [self showSuccessMessage:successMessage];
-                        }
-                    });
-                }];
-            } else {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self hideLoadingIndicator];
-                    [self showError:error];
-                });
-            }
-        }];
-    }];
-    [alertController addAction:createAction];
-    
-    // Present the alert controller
-    [self presentViewController:alertController animated:YES completion:nil];
+    (void)sender;
+    [self presentManualProfileCreationWithPreview:NO roundedFields:YES];
 }
 
-// Replace the identifierDidTap method to handle Battery like other simple identifiers
 - (void)identifierDidTap:(UITapGestureRecognizer *)gesture {
     // Get the identifier type from the associated object
     NSString *identifierType = objc_getAssociatedObject(gesture, "identifierType");

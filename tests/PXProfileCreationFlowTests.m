@@ -21,6 +21,7 @@ extern char **environ;
 
 @class PXProfileCreationFixture;
 static __weak PXProfileCreationFixture *gNotifyingManager;
+static PXProfileCreationFixture *gControllerManager;
 
 static NSUInteger gChecks, gFailures, gNotices, gCanvas, gMirrors, gTerminations, gCachePublications, gSettingsNotices;
 static NSString *gRoot, *gRequested, *gMirroredID, *gMemoryAtLastMirrorID;
@@ -142,6 +143,7 @@ static void OutsideGate(void) {
 }
 @end
 @interface PXProfileCreationFixture : NSObject
++ (instancetype)sharedManager;
 @property (nonatomic, strong) NSMutableArray<Profile *> *mutableProfiles;
 @property (nonatomic, strong) Profile *mutableCurrentProfile;
 @property (nonatomic, strong) NSFileManager *fileManager;
@@ -162,6 +164,7 @@ static void OutsideGate(void) {
 #include "PXProfileFlowDeclarations.inc"
 @end
 @implementation PXProfileCreationFixture
++ (instancetype)sharedManager { return gControllerManager; }
 - (instancetype)init {
     if ((self = [super init])) { _fileManager = NSFileManager.defaultManager; _profilesDirectory = PXProfilesPath(); _mutableProfiles = [NSMutableArray array]; }
     return self;
@@ -1829,6 +1832,190 @@ static void TestProfileIDAllocation(void) {
     [fm removeItemAtPath:gRoot error:NULL]; gRoot = previousRoot; gStore = previousStore;
 }
 
+static NSUInteger gCreationUIEvents;
+static void CreationUIEvent(void) { CHECK(NSThread.isMainThread, "creation UI adapter effects run on main"); gCreationUIEvents++; }
+@interface PXControlledCreationManager : PXProfileCreationFixture
+@property (nonatomic) NSUInteger requests, selectionChecks;
+@property (nonatomic, strong) Profile *requestedInput;
+@property (nonatomic, copy) NSString *activeID;
+@property (nonatomic, copy) void (^pendingCreation)(BOOL, NSError *);
+- (void)completeCreation:(BOOL)success;
+@end
+@implementation PXControlledCreationManager
+- (void)createProfile:(Profile *)profile completion:(void (^)(BOOL, NSError *))completion {
+    CHECK(NSThread.isMainThread, "controlled controller create enters on main"); self.requests++;
+    [profile setValue:@"controller-target" forKey:@"profileId"]; self.requestedInput = profile;
+    self.mutableProfiles = [NSMutableArray arrayWithObject:profile]; self.pendingCreation = completion;
+}
+- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError **)error {
+    CHECK(NSThread.isMainThread, "controller selection checkpoint enters on main"); self.selectionChecks++;
+    if ([profileID isEqual:self.activeID]) return YES;
+    if (error) *error = [NSError errorWithDomain:@"fixture.selection" code:20 userInfo:nil]; return NO;
+}
+- (void)completeCreation:(BOOL)success {
+    void (^callback)(BOOL, NSError *) = self.pendingCreation; self.pendingCreation = nil;
+    CHECK(callback != nil, "controlled creation callback exists exactly once");
+    if (callback) callback(success, success ? nil : [NSError errorWithDomain:@"fixture.create" code:9 userInfo:nil]);
+}
+@end
+@interface PXCreationButtons : NSObject
+@property (nonatomic) BOOL userInteractionEnabled, enabled;
+@end
+@implementation PXCreationButtons
+- (instancetype)init { if ((self = [super init])) { _enabled = YES; _userInteractionEnabled = YES; } return self; }
+@end
+@interface PXDeviceCreateUIFixture : NSObject
+@property (nonatomic) BOOL profileCreationInProgress;
+@property (nonatomic, strong) PXCreationButtons *profileButtonsView;
+@property (nonatomic) NSUInteger refreshes, failures, warnings;
+- (void)createDeviceProfileWithName:(NSString *)name shortDescription:(NSString *)shortDescription;
+- (void)refreshProfileUI;
+- (void)presentDeviceProfileCreationResult:(BOOL)created error:(NSError *)error;
+@end
+@interface PXManualCreateUIFixture : NSObject
+@property (nonatomic) BOOL manualProfileCreationInProgress;
+@property (nonatomic, strong) NSMutableArray *profiles;
+@property (nonatomic) NSUInteger shows, hides, refreshes, indicators, successes, failures, warnings;
+- (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription;
+- (void)showLoadingIndicator; - (void)hideLoadingIndicator; - (void)updateProfileIndicator; - (void)refreshIdentifierValuesInUI;
+- (void)showError:(NSError *)error; - (void)showSuccessMessage:(NSString *)message; - (void)showManualProfileCreationUnconfirmed:(NSError *)error;
+@end
+@interface UITextField : NSObject
+@property (nonatomic, copy) NSString *text;
+@end
+@implementation UITextField
+@end
+@interface PXCreationSpinner : NSObject
+@property (nonatomic) NSUInteger starts, stops;
+- (void)startAnimating; - (void)stopAnimating;
+@end
+@implementation PXCreationSpinner
+- (void)startAnimating { CreationUIEvent(); self.starts++; }
+- (void)stopAnimating { CreationUIEvent(); self.stops++; }
+@end
+@protocol PXCreationDelegate <NSObject>
+- (void)profileCreationViewController:(id)controller didCreateProfile:(NSString *)name;
+@end
+@interface PXCreationDelegateFixture : NSObject <PXCreationDelegate>
+@property (nonatomic) NSUInteger calls;
+@property (nonatomic, copy) NSString *name;
+@end
+@implementation PXCreationDelegateFixture
+- (void)profileCreationViewController:(id)controller didCreateProfile:(NSString *)name { (void)controller; CreationUIEvent(); self.calls++; self.name = name; }
+@end
+@interface PXFormCreateUIFixture : NSObject
+@property (nonatomic) BOOL profileCreationInProgress;
+@property (nonatomic, strong) UITextField *nameTextField;
+@property (nonatomic, strong) PXCreationButtons *createButton, *cancelButton;
+@property (nonatomic, strong) PXCreationSpinner *activityIndicator;
+@property (nonatomic, weak) id<PXCreationDelegate> delegate;
+@property (nonatomic) NSUInteger alerts, dismissals;
+- (void)createButtonTapped; - (void)cancelButtonTapped; - (void)textFieldDidChangeSelection:(UITextField *)textField;
+- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message;
+- (void)dismissViewControllerAnimated:(BOOL)animated completion:(void (^)(void))completion;
+@end
+// Compile the exact controller adapter bodies with controlled collaborators;
+// UIKit presentation/layout is deliberately outside this Foundation fixture.
+#define ProfileManager PXProfileCreationFixture
+@implementation PXDeviceCreateUIFixture
+- (instancetype)init { if ((self = [super init])) _profileButtonsView = [PXCreationButtons new]; return self; }
+- (void)refreshProfileUI { CreationUIEvent(); self.refreshes++; }
+- (void)presentDeviceProfileCreationResult:(BOOL)created error:(NSError *)error { (void)error; CreationUIEvent(); if (created) self.warnings++; else self.failures++; }
+#include "PXDeviceCreateUI.inc"
+@end
+@implementation PXManualCreateUIFixture
+- (void)showLoadingIndicator { CreationUIEvent(); self.shows++; }
+- (void)hideLoadingIndicator { CreationUIEvent(); self.hides++; }
+- (void)updateProfileIndicator { CreationUIEvent(); self.indicators++; }
+- (void)refreshIdentifierValuesInUI { CreationUIEvent(); self.refreshes++; }
+- (void)showError:(NSError *)error { (void)error; CreationUIEvent(); self.failures++; }
+- (void)showSuccessMessage:(NSString *)message { (void)message; CreationUIEvent(); self.successes++; }
+- (void)showManualProfileCreationUnconfirmed:(NSError *)error { (void)error; CreationUIEvent(); self.warnings++; }
+#include "PXManualCreateUI.inc"
+@end
+@implementation PXFormCreateUIFixture
+- (instancetype)init {
+    if ((self = [super init])) { _nameTextField = [UITextField new]; _nameTextField.text = @"form entry"; _createButton = [PXCreationButtons new]; _cancelButton = [PXCreationButtons new]; _activityIndicator = [PXCreationSpinner new]; }
+    return self;
+}
+- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message { (void)title; (void)message; CreationUIEvent(); self.alerts++; }
+- (void)dismissViewControllerAnimated:(BOOL)animated completion:(void (^)(void))completion { (void)animated; CreationUIEvent(); self.dismissals++; if (completion) completion(); }
+#include "PXFormCreateUI.inc"
+@end
+#undef ProfileManager
+static PXControlledCreationManager *ControlledCreationManager(void) {
+    PXControlledCreationManager *manager = [PXControlledCreationManager new]; manager.activeID = @"controller-target"; gControllerManager = manager; return manager;
+}
+static void TestCreationUIAdapters(void) {
+    for (NSUInteger mode = 0; mode < 3; mode++) {
+        PXControlledCreationManager *manager = ControlledCreationManager(); PXDeviceCreateUIFixture *view = [PXDeviceCreateUIFixture new];
+        NSMutableString *name = [@"device request" mutableCopy]; [view createDeviceProfileWithName:name shortDescription:@"description"];
+        [name setString:@"later edit"]; [view createDeviceProfileWithName:@"duplicate" shortDescription:nil];
+        CHECK(manager.requests == 1 && view.profileCreationInProgress && !view.profileButtonsView.userInteractionEnabled && view.refreshes == 0 &&
+            view.failures == 0 && manager.selectionChecks == 0 && [manager.requestedInput.name isEqual:@"device request"], "device creation adapter waits for completion and rejects duplicate submission");
+        [manager completeCreation:mode != 0]; if (mode == 2) manager.activeID = @"newer-selection";
+        CHECK(Pump(^BOOL { return !view.profileCreationInProgress; }) && view.profileButtonsView.userInteractionEnabled &&
+            view.refreshes == (mode == 1 ? 1 : 0) && view.failures == (mode == 0 ? 1 : 0) && view.warnings == (mode == 2 ? 1 : 0) &&
+            manager.selectionChecks == (mode == 0 ? 0 : 1), "device creation adapter refreshes only committed current success and reports failure or supersession");
+    }
+    for (NSUInteger mode = 0; mode < 3; mode++) {
+        PXControlledCreationManager *manager = ControlledCreationManager(); PXManualCreateUIFixture *view = [PXManualCreateUIFixture new];
+        [view submitManualProfileName:@"manual request" shortDescription:nil]; [view submitManualProfileName:@"duplicate" shortDescription:nil];
+        CHECK(manager.requests == 1 && view.manualProfileCreationInProgress && view.shows == 1 && view.hides == 0 && view.refreshes == 0 && view.successes == 0,
+            "manual popup adapter submits once and publishes no premature success");
+        [manager completeCreation:mode != 0]; if (mode == 2) manager.activeID = @"newer-selection";
+        CHECK(Pump(^BOOL { return !view.manualProfileCreationInProgress; }) && view.hides == 1 && view.refreshes == (mode == 1 ? 1 : 0) &&
+            view.indicators == (mode == 1 ? 1 : 0) && view.successes == (mode == 1 ? 1 : 0) && view.failures == (mode == 0 ? 1 : 0) &&
+            view.warnings == (mode == 2 ? 1 : 0), "manual popup adapter gates active success on completion and current selection without delayed regeneration");
+    }
+    for (NSUInteger mode = 0; mode < 2; mode++) {
+        PXControlledCreationManager *manager = ControlledCreationManager(); PXFormCreateUIFixture *view = [PXFormCreateUIFixture new];
+        PXCreationDelegateFixture *delegate = [PXCreationDelegateFixture new]; view.delegate = delegate;
+        [view createButtonTapped]; view.nameTextField.text = @"later form edit"; [view textFieldDidChangeSelection:view.nameTextField];
+        [view createButtonTapped]; [view cancelButtonTapped];
+        CHECK(manager.requests == 1 && view.profileCreationInProgress && !view.createButton.enabled && !view.cancelButton.enabled &&
+            view.activityIndicator.starts == 1 && view.dismissals == 0 && delegate.calls == 0, "form pending state survives text changes duplicate submit and cancel attempts");
+        [manager completeCreation:mode == 1];
+        CHECK(Pump(^BOOL { return !view.profileCreationInProgress; }) && view.createButton.enabled && view.cancelButton.enabled && view.activityIndicator.stops == 1 &&
+            delegate.calls == mode && view.dismissals == mode && view.alerts == (mode == 0 ? 1 : 0) && (mode == 0 || [delegate.name isEqual:@"form entry"]),
+            "form creation publishes captured name once only on success after restoring controls");
+    }
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        PXControlledCreationManager *manager = ControlledCreationManager(); __weak id released; NSUInteger events;
+        @autoreleasepool {
+            if (kind == 0) { PXDeviceCreateUIFixture *view = [PXDeviceCreateUIFixture new]; released = view; [view createDeviceProfileWithName:@"released device" shortDescription:nil]; }
+            else if (kind == 1) { PXManualCreateUIFixture *view = [PXManualCreateUIFixture new]; released = view; [view submitManualProfileName:@"released popup" shortDescription:nil]; }
+            else { PXFormCreateUIFixture *view = [PXFormCreateUIFixture new]; released = view; [view createButtonTapped]; }
+        }
+        events = gCreationUIEvents; CHECK(!released && manager.pendingCreation, "pending core creation does not retain controller ownership");
+        [manager completeCreation:YES]; __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+        CHECK(Pump(^BOOL { return drained; }) && events == gCreationUIEvents && manager.selectionChecks == 0, "late creation completion skips released UI while producer still completes");
+    }
+    PXControlledCreationManager *manager = ControlledCreationManager(); PXManualCreateUIFixture *view = [PXManualCreateUIFixture new];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ [view submitManualProfileName:@"background popup" shortDescription:nil]; });
+    CHECK(Pump(^BOOL { return manager.requests == 1; }) && view.manualProfileCreationInProgress, "off-main manual create handoff reaches producer on main");
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ [manager completeCreation:YES]; });
+    CHECK(Pump(^BOOL { return !view.manualProfileCreationInProgress; }) && view.successes == 1, "off-main request and producer callback receive normal main-thread UI acknowledgement");
+    gControllerManager = nil;
+}
+static void TestCurrentProfileCheckpoint(void) {
+    PXProfileCreationFixture *manager = NewManager(); CHECK(Reload(manager), "current profile checkpoint loads known state");
+    __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; }); CHECK(Pump(^BOOL { return drained; }), "current profile checkpoint drains reload mirror");
+    NSDictionary *before = ActiveFiles(), *info = Record(PXCurrentProfileInfoPath()); NSString *profileID = info[@"ProfileId"];
+    NSData *archive = [NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")];
+    Profile *memory = manager.mutableCurrentProfile; manager.mutableCurrentProfile = New(@"stale UI memory");
+    NSUInteger notices = gNotices, mirrors = gMirrors; NSError *error = nil;
+    CHECK([manager validateCurrentProfileID:profileID error:&error] && !error && ![manager validateCurrentProfileID:@"not-current" error:&error] && error.code == 20 &&
+        ![manager validateCurrentProfileID:nil error:&error] && error.code == 10 && [before isEqual:ActiveFiles()] &&
+        [archive isEqual:[NSData dataWithContentsOfFile:Path(PXProfilesPath(), @"profiles.plist")]] && notices == gNotices && mirrors == gMirrors,
+        "current profile checkpoint reads committed ID without repairing selection memory archive or defaults");
+    manager.mutableCurrentProfile = memory;
+    CHECK(ExternalSelectionWrite(@{ @"ProfileId": @"newer-ui-intent" }), "current profile checkpoint newer selection installed");
+    NSDictionary *newer = ActiveFiles();
+    CHECK(![manager validateCurrentProfileID:profileID error:&error] && error.code == 20 && [newer isEqual:ActiveFiles()], "completion checkpoint preserves newer selection instead of switching back");
+    CHECK(ExternalSelectionWrite(info), "current profile checkpoint original target restored explicitly by fixture");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -1888,6 +2075,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

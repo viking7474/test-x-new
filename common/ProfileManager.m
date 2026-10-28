@@ -1750,6 +1750,24 @@ static NSSet<Class> *PXProfileArchiveClasses(void) {
     return YES;
 }
 
+- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || self.selectionUnavailable || self.registryUnavailable) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:23 userInfo:@{NSLocalizedDescriptionKey: @"A valid registry and main-thread selection check are required"}]; return NO;
+    }
+    if (![PXValidatedProfileID(profileID) isEqual:profileID]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:10 userInfo:@{NSLocalizedDescriptionKey: @"Invalid profile selection ID"}]; return NO;
+    }
+    NSDictionary *pair = [self captureProfileSelectionWithError:error];
+    if (!pair) return NO;
+    NSDictionary *central = pair[PXCurrentProfileInfoPath()], *legacy = pair[PXLegacyActiveProfileInfoPath()];
+    NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+    if (![PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]) isEqual:profileID]) {
+        if (error) *error = [NSError errorWithDomain:@"WeaponXProfileError" code:20 userInfo:@{NSLocalizedDescriptionKey: @"The active selection changed; the current profile was preserved"}]; return NO;
+    }
+    return YES;
+}
+
 - (NSDictionary *)loadCentralProfileInfo {
     // Common UI read needs only the canonical record. Load legacy lazily, while
     // retaining the same recovery gate; full two-record capture is for CAS.

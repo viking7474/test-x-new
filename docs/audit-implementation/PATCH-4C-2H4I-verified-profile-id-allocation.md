@@ -107,3 +107,7 @@ vẫn hợp lệ theo existing decoder. Cần kiểm tra installations dùng nam
 missing registry và busy preview trên thiết bị. Whole Reset Data orchestration,
 remaining producers/defaults/security authority, cleanup/durability và rootful reader
 rollout vẫn partial. Manifest `4C.2H4I-partial`; toàn Patch 4 chưa hoàn tất.
+
+Người dùng xác nhận build H4I pass ngày 2026-10-28. Manual creation caller
+acknowledgement được chuyển tại [H4J](PATCH-4C-2H4J-manual-creation-acknowledgement.md);
+full UIKit/device runtime matrix và toàn Patch 4 vẫn partial.

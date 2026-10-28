@@ -64,6 +64,12 @@ METHODS += ['- (NSString *)generateProfileIDWithError:(NSError **)error',
             '- (NSUInteger)allocationOrdinalForID:(NSString *)profileID',
             '- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied error:(NSError **)error',
             '- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied probe:(BOOL (^)(NSString *, BOOL *, NSError **))probe error:(NSError **)error']
+METHODS += ['- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError **)error']
+UI_ADAPTERS = {
+    'PXDeviceCreateUI.inc': ('DeviceSpecificSpoofingViewController.m', ['- (void)createDeviceProfileWithName:(NSString *)name shortDescription:(NSString *)shortDescription']),
+    'PXManualCreateUI.inc': ('TLinkIOSViewController.m', ['- (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription']),
+    'PXFormCreateUI.inc': ('ProfileCreationViewController.m', ['- (void)createButtonTapped', '- (void)cancelButtonTapped', '- (void)textFieldDidChangeSelection:(UITextField *)textField']),
+}
 
 
 def check_macro_arity(source, label):
@@ -272,6 +278,43 @@ def source_contracts():
     auto = writers.method(read('TLinkIOSViewController.m'), '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
     assert auto.index('if (!NSThread.isMainThread)') < auto.index('generateProfileIDWithError:&allocationError')
     assert auto.index('if (!candidateID)') < auto.index('[pm createProfile:') and '[pm generateProfileID]' not in auto
+    for _, (path, signatures) in UI_ADAPTERS.items():
+        for signature in signatures:
+            adapter = writers.method(read(path), signature)
+            for forbidden in ('switchToProfile:', 'regenerateAllEnabledIdentifiers', 'regenerateDeviceProfileGroup', 'generateDeviceTheme', 'dispatch_after'):
+                assert forbidden not in adapter, (path, forbidden)
+    for path, signature, busy in (
+        ('DeviceSpecificSpoofingViewController.m', UI_ADAPTERS['PXDeviceCreateUI.inc'][1][0], 'profileCreationInProgress'),
+        ('TLinkIOSViewController.m', UI_ADAPTERS['PXManualCreateUI.inc'][1][0], 'manualProfileCreationInProgress'),
+        ('ProfileCreationViewController.m', '- (void)createButtonTapped', 'profileCreationInProgress')):
+        adapter = writers.method(read(path), signature)
+        assert 'if (!NSThread.isMainThread)' in adapter and f'if (self.{busy}) return;' in adapter
+        expected_call = 'createProfile:newProfile completion:' if 'createButtonTapped' in signature else 'createProfile:input completion:'
+        assert 'weakSelf' in adapter and expected_call in adapter
+    for path in ('DeviceSpecificSpoofingViewController.m', 'TLinkIOSViewController.m'):
+        adapter = writers.method(read(path), UI_ADAPTERS['PXDeviceCreateUI.inc' if 'DeviceSpecific' in path else 'PXManualCreateUI.inc'][1][0])
+        assert adapter.index('if (!success)') < adapter.index('validateCurrentProfileID:input.profileId')
+    assert 'addProfileWithName:' not in read('DeviceSpecificSpoofingViewController.m')
+    form = read('ProfileCreationViewController.m')
+    assert '!self.profileCreationInProgress && trimmedText.length > 0' in form
+    current_check = writers.method(source, '- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError **)error')
+    assert 'captureProfileSelectionWithError:error' in current_check and 'code:20' in current_check
+    for forbidden in ('mutableCurrentProfile =', 'PXStage', 'mirrorCurrentProfileID:', 'writeRegistryData:'):
+        assert forbidden not in current_check, forbidden
+    generation = writers.method(read('common/IdentifierManager.m'), '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
+    assert 'BOOL needsBaseline = !PXProfileString(ids[@"DeviceModel"]).length' in generation and 'candidate[@"theme"] = ' in generation
+    for case in ('device creation adapter waits for completion and rejects duplicate submission',
+                 'device creation adapter refreshes only committed current success and reports failure or supersession',
+                 'manual popup adapter submits once and publishes no premature success',
+                 'manual popup adapter gates active success on completion and current selection without delayed regeneration',
+                 'form pending state survives text changes duplicate submit and cancel attempts',
+                 'form creation publishes captured name once only on success after restoring controls',
+                 'pending core creation does not retain controller ownership',
+                 'late creation completion skips released UI while producer still completes',
+                 'off-main manual create handoff reaches producer on main',
+                 'current profile checkpoint reads committed ID without repairing selection memory archive or defaults',
+                 'completion checkpoint preserves newer selection instead of switching back'):
+        assert case in fixture, case
     for case in ('ID ordering preserves normal numeric and alpha progression without overflow or foreign-name poisoning',
                  'allocation grammar is nonempty ASCII with bounded canonical alpha suffixes',
                  'namespace probing advances each candidate once without redoing sequence discovery',
@@ -537,7 +580,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4I-partial'
+    assert manifest['rollout'] == '4C.2H4J-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
@@ -557,6 +600,8 @@ def generate_native_fragments(folder):
     end = source.index('\n@end', implementation) + len('\n@end')
     helper = writers.method(source, 'static NSSet<Class> *PXProfileArchiveClasses(void)')
     (folder / 'PXProfileModel.inc').write_text(helper + '\n' + source[start:end], encoding='utf-8')
+    for filename, (path, signatures) in UI_ADAPTERS.items():
+        (folder / filename).write_text('\n\n'.join(writers.method(read(path), signature) for signature in signatures), encoding='utf-8')
 
 
 def native_tests():

@@ -12,6 +12,10 @@
 #import "common/UIButton+SafeConfiguration.h"
 
 @interface DeviceSpecificSpoofingViewController ()
+@property (nonatomic) BOOL profileCreationInProgress;
+- (void)showDeviceProfileCreation;
+- (void)createDeviceProfileWithName:(NSString *)name shortDescription:(NSString *)shortDescription;
+- (void)presentDeviceProfileCreationResult:(BOOL)created error:(NSError *)error;
 @property (nonatomic, strong) UIView *profileIndicatorView;
 @property (nonatomic, strong) UILabel *profileLabel; // Track the label for updates
 @property (nonatomic, strong) UIView *imeiCard;
@@ -56,60 +60,7 @@
     // self.profileButtonsView.backgroundColor = [PXSystemBackgroundColor() colorWithAlphaComponent:0.2];
     [self.view addSubview:self.profileButtonsView];
     __weak typeof(self) weakSelf = self;
-    self.profileButtonsView.onNewProfileTapped = ^{
-        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Create New Profile"
-                                                                                 message:nil
-                                                                          preferredStyle:UIAlertControllerStyleAlert];
-        [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-            textField.placeholder = @"Profile Name";
-            textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        }];
-        [alertController addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-            textField.placeholder = @"Short Description (optional)";
-            textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        }];
-        NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileIDWithError:NULL];
-        alertController.message = sampleProfileID.length ? [NSString stringWithFormat:@"Next Profile ID (preview): %@", sampleProfileID] :
-            @"Profile ID will be assigned when creation starts.";
-        UIAlertAction *createAction = [UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            NSString *profileName = alertController.textFields.firstObject.text;
-            NSString *profileDesc = alertController.textFields.count > 1 ? alertController.textFields[1].text : @"";
-            if (profileName.length > 0) {
-                // Use the convenience method to add a profile (does not set custom profileId)
-                [[ProfileManager sharedManager] addProfileWithName:profileName shortDescription:profileDesc];
-
-                IdentifierManager *manager = [IdentifierManager sharedManager];
-
-                // Generate the canonical DeviceModel/iOS/hardware dependency group first.
-                // IMEI/IMEI2/MEID/baseband, when enabled and authoritative, are
-                // populated atomically by the same group from the selected A-number.
-                // Never seed generic telephony identifiers before model selection.
-                // Generate Device Model if missing for the new profile
-                if (![manager currentValueForIdentifier:@"DeviceModel"]) {
-                    NSString *deviceModel = [manager regenerateDeviceProfileGroup];
-                    if (deviceModel) {
-                        NSLog(@"[DeviceSpecificSpoofingVC] Generated device model for new profile: %@", deviceModel);
-                    }
-                }
-                
-                // Generate Device Theme if missing for the new profile
-                if (![manager currentValueForIdentifier:@"DeviceTheme"]) {
-                    NSString *deviceTheme = [manager generateDeviceTheme];
-                    if (deviceTheme) {
-                        [manager setCustomDeviceTheme:deviceTheme];
-                        NSLog(@"[DeviceSpecificSpoofingVC] Generated device theme for new profile: %@", deviceTheme);
-                    }
-                }
-                
-                [weakSelf refreshProfileUI]; // Immediately update UI after new profile and identifier generation
-
-            }
-        }];
-        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
-        [alertController addAction:createAction];
-        [alertController addAction:cancelAction];
-        [weakSelf presentViewController:alertController animated:YES completion:nil];
-    };
+    self.profileButtonsView.onNewProfileTapped = ^{ [weakSelf showDeviceProfileCreation]; };
     self.profileButtonsView.onManageProfilesTapped = ^{
         ProfileManagerViewController *profileVC = [[ProfileManagerViewController alloc] initWithProfiles:nil];
         profileVC.delegate = (id<ProfileManagerViewControllerDelegate>)weakSelf;
@@ -179,6 +130,64 @@
         [self.profileButtonsView.widthAnchor constraintEqualToConstant:60],
         [self.profileButtonsView.heightAnchor constraintEqualToConstant:136],
     ]];
+}
+
+- (void)showDeviceProfileCreation {
+    if (!NSThread.isMainThread) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showDeviceProfileCreation]; }); return;
+    }
+    if (self.profileCreationInProgress) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Create New Profile" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) { field.placeholder = @"Profile Name"; field.clearButtonMode = UITextFieldViewModeWhileEditing; }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) { field.placeholder = @"Short Description (optional)"; field.clearButtonMode = UITextFieldViewModeWhileEditing; }];
+    NSString *sampleProfileID = [[ProfileManager sharedManager] generateProfileIDWithError:NULL];
+    alert.message = sampleProfileID.length ? [NSString stringWithFormat:@"Next Profile ID (preview): %@", sampleProfileID] :
+        @"Profile ID will be assigned when creation starts.";
+    __weak UIAlertController *weakAlert = alert; __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Create" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        NSString *name = weakAlert.textFields.firstObject.text;
+        NSString *description = weakAlert.textFields.count > 1 ? weakAlert.textFields[1].text : @"";
+        if (name.length) [weakSelf createDeviceProfileWithName:name shortDescription:description];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)createDeviceProfileWithName:(NSString *)name shortDescription:(NSString *)shortDescription {
+    if (!NSThread.isMainThread) {
+        NSString *capturedName = [name copy], *capturedDescription = [shortDescription copy]; __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf createDeviceProfileWithName:capturedName shortDescription:capturedDescription]; }); return;
+    }
+    if (self.profileCreationInProgress) return;
+    if (![name isKindOfClass:NSString.class] || !name.length) return;
+    self.profileCreationInProgress = YES; self.profileButtonsView.userInteractionEnabled = NO;
+    Profile *input = [[Profile alloc] initWithName:[name copy] shortDescription:[shortDescription copy] iconName:@"default_profile"];
+    __weak typeof(self) weakSelf = self;
+    [[ProfileManager sharedManager] createProfile:input completion:^(BOOL success, NSError *error) {
+        // Core completion includes generation/activation. Defer only to allow the
+        // input alert to dismiss; no provider or timer work belongs in this UI.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
+            self.profileCreationInProgress = NO; self.profileButtonsView.userInteractionEnabled = YES;
+            if (!success) { [self presentDeviceProfileCreationResult:NO error:error]; return; }
+            NSError *selectionError = nil;
+            if (![[ProfileManager sharedManager] validateCurrentProfileID:input.profileId error:&selectionError]) {
+                [self presentDeviceProfileCreationResult:YES error:selectionError]; return;
+            }
+            [self refreshProfileUI];
+        });
+    }];
+}
+
+- (void)presentDeviceProfileCreationResult:(BOOL)created error:(NSError *)error {
+    if (!self.view.window) return;
+    NSString *message = created ? @"The profile was created. Its active selection could not be confirmed; refresh before continuing." :
+        (error.localizedDescription ?: @"Profile creation did not complete.");
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:created ? @"Profile Created" : @"Creation Failed" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 // Method to add the "Show Advanced" button
