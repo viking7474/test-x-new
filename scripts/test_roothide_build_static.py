@@ -337,7 +337,7 @@ require('return PXJailbreakRootPath(@"/usr/lib/TweakInject");' in daemon and
         '@"target-dir-missing"' in daemon and
         'ElleKit canonical /usr/lib/TweakInject is missing' in daemon,
         "RootHide daemon does not use/fail-closed on ElleKit's canonical TweakInject path")
-require("if (![self syncHookScopeToResetApps])" in view_controller and
+require("if (![self syncHookScopeToResetAppIDs:apps waitingForDaemon:YES])" in view_controller and
         "Không thể bật hook" in view_controller,
         "Reset Data does not stop safely when the injection filter cannot be installed")
 reset_profile_start = view_controller.index("- (void)createNextProfileAndRandomizeWithWarnings:")

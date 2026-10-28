@@ -748,9 +748,11 @@ require("replaceApplicationScopeWithBundleIDs" in sync_body and
 reset_start = tlink_ui.index("- (void)performResetAndPrepareNextProfileWithWarnings:")
 reset_end = tlink_ui.index("- (void)backupApps:", reset_start)
 reset_body = tlink_ui[reset_start:reset_end]
-require("[self syncHookScopeToResetApps]" in reset_body,
+require("[self syncHookScopeToResetAppIDs:apps waitingForDaemon:YES]" in reset_body,
         "reset must reconcile injection scope before destructive clear/relaunch")
-require("[self clearApps:self.selectedResetAppIDs" in reset_body,
+require('NSArray<NSString *> *apps = self.dashboardResetInputs[@"resetApps"];' in reset_body and
+        "[self clearApps:apps index:0" in reset_body and
+        "PXResetBundlesForSpoofScope(bundleIDs)" in sync_body,
         "MobileMail must remain in reset selection for AppDataCleaner even when excluded from spoof scope")
 setup_start = tlink_ui.index("- (void)setupDashboardUI")
 setup_end = tlink_ui.index("- (UIView *)dashboardGroupCard", setup_start)

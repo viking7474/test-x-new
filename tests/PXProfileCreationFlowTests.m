@@ -2227,6 +2227,9 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 @interface PXResetRunUIFixture : PXResetPreparationUIFixture
 @property (nonatomic, strong) NSObject *dashboardResetToken;
 @property (nonatomic, copy) NSString *dashboardResetPhase;
+@property (nonatomic, strong) NSDictionary *dashboardResetInputs;
+@property (nonatomic, strong) UITextField *rrsNoteTextField;
+@property (nonatomic, copy) NSArray *lastScopeApps, *lastBackupApps, *lastClearApps;
 @property (nonatomic, strong) NSArray *selectedRRSAppIDs, *selectedResetAppIDs;
 @property (nonatomic) NSUInteger backups, clears, filters, shows, hides, errors, messages, successes, persists, refreshes, restarts;
 @property (nonatomic) BOOL filterFails, throwRestart;
@@ -2242,6 +2245,9 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (void)showProgressHUDWithTitle:(NSString *)title; - (void)hideProgressHUD;
 - (void)showError:(NSError *)error; - (void)showDashboardMessage:(NSString *)title message:(NSString *)message;
 - (BOOL)syncHookScopeToResetApps;
+- (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon;
+- (NSArray<NSString *> *)captureDashboardAppIDs:(NSArray<NSString *> *)apps error:(NSError **)error;
+- (NSDictionary *)captureDashboardResetInputsForBackup:(BOOL)backup error:(NSError **)error;
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion;
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *))completion;
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion;
@@ -2255,6 +2261,7 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 @implementation PXResetRunUIFixture
 - (instancetype)init {
     if ((self = [super init])) { _selectedRRSAppIDs = @[@"test.rrs"]; _selectedResetAppIDs = @[@"test.reset"];
+        _rrsNoteTextField = [UITextField new]; _rrsNoteTextField.text = @"";
         self.nextFakeOptions = @{ @"fakeModelEnabled": @YES, @"fakeIOSVersionEnabled": @YES };
         self.nextFakePreview = [self generateFakePreviewFromOptions:self.nextFakeOptions]; }
     return self;
@@ -2264,11 +2271,14 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (void)showError:(NSError *)error { CreationUIEvent(); CHECK(error != nil, "reset failure presents an error"); self.errors++; }
 - (void)showDashboardMessage:(NSString *)title message:(NSString *)message { (void)message; CreationUIEvent(); if ([title isEqual:@"Hoàn tất"]) self.successes++; else self.messages++; }
 - (BOOL)syncHookScopeToResetApps { CreationUIEvent(); self.filters++; return !self.filterFails; }
+- (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon {
+    CHECK(waitForDaemon, "reset waits for the selected injection filter"); self.lastScopeApps = bundleIDs; return [self syncHookScopeToResetApps];
+}
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion {
-    (void)apps; (void)index; (void)saved; (void)warnings; CreationUIEvent(); self.backups++; self.backupCompletion = completion;
+    (void)index; (void)saved; (void)warnings; CreationUIEvent(); self.lastBackupApps = apps; self.backups++; self.backupCompletion = completion;
 }
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *))completion {
-    (void)apps; (void)index; (void)warnings; CreationUIEvent(); self.clears++; self.clearCompletion = completion;
+    (void)index; (void)warnings; CreationUIEvent(); self.lastClearApps = apps; self.clears++; self.clearCompletion = completion;
 }
 - (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options {
     (void)options;
@@ -2285,6 +2295,7 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (void)persistDashboardSelections { CreationUIEvent(); self.persists++; }
 - (void)refreshDashboardSelectionLabels { CreationUIEvent(); self.refreshes++; }
 - (void)killEnabledAppsAndRespring { CreationUIEvent(); self.restarts++; if (self.throwRestart) [NSException raise:@"fixture.restart" format:@"restart failed"]; }
+#include "PXResetInputsUI.inc"
 #include "PXResetWorkflowUI.inc"
 @end
 #undef CFNotificationCenterPostNotification
@@ -2412,7 +2423,6 @@ static PXBatchClearProducer *gBatchClear;
 }
 @end
 @interface PXResetBatchUIFixture : PXResetRunUIFixture
-@property (nonatomic, strong) UITextField *rrsNoteTextField;
 @property (nonatomic) NSUInteger metadataWrites, progressUpdates;
 @property (nonatomic) BOOL metadataFails;
 @property (nonatomic, strong) NSMutableArray *notes;
@@ -2424,7 +2434,7 @@ static PXBatchClearProducer *gBatchClear;
 #define AppDataBackupManager PXBatchBackupProducer
 #define AppDataCleaner PXBatchClearProducer
 @implementation PXResetBatchUIFixture
-- (instancetype)init { if ((self = [super init])) { _rrsNoteTextField = [UITextField new]; _rrsNoteTextField.text = @"note"; _notes = [NSMutableArray array]; } return self; }
+- (instancetype)init { if ((self = [super init])) { self.rrsNoteTextField.text = @"note"; _notes = [NSMutableArray array]; } return self; }
 - (NSString *)displayNameForBundleID:(NSString *)bundleID { CreationUIEvent(); return bundleID; }
 - (void)updateProgress:(float)progress detail:(NSString *)detail { (void)progress; (void)detail; CreationUIEvent(); self.progressUpdates++; }
 - (BOOL)updateRRSMetadataAtBackupDirectory:(NSString *)directory bundleID:(NSString *)bundleID appName:(NSString *)name note:(NSString *)note {
@@ -2512,6 +2522,61 @@ static void TestResetPerAppCallbacks(void) {
     gBatchBackup = nil; gBatchClear = nil;
 }
 
+static void TestResetAdmittedInputs(void) {
+    PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
+    NSMutableString *appID = [@"app.reset.A" mutableCopy], *backupID = [@"app.backup.A" mutableCopy];
+    NSMutableArray *resetApps = [NSMutableArray arrayWithObjects:appID, @"com.apple.mobilemail", appID, nil];
+    NSMutableArray *backupApps = [NSMutableArray arrayWithObject:backupID];
+    view.selectedResetAppIDs = resetApps; view.selectedRRSAppIDs = backupApps; view.rrsNoteTextField.text = @"submitted note";
+    [view saveRRSThenResetTapped]; NSObject *token = view.dashboardResetToken;
+    NSArray *expected = @[@"app.reset.A", @"com.apple.mobilemail", @"app.reset.A"];
+    [appID setString:@"edited ID"]; [backupID setString:@"edited backup"]; [resetApps removeAllObjects]; [backupApps removeAllObjects];
+    NSArray *newReset = @[@"app.new.choice"], *newBackup = @[@"app.new.backup"];
+    view.selectedResetAppIDs = newReset; view.selectedRRSAppIDs = newBackup; view.rrsNoteTextField.text = @"new note";
+    CHECK(token && [view.dashboardResetInputs[@"resetApps"] isEqual:expected] && [view.lastBackupApps.firstObject isEqual:@"app.backup.A"] && [view.dashboardResetInputs[@"note"] isEqual:@"submitted note"],
+        "reset admission captures app order duplicates and mutable strings without editing live choices");
+    view.backupCompletion(@[], 1);
+    CHECK(Pump(^BOOL { return view.clears == 1; }) && [view.lastScopeApps isEqual:expected] && [view.lastClearApps isEqual:expected] && view.selectedResetAppIDs == newReset && view.selectedRRSAppIDs == newBackup,
+        "reset scope and clear use the admitted list after backup while newer choices survive");
+    [view finishDashboardReset:token]; CHECK(!view.dashboardResetInputs, "terminal reset releases captured app lists and note"); ResetRunRelease(view, manager);
+    NSArray *invalidLists = @[@"wrong root", @{}, NSNull.null, @[@1], @[@""], @[@"valid", @[]]];
+    for (id invalid in invalidLists) {
+        view = [PXResetRunUIFixture new]; view.selectedResetAppIDs = invalid; [view resetDataTapped];
+        CHECK(!view.dashboardResetToken && !view.dashboardResetInputs && view.errors == 1 && !view.shows && !view.filters && !view.clears && !view.backups,
+            "invalid app selections fail before admission HUD filter or service effects");
+        view = [PXResetRunUIFixture new]; view.selectedRRSAppIDs = invalid; [view saveRRSThenResetTapped];
+        CHECK(!view.dashboardResetToken && view.errors == 1 && !view.shows && !view.backups && !view.clears, "invalid backup list never starts save-before-reset services");
+    }
+    view = [PXResetRunUIFixture new]; view.rrsNoteTextField.text = (id)@42; [view saveRRSThenResetTapped];
+    CHECK(!view.dashboardResetToken && view.errors == 1 && !view.backups, "invalid backup note reports failure before admission");
+    view.selectedRRSAppIDs = (id)@"unused malformed RRS"; [view resetDataTapped]; token = view.dashboardResetToken;
+    CHECK(token && view.clears == 1 && ![view.dashboardResetInputs[@"backupApps"] count] && [view.dashboardResetInputs[@"note"] isEqual:@""],
+        "direct reset ignores unused malformed RRS input and matching finish releases its snapshot");
+    [view finishDashboardReset:token]; NSObject *nextToken = [view beginDashboardResetInPhase:@"clear"]; NSDictionary *nextInputs = view.dashboardResetInputs;
+    CHECK(![view finishDashboardReset:token] && view.dashboardResetInputs == nextInputs && [view finishDashboardReset:nextToken] && !view.dashboardResetInputs, "stale finish preserves the newer reset input packet");
+    ResetRunRelease(view, nil);
+    view = [PXResetRunUIFixture new]; view.selectedResetAppIDs = nil; view.selectedRRSAppIDs = nil; view.rrsNoteTextField.text = nil;
+    NSError *error = [NSError errorWithDomain:@"old" code:1 userInfo:nil]; NSDictionary *empty = [view captureDashboardResetInputsForBackup:YES error:&error];
+    CHECK(empty && !error && ![empty[@"resetApps"] count] && ![empty[@"backupApps"] count] && [empty[@"note"] isEqual:@""], "nil reset inputs preserve existing empty selection and note defaults");
+    CHECK(![view captureDashboardAppIDs:(id)@42 error:NULL], "invalid captured app list supports null error output");
+    PXResetBatchUIFixture *batch = NewBatchUI(); batch.selectedRRSAppIDs = @[@"app.A", @"app.B"]; batch.rrsNoteTextField.text = @"fixed reset note";
+    token = [batch beginDashboardResetInPhase:@"backup"]; __block BOOL done = NO;
+    [batch backupApps:batch.dashboardResetInputs[@"backupApps"] index:0 savedCount:0 warnings:[NSMutableArray array] resetToken:token completion:^(NSArray *w, NSUInteger count) { (void)w; done = count == 2; }];
+    batch.rrsNoteTextField.text = @"edited while running";
+    void (^first)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0]; first(BatchBackupResult(@"app.A"), nil);
+    CHECK(Pump(^BOOL { return gBatchBackup.requests.count == 2; }), "captured-note batch reaches second app");
+    void (^second)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[1]; second(BatchBackupResult(@"app.B"), nil);
+    NSArray *fixedNotes = @[@"fixed reset note", @"fixed reset note"];
+    CHECK(Pump(^BOOL { return done; }) && [batch.notes isEqual:fixedNotes] && [batch.rrsNoteTextField.text isEqual:@"edited while running"], "reset backup metadata uses the admitted note after UI text changes");
+    [batch finishDashboardReset:token]; gBatchBackup = nil; gBatchClear = nil;
+    view = [PXResetRunUIFixture new]; __block BOOL rejected = NO;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSError *failure = nil; NSDictionary *packet = [view captureDashboardResetInputsForBackup:YES error:&failure];
+        dispatch_async(dispatch_get_main_queue(), ^{ rejected = !packet && failure.code == 4; });
+    });
+    CHECK(Pump(^BOOL { return rejected; }) && !view.dashboardResetToken && !view.errors && !view.shows, "off-main input capture fails without reading mutable UI state");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2571,7 +2636,7 @@ int main(int argc, const char *argv[]) {
         TestDeletionRecovery([NSString stringWithUTF8String:argv[0]]);
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
-        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks();
+        TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks(); TestResetAdmittedInputs();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

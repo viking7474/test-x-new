@@ -94,3 +94,7 @@ workflow. Metadata đang được apply có thể hoàn tất sau reentrant stat
 next item sẽ recheck token. Cross-instance admission, defaults/directory durability,
 crash recovery và daemon acknowledgement vẫn partial. Manifest `4C.2H4N-partial`;
 whole Reset và toàn Patch 4 chưa hoàn tất, Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4N pass ngày 2026-10-28. Admitted Reset app IDs/note và
+explicit scope forwarding được triển khai tiếp tại
+[H4O](PATCH-4C-2H4O-reset-admitted-app-inputs.md); full device/whole Reset vẫn partial.

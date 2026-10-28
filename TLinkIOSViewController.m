@@ -518,6 +518,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (void)killEnabledAppsAndRespring;
 - (BOOL)syncHookScopeToResetApps;
 - (BOOL)syncHookScopeToResetAppsWaitingForDaemon:(BOOL)waitForDaemon;
+- (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon;
 - (void)scheduleStartupHookScopeRepair;
 - (void)loadSettings;
 - (void)setupUI;
@@ -586,6 +587,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 @property (nonatomic, strong) NSDictionary *nextFakePreview;
 @property (nonatomic, strong) NSObject *dashboardResetToken;
 @property (nonatomic, copy) NSString *dashboardResetPhase;
+@property (nonatomic, strong) NSDictionary *dashboardResetInputs;
 @property (nonatomic, copy) NSString *rrsRestoreOrder;
 
 // Modify setupUI method to add a "Show Advanced" button and initially hide the advanced identifier sections
@@ -607,6 +609,8 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase;
 - (BOOL)finishDashboardReset:(NSObject *)token;
 - (BOOL)isDashboardReset:(NSObject *)token inPhase:(NSString *)phase;
+- (NSArray<NSString *> *)captureDashboardAppIDs:(NSArray<NSString *> *)apps error:(NSError **)error;
+- (NSDictionary *)captureDashboardResetInputsForBackup:(BOOL)backup error:(NSError **)error;
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion;
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings))completion;
 @end
@@ -7300,7 +7304,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (BOOL)syncHookScopeToResetAppsWaitingForDaemon:(BOOL)waitForDaemon {
-    NSArray<NSString *> *spoofEligibleResetApps = PXResetBundlesForSpoofScope(self.selectedResetAppIDs ?: @[]);
+    return [self syncHookScopeToResetAppIDs:self.selectedResetAppIDs ?: @[] waitingForDaemon:waitForDaemon];
+}
+
+- (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon {
+    NSArray<NSString *> *spoofEligibleResetApps = PXResetBundlesForSpoofScope(bundleIDs);
     NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(spoofEligibleResetApps);
     @synchronized (self.manager) {
         if (![self.manager replaceApplicationScopeWithBundleIDs:expandedBundles]) return NO;
@@ -7548,11 +7556,11 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf saveRRSThenResetTapped]; }); return;
     }
     if (self.dashboardResetToken) return;
-    if (!self.selectedRRSAppIDs.count) { [self showDashboardMessage:@"Thiếu app lưu RRS" message:@"Hãy chọn ít nhất một app trong Chọn App lưu RRS."]; return; }
     NSObject *token = [self beginDashboardResetInPhase:@"backup"];
     if (!token) return;
+    NSArray<NSString *> *apps = self.dashboardResetInputs[@"backupApps"];
+    if (!apps.count) { [self finishDashboardReset:token]; [self showDashboardMessage:@"Thiếu app lưu RRS" message:@"Hãy chọn ít nhất một app trong Chọn App lưu RRS."]; return; }
     [self showProgressHUDWithTitle:@"Lưu RRS..."];
-    NSArray<NSString *> *apps = [self.selectedRRSAppIDs copy];
     [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] resetToken:token completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![self advanceDashboardReset:token fromPhase:@"backup" toPhase:@"clear"]) return;
@@ -7586,7 +7594,8 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (!NSThread.isMainThread) return;
     NSObject *token = self.dashboardResetToken;
     if (![self advanceDashboardReset:token fromPhase:@"clear" toPhase:@"clearing"]) return;
-    if (!self.selectedResetAppIDs.count) {
+    NSArray<NSString *> *apps = self.dashboardResetInputs[@"resetApps"];
+    if (!apps.count) {
         [self finishDashboardReset:token];
         [self hideProgressHUD];
         [self showDashboardMessage:@"Thiếu app reset" message:@"Hãy chọn ít nhất một app trong Chọn App RESET!."];
@@ -7596,7 +7605,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     // Reconcile the injection filter immediately before destructive reset. This also
     // removes previously persisted clear-only system targets (notably MobileMail)
     // from the spoof scope before AppDataCleaner kills/relaunches the target process.
-    if (![self syncHookScopeToResetApps]) {
+    if (![self syncHookScopeToResetAppIDs:apps waitingForDaemon:YES]) {
         [self finishDashboardReset:token];
         [self hideProgressHUD];
         NSDictionary *syncDebug = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/TLinkIOS/filter_sync_debug.plist"];
@@ -7636,7 +7645,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         return;
     }
 
-    [self clearApps:self.selectedResetAppIDs index:0 warnings:[warnings mutableCopy] resetToken:token completion:^(NSArray<NSString *> *allWarnings) {
+    [self clearApps:apps index:0 warnings:[warnings mutableCopy] resetToken:token completion:^(NSArray<NSString *> *allWarnings) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (![self advanceDashboardReset:token fromPhase:@"clearing" toPhase:@"preparing"]) return;
             [self createNextProfileAndRandomizeWithWarnings:allWarnings];
@@ -7658,6 +7667,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSString *name = [self displayNameForBundleID:bundleID];
     [self updateProgress:(float)index / MAX((float)apps.count, 1.0) detail:[NSString stringWithFormat:@"Backup %@", name]];
     PXBackupOptions options = PXBackupOptionIncludeAppGroups | PXBackupOptionIncludePreferences;
+    NSString *resetNote = resetToken ? self.dashboardResetInputs[@"note"] : nil;
     __block BOOL completed = NO; // Access only in the main-queue delivery below.
     [[AppDataBackupManager shared] createBackupForBundleID:bundleID appName:name options:options completion:^(PXBackupResult *result, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -7673,7 +7683,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                 saved = [self updateRRSMetadataAtBackupDirectory:result.backupDirectory
                                                         bundleID:bundleID
                                                          appName:name
-                                                            note:self.rrsNoteTextField.text ?: @""];
+                                                            note:resetToken ? (resetNote ?: @"") : (self.rrsNoteTextField.text ?: @"")];
                 if (!saved) {
                     [warnings addObject:[NSString stringWithFormat:@"Backup %@: không thể lưu metadata RRS", name]];
                 }
@@ -7800,11 +7810,48 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return YES;
 }
 
+- (NSArray<NSString *> *)captureDashboardAppIDs:(NSArray<NSString *> *)apps error:(NSError **)error {
+    if (error) *error = nil;
+    if (!apps) return @[];
+    if ([apps isKindOfClass:NSArray.class]) {
+        NSMutableArray *captured = [NSMutableArray arrayWithCapacity:apps.count];
+        for (id value in apps) {
+            if (![value isKindOfClass:NSString.class] || ![value length]) {
+                if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:6 userInfo:@{NSLocalizedDescriptionKey: @"Invalid app selection for Reset Data"}]; return nil;
+            }
+            [captured addObject:[value copy]];
+        }
+        return [captured copy];
+    }
+    if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:6 userInfo:@{NSLocalizedDescriptionKey: @"Invalid app selection for Reset Data"}];
+    return nil;
+}
+
+- (NSDictionary *)captureDashboardResetInputsForBackup:(BOOL)backup error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:4 userInfo:@{NSLocalizedDescriptionKey: @"Reset inputs require the main thread"}]; return nil;
+    }
+    NSArray *resetApps = [self captureDashboardAppIDs:self.selectedResetAppIDs error:error];
+    if (!resetApps) return nil;
+    NSArray *backupApps = backup ? [self captureDashboardAppIDs:self.selectedRRSAppIDs error:error] : @[];
+    if (!backupApps) return nil;
+    NSString *note = backup ? self.rrsNoteTextField.text : nil;
+    if (note && ![note isKindOfClass:NSString.class]) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios.dashboard" code:6 userInfo:@{NSLocalizedDescriptionKey: @"Invalid RRS note for Reset Data"}]; return nil;
+    }
+    return @{ @"resetApps": resetApps, @"backupApps": backupApps, @"note": [note copy] ?: @"" };
+}
+
 - (NSObject *)beginDashboardResetInPhase:(NSString *)phase {
     // Main-thread admission for this controller. Keep ownership through the
     // scheduled restart; ProfileManager's create gate starts too late for clear.
     if (!NSThread.isMainThread || self.dashboardResetToken || !phase.length) return nil;
+    NSError *error = nil;
+    NSDictionary *inputs = [self captureDashboardResetInputsForBackup:[phase isEqual:@"backup"] error:&error];
+    if (!inputs) { [self showError:error]; return nil; }
     NSObject *token = [NSObject new];
+    self.dashboardResetInputs = inputs;
     self.dashboardResetToken = token;
     self.dashboardResetPhase = phase;
     return token;
@@ -7820,6 +7867,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 - (BOOL)finishDashboardReset:(NSObject *)token {
     if (!NSThread.isMainThread || !token || self.dashboardResetToken != token) return NO;
     self.dashboardResetPhase = nil;
+    self.dashboardResetInputs = nil;
     self.dashboardResetToken = nil;
     return YES;
 }

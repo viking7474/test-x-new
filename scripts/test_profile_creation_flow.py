@@ -87,6 +87,9 @@ UI_ADAPTERS = {
         '- (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion',
         '- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings completion:(void (^)(NSArray<NSString *> *warnings))completion',
         '- (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings))completion']),
+    'PXResetInputsUI.inc': ('TLinkIOSViewController.m', [
+        '- (NSArray<NSString *> *)captureDashboardAppIDs:(NSArray<NSString *> *)apps error:(NSError **)error',
+        '- (NSDictionary *)captureDashboardResetInputsForBackup:(BOOL)backup error:(NSError **)error']),
 }
 
 
@@ -362,6 +365,18 @@ def source_contracts():
     assert 'fromPhase:@"clearing" toPhase:@"preparing"' in clear_entry
     assert 'warnings:[NSMutableArray array] resetToken:token completion:' in backup_entry
     assert 'warnings:[warnings mutableCopy] resetToken:token completion:' in clear_entry
+    assert 'NSArray<NSString *> *apps = self.dashboardResetInputs[@"resetApps"];' in clear_entry
+    assert 'syncHookScopeToResetAppIDs:apps waitingForDaemon:YES' in clear_entry and '[self clearApps:apps index:0' in clear_entry
+    assert 'self.selectedResetAppIDs' not in clear_entry and 'self.selectedRRSAppIDs' not in backup_entry
+    assert 'self.dashboardResetInputs[@"backupApps"]' in backup_entry
+    assert reset_begin.index('captureDashboardResetInputsForBackup:') < reset_begin.index('self.dashboardResetToken = token;')
+    assert 'self.dashboardResetInputs = nil;' in reset_finish
+    app_capture, input_capture = [writers.method(reset_source, s) for s in UI_ADAPTERS['PXResetInputsUI.inc'][1]]
+    assert '[value copy]' in app_capture and 'return [captured copy];' in app_capture and 'NSString.class' in app_capture
+    assert '!NSThread.isMainThread' in input_capture and '[note copy]' in input_capture
+    scope_adapter = writers.method(reset_source, '- (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon')
+    assert 'PXResetBundlesForSpoofScope(bundleIDs)' in scope_adapter and 'self.selectedResetAppIDs' not in scope_adapter
+    assert scope_adapter.index('PXExpandedResetBundleIDs(spoofEligibleResetApps)') < scope_adapter.index('replaceApplicationScopeWithBundleIDs:expandedBundles') < scope_adapter.index('PXWriteSubstrateFilterPlists()')
     for old, new in (('preparing','preflight'), ('preflight','create'), ('create','switch'), ('switch','apply'), ('apply','restart'), ('restart','restarting')):
         assert f'fromPhase:@"{old}" toPhase:@"{new}"' in auto
     assert '@finally { [self finishDashboardReset:token]; }' in auto
@@ -381,6 +396,15 @@ def source_contracts():
         assert batch.index('if (completed) return;') < batch.index('completed = YES;') < batch.rindex('isDashboardReset:resetToken')
         assert 'resetToken:resetToken' in batch and 'dispatch_async(dispatch_get_main_queue()' in batch
     assert 'resetToken:nil' in batch_helpers[1] and 'resetToken:nil' in batch_helpers[3]
+    assert 'NSString *resetNote = resetToken ? self.dashboardResetInputs[@"note"] : nil;' in batch_helpers[2]
+    assert 'note:resetToken ? (resetNote ?: @"") : (self.rrsNoteTextField.text ?: @"")' in batch_helpers[2]
+    for case in ('reset admission captures app order duplicates and mutable strings without editing live choices',
+                 'reset scope and clear use the admitted list after backup while newer choices survive',
+                 'reset backup metadata uses the admitted note after UI text changes',
+                 'invalid app selections fail before admission HUD filter or service effects',
+                 'direct reset ignores unused malformed RRS input and matching finish releases its snapshot',
+                 'off-main input capture fails without reading mutable UI state'):
+        assert case in fixture, case
     for case in ('backup per-app callbacks advance once with one metadata write on main',
                  'clear per-app callbacks append one failure and advance once on main',
                  'retired reset batches ignore metadata warnings and remaining app submissions',
@@ -680,7 +704,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4N-partial'
+    assert manifest['rollout'] == '4C.2H4O-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
