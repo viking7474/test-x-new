@@ -66,6 +66,9 @@ METHODS += ['- (NSString *)generateProfileIDWithError:(NSError **)error',
             '- (NSString *)nextProfileIDForExistingIDs:(NSSet<NSString *> *)existing occupied:(NSSet<NSString *> *)occupied probe:(BOOL (^)(NSString *, BOOL *, NSError **))probe error:(NSError **)error']
 METHODS += ['- (BOOL)validateCurrentProfileID:(NSString *)profileID error:(NSError **)error']
 UI_ADAPTERS = {
+    'PXFakePreviewUI.inc': ('TLinkIOSViewController.m', [
+        '- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options',
+        '- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options currentDeviceIDs:(NSDictionary *)currentDeviceIDs']),
     'PXDeviceCreateUI.inc': ('DeviceSpecificSpoofingViewController.m', ['- (void)createDeviceProfileWithName:(NSString *)name shortDescription:(NSString *)shortDescription']),
     'PXManualCreateUI.inc': ('TLinkIOSViewController.m', ['- (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription']),
     'PXFormCreateUI.inc': ('ProfileCreationViewController.m', ['- (void)createButtonTapped', '- (void)cancelButtonTapped', '- (void)textFieldDidChangeSelection:(UITextField *)textField']),
@@ -337,6 +340,14 @@ def source_contracts():
     assert 'applyDashboardPreview:preview expectedActiveProfileID:profileID error:&previewError' in reset_prepare and 'if (!applied)' in reset_prepare
     assert 'generationError ?: [NSError' in reset_prepare and reset_prepare.count('validateDashboardResetProfileID:profileID error:error') == 4
     assert 'expectedProfileID:nil error:error' in reset_wrapper
+    assert auto.count('captureCurrentDashboardHardwareWithError:&intentError') == 1
+    assert auto.index('captureCurrentDashboardHardwareWithError:') < auto.index('if (previewNeedsRefresh)') < auto.index('generateProfileIDWithError:')
+    assert 'generateFakePreviewFromOptions:fakeOptions currentDeviceIDs:currentDeviceIDs' in auto
+    assert 'profileIdentityPath]' not in auto and 'dictionaryWithContentsOfFile:' not in auto
+    preview_wrapper = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXFakePreviewUI.inc'][1][0])
+    preview_provider = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXFakePreviewUI.inc'][1][1])
+    assert 'currentDeviceIDs:nil' in preview_wrapper
+    assert preview_provider.count('currentDeviceIDs ? currentDeviceIDs[@"DeviceModel"] : [self.manager currentValueForIdentifier:@"DeviceModel"]') == 2
     assert '*stop = YES;' in required and 'return failure == nil;' in required and 'NSUnderlyingErrorKey' in required
     assert '[self.manager regenerateAllEnabledIdentifiers];' not in auto
     assert 'prepareResetProfileWithOptions:fakeOptions preview:preparedPreview expectedProfileID:createdProfileID error:&preparationError' in auto
@@ -345,6 +356,12 @@ def source_contracts():
     assert auto.index('NSString *createdProfileID = [newProfile.profileId copy];') < auto.index('[pm switchToProfile:newProfile')
     assert auto.count('validateDashboardResetProfileID:createdProfileID') == 3
     assert 'Skipping Reset restart after selection checkpoint failure' in auto
+    for case in ('reset hardware capture failure stops before profile creation flags generation and preview',
+                 'reset iOS-only reuses one hardware packet for preview refresh marker validation and variant preservation',
+                 'other reset option modes keep legacy preview path without hardware capture',
+                 'actual preview generator uses supplied hardware without rereading mutable current model',
+                 'generic preview wrapper retains existing live model lookup policy'):
+        assert case in read('tests/PXProfileCreationFlowTests.m'), case
     for case in ('reset selection change after create never switches back to the old request',
                  'reset selection checkpoints stop after toggle generation or preview supersession',
                  'queued reset feedback rejects a selection changed after persistence',
@@ -725,7 +742,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4T-partial'
+    assert manifest['rollout'] == '4C.2H4U-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

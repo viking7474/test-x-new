@@ -2024,6 +2024,11 @@ static void TestCurrentProfileCheckpoint(void) {
 @property (nonatomic) NSUInteger writes, reads, generations, failWriteOrdinal;
 @property (nonatomic) NSUInteger requiredPackets, legacyToggleWrites;
 @property (nonatomic, copy) NSArray *requiredTypes;
+@property (nonatomic, copy) NSDictionary *hardware;
+@property (nonatomic, copy) NSString *currentModel;
+@property (nonatomic) NSUInteger hardwareCaptures, modelReads, pathReads;
+@property (nonatomic) BOOL failHardwareCapture;
+@property (nonatomic, copy) dispatch_block_t afterHardwareCapture;
 @property (nonatomic) BOOL failGeneration;
 @property (nonatomic, strong) NSError *failure;
 @property (nonatomic, copy) dispatch_block_t afterToggle, afterGeneration;
@@ -2037,6 +2042,7 @@ static void TestCurrentProfileCheckpoint(void) {
 - (NSError *)lastError;
 - (NSString *)currentValueForIdentifier:(NSString *)identifier;
 - (NSString *)profileIdentityPath;
+- (NSDictionary *)captureCurrentDashboardHardwareWithError:(NSError **)error;
 @end
 @implementation PXResetIdentifierFixture
 - (instancetype)init { if ((self = [super init])) { _enabled = [NSMutableDictionary dictionary]; _events = [NSMutableArray array]; } return self; }
@@ -2072,8 +2078,15 @@ static void TestCurrentProfileCheckpoint(void) {
     BOOL applied = self.expectedPreview ? self.expectedPreview(preview) : NO;
     if (error) *error = applied ? nil : [NSError errorWithDomain:@"fixture.preview" code:9 userInfo:nil]; return applied;
 }
-- (NSString *)currentValueForIdentifier:(NSString *)identifier { (void)identifier; return @"iPhone15,4"; }
-- (NSString *)profileIdentityPath { return nil; }
+- (NSString *)currentValueForIdentifier:(NSString *)identifier { (void)identifier; self.modelReads++; return self.currentModel ?: @"iPhone15,4"; }
+- (NSString *)profileIdentityPath { self.pathReads++; return nil; }
+- (NSDictionary *)captureCurrentDashboardHardwareWithError:(NSError **)error {
+    self.hardwareCaptures++;
+    NSDictionary *hardware = self.failHardwareCapture ? nil : (self.hardware ?: @{ @"DeviceModel": @"iPhone15,4", @"DeviceModelName": @"A name", @"RegulatoryModelNumber": @"A2846", @"BoardID": @"A-board", @"HwModel": @"A-hw" });
+    dispatch_block_t callback = self.afterHardwareCapture; self.afterHardwareCapture = nil; if (callback) callback();
+    if (error) *error = hardware ? nil : [NSError errorWithDomain:@"fixture.hardware" code:6032 userInfo:nil];
+    return hardware;
+}
 @end
 @interface PXResetPreparationUIFixture : NSObject
 @property (nonatomic, strong) PXResetIdentifierFixture *manager;
@@ -2285,6 +2298,8 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 @property (nonatomic) NSUInteger backups, clears, filters, shows, hides, errors, messages, successes, persists, refreshes, restarts;
 @property (nonatomic) BOOL filterFails, throwRestart;
 @property (nonatomic) NSUInteger previewMode;
+@property (nonatomic, copy) NSDictionary *previewHardware;
+@property (nonatomic) NSUInteger targetedPreviewGenerations;
 @property (nonatomic, copy) void (^backupCompletion)(NSArray *, NSUInteger);
 @property (nonatomic, copy) void (^clearCompletion)(NSArray *);
 - (NSObject *)beginDashboardResetInPhase:(NSString *)phase;
@@ -2304,6 +2319,7 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion;
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *))completion;
 - (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options;
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options currentDeviceIDs:(NSDictionary *)currentDeviceIDs;
 - (void)persistDashboardSelections; - (void)refreshDashboardSelectionLabels; - (void)killEnabledAppsAndRespring;
 @end
 #define ProfileManager PXProfileCreationFixture
@@ -2336,6 +2352,10 @@ static void PXResetWorkflowNotification(void) { CHECK(NSThread.isMainThread, "re
     if (self.previewMode == 1) return nil;
     if (self.previewMode == 2) return @{ @"DeviceModel": NSObject.new };
     return @{ @"DeviceModel": @"iPhone15,4", @"IOSVersion": @"16.0", @"IOSProductType": @"iPhone15,4" };
+}
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options currentDeviceIDs:(NSDictionary *)currentDeviceIDs {
+    (void)options; self.previewHardware = currentDeviceIDs; self.targetedPreviewGenerations++;
+    return @{ @"IOSVersion": @"16.0", @"IOSProductType": currentDeviceIDs[@"DeviceModel"] };
 }
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)saved warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)token completion:(void (^)(NSArray<NSString *> *, NSUInteger))completion {
     (void)token; [self backupApps:apps index:index savedCount:saved warnings:warnings completion:completion];
@@ -2672,6 +2692,98 @@ static void TestResetSelectionCheckpoints(void) {
     gResetRestart(); CHECK(view.restarts == 1 && !view.dashboardResetToken, "matching frozen reset ID permits one normal restart"); ResetRunRelease(view, manager);
 }
 
+static void TestResetHardwareSnapshot(void) {
+    for (NSUInteger mode = 0; mode < 6; mode++) {
+        PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
+        BOOL preserves = mode < 4;
+        view.nextFakeOptions = @{ @"fakeIOSVersionEnabled": @(mode != 5), @"fakeModelEnabled": @(mode == 4) };
+        view.nextFakePreview = mode == 0 ? @{} : @{ @"IOSVersion": @"16.0", @"IOSProductType": mode == 2 ? @"iPhone16,1" : @"iPhone15,4", @"DeviceModel": @"iPhone15,4" };
+        view.manager.currentModel = @"iPhone16,1";
+        view.manager.failHardwareCapture = mode >= 3;
+        view.manager.afterHardwareCapture = ^{ view.manager.currentModel = @"iPhone16,1"; view.manager.hardware = @{ @"DeviceModel": @"iPhone16,1", @"BoardID": @"B-board" }; };
+        [view resetDataTapped]; view.clearCompletion(@[]);
+        if (mode == 3) {
+            CHECK(Pump(^BOOL { return !view.dashboardResetToken; }) && view.errors == 1 && !manager.requests && !view.manager.requiredPackets && !view.manager.generations && !view.previews,
+                  "reset hardware capture failure stops before profile creation flags generation and preview");
+        } else {
+            CHECK(Pump(^BOOL { return manager.requests == 1; }), "reset hardware snapshot reaches controlled create");
+            manager.pendingCreation(YES, nil); CHECK(Pump(^BOOL { return manager.switches == 1; }), "reset hardware snapshot reaches controlled switch");
+            manager.pendingSwitch(YES, nil); CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }), "reset hardware snapshot reaches preparation and feedback");
+            if (preserves) {
+                CHECK([view.seenPreview[@"DeviceModel"] isEqual:@"iPhone15,4"] && [view.seenPreview[@"IOSProductType"] isEqual:@"iPhone15,4"] &&
+                      [view.seenPreview[@"RegulatoryModelNumber"] isEqual:@"A2846"] && [view.seenPreview[@"BoardID"] isEqual:@"A-board"] && [view.seenPreview[@"HwModel"] isEqual:@"A-hw"] &&
+                      view.manager.hardwareCaptures == 1 && !view.manager.modelReads && !view.manager.pathReads && view.targetedPreviewGenerations == (mode == 1 ? 0 : 1),
+                      "reset iOS-only reuses one hardware packet for preview refresh marker validation and variant preservation");
+            } else CHECK(!view.manager.hardwareCaptures, "other reset option modes keep legacy preview path without hardware capture");
+            [view finishDashboardReset:view.dashboardResetToken];
+        }
+        view.manager.afterHardwareCapture = nil; ResetRunRelease(view, manager);
+    }
+}
+
+static NSMutableArray *gPreviewProducts;
+static dispatch_block_t gDuringPreviewLookup;
+@interface IPhoneModelDB : NSObject
++ (instancetype)sharedManager;
+- (NSDictionary *)canonicalHardwareSpecForProductType:(NSString *)product;
+@end
+@implementation IPhoneModelDB
++ (instancetype)sharedManager { static id manager; static dispatch_once_t once; dispatch_once(&once, ^{ manager = [self new]; }); return manager; }
+- (NSDictionary *)canonicalHardwareSpecForProductType:(NSString *)product { return product.length ? @{ @"deviceMemory": @6 } : @{}; }
+@end
+@interface DeviceModelManager : NSObject
++ (instancetype)sharedManager;
+- (NSDictionary *)deviceSpecificationsForModel:(NSString *)product;
+@end
+@implementation DeviceModelManager
++ (instancetype)sharedManager { static id manager; static dispatch_once_t once; dispatch_once(&once, ^{ manager = [self new]; }); return manager; }
+- (NSDictionary *)deviceSpecificationsForModel:(NSString *)product { (void)product; return @{ @"deviceMemory": @6 }; }
+@end
+@interface IOSBuildDB : NSObject
++ (instancetype)sharedManager;
+- (NSDictionary *)randomMetaForDevice:(NSString *)product min:(NSString *)minimum max:(NSString *)maximum error:(NSError **)error;
+@end
+@implementation IOSBuildDB
++ (instancetype)sharedManager { static id manager; static dispatch_once_t once; dispatch_once(&once, ^{ manager = [self new]; }); return manager; }
+- (NSDictionary *)randomMetaForDevice:(NSString *)product min:(NSString *)minimum max:(NSString *)maximum error:(NSError **)error {
+    (void)minimum; (void)maximum; if (error) *error = nil; [gPreviewProducts addObject:product];
+    dispatch_block_t callback = gDuringPreviewLookup; gDuringPreviewLookup = nil; if (callback) callback();
+    return @{ @"version": @"16.0", @"build": @"B1", @"darwin": @"22.0", @"xnu": @"fixture-xnu", @"kernel_version": @"fixture-kernel" };
+}
+@end
+@interface PXHardwarePreviewFixture : NSObject
+@property (nonatomic, strong) PXResetIdentifierFixture *manager;
+- (NSArray *)pxSupportedFakeModels;
+- (NSArray *)pxCarriersForCountry:(NSString *)country;
+- (NSString *)pxRandomDeviceName; - (NSString *)pxRandomSerial; - (NSString *)pxRandomMAC;
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options;
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options currentDeviceIDs:(NSDictionary *)currentDeviceIDs;
+@end
+@implementation PXHardwarePreviewFixture
+- (NSArray *)pxSupportedFakeModels { return @[@{ @"id": @"iPhone15,4", @"name": @"A" }, @{ @"id": @"iPhone16,1", @"name": @"B" }]; }
+- (NSArray *)pxCarriersForCountry:(NSString *)country { (void)country; return @[]; }
+- (NSString *)pxRandomDeviceName { return @"fixture-name"; }
+- (NSString *)pxRandomSerial { return @"FVF12345678"; }
+- (NSString *)pxRandomMAC { return @"02:11:22:33:44:55"; }
+#include "PXFakePreviewUI.inc"
+@end
+static void TestHardwarePreviewProvider(void) {
+    PXHardwarePreviewFixture *view = [PXHardwarePreviewFixture new]; view.manager = [PXResetIdentifierFixture new];
+    view.manager.currentModel = @"iPhone16,1"; gPreviewProducts = [NSMutableArray array];
+    NSDictionary *hardware = @{ @"DeviceModel": @"iPhone15,4", @"BoardID": @"A-board" };
+    NSDictionary *options = @{ @"fakeIOSVersionEnabled": @YES, @"fakeModelEnabled": @NO };
+    gDuringPreviewLookup = ^{ view.manager.currentModel = @"iPhone16,1"; };
+    NSDictionary *preview = [view generateFakePreviewFromOptions:options currentDeviceIDs:hardware];
+    NSArray *onlyA = @[@"iPhone15,4"];
+    CHECK([preview[@"IOSProductType"] isEqual:@"iPhone15,4"] && [preview[@"IOSVersion"] isEqual:@"16.0"] && [gPreviewProducts isEqual:onlyA] && !view.manager.modelReads,
+          "actual preview generator uses supplied hardware without rereading mutable current model");
+    [gPreviewProducts removeAllObjects];
+    preview = [view generateFakePreviewFromOptions:options]; NSArray *onlyB = @[@"iPhone16,1"];
+    CHECK([preview[@"IOSProductType"] isEqual:@"iPhone16,1"] && [gPreviewProducts isEqual:onlyB] && view.manager.modelReads == 2,
+          "generic preview wrapper retains existing live model lookup policy");
+    gPreviewProducts = nil; gDuringPreviewLookup = nil;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if ((argc == 5 && strcmp(argv[1], "--delete-crash") == 0) || (argc == 4 && strcmp(argv[1], "--recover-crash") == 0)) {
@@ -2732,6 +2844,7 @@ int main(int argc, const char *argv[]) {
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
         TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks(); TestResetAdmittedInputs(); TestResetSelectionCheckpoints();
+        TestResetHardwareSnapshot(); TestHardwarePreviewProvider();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

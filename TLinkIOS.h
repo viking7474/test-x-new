@@ -48,6 +48,8 @@
 // Reset preflight: enable only model/iOS/storage/name flags for the expected
 // active profile. Never generate artifacts through the legacy toggle setters.
 - (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
+// Read-only coherent selection/device_ids view for preserving hardware during Reset.
+- (NSDictionary *)captureCurrentDashboardHardwareWithError:(NSError **)error;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
 
 // Current Values

@@ -603,6 +603,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options expectedProfileID:(NSString *)profileID error:(NSError **)error;
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options currentDeviceIDs:(NSDictionary *)currentDeviceIDs;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error;
@@ -7352,6 +7353,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options {
+    return [self generateFakePreviewFromOptions:options currentDeviceIDs:nil];
+}
+
+- (NSDictionary *)generateFakePreviewFromOptions:(NSDictionary *)options currentDeviceIDs:(NSDictionary *)currentDeviceIDs {
     BOOL fakeIOS = options[@"fakeIOSVersionEnabled"] ? [options[@"fakeIOSVersionEnabled"] boolValue] : YES;
     BOOL fakeModel = options[@"fakeModelEnabled"] ? [options[@"fakeModelEnabled"] boolValue] : YES;
     BOOL fakeName = options[@"fakeNameEnabled"] ? [options[@"fakeNameEnabled"] boolValue] : NO;
@@ -7382,7 +7387,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         }
         allowedModels = [canonicalModels copy];
     }
-    NSString *currentModelID = [self.manager currentValueForIdentifier:@"DeviceModel"];
+    NSString *currentModelID = currentDeviceIDs ? currentDeviceIDs[@"DeviceModel"] : [self.manager currentValueForIdentifier:@"DeviceModel"];
     NSDictionary *currentSpecs = [modelDB canonicalHardwareSpecForProductType:currentModelID];
     if (!currentSpecs.count && ![currentModelID hasPrefix:@"iPhone"]) {
         currentSpecs = [[DeviceModelManager sharedManager] deviceSpecificationsForModel:currentModelID];
@@ -7458,7 +7463,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     } else {
         model = selectionPool[arc4random_uniform((uint32_t)selectionPool.count)];
         if (fakeIOS) {
-            iosProductType = [self.manager currentValueForIdentifier:@"DeviceModel"];
+            iosProductType = currentDeviceIDs ? currentDeviceIDs[@"DeviceModel"] : [self.manager currentValueForIdentifier:@"DeviceModel"];
             if (!iosProductType.length) {
                 NSLog(@"[Dashboard] Cannot generate fake iOS without a current DeviceModel");
                 return nil;
@@ -7922,11 +7927,19 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     BOOL fakeIOS = fakeOptions[@"fakeIOSVersionEnabled"] ? [fakeOptions[@"fakeIOSVersionEnabled"] boolValue] : YES;
     BOOL fakeModel = fakeOptions[@"fakeModelEnabled"] ? [fakeOptions[@"fakeModelEnabled"] boolValue] : YES;
 
+    NSDictionary *currentDeviceIDs = nil;
+    if (!fakeModel && fakeIOS) {
+        // Read the hardware to preserve once. Separate current-value/path reads
+        // can observe different profiles, or migrate one merely to build a preview.
+        currentDeviceIDs = [self.manager captureCurrentDashboardHardwareWithError:&intentError];
+        if (!currentDeviceIDs) { [self finishDashboardReset:token]; [self hideProgressHUD]; [self showError:intentError]; return; }
+    }
+
     NSDictionary *preparedPreview = submittedIntent[@"preview"];
     NSString *previewModel = [preparedPreview[@"DeviceModel"] isKindOfClass:NSString.class] ? preparedPreview[@"DeviceModel"] : nil;
     NSString *previewIOS = [preparedPreview[@"IOSVersion"] isKindOfClass:NSString.class] ? preparedPreview[@"IOSVersion"] : nil;
     NSString *previewIOSProductType = [preparedPreview[@"IOSProductType"] isKindOfClass:NSString.class] ? preparedPreview[@"IOSProductType"] : nil;
-    NSString *currentModelForIOS = [self.manager currentValueForIdentifier:@"DeviceModel"];
+    NSString *currentModelForIOS = currentDeviceIDs ? currentDeviceIDs[@"DeviceModel"] : [self.manager currentValueForIdentifier:@"DeviceModel"];
     NSString *expectedIOSProductType = fakeModel ? previewModel : currentModelForIOS;
     BOOL previewNeedsRefresh = !preparedPreview.count ||
         (fakeModel && !previewModel.length) ||
@@ -7934,18 +7947,14 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         (fakeIOS && (!previewIOSProductType.length ||
                      (expectedIOSProductType.length && ![previewIOSProductType isEqualToString:expectedIOSProductType])));
     if (previewNeedsRefresh) {
-        preparedPreview = [self generateFakePreviewFromOptions:fakeOptions];
+        preparedPreview = currentDeviceIDs ? [self generateFakePreviewFromOptions:fakeOptions currentDeviceIDs:currentDeviceIDs] : [self generateFakePreviewFromOptions:fakeOptions];
     }
 
     // Fake iOS without Fake Model must preserve the current hardware identity.
     // regenerateAllEnabledIdentifiers() uses a grouped model+iOS generator, so
-    // capture the current model variant before switching to the new profile and
-    // reapply it together with the prepared iOS tuple.
+    // reapply the captured hardware variant together with its prepared iOS tuple,
+    // without resolving a possibly different current profile after provider work.
     if (!fakeModel && fakeIOS && preparedPreview.count) {
-        NSString *currentIdentityDir = [self.manager profileIdentityPath];
-        NSDictionary *currentDeviceIDs = currentIdentityDir.length
-            ? [NSDictionary dictionaryWithContentsOfFile:[currentIdentityDir stringByAppendingPathComponent:@"device_ids.plist"]]
-            : nil;
         NSMutableDictionary *preservedPreview = [preparedPreview mutableCopy];
         for (NSString *key in @[@"DeviceModel", @"DeviceModelName", @"RegulatoryModelNumber", @"BoardID", @"HwModel"]) {
             NSString *value = [currentDeviceIDs[key] isKindOfClass:NSString.class] ? currentDeviceIDs[key] : nil;

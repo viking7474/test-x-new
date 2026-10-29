@@ -60,6 +60,25 @@ def source_contracts():
                    '- (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error'):
         assert method in groups.SIGNATURES
     fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    capture_signature = '- (NSDictionary *)captureCurrentDashboardHardwareWithError:(NSError **)error'
+    assert capture_signature in groups.SIGNATURES and capture_signature in read('TLinkIOS.h')
+    capture_hardware = groups.method(source, capture_signature)
+    for token in ('PXPerformStandaloneRuntimeSourceWrite(', 'PXReadRuntimeProfileSelection(', 'PXProfileIdentityPath(profileID)',
+                  'exists:&exists', 'if (!exists || !model.length)', 'hardware = PXDetachRuntimeGeneration(values, readError)'):
+        assert token in capture_hardware, token
+    for forbidden in ('setDictionary:', 'profileIdentityPath]', 'PXActiveProfileID()', 'sharedManager', 'migrateProfileSchema',
+                      'PXPostSettingsChangedNotification', 'createDirectory', 'dispatch_', 'self.error'):
+        assert forbidden not in capture_hardware, forbidden
+    for case in ('hardware capture reads authoritative selection and one source without cache resolver migration provider or commit effects',
+                 'hardware packet remains detached when selection or captured source changes later',
+                 'hardware capture preserves legacy fallback without selection repair',
+                 'hardware capture does not fall back past invalid canonical selection',
+                 'hardware capture rejects missing empty or malformed model before preview work',
+                 'hardware capture preserves corrupt source bytes on failure',
+                 'hardware malformed teardown restores shared files and commit identity',
+                 'hardware capture rejects nested uncommitted source views and poisons outer staging'):
+        assert case in fixture, case
+    assert 'TestDashboardHardwareCapture(manager, Identity(@"a"), Identity(@"b"))' in fixture
     for case in ('expected preview skips stale publication after post-commit selection or model changes',
                  'expected preview publishes matching model but skips newer storage values',
                  'preview model callback may publish newer target without stale storage overwrite',
@@ -88,7 +107,7 @@ def source_contracts():
     assert 'otherBefore = Snapshot(b)[@"files"]' in fixture, 'a successful A commit changes the global token; compare only B file bytes'
     assert 'TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"))' in fixture
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4T-partial'
+    assert manifest['rollout'] == '4C.2H4U-partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert 'test_runtime_dashboard_preview.py' in read('.github/workflows/build-ios-arm.yml')

@@ -2,6 +2,10 @@
 
 Hoàn tất local ngày 2026-10-29. Người dùng xác nhận H4S build pass trước bước này.
 
+Follow-up: người dùng xác nhận H4T cùng native fixture cleanup/oracle fix đã build
+pass ngày 2026-10-29. H4U tiếp tục hardware read preflight cho iOS-only Reset; xem
+[báo cáo H4U](PATCH-4C-2H4U-reset-hardware-snapshot.md).
+
 ## Finding
 
 Confirmed target-admission gap, severity High, trong bước

@@ -1690,6 +1690,59 @@ static void TestRequiredIdentifiers(NSString *a, NSString *b) {
     gSelected = @"a"; CheckLeaseFree();
 }
 
+static void TestDashboardHardwareCapture(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
+    NSDictionary *aHardware = @{ @"DeviceModel": @"iPhone15,4", @"DeviceModelName": @"A name", @"RegulatoryModelNumber": @"A2846", @"BoardID": @"A-board", @"HwModel": @"A-hw" };
+    NSDictionary *bHardware = @{ @"DeviceModel": @"iPhone16,1", @"DeviceModelName": @"B name", @"RegulatoryModelNumber": @"B-number", @"BoardID": @"B-board", @"HwModel": @"B-hw" };
+    CHECK(Seed(a, aHardware, NO) && Seed(b, bHardware, NO) && SelectExpectedSource(@"a", @"hardware-capture"), "dashboard hardware capture independent sources seeded");
+    gSelected = @"b";
+    NSDictionary *before = BatchSnapshot();
+    NSUInteger resolves = gSelections, migrations = gMigrations, preparations = gPreparations, caches = gCacheChanges, adoptions = gArtifactAdoptions, notices = gBatchNotifications;
+    NSError *error = [NSError errorWithDomain:@"old" code:9 userInfo:nil];
+    NSDictionary *captured = [manager captureCurrentDashboardHardwareWithError:&error];
+    CHECK([captured isEqual:aHardware] && !error && [before isEqual:BatchSnapshot()] && resolves == gSelections && migrations == gMigrations && preparations == gPreparations && caches == gCacheChanges && adoptions == gArtifactAdoptions && notices == gBatchNotifications,
+          "hardware capture reads authoritative selection and one source without cache resolver migration provider or commit effects");
+    CHECK(SelectExpectedSource(@"b", @"hardware-after") && SetSource(Path(a, @"device_ids.plist"), @"BoardID", @"newer-board"), "hardware source changes after capture");
+    CHECK([captured isEqual:aHardware] && [[manager captureCurrentDashboardHardwareWithError:NULL] isEqual:bHardware],
+          "hardware packet remains detached when selection or captured source changes later");
+    CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:writeError];
+    }, NULL), "hardware legacy fallback fixture seeded");
+    before = BatchSnapshot();
+    CHECK([[manager captureCurrentDashboardHardwareWithError:&error] isEqual:bHardware] && !error && [before isEqual:BatchSnapshot()], "hardware capture preserves legacy fallback without selection repair");
+    CHECK(SetSource(PXCurrentProfileInfoPath(), @"ProfileId", @7), "hardware invalid canonical selection seeded"); before = BatchSnapshot();
+    CHECK(![manager captureCurrentDashboardHardwareWithError:&error] && error.code == 20 && [before isEqual:BatchSnapshot()], "hardware capture does not fall back past invalid canonical selection");
+    CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:writeError] && [tx removeDictionaryAtPath:PXLegacyActiveProfileInfoPath() error:writeError];
+    }, NULL), "hardware missing selection fixture seeded"); before = BatchSnapshot();
+    CHECK(![manager captureCurrentDashboardHardwareWithError:NULL] && [before isEqual:BatchSnapshot()], "hardware capture rejects missing selection without creating a profile");
+    CHECK(SelectExpectedSource(@"a", @"hardware-model-validation"), "hardware model validation target seeded");
+    for (id model in @[@7, @"", NSNull.null]) {
+        CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            return model == NSNull.null ? [tx removeDictionaryAtPath:Path(a, @"device_ids.plist") error:writeError] : [tx setDictionary:@{ @"DeviceModel": model } atPath:Path(a, @"device_ids.plist") error:writeError];
+        }, NULL), "hardware invalid or missing identity source seeded"); before = BatchSnapshot();
+        CHECK(![manager captureCurrentDashboardHardwareWithError:&error] && error.code == 6032 && [before isEqual:BatchSnapshot()], "hardware capture rejects missing empty or malformed model before preview work");
+    }
+    CHECK(Seed(a, aHardware, NO), "hardware malformed plist baseline restored");
+    NSString *path = Path(a, @"device_ids.plist"); NSData *saved = [NSData dataWithContentsOfFile:path]; NSDictionary *clean = BatchSnapshot();
+    @try {
+        CHECK([[@"invalid hardware plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES], "hardware malformed plist injected");
+        before = BatchSnapshot();
+        CHECK(![manager captureCurrentDashboardHardwareWithError:&error] && error && [before isEqual:BatchSnapshot()], "hardware capture preserves corrupt source bytes on failure");
+    } @finally { CHECK([saved writeToFile:path atomically:YES], "hardware malformed fixture restores original bytes"); }
+    CHECK([clean isEqual:BatchSnapshot()], "hardware malformed teardown restores shared files and commit identity");
+    CHECK(SetSource(path, @"DeviceModelName", @7) && SetSource(path, @"BoardID", @[]) && SetSource(path, @"HwModel", @""), "hardware optional field type fixture seeded");
+    captured = [manager captureCurrentDashboardHardwareWithError:&error];
+    CHECK(captured && !error && [captured[@"DeviceModel"] isEqual:aHardware[@"DeviceModel"]] && !captured[@"DeviceModelName"] && !captured[@"BoardID"] && !captured[@"HwModel"], "hardware capture keeps legacy optional string omission policy");
+    before = BatchSnapshot(); __block NSDictionary *uncommitted = nil;
+    BOOL outer = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        if (![tx setDictionary:bHardware atPath:path error:writeError]) return NO;
+        uncommitted = [manager captureCurrentDashboardHardwareWithError:NULL];
+        return YES;
+    }, &error);
+    CHECK(!outer && error && !uncommitted && [before isEqual:BatchSnapshot()], "hardware capture rejects nested uncommitted source views and poisons outer staging");
+    gSelected = @"a";
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1714,6 +1767,7 @@ int main(void) {
         TestExpectedPreviewPublication(Identity(@"a"), Identity(@"b"));
         TestExpectedGenerationPublication(Identity(@"a"), Identity(@"b"));
         TestRequiredIdentifiers(Identity(@"a"), Identity(@"b"));
+        TestDashboardHardwareCapture(manager, Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

@@ -2239,6 +2239,44 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return success;
 }
 
+- (NSDictionary *)captureCurrentDashboardHardwareWithError:(NSError **)error {
+    if (error) *error = nil;
+    NSError *failure = nil;
+    __block NSDictionary *hardware = nil;
+    BOOL captured = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        NSDictionary *pair = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), readError);
+        if (!pair) return NO;
+        NSDictionary *central = pair[PXCurrentProfileInfoPath()], *legacy = pair[PXLegacyActiveProfileInfoPath()];
+        NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+        NSString *profileID = PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]);
+        NSString *identity = PXProfileIdentityPath(profileID);
+        if (!identity.length) {
+            if (readError) *readError = [NSError errorWithDomain:@"WeaponXProfileError" code:20 userInfo:@{NSLocalizedDescriptionKey: @"Current profile is unavailable for hardware capture"}];
+            return NO;
+        }
+        BOOL exists = NO;
+        NSDictionary *ids = [tx dictionaryAtPath:[identity stringByAppendingPathComponent:@"device_ids.plist"] exists:&exists error:readError];
+        if (!ids) return NO;
+        NSString *model = [ids[@"DeviceModel"] isKindOfClass:NSString.class] ? ids[@"DeviceModel"] : nil;
+        if (!exists || !model.length) {
+            if (readError) *readError = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6032 userInfo:@{NSLocalizedDescriptionKey: @"Current profile has no DeviceModel to preserve"}];
+            return NO;
+        }
+        NSMutableDictionary *values = [NSMutableDictionary dictionary];
+        for (NSString *key in @[@"DeviceModel", @"DeviceModelName", @"RegulatoryModelNumber", @"BoardID", @"HwModel"]) {
+            NSString *value = [ids[key] isKindOfClass:NSString.class] ? ids[key] : nil;
+            if (value.length) values[key] = value;
+        }
+        // Detach under the same gate as selection and source reads. No current
+        // resolver, migration, provider, directory creation or cache publication.
+        hardware = PXDetachRuntimeGeneration(values, readError);
+        return hardware != nil;
+    }, &failure);
+    if (!captured && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6032 userInfo:@{NSLocalizedDescriptionKey: @"Could not capture current profile hardware"}];
+    if (!captured && error) *error = failure;
+    return captured ? hardware : nil;
+}
+
 - (BOOL)isIdentifierEnabled:(NSString *)type {
     PX_IDENTIFIER_RUNTIME_READ_OPERATION;
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;
