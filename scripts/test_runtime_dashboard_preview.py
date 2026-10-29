@@ -31,6 +31,13 @@ def source_contracts():
     assert body.index('[mutation invalidate]') < body.index('setCurrentDeviceModel:') < body.index('adoptCommittedStorageInfo:')
     assert '@finally' in body and 'if (!committed && error) *error = self.error;' in body
     assert 'if (!committed) return NO;' in body and '@catch' in body
+    assert body.count('dashboardPreviewPublicationIsCurrentAtIdentity:publicationIdentity') == 2
+    assert body.index('[mutation invalidate]') < body.index('dashboardPreviewPublicationIsCurrentAtIdentity:publicationIdentity') < body.index('setCurrentDeviceModel:')
+    publication = groups.method(source, '- (BOOL)dashboardPreviewPublicationIsCurrentAtIdentity:(NSString *)identity model:(NSString *)model storage:(NSDictionary *)storage')
+    for token in ('PXReadRuntimeProfileSelection(', 'isEqual:profileID', 'ids[@"DeviceModel"] isEqual:model', '[current isEqual:storage]', 'exists:&exists'):
+        assert token in publication, token
+    for forbidden in ('setCurrent', 'adoptCommitted', 'sharedManager', 'setDictionary:', 'dispatch_', 'self.error'):
+        assert forbidden not in publication, forbidden
     assert 'identifierMutationForExpectedProfileID:profileID selection:&selection' in body
     assert body.index('PXRuntimeProfileSelectionMatches(') < body.index('PXStageRuntimeIdentifierReplacement(')
     expected_owner = groups.method(source, '- (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection')
@@ -49,6 +56,12 @@ def source_contracts():
                    '- (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error'):
         assert method in groups.SIGNATURES
     fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    for case in ('expected preview skips stale publication after post-commit selection or model changes',
+                 'expected preview publishes matching model but skips newer storage values',
+                 'preview model callback may publish newer target without stale storage overwrite',
+                 'expected preview publication suppression preserves source success and released ownership',
+                 'generic preview preserves legacy cache publication without checkpoint reads'):
+        assert case in fixture, case
     for case in ('custom model builder prepares detached replacement without source or cache effects',
                  'busy dashboard stops before target providers and all candidate writes',
                  'pending deletion blocks dashboard without partial setters',
@@ -71,7 +84,7 @@ def source_contracts():
     assert 'otherBefore = Snapshot(b)[@"files"]' in fixture, 'a successful A commit changes the global token; compare only B file bytes'
     assert 'TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"))' in fixture
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4Q-partial'
+    assert manifest['rollout'] == '4C.2H4R-partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert 'test_runtime_dashboard_preview.py' in read('.github/workflows/build-ios-arm.yml')

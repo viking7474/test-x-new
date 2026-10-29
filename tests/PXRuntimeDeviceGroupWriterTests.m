@@ -1319,6 +1319,81 @@ static void TestExpectedActiveOwners(PXDeviceGroupFixture *manager, NSString *a,
     CHECK(SelectExpectedSource(@"a", @"restored"), "expected owner fixture restores selection");
 }
 
+@interface PXPreviewPublicationFixture : PXDeviceGroupFixture
+@property (nonatomic, copy) dispatch_block_t beforePublicationCheck;
+@property (nonatomic) NSUInteger publicationChecks;
+@end
+@implementation PXPreviewPublicationFixture
+- (BOOL)dashboardPreviewPublicationIsCurrentAtIdentity:(NSString *)identity model:(NSString *)model storage:(NSDictionary *)storage {
+    self.publicationChecks++;
+    dispatch_block_t callback = self.beforePublicationCheck; self.beforePublicationCheck = nil;
+    if (callback) callback();
+    return [super dashboardPreviewPublicationIsCurrentAtIdentity:identity model:model storage:storage];
+}
+@end
+static void TestExpectedPreviewPublication(NSString *a, NSString *b) {
+    gExpectedIdentity = a; gSelected = @"a"; gBuild = @"B1";
+    gFailDB = gNoHardware = gNoFirmware = NO; gDuringPrepare = gDuringResolve = nil;
+    gBadDashboardStorage = gFailDashboardTuple = gIncompleteDashboardTuple = NO;
+    gCheckDashboardPublication = gCheckDependencyPublication = gThrowDependencyPublication = NO;
+    gDuringPublication = gDuringDependencyPublication = nil;
+    for (NSUInteger drift = 0; drift < 5; drift++) {
+        CHECK(SeedDashboard(a, 7) && SeedDashboard(b, 8) && SelectExpectedSource(@"a", @"publication-before"), "expected preview publication baseline seeded");
+        PXPreviewPublicationFixture *manager = [PXPreviewPublicationFixture new]; manager.settings = [@{ @"StorageSystem": @YES } mutableCopy];
+        NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions;
+        __block NSDictionary *afterCommit = nil;
+        manager.beforePublicationCheck = ^{
+            CheckLeaseFree();
+            if (drift == 0) CHECK(SelectExpectedSource(@"b", @"after-commit"), "publication observes newer active profile");
+            else if (drift == 1) CHECK(SelectExpectedSource(@"a", @"newer-same-id"), "publication observes newer selection revision");
+            else if (drift == 2) CHECK(SetSource(Path(a, @"device_ids.plist"), @"DeviceModel", @"iPhone16,1"), "publication observes newer model field");
+            else if (drift == 3) CHECK(SetSource(Path(a.stringByDeletingLastPathComponent, @"storage.plist"), @"TotalStorage", @"512"), "publication observes newer storage source");
+            else CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:error] && [tx removeDictionaryAtPath:PXLegacyActiveProfileInfoPath() error:error];
+            }, NULL), "publication observes missing selection");
+            afterCommit = BatchSnapshot();
+        };
+        NSError *error = nil; BOOL applied = [manager applyDashboardPreview:DashboardPreview() expectedActiveProfileID:@"a" error:&error];
+        CHECK(applied && !error && !manager.error && manager.publicationChecks == 2 && [afterCommit isEqual:BatchSnapshot()] && gArtifactAdoptions == adoptions + (drift == 1 ? 1 : 0) && gCacheChanges == caches + (drift == 1 || drift == 3 ? 1 : 0),
+            "expected preview publication suppression preserves source success and released ownership");
+        if (drift == 3) CHECK(gCacheChanges == caches + 1 && adoptions == gArtifactAdoptions, "expected preview publishes matching model but skips newer storage values");
+        else if (drift == 1) CHECK(gCacheChanges == caches + 1 && gArtifactAdoptions == adoptions + 1, "same-profile metadata changes preserve matching preview cache adoption");
+        else CHECK(caches == gCacheChanges && adoptions == gArtifactAdoptions, "expected preview skips stale publication after post-commit selection or model changes");
+        CheckLeaseFree();
+    }
+    for (NSUInteger mode = 0; mode < 3; mode++) {
+        CHECK(SeedDashboard(a, 7) && SeedDashboard(b, 8) && SelectExpectedSource(@"a", @"callback-before"), "model callback publication baseline seeded");
+        PXPreviewPublicationFixture *manager = [PXPreviewPublicationFixture new]; manager.settings = [@{ @"StorageSystem": @YES } mutableCopy];
+        NSDictionary *newerStorage = @{ @"TotalStorage": @"512", @"FreeStorage": @"300", @"FilesystemType": @"newer" };
+        NSUInteger adoptions = gArtifactAdoptions;
+        gCheckDependencyPublication = YES; gThrowDependencyPublication = mode == 2;
+        gDuringDependencyPublication = ^{
+            CheckLeaseFree();
+            NSString *target = mode == 1 ? a : b;
+            if (mode != 1) CHECK(SelectExpectedSource(@"b", @"model-callback"), "model callback changes active target");
+            else CHECK(SetSource(Path(a, @"device_ids.plist"), @"DeviceModel", @"iPhone16,1"), "model callback commits a newer same-profile model");
+            CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                return [tx setDictionary:newerStorage atPath:Path(target.stringByDeletingLastPathComponent, @"storage.plist") error:error];
+            }, NULL), "model callback commits newer storage source");
+            [[StorageManager sharedManager] adoptCommittedStorageInfo:newerStorage];
+        };
+        NSError *error = nil;
+        CHECK([manager applyDashboardPreview:DashboardPreview() expectedActiveProfileID:@"a" error:&error] && !error && adoptions + 1 == gArtifactAdoptions && [gDashboardStorage isEqual:newerStorage] && manager.publicationChecks == 2,
+            "preview model callback may publish newer target without stale storage overwrite");
+        gCheckDependencyPublication = gThrowDependencyPublication = NO; gDuringDependencyPublication = nil; CheckLeaseFree();
+    }
+    CHECK(SeedDashboard(a, 7) && SelectExpectedSource(@"a", @"publication-matching"), "matching preview publication baseline seeded");
+    PXPreviewPublicationFixture *manager = [PXPreviewPublicationFixture new]; manager.settings = [@{ @"StorageSystem": @YES } mutableCopy];
+    NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions; NSError *error = nil;
+    CHECK([manager applyDashboardPreview:DashboardPreview() expectedActiveProfileID:@"a" error:&error] && !error && manager.publicationChecks == 2 && caches + 1 == gCacheChanges && adoptions + 1 == gArtifactAdoptions,
+        "matching expected preview still adopts model and storage once");
+    manager.beforePublicationCheck = ^{ CHECK(NO, "generic preview must not read targeted publication checkpoints"); };
+    NSUInteger checks = manager.publicationChecks;
+    CHECK([manager applyDashboardPreview:DashboardPreview() error:&error] && !error && manager.publicationChecks == checks && manager.beforePublicationCheck,
+        "generic preview preserves legacy cache publication without checkpoint reads");
+    manager.beforePublicationCheck = nil; CheckLeaseFree();
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1340,6 +1415,7 @@ int main(void) {
         TestTelephonyLifecycle(manager, Identity(@"a"), Identity(@"b"));
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"));
+        TestExpectedPreviewPublication(Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

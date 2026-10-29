@@ -103,3 +103,8 @@ trước create. Backup/clear target, global scope authority, cross-instance adm
 owner cancellation, defaults/directory durability và daemon acknowledgement vẫn
 partial. Manifest `4C.2H4Q-partial`; whole Reset và toàn Patch 4 chưa hoàn tất,
 Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận build H4Q pass ngày 2026-10-28. Expected-preview cache
+publication checkpoints được triển khai tiếp tại
+[H4R](PATCH-4C-2H4R-preview-cache-publication-checks.md); global ordering/whole Reset
+và device matrix vẫn partial.

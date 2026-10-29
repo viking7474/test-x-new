@@ -84,6 +84,7 @@
 - (PXProfileArtifactMutation *)currentIdentifierMutation;
 - (NSDictionary *)captureExpectedActiveSelection:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
 - (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection;
+- (BOOL)dashboardPreviewPublicationIsCurrentAtIdentity:(NSString *)identity model:(NSString *)model storage:(NSDictionary *)storage;
 - (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error;
 - (BOOL)validateCustomDeviceModel:(NSString *)value error:(NSError **)error;
 - (PXPreparedDeviceProfileGroup *)prepareCustomDeviceModel:(NSString *)value error:(NSError **)error;
@@ -969,15 +970,42 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     }
     if (!committed) return NO;
     // Commit acknowledgement is independent of best-effort cache publication.
-    if (model.length) {
+    NSString *publicationIdentity = selection ? [mutation.identityDirectory copy] : nil;
+    if (model.length && (!selection || [self dashboardPreviewPublicationIsCurrentAtIdentity:publicationIdentity model:model storage:nil])) {
         @try { [[DeviceModelManager sharedManager] setCurrentDeviceModel:model]; }
         @catch (NSException *exception) { PXLog(@"[Dashboard] Source committed; model cache publication failed: %@", exception); }
     }
-    if (storage) {
+    if (storage && (!selection || [self dashboardPreviewPublicationIsCurrentAtIdentity:publicationIdentity model:model storage:storage])) {
         @try { [storageManager adoptCommittedStorageInfo:storage]; }
         @catch (NSException *exception) { PXLog(@"[Dashboard] Source committed; storage cache publication failed: %@", exception); }
     }
     return YES;
+}
+
+- (BOOL)dashboardPreviewPublicationIsCurrentAtIdentity:(NSString *)identity model:(NSString *)model storage:(NSDictionary *)storage {
+    // Read-only checkpoint after releasing lifecycle ownership. Never hold the
+    // source gate across cache callbacks, which may reenter a source writer.
+    return PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSString *profileID = PXValidatedProfileID(identity.stringByDeletingLastPathComponent.lastPathComponent);
+        if (![PXProfileIdentityPath(profileID) isEqual:identity]) return NO;
+        NSDictionary *pair = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
+        if (!pair) return NO;
+        NSDictionary *central = pair[PXCurrentProfileInfoPath()], *legacy = pair[PXLegacyActiveProfileInfoPath()];
+        NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+        if (![PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]) isEqual:profileID]) return NO;
+        if (model.length) {
+            BOOL exists = NO;
+            NSDictionary *ids = [tx dictionaryAtPath:[identity stringByAppendingPathComponent:@"device_ids.plist"] exists:&exists error:error];
+            if (!ids || !exists || ![ids[@"DeviceModel"] isEqual:model]) return NO;
+        }
+        if (storage) {
+            BOOL exists = NO;
+            NSString *path = [identity.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"storage.plist"];
+            NSDictionary *current = [tx dictionaryAtPath:path exists:&exists error:error];
+            if (!current || !exists || ![current isEqual:storage]) return NO;
+        }
+        return YES;
+    }, NULL);
 }
 
 
