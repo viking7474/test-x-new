@@ -45,6 +45,18 @@ def source_contracts():
     assert '@{type: value}, @[type], expected, YES, NO, error' in stage
     assert 'PXRuntimeIdentifierSidecar(type)' in stage and '@"value": value, @"lastUpdated": timestamp' in stage
     fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    telephony = groups.method(fixture, 'static void TestTelephony(PXDeviceGroupFixture *manager, NSString *a, NSString *b)')
+    cleanup_order = (
+        'NSData *savedSidecar = [NSData dataWithContentsOfFile:sidecarPath]',
+        'NSDictionary *clean = Snapshot(a)',
+        '[badBytes writeToFile:sidecarPath atomically:YES]',
+        'malformed telephony sidecar is never silently replaced',
+        '@finally',
+        '[savedSidecar writeToFile:sidecarPath atomically:YES]',
+        '[clean isEqual:Snapshot(a)]',
+    )
+    positions = [telephony.index(token) for token in cleanup_order]
+    assert positions == sorted(positions), 'corruption fixture must verify rejection, restore exact bytes in finally, then verify a clean shared store'
     for case in ('four telephony APIs keep one target and one regional lookup',
                  'standalone IMEI and MEID keep independent fields and sidecars',
                  'telephony pair merges unrelated fields and increments once',

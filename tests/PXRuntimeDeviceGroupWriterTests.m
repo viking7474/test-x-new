@@ -484,10 +484,22 @@ static void TestTelephony(PXDeviceGroupFixture *manager, NSString *a, NSString *
     CHECK(![manager setCustomIMEI:imei] && [manager generateMEID] == nil && [before isEqual:Snapshot(a)],
           "telephony counter exhaustion preserves complete pair");
     CHECK(Seed(a, baseline, YES), "telephony malformed sidecar fixture seeded");
+    NSString *sidecarPath = Path(a, @"imei.plist");
+    NSData *savedSidecar = [NSData dataWithContentsOfFile:sidecarPath];
+    NSDictionary *clean = Snapshot(a);
+    CHECK(savedSidecar != nil, "telephony malformed fixture captures original sidecar bytes");
     NSData *badBytes = [@"malformed sidecar" dataUsingEncoding:NSUTF8StringEncoding];
-    CHECK([badBytes writeToFile:Path(a, @"imei.plist") atomically:YES], "malformed telephony sidecar prepared");
-    before = Snapshot(a);
-    CHECK(![manager setCustomIMEI:imei] && [before isEqual:Snapshot(a)], "malformed telephony sidecar is never silently replaced");
+    @try {
+        CHECK([badBytes writeToFile:sidecarPath atomically:YES], "malformed telephony sidecar prepared");
+        before = Snapshot(a);
+        CHECK(![manager setCustomIMEI:imei] && [before isEqual:Snapshot(a)], "malformed telephony sidecar is never silently replaced");
+    } @finally {
+        // Only fixture teardown restores the injected corruption. A source
+        // writer must keep rejecting this malformed before-image; Seed cannot
+        // overwrite it for the next suite sharing the same store.
+        CHECK([savedSidecar writeToFile:sidecarPath atomically:YES], "telephony malformed fixture restores original sidecar bytes");
+    }
+    CHECK([clean isEqual:Snapshot(a)], "telephony corruption teardown restores files and global commit identity before later suites");
     CheckLeaseFree();
 }
 static void TestModelPreparation(PXDeviceGroupFixture *manager, NSString *identity) {
@@ -1289,8 +1301,14 @@ static void TestExpectedActiveOwners(PXDeviceGroupFixture *manager, NSString *a,
         gSelected = @"b"; NSDictionary *other = Snapshot(b); NSUInteger resolve = gSelections; NSError *error = nil;
         NSMutableString *expectedID = [@"a" mutableCopy];
         gDuringPrepare = ^{ [expectedID setString:@"b"]; };
-        CHECK(ApplyExpectedOwner(manager, preview, expectedID, &error) && !error && resolve == gSelections && [other isEqual:Snapshot(b)] && [expectedID isEqual:@"b"],
+        BOOL committed = ApplyExpectedOwner(manager, preview, expectedID, &error);
+        NSDictionary *after = Snapshot(b);
+        // A committed A operation advances the store-wide marker returned by
+        // capture. Only B's file bytes are expected to remain unchanged.
+        CHECK(committed && !error && resolve == gSelections && [other[@"files"] isEqual:after[@"files"]] && [expectedID isEqual:@"b"],
             "expected owners freeze caller ID and never resolve the stale current profile");
+        CHECK(committed && [other[@"sourceCommitID"] length] && [after[@"sourceCommitID"] length] && ![other[@"sourceCommitID"] isEqual:after[@"sourceCommitID"]],
+            "expected owner A commit advances the global marker while preserving inactive B file bytes");
         CheckLeaseFree();
     }
     gSelected = @"a";

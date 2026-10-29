@@ -123,6 +123,10 @@ def source_contracts():
                  'expected owners preserve legacy fallback without creating or repairing canonical selection'):
         assert case in fixture, case
     assert 'TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"))' in fixture
+    expected_cases = groups.method(fixture, 'static void TestExpectedActiveOwners(PXDeviceGroupFixture *manager, NSString *a, NSString *b)')
+    assert '[other[@"files"] isEqual:after[@"files"]]' in expected_cases
+    assert '![other[@"sourceCommitID"] isEqual:after[@"sourceCommitID"]]' in expected_cases
+    assert '[other isEqual:Snapshot(b)]' not in expected_cases, 'a successful A commit changes the store-wide marker, not B file bytes'
     for case in ('whole regenerate commits once at one captured target',
                  'whole batch rollback restores artifacts settings scope',
                  'batch scalar preparation failure leaves all source and caches intact',

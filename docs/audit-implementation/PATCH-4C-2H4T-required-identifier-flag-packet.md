@@ -118,3 +118,30 @@ vẫn chờ CI. Static/extraction pass không thay thế native verification.
 Manifest `4C.2H4T-partial`. Whole Reset, earlier backup/metadata/hardware target
 capture, global cache/defaults ordering, cross-instance/lifetime/cancellation,
 directory durability và daemon ack vẫn partial. Patch 5–8 chưa triển khai.
+
+## Native build follow-up — 2026-10-29
+
+CI báo chuỗi FAIL bắt đầu tại `expected owners seed independent targets and newer
+selection`. Đọc call order của shared native fixture xác định hai lỗi test:
+
+1. `TestTelephony` kết thúc bằng case ghi malformed `identity/imei.plist` rồi kiểm
+   tra production từ chối overwrite, nhưng không restore bytes gốc. Suite kế tiếp
+   `TestExpectedActiveOwners` gọi SeedDashboard; Seed muốn overwrite sidecar hỏng,
+   SourceStore từ chối malformed before-image đúng contract. Vì shared store vẫn
+   bị nhiễm fixture corruption, preview/generation baselines phía sau cũng fail.
+   Sửa bằng save raw bytes trước injection, restore trong `@finally` của test và
+   assert toàn snapshot/commit identity trở về baseline trước khi rời suite. Không
+   cho production writer repair hay bỏ qua malformed source.
+2. Successful expected-owner A commit từng so toàn `Snapshot(b)` để kiểm tra B
+   không đổi. Capture còn chứa global sourceCommitID, nên A commit hợp lệ cũng làm
+   snapshot B khác dù B bytes nguyên vẹn. Sửa oracle so riêng `files`, đồng thời
+   assert global marker có tiến lên. Những failure/rollback assertions vẫn so cả
+   snapshot để bảo vệ invariant không có commit ngoài ý muốn.
+
+Thêm source regression guards trong telephony/generation suites. Negative controls
+gỡ restoration hoặc đưa lại whole-snapshot oracle đều bị guard từ chối, kể cả khi
+đặt lại token đúng ở ngoài function. Exact extraction và CHECK macro arity pass.
+Không đổi production, manifest phase hay RootHide packaging. Native recipe chạy
+rootful trước và dừng khi binary fail; log rootful không chứng minh lỗi chỉ có ở
+rootful. Hai lane dùng cùng fixture sửa này. Native/Foundation rerun vẫn cần macOS
+CI; Windows source checks không xác nhận toàn bộ chuỗi runtime đã pass.
