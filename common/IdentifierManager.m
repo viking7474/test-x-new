@@ -72,8 +72,13 @@
 - (NSString *)existingGenerationIdentityForProfileID:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error;
 - (NSDictionary *)prepareCellularRefreshForDeviceIDs:(NSDictionary *)capturedIDs options:(NSDictionary *)options error:(NSError **)error;
 - (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model;
+- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model publicationGuard:(BOOL (^)(NSArray *, NSArray *))guard;
+- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation checkedPublication:(BOOL)checked;
+- (BOOL)runtimeGenerationPublicationIsCurrent:(PXCommittedRuntimeGeneration *)generation identifierKeys:(NSArray *)keys artifactPaths:(NSArray *)paths;
+- (BOOL)runtimePublicationHasCurrentIdentity:(NSString *)identity transaction:(PXRuntimeSourceTransaction *)tx error:(NSError **)error;
 - (PXPreparedDeviceProfileGroup *)prepareDeviceProfileGroupWithOptions:(NSDictionary *)options error:(NSError **)error;
 - (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared;
+- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared publicationGuard:(BOOL (^)(NSArray *))guard;
 - (NSString *)generatePreparedIdentifierForType:(NSString *)type;
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial;
 - (BOOL)isValidIMEI:(NSString *)imei;
@@ -526,10 +531,21 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared {
+    [self publishPreparedDeviceProfileGroup:prepared publicationGuard:nil];
+}
+
+- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared publicationGuard:(BOOL (^)(NSArray *))guard {
     NSDictionary *ids = prepared.updates;
-    @try { [[IOSVersionInfo sharedManager] setCurrentIOSVersionInfo:prepared.versionInfo]; }
+    @try {
+        IOSVersionInfo *manager = [IOSVersionInfo sharedManager];
+        if (!guard || guard(@[@"DeviceModel", @"IOSVersion", @"IOSBuild", @"Darwin", @"XNU", @"KernelVersion"]))
+            [manager setCurrentIOSVersionInfo:prepared.versionInfo];
+    }
     @catch (__unused NSException *exception) {}
-    @try { [[DeviceModelManager sharedManager] setCurrentDeviceModel:ids[@"DeviceModel"]]; }
+    @try {
+        DeviceModelManager *manager = [DeviceModelManager sharedManager];
+        if (!guard || guard(@[@"DeviceModel"])) [manager setCurrentDeviceModel:ids[@"DeviceModel"]];
+    }
     @catch (__unused NSException *exception) {}
     PXLog(@"[WeaponX] DeviceProfileGroup committed: %@ (%@) iOS %@ (%@)", ids[@"DeviceModel"], ids[@"DeviceModelName"], ids[@"IOSVersion"], ids[@"IOSBuild"]);
     PXDBLog(@"DeviceProfileGroup: device=%@ regulatory=%@ boardID=%@ hwModel=%@", ids[@"DeviceModel"], ids[@"RegulatoryModelNumber"], ids[@"BoardID"], ids[@"HwModel"]);
@@ -986,13 +1002,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     // Read-only checkpoint after releasing lifecycle ownership. Never hold the
     // source gate across cache callbacks, which may reenter a source writer.
     return PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        NSString *profileID = PXValidatedProfileID(identity.stringByDeletingLastPathComponent.lastPathComponent);
-        if (![PXProfileIdentityPath(profileID) isEqual:identity]) return NO;
-        NSDictionary *pair = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
-        if (!pair) return NO;
-        NSDictionary *central = pair[PXCurrentProfileInfoPath()], *legacy = pair[PXLegacyActiveProfileInfoPath()];
-        NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
-        if (![PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]) isEqual:profileID]) return NO;
+        if (![self runtimePublicationHasCurrentIdentity:identity transaction:tx error:error]) return NO;
         if (model.length) {
             BOOL exists = NO;
             NSDictionary *ids = [tx dictionaryAtPath:[identity stringByAppendingPathComponent:@"device_ids.plist"] exists:&exists error:error];
@@ -1003,6 +1013,39 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             NSString *path = [identity.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"storage.plist"];
             NSDictionary *current = [tx dictionaryAtPath:path exists:&exists error:error];
             if (!current || !exists || ![current isEqual:storage]) return NO;
+        }
+        return YES;
+    }, NULL);
+}
+
+- (BOOL)runtimePublicationHasCurrentIdentity:(NSString *)identity transaction:(PXRuntimeSourceTransaction *)tx error:(NSError **)error {
+    NSString *profileID = PXValidatedProfileID(identity.stringByDeletingLastPathComponent.lastPathComponent);
+    if (![PXProfileIdentityPath(profileID) isEqual:identity]) return NO;
+    NSDictionary *pair = PXReadRuntimeProfileSelection(tx, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), error);
+    if (!pair) return NO;
+    NSDictionary *central = pair[PXCurrentProfileInfoPath()], *legacy = pair[PXLegacyActiveProfileInfoPath()];
+    NSDictionary *info = [central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"];
+    return [PXValidatedProfileID(info[@"ProfileId"] ?: info[@"currentProfileId"]) isEqual:profileID];
+}
+
+- (BOOL)runtimeGenerationPublicationIsCurrent:(PXCommittedRuntimeGeneration *)generation identifierKeys:(NSArray *)keys artifactPaths:(NSArray *)paths {
+    // A value checkpoint, not a lock across callbacks. Revalidate only the
+    // callback's inputs; replaying the entire receipt here multiplies file I/O.
+    return PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSString *identity = generation.identityDirectory;
+        if (![self runtimePublicationHasCurrentIdentity:identity transaction:tx error:error]) return NO;
+        if (keys.count) {
+            NSString *path = [identity stringByAppendingPathComponent:@"device_ids.plist"];
+            NSDictionary *record = generation.proof[path];
+            BOOL exists = NO;
+            NSDictionary *ids = [tx dictionaryAtPath:path exists:&exists error:error];
+            if (!ids || !exists || ![record[@"exists"] boolValue] || ![record[@"info"] isKindOfClass:NSDictionary.class]) return NO;
+            for (NSString *key in keys)
+                if (![(ids[key] ?: NSNull.null) isEqual:(record[@"info"][key] ?: NSNull.null)]) return NO;
+        }
+        for (NSString *path in paths) {
+            NSDictionary *record = generation.proof[path];
+            if (!record || !PXRuntimeGenerationMatchesProof(tx, @{path: record}, error)) return NO;
         }
         return YES;
     }, NULL);
@@ -1518,7 +1561,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     }
     PXCommittedRuntimeGeneration *receipt = [self ownedRuntimeGenerationForProfileID:expected currentProfile:YES networkArtifacts:nil deferSettings:NO error:error];
     if (!receipt) return NO;
-    [self publishCommittedRuntimeGeneration:receipt];
+    [self publishCommittedRuntimeGeneration:receipt checkedPublication:YES];
     return YES;
 }
 
@@ -1593,6 +1636,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation {
+    [self publishCommittedRuntimeGeneration:generation checkedPublication:NO];
+}
+
+- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation checkedPublication:(BOOL)checked {
     if (![generation isKindOfClass:PXCommittedRuntimeGeneration.class]) { PXPostSettingsChangedNotification(); return; }
     // Activation already checked the full proof. Recheck artifacts before
     // knowingly installing a stale candidate; defaults/scope were just advanced.
@@ -1603,7 +1650,14 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     BOOL current = [generation isKindOfClass:PXCommittedRuntimeGeneration.class] && PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         return PXRuntimeGenerationMatchesProof(tx, artifactProof, error);
     }, NULL);
-    if (current) [self publishRuntimeGeneration:generation.payload identityDirectory:generation.identityDirectory model:generation.model];
+    if (current) {
+        BOOL (^guard)(NSArray *, NSArray *) = nil;
+        if (checked) guard = ^BOOL(NSArray *keys, NSArray *paths) {
+            return [self runtimeGenerationPublicationIsCurrent:generation identifierKeys:keys artifactPaths:paths];
+        };
+        if (checked) [self publishRuntimeGeneration:generation.payload identityDirectory:generation.identityDirectory model:generation.model publicationGuard:guard];
+        else [self publishRuntimeGeneration:generation.payload identityDirectory:generation.identityDirectory model:generation.model];
+    }
     else PXPostSettingsChangedNotification(); // Wake readers for the latest committed state.
 }
 
@@ -1815,33 +1869,50 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model {
+    [self publishRuntimeGeneration:payload identityDirectory:identityDir model:model publicationGuard:nil];
+}
+
+- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model publicationGuard:(BOOL (^)(NSArray *, NSArray *))guard {
     NSString *profileID = identityDir.stringByDeletingLastPathComponent.lastPathComponent;
     [self.spoofCache removeAllObjects];
     [_appEnabledCache removeAllObjects];
     @try {
         // Owned batches release lifecycle ownership before compatibility callbacks.
         // Avoid knowingly installing A's values if selection has since moved to B.
-        if ([PXActiveProfileID() isEqualToString:profileID]) {
-            if (model) [self publishPreparedDeviceProfileGroup:model];
+        if (guard ? guard(@[], @[]) : [PXActiveProfileID() isEqualToString:profileID]) {
+            if (model) {
+                if (guard) [self publishPreparedDeviceProfileGroup:model publicationGuard:^BOOL(NSArray *keys) { return guard(keys, @[]); }];
+                else [self publishPreparedDeviceProfileGroup:model];
+            }
             for (NSString *type in payload[@"scalars"]) {
-                if (![PXActiveProfileID() isEqualToString:profileID]) break;
+                if (guard) {
+                    NSString *file = PXRuntimeIdentifierSidecar(type);
+                    NSArray *paths = file ? @[[identityDir stringByAppendingPathComponent:file]] : @[];
+                    if (!guard(@[type], paths)) continue;
+                } else if (![PXActiveProfileID() isEqualToString:profileID]) break;
                 [self publishPreparedIdentifier:payload[@"scalars"][type] type:type includeNameAndSerial:YES];
             }
             WiFiManager *wifi = [WiFiManager sharedManager];
-            if ([PXActiveProfileID() isEqualToString:profileID]) [wifi adoptCommittedWiFiInfo:payload[@"wifi"] profileID:profileID];
+            if (guard ? guard(@[@"SSID", @"BSSID"], @[[identityDir stringByAppendingPathComponent:@"wifi_info.plist"]]) : [PXActiveProfileID() isEqualToString:profileID])
+                [wifi adoptCommittedWiFiInfo:payload[@"wifi"] profileID:profileID];
             if (payload[@"storage"]) {
                 StorageManager *storage = [StorageManager sharedManager];
-                if ([PXActiveProfileID() isEqualToString:profileID]) [storage adoptCommittedStorageInfo:payload[@"storage"]];
+                if (guard ? guard(@[@"DeviceModel"], @[[identityDir.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"storage.plist"]]) : [PXActiveProfileID() isEqualToString:profileID])
+                    [storage adoptCommittedStorageInfo:payload[@"storage"]];
             }
             if (payload[@"uptime"]) {
                 UptimeManager *uptime = [UptimeManager sharedManager];
-                if ([PXActiveProfileID() isEqualToString:profileID]) [uptime adoptCommittedUptimeInfo:payload[@"uptime"] timestamp:payload[@"timestamp"]];
+                if (guard ? guard(@[@"BootTime", @"SystemUptime"], @[[identityDir stringByAppendingPathComponent:@"boot_time.plist"], [identityDir stringByAppendingPathComponent:@"system_uptime.plist"]]) : [PXActiveProfileID() isEqualToString:profileID])
+                    [uptime adoptCommittedUptimeInfo:payload[@"uptime"] timestamp:payload[@"timestamp"]];
             }
             if (payload[@"battery"]) {
                 BatteryManager *battery = [BatteryManager sharedManager];
-                if ([PXActiveProfileID() isEqualToString:profileID]) {
+                NSArray *batteryPaths = @[[identityDir stringByAppendingPathComponent:@"battery_info.plist"]];
+                NSArray *batteryKeys = @[@"BatteryLevel", @"LowPowerMode"];
+                if (guard ? guard(batteryKeys, batteryPaths) : [PXActiveProfileID() isEqualToString:profileID]) {
                     [battery adoptCommittedBatteryInfo:payload[@"batteryUI"]];
-                    [battery publishCommittedBatteryInfo:payload[@"batteryUI"] timestamp:payload[@"timestamp"]];
+                    if (!guard || guard(batteryKeys, batteryPaths))
+                        [battery publishCommittedBatteryInfo:payload[@"batteryUI"] timestamp:payload[@"timestamp"]];
                 }
             }
         }

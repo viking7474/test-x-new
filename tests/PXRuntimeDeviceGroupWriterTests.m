@@ -38,6 +38,8 @@ static NSString *gDashboardStorageModel;
 static NSUInteger gDashboardStorageSelections;
 static void ProbeDashboardStorage(NSDictionary *info);
 static void (^gDuringDependencyPublication)(void);
+static void (^gDuringScalarPublication)(void);
+static void (^gDuringBatteryAdoption)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
@@ -236,7 +238,11 @@ ARTIFACT_SINGLETON
 @end
 @implementation BatteryManager
 ARTIFACT_SINGLETON
-- (void)adoptCommittedBatteryInfo:(NSDictionary *)info { (void)info; Adopt(); }
+- (void)adoptCommittedBatteryInfo:(NSDictionary *)info {
+    (void)info; Adopt();
+    void (^callback)(void) = gDuringBatteryAdoption; gDuringBatteryAdoption = nil;
+    if (callback) callback();
+}
 - (void)publishCommittedBatteryInfo:(NSDictionary *)info timestamp:(NSDate *)timestamp {
     (void)timestamp; gBatteryNotifications++;
     CHECK([info[@"LowPowerMode"] boolValue] && [IDs(gExpectedIdentity)[@"LowPowerMode"] boolValue], "batch battery preserves captured target LPM");
@@ -288,6 +294,8 @@ ARTIFACT_SINGLETON
     (void)includeNameAndSerial; gCacheChanges++;
     CHECK([IDs(gExpectedIdentity)[type] isEqual:value] && Snapshot(gExpectedIdentity) != nil,
           "batch scalar publisher sees committed value outside gate");
+    void (^callback)(void) = gDuringScalarPublication; gDuringScalarPublication = nil;
+    if (callback) callback();
 }
 #include "PXDeviceGroupMethods.inc"
 @end
@@ -1394,6 +1402,144 @@ static void TestExpectedPreviewPublication(NSString *a, NSString *b) {
     manager.beforePublicationCheck = nil; CheckLeaseFree();
 }
 
+@interface PXGenerationPublicationFixture : PXDeviceGroupFixture
+@property (nonatomic, copy) void (^beforePublicationCheck)(PXCommittedRuntimeGeneration *, NSArray *, NSArray *);
+@property (nonatomic) NSUInteger publicationChecks;
+@end
+@implementation PXGenerationPublicationFixture
+- (BOOL)runtimeGenerationPublicationIsCurrent:(PXCommittedRuntimeGeneration *)generation identifierKeys:(NSArray *)keys artifactPaths:(NSArray *)paths {
+    self.publicationChecks++;
+    void (^callback)(PXCommittedRuntimeGeneration *, NSArray *, NSArray *) = self.beforePublicationCheck;
+    self.beforePublicationCheck = nil;
+    if (callback) callback(generation, keys, paths);
+    return [super runtimeGenerationPublicationIsCurrent:generation identifierKeys:keys artifactPaths:paths];
+}
+@end
+static PXGenerationPublicationFixture *GenerationPublicationFixture(NSString *a, NSString *b) {
+    gExpectedIdentity = a; gSelected = @"a"; gBuild = @"B1";
+    gFailDB = gNoHardware = gNoFirmware = gUnknownCellular = gDisabledCellular = NO;
+    gFailSerial = gThrowBatteryPublication = NO;
+    gCheckDependencyPublication = gThrowDependencyPublication = gCheckDashboardPublication = NO;
+    gDuringPrepare = gDuringResolve = gDuringPublication = gDuringDependencyPublication = nil;
+    gDuringScalarPublication = gDuringBatteryAdoption = nil;
+    CHECK(SeedDashboard(a, 7) && SeedDashboard(b, 8) && SelectExpectedSource(@"a", @"generation-before") &&
+          SetSource(Path(a, @"battery_info.plist"), @"LowPowerMode", @YES), "expected generation publication bases seeded");
+    PXGenerationPublicationFixture *manager = [PXGenerationPublicationFixture new];
+    manager.settings = [@{ @"DeviceModel": @YES, @"IDFA": @YES, @"IDFV": @YES, @"StorageSystem": @YES,
+        @"BootTime": @YES, @"Battery": @YES } mutableCopy];
+    return manager;
+}
+static void TestExpectedGenerationPublication(NSString *a, NSString *b) {
+    for (NSUInteger drift = 0; drift < 4; drift++) {
+        PXGenerationPublicationFixture *manager = GenerationPublicationFixture(a, b);
+        NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions, battery = gBatteryNotifications, notices = gBatchNotifications;
+        __block NSDictionary *afterCommit = nil;
+        manager.beforePublicationCheck = ^(PXCommittedRuntimeGeneration *generation, NSArray *keys, NSArray *paths) {
+            (void)generation; (void)keys; (void)paths; CheckLeaseFree();
+            if (drift == 0) CHECK(SelectExpectedSource(@"b", @"generation-after"), "generation publication observes post-commit handoff");
+            else if (drift == 1) CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                return [tx removeDictionaryAtPath:PXCurrentProfileInfoPath() error:error] && [tx removeDictionaryAtPath:PXLegacyActiveProfileInfoPath() error:error];
+            }, NULL), "generation publication observes missing authoritative selection");
+            else if (drift == 2) CHECK(SelectExpectedSource(@"a", @"metadata-only"), "generation publication observes same-ID metadata change");
+            else CHECK(SetSource(Path(a, @"device_ids.plist"), @"Unrelated", @"newer"), "generation publication observes unrelated ID merge");
+            afterCommit = BatchSnapshot();
+        };
+        NSError *error = nil;
+        CHECK([manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:@"a" error:&error] && !error && !manager.error &&
+              [afterCommit isEqual:BatchSnapshot()] && gBatchNotifications == notices + 1 &&
+              gCacheChanges == caches + (drift < 2 ? 0 : 4) && gArtifactAdoptions == adoptions + (drift < 2 ? 0 : 4) &&
+              gBatteryNotifications == battery + (drift < 2 ? 0 : 1),
+              "expected generation checks authoritative post-commit selection without negating source success or matching metadata merges");
+        CheckLeaseFree();
+    }
+    // Field and sidecar drift are independent: do not reject unaffected groups
+    // merely because device_ids carries some other writer's newer fields.
+    NSArray *cases = @[
+        @[@"device_ids.plist", @"IDFA", @"newer-scalar", @3, @4, @1],
+        @[PXRuntimeIdentifierSidecar(@"IDFA"), @"value", @"newer-sidecar", @3, @4, @1],
+        @[PXRuntimeIdentifierSidecar(@"IDFV"), NSNull.null, NSNull.null, @3, @4, @1],
+        @[@"device_ids.plist", @"SSID", @"newer-wifi", @4, @3, @1],
+        @[@"wifi_info.plist", @"ssid", @"newer-wifi", @4, @3, @1],
+        @[@"storage.plist", @"TotalStorage", @"512", @4, @3, @1],
+        @[@"device_ids.plist", @"SystemUptime", @"newer-uptime", @4, @3, @1],
+        @[@"boot_time.plist", @"value", @"newer-boot", @4, @3, @1],
+        @[@"device_ids.plist", @"BatteryLevel", @0.11, @4, @3, @0],
+        @[@"battery_info.plist", @"BatteryLevel", @0.11, @4, @3, @0],
+        @[@"device_ids.plist", @"IOSBuild", @"B2", @3, @4, @1],
+        @[@"device_ids.plist", @"DeviceModel", @"iPhone16,1", @2, @3, @1]
+    ];
+    for (NSArray *entry in cases) {
+        PXGenerationPublicationFixture *manager = GenerationPublicationFixture(a, b);
+        NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions, battery = gBatteryNotifications;
+        __block NSDictionary *newer = nil;
+        manager.beforePublicationCheck = ^(PXCommittedRuntimeGeneration *generation, NSArray *keys, NSArray *paths) {
+            (void)generation; (void)keys; (void)paths; CheckLeaseFree();
+            NSString *root = [entry[0] isEqual:@"storage.plist"] ? a.stringByDeletingLastPathComponent : a;
+            if (entry[1] == NSNull.null) CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                return [tx removeDictionaryAtPath:Path(root, entry[0]) error:error];
+            }, NULL), "generation callback sidecar removed after commit");
+            else CHECK(SetSource(Path(root, entry[0]), entry[1], entry[2]), "newer generation callback input committed");
+            newer = BatchSnapshot();
+        };
+        NSError *error = nil;
+        CHECK([manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:@"a" error:&error] && !error &&
+              [newer isEqual:BatchSnapshot()] && gCacheChanges == caches + [entry[3] unsignedIntegerValue] &&
+              gArtifactAdoptions == adoptions + [entry[4] unsignedIntegerValue] && gBatteryNotifications == battery + [entry[5] unsignedIntegerValue],
+              "generation field and sidecar checkpoints skip only stale callback inputs");
+    }
+    for (NSUInteger mode = 0; mode < 3; mode++) {
+        PXGenerationPublicationFixture *manager = GenerationPublicationFixture(a, b);
+        NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions, battery = gBatteryNotifications;
+        gCheckDependencyPublication = YES; gThrowDependencyPublication = mode == 2;
+        gDuringDependencyPublication = ^{
+            CheckLeaseFree();
+            if (mode == 1) CHECK(SetSource(Path(a, @"device_ids.plist"), @"DeviceModel", @"iPhone16,1"), "software callback commits newer same-profile hardware");
+            else CHECK(SelectExpectedSource(@"b", @"software-callback"), "software callback selects newer target");
+        };
+        NSError *error = nil;
+        CHECK([manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:@"a" error:&error] && !error &&
+              gCacheChanges == caches + (mode == 1 ? 3 : 1) && gArtifactAdoptions == adoptions + (mode == 1 ? 3 : 0) &&
+              gBatteryNotifications == battery + (mode == 1 ? 1 : 0),
+              "generation rechecks between software and model callbacks including throwing reentry");
+        gCheckDependencyPublication = gThrowDependencyPublication = NO;
+    }
+    for (NSUInteger mode = 0; mode < 3; mode++) {
+        PXGenerationPublicationFixture *manager = GenerationPublicationFixture(a, b);
+        NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions, battery = gBatteryNotifications;
+        if (mode == 0) gDuringScalarPublication = ^{
+            CheckLeaseFree();
+            CHECK(SetSource(Path(a, @"device_ids.plist"), @"IDFA", @"newer-idfa") && SetSource(Path(a, @"device_ids.plist"), @"IDFV", @"newer-idfv"), "scalar callback changes remaining scalar inputs");
+        };
+        else gDuringBatteryAdoption = ^{
+            CheckLeaseFree();
+            if (mode == 1) CHECK(SelectExpectedSource(@"b", @"battery-callback"), "battery adoption changes authoritative target");
+            else CHECK(SetSource(Path(a, @"battery_info.plist"), @"BatteryLevel", @0.11), "battery adoption changes its source packet");
+        };
+        NSError *error = nil;
+        CHECK([manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:@"a" error:&error] && !error &&
+              gCacheChanges == caches + (mode == 0 ? 3 : 4) && gArtifactAdoptions == adoptions + 4 &&
+              gBatteryNotifications == battery + (mode == 0 ? 1 : 0),
+              "generation rechecks each scalar and battery publication after reentrant adoption");
+        CheckLeaseFree();
+    }
+    PXGenerationPublicationFixture *manager = GenerationPublicationFixture(a, b);
+    gSelected = @"b"; // Stale resolver cache must not defeat authoritative A.
+    NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"commit-written"]) commits++; };
+    NSError *error = nil;
+    CHECK([manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:@"a" error:&error] && !error && commits == 1 && gCacheChanges == caches + 4 && gArtifactAdoptions == adoptions + 4,
+          "expected generation publication uses source selection even when resolver cache is stale");
+    gStore.testCheckpoint = nil;
+    manager = GenerationPublicationFixture(a, b);
+    manager.beforePublicationCheck = ^(PXCommittedRuntimeGeneration *generation, NSArray *keys, NSArray *paths) {
+        (void)generation; (void)keys; (void)paths; CHECK(NO, "generic generation must not read expected publication checkpoints");
+    };
+    CHECK([manager regenerateAllEnabledIdentifiersWithError:&error] && !error && manager.publicationChecks == 0 && manager.beforePublicationCheck,
+          "generic generation retains legacy publication without targeted checkpoint reads");
+    manager.beforePublicationCheck = nil; gSelected = @"a"; CheckLeaseFree();
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1416,6 +1562,7 @@ int main(void) {
         TestTelephony(manager, Identity(@"a"), Identity(@"b"));
         TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"));
         TestExpectedPreviewPublication(Identity(@"a"), Identity(@"b"));
+        TestExpectedGenerationPublication(Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

@@ -44,14 +44,6 @@ def source_contracts():
     assert flow.rindex('PXRuntimeProfileSelectionMatches(') < flow.index('PXStageRuntimeGeneration(')
     legacy_core = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
     assert 'expectedSelection:nil' in legacy_core
-    expected_api = groups.method(manager, '- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error')
-    assert 'PXValidatedProfileID(profileID)' in expected_api and 'ownedRuntimeGenerationForProfileID:expected currentProfile:YES' in expected_api
-    assert publisher_wrapper.index('captureExpectedActiveSelection:') < publisher_wrapper.index('existingGenerationIdentityForProfileID:')
-    assert flow.count('PXRuntimeProfileSelectionMatches(') == 2
-    assert flow.index('PXRuntimeProfileSelectionMatches(') < flow.index('prepareDeviceProfileGroupWithOptions:')
-    assert flow.rindex('PXRuntimeProfileSelectionMatches(') < flow.index('PXStageRuntimeGeneration(')
-    legacy_core = groups.method(manager, '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error')
-    assert 'expectedSelection:nil' in legacy_core
     for forbidden in ('[self saveSettings]', 'generateWiFiInfo]', 'generateBootTimeForProfile:',
                       'setTotalStorageCapacity:', 'generateDeviceTheme]', 'setCustomValue:', 'dispatch_'):
         assert forbidden not in flow, forbidden
@@ -62,9 +54,22 @@ def source_contracts():
         assert token in stage, token
     for forbidden in ('PXActiveProfile', 'sharedManager', 'NSNotification', 'writeToFile:', 'dispatch_async', 'PXPerformRuntimeSourceWrite'):
         assert forbidden not in stage, forbidden
-    publisher = groups.method(manager, '- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model')
+    publisher = groups.method(manager, '- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model publicationGuard:(BOOL (^)(NSArray *, NSArray *))guard')
     assert 'PXActiveProfileID()' in publisher and '@catch' in publisher
     assert publisher.index('removeAllObjects]') < publisher.index('publishCommittedBatteryInfo:')
+    assert 'checkedPublication:YES' in expected_api
+    legacy_publication = groups.method(manager, '- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation')
+    assert 'checkedPublication:NO' in legacy_publication
+    publication_wrapper = groups.method(manager, '- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation checkedPublication:(BOOL)checked')
+    assert publication_wrapper.index('PXRuntimeGenerationMatchesProof') < publication_wrapper.index('publicationGuard:guard')
+    assert 'runtimeGenerationPublicationIsCurrent:generation identifierKeys:keys artifactPaths:paths' in publication_wrapper
+    checkpoint = groups.method(manager, '- (BOOL)runtimeGenerationPublicationIsCurrent:(PXCommittedRuntimeGeneration *)generation identifierKeys:(NSArray *)keys artifactPaths:(NSArray *)paths')
+    for token in ('runtimePublicationHasCurrentIdentity:identity transaction:tx error:error', 'for (NSString *key in keys)', 'for (NSString *path in paths)', 'PXRuntimeGenerationMatchesProof(tx, @{path: record}', 'exists:&exists'):
+        assert token in checkpoint, token
+    for forbidden in ('setDictionary:', 'sharedManager', 'self.error', 'generation.proof,', 'dispatch_'):
+        assert forbidden not in checkpoint, forbidden
+    assert 'guard(@[type], paths)' in publisher and 'if (!guard || guard(batteryKeys, batteryPaths))' in publisher
+    assert publisher.index('adoptCommittedBatteryInfo:') < publisher.index('if (!guard || guard(batteryKeys, batteryPaths))') < publisher.index('publishCommittedBatteryInfo:')
     for file, signature in (
         ('WiFi', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID'),
         ('Battery', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo'),
@@ -76,15 +81,14 @@ def source_contracts():
     battery = groups.method(read('common/BatteryManager.m'), '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp')
     assert 'saveBatteryInfoToDisk' not in battery and 'PXPerformRuntimeSourceWrite' not in battery
     fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
-    for case in ('expected active mismatch rejects before target lookup migration providers writes or caches',
-                 'expected owners reject busy lifecycle before resolving target',
-                 'expected owners reject invalid IDs without selection repair',
-                 'expected owners freeze caller ID and never resolve the stale current profile',
-                 'expected selection receipt drift aborts complete generation or preview before source commit and publication',
-                 'expected owner source fault rolls back artifacts without cache or notification effects',
-                 'expected owners preserve legacy fallback without creating or repairing canonical selection'):
+    for case in ('expected generation checks authoritative post-commit selection without negating source success or matching metadata merges',
+                 'generation field and sidecar checkpoints skip only stale callback inputs',
+                 'generation rechecks between software and model callbacks including throwing reentry',
+                 'generation rechecks each scalar and battery publication after reentrant adoption',
+                 'expected generation publication uses source selection even when resolver cache is stale',
+                 'generic generation retains legacy publication without targeted checkpoint reads'):
         assert case in fixture, case
-    assert 'TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"))' in fixture
+    assert 'TestExpectedGenerationPublication(Identity(@"a"), Identity(@"b"))' in fixture
     for case in ('expected active mismatch rejects before target lookup migration providers writes or caches',
                  'expected owners reject busy lifecycle before resolving target',
                  'expected owners reject invalid IDs without selection repair',
@@ -128,7 +132,7 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4R-partial'
+    assert manifest['rollout'] == '4C.2H4S-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'

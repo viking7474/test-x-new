@@ -52,6 +52,11 @@ SIGNATURES = [
     '- (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error',
     '- (BOOL)commitRuntimeGenerationAtIdentityDirectory:(NSString *)identityDir networkArtifacts:(NSDictionary *)networkArtifacts lifecycleLease:(PXProfileLifecycleLease *)lease expectedSelection:(NSDictionary *)selection deferSettings:(BOOL)deferSettings receipt:(PXCommittedRuntimeGeneration **)receipt error:(NSError **)error',
     '- (BOOL)dashboardPreviewPublicationIsCurrentAtIdentity:(NSString *)identity model:(NSString *)model storage:(NSDictionary *)storage',
+    '- (BOOL)runtimePublicationHasCurrentIdentity:(NSString *)identity transaction:(PXRuntimeSourceTransaction *)tx error:(NSError **)error',
+    '- (BOOL)runtimeGenerationPublicationIsCurrent:(PXCommittedRuntimeGeneration *)generation identifierKeys:(NSArray *)keys artifactPaths:(NSArray *)paths',
+    '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared publicationGuard:(BOOL (^)(NSArray *))guard',
+    '- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation checkedPublication:(BOOL)checked',
+    '- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model publicationGuard:(BOOL (^)(NSArray *, NSArray *))guard',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -123,6 +128,8 @@ def source_contracts():
     for forbidden in ('self.error', 'profileIdentityPath', 'PXPerformRuntimeSourceWrite', 'setCurrentIOSVersionInfo:', 'setCurrentDeviceModel:'):
         assert forbidden not in builder
     publisher = method(manager, '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared')
+    assert 'publicationGuard:nil' in publisher
+    publisher = method(manager, '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared publicationGuard:(BOOL (^)(NSArray *))guard')
     assert 'setCurrentIOSVersionInfo:prepared.versionInfo' in publisher and 'setCurrentDeviceModel:ids[@"DeviceModel"]' in publisher
     assert 'PXRemoveLegacyCellularFiles' not in manager
     assert 'replacedKeys, NSDictionary *expected' in helper
@@ -154,7 +161,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4R-partial'
+    assert manifest['rollout'] == '4C.2H4S-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

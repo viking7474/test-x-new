@@ -34,10 +34,14 @@ def source_contracts():
     assert body.count('dashboardPreviewPublicationIsCurrentAtIdentity:publicationIdentity') == 2
     assert body.index('[mutation invalidate]') < body.index('dashboardPreviewPublicationIsCurrentAtIdentity:publicationIdentity') < body.index('setCurrentDeviceModel:')
     publication = groups.method(source, '- (BOOL)dashboardPreviewPublicationIsCurrentAtIdentity:(NSString *)identity model:(NSString *)model storage:(NSDictionary *)storage')
-    for token in ('PXReadRuntimeProfileSelection(', 'isEqual:profileID', 'ids[@"DeviceModel"] isEqual:model', '[current isEqual:storage]', 'exists:&exists'):
+    for token in ('runtimePublicationHasCurrentIdentity:identity transaction:tx error:error', 'ids[@"DeviceModel"] isEqual:model', '[current isEqual:storage]', 'exists:&exists'):
         assert token in publication, token
+    authority = groups.method(source, '- (BOOL)runtimePublicationHasCurrentIdentity:(NSString *)identity transaction:(PXRuntimeSourceTransaction *)tx error:(NSError **)error')
+    for token in ('PXReadRuntimeProfileSelection(', 'isEqual:profileID', 'PXProfileIdentityPath(profileID)', '[central[@"exists"] boolValue] ? central[@"info"] : legacy[@"info"]'):
+        assert token in authority, token
     for forbidden in ('setCurrent', 'adoptCommitted', 'sharedManager', 'setDictionary:', 'dispatch_', 'self.error'):
         assert forbidden not in publication, forbidden
+        assert forbidden not in authority, forbidden
     assert 'identifierMutationForExpectedProfileID:profileID selection:&selection' in body
     assert body.index('PXRuntimeProfileSelectionMatches(') < body.index('PXStageRuntimeIdentifierReplacement(')
     expected_owner = groups.method(source, '- (PXProfileArtifactMutation *)identifierMutationForExpectedProfileID:(NSString *)profileID selection:(NSDictionary **)selection')
@@ -84,7 +88,7 @@ def source_contracts():
     assert 'otherBefore = Snapshot(b)[@"files"]' in fixture, 'a successful A commit changes the global token; compare only B file bytes'
     assert 'TestDashboardPreview(manager, Identity(@"a"), Identity(@"b"))' in fixture
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4R-partial'
+    assert manifest['rollout'] == '4C.2H4S-partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert 'test_runtime_dashboard_preview.py' in read('.github/workflows/build-ios-arm.yml')

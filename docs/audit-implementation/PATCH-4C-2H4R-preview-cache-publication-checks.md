@@ -2,6 +2,11 @@
 
 Ngày 2026-10-28. Người dùng xác nhận H4Q build pass trước bước này.
 
+Follow-up: người dùng đã xác nhận H4R build pass ngày 2026-10-28. H4S tiếp tục
+expected-active generation publication; xem
+[báo cáo H4S](PATCH-4C-2H4S-generation-cache-publication-checks.md). Các giới hạn
+generation bên dưới mô tả trạng thái tại thời điểm H4R.
+
 ## Finding
 
 Confirmed missing post-commit guard, severity Medium, tại
