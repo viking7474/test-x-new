@@ -2171,6 +2171,74 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return NO;
 }
 
+- (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
+    if (error) *error = nil;
+    NSError *failure = nil;
+    NSString *expected = PXValidatedProfileID(profileID);
+    NSArray *allowed = @[@"IOSVersion", @"DeviceModel", @"StorageSystem", @"DeviceName"];
+    NSMutableArray *capturedTypes = [NSMutableArray array];
+    BOOL valid = [expected isEqual:profileID] && [types isKindOfClass:NSArray.class] && types.count <= allowed.count;
+    if (valid) for (id type in types) {
+        if (![type isKindOfClass:NSString.class] || ![allowed containsObject:type]) { valid = NO; break; }
+        [capturedTypes addObject:[type copy]];
+    }
+    if (!valid) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6031 userInfo:@{NSLocalizedDescriptionKey: @"Invalid required identifier request or expected profile ID"}];
+        self.error = failure; if (error) *error = failure; return NO;
+    }
+    // Freeze caller strings before ownership or source callbacks. Unlike the
+    // generic toggle, this operation never resolves/generates current artifacts.
+    NSArray *required = [capturedTypes copy];
+    BOOL success = NO, wrote = NO;
+    PXProfileLifecycleLease *lease = [PXProfileLifecycleLease acquireInDirectory:PXProfilesPath() error:&failure];
+    @try {
+        if (lease && [lease validateForDirectory:PXProfilesPath() error:&failure] && PXRequireNoPendingProfileDeletion(&failure)) {
+            NSDictionary *selection = [self captureExpectedActiveSelection:expected lifecycleLease:lease error:&failure];
+            if (selection) {
+                NSMutableDictionary *flags = [PXSanitizedIdentifierSettings(self.settings) mutableCopy];
+                BOOL changed = NO;
+                for (NSString *type in required) {
+                    if (![flags[type] boolValue]) changed = YES;
+                    flags[type] = @YES;
+                }
+                NSDictionary *payload = changed && [self.scopedApps isKindOfClass:NSDictionary.class] ? PXDetachRuntimeGeneration(@{
+                    @"flags": flags, @"scope": self.scopedApps, @"settingsPath": PXTLinkIOSSettingsPath(), @"scopePath": PXGlobalScopePath()
+                }, &failure) : nil;
+                // Even a no-op must reject an enclosing uncommitted source
+                // transaction and recheck the receipt before acknowledging it.
+                if (!changed || payload) success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                    if (![lease validateForDirectory:PXProfilesPath() error:writeError]) return NO;
+                    BOOL pending = NO;
+                    if (![tx dictionaryAtPath:PXProfileDeletionJournalPath() exists:&pending error:writeError]) return NO;
+                    if (pending) {
+                        if (writeError) *writeError = [NSError errorWithDomain:@"WeaponXProfileError" code:27 userInfo:@{NSLocalizedDescriptionKey: @"Deletion recovery started before required identifiers were staged"}];
+                        return NO;
+                    }
+                    return PXRuntimeProfileSelectionMatches(tx, selection, PXCurrentProfileInfoPath(), PXLegacyActiveProfileInfoPath(), writeError) &&
+                        (!changed || PXStageRuntimeGenerationSettings(tx, payload, writeError));
+                }, &failure);
+                wrote = success && changed;
+            }
+        }
+    } @catch (NSException *exception) {
+        failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6031 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Required identifier preparation raised an exception"}];
+    } @finally { [lease invalidate]; }
+    if (wrote) {
+        @try {
+            for (NSString *type in required) self.settings[type] = @YES;
+            [self.spoofCache removeAllObjects];
+            [_appEnabledCache removeAllObjects];
+            PXPostSettingsChangedNotification();
+        } @catch (NSException *exception) {
+            PXLog(@"[IdentifierManager] Required flags committed; compatibility publication failed: %@", exception);
+        }
+    }
+    if (!success && !failure) failure = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6031 userInfo:@{NSLocalizedDescriptionKey: @"Required identifiers were not committed for the expected profile"}];
+    self.error = success ? nil : failure;
+    if (!success && error) *error = failure;
+    return success;
+}
+
 - (BOOL)isIdentifierEnabled:(NSString *)type {
     PX_IDENTIFIER_RUNTIME_READ_OPERATION;
     if (![type isKindOfClass:NSString.class] || !type.length) return NO;

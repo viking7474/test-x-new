@@ -57,6 +57,7 @@ SIGNATURES = [
     '- (void)publishPreparedDeviceProfileGroup:(PXPreparedDeviceProfileGroup *)prepared publicationGuard:(BOOL (^)(NSArray *))guard',
     '- (void)publishCommittedRuntimeGeneration:(PXCommittedRuntimeGeneration *)generation checkedPublication:(BOOL)checked',
     '- (void)publishRuntimeGeneration:(NSDictionary *)payload identityDirectory:(NSString *)identityDir model:(PXPreparedDeviceProfileGroup *)model publicationGuard:(BOOL (^)(NSArray *, NSArray *))guard',
+    '- (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -161,7 +162,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4S-partial'
+    assert manifest['rollout'] == '4C.2H4T-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

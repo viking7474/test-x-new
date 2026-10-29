@@ -45,6 +45,9 @@
 // Settings Management
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type;
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type;
+// Reset preflight: enable only model/iOS/storage/name flags for the expected
+// active profile. Never generate artifacts through the legacy toggle setters.
+- (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)isIdentifierEnabled:(NSString *)type;
 
 // Current Values

@@ -2,6 +2,10 @@
 
 Ngày 2026-10-28. Người dùng xác nhận H4R build pass trước bước này.
 
+Follow-up: người dùng đã xác nhận H4S build pass ngày 2026-10-28. H4T đóng
+required-toggle target gap trước generation; xem
+[báo cáo H4T](PATCH-4C-2H4T-required-identifier-flag-packet.md).
+
 ## Finding
 
 Confirmed missing checkpoint, severity Medium, trong

@@ -602,6 +602,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 // Handle toggle of advanced identifiers
 - (void)toggleAdvancedIdentifiers:(UIButton *)sender;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
+- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options expectedProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error;
@@ -7727,6 +7728,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error {
+    return [self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options expectedProfileID:nil error:error];
+}
+
+- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options expectedProfileID:(NSString *)profileID error:(NSError **)error {
     if (error) *error = nil;
     NSDictionary *resolved = [options isKindOfClass:NSDictionary.class] ? options : @{};
     BOOL fakeIOS = resolved[@"fakeIOSVersionEnabled"] ? [resolved[@"fakeIOSVersionEnabled"] boolValue] : YES;
@@ -7741,6 +7746,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         @"StorageSystem": @(fakeModel),
         @"DeviceName": @(fakeName)
     };
+    if (profileID) {
+        // The legacy toggle may generate artifacts for its own current target.
+        // Enable flags here; the expected-target generation below owns artifacts.
+        NSMutableArray *types = [NSMutableArray array];
+        for (NSString *type in required) if ([required[type] boolValue]) [types addObject:type];
+        return [self.manager enableRequiredIdentifiers:types forExpectedActiveProfileID:profileID error:error];
+    }
     __block NSError *failure = nil;
     [required enumerateKeysAndObjectsUsingBlock:^(NSString *identifier, NSNumber *needed, BOOL *stop) {
         if (![needed boolValue] || [self.manager isIdentifierEnabled:identifier]) return;
@@ -7776,7 +7788,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     // Each targeted writer validates selection again under its own ownership.
     // Checkpoints still cover publication/feedback gaps between those operations.
     if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
-    if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;
+    if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options expectedProfileID:profileID error:error]) return NO;
     if (profileID && ![self validateDashboardResetProfileID:profileID error:error]) return NO;
     NSError *generationError = nil;
     BOOL generated = profileID ? [self.manager regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:&generationError] :

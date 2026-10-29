@@ -40,11 +40,13 @@ static void ProbeDashboardStorage(NSDictionary *info);
 static void (^gDuringDependencyPublication)(void);
 static void (^gDuringScalarPublication)(void);
 static void (^gDuringBatteryAdoption)(void);
+static void (^gDuringRequiredNotification)(void);
 #define CHECK(value, message) do { gChecks++; if (!(value)) { gFailures++; fprintf(stderr, "FAIL: %s\n", message); } } while (0)
 static NSString *Path(NSString *root, NSString *name) { return [root stringByAppendingPathComponent:name]; }
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
 static NSDictionary *IDs(NSString *identity) { return [NSDictionary dictionaryWithContentsOfFile:Path(identity, @"device_ids.plist")] ?: @{}; }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performWrite:body error:error]; }
+BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performStandaloneWrite:body error:error]; }
 NSString *PXActiveProfileID(void) { return gSelected; }
 NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.class] && [@[@"a", @"b"] containsObject:value] ? [value copy] : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
@@ -60,6 +62,8 @@ void PXPostSettingsChangedNotification(void) {
     gBatchNotifications++;
     CHECK([gStore capture:^NSDictionary *(NSError **error) { (void)error; return @{}; } error:NULL] != nil,
           "batch notification runs outside source gate after commit");
+    void (^callback)(void) = gDuringRequiredNotification; gDuringRequiredNotification = nil;
+    if (callback) callback();
 }
 void PXLog(NSString *format, ...) { (void)format; }
 void PXDBLog(NSString *format, ...) { (void)format; }
@@ -1540,6 +1544,134 @@ static void TestExpectedGenerationPublication(NSString *a, NSString *b) {
     manager.beforePublicationCheck = nil; gSelected = @"a"; CheckLeaseFree();
 }
 
+@interface PXRequiredIdentifiersFixture : PXDeviceGroupFixture
+@property (nonatomic, copy) dispatch_block_t afterSelection;
+@property (nonatomic) NSUInteger selectionCaptures;
+@end
+@implementation PXRequiredIdentifiersFixture
+- (NSDictionary *)captureExpectedActiveSelection:(NSString *)profileID lifecycleLease:(PXProfileLifecycleLease *)lease error:(NSError **)error {
+    self.selectionCaptures++;
+    NSDictionary *selection = [super captureExpectedActiveSelection:profileID lifecycleLease:lease error:error];
+    dispatch_block_t callback = self.afterSelection; self.afterSelection = nil;
+    if (callback) callback();
+    return selection;
+}
+@end
+static NSDictionary *RequiredArtifactSnapshot(NSString *a, NSString *b) {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    NSDictionary *all = BatchSnapshot()[@"files"];
+    NSString *aRoot = [a.stringByDeletingLastPathComponent.lastPathComponent stringByAppendingString:@"/"], *bRoot = [b.stringByDeletingLastPathComponent.lastPathComponent stringByAppendingString:@"/"];
+    for (NSString *path in all) if ([path hasPrefix:aRoot] || [path hasPrefix:bRoot]) result[path] = all[path];
+    return result;
+}
+static PXRequiredIdentifiersFixture *RequiredIdentifiersFixture(void) {
+    CHECK(SelectExpectedSource(@"a", @"required-before"), "required flag active selection seeded");
+    PXRequiredIdentifiersFixture *manager = [PXRequiredIdentifiersFixture new];
+    manager.settings = [@{ @"IDFA": @YES, @"Battery": @NO, @"StorageSystem": @NO } mutableCopy];
+    manager.scopedApps = [@{ @"fixture.required": @YES } mutableCopy];
+    return manager;
+}
+static void TestRequiredIdentifiers(NSString *a, NSString *b) {
+    NSArray *types = @[@"IOSVersion", @"DeviceModel", @"StorageSystem", @"DeviceName"];
+    PXRequiredIdentifiersFixture *manager = RequiredIdentifiersFixture();
+    CHECK(SetSource(PXTLinkIOSSettingsPath(), @"KeepTopLevel", @YES), "required settings merge basis seeded");
+    NSDictionary *artifacts = RequiredArtifactSnapshot(a, b);
+    CHECK(artifacts.count > 0, "required artifact oracle includes real profile file bytes");
+    NSUInteger preparations = gPreparations, migrations = gMigrations, selections = gSelections;
+    NSUInteger caches = gCacheChanges, adoptions = gArtifactAdoptions, notices = gBatchNotifications;
+    __block NSUInteger commits = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"commit-written"]) commits++; };
+    gSelected = @"b"; NSError *error = nil;
+    gDuringRequiredNotification = ^{ CheckLeaseFree(); };
+    CHECK([manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && !error && !manager.error && commits == 1 &&
+          gBatchNotifications == notices + 1 && gPreparations == preparations && gMigrations == migrations && gSelections == selections &&
+          gCacheChanges == caches && gArtifactAdoptions == adoptions && [artifacts isEqual:RequiredArtifactSnapshot(a, b)],
+          "required flags commit once without target resolution providers migration or profile artifact writes");
+    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    BOOL allEnabled = YES;
+    for (NSString *type in types) if (![settings[@"EnabledIdentifiers"][type] boolValue] || ![manager.settings[type] boolValue]) allEnabled = NO;
+    CHECK(allEnabled && [settings[@"StorageSystemEnabled"] boolValue] && [settings[@"KeepTopLevel"] boolValue] &&
+          [settings[@"EnabledIdentifiers"][@"IDFA"] boolValue] && ![settings[@"EnabledIdentifiers"][@"Battery"] boolValue] &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"] isEqual:manager.scopedApps],
+          "required packet keeps enable-only policy unrelated flags top-level keys scope and storage alias");
+    NSDictionary *before = BatchSnapshot(); notices = gBatchNotifications;
+    CHECK([manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:NULL] && commits == 1 && notices == gBatchNotifications && [before isEqual:BatchSnapshot()],
+          "already enabled required packet validates selection without writes or notification");
+    gStore.testCheckpoint = nil;
+    CHECK(SelectExpectedSource(@"b", @"required-mismatch"), "required mismatch source installed"); before = BatchSnapshot();
+    CHECK(![manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && error && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+          "required packet rejects authoritative mismatch even when all flags are already enabled");
+    for (id invalid in @[@[@"Battery"], @[@"WiFi"], @[@1], @"IOSVersion", NSNull.null]) {
+        before = BatchSnapshot();
+        CHECK(![manager enableRequiredIdentifiers:invalid forExpectedActiveProfileID:@"a" error:&error] && error && [before isEqual:BatchSnapshot()],
+              "required packet rejects unsupported secondary toggles and malformed requests");
+    }
+    for (NSUInteger cut = 1; cut <= 2; cut++) {
+        manager = RequiredIdentifiersFixture();
+        if (cut == 2) CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            return [tx removeDictionaryAtPath:PXGlobalScopePath() error:writeError];
+        }, NULL), "required rollback fixture has absent scope source");
+        before = BatchSnapshot(); NSDictionary *memory = [manager.settings copy]; notices = gBatchNotifications;
+        __block NSUInteger writes = 0;
+        gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"] && ++writes == cut) [NSException raise:@"fixture.required" format:@"flag packet fault"]; };
+        CHECK(![manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && error && [before isEqual:BatchSnapshot()] &&
+              [memory isEqual:manager.settings] && notices == gBatchNotifications, "required flag fault rolls back settings scope and memory without publication");
+        gStore.testCheckpoint = nil; CheckLeaseFree();
+    }
+    for (NSUInteger drift = 0; drift < 4; drift++) {
+        manager = RequiredIdentifiersFixture(); __block NSDictionary *competitor = nil;
+        NSDictionary *memory = [manager.settings copy]; notices = gBatchNotifications;
+        manager.afterSelection = ^{
+            if (drift == 0) CHECK(SelectExpectedSource(@"b", @"required-new-target"), "required competitor selects B");
+            else if (drift == 1) CHECK(SelectExpectedSource(@"a", @"required-new-revision"), "required competitor replaces same-ID selection receipt");
+            else if (drift == 2) CHECK(SetSource(PXLegacyActiveProfileInfoPath(), @"SelectionRevision", @"legacy-drift"), "required legacy selection drifts");
+            else CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"pending"), "required late deletion intent installed");
+            competitor = BatchSnapshot();
+        };
+        CHECK(![manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && error && [competitor isEqual:BatchSnapshot()] &&
+              [memory isEqual:manager.settings] && notices == gBatchNotifications, "required packet revalidates selection receipt and deletion before staging any flag");
+        if (drift == 3) CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            return [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:writeError];
+        }, NULL), "required deletion fixture removed");
+        CheckLeaseFree();
+    }
+    manager = RequiredIdentifiersFixture(); before = BatchSnapshot();
+    PXProfileLifecycleLease *held = [PXProfileLifecycleLease acquireInDirectory:gRoot error:NULL];
+    CHECK(held && ![manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && error.code == 12 && !manager.selectionCaptures && [before isEqual:BatchSnapshot()],
+          "busy required packet rejects before selection capture and settings mutation");
+    [held invalidate];
+    CHECK(SetSource(PXProfileDeletionJournalPath(), @"state", @"pending"), "required early deletion intent installed"); before = BatchSnapshot();
+    CHECK(![manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && error && !manager.selectionCaptures && [before isEqual:BatchSnapshot()],
+          "pending deletion blocks required flags before selection capture or writes");
+    CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        return [tx removeDictionaryAtPath:PXProfileDeletionJournalPath() error:writeError];
+    }, NULL), "required early deletion fixture removed");
+    NSMutableString *mutableID = [@"a" mutableCopy], *mutableType = [@"DeviceName" mutableCopy];
+    NSMutableArray *mutableTypes = [NSMutableArray arrayWithObject:mutableType];
+    manager.afterSelection = ^{ [mutableID setString:@"b"]; [mutableType setString:@"Battery"]; [mutableTypes removeAllObjects]; };
+    CHECK([manager enableRequiredIdentifiers:mutableTypes forExpectedActiveProfileID:mutableID error:&error] && !error && [manager.settings[@"DeviceName"] boolValue] && ![manager.settings[@"Battery"] boolValue],
+          "required packet freezes caller ID container and strings before source callbacks");
+    manager = RequiredIdentifiersFixture(); notices = gBatchNotifications;
+    gDuringRequiredNotification = ^{ CheckLeaseFree(); [NSException raise:@"fixture.required" format:@"notification observer exception"]; };
+    CHECK([manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:&error] && !error && !manager.error && notices + 1 == gBatchNotifications,
+          "required flag notification exception after ownership release preserves committed success");
+    for (NSUInteger noOp = 0; noOp < 2; noOp++) {
+        manager = RequiredIdentifiersFixture();
+        if (noOp) for (NSString *type in types) manager.settings[type] = @YES;
+        before = BatchSnapshot(); NSDictionary *memory = [manager.settings copy]; notices = gBatchNotifications;
+        __block BOOL accepted = YES;
+        BOOL outer = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+            if (![tx setDictionary:@{ @"uncommitted": @YES } atPath:PXTLinkIOSSettingsPath() error:writeError]) return NO;
+            accepted = [manager enableRequiredIdentifiers:types forExpectedActiveProfileID:@"a" error:NULL];
+            return YES; // Swallowing the failure must still poison outer staging.
+        }, &error);
+        CHECK(!outer && error && !accepted && [before isEqual:BatchSnapshot()] && [memory isEqual:manager.settings] && notices == gBatchNotifications,
+              "required packet including no-op rejects nested source acknowledgement before publication");
+        CheckLeaseFree();
+    }
+    gSelected = @"a"; CheckLeaseFree();
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1563,6 +1695,7 @@ int main(void) {
         TestExpectedActiveOwners(manager, Identity(@"a"), Identity(@"b"));
         TestExpectedPreviewPublication(Identity(@"a"), Identity(@"b"));
         TestExpectedGenerationPublication(Identity(@"a"), Identity(@"b"));
+        TestRequiredIdentifiers(Identity(@"a"), Identity(@"b"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

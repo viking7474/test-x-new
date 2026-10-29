@@ -70,6 +70,19 @@ def source_contracts():
         assert forbidden not in checkpoint, forbidden
     assert 'guard(@[type], paths)' in publisher and 'if (!guard || guard(batteryKeys, batteryPaths))' in publisher
     assert publisher.index('adoptCommittedBatteryInfo:') < publisher.index('if (!guard || guard(batteryKeys, batteryPaths))') < publisher.index('publishCommittedBatteryInfo:')
+    required_signature = '- (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error'
+    assert required_signature in groups.SIGNATURES and required_signature in read('TLinkIOS.h')
+    required = groups.method(manager, required_signature)
+    for token in ('PXValidatedProfileID(profileID)', '[type copy]', '[capturedTypes copy]', 'captureExpectedActiveSelection:expected',
+                  'PXProfileDeletionJournalPath() exists:&pending', 'PXStageRuntimeGenerationSettings(tx, payload, writeError)',
+                  'wrote = success && changed;', 'PXPerformStandaloneRuntimeSourceWrite(', 'PXDetachRuntimeGeneration(', '@finally { [lease invalidate]; }'):
+        assert token in required, token
+    assert required.index('[capturedTypes copy]') < required.index('acquireInDirectory:') < required.index('captureExpectedActiveSelection:')
+    assert required.index('PXRuntimeProfileSelectionMatches(') < required.index('PXStageRuntimeGenerationSettings(')
+    assert required.index('[lease invalidate]') < required.index('self.settings[type] = @YES') < required.index('PXPostSettingsChangedNotification()')
+    for forbidden in ('profileIdentityPath', 'existingGenerationIdentityForProfileID:', 'setIdentifierEnabled:', 'currentValueForIdentifier:',
+                      'prepareDeviceProfileGroup', 'publishPreparedIdentifier:', '[self saveSettings]', 'dispatch_'):
+        assert forbidden not in required, forbidden
     for file, signature in (
         ('WiFi', '- (void)adoptCommittedWiFiInfo:(NSDictionary *)wifiInfo profileID:(NSString *)profileID'),
         ('Battery', '- (void)adoptCommittedBatteryInfo:(NSDictionary *)batteryInfo'),
@@ -81,6 +94,18 @@ def source_contracts():
     battery = groups.method(read('common/BatteryManager.m'), '- (void)publishCommittedBatteryInfo:(NSDictionary *)batteryInfo timestamp:(NSDate *)timestamp')
     assert 'saveBatteryInfoToDisk' not in battery and 'PXPerformRuntimeSourceWrite' not in battery
     fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    for case in ('required flags commit once without target resolution providers migration or profile artifact writes',
+                 'required packet keeps enable-only policy unrelated flags top-level keys scope and storage alias',
+                 'already enabled required packet validates selection without writes or notification',
+                 'required packet rejects authoritative mismatch even when all flags are already enabled',
+                 'required flag fault rolls back settings scope and memory without publication',
+                 'required packet revalidates selection receipt and deletion before staging any flag',
+                 'busy required packet rejects before selection capture and settings mutation',
+                 'required packet freezes caller ID container and strings before source callbacks',
+                 'required packet including no-op rejects nested source acknowledgement before publication',
+                 'required flag notification exception after ownership release preserves committed success'):
+        assert case in fixture, case
+    assert 'TestRequiredIdentifiers(Identity(@"a"), Identity(@"b"))' in fixture
     for case in ('expected generation checks authoritative post-commit selection without negating source success or matching metadata merges',
                  'generation field and sidecar checkpoints skip only stale callback inputs',
                  'generation rechecks between software and model callbacks including throwing reentry',
@@ -132,7 +157,7 @@ def source_contracts():
     assert 'test_runtime_generation.py' in read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_generation.py' in read('scripts/release_hardening.py')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4S-partial'
+    assert manifest['rollout'] == '4C.2H4T-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     assert manifest['writers']['dashboard-preview']['status'] == 'enrolled'

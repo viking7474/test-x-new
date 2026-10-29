@@ -75,7 +75,8 @@ UI_ADAPTERS = {
         '- (NSDictionary *)captureResetIntentWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error',
         '- (BOOL)discardConsumedResetPreviewForIntent:(NSDictionary *)intent',
         '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error',
-        '- (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error']),
+        '- (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error',
+        '- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options expectedProfileID:(NSString *)profileID error:(NSError **)error']),
     'PXResetWorkflowUI.inc': ('TLinkIOSViewController.m', [
         '- (NSObject *)beginDashboardResetInPhase:(NSString *)phase',
         '- (BOOL)advanceDashboardReset:(NSObject *)token fromPhase:(NSString *)phase toPhase:(NSString *)nextPhase',
@@ -324,9 +325,13 @@ def source_contracts():
     assert '!self.profileCreationInProgress && trimmedText.length > 0' in form
     reset_wrapper = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][1])
     reset_prepare = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][4])
-    required = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][0])
+    required_wrapper = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][0])
+    required = writers.method(read('TLinkIOSViewController.m'), UI_ADAPTERS['PXResetPreparationUI.inc'][1][-1])
+    assert 'expectedProfileID:nil error:error' in required_wrapper
+    assert required.index('if (profileID)') < required.index('enumerateKeysAndObjectsUsingBlock:')
+    assert 'enableRequiredIdentifiers:types forExpectedActiveProfileID:profileID error:error' in required
     assert 'if (error) *error = nil;' in reset_prepare and 'if (!NSThread.isMainThread)' in reset_prepare
-    assert 'if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare
+    assert 'if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options expectedProfileID:profileID error:error]) return NO;' in reset_prepare
     assert reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') < reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview')
     assert 'regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:&generationError' in reset_prepare and 'if (!generated)' in reset_prepare
     assert 'applyDashboardPreview:preview expectedActiveProfileID:profileID error:&previewError' in reset_prepare and 'if (!applied)' in reset_prepare
@@ -720,7 +725,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4S-partial'
+    assert manifest['rollout'] == '4C.2H4T-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

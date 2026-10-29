@@ -246,7 +246,7 @@ require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
         "Identifier settings persistence can still corrupt EnabledIdentifiers or clobber suite-level feature flags")
 reset_prepare = method(view_controller, '- (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error')
 reset_flow = method(view_controller, '- (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings')
-require('if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options error:error]) return NO;' in reset_prepare and
+require('if (![self ensureDashboardFakeOptionsEnableRequiredIdentifiers:options expectedProfileID:profileID error:error]) return NO;' in reset_prepare and
         'regenerateAllEnabledIdentifiersForExpectedActiveProfileID:profileID error:&generationError' in reset_prepare and 'if (!generated)' in reset_prepare and
         reset_prepare.index('ensureDashboardFakeOptionsEnableRequiredIdentifiers:options') <
         reset_prepare.index('regenerateAllEnabledIdentifiersWithError:') < reset_prepare.index('applyFakePreviewToCurrentProfile:preview') and

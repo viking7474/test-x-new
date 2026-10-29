@@ -2022,12 +2022,15 @@ static void TestCurrentProfileCheckpoint(void) {
 @property (nonatomic, strong) NSMutableArray *events;
 @property (nonatomic, copy) NSString *failKey;
 @property (nonatomic) NSUInteger writes, reads, generations, failWriteOrdinal;
+@property (nonatomic) NSUInteger requiredPackets, legacyToggleWrites;
+@property (nonatomic, copy) NSArray *requiredTypes;
 @property (nonatomic) BOOL failGeneration;
 @property (nonatomic, strong) NSError *failure;
 @property (nonatomic, copy) dispatch_block_t afterToggle, afterGeneration;
 @property (nonatomic, copy) BOOL (^expectedPreview)(NSDictionary *);
 - (BOOL)isIdentifierEnabled:(NSString *)identifier;
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier;
+- (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error;
 - (BOOL)regenerateAllEnabledIdentifiersForExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)applyDashboardPreview:(NSDictionary *)preview expectedActiveProfileID:(NSString *)profileID error:(NSError **)error;
@@ -2040,10 +2043,20 @@ static void TestCurrentProfileCheckpoint(void) {
 - (BOOL)isIdentifierEnabled:(NSString *)identifier { CHECK(NSThread.isMainThread, "reset enable read on main"); self.reads++; return [self.enabled[identifier] boolValue]; }
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)identifier {
     CHECK(NSThread.isMainThread && enabled, "reset only enables requested identifiers on main");
-    self.writes++; [self.events addObject:identifier];
+    self.writes++; self.legacyToggleWrites++; [self.events addObject:identifier];
     if ([identifier isEqual:self.failKey] || (self.failWriteOrdinal && self.writes == self.failWriteOrdinal)) return NO;
     self.enabled[identifier] = @(enabled);
     dispatch_block_t callback = self.afterToggle; self.afterToggle = nil; if (callback) callback(); return YES;
+}
+- (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
+    CHECK(NSThread.isMainThread && [profileID isEqual:@"controller-target"], "reset required flag packet uses frozen target on main");
+    self.requiredPackets++; self.requiredTypes = [types copy]; [self.events addObject:@"required"];
+    if (self.failKey && [types containsObject:self.failKey]) { if (error) *error = self.failure; return NO; }
+    BOOL changed = NO;
+    for (NSString *type in types) { if (![self.enabled[type] boolValue]) changed = YES; self.enabled[type] = @YES; }
+    if (changed) self.writes++;
+    dispatch_block_t callback = self.afterToggle; self.afterToggle = nil; if (callback) callback();
+    if (error) *error = nil; return YES;
 }
 - (BOOL)regenerateAllEnabledIdentifiersWithError:(NSError **)error {
     CHECK(NSThread.isMainThread, "reset generation on main"); self.generations++; [self.events addObject:@"generation"];
@@ -2071,6 +2084,7 @@ static void TestCurrentProfileCheckpoint(void) {
 @property (nonatomic, copy) dispatch_block_t afterPreview;
 - (BOOL)applyFakePreviewToCurrentProfile:(NSDictionary *)preview;
 - (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options error:(NSError **)error;
+- (BOOL)ensureDashboardFakeOptionsEnableRequiredIdentifiers:(NSDictionary *)options expectedProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview error:(NSError **)error;
 - (BOOL)prepareResetProfileWithOptions:(NSDictionary *)options preview:(NSDictionary *)preview expectedProfileID:(NSString *)profileID error:(NSError **)error;
 - (BOOL)validateDashboardResetProfileID:(NSString *)profileID error:(NSError **)error;
@@ -2103,9 +2117,20 @@ static void TestResetPreparationStatus(void) {
         BOOL matches = YES; for (NSString *key in expected) if ([view.manager.enabled[key] boolValue] != [expected[key] boolValue]) matches = NO;
         CHECK(prepared && !error && matches && view.manager.writes == (NSUInteger)ios + 2 * (NSUInteger)model + (NSUInteger)name && view.manager.generations == 1 && view.previews == 1,
             "reset required identifier defaults and option matrix preserve enable-only policy");
+        view = [PXResetPreparationUIFixture new];
+        NSMutableSet *needed = [NSMutableSet set];
+        for (NSString *key in expected) if ([expected[key] boolValue]) [needed addObject:key];
+        CHECK([view ensureDashboardFakeOptionsEnableRequiredIdentifiers:options expectedProfileID:@"controller-target" error:&error] && !error &&
+              [[NSSet setWithArray:view.manager.requiredTypes] isEqual:needed] && view.manager.requiredPackets == 1 && !view.manager.legacyToggleWrites && !view.manager.generations,
+              "targeted reset option matrix submits one enable-only packet without legacy artifact setters");
     }
     NSDictionary *all = @{ @"fakeIOSVersionEnabled": @YES, @"fakeModelEnabled": @YES, @"fakeNameEnabled": @YES };
     NSError *cause = [NSError errorWithDomain:@"fixture.reset" code:91 userInfo:nil];
+    PXResetPreparationUIFixture *packetView = [PXResetPreparationUIFixture new];
+    packetView.manager.failKey = @"IOSVersion"; packetView.manager.failure = cause; NSError *packetError = nil;
+    CHECK(![packetView ensureDashboardFakeOptionsEnableRequiredIdentifiers:all expectedProfileID:@"controller-target" error:&packetError] && packetError == cause &&
+          packetView.manager.requiredPackets == 1 && !packetView.manager.legacyToggleWrites && !packetView.manager.enabled.count && !packetView.manager.generations && !packetView.previews,
+          "targeted required packet failure does not fall back to legacy toggles or artifacts");
     for (NSString *key in @[@"IOSVersion", @"DeviceModel", @"StorageSystem", @"DeviceName"]) {
         PXResetPreparationUIFixture *view = [PXResetPreparationUIFixture new]; view.manager.failKey = key; view.manager.failure = cause; NSError *error = nil;
         BOOL prepared = [view prepareResetProfileWithOptions:all preview:preview error:&error];
