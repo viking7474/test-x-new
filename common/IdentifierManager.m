@@ -3241,8 +3241,40 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (void)removeApplicationFromScope:(NSString *)bundleID {
+    [self removeApplicationFromScopeAndPersist:bundleID error:NULL];
+}
+
+- (BOOL)removeApplicationFromScopeAndPersist:(NSString *)bundleID error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6044 userInfo:@{NSLocalizedDescriptionKey: @"Invalid scoped application removal ID"}];
+        if (error) *error = self.error;
+        return NO;
+    }
+    bundleID = [bundleID copy];
+    NSString *scopePath = PXGlobalScopePath();
+    NSError *failure = nil;
+    __block BOOL wrote = NO;
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        NSDictionary *scope = [tx dictionaryAtPath:scopePath error:writeError];
+        if (!scope || !PXValidateManagerSettingsSources(nil, scope, writeError)) return NO;
+        NSDictionary *apps = scope[@"ScopedApps"] ?: @{};
+        if (!apps[bundleID]) return YES; // Verified absence does not create a file.
+        NSMutableDictionary *changedApps = [apps mutableCopy]; [changedApps removeObjectForKey:bundleID];
+        NSMutableDictionary *changedScope = [scope mutableCopy]; changedScope[@"ScopedApps"] = changedApps;
+        wrote = [tx setDictionary:changedScope atPath:scopePath error:writeError];
+        return wrote;
+    }, &failure);
+    if (!success) {
+        self.error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6044 userInfo:@{NSLocalizedDescriptionKey: @"Failed to remove scoped application"}];
+        if (error) *error = self.error;
+        return NO;
+    }
+    BOOL memoryChanged = self.scopedApps[bundleID] != nil;
     [self.scopedApps removeObjectForKey:bundleID];
-    [self saveSettings];
+    if (wrote || memoryChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
+    if (wrote) PXPostSettingsChangedNotification();
+    return YES;
 }
 
 - (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled {

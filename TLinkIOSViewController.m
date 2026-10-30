@@ -473,6 +473,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 }
 
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
+- (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager;
 - (void)updateIdentifierSwitchStatus:(UISwitch *)sender;
 @property (nonatomic) BOOL manualProfileCreationInProgress;
 - (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription;
@@ -2465,7 +2466,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
             UIAlertAction *removeAction = [UIAlertAction actionWithTitle:@"Remove from Scope"
                                                                  style:UIAlertActionStyleDestructive
                                                                handler:^(UIAlertAction * _Nonnull action) {
-                [[IdentifierManager sharedManager] removeApplicationFromScope:bundleID];
+                if (![self persistScopedApplicationRemoval:bundleID manager:[IdentifierManager sharedManager]]) return;
                 [self loadScopedApps];
             }];
             
@@ -4654,6 +4655,15 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager {
+    NSError *failure = nil;
+    if (![manager removeApplicationFromScopeAndPersist:bundleID error:&failure]) {
+        if (failure) [self showError:failure];
+        return NO;
+    }
+    return YES;
+}
+
 - (void)deleteAppButtonTapped:(UIButton *)sender {
     NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
     if (!bundleID.length) {
@@ -4667,7 +4677,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"Remove" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        [self.manager removeApplicationFromScope:bundleID];
+        if (![self persistScopedApplicationRemoval:bundleID manager:self.manager]) return;
         [self updateAppsList];
     }]];
     

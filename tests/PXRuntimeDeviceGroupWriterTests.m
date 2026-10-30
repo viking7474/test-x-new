@@ -534,12 +534,16 @@ ARTIFACT_SINGLETON
 @property (nonatomic) NSUInteger errors;
 - (void)showError:(NSError *)error;
 - (void)appSwitchChanged:(PXScopeSwitchFixture *)sender;
+- (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(PXDeviceGroupFixture *)manager;
 @end
 @implementation PXAppScopeToggleUIFixture
 - (void)showError:(NSError *)error { self.presentedError = error; self.errors++; }
 #define UISwitch PXScopeSwitchFixture
 #include "PXAppScopeToggleUI.inc"
 #undef UISwitch
+#define IdentifierManager PXDeviceGroupFixture
+#include "PXAppScopeRemovalUI.inc"
+#undef IdentifierManager
 @end
 
 static void TestGroups(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
@@ -3146,6 +3150,116 @@ static void TestAppScopeToggleUI(void) {
     CHECK(attempts == gStandaloneSourceAttempts && ui.errors == 1, "unknown app switch does not issue source work");
 }
 
+static void TestPerApplicationScopeRemoval(void) {
+    PXDeviceGroupFixture *manager = ScopeMetadataFixture(NO);
+    manager.scopedApps[@"fixture.unresolved"][@"version"] = @"dirty memory";
+    NSData *settingsBytes = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSUInteger notices = gBatchNotifications, lookups = gScopeProxyLookups; __block NSUInteger writes = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) writes++; };
+    NSError *failure = nil; BOOL success = [manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:&failure]; gStore.testCheckpoint = nil;
+    NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+    CHECK(success && !failure && writes == 1 && notices + 1 == gBatchNotifications && lookups == gScopeProxyLookups &&
+          !source[@"ScopedApps"][@"fixture.installed"] && !manager.scopedApps[@"fixture.installed"] &&
+          [source[@"RootMetadata"] isEqual:@"keep"] && [source[@"ScopedApps"][@"fixture.unresolved"][@"version"] isEqual:@"keep"] &&
+          [manager.scopedApps[@"fixture.unresolved"][@"version"] isEqual:@"dirty memory"] &&
+          [settingsBytes isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]],
+          "per-app removal preserves settings other records root metadata and dirty memory in one scope write");
+    [manager seedPersistenceCaches]; NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    CHECK([manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:NULL] && [before isEqual:BatchSnapshot()] &&
+          [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications, "canonical absence is a verified removal no-op without cache or topic effects");
+    manager.scopedApps[@"fixture.installed"] = [@{ @"enabled": @YES } mutableCopy];
+    CHECK([manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:NULL] && !manager.scopedApps[@"fixture.installed"] &&
+          [before isEqual:BatchSnapshot()] && ![[manager persistenceCaches][@"spoof"] count] && notices == gBatchNotifications,
+          "verified absence removes stale local membership without rewriting source");
+    manager = ScopeMetadataFixture(NO); [manager.scopedApps removeObjectForKey:@"fixture.installed"];
+    CHECK([manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:NULL] &&
+          ![NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"], "missing memory cannot hide a remaining canonical app");
+    manager = ScopeMetadataFixture(NO); before = BatchSnapshot(); cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    NSMutableDictionary *old = manager.scopedApps; id oldRecord = manager.scopedApps[@"fixture.installed"]; __block BOOL faulted = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.remove" format:@"source fault"]; }
+    };
+    failure = nil; success = [manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:&failure]; gStore.testCheckpoint = nil;
+    CHECK(!success && failure && faulted && manager.scopedApps == old && manager.scopedApps[@"fixture.installed"] == oldRecord &&
+          [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "failed removal preserves live membership source marker caches and notification");
+    [manager removeApplicationFromScope:@"fixture.installed"];
+    CHECK(!manager.scopedApps[@"fixture.installed"] && ![NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"],
+          "legacy void removal retries through acknowledged canonical deletion");
+    for (NSUInteger absent = 0; absent < 2; absent++) {
+        manager = ScopeMetadataFixture(NO);
+        if (absent) CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+        } error:NULL], "removal absent source fixture seeded");
+        before = BatchSnapshot(); old = manager.scopedApps; __block BOOL inner = YES; failure = nil;
+        success = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"remove-outer.plist") error:error]) return NO;
+            inner = [manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:NULL]; return YES;
+        } error:&failure];
+        CHECK(!success && !inner && failure && manager.scopedApps == old && manager.scopedApps[@"fixture.installed"] && [before isEqual:BatchSnapshot()],
+              "removal including absent no-op rejects nested acknowledgement and poisons outer staging");
+        if (absent) CHECK([manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:NULL] && !manager.scopedApps[@"fixture.installed"] &&
+                          [before isEqual:BatchSnapshot()] && ![NSFileManager.defaultManager fileExistsAtPath:PXGlobalScopePath()],
+                          "removal never materializes an absent canonical scope file");
+    }
+    manager = ScopeMetadataFixture(NO); before = BatchSnapshot(); notices = gBatchNotifications;
+    for (id invalid in @[NSNull.null, @7, @""]) {
+        failure = nil;
+        CHECK(![manager removeApplicationFromScopeAndPersist:(invalid == NSNull.null ? nil : invalid) error:&failure] && failure.code == 6044 &&
+              [before isEqual:BatchSnapshot()] && notices == gBatchNotifications, "invalid removal IDs fail before memory or source mutation");
+    }
+    CHECK([manager removeApplicationFromScopeAndPersist:@"fixture.Installed" error:NULL] && [before isEqual:BatchSnapshot()] && manager.scopedApps[@"fixture.installed"],
+          "scope removal retains exact case-sensitive key policy");
+    NSData *saved = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
+    @try {
+        CHECK([[@"malformed scope" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:PXGlobalScopePath() atomically:YES], "removal corrupt scope fixture seeded");
+        before = BatchSnapshot(); old = manager.scopedApps;
+        CHECK(![manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:&failure] && failure && manager.scopedApps == old &&
+              manager.scopedApps[@"fixture.installed"] && [before isEqual:BatchSnapshot()], "malformed scope is preserved instead of deleting live memory");
+    } @finally { CHECK([saved writeToFile:PXGlobalScopePath() atomically:YES], "removal corrupt source teardown restores exact bytes"); }
+    manager = ScopeMetadataFixture(NO); NSMutableString *requested = [@"fixture.installed" mutableCopy];
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) [requested setString:@"changed.by.callback"]; };
+    success = [manager removeApplicationFromScopeAndPersist:requested error:NULL]; gStore.testCheckpoint = nil;
+    CHECK(success && [requested isEqual:@"changed.by.callback"] && !manager.scopedApps[@"fixture.installed"] &&
+          ![NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"], "removal freezes caller ID through source callbacks");
+    manager = ScopeMetadataFixture(NO); __block BOOL postMarker = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!postMarker && [stage isEqual:@"commit-written"]) { postMarker = YES; [NSException raise:@"fixture.remove" format:@"post-marker housekeeping"]; }
+    };
+    success = [manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:NULL]; gStore.testCheckpoint = nil;
+    CHECK(success && postMarker && !manager.scopedApps[@"fixture.installed"] && ![NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"],
+          "removal adopts acknowledged deletion despite post-marker housekeeping failure");
+    manager = ScopeMetadataFixture(NO); __block BOOL successor = NO;
+    gDuringRequiredNotification = ^{
+        CHECK(!manager.scopedApps[@"fixture.installed"], "removal publication observes post-commit memory deletion");
+        successor = [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            NSMutableDictionary *scope = [[tx dictionaryAtPath:PXGlobalScopePath() error:error] mutableCopy];
+            NSMutableDictionary *apps = [scope[@"ScopedApps"] mutableCopy];
+            apps[@"fixture.installed"] = @{ @"enabled": @YES, @"name": @"Successor" }; scope[@"ScopedApps"] = apps;
+            return [tx setDictionary:scope atPath:PXGlobalScopePath() error:error];
+        } error:NULL];
+        manager.scopedApps[@"fixture.installed"] = [@{ @"enabled": @YES, @"name": @"Successor" } mutableCopy];
+        manager.error = [NSError errorWithDomain:@"successor" code:995 userInfo:nil];
+    };
+    failure = [NSError errorWithDomain:@"stale" code:1 userInfo:nil];
+    CHECK([manager removeApplicationFromScopeAndPersist:@"fixture.installed" error:&failure] && !failure && successor && manager.error.code == 995 &&
+          [manager.scopedApps[@"fixture.installed"][@"name"] isEqual:@"Successor"] &&
+          [[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"][@"name"] isEqual:@"Successor"],
+          "removal receipt preserves publication successor membership and shared error");
+}
+static void TestAppScopeRemovalUI(void) {
+    PXAppScopeToggleUIFixture *ui = [PXAppScopeToggleUIFixture new];
+    ui.manager = ScopeMetadataFixture(NO); PXDeviceGroupFixture *chosen = ScopeMetadataFixture(NO); __block BOOL faulted = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.remove-ui" format:@"source fault"]; }
+    };
+    BOOL saved = [ui persistScopedApplicationRemoval:@"fixture.installed" manager:chosen]; gStore.testCheckpoint = nil;
+    CHECK(!saved && faulted && ui.errors == 1 && ui.presentedError && chosen.scopedApps[@"fixture.installed"],
+          "removal UI helper returns failure with local error and preserved membership");
+    CHECK([ui persistScopedApplicationRemoval:@"fixture.installed" manager:chosen] && !chosen.scopedApps[@"fixture.installed"] &&
+          ui.manager.scopedApps[@"fixture.installed"] && ui.errors == 1, "removal UI helper retries using supplied manager and local receipt");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3184,6 +3298,8 @@ int main(void) {
         TestScopeMetadataRefresh();
         TestPerApplicationScopeToggle();
         TestAppScopeToggleUI();
+        TestPerApplicationScopeRemoval();
+        TestAppScopeRemovalUI();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

@@ -111,3 +111,8 @@ using shared error as receipt, accepting missing enabled as false, or inverting 
 obsolete UI intent are all rejected. These controls do not edit production files.
 Native Foundation/Theos builds for rootful/RootHide, UIKit presentation and device
 injection remain pending macOS CI/device. Full Patch 4 writer rollout remains partial.
+
+
+## Build acknowledgement
+
+2026-10-30: user reports H5I build pass. This is user-provided confirmation, not native execution on Windows. H5J proceeds with app-scope removal and its two dashboard UI actions; add/extension workflows remain separate.

@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5I-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5J-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -262,6 +262,50 @@ def source_contracts():
         assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
     assert 'TestPerApplicationScopeToggle();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     assert 'TestAppScopeToggleUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    removal_signature = '- (BOOL)removeApplicationFromScopeAndPersist:(NSString *)bundleID error:(NSError **)error'
+    removal = method(manager, removal_signature)
+    assert removal_signature + ';' in read('common/IdentifierManager.h')
+    assert '[self removeApplicationFromScopeAndPersist:bundleID error:NULL]' in method(manager, '- (void)removeApplicationFromScope:(NSString *)bundleID')
+    assert 'saveSettings' not in removal and 'PXTLinkIOSSettingsPath' not in removal and 'LSApplicationProxy' not in removal
+    assert removal.count('PXPerformStandaloneRuntimeSourceWrite(') == 1
+    assert removal.index('bundleID = [bundleID copy]') < removal.index('PXPerformStandaloneRuntimeSourceWrite(')
+    assert 'self.scopedApps' not in removal.split('if (!success)', 1)[0]
+    assert 'PXValidateManagerSettingsSources(nil, scope, writeError)' in removal and 'code:6044' in removal
+    assert 'if (!apps[bundleID]) return YES;' in removal
+    assert '[changedApps removeObjectForKey:bundleID]' in removal and 'setDictionary:changedScope atPath:scopePath' in removal
+    assert removal.index('}, &failure)') < removal.index('if (!success)') < removal.index('[self.scopedApps removeObjectForKey:bundleID]') < removal.index('PXPostSettingsChangedNotification()')
+    assert 'if (wrote || memoryChanged)' in removal and 'if (wrote) PXPostSettingsChangedNotification();' in removal
+    assert 'return self.error' not in removal
+    removal_ui_signature = '- (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager'
+    ui_source = read('TLinkIOSViewController.m')
+    removal_ui = method(ui_source, removal_ui_signature)
+    assert '[manager removeApplicationFromScopeAndPersist:bundleID error:&failure]' in removal_ui
+    assert 'if (failure) [self showError:failure];' in removal_ui and 'return NO;' in removal_ui
+    assert 'lastError' not in removal_ui and 'self.manager' not in removal_ui
+    assert 'if (![self persistScopedApplicationRemoval:bundleID manager:[IdentifierManager sharedManager]]) return;' in ui_source
+    assert 'if (![self persistScopedApplicationRemoval:bundleID manager:self.manager]) return;' in ui_source
+    assert ui_source.count('[self persistScopedApplicationRemoval:bundleID manager:') == 2
+    assert 'removeApplicationFromScope:bundleID' not in ui_source
+    assert 'PXAppScopeRemovalUI.inc' in read('scripts/test_runtime_device_group_writers.py')
+    for case in ('per-app removal preserves settings other records root metadata and dirty memory in one scope write',
+                 'canonical absence is a verified removal no-op without cache or topic effects',
+                 'verified absence removes stale local membership without rewriting source',
+                 'missing memory cannot hide a remaining canonical app',
+                 'failed removal preserves live membership source marker caches and notification',
+                 'legacy void removal retries through acknowledged canonical deletion',
+                 'removal including absent no-op rejects nested acknowledgement and poisons outer staging',
+                 'removal never materializes an absent canonical scope file',
+                 'invalid removal IDs fail before memory or source mutation',
+                 'scope removal retains exact case-sensitive key policy',
+                 'malformed scope is preserved instead of deleting live memory',
+                 'removal freezes caller ID through source callbacks',
+                 'removal adopts acknowledged deletion despite post-marker housekeeping failure',
+                 'removal receipt preserves publication successor membership and shared error',
+                 'removal UI helper returns failure with local error and preserved membership',
+                 'removal UI helper retries using supplied manager and local receipt'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestPerApplicationScopeRemoval();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestAppScopeRemovalUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('standalone settings and scope saves commit once before one compatibility notification',
                  'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',

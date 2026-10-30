@@ -13,6 +13,8 @@
 
 - (void)addApplicationToScope:(NSString *)bundleID;
 - (void)removeApplicationFromScope:(NSString *)bundleID;
+// Removes only this canonical entry; already absent is a verified no-op.
+- (BOOL)removeApplicationFromScopeAndPersist:(NSString *)bundleID error:(NSError **)error;
 - (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled;
 // Canonical per-app scope write; success is local acknowledgement, including a verified no-op.
 - (BOOL)setApplicationEnabledAndPersist:(BOOL)enabled forBundleID:(NSString *)bundleID error:(NSError **)error;
