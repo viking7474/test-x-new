@@ -3789,17 +3789,39 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
             capturedImage = PXCaptureToggleBeforeImage(transaction, existing, type, writeError);
             if (!capturedImage) return NO;
         }
+        id liveSettings = self.settings;
+        id liveScope = self.scopedApps;
+        if ((liveSettings && ![liveSettings isKindOfClass:NSDictionary.class]) || ![liveScope isKindOfClass:NSDictionary.class]) {
+            if (writeError) *writeError = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6039
+                userInfo:@{NSLocalizedDescriptionKey: @"Invalid settings or scope map for save"}];
+            return NO;
+        }
+        NSDictionary *settingsSnapshot = [liveSettings copy];
+        // Stage is an immutable in-memory copy, not a physical write. Validate
+        // exactly that packet before normalization callbacks or commit can run.
+        NSDictionary *scopedAppsDict = @{ @"ScopedApps": [liveScope copy] };
+        if (![transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError]) return NO;
+        NSDictionary *stagedScope = [transaction dictionaryAtPath:scopedAppsFile error:writeError];
+        if (!stagedScope || !PXValidateManagerSettingsSources(nil, stagedScope, writeError)) return NO;
+        NSDictionary *normalizedFlags = PXSanitizedIdentifierSettings(settingsSnapshot);
+        BOOL hasStorage = settingsSnapshot[@"StorageSystem"] != nil;
+        id normalizedStorage = normalizedFlags[@"StorageSystem"];
+        if (hasStorage && !normalizedStorage) {
+            if (writeError) *writeError = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6039
+                userInfo:@{NSLocalizedDescriptionKey: @"Invalid StorageSystem scalar for save"}];
+            return NO;
+        }
         NSMutableDictionary *saveDict = [existing mutableCopy];
-        saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings);
+        saveDict[@"EnabledIdentifiers"] = normalizedFlags;
         // Keep the legacy top-level storage flag synchronized in the same
         // transaction. Rootful StorageManager still consults this key.
-        if (self.settings[@"StorageSystem"] != nil) {
-            saveDict[@"StorageSystemEnabled"] = @([self.settings[@"StorageSystem"] boolValue]);
-        }
+        if (hasStorage) saveDict[@"StorageSystemEnabled"] = normalizedStorage;
         saveDict[@"SettingsInitialized"] = @YES;
         if (![transaction setDictionary:saveDict atPath:prefsFile error:writeError]) return NO;
-        NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
-        if (![transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError]) return NO;
+        // A cooperating low-level nested writer may have replaced staging during
+        // normalization. Never acknowledge a scope packet our loader rejects.
+        stagedScope = [transaction dictionaryAtPath:scopedAppsFile error:writeError];
+        if (!stagedScope || !PXValidateManagerSettingsSources(nil, stagedScope, writeError)) return NO;
         if (wantsReceipt) candidate = [transaction prospectiveCommitIdentifierWithError:writeError];
         return !wantsReceipt || candidate != nil;
     }, &sourceError);

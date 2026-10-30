@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5R-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5S-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -145,6 +145,36 @@ def source_contracts():
         assert 'writeToFile:scopedAppsFile' not in body
         assert body.index('}, &sourceError)') < body.index('PXPostSettingsChangedNotification()')
         assert body.index('if (!success)') < body.index('removeAllObjects]')
+    assert 'id liveSettings = self.settings;' in save and 'id liveScope = self.scopedApps;' in save
+    assert save.count('self.settings') == 1 and save.count('self.scopedApps') == 1
+    assert 'NSDictionary *settingsSnapshot = [liveSettings copy];' in save
+    assert 'NSDictionary *normalizedFlags = PXSanitizedIdentifierSettings(settingsSnapshot);' in save
+    assert 'saveDict[@"EnabledIdentifiers"] = normalizedFlags;' in save
+    assert 'BOOL hasStorage = settingsSnapshot[@"StorageSystem"] != nil;' in save
+    assert 'id normalizedStorage = normalizedFlags[@"StorageSystem"];' in save
+    assert 'if (hasStorage && !normalizedStorage)' in save
+    assert 'if (hasStorage) saveDict[@"StorageSystemEnabled"] = normalizedStorage;' in save
+    assert ' boolValue]' not in save and 'PXDetachRuntimeGeneration(' not in save
+    assert save.count('setDictionary:scopedAppsDict atPath:scopedAppsFile') == 1
+    assert save.count('dictionaryAtPath:scopedAppsFile error:writeError]') == 2
+    scope_validation = 'if (!stagedScope || !PXValidateManagerSettingsSources(nil, stagedScope, writeError)) return NO;'
+    assert save.count(scope_validation) == 2
+    assert save.index('PXCaptureToggleBeforeImage(') < save.index('setDictionary:scopedAppsDict') < save.index(scope_validation) < save.index('PXSanitizedIdentifierSettings(settingsSnapshot)')
+    assert save.index('setDictionary:saveDict') < save.rindex(scope_validation) < save.index('prospectiveCommitIdentifierWithError:')
+    assert save.index('if (!success)') < save.index('if (identifier) *identifier = candidate;') < save.index('PXPostSettingsChangedNotification()')
+    assert save.index('if (!success)') < save.index('if (beforeImage) *beforeImage = capturedImage;')
+    save_fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestFullSettingsSavePayload();' in save_fixture
+    for case in ('full save rejects unloadable scope before scalar conversion without source receipt cache or publication effects',
+                 'full save publishes outputs only after a readable prepared payload commits',
+                 'full save uses one normalized storage value and frozen staged scope while preserving before images unrelated features and newer dirty memory',
+                 'full settings save round trips through the production loader',
+                 'normalizer exception or nested invalid scope aborts the full staged group without acknowledging partial work',
+                 'unsupported storage scalar still fails full save instead of inventing an alias value',
+                 'nil settings retains empty flag map and absent storage intent preserves existing alias',
+                 'malformed settings root fails without publishing an empty replacement',
+                 'nil scope keeps full save failure policy without materializing empty membership'):
+        assert case in save_fixture, case
     assert scope.index('}, &sourceError)') < scope.index('setAttributes:fileAttributes')
     replacement = method(manager, '- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs')
     assert 'return [self persistScopedApps:replacement adopt:YES error:NULL];' in replacement

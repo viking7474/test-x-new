@@ -4134,6 +4134,92 @@ static void TestFullSettingsLoadCacheAdmission(void) {
           "full load missing sources clears stale scope decisions without materializing defaults");
 }
 
+@interface PXSettingsBoolProbe : NSObject
+@property (nonatomic) NSUInteger reads;
+@property (nonatomic) BOOL initialValue;
+@property (nonatomic) BOOL flip;
+@property (nonatomic) BOOL throws;
+@property (nonatomic, copy) void (^duringRead)(void);
+- (BOOL)boolValue;
+@end
+@implementation PXSettingsBoolProbe
+- (BOOL)boolValue {
+    self.reads++;
+    void (^callback)(void) = self.duringRead; self.duringRead = nil; if (callback) callback();
+    if (self.throws) [NSException raise:@"fixture.settings.scalar" format:@"Scalar conversion failed"];
+    return self.flip && self.reads > 1 ? !self.initialValue : self.initialValue;
+}
+@end
+static PXDeviceGroupFixture *SettingsPayloadFixture(void) {
+    PXDeviceGroupFixture *manager = ScopeMetadataFixture(NO);
+    manager.settings = [@{ @"IDFA": @YES, @"StorageSystem": @NO, @"WiFi": @NO, @"Battery": @NO, @"DeviceTheme": @NO } mutableCopy];
+    manager.scopedApps = [@{ @"fixture.save": [@{ @"enabled": @YES, @"name": @"Saved" } mutableCopy] } mutableCopy];
+    NSDictionary *baseline = @{ @"SettingsInitialized": @YES, @"EnabledIdentifiers": @{ @"StorageSystem": @"YES", @"IDFA": @"NO" },
+        @"StorageSystemEnabled": @"NO", @"UnrelatedFeature": @7 };
+    CHECK(SeedManagerLoading(baseline, @{ @"ScopedApps": @{ @"fixture.old": @{ @"enabled": @NO } } }), "full save payload canonical baseline seeded");
+    [manager seedPersistenceCaches]; return manager;
+}
+static void TestFullSettingsSavePayload(void) {
+    NSArray *invalidScopes = @[@[], NSNull.null, @{ @"bad": @YES }, @{ @"bad": @{ @"enabled": @[] } }];
+    for (id invalid in invalidScopes) {
+        PXDeviceGroupFixture *manager = SettingsPayloadFixture(); manager.scopedApps = invalid;
+        PXSettingsBoolProbe *probe = [PXSettingsBoolProbe new]; manager.settings[@"StorageSystem"] = probe;
+        NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; NSUInteger notices = gBatchNotifications;
+        NSString *receipt = @"stale"; NSDictionary *image = @{ @"stale": @YES }; NSError *failure = nil;
+        CHECK(![manager saveSettingsWithSourceCommitIdentifier:&receipt forIdentifier:@"StorageSystem" beforeImage:&image error:&failure] &&
+              failure.code == 4006 && manager.error == failure && !receipt && !image && !probe.reads &&
+              [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "full save rejects unloadable scope before scalar conversion without source receipt cache or publication effects");
+    }
+    PXDeviceGroupFixture *manager = SettingsPayloadFixture();
+    PXSettingsBoolProbe *probe = [PXSettingsBoolProbe new]; probe.flip = YES;
+    manager.settings[@"StorageSystem"] = probe; manager.settings[@"NotAnIdentifier"] = [NSObject new];
+    NSMutableString *name = [@"Captured" mutableCopy]; manager.scopedApps[@"fixture.save"][@"name"] = name;
+    probe.duringRead = ^{ [name setString:@"Newer local name"]; manager.settings[@"IDFA"] = @NO; manager.scopedApps[@"fixture.newer"] = @{ @"enabled": @YES }; };
+    NSUInteger notices = gBatchNotifications; NSString *receipt = nil; NSDictionary *image = nil; NSError *failure = nil;
+    CHECK([manager saveSettingsWithSourceCommitIdentifier:&receipt forIdentifier:@"StorageSystem" beforeImage:&image error:&failure] && !failure && receipt.length && image,
+          "full save publishes outputs only after a readable prepared payload commits");
+    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSDictionary *scope = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+    CHECK(probe.reads == 1 && [saved[@"EnabledIdentifiers"][@"StorageSystem"] isEqual:@NO] && [saved[@"StorageSystemEnabled"] isEqual:@NO] &&
+          [saved[@"EnabledIdentifiers"][@"IDFA"] isEqual:@YES] && !saved[@"EnabledIdentifiers"][@"NotAnIdentifier"] && [saved[@"UnrelatedFeature"] isEqual:@7] &&
+          [scope[@"ScopedApps"][@"fixture.save"][@"name"] isEqual:@"Captured"] && !scope[@"ScopedApps"][@"fixture.newer"] &&
+          ![manager.settings[@"IDFA"] boolValue] && manager.scopedApps[@"fixture.newer"] && [name isEqual:@"Newer local name"] &&
+          [image[@"primary"][@"value"] isEqual:@"YES"] && [image[@"storage"][@"value"] isEqual:@"NO"] && notices + 1 == gBatchNotifications &&
+          !manager.appEnabledCache.count && !manager.spoofCache.count,
+          "full save uses one normalized storage value and frozen staged scope while preserving before images unrelated features and newer dirty memory");
+    PXDeviceGroupFixture *reader = [PXDeviceGroupFixture new]; [reader loadSettings];
+    CHECK(!reader.error && [reader.scopedApps isEqual:scope[@"ScopedApps"]], "full settings save round trips through the production loader");
+    for (NSUInteger mode = 0; mode < 2; mode++) {
+        manager = SettingsPayloadFixture(); probe = [PXSettingsBoolProbe new]; probe.throws = mode == 0;
+        manager.settings[@"StorageSystem"] = probe;
+        __block BOOL nested = NO;
+        if (mode == 1) probe.duringRead = ^{
+            nested = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                return [tx setDictionary:@{ @"ScopedApps": @[] } atPath:PXGlobalScopePath() error:error];
+            }, NULL);
+        };
+        NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; notices = gBatchNotifications;
+        receipt = @"stale"; image = @{ @"stale": @YES }; failure = nil;
+        CHECK(![manager saveSettingsWithSourceCommitIdentifier:&receipt forIdentifier:@"StorageSystem" beforeImage:&image error:&failure] &&
+              failure.code == 4006 && !receipt && !image && probe.reads == 1 && (mode == 0 || nested) &&
+              [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "normalizer exception or nested invalid scope aborts the full staged group without acknowledging partial work");
+    }
+    manager = SettingsPayloadFixture(); manager.settings[@"StorageSystem"] = @[];
+    NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    CHECK(![manager saveSettingsWithError:&failure] && failure.code == 4006 && [before isEqual:BatchSnapshot()] &&
+          [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications, "unsupported storage scalar still fails full save instead of inventing an alias value");
+    manager = SettingsPayloadFixture(); manager.settings = nil;
+    CHECK([manager saveSettingsWithError:NULL] && ![[NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()][@"EnabledIdentifiers"] count] &&
+          [[NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()][@"StorageSystemEnabled"] isEqual:@"NO"],
+          "nil settings retains empty flag map and absent storage intent preserves existing alias");
+    manager = SettingsPayloadFixture(); manager.settings = (id)@[]; before = BatchSnapshot();
+    CHECK(![manager saveSettingsWithError:&failure] && failure.code == 4006 && [before isEqual:BatchSnapshot()], "malformed settings root fails without publishing an empty replacement");
+    manager = SettingsPayloadFixture(); manager.scopedApps = nil; before = BatchSnapshot();
+    CHECK(![manager saveSettingsWithError:&failure] && failure.code == 4006 && [before isEqual:BatchSnapshot()], "nil scope keeps full save failure policy without materializing empty membership");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -4184,6 +4270,7 @@ int main(void) {
         TestReplacementPreparationAdmission();
         TestScopeInfoExportOwnership();
         TestFullSettingsLoadCacheAdmission();
+        TestFullSettingsSavePayload();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

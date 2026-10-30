@@ -237,10 +237,14 @@ require('if (!PXIdentifierManagerIsManagerProcess())' in current_value_method an
         current_value_method.index('if (!PXIdentifierManagerIsManagerProcess())') <
         current_value_method.index('PXIdentitySnapshot *runtimeSnapshot = PXCurrentIdentitySnapshot();'),
         "RootHide manager can still read identifier values from a stale runtime snapshot")
+full_settings_save = method(identifier_manager, '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error')
 require('PXCanonicalIdentifierToggleKeys' in identifier_manager and
         'PXSanitizedIdentifierSettings(self.settings)' in identifier_manager and
         'dictionaryWithContentsOfFile:prefsFile' in identifier_manager and
-        'saveDict[@"EnabledIdentifiers"] = PXSanitizedIdentifierSettings(self.settings)' in identifier_manager and
+        'NSDictionary *normalizedFlags = PXSanitizedIdentifierSettings(settingsSnapshot);' in full_settings_save and
+        'saveDict[@"EnabledIdentifiers"] = normalizedFlags;' in full_settings_save and
+        'if (hasStorage) saveDict[@"StorageSystemEnabled"] = normalizedStorage;' in full_settings_save and
+        full_settings_save.count('PXValidateManagerSettingsSources(nil, stagedScope, writeError)') == 2 and
         'updatedSettings[@"canvasNoiseSeedNonce"]' not in identifier_manager and
         'updatedSettings[@"canvasFingerprintingEnabled"]' not in identifier_manager,
         "Identifier settings persistence can still corrupt EnabledIdentifiers or clobber suite-level feature flags")

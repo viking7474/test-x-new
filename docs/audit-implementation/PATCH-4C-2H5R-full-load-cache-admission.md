@@ -96,3 +96,6 @@ files are not modified by negative controls. Final targeted contracts, extractio
 macro scans also pass with the explicit warm-positive revocation fixture. Native
 builds/runtime checks for both
 schemes and real device behavior remain pending macOS CI/device validation.
+
+2026-10-30: user reports H5R build pass. H5S follows for full-save staged packet
+validation and storage alias consistency. Local validation is not native execution.
