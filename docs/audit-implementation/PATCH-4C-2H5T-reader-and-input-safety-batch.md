@@ -128,3 +128,27 @@ P1: guard the five correctness/input areas above. P2: shared registry and consta
 schema cache. No new P0 finding or evidence of a device-level critical incident.
 Full Patch 4 remains partial, especially authority, concurrent manager memory,
 remaining direct writers and real-device compatibility/performance validation.
+
+## Native build follow-up — reader fragment truncation
+
+The supplied CI log reports 484/484 writer checks on each of three rootful runs,
+then a compile failure in readers-rootful. The original extraction helper treated
+the first column-zero closing brace as the method boundary. The legacy uptime
+branch inside currentValueForIdentifier contains such an inner brace, so the
+emitted method stopped after 109 lines instead of its complete 417 lines. The
+next ATT method appeared inside the unfinished display method, causing the
+undeclared identifier, missing brace and missing @end diagnostics. The rootful
+failure stopped this recipe before its RootHide iteration; the cause is shared.
+
+Replace the indentation heuristic with balanced braces after masking string and
+character literals and comments, preserving source offsets and returning original
+text. Add an extractor regression with an unindented inner brace, nested block,
+misleading literal/comment braces, a following method and a truncated outer body.
+Check the real display method's final fallback and compare its full body with an
+independently delimited App Management section. All previously selected writer
+fragments remain identical; only the truncated reader becomes complete. The six
+reader definitions now span 507 emitted lines in total.
+
+This follow-up changes the test extractor and documentation only. It leaves the
+H5T production behavior and both scheme build commands intact. Local source and
+fragment validation does not replace rerunning native compilation on macOS.

@@ -46,11 +46,43 @@ READER_SIGNATURES = [
 
 def method(source, signature):
     start = source.index(signature + ' {')
-    # These selected production methods close at column zero. Reject a missing
-    # closing brace rather than falling back to a separately implemented model.
-    match = re.search(r'^}', source[start:], re.M)
-    assert match
-    return source[start:start + match.end()]
+    fragment = source[start:]
+    # Indentation is not a scope boundary: legacy uptime/boot branches contain
+    # column-zero inner braces. Mask comments/literals while preserving offsets,
+    # then return the exact source bytes through the outermost closing brace.
+    masked = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                    lambda match: ' ' * len(match.group()), fragment)
+    opening = len(signature) + 1
+    depth = 0
+    for offset in range(opening, len(masked)):
+        if masked[offset] == '{':
+            depth += 1
+        elif masked[offset] == '}':
+            depth -= 1
+            if depth == 0:
+                return fragment[:offset + 1]
+    raise AssertionError(f'unterminated production method: {signature}')
+
+
+def extraction_contracts():
+    signature = '- (NSString *)fixture'
+    complete = '''- (NSString *)fixture {
+    if (YES) {
+        id value = @{ @"brace": @"}\\\"{", @"character": @'}' };
+        /* } { */ // } misleading braces
+        (void)value;
+}
+    void (^callback)(void) = ^{ (void)@"{"; };
+    callback();
+    return @"complete";
+}'''
+    assert method(complete + '\n- (void)next { }', signature) == complete
+    try:
+        method(complete[:-1], signature)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError('extractor accepted a truncated outer method')
 
 
 def selected_signatures():
@@ -72,6 +104,7 @@ def selected_signatures():
 
 
 def source_contracts():
+    extraction_contracts()
     manager = read('common/IdentifierManager.m')
     helper = read('common/PXRuntimeIdentifierWriter.m')
     paths = read('common/PXRuntimeSources.m')
@@ -85,6 +118,10 @@ def source_contracts():
     assert 'isKindOfClass:NSDictionary.class' in enabled
     assert 'return [flag respondsToSelector:@selector(boolValue)] && [flag boolValue];' in enabled
     display = readers[READER_SIGNATURES[1]]
+    assert display.endswith('PXLog(@"No value found for %@", type);\n    return nil;\n}'), 'display extraction must include its final fallback, not stop at an inner brace'
+    assert 'currentBootTimeForProfile:' in display and 'currentAppContainerUUID]' in display
+    expected_display = manager[manager.index(READER_SIGNATURES[1] + ' {'):manager.index('\n#pragma mark - App Management')].rstrip()
+    assert display == expected_display, 'reader body must match its complete independently bounded source section'
     assert 'PXRuntimeIdentifierSidecar(type)' in display and 'PXIdentifierDisplayString(record[@"value"])' in display
     assert 'PXIdentifierDisplayString(batteryDict[type])' in display
     assert '[uptimeValue isKindOfClass:NSNumber.class]' in display and '[uptimeValue isKindOfClass:NSString.class]' in display
