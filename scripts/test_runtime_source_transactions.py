@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5O-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5P-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -152,6 +152,47 @@ def source_contracts():
     assert 'isEqualToDictionary:replacement]) return YES' not in replacement
     assert 'NSString *bundleID = [value copy];' in replacement
     assert '![bundleIDs isKindOfClass:NSArray.class]' in replacement and '![existing isKindOfClass:NSDictionary.class]' in replacement
+    assert 'NSDictionary *liveScope = self.scopedApps;' in replacement
+    assert 'normalized.count && liveScope && ![liveScope isKindOfClass:NSDictionary.class]' in replacement
+    assert replacement.index('appInfo[@"enabled"] = @YES; appInfo[@"bundleID"] = bundleID; appInfo[@"originalBundleID"] = bundleID;') < replacement.index('PXDetachRuntimeGeneration(')
+    assert replacement.index('PXDetachRuntimeGeneration(@{ @"ScopedApps": retained }, &failure)') < replacement.index('PXPerformStandaloneRuntimeSourceWrite(') < replacement.index('NSClassFromString(@"LSApplicationProxy")')
+    assert 'PXValidateManagerSettingsSources(nil, frozen, &failure)' in replacement
+    assert 'NSDictionary *basis = frozen[@"ScopedApps"];' in replacement
+    assert '[basis[bundleID] mutableCopy]' in replacement
+    admission = replacement.split('BOOL admitted = PXPerformStandaloneRuntimeSourceWrite(', 1)[1].split('}, &failure);', 1)[0]
+    assert 'return [tx dictionaryAtPath:scopePath error:readError] != nil;' in admission
+    assert 'PXValidateManagerSettingsSources' not in admission, 'replacement must retain its decodable canonical schema repair policy'
+    assert 'setDictionary:' not in admission
+    assert replacement.index('if (!admitted)') < replacement.index('@try') < replacement.index('NSClassFromString(@"LSApplicationProxy")')
+    assert 'code:4006' in replacement
+    assert replacement.count('NSClassFromString(@"LSApplicationProxy")') == 1
+    assert 'if (!resolvedProxyClass) { proxyClass = NSClassFromString(@"LSApplicationProxy"); resolvedProxyClass = YES; }' in replacement
+    for selector in ('applicationProxyForIdentifier:', 'localizedName', 'shortVersionString', 'bundleVersion'):
+        assert f'respondsToSelector:@selector({selector})' in replacement
+    for value in ('name', 'version', 'build'):
+        assert f'[{value} isKindOfClass:NSString.class] ? [{value} copy]' in replacement
+    for forbidden in ('valueForKey:', 'PXScopeOptionalKVCString(', 'PXPrepareScopeAdditionRecord(', 'proxy.bundleVersion', 'self.scopedApps[bundleID]'):
+        assert forbidden not in replacement
+    assert '@catch (NSException *exception)' in replacement and 'code:6048' in replacement
+    assert replacement.index('@catch (NSException *exception)') < replacement.index('return [self persistScopedApps:replacement adopt:YES error:NULL];')
+    assert 'BOOL memoryChanged = adopt && ![self.scopedApps isEqual:candidate];' in scope
+    ui_scope = method(read('TLinkIOSViewController.m'), '- (BOOL)syncHookScopeToResetAppIDs:(NSArray<NSString *> *)bundleIDs waitingForDaemon:(BOOL)waitForDaemon')
+    assert ui_scope.index('if (![self.manager replaceApplicationScopeWithBundleIDs:expandedBundles]) return NO;') < ui_scope.index('PXWriteSubstrateFilterPlists()')
+    replacement_fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestReplacementPreparationAdmission();' in replacement_fixture
+    for case in ('replacement optional class factory getters and metadata types preserve fallback values without KVC',
+                 'retained replacement records need no private class or factory lookup',
+                 'replacement nested admission poisons ignored outer staging before metadata lookup or live effects',
+                 'late factory or getter exceptions fail replacement before source staging memory adoption and notification',
+                 'replacement metadata callbacks run outside source gate with one lazy class lookup for all new IDs',
+                 'replacement freezes retained nested metadata before callbacks even when a later requested live record is removed',
+                 'replacement still repairs fields replaced by intent and ignores dropped malformed local members',
+                 'invalid retained metadata rejects before private lookup without altering canonical source or live map',
+                 'replacement admission keeps full replacement repair of a decodable malformed canonical schema',
+                 'undecodable canonical replacement fails before private metadata while preserving source error code',
+                 'non dictionary local replacement map rejects selected IDs before lookup',
+                 'empty replacement retains clear policy and safely adopts after a malformed old local root'):
+        assert case in replacement_fixture, case
     assert scope.index('PXDetachRuntimeGeneration(') < scope.index('PXPerformStandaloneRuntimeSourceWrite(')
     assert 'PXValidateManagerSettingsSources(nil, scopedAppsDict, &sourceError)' in scope
     assert 'if ([existing isEqual:scopedAppsDict]) return YES;' in scope

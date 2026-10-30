@@ -3431,34 +3431,70 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         [normalized addObject:bundleID];
     }
 
-    NSMutableDictionary *replacement = [NSMutableDictionary dictionaryWithCapacity:normalized.count];
+    // Freeze only retained requested records before any private-framework callback.
+    // Other members are intentionally dropped by this full-replacement operation.
+    NSDictionary *liveScope = self.scopedApps;
+    if (normalized.count && liveScope && ![liveScope isKindOfClass:NSDictionary.class]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6040 userInfo:@{NSLocalizedDescriptionKey: @"Malformed existing scope map"}];
+        return NO;
+    }
+    NSMutableDictionary *retained = [NSMutableDictionary dictionary];
     for (NSString *bundleID in normalized) {
-        id existing = self.scopedApps[bundleID];
+        id existing = liveScope[bundleID];
         if (existing && ![existing isKindOfClass:NSDictionary.class]) {
             self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6040 userInfo:@{NSLocalizedDescriptionKey: @"Malformed existing scope record"}];
             return NO;
         }
-        NSMutableDictionary *appInfo = [existing mutableCopy];
-        if (!appInfo) {
-            LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-            // bundleVersion is part of the local private-framework declaration
-            // above and is already used by refreshScopedAppsInfoIfNeeded. Calling
-            // that typed property keeps RootHide's stricter compiler from trying
-            // to resolve NSObject runtime/KVC selectors on a forward-only class.
-            NSString *buildVersion = proxy.bundleVersion;
-            appInfo = [@{
-                @"name": proxy.localizedName ?: bundleID,
-                @"version": proxy.shortVersionString ?: (proxy ? @"Unknown" : @"Helper/Extension"),
-                @"build": buildVersion ?: @"Unknown",
-                @"installed": @YES,
-                @"bundleID": bundleID,
-                @"originalBundleID": bundleID
-            } mutableCopy];
+        if (existing) {
+            NSMutableDictionary *appInfo = [existing mutableCopy];
+            // These fields are replaced by intent, even if old values are invalid.
+            appInfo[@"enabled"] = @YES; appInfo[@"bundleID"] = bundleID; appInfo[@"originalBundleID"] = bundleID;
+            retained[bundleID] = appInfo;
         }
-        appInfo[@"enabled"] = @YES;
-        appInfo[@"bundleID"] = bundleID;
-        appInfo[@"originalBundleID"] = bundleID;
-        replacement[bundleID] = appInfo;
+    }
+    NSError *failure = nil;
+    NSDictionary *frozen = PXDetachRuntimeGeneration(@{ @"ScopedApps": retained }, &failure);
+    if (!frozen || !PXValidateManagerSettingsSources(nil, frozen, &failure)) {
+        self.error = failure; return NO;
+    }
+    NSDictionary *basis = frozen[@"ScopedApps"];
+    NSString *scopePath = PXGlobalScopePath();
+    BOOL admitted = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        // Keep replacement's repair policy: the current root must decode, but its
+        // old membership/record schema need not match the new full replacement.
+        return [tx dictionaryAtPath:scopePath error:readError] != nil;
+    }, &failure);
+    if (!admitted) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:4006
+            userInfo:@{NSLocalizedDescriptionKey: failure.localizedDescription ?: @"Failed to save global scoped apps"}];
+        return NO;
+    }
+    NSMutableDictionary *replacement = [NSMutableDictionary dictionaryWithCapacity:normalized.count];
+    @try {
+        Class proxyClass = Nil; BOOL resolvedProxyClass = NO;
+        for (NSString *bundleID in normalized) {
+            NSMutableDictionary *appInfo = [basis[bundleID] mutableCopy];
+            if (!appInfo) {
+                if (!resolvedProxyClass) { proxyClass = NSClassFromString(@"LSApplicationProxy"); resolvedProxyClass = YES; }
+                id proxy = [proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)] ? [(id)proxyClass applicationProxyForIdentifier:bundleID] : nil;
+                id name = [proxy respondsToSelector:@selector(localizedName)] ? [proxy localizedName] : nil;
+                id version = [proxy respondsToSelector:@selector(shortVersionString)] ? [proxy shortVersionString] : nil;
+                id build = [proxy respondsToSelector:@selector(bundleVersion)] ? [proxy bundleVersion] : nil;
+                // Replacement historically used Unknown for absent build; unlike
+                // additive insertion it must not introduce a KVC fallback here.
+                appInfo = [@{ @"name": [name isKindOfClass:NSString.class] ? [name copy] : bundleID,
+                    @"version": [version isKindOfClass:NSString.class] ? [version copy] : (proxy ? @"Unknown" : @"Helper/Extension"),
+                    @"build": [build isKindOfClass:NSString.class] ? [build copy] : @"Unknown", @"installed": @YES } mutableCopy];
+            }
+            appInfo[@"enabled"] = @YES;
+            appInfo[@"bundleID"] = bundleID;
+            appInfo[@"originalBundleID"] = bundleID;
+            replacement[bundleID] = appInfo;
+        }
+    } @catch (NSException *exception) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6048
+            userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Failed to prepare replacement scope metadata"}];
+        return NO;
     }
 
     // A matching memory map cannot acknowledge a failed/absent source write.
@@ -4122,7 +4158,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         if (error) *error = self.error;
         return NO;
     }
-    BOOL memoryChanged = adopt && ![self.scopedApps isEqualToDictionary:candidate];
+    BOOL memoryChanged = adopt && ![self.scopedApps isEqual:candidate];
     if (adopt) self.scopedApps = candidate;
     if (wrote) {
         NSError *permError = nil;

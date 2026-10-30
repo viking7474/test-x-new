@@ -297,11 +297,15 @@ require("PXWriteSubstrateFilterPlistsInternal(BOOL waitForInstalledFilters)" in 
 batch_scope_start = identifier_manager.index("- (BOOL)replaceApplicationScopeWithBundleIDs:")
 batch_scope_end = identifier_manager.index("- (NSDictionary *)getApplicationInfo:", batch_scope_start)
 batch_scope_body = identifier_manager[batch_scope_start:batch_scope_end]
-require("NSString *buildVersion = proxy.bundleVersion;" in batch_scope_body and
-        "respondsToSelector:" not in batch_scope_body and
+require('id proxy = [proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)] ? [(id)proxyClass applicationProxyForIdentifier:bundleID] : nil;' in batch_scope_body and
+        'id build = [proxy respondsToSelector:@selector(bundleVersion)] ? [proxy bundleVersion] : nil;' in batch_scope_body and
+        all(f'respondsToSelector:@selector({selector})' in batch_scope_body
+            for selector in ('localizedName', 'shortVersionString', 'bundleVersion')) and
+        "LSApplicationProxy *proxy" not in batch_scope_body and
         "performSelector:" not in batch_scope_body and
-        "valueForKey:" not in batch_scope_body,
-        "RootHide batch scope metadata still invokes undeclared NSObject selectors on LSApplicationProxy")
+        "valueForKey:" not in batch_scope_body and
+        "PXScopeOptionalKVCString(" not in batch_scope_body,
+        "RootHide replacement metadata requires guarded id receivers and its existing no-KVC fallback")
 primary_controller_start = view_controller.index("@implementation TLinkIOSViewController")
 primary_view_did_load_start = view_controller.index("- (void)viewDidLoad", primary_controller_start)
 primary_view_did_load_end = view_controller.index("- (void)viewDidLayoutSubviews", primary_view_did_load_start)

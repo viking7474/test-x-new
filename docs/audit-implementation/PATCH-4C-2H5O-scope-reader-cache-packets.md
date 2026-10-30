@@ -117,3 +117,6 @@ were rerun after changing root reads to a single local reference per observation
 
 Native builds and runtime tests for both schemes remain pending macOS CI/device
 validation; source contracts and generated-fragment review are not native runtime proof.
+
+2026-10-30: user reports H5O build pass. H5P follows for Reset scope replacement
+preparation; the local host still cannot run native/device validation.

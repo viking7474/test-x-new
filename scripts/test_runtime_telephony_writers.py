@@ -89,7 +89,7 @@ def source_contracts():
     workflow = read('.github/workflows/build-ios-arm.yml')
     assert 'test_runtime_telephony_writers.py' in workflow and 'test_runtime_device_group_writers.py --native' in workflow
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5O-partial'
+    assert manifest['rollout'] == '4C.2H5P-partial'
     assert manifest['writers']['identifier-telephony']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['entryPoints'] == [
         'regenerateAllEnabledIdentifiers', 'regenerateAllEnabledIdentifiersWithError:',

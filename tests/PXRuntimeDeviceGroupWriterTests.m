@@ -202,6 +202,15 @@ static BOOL gScopeProxyMissingVersion, gScopeProxyMissingBuild, gScopeProxyBadTy
 static BOOL gScopeProxyMissingName, gScopeProxyBadName, gScopeKVCPrimaryThrows, gScopeKVCBothThrow;
 static NSUInteger gScopeKVCCalls;
 static NSUInteger gScopeProxyThrowAtLookup;
+static NSUInteger gScopeProxyClassLookups;
+static BOOL gScopeProxyBadBuild, gScopeProxyThrowingGetter;
+
+@interface PXScopeThrowingGetterFixture : NSObject
+- (NSString *)localizedName;
+@end
+@implementation PXScopeThrowingGetterFixture
+- (NSString *)localizedName { [NSException raise:@"fixture.scope.getter" format:@"Metadata getter failed"]; return nil; }
+@end
 
 @interface PXScopeProxyFixture : NSObject
 + (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
@@ -236,14 +245,15 @@ static NSUInteger gScopeProxyThrowAtLookup;
     void (^callback)(void) = gScopeProxyLookup; gScopeProxyLookup = nil;
     if (callback) callback();
     if (![identifier isEqual:@"fixture.installed"]) return nil;
+    if (gScopeProxyThrowingGetter) return (id)[PXScopeThrowingGetterFixture new];
     PXScopeProxyFixture *proxy = [self new]; proxy.localizedName = gScopeProxyBadName ? (id)@42 : @"Installed";
     proxy.shortVersionString = gScopeProxyBadType ? (id)@[@"bad"] : (gScopeProxyNilValues ? nil : @"1.2");
-    proxy.bundleVersion = gScopeProxyNilValues ? nil : @"12"; return proxy;
+    proxy.bundleVersion = gScopeProxyBadBuild ? (id)@99 : (gScopeProxyNilValues ? nil : @"12"); return proxy;
 }
 @end
 
 static Class PXFixtureClassLookup(NSString *name) {
-    if ([name isEqual:@"LSApplicationProxy"]) return gScopeProxyMissingClass ? Nil : PXScopeProxyFixture.class;
+    if ([name isEqual:@"LSApplicationProxy"]) { gScopeProxyClassLookups++; return gScopeProxyMissingClass ? Nil : PXScopeProxyFixture.class; }
     return NSClassFromString(name);
 }
 
@@ -2970,6 +2980,7 @@ static void TestScopeReplacementAcknowledgement(void) {
 }
 
 static PXDeviceGroupFixture *ScopeMetadataFixture(BOOL current) {
+    gScopeProxyBadBuild = gScopeProxyThrowingGetter = NO;
     gScopeProxyMissingClass = gScopeProxyMissingFactory = gScopeProxyMissingVersion = gScopeProxyMissingBuild = gScopeProxyBadType = gScopeProxyNilValues = NO;
     gScopeProxyMissingName = gScopeProxyBadName = gScopeKVCPrimaryThrows = gScopeKVCBothThrow = NO;
     gScopeProxyThrowAtLookup = 0;
@@ -3854,6 +3865,108 @@ static void TestScopeDecisionReaderPackets(void) {
 #endif
 }
 
+static PXDeviceGroupFixture *ReplacementPreparationFixture(void) {
+    gScopeProxyMissingClass = gScopeProxyMissingFactory = gScopeProxyMissingName = gScopeProxyMissingVersion = gScopeProxyMissingBuild = NO;
+    gScopeProxyBadName = gScopeProxyBadType = gScopeProxyBadBuild = gScopeProxyNilValues = gScopeProxyThrowingGetter = NO;
+    gScopeProxyThrowAtLookup = 0; gScopeProxyLookup = nil;
+    return ScopeReplacementFixture();
+}
+static void TestReplacementPreparationAdmission(void) {
+    NSArray *newIDs = @[@"fixture.installed", @"fixture.helper"];
+    NSArray *mixedIDs = @[@"fixture.installed", @"fixture.old"];
+    for (NSUInteger mode = 0; mode < 9; mode++) {
+        PXDeviceGroupFixture *manager = ReplacementPreparationFixture();
+        gScopeProxyMissingClass = mode == 0; gScopeProxyMissingFactory = mode == 1; gScopeProxyMissingName = mode == 2;
+        gScopeProxyMissingVersion = mode == 3; gScopeProxyMissingBuild = mode == 4; gScopeProxyNilValues = mode == 5;
+        gScopeProxyBadName = mode == 6; gScopeProxyBadType = mode == 7; gScopeProxyBadBuild = mode == 8;
+        NSUInteger classes = gScopeProxyClassLookups, lookups = gScopeProxyLookups, kvc = gScopeKVCCalls;
+        __block NSUInteger writes = 0; gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) writes++; };
+        BOOL success = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]]; gStore.testCheckpoint = nil;
+        NSDictionary *record = manager.scopedApps[@"fixture.installed"];
+        NSString *name = mode == 0 || mode == 1 || mode == 2 || mode == 6 ? @"fixture.installed" : @"Installed";
+        NSString *version = mode < 2 ? @"Helper/Extension" : (mode == 3 || mode == 5 || mode == 7 ? @"Unknown" : @"1.2");
+        NSString *build = mode < 2 || mode == 4 || mode == 5 || mode == 8 ? @"Unknown" : @"12";
+        CHECK(success && writes == 1 && [record[@"name"] isEqual:name] && [record[@"version"] isEqual:version] && [record[@"build"] isEqual:build] &&
+              [record[@"enabled"] boolValue] && classes + 1 == gScopeProxyClassLookups && lookups + (mode < 2 ? 0 : 1) == gScopeProxyLookups && kvc == gScopeKVCCalls,
+              "replacement optional class factory getters and metadata types preserve fallback values without KVC");
+    }
+    PXDeviceGroupFixture *manager = ReplacementPreparationFixture();
+    NSUInteger classes = gScopeProxyClassLookups, lookups = gScopeProxyLookups;
+    gScopeProxyMissingClass = YES;
+    CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.old"]] && classes == gScopeProxyClassLookups && lookups == gScopeProxyLookups &&
+          [manager.scopedApps[@"fixture.old"][@"custom"] isEqual:@"keep"], "retained replacement records need no private class or factory lookup");
+
+    manager = ReplacementPreparationFixture();
+    NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; id old = manager.scopedApps;
+    classes = gScopeProxyClassLookups; lookups = gScopeProxyLookups; NSUInteger notices = gBatchNotifications;
+    __block BOOL inner = YES; NSError *failure = nil;
+    BOOL outer = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"replacement-outer.plist") error:error]) return NO;
+        inner = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]]; return YES;
+    } error:&failure];
+    CHECK(!outer && !inner && failure && classes == gScopeProxyClassLookups && lookups == gScopeProxyLookups && manager.scopedApps == old &&
+          [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "replacement nested admission poisons ignored outer staging before metadata lookup or live effects");
+    for (NSUInteger mode = 0; mode < 2; mode++) {
+        manager = ReplacementPreparationFixture(); old = manager.scopedApps; before = BatchSnapshot(); cache = [manager persistenceCaches]; notices = gBatchNotifications;
+        gScopeProxyThrowAtLookup = mode == 0 ? gScopeProxyLookups + 2 : 0; gScopeProxyThrowingGetter = mode == 1;
+        CHECK(![manager replaceApplicationScopeWithBundleIDs:newIDs] && manager.error.code == 6048 && manager.scopedApps == old &&
+              [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "late factory or getter exceptions fail replacement before source staging memory adoption and notification");
+    }
+    manager = ReplacementPreparationFixture();
+    classes = gScopeProxyClassLookups; __block BOOL outside = NO;
+    gScopeProxyLookup = ^{
+        outside = [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx setDictionary:@{ @"provider": @YES } atPath:Path(gRoot, @"replacement-provider.plist") error:error];
+        } error:NULL];
+    };
+    CHECK([manager replaceApplicationScopeWithBundleIDs:newIDs] && outside && classes + 1 == gScopeProxyClassLookups,
+          "replacement metadata callbacks run outside source gate with one lazy class lookup for all new IDs");
+
+    manager = ReplacementPreparationFixture();
+    NSMutableString *name = [@"Frozen name" mutableCopy]; NSMutableArray *notes = [@[@"frozen"] mutableCopy];
+    manager.scopedApps[@"fixture.old"][@"name"] = name; manager.scopedApps[@"fixture.old"][@"notes"] = notes;
+    gScopeProxyLookup = ^{ [name setString:@"Changed name"]; [notes addObject:@"changed"]; [manager.scopedApps removeObjectForKey:@"fixture.old"]; };
+    CHECK([manager replaceApplicationScopeWithBundleIDs:mixedIDs] &&
+          [manager.scopedApps[@"fixture.old"][@"name"] isEqual:@"Frozen name"] && [manager.scopedApps[@"fixture.old"][@"notes"] count] == 1 &&
+          [manager.scopedApps[@"fixture.old"][@"custom"] isEqual:@"keep"] && [name isEqual:@"Changed name"],
+          "replacement freezes retained nested metadata before callbacks even when a later requested live record is removed");
+    manager = ReplacementPreparationFixture();
+    manager.scopedApps[@"fixture.old"][@"enabled"] = (id)@[]; manager.scopedApps[@"fixture.old"][@"bundleID"] = @7;
+    manager.scopedApps[@"unrequested.invalid"] = @YES;
+    CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.old"]] && [manager.scopedApps[@"fixture.old"][@"enabled"] boolValue] &&
+          [manager.scopedApps[@"fixture.old"][@"bundleID"] isEqual:@"fixture.old"] && !manager.scopedApps[@"unrequested.invalid"],
+          "replacement still repairs fields replaced by intent and ignores dropped malformed local members");
+    manager = ReplacementPreparationFixture(); old = manager.scopedApps; before = BatchSnapshot(); cache = [manager persistenceCaches]; classes = gScopeProxyClassLookups;
+    manager.scopedApps[@"fixture.old"][@"nonplist"] = [NSObject new];
+    CHECK(![manager replaceApplicationScopeWithBundleIDs:mixedIDs] && manager.scopedApps == old && manager.error &&
+          classes == gScopeProxyClassLookups && [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]],
+          "invalid retained metadata rejects before private lookup without altering canonical source or live map");
+    manager = ReplacementPreparationFixture();
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{ @"ScopedApps": @[] } atPath:PXGlobalScopePath() error:error];
+    } error:NULL], "replacement malformed canonical schema seeded");
+    CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] &&
+          [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"],
+          "replacement admission keeps full replacement repair of a decodable malformed canonical schema");
+
+    manager = ReplacementPreparationFixture(); NSData *saved = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
+    @try {
+        CHECK([[@"malformed canonical replacement" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:PXGlobalScopePath() atomically:YES], "replacement undecodable bytes seeded");
+        before = BatchSnapshot(); old = manager.scopedApps; classes = gScopeProxyClassLookups; lookups = gScopeProxyLookups;
+        CHECK(![manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] && manager.error.code == 4006 && manager.scopedApps == old &&
+              classes == gScopeProxyClassLookups && lookups == gScopeProxyLookups && [before isEqual:BatchSnapshot()],
+              "undecodable canonical replacement fails before private metadata while preserving source error code");
+    } @finally { CHECK([saved writeToFile:PXGlobalScopePath() atomically:YES], "replacement corrupt source teardown restores exact bytes"); }
+    manager = ReplacementPreparationFixture(); manager.scopedApps = (id)NSNull.null; before = BatchSnapshot(); classes = gScopeProxyClassLookups;
+    CHECK(![manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] && manager.error.code == 6040 && classes == gScopeProxyClassLookups &&
+          [before isEqual:BatchSnapshot()], "non dictionary local replacement map rejects selected IDs before lookup");
+    CHECK([manager replaceApplicationScopeWithBundleIDs:nil] && !manager.scopedApps.count && classes == gScopeProxyClassLookups,
+          "empty replacement retains clear policy and safely adopts after a malformed old local root");
+    (void)ReplacementPreparationFixture();
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3901,6 +4014,7 @@ int main(void) {
         TestExplicitScopeReload();
         TestApplicationEnabledCacheOwnership();
         TestScopeDecisionReaderPackets();
+        TestReplacementPreparationAdmission();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
