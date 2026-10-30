@@ -2692,6 +2692,118 @@ static void TestResetSelectionCheckpoints(void) {
     gResetRestart(); CHECK(view.restarts == 1 && !view.dashboardResetToken, "matching frozen reset ID permits one normal restart"); ResetRunRelease(view, manager);
 }
 
+static void TestResetOwnerLifetime(void) {
+    // Keep producer callbacks alive outside the UI pool, as real asynchronous
+    // services do. The callback itself must not become the UI's last owner.
+    for (NSUInteger phase = 0; phase < 5; phase++) {
+        PXResetRunProfileManager *manager = ResetRunManager(); __weak PXResetRunUIFixture *released;
+        void (^backup)(NSArray *, NSUInteger) = nil; void (^clear)(NSArray *) = nil;
+        PXResetIdentifierFixture *identifiers = nil;
+        @autoreleasepool {
+            PXResetRunUIFixture *view = [PXResetRunUIFixture new]; released = view; identifiers = view.manager;
+            if (phase == 0) { [view saveRRSThenResetTapped]; backup = view.backupCompletion; }
+            else { [view resetDataTapped]; clear = view.clearCompletion; }
+            if (phase >= 2) { clear(@[]); CHECK(Pump(^BOOL { return manager.requests == 1; }), "owner lifetime reaches pending profile create"); }
+            if (phase >= 3) { manager.pendingCreation(YES, nil); CHECK(Pump(^BOOL { return manager.switches == 1; }), "owner lifetime reaches pending profile switch"); }
+            if (phase == 4) { manager.pendingSwitch(YES, nil); CHECK(Pump(^BOOL { return gResetRestartSchedules == 1; }), "owner lifetime reaches delayed restart"); }
+            view = nil;
+        }
+        CHECK(!released, "reset backup clear create switch and restart callbacks do not retain the UI owner");
+        NSUInteger events = gCreationUIEvents, generations = identifiers.generations;
+        if (phase == 0) { backup(@[], 1); backup(@[], 1); }
+        else if (phase == 1) { clear(@[]); clear(@[]); }
+        else if (phase == 2) { manager.pendingCreation(YES, nil); manager.pendingCreation(NO, nil); }
+        else if (phase == 3) { manager.pendingSwitch(YES, nil); manager.pendingSwitch(NO, nil); }
+        else { gResetRestart(); gResetRestart(); }
+        DrainResetUI();
+        CHECK(!released && events == gCreationUIEvents && generations == identifiers.generations && manager.requests == (phase >= 2 ? 1 : 0) && manager.switches == (phase >= 3 ? 1 : 0),
+              "late reset phase callbacks and restart skip UI effects and later work after owner release");
+        ResetRunRelease(nil, manager);
+    }
+    PXResetRunProfileManager *manager = ResetRunManager(); __weak PXResetRunUIFixture *released;
+    PXResetIdentifierFixture *identifiers = nil;
+    @autoreleasepool {
+        __block PXResetRunUIFixture *owner = [PXResetRunUIFixture new]; released = owner; identifiers = owner.manager;
+        [owner resetDataTapped]; owner.clearCompletion(@[]); CHECK(Pump(^BOOL { return manager.requests == 1; }), "feedback lifetime reaches create");
+        manager.pendingCreation(YES, nil); CHECK(Pump(^BOOL { return manager.switches == 1; }), "feedback lifetime reaches switch");
+        owner.afterPersist = ^{ owner = nil; };
+        manager.pendingSwitch(YES, nil);
+        CHECK(Pump(^BOOL { return owner == nil; }), "feedback lifetime releases caller during admitted preparation");
+    }
+    DrainResetUI();
+    CHECK(!released && identifiers.generations == 1 && gResetFinalNotifications == 1 && !gResetRestartSchedules,
+          "queued reset feedback does not extend owner lifetime or schedule restart after release");
+    ResetRunRelease(nil, manager);
+
+    for (NSUInteger backup = 0; backup < 2; backup++) for (NSUInteger queued = 0; queued < 2; queued++) {
+        manager = ResetRunManager(); __weak PXResetBatchUIFixture *releasedBatch;
+        @autoreleasepool {
+            PXResetBatchUIFixture *view = NewBatchUI(); releasedBatch = view;
+            if (backup) [view saveRRSThenResetTapped]; else [view resetDataTapped];
+            if (queued) {
+                if (backup) { void (^callback)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0]; callback(BatchBackupResult(@"app.A"), nil); }
+                else { void (^callback)(BOOL, NSError *) = gBatchClear.callbacks[0]; callback(NO, nil); }
+            }
+            view = nil;
+        }
+        CHECK(!releasedBatch, "reset per-app service and already queued delivery do not retain the controller");
+        NSUInteger events = gCreationUIEvents;
+        if (backup) { void (^callback)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0]; callback(BatchBackupResult(@"app.A"), nil); callback(nil, nil); }
+        else { void (^callback)(BOOL, NSError *) = gBatchClear.callbacks[0]; callback(NO, nil); callback(YES, nil); }
+        DrainResetUI();
+        CHECK(!releasedBatch && events == gCreationUIEvents && !manager.requests && gBatchBackup.requests.count + gBatchClear.requests.count == 1,
+              "released reset batch rejects late duplicate service deliveries without metadata or next submissions");
+        gBatchBackup = nil; gBatchClear = nil; ResetRunRelease(nil, manager);
+    }
+    for (NSUInteger backup = 0; backup < 2; backup++) {
+        __weak PXResetBatchUIFixture *releasedBatch; __block NSUInteger completed = 0;
+        @autoreleasepool {
+            PXResetBatchUIFixture *view = NewBatchUI(); releasedBatch = view;
+            NSArray *apps = @[@"app.A"];
+            if (backup) [view backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] completion:^(NSArray *w, NSUInteger saved) { (void)w; (void)saved; completed++; }];
+            else [view clearApps:apps index:0 warnings:[NSMutableArray array] completion:^(NSArray *w) { (void)w; completed++; }];
+            view = nil;
+        }
+        @autoreleasepool {
+            CHECK(releasedBatch != nil, "generic nil-token batches preserve strong owner lifetime until callback release");
+            if (backup) { void (^callback)(PXBackupResult *, NSError *) = gBatchBackup.callbacks[0]; callback(BatchBackupResult(@"app.A"), nil); }
+            else { void (^callback)(BOOL, NSError *) = gBatchClear.callbacks[0]; callback(YES, nil); }
+            CHECK(Pump(^BOOL { return completed == 1; }), "generic batch still delivers terminal result after caller releases its reference");
+            [gBatchBackup.callbacks removeAllObjects]; [gBatchClear.callbacks removeAllObjects];
+        }
+        CHECK(!releasedBatch, "generic batch owner releases when producer callbacks are released");
+        gBatchBackup = nil; gBatchClear = nil;
+    }
+    for (NSUInteger entry = 0; entry < 3; entry++) {
+        BOOL backup = entry == 1;
+        manager = ResetRunManager();
+        __weak PXResetBatchUIFixture *releasedBatch;
+        @autoreleasepool {
+            PXResetBatchUIFixture *view = NewBatchUI(); releasedBatch = view;
+            NSString *phase = entry == 2 ? @"preparing" : (backup ? @"backup" : @"clearing");
+            NSObject *token = [view beginDashboardResetInPhase:phase];
+            __weak PXResetBatchUIFixture *weakView = view;
+            dispatch_semaphore_t bounced = dispatch_semaphore_create(0);
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                @autoreleasepool {
+                    PXResetBatchUIFixture *workerView = weakView;
+                    if (entry == 2) [workerView createNextProfileAndRandomizeWithWarnings:@[]];
+                    else if (backup) [workerView backupApps:@[@"app.A"] index:0 savedCount:0 warnings:[NSMutableArray array] resetToken:token completion:nil];
+                    else [workerView clearApps:@[@"app.A"] index:0 warnings:[NSMutableArray array] resetToken:token completion:nil];
+                    workerView = nil;
+                }
+                dispatch_semaphore_signal(bounced);
+            });
+            CHECK(dispatch_semaphore_wait(bounced, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0, "off-main lifetime fixture enqueues before main delivery");
+            view = nil;
+        }
+        CHECK(!releasedBatch, "off-main reset service and creation bounce do not retain the controller");
+        DrainResetUI();
+        CHECK(!gBatchBackup.requests.count && !gBatchClear.requests.count && !manager.requests, "released off-main reset bounce submits no service or profile request");
+        gBatchBackup = nil; gBatchClear = nil; ResetRunRelease(nil, manager);
+    }
+}
+
 static void TestResetHardwareSnapshot(void) {
     for (NSUInteger mode = 0; mode < 6; mode++) {
         PXResetRunProfileManager *manager = ResetRunManager(); PXResetRunUIFixture *view = [PXResetRunUIFixture new];
@@ -2844,7 +2956,7 @@ int main(int argc, const char *argv[]) {
         TestUIDeletionAuthority();
         TestProfileIDAllocation();
         TestCurrentProfileCheckpoint(); TestCreationUIAdapters(); TestResetPreparationStatus(); TestResetIntentSnapshots(); TestResetRunAdmission(); TestResetPerAppCallbacks(); TestResetAdmittedInputs(); TestResetSelectionCheckpoints();
-        TestResetHardwareSnapshot(); TestHardwarePreviewProvider();
+        TestResetHardwareSnapshot(); TestHardwarePreviewProvider(); TestResetOwnerLifetime();
         __block BOOL drained = NO; dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
         CHECK(Pump(^BOOL { return drained; }), "deferred mirror callbacks drained before source teardown");
         [NSNotificationCenter.defaultCenter removeObserver:observer]; gStore = nil;

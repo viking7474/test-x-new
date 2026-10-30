@@ -7569,8 +7569,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSArray<NSString *> *apps = self.dashboardResetInputs[@"backupApps"];
     if (!apps.count) { [self finishDashboardReset:token]; [self showDashboardMessage:@"Thiếu app lưu RRS" message:@"Hãy chọn ít nhất một app trong Chọn App lưu RRS."]; return; }
     [self showProgressHUDWithTitle:@"Lưu RRS..."];
+    __weak typeof(self) weakSelf = self;
     [self backupApps:apps index:0 savedCount:0 warnings:[NSMutableArray array] resetToken:token completion:^(NSArray<NSString *> *warnings, NSUInteger savedCount) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
             if (![self advanceDashboardReset:token fromPhase:@"backup" toPhase:@"clear"]) return;
             if (savedCount != apps.count) {
                 [self finishDashboardReset:token];
@@ -7653,8 +7655,10 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         return;
     }
 
+    __weak typeof(self) weakSelf = self;
     [self clearApps:apps index:0 warnings:[warnings mutableCopy] resetToken:token completion:^(NSArray<NSString *> *allWarnings) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
             if (![self advanceDashboardReset:token fromPhase:@"clearing" toPhase:@"preparing"]) return;
             [self createNextProfileAndRandomizeWithWarnings:allWarnings];
         });
@@ -7666,8 +7670,15 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)backupApps:(NSArray<NSString *> *)apps index:(NSUInteger)index savedCount:(NSUInteger)savedCount warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings, NSUInteger savedCount))completion {
+    // Reset callbacks observe UI lifetime; generic callers retain their owner
+    // until delivery, matching the existing nil-token completion contract.
+    __weak typeof(self) weakSelf = self;
+    __strong typeof(self) retainedOwner = resetToken ? nil : self;
     if (!NSThread.isMainThread) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self backupApps:apps index:index savedCount:savedCount warnings:warnings resetToken:resetToken completion:completion]; }); return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = retainedOwner ?: weakSelf; if (!self) return;
+            [self backupApps:apps index:index savedCount:savedCount warnings:warnings resetToken:resetToken completion:completion];
+        }); return;
     }
     if (resetToken && ![self isDashboardReset:resetToken inPhase:@"backup"]) return;
     if (index >= apps.count) { if (completion) completion(warnings, savedCount); return; }
@@ -7681,6 +7692,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completed) return;
             completed = YES;
+            __strong typeof(weakSelf) self = retainedOwner ?: weakSelf; if (!self) return;
             if (resetToken && ![self isDashboardReset:resetToken inPhase:@"backup"]) return;
             BOOL saved = NO;
             if (error) {
@@ -7712,8 +7724,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)clearApps:(NSArray<NSString *> *)apps index:(NSUInteger)index warnings:(NSMutableArray<NSString *> *)warnings resetToken:(NSObject *)resetToken completion:(void (^)(NSArray<NSString *> *warnings))completion {
+    __weak typeof(self) weakSelf = self;
+    __strong typeof(self) retainedOwner = resetToken ? nil : self;
     if (!NSThread.isMainThread) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self clearApps:apps index:index warnings:warnings resetToken:resetToken completion:completion]; }); return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = retainedOwner ?: weakSelf; if (!self) return;
+            [self clearApps:apps index:index warnings:warnings resetToken:resetToken completion:completion];
+        }); return;
     }
     if (resetToken && ![self isDashboardReset:resetToken inPhase:@"clearing"]) return;
     if (index >= apps.count) { if (completion) completion(warnings); return; }
@@ -7725,6 +7742,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
         dispatch_async(dispatch_get_main_queue(), ^{
             if (completed) return;
             completed = YES;
+            __strong typeof(weakSelf) self = retainedOwner ?: weakSelf; if (!self) return;
             if (resetToken && ![self isDashboardReset:resetToken inPhase:@"clearing"]) return;
             if (!success) [warnings addObject:[NSString stringWithFormat:@"Clear %@: %@", name, error.localizedDescription ?: @"failed"]];
             [self clearApps:apps index:index + 1 warnings:warnings resetToken:resetToken completion:completion];
@@ -7914,9 +7932,13 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
 }
 
 - (void)createNextProfileAndRandomizeWithWarnings:(NSArray<NSString *> *)warnings {
+    __weak typeof(self) weakSelf = self;
     if (!NSThread.isMainThread) {
         NSArray *capturedWarnings = [warnings copy];
-        dispatch_async(dispatch_get_main_queue(), ^{ [self createNextProfileAndRandomizeWithWarnings:capturedWarnings]; }); return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
+            [self createNextProfileAndRandomizeWithWarnings:capturedWarnings];
+        }); return;
     }
     NSObject *token = self.dashboardResetToken;
     if (![self advanceDashboardReset:token fromPhase:@"preparing" toPhase:@"preflight"]) return;
@@ -7989,6 +8011,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     if (![self advanceDashboardReset:token fromPhase:@"preflight" toPhase:@"create"]) return;
     [pm createProfile:newProfile completion:^(BOOL success, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
             if (![self advanceDashboardReset:token fromPhase:@"create" toPhase:@"switch"]) return;
             if (!success) {
                 [self finishDashboardReset:token];
@@ -8003,6 +8026,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
             }
             [pm switchToProfile:newProfile completion:^(BOOL switchSuccess, NSError *switchError) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    __strong typeof(weakSelf) self = weakSelf; if (!self) return;
                     if (![self advanceDashboardReset:token fromPhase:@"switch" toPhase:@"apply"]) return;
                     if (!switchSuccess) {
                         [self finishDashboardReset:token];
@@ -8028,6 +8052,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                                                          CFSTR("com.hydra.tlinkios.profileChanged"),
                                                          NULL, NULL, true);
                     dispatch_async(dispatch_get_main_queue(), ^{
+                        __strong typeof(weakSelf) self = weakSelf; if (!self) return;
                         if (![self advanceDashboardReset:token fromPhase:@"apply" toPhase:@"restart"]) return;
                         NSError *feedbackError = nil;
                         if (![self validateDashboardResetProfileID:createdProfileID error:&feedbackError]) {
@@ -8038,6 +8063,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
                         NSString *msg = [NSString stringWithFormat:@"Đã tạo profile mới: %@.%@", createdProfileID, warnings.count ? [NSString stringWithFormat:@"\n\nWarnings:\n%@", [warnings componentsJoinedByString:@"\n"]] : @""];
                         [self showDashboardMessage:@"Hoàn tất" message:msg];
                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            __strong typeof(weakSelf) self = weakSelf; if (!self) return;
                             if (![self advanceDashboardReset:token fromPhase:@"restart" toPhase:@"restarting"]) return;
                             NSError *restartError = nil;
                             if (![self validateDashboardResetProfileID:createdProfileID error:&restartError]) {

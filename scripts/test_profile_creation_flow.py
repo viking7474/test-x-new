@@ -401,6 +401,9 @@ def source_contracts():
     assert 'fromPhase:@"backup" toPhase:@"clear"' in backup_entry
     assert 'fromPhase:@"clear" toPhase:@"clearing"' in clear_entry
     assert 'fromPhase:@"clearing" toPhase:@"preparing"' in clear_entry
+    weak_delivery = '__strong typeof(weakSelf) self = weakSelf; if (!self) return;'
+    assert weak_delivery in backup_entry and weak_delivery in clear_entry
+    assert auto.count(weak_delivery) == 5, 'Reset must promote weak owner separately for entry/create/switch/feedback/restart deliveries'
     assert 'warnings:[NSMutableArray array] resetToken:token completion:' in backup_entry
     assert 'warnings:[warnings mutableCopy] resetToken:token completion:' in clear_entry
     assert 'NSArray<NSString *> *apps = self.dashboardResetInputs[@"resetApps"];' in clear_entry
@@ -433,9 +436,22 @@ def source_contracts():
         assert batch.count(f'isDashboardReset:resetToken inPhase:@"{phase}"') == 2
         assert batch.index('if (completed) return;') < batch.index('completed = YES;') < batch.rindex('isDashboardReset:resetToken')
         assert 'resetToken:resetToken' in batch and 'dispatch_async(dispatch_get_main_queue()' in batch
+        assert '__strong typeof(self) retainedOwner = resetToken ? nil : self;' in batch
+        assert batch.count('__strong typeof(weakSelf) self = retainedOwner ?: weakSelf; if (!self) return;') == 2
+        assert batch.index('completed = YES;') < batch.rindex('self = retainedOwner ?: weakSelf') < batch.rindex('isDashboardReset:resetToken')
     assert 'resetToken:nil' in batch_helpers[1] and 'resetToken:nil' in batch_helpers[3]
     assert 'NSString *resetNote = resetToken ? self.dashboardResetInputs[@"note"] : nil;' in batch_helpers[2]
     assert 'note:resetToken ? (resetNote ?: @"") : (self.rrsNoteTextField.text ?: @"")' in batch_helpers[2]
+    for case in ('reset backup clear create switch and restart callbacks do not retain the UI owner',
+                 'late reset phase callbacks and restart skip UI effects and later work after owner release',
+                 'queued reset feedback does not extend owner lifetime or schedule restart after release',
+                 'reset per-app service and already queued delivery do not retain the controller',
+                 'released reset batch rejects late duplicate service deliveries without metadata or next submissions',
+                 'generic nil-token batches preserve strong owner lifetime until callback release',
+                 'generic batch owner releases when producer callbacks are released',
+                 'off-main reset service and creation bounce do not retain the controller'):
+        assert case in fixture, case
+    assert 'TestResetOwnerLifetime();' in fixture
     for case in ('reset admission captures app order duplicates and mutable strings without editing live choices',
                  'reset scope and clear use the admitted list after backup while newer choices survive',
                  'reset backup metadata uses the admitted note after UI text changes',
@@ -742,7 +758,7 @@ def source_contracts():
                  'journal validation preserves legacy timestamp fallback compatibility'):
         assert case in fixture, case
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4U-partial'
+    assert manifest['rollout'] == '4C.2H4V-partial'
     assert manifest['writers']['default-profile-seed']['status'] == 'enrolled'
     assert 'default-profile-seed' in next(item for item in manifest['sources'] if item['field'] == 'deviceIDs')['writers']
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'

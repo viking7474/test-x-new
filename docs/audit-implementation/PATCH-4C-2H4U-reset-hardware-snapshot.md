@@ -2,6 +2,10 @@
 
 Ngày 2026-10-29. Người dùng xác nhận H4T và native fixture follow-up đã build pass.
 
+Follow-up: người dùng xác nhận H4U build pass ngày 2026-10-29. H4V xử lý weak UI
+ownership tại Reset callbacks; xem
+[báo cáo H4V](PATCH-4C-2H4V-reset-weak-owner-lifecycle.md).
+
 ## Finding
 
 Confirmed mixed-read window, severity Medium/P1, trong
