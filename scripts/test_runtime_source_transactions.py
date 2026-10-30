@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5P-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5Q-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -277,7 +277,46 @@ def source_contracts():
     assert 'if (wrote || memoryChanged)' in app_toggle and 'if (wrote) PXPostSettingsChangedNotification();' in app_toggle
     assert 'adopted[@"enabled"] = committedRecord[@"enabled"]' in app_toggle and 'return self.error' not in app_toggle
     getter = method(manager, '- (NSDictionary *)getApplicationInfo:(NSString *)bundleID')
-    assert 'if ([appInfo isKindOfClass:NSDictionary.class]) return [appInfo mutableCopy];' in getter
+    assert 'if (![appInfo isKindOfClass:NSDictionary.class]) return nil;' in getter
+    assert 'return PXScopeInfoRecordIsSafe(frozen) ? [frozen mutableCopy] : nil;' in getter
+    assert 'if (bundleID && ![bundleID isKindOfClass:NSString.class]) return nil;' in getter
+    assert getter.count('self.scopedApps') == 1 and 'NSDictionary *scopedApps = self.scopedApps;' in getter
+    assert 'if (![scopedApps isKindOfClass:NSDictionary.class]) return bundleID ? nil : [NSMutableDictionary dictionary];' in getter
+    single_info, bulk_info = getter.split('NSMutableDictionary *candidates =', 1)
+    assert 'PXDetachRuntimeGeneration(appInfo, NULL)' in single_info and 'originalBundleID' not in single_info
+    assert getter.count('PXDetachRuntimeGeneration(') == 2
+    assert 'if (![key isKindOfClass:NSString.class] || ![record isKindOfClass:NSDictionary.class]) continue;' in bulk_info
+    assert 'if (![NSPropertyListSerialization propertyList:record isValidForFormat:NSPropertyListBinaryFormat_v1_0]) continue;' in bulk_info
+    assert bulk_info.index('candidates[key] = record;') < bulk_info.index('PXDetachRuntimeGeneration(candidates, NULL)') < bulk_info.index('for (NSString *key in detached)')
+    assert bulk_info.index('if (!PXScopeInfoRecordIsSafe(appInfo)) continue;') < bulk_info.index('NSMutableDictionary *displayInfo = [appInfo mutableCopy];')
+    assert 'if (originalBundleID) displayInfo[@"bundleID"] = originalBundleID;' in bulk_info and 'displayApps[key] = displayInfo;' in bulk_info
+    info_helper = manager.split('static BOOL PXScopeInfoRecordIsSafe(NSDictionary *record) {', 1)[1].split('static BOOL PXValidateManagerSettingsSources', 1)[0]
+    assert 'if (![record isKindOfClass:NSDictionary.class]) return NO;' in info_helper
+    for field in ('enabled', 'installed', 'name', 'version', 'build', 'bundleID', 'originalBundleID', 'extensionPattern'):
+        assert f'@"{field}"' in info_helper
+    assert 'static NSString * const flags[]' in info_helper and 'static NSString * const strings[]' in info_helper
+    assert 'value && ![value isKindOfClass:NSNumber.class] && ![value isKindOfClass:NSString.class]' in info_helper
+    assert 'value && ![value isKindOfClass:NSString.class]' in info_helper
+    for forbidden in (' boolValue]', 'lowercaseString', 'self.error =', 'self.scopedApps =', 'removeAllObjects', 'dictionaryWithContentsOfFile:',
+                      'writeToFile:', 'PXRuntimeReadBool(', 'PXReadRuntimeSourceDictionary', 'PXCaptureRuntimeSources',
+                      'loadScopedApps', 'loadSettings', 'NSUserDefaults', 'PXCaptureRuntimeSnapshot', 'PX_IDENTIFIER_RUNTIME_READ_OPERATION', 'PXPerformRuntimeSourceWrite',
+                      'PXPerformStandaloneRuntimeSourceWrite', 'PXPostSettingsChangedNotification', 'NSClassFromString', 'dispatch_async', 'dispatch_sync'):
+        assert forbidden not in getter and forbidden not in info_helper
+    info_fixture = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestScopeInfoExportOwnership();' in info_fixture
+    assert 'static BOOL PXScopeInfoRecordIsSafe(NSDictionary *record)' in read('scripts/test_runtime_device_group_writers.py')
+    for case in ('info exports preserve mutable map records raw flags unknown fields exact keys and single versus bulk display projection',
+                 'single and bulk exports detach nested strings containers and data from later manager mutation',
+                 'caller edits to exported maps records and replaced nested values never mutate manager or other exports',
+                 'single info lookup rejects missing or non string IDs without treating them as bulk requests',
+                 'malformed info records are skipped independently while valid disabled installed rows remain visible',
+                 'unsafe known metadata scalar and string fields cannot escape through info export',
+                 'non plist record and non string map key do not poison unrelated valid info rows',
+                 'malformed info root returns absent single record and mutable empty bulk map',
+                 'missing info root retains empty bulk policy',
+                 'info export keeps local manager authority without introducing injected snapshot or disk reads',
+                 'info export preserves source marker caches error notifications and provider counters'):
+        assert case in info_fixture, case
     ui_toggle = method(read('TLinkIOSViewController.m'), '- (void)appSwitchChanged:(UISwitch *)sender')
     assert 'BOOL saved = [self.manager setApplicationEnabledAndPersist:sender.isOn forBundleID:bundleID error:&failure]' in ui_toggle
     assert ui_toggle.index('setApplicationEnabledAndPersist:') < ui_toggle.index('getApplicationInfo:bundleID') < ui_toggle.index('[sender setOn:currentEnabled animated:YES]')

@@ -3967,6 +3967,85 @@ static void TestReplacementPreparationAdmission(void) {
     (void)ReplacementPreparationFixture();
 }
 
+static void TestScopeInfoExportOwnership(void) {
+    PXDeviceGroupFixture *manager = ScopeMetadataFixture(NO);
+    NSMutableString *name = [@"Original name" mutableCopy];
+    NSMutableArray *items = [@[@"initial"] mutableCopy];
+    NSMutableData *data = [[@"abc" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSMutableDictionary *nested = [@{ @"items": items, @"data": data } mutableCopy];
+    manager.scopedApps = [@{
+        @"fixture.Mixed": [@{ @"name": name, @"enabled": @"YES", @"installed": @YES, @"bundleID": @"raw.ID",
+            @"originalBundleID": @"Fixture.Original", @"nested": nested } mutableCopy],
+        @"fixture.disabled": [@{ @"enabled": @NO, @"installed": @"NO" } mutableCopy],
+        @"fixture.empty-record": [NSMutableDictionary dictionary],
+        @"fixture.empty-original": [@{ @"bundleID": @"raw.empty", @"originalBundleID": @"" } mutableCopy],
+        @"": [@{ @"name": @"Empty key" } mutableCopy]
+    } mutableCopy];
+    NSError *sentinel = [NSError errorWithDomain:@"fixture.export" code:91 userInfo:nil]; manager.error = sentinel;
+    NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches];
+    NSUInteger reads = gVerificationSourceReads, captures = gVerificationCaptures, attempts = gStandaloneSourceAttempts;
+    NSUInteger notices = gBatchNotifications, classes = gScopeProxyClassLookups, snapshots = gAppEnabledSnapshotCaptures;
+    NSMutableDictionary *one = (id)[manager getApplicationInfo:@"fixture.Mixed"];
+    NSMutableDictionary *all = (id)[manager getApplicationInfo:nil];
+    NSMutableDictionary *display = all[@"fixture.Mixed"];
+    CHECK([one isKindOfClass:NSMutableDictionary.class] && [all isKindOfClass:NSMutableDictionary.class] && [display isKindOfClass:NSMutableDictionary.class] &&
+          [one[@"bundleID"] isEqual:@"raw.ID"] && [display[@"bundleID"] isEqual:@"Fixture.Original"] && !all[@"Fixture.Original"] &&
+          [one[@"enabled"] isEqual:@"YES"] && [all[@"fixture.disabled"][@"enabled"] isEqual:@NO] && [all[@"fixture.disabled"][@"installed"] isEqual:@"NO"] &&
+          [all[@"fixture.empty-original"][@"bundleID"] isEqual:@""] && all[@"fixture.empty-record"] && [manager getApplicationInfo:@""] &&
+          [all[@"fixture.Mixed"][@"nested"][@"data"] isEqual:data],
+          "info exports preserve mutable map records raw flags unknown fields exact keys and single versus bulk display projection");
+    [name setString:@"Manager newer"]; [items addObject:@"new"]; [data appendData:[@"d" dataUsingEncoding:NSUTF8StringEncoding]];
+    CHECK([one[@"name"] isEqual:@"Original name"] && [display[@"name"] isEqual:@"Original name"] &&
+          [one[@"nested"][@"items"] count] == 1 && [display[@"nested"][@"items"] count] == 1 &&
+          [one[@"nested"][@"data"] length] == 3 && [display[@"nested"][@"data"] length] == 3,
+          "single and bulk exports detach nested strings containers and data from later manager mutation");
+    one[@"name"] = @"Caller one"; display[@"name"] = @"Caller bulk";
+    NSMutableDictionary *editedNested = [one[@"nested"] isKindOfClass:NSMutableDictionary.class] ? one[@"nested"] : [one[@"nested"] mutableCopy];
+    editedNested[@"items"] = @[@"caller"];
+    one[@"nested"] = editedNested; [all removeObjectForKey:@"fixture.disabled"];
+    CHECK([manager.scopedApps[@"fixture.Mixed"][@"name"] isEqual:@"Manager newer"] && [items count] == 2 &&
+          [manager.scopedApps[@"fixture.Mixed"][@"nested"][@"items"] count] == 2 && manager.scopedApps[@"fixture.disabled"] &&
+          [[manager getApplicationInfo:@"fixture.Mixed"][@"name"] isEqual:@"Manager newer"] && [display[@"nested"][@"items"] count] == 1,
+          "caller edits to exported maps records and replaced nested values never mutate manager or other exports");
+    CHECK([manager getApplicationInfo:@"fixture.missing"] == nil && [manager getApplicationInfo:(id)@1] == nil && [manager getApplicationInfo:(id)@[]] == nil,
+          "single info lookup rejects missing or non string IDs without treating them as bulk requests");
+    manager.scopedApps = [@{ @"fixture.good": @{ @"name": @"Good", @"installed": @YES, @"enabled": @NO } } mutableCopy];
+    for (id bad in @[@YES, @[], NSNull.null]) {
+        manager.scopedApps[@"fixture.bad"] = bad;
+        CHECK([manager getApplicationInfo:@"fixture.bad"] == nil && [manager getApplicationInfo:nil][@"fixture.good"] && ![manager getApplicationInfo:nil][@"fixture.bad"],
+              "malformed info records are skipped independently while valid disabled installed rows remain visible");
+    }
+    for (NSString *field in @[@"enabled", @"installed", @"name", @"version", @"build", @"bundleID", @"originalBundleID", @"extensionPattern"]) {
+        NSMutableDictionary *bad = [@{ @"name": @"Bad", @"enabled": @YES } mutableCopy]; bad[field] = @[];
+        manager.scopedApps[@"fixture.bad"] = bad;
+        CHECK([manager getApplicationInfo:@"fixture.bad"] == nil && [manager getApplicationInfo:nil][@"fixture.good"] && ![manager getApplicationInfo:nil][@"fixture.bad"],
+              "unsafe known metadata scalar and string fields cannot escape through info export");
+    }
+    manager.scopedApps[@"fixture.bad"] = @{ @"custom": [NSObject new] };
+    manager.scopedApps[(id)@7] = @{ @"name": @"Non string key" };
+    all = (id)[manager getApplicationInfo:nil];
+    CHECK(all.count == 1 && all[@"fixture.good"] && [manager getApplicationInfo:@"fixture.bad"] == nil && [manager getApplicationInfo:(id)@7] == nil,
+          "non plist record and non string map key do not poison unrelated valid info rows");
+    for (id root in @[@YES, @[], NSNull.null]) {
+        manager.scopedApps = root;
+        CHECK([manager getApplicationInfo:@"fixture.good"] == nil && [[manager getApplicationInfo:nil] isKindOfClass:NSMutableDictionary.class] && ![manager getApplicationInfo:nil].count,
+              "malformed info root returns absent single record and mutable empty bulk map");
+    }
+    manager.scopedApps = nil;
+    CHECK([manager getApplicationInfo:@"fixture.good"] == nil && ![manager getApplicationInfo:nil].count, "missing info root retains empty bulk policy");
+    manager.scopedApps = [@{ @"fixture.local": @{ @"name": @"Local" } } mutableCopy];
+    gManagerLoadRole = NO;
+    @try {
+        NSDictionary *runtime = @{ @"schemaVersion": @1, @"globalScope": @{ @"ScopedApps": @{ @"fixture.foreign": @{ @"name": @"Snapshot" } } } };
+        gAppEnabledReadView = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:runtime readerGeneration:1];
+        CHECK([manager getApplicationInfo:@"fixture.local"] && ![manager getApplicationInfo:@"fixture.foreign"] && ![manager getApplicationInfo:nil][@"fixture.foreign"],
+              "info export keeps local manager authority without introducing injected snapshot or disk reads");
+    } @finally { gManagerLoadRole = YES; gAppEnabledReadView = nil; }
+    CHECK([before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && manager.error == sentinel && reads == gVerificationSourceReads &&
+          captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts && notices == gBatchNotifications && classes == gScopeProxyClassLookups && snapshots == gAppEnabledSnapshotCaptures,
+          "info export preserves source marker caches error notifications and provider counters");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -4015,6 +4094,7 @@ int main(void) {
         TestApplicationEnabledCacheOwnership();
         TestScopeDecisionReaderPackets();
         TestReplacementPreparationAdmission();
+        TestScopeInfoExportOwnership();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

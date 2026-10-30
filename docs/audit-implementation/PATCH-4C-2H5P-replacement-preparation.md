@@ -148,3 +148,6 @@ metadata exception propagation and a catch region extended across final publicat
 No files are changed by negative controls. Targeted source/RootHide checks pass after
 the gate update. Native Foundation/Theos builds and runtime tests for both schemes
 remain pending macOS CI; local contracts are not native/device execution proof.
+
+2026-10-30: user reports H5P build pass. H5Q follows for detached, typed metadata
+exports. Local Windows validation remains distinct from native/device execution.

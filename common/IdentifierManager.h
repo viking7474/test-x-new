@@ -23,6 +23,8 @@
 // Canonical per-app scope write; success is local acknowledgement, including a verified no-op.
 - (BOOL)setApplicationEnabledAndPersist:(BOOL)enabled forBundleID:(NSString *)bundleID error:(NSError **)error;
 - (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs;
+// nil ID exports all valid rows; single missing/malformed record returns nil.
+// Mutable outer maps/records own detached values; nested plist values are immutable.
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID;
 - (BOOL)isApplicationEnabled:(NSString *)bundleID;
 - (void)refreshScopedAppsInfoIfNeeded;

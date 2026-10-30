@@ -188,6 +188,22 @@ static BOOL PXScopeRecordEnabled(id record) {
     return [record isKindOfClass:NSDictionary.class] && PXRuntimeReadBool(record[@"enabled"]);
 }
 
+// Export only shapes consumed safely by list/backup/freeze callers. Keep raw values.
+static BOOL PXScopeInfoRecordIsSafe(NSDictionary *record) {
+    if (![record isKindOfClass:NSDictionary.class]) return NO;
+    static NSString * const flags[] = { @"enabled", @"installed" };
+    for (NSUInteger i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        id value = record[flags[i]];
+        if (value && ![value isKindOfClass:NSNumber.class] && ![value isKindOfClass:NSString.class]) return NO;
+    }
+    static NSString * const strings[] = { @"name", @"version", @"build", @"bundleID", @"originalBundleID", @"extensionPattern" };
+    for (NSUInteger i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
+        id value = record[strings[i]];
+        if (value && ![value isKindOfClass:NSString.class]) return NO;
+    }
+    return YES;
+}
+
 // Validate the complete load packet before replacing either live dictionary.
 // Missing legacy fields remain valid; present structural/scalar fields must be safe.
 static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error) {
@@ -3503,25 +3519,34 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID {
+    if (bundleID && ![bundleID isKindOfClass:NSString.class]) return nil;
+    NSDictionary *scopedApps = self.scopedApps;
+    if (![scopedApps isKindOfClass:NSDictionary.class]) return bundleID ? nil : [NSMutableDictionary dictionary];
     if (bundleID) {
-        NSDictionary *appInfo = self.scopedApps[bundleID];
-        if ([appInfo isKindOfClass:NSDictionary.class]) return [appInfo mutableCopy];
-        return nil;
+        NSDictionary *appInfo = scopedApps[bundleID];
+        if (![appInfo isKindOfClass:NSDictionary.class]) return nil;
+        NSDictionary *frozen = PXDetachRuntimeGeneration(appInfo, NULL);
+        return PXScopeInfoRecordIsSafe(frozen) ? [frozen mutableCopy] : nil;
     }
-    
-    // Return all apps with their original case-preserved bundle IDs
+
+    // Skip unexportable rows independently, then detach the valid graph once.
+    NSMutableDictionary *candidates = [NSMutableDictionary dictionary];
+    for (id key in scopedApps) {
+        id record = scopedApps[key];
+        if (![key isKindOfClass:NSString.class] || ![record isKindOfClass:NSDictionary.class]) continue;
+        if (![NSPropertyListSerialization propertyList:record isValidForFormat:NSPropertyListBinaryFormat_v1_0]) continue;
+        candidates[key] = record;
+    }
+    NSDictionary *detached = PXDetachRuntimeGeneration(candidates, NULL);
     NSMutableDictionary *displayApps = [NSMutableDictionary dictionary];
-    [self.scopedApps enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSDictionary *appInfo, BOOL *stop) {
+    for (NSString *key in detached) {
+        NSDictionary *appInfo = detached[key];
+        if (!PXScopeInfoRecordIsSafe(appInfo)) continue;
         NSMutableDictionary *displayInfo = [appInfo mutableCopy];
         NSString *originalBundleID = appInfo[@"originalBundleID"];
-        if (originalBundleID) {
-            // Use the original case-sensitive bundle ID
-            displayInfo[@"bundleID"] = originalBundleID;
-            displayApps[key] = displayInfo;
-        } else {
-            displayApps[key] = displayInfo;
-        }
-    }];
+        if (originalBundleID) displayInfo[@"bundleID"] = originalBundleID;
+        displayApps[key] = displayInfo;
+    }
     return displayApps;
 }
 
