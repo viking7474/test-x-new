@@ -62,6 +62,7 @@
 @end
 
 @interface IdentifierManager ()
+- (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error;
 - (NSDictionary *)captureIdentifierVerification:(NSString *)type enabled:(BOOL)enabled secondaryKey:(NSString *)secondaryKey error:(NSError **)error;
 - (BOOL)saveSettingsWithError:(NSError **)error;
 - (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error;
@@ -3189,10 +3190,14 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 
 - (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs {
     self.error = nil;
+    if (bundleIDs && ![bundleIDs isKindOfClass:NSArray.class]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6040 userInfo:@{NSLocalizedDescriptionKey: @"Invalid scope replacement request"}];
+        return NO;
+    }
     NSMutableOrderedSet<NSString *> *normalized = [NSMutableOrderedSet orderedSet];
     for (id value in bundleIDs ?: @[]) {
         if (![value isKindOfClass:NSString.class] || ![(NSString *)value length]) continue;
-        NSString *bundleID = (NSString *)value;
+        NSString *bundleID = [value copy];
         if ([bundleID isEqualToString:@"com.hydra.tlinkios"] ||
             [bundleID isEqualToString:@"com.hydra.weaponx"] ||
             [bundleID isEqualToString:@"com.hydra.projectx"]) continue;
@@ -3201,7 +3206,12 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 
     NSMutableDictionary *replacement = [NSMutableDictionary dictionaryWithCapacity:normalized.count];
     for (NSString *bundleID in normalized) {
-        NSMutableDictionary *appInfo = [self.scopedApps[bundleID] mutableCopy];
+        id existing = self.scopedApps[bundleID];
+        if (existing && ![existing isKindOfClass:NSDictionary.class]) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6040 userInfo:@{NSLocalizedDescriptionKey: @"Malformed existing scope record"}];
+            return NO;
+        }
+        NSMutableDictionary *appInfo = [existing mutableCopy];
         if (!appInfo) {
             LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
             // bundleVersion is part of the local private-framework declaration
@@ -3224,10 +3234,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         replacement[bundleID] = appInfo;
     }
 
-    if ([self.scopedApps isEqualToDictionary:replacement]) return YES;
-    self.scopedApps = replacement;
-    [self saveScopedApps];
-    return self.error == nil;
+    // A matching memory map cannot acknowledge a failed/absent source write.
+    // The helper compares under standalone admission and adopts only after success.
+    return [self persistScopedApps:replacement adopt:YES error:NULL];
 }
 
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID {
@@ -3858,43 +3867,66 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (void)saveScopedApps {
-    // Get the proper preferences path
+    [self persistScopedApps:self.scopedApps adopt:NO error:NULL];
+}
+
+- (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error {
+    if (error) *error = nil;
+    NSError *sourceError = nil;
+    NSDictionary *scopedAppsDict = [apps isKindOfClass:NSDictionary.class]
+        ? PXDetachRuntimeGeneration(@{ @"ScopedApps": apps }, &sourceError) : nil;
+    if (!scopedAppsDict || !PXValidateManagerSettingsSources(nil, scopedAppsDict, &sourceError)) {
+        self.error = sourceError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6040 userInfo:@{NSLocalizedDescriptionKey: @"Invalid scope persistence packet"}];
+        if (error) *error = self.error;
+        return NO;
+    }
+    // Build owned records before committing. No caller aliases are adopted.
+    NSMutableDictionary *candidate = nil;
+    if (adopt) {
+        candidate = [NSMutableDictionary dictionary];
+        NSDictionary *records = scopedAppsDict[@"ScopedApps"];
+        for (NSString *bundleID in records) candidate[bundleID] = [records[bundleID] mutableCopy];
+    }
     NSString *prefsPath = PXPreferencesPath();
     NSString *scopedAppsFile = PXGlobalScopePath();
-    
     NSFileManager *fileManager = [NSFileManager defaultManager];
     if (![fileManager fileExistsAtPath:prefsPath]) {
         [fileManager createDirectoryAtPath:prefsPath withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0755} error:nil];
     }
-    
-    // Save scoped apps separately in the global scope file
-    NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
-    NSError *sourceError = nil;
-    // Permission/cache/notification effects below require this commit to finish,
-    // not merely stage inside a caller's source transaction.
+    __block BOOL wrote = NO;
+    // Even a replacement no-op must join standalone admission: memory equality
+    // cannot acknowledge an outer staging transaction or a stale source map.
     BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
-        return [transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError];
+        if (adopt) {
+            NSDictionary *existing = [transaction dictionaryAtPath:scopedAppsFile error:writeError];
+            if (!existing) return NO;
+            if ([existing isEqual:scopedAppsDict]) return YES;
+        }
+        wrote = [transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError];
+        return wrote;
     }, &sourceError);
     if (!success) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                      code:4006 
-                                  userInfo:@{NSLocalizedDescriptionKey: sourceError.localizedDescription ?: @"Failed to save global scoped apps"}];
-        return;
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:4006
+                                     userInfo:@{NSLocalizedDescriptionKey: sourceError.localizedDescription ?: @"Failed to save global scoped apps"}];
+        if (error) *error = self.error;
+        return NO;
     }
-    
-    // Set proper permissions for global scope file
-    NSError *permError = nil;
-    NSDictionary *fileAttributes = @{NSFilePosixPermissions: @0644,
-                                   NSFileOwnerAccountName: @"mobile"};
-    
-    if (![fileManager setAttributes:fileAttributes
-                      ofItemAtPath:scopedAppsFile
-                             error:&permError]) {
-        NSLog(@"[TLinkIOS] Warning: Failed to set global scope file permissions: %@", permError);
+    BOOL memoryChanged = adopt && ![self.scopedApps isEqualToDictionary:candidate];
+    if (adopt) self.scopedApps = candidate;
+    if (wrote) {
+        NSError *permError = nil;
+        NSDictionary *fileAttributes = @{NSFilePosixPermissions: @0644, NSFileOwnerAccountName: @"mobile"};
+        if (![fileManager setAttributes:fileAttributes ofItemAtPath:scopedAppsFile error:&permError]) {
+            NSLog(@"[TLinkIOS] Warning: Failed to set global scope file permissions: %@", permError);
+        }
     }
-    [self.spoofCache removeAllObjects];
-    [_appEnabledCache removeAllObjects];
-    PXPostSettingsChangedNotification();
+    if (wrote || memoryChanged) {
+        [self.spoofCache removeAllObjects];
+        [_appEnabledCache removeAllObjects];
+    }
+    if (wrote) PXPostSettingsChangedNotification();
+    // Publication may reenter and set shared error; the local receipt stays valid.
+    return YES;
 }
 
 - (BOOL)isExtensionEnabled:(NSString *)bundleID {

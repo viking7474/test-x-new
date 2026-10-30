@@ -95,3 +95,8 @@ assigning live memory before validation are all caught by source contracts. The
 controls do not modify production files. No native Foundation, Theos, package or
 device validation is claimed locally; H5F awaits macOS CI. Writer rollout remains
 partial.
+
+
+## Build acknowledgement
+
+2026-10-30: user reports H5F build pass. This is user-provided confirmation; no native Foundation/Theos execution occurred on the Windows host. H5G proceeds to scope replacement write acknowledgement and candidate adoption.

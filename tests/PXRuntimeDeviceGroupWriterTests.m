@@ -189,6 +189,26 @@ static void PXToggleFixtureNotification(CFNotificationCenterRef center, CFString
     void (^callback)(void) = gDuringToggleSecondaryNotification; gDuringToggleSecondaryNotification = nil;
     if (callback) callback();
 }
+// Controlled private-framework collaborator for exact scope replacement methods.
+static NSUInteger gScopeProxyLookups;
+static void (^gScopeProxyLookup)(void);
+@interface PXScopeProxyFixture : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
+@property (nonatomic, copy) NSString *localizedName;
+@property (nonatomic, copy) NSString *shortVersionString;
+@property (nonatomic, copy) NSString *bundleVersion;
+@end
+@implementation PXScopeProxyFixture
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier {
+    gScopeProxyLookups++;
+    void (^callback)(void) = gScopeProxyLookup; gScopeProxyLookup = nil;
+    if (callback) callback();
+    if (![identifier isEqual:@"fixture.installed"]) return nil;
+    PXScopeProxyFixture *proxy = [self new]; proxy.localizedName = @"Installed";
+    proxy.shortVersionString = @"1.2"; proxy.bundleVersion = @"12"; return proxy;
+}
+@end
+
 // Only provider signatures are needed for unexercised legacy branches. Existing
 // values skip them; the IDFA provider below exercises the missing-value path.
 @interface NSObject (PXLegacyToggleProviderDeclarations)
@@ -469,7 +489,9 @@ ARTIFACT_SINGLETON
 #define PXReadRuntimeSourceDictionary PXFixtureReadVerificationDictionary
 #define PX_IDENTIFIER_RUNTIME_READ_OPERATION ((void)0)
 #define PXCaptureRuntimeSnapshot() ((PXRuntimeReadSnapshot *)nil)
+#define LSApplicationProxy PXScopeProxyFixture
 #include "PXDeviceGroupMethods.inc"
+#undef LSApplicationProxy
 #undef PXCaptureRuntimeSnapshot
 #undef PX_IDENTIFIER_RUNTIME_READ_OPERATION
 #undef PXReadRuntimeSourceDictionary
@@ -2729,6 +2751,121 @@ static void TestManagerSettingsLoading(void) {
 #endif
 }
 
+static PXDeviceGroupFixture *ScopeReplacementFixture(void) {
+    PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
+    manager.scopedApps = [@{ @"fixture.old": [@{ @"enabled": @NO, @"name": @"Old", @"custom": @"keep" } mutableCopy] } mutableCopy];
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{ @"ScopedApps": manager.scopedApps } atPath:PXGlobalScopePath() error:error];
+    } error:NULL], "scope replacement canonical baseline seeded");
+    [manager seedPersistenceCaches]; return manager;
+}
+static void TestScopeReplacementAcknowledgement(void) {
+    for (NSUInteger absent = 0; absent < 2; absent++) {
+        PXDeviceGroupFixture *manager = ScopeReplacementFixture();
+        if (absent) CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+        } error:NULL], "scope replacement absent source seeded");
+        NSMutableDictionary *old = manager.scopedApps;
+        NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; NSUInteger notices = gBatchNotifications;
+        __block BOOL faulted = NO;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.scope" format:@"source fault"]; }
+        };
+        BOOL success = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]]; gStore.testCheckpoint = nil;
+        CHECK(!success && faulted && manager.error.code == 4006 && manager.scopedApps == old && [before isEqual:BatchSnapshot()] &&
+              [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "failed scope replacement preserves prior memory source absence caches and notification");
+        CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] &&
+              [manager.scopedApps[@"fixture.installed"][@"version"] isEqual:@"1.2"] &&
+              [manager.scopedApps[@"fixture.installed"][@"build"] isEqual:@"12"] && !manager.scopedApps[@"fixture.old"] &&
+              [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"] isEqual:manager.scopedApps] &&
+              notices + 1 == gBatchNotifications,
+              "retry after failed scope replacement performs a real acknowledged source write");
+        [manager seedPersistenceCaches]; before = BatchSnapshot(); cache = [manager persistenceCaches]; notices = gBatchNotifications;
+        CHECK(chmod(PXGlobalScopePath().fileSystemRepresentation, 0600) == 0, "scope no-op mode baseline seeded");
+        CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] && [before isEqual:BatchSnapshot()] &&
+              [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "canonical scope no-op preserves marker caches and notification count");
+        struct stat st = {0}; CHECK(stat(PXGlobalScopePath().fileSystemRepresentation, &st) == 0 && (st.st_mode & 0777) == 0600,
+              "canonical scope no-op skips permission repair");
+        NSError *failure = nil; __block BOOL inner = YES;
+        BOOL outer = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"scope-outer.plist") error:error]) return NO;
+            inner = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]]; return YES;
+        } error:&failure];
+        CHECK(!outer && !inner && failure && [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "scope replacement no-op rejects nested acknowledgement and poisons outer staging");
+        // Matching manager memory is insufficient after another source owner changes scope.
+        CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx setDictionary:@{ @"ScopedApps": @{} } atPath:PXGlobalScopePath() error:error];
+        } error:NULL], "scope source drift seeded");
+        CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] && notices + 1 == gBatchNotifications &&
+              [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"] isEqual:manager.scopedApps],
+              "matching memory cannot bypass replacement of a drifted canonical scope");
+        // Conversely source equality is a real no-op even when local memory is stale.
+        manager.scopedApps = old; [manager seedPersistenceCaches]; before = BatchSnapshot(); notices = gBatchNotifications;
+        CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications &&
+              ![[manager persistenceCaches][@"spoof"] count] && !manager.scopedApps[@"fixture.old"],
+              "matching canonical scope adopts fresh memory and clears stale caches without a write");
+    }
+    PXDeviceGroupFixture *manager = ScopeReplacementFixture();
+    NSMutableString *mutableName = [@"Before capture" mutableCopy];
+    manager.scopedApps[@"fixture.old"][@"name"] = mutableName;
+    __block BOOL mutated = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!mutated && [stage isEqual:@"source-written"]) { mutated = YES; [mutableName setString:@"After capture"]; }
+    };
+    BOOL detachedSuccess = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.old"]]; gStore.testCheckpoint = nil;
+    CHECK(detachedSuccess && mutated && [manager.scopedApps[@"fixture.old"][@"name"] isEqual:@"Before capture"] &&
+          [manager.scopedApps[@"fixture.old"][@"custom"] isEqual:@"keep"] && [manager.scopedApps[@"fixture.old"] isKindOfClass:NSMutableDictionary.class] &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"] isEqual:manager.scopedApps],
+          "scope replacement deep detaches metadata and adopts mutable records after source commit");
+    __block BOOL postMarker = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!postMarker && [stage isEqual:@"commit-written"]) { postMarker = YES; [NSException raise:@"fixture.scope" format:@"post-marker cleanup fault"]; }
+    };
+    BOOL committedSuccess = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]]; gStore.testCheckpoint = nil;
+    CHECK(committedSuccess && postMarker && manager.scopedApps[@"fixture.installed"] &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"] isEqual:manager.scopedApps],
+          "scope replacement keeps source acknowledgement through post-marker housekeeping failure");
+    manager = ScopeReplacementFixture();
+    __block BOOL notificationSawCandidate = NO;
+    gDuringRequiredNotification = ^{
+        notificationSawCandidate = [manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue];
+        manager.error = [NSError errorWithDomain:@"fixture.scope.callback" code:995 userInfo:nil];
+    };
+    CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.installed"]] && notificationSawCandidate && manager.error.code == 995,
+          "scope success uses local acknowledgement despite shared error changed by publication");
+    __block BOOL successor = NO;
+    gDuringRequiredNotification = ^{ successor = [manager replaceApplicationScopeWithBundleIDs:@[@"fixture.successor"]]; };
+    CHECK([manager replaceApplicationScopeWithBundleIDs:@[@"fixture.other"]] && successor && manager.scopedApps[@"fixture.successor"] &&
+          !manager.scopedApps[@"fixture.other"] &&
+          [[[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()] objectForKey:@"ScopedApps"] isEqual:manager.scopedApps],
+          "scope adopts before notification and never overwrites a publication successor");
+    NSMutableString *requested = [@"fixture.Mutable" mutableCopy];
+    gScopeProxyLookup = ^{ [requested setString:@"changed.by.provider"]; };
+    CHECK(([manager replaceApplicationScopeWithBundleIDs:@[requested, @7, @"com.hydra.tlinkios", @"fixture.Mutable"]] &&
+          manager.scopedApps[@"fixture.Mutable"] && !manager.scopedApps[@"changed.by.provider"] && manager.scopedApps.count == 1),
+          "scope replacement freezes caller keys while preserving filtering deduplication and case");
+    NSData *saved = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
+    @try {
+        CHECK([[@"malformed scope" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:PXGlobalScopePath() atomically:YES], "scope replacement corrupt source seeded");
+        NSMutableDictionary *old = manager.scopedApps; NSDictionary *before = BatchSnapshot(); NSUInteger notices = gBatchNotifications;
+        CHECK(![manager replaceApplicationScopeWithBundleIDs:@[@"fixture.Mutable"]] && manager.scopedApps == old &&
+              manager.error.code == 4006 && notices == gBatchNotifications && [before isEqual:BatchSnapshot()],
+              "matching memory cannot acknowledge a malformed canonical scope");
+    } @finally { CHECK([saved writeToFile:PXGlobalScopePath() atomically:YES], "scope replacement corrupt source teardown restores exact bytes"); }
+    manager = ScopeReplacementFixture(); manager.scopedApps[@"fixture.old"] = @7;
+    NSDictionary *before = BatchSnapshot(); NSUInteger lookups = gScopeProxyLookups;
+    CHECK(![manager replaceApplicationScopeWithBundleIDs:@[@"fixture.old"]] && manager.error.code == 6040 &&
+          ![manager replaceApplicationScopeWithBundleIDs:(id)@7] && [before isEqual:BatchSnapshot()] && lookups == gScopeProxyLookups,
+          "invalid scope requests or existing records fail before lookup or source writes");
+    manager = ScopeReplacementFixture();
+    CHECK([manager replaceApplicationScopeWithBundleIDs:nil] && !manager.scopedApps.count &&
+          ![[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"] count],
+          "nil scope replacement retains explicit empty-scope policy");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2763,6 +2900,7 @@ int main(void) {
         TestToggleAuthoritativeBeforeImages();
         TestCoherentToggleVerification();
         TestManagerSettingsLoading();
+        TestScopeReplacementAcknowledgement();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5F-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5G-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -137,7 +137,8 @@ def source_contracts():
     assert '[self saveSettingsWithError:NULL]' in method(manager, '- (void)saveSettings')
     assert '[self saveSettingsWithSourceCommitIdentifier:NULL forIdentifier:nil beforeImage:NULL error:error]' in method(manager, '- (BOOL)saveSettingsWithError:(NSError **)error')
     save = method(manager, '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error')
-    scope = method(manager, '- (void)saveScopedApps')
+    scope = method(manager, '- (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error')
+    assert '[self persistScopedApps:self.scopedApps adopt:NO error:NULL]' in method(manager, '- (void)saveScopedApps')
     for body in (save, scope):
         assert 'PXPerformStandaloneRuntimeSourceWrite' in body and 'atPath:scopedAppsFile' in body
         assert 'PXPerformRuntimeSourceWrite(' not in body
@@ -145,6 +146,39 @@ def source_contracts():
         assert body.index('}, &sourceError)') < body.index('PXPostSettingsChangedNotification()')
         assert body.index('if (!success)') < body.index('removeAllObjects]')
     assert scope.index('}, &sourceError)') < scope.index('setAttributes:fileAttributes')
+    replacement = method(manager, '- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs')
+    assert 'return [self persistScopedApps:replacement adopt:YES error:NULL];' in replacement
+    assert 'self.scopedApps = replacement' not in replacement and 'return self.error == nil' not in replacement
+    assert 'isEqualToDictionary:replacement]) return YES' not in replacement
+    assert 'NSString *bundleID = [value copy];' in replacement
+    assert '![bundleIDs isKindOfClass:NSArray.class]' in replacement and '![existing isKindOfClass:NSDictionary.class]' in replacement
+    assert scope.index('PXDetachRuntimeGeneration(') < scope.index('PXPerformStandaloneRuntimeSourceWrite(')
+    assert 'PXValidateManagerSettingsSources(nil, scopedAppsDict, &sourceError)' in scope
+    assert 'if ([existing isEqual:scopedAppsDict]) return YES;' in scope
+    assert scope.index('dictionaryAtPath:scopedAppsFile') < scope.index('if ([existing isEqual:scopedAppsDict])')
+    source_body = scope.split('BOOL success = PXPerformStandaloneRuntimeSourceWrite(', 1)[1]
+    assert source_body.index('if (adopt) {') < source_body.index('dictionaryAtPath:scopedAppsFile')
+    assert scope.index('}, &sourceError)') < scope.index('if (!success)') < scope.index('if (adopt) self.scopedApps = candidate;') < scope.index('PXPostSettingsChangedNotification()')
+    assert 'if (wrote || memoryChanged)' in scope and 'if (wrote) PXPostSettingsChangedNotification();' in scope
+    assert 'if (wrote) {' in scope and 'candidate[bundleID] = [records[bundleID] mutableCopy];' in scope
+    assert scope.rstrip().endswith('return YES;\n}')
+    for case in ('failed scope replacement preserves prior memory source absence caches and notification',
+                 'retry after failed scope replacement performs a real acknowledged source write',
+                 'canonical scope no-op preserves marker caches and notification count',
+                 'canonical scope no-op skips permission repair',
+                 'scope replacement no-op rejects nested acknowledgement and poisons outer staging',
+                 'matching memory cannot bypass replacement of a drifted canonical scope',
+                 'matching canonical scope adopts fresh memory and clears stale caches without a write',
+                 'scope replacement deep detaches metadata and adopts mutable records after source commit',
+                 'scope replacement keeps source acknowledgement through post-marker housekeeping failure',
+                 'scope success uses local acknowledgement despite shared error changed by publication',
+                 'scope adopts before notification and never overwrites a publication successor',
+                 'scope replacement freezes caller keys while preserving filtering deduplication and case',
+                 'matching memory cannot acknowledge a malformed canonical scope',
+                 'invalid scope requests or existing records fail before lookup or source writes',
+                 'nil scope replacement retains explicit empty-scope policy'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestScopeReplacementAcknowledgement();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('standalone settings and scope saves commit once before one compatibility notification',
                  'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',
@@ -376,7 +410,7 @@ def source_contracts():
         assert case in fixture_settings, case
     assert 'TestManagerSettingsLoading();' in fixture_settings
     group_recipe = read('scripts/test_runtime_device_group_writers.py')
-    assert "SIGNATURES += ['- (void)loadSettings']" in group_recipe
+    assert "SIGNATURES += ['- (void)loadSettings'," in group_recipe
     assert 'static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error)' in group_recipe
     for token in ('nested writer shares staged dictionaries', 'ignored nested failure', 'rollback restores exact prior bytes',
                   'rollback preserves original source permissions', 'validate all journal paths before any recovery writes',
