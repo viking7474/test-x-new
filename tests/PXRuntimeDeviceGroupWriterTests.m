@@ -4046,6 +4046,94 @@ static void TestScopeInfoExportOwnership(void) {
           "info export preserves source marker caches error notifications and provider counters");
 }
 
+static void TestFullSettingsLoadCacheAdmission(void) {
+    gManagerLoadRole = YES;
+    NSDictionary *flags = @{ @"IDFA": @NO, @"WiFi": @NO, @"Battery": @NO, @"DeviceTheme": @NO, @"StorageSystem": @NO, @"IOSVersion": @NO };
+    NSDictionary *settings = @{ @"SettingsInitialized": @YES, @"EnabledIdentifiers": flags };
+    NSDictionary *off = @{ @"fixture.full.load": @{ @"enabled": @NO, @"name": @"Full load" } };
+    NSDictionary *on = @{ @"fixture.full.load": @{ @"enabled": @YES, @"name": @"Full load" } };
+    CHECK(SeedManagerLoading(settings, @{ @"ScopedApps": off }), "full loader cache baseline seeded");
+    PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new]; [manager loadSettings];
+    CHECK(![manager isApplicationEnabled:@"fixture.full.load"] && ![manager shouldSpoofForBundle:@"fixture.full.load"] &&
+          manager.appEnabledCache.count == 1 && manager.spoofCache.count == 1, "full loader warms independent negative decision caches");
+    CHECK(SetSource(PXGlobalScopePath(), @"ScopedApps", on), "full loader external scope enable committed");
+    NSDictionary *before = BatchSnapshot(); NSUInteger notices = gBatchNotifications;
+    [manager loadSettings];
+    CHECK([manager.scopedApps isEqual:on] && !manager.appEnabledCache.count && !manager.spoofCache.count && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications &&
+          [manager isApplicationEnabled:@"fixture.full.load"] && [manager shouldSpoofForBundle:@"fixture.full.load"],
+          "full settings load invalidates both stale decisions only after changed scope adoption");
+    NSError *sentinel = [NSError errorWithDomain:@"fixture.full.load" code:81 userInfo:nil]; manager.error = sentinel;
+    NSDictionary *cache = [manager persistenceCaches]; before = BatchSnapshot();
+    [manager loadSettings];
+    CHECK([cache isEqual:[manager persistenceCaches]] && manager.error == sentinel && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+          "matching full load preserves decision caches marker notifications and legacy shared error policy");
+    NSMutableDictionary *changedFlags = [flags mutableCopy]; changedFlags[@"IDFA"] = @YES;
+    CHECK(SetSource(PXTLinkIOSSettingsPath(), @"EnabledIdentifiers", changedFlags), "full loader settings only change seeded");
+    cache = [manager persistenceCaches]; before = BatchSnapshot(); [manager loadSettings];
+    CHECK([manager.settings[@"IDFA"] boolValue] && [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()],
+          "settings only reload leaves scope decision caches intact");
+    CHECK(SetSource(PXGlobalScopePath(), @"ScopedApps", off), "full loader external scope disable committed");
+    before = BatchSnapshot(); [manager loadSettings];
+    CHECK(!manager.appEnabledCache.count && !manager.spoofCache.count && [before isEqual:BatchSnapshot()] &&
+          ![manager isApplicationEnabled:@"fixture.full.load"] && ![manager shouldSpoofForBundle:@"fixture.full.load"],
+          "full loader revokes warmed positive decisions without waiting for cache expiry");
+    CHECK(SetSource(PXGlobalScopePath(), @"ScopedApps", on), "full loader enabled scope restored");
+    [manager loadSettings];
+    CHECK([manager isApplicationEnabled:@"fixture.full.load"] && [manager shouldSpoofForBundle:@"fixture.full.load"],
+          "full loader decision cache recovery works in both scope directions");
+    NSDictionary *renamed = @{ @"fixture.full.load": @{ @"enabled": @YES, @"name": @"Renamed" } };
+    CHECK(SetSource(PXGlobalScopePath(), @"ScopedApps", renamed), "full loader metadata change seeded");
+    before = BatchSnapshot(); [manager loadSettings];
+    CHECK(!manager.appEnabledCache.count && !manager.spoofCache.count && [manager.scopedApps isEqual:renamed] && [before isEqual:BatchSnapshot()],
+          "full loader conservatively invalidates on scope metadata changes without a source write");
+    [manager seedPersistenceCaches]; cache = [manager persistenceCaches];
+    id oldSettings = manager.settings, oldScope = manager.scopedApps;
+    CHECK(SeedManagerLoading(settings, @{ @"ScopedApps": @[] }), "full loader malformed scope seeded");
+    before = BatchSnapshot(); manager.error = nil; [manager loadSettings];
+    CHECK(manager.error.code == 6039 && manager.settings == oldSettings && manager.scopedApps == oldScope &&
+          [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+          "failed full load validation preserves exact memory and both decision caches");
+    CHECK(SeedManagerLoading(settings, @{ @"ScopedApps": renamed }), "full loader capture failure baseline restored");
+    before = BatchSnapshot(); gFailNextToggleVerificationCapture = YES; manager.error = nil; [manager loadSettings];
+    CHECK(manager.error.code == 6033 && manager.settings == oldSettings && manager.scopedApps == oldScope &&
+          [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()],
+          "failed full capture never invalidates prior decisions or adopts partial state");
+    NSUInteger reads = gVerificationSourceReads, captures = gVerificationCaptures;
+    __block BOOL errorObserved = NO; NSError *failure = nil;
+    BOOL outer = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"full-load-outer.plist") error:error]) return NO;
+        manager.error = nil; [manager loadSettings]; errorObserved = manager.error != nil; return YES;
+    } error:&failure];
+    CHECK(!outer && failure && errorObserved && reads == gVerificationSourceReads && captures == gVerificationCaptures &&
+          manager.settings == oldSettings && manager.scopedApps == oldScope && [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()],
+          "full loader standalone recovery poisons ignored parent staging before source capture or cache effects");
+    manager.scopedApps = [@{ @"fixture.full.load": [@{ @"enabled": @NO } mutableCopy] } mutableCopy];
+    [manager.appEnabledCache removeAllObjects]; [manager.spoofCache removeAllObjects];
+    CHECK(![manager isApplicationEnabled:@"fixture.full.load"] && ![manager shouldSpoofForBundle:@"fixture.full.load"], "legacy role decision cache baseline seeded");
+    oldSettings = manager.settings; oldScope = manager.scopedApps; cache = [manager persistenceCaches]; manager.error = sentinel;
+    NSUInteger attempts = gStandaloneSourceAttempts; reads = gVerificationSourceReads; captures = gVerificationCaptures;
+    before = BatchSnapshot(); gManagerLoadRole = NO;
+    @try {
+        [manager loadSettings];
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        CHECK(manager.settings == oldSettings && manager.scopedApps == oldScope && [cache isEqual:[manager persistenceCaches]] && manager.error == sentinel &&
+              attempts == gStandaloneSourceAttempts && reads == gVerificationSourceReads && captures == gVerificationCaptures,
+              "RootHide injected full load keeps early source and cache no op");
+#else
+        CHECK([manager.scopedApps isEqual:renamed] && !manager.appEnabledCache.count && !manager.spoofCache.count && manager.error == sentinel &&
+              attempts == gStandaloneSourceAttempts && reads == gVerificationSourceReads && captures == gVerificationCaptures && [before isEqual:BatchSnapshot()],
+              "rootful legacy full load invalidates adopted scope caches without source owner recovery or capture");
+#endif
+    } @finally { gManagerLoadRole = YES; }
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:PXTLinkIOSSettingsPath() error:error] && [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+    } error:NULL], "full loader missing sources seeded");
+    [manager seedPersistenceCaches]; before = BatchSnapshot(); [manager loadSettings];
+    CHECK(!manager.scopedApps.count && !manager.appEnabledCache.count && !manager.spoofCache.count && ![manager.settings[@"IDFA"] boolValue] &&
+          [before isEqual:BatchSnapshot()] && ![NSFileManager.defaultManager fileExistsAtPath:PXGlobalScopePath()] && notices == gBatchNotifications,
+          "full load missing sources clears stale scope decisions without materializing defaults");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -4095,6 +4183,7 @@ int main(void) {
         TestScopeDecisionReaderPackets();
         TestReplacementPreparationAdmission();
         TestScopeInfoExportOwnership();
+        TestFullSettingsLoadCacheAdmission();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

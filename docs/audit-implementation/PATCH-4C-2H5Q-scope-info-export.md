@@ -134,3 +134,6 @@ checks and fragment review pass after strengthening reverse-alias assertions.
 
 Native Foundation/Theos builds and runtime checks for both schemes remain pending
 macOS CI/device validation; local contracts are not native execution proof.
+
+2026-10-30: user reports H5Q build pass. H5R follows for full-load source admission
+and cache invalidation; local Windows checks remain separate from native/device runs.

@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5Q-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5R-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -688,7 +688,11 @@ def source_contracts():
     assert '[transaction dictionaryAtPath:prefsFile error:writeError]' in save
     assert 'setDictionary:saveDict atPath:prefsFile' in save and 'writeToFile:prefsFile' not in save
     load = method(manager, '- (void)loadSettings')
-    assert load.index('PXPerformRuntimeSourceWrite') < load.index('fileExistsAtPath:prefsFile')
+    assert load.index('PXPerformStandaloneRuntimeSourceWrite') < load.index('fileExistsAtPath:prefsFile')
+    assert 'PXPerformRuntimeSourceWrite(' not in load
+    assert 'if (PXIdentifierManagerIsManagerProcess() && !PXPerformStandaloneRuntimeSourceWrite(' in load
+    injected_load_guard = '#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)\n    if (!PXIdentifierManagerIsManagerProcess()) return;'
+    assert injected_load_guard in load and load.index(injected_load_guard) < load.index('PXPerformStandaloneRuntimeSourceWrite(')
     assert 'managerSources[@"settings"]' in load and 'managerSources[@"scope"]' in load
     assert 'PXCaptureRuntimeSources' in load
     packet = load.split('managerSources = PXCaptureRuntimeSources(', 1)[1].split('}, &sourceError)', 1)[0]
@@ -703,6 +707,10 @@ def source_contracts():
     assert load.index(validation) < load.index('self.settings = newSettings;') < load.index('self.scopedApps = newScope;')
     assert load.count('self.settings =') == 1 and load.count('self.scopedApps =') == 1
     assert 'for (NSString *bundleID in apps) newScope[bundleID] = [apps[bundleID] mutableCopy];' in load
+    assert load.index(validation) < load.index('BOOL scopeChanged = ![self.scopedApps isEqual:newScope];') < load.index('self.settings = newSettings;')
+    assert load.index('self.scopedApps = newScope;') < load.index('if (scopeChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }')
+    assert load.count('removeAllObjects') == 2
+    assert 'PXPostSettingsChangedNotification' not in load and 'setDictionary:' not in load and 'writeToFile:' not in load
     validator = manager.split('static BOOL PXValidateManagerSettingsSources(', 1)[1].split('static NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
     for field in ('SettingsInitialized', 'EnabledIdentifiers', 'ScopedApps', 'enabled'):
         assert f'@"{field}"' in validator
@@ -720,6 +728,20 @@ def source_contracts():
                  'RootHide injected load still exits before source access'):
         assert case in fixture_settings, case
     assert 'TestManagerSettingsLoading();' in fixture_settings
+    assert 'TestFullSettingsLoadCacheAdmission();' in fixture_settings
+    for case in ('full settings load invalidates both stale decisions only after changed scope adoption',
+                 'matching full load preserves decision caches marker notifications and legacy shared error policy',
+                 'settings only reload leaves scope decision caches intact',
+                 'full loader revokes warmed positive decisions without waiting for cache expiry',
+                 'full loader decision cache recovery works in both scope directions',
+                 'full loader conservatively invalidates on scope metadata changes without a source write',
+                 'failed full load validation preserves exact memory and both decision caches',
+                 'failed full capture never invalidates prior decisions or adopts partial state',
+                 'full loader standalone recovery poisons ignored parent staging before source capture or cache effects',
+                 'RootHide injected full load keeps early source and cache no op',
+                 'rootful legacy full load invalidates adopted scope caches without source owner recovery or capture',
+                 'full load missing sources clears stale scope decisions without materializing defaults'):
+        assert case in fixture_settings, case
     group_recipe = read('scripts/test_runtime_device_group_writers.py')
     assert "SIGNATURES += ['- (void)loadSettings'," in group_recipe
     assert 'static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error)' in group_recipe

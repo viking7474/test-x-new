@@ -3832,7 +3832,8 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     NSError *sourceError = nil;
     // Recovery precedes reading either source or choosing a legacy fallback.
     // Do not load a crashed transaction into mutable manager state, then save it.
-    if (PXIdentifierManagerIsManagerProcess() && !PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+    // A high-level reload cannot join an outer owner's uncommitted staging.
+    if (PXIdentifierManagerIsManagerProcess() && !PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
         (void)tx; (void)error; return YES;
     }, &sourceError)) { self.error = sourceError; return; }
     PXLog(@"[WeaponX] Loading settings...");
@@ -3995,8 +3996,10 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         PXLog(@"[WeaponX] No ScopedApps found or failed to load scoped apps file.");
         newScope = [NSMutableDictionary dictionary];
     }
+    BOOL scopeChanged = ![self.scopedApps isEqual:newScope];
     self.settings = newSettings;
     self.scopedApps = newScope;
+    if (scopeChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
 }
 
 #pragma mark - Error Handling
