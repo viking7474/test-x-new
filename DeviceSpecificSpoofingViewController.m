@@ -897,9 +897,13 @@
     else if (sender.tag == 3) key = @"DeviceModel";
     else if (sender.tag == 4) key = @"DeviceTheme";
     BOOL enabled = sender.isOn;
-    if (!key.length || ![[IdentifierManager sharedManager] setIdentifierEnabledAndPersist:enabled forType:key]) {
+    if (!key.length) {
         [sender setOn:!enabled animated:YES];
         return;
+    }
+    if (![[IdentifierManager sharedManager] setIdentifierEnabledAndPersist:enabled forType:key]) {
+        // A newer reentrant toggle may own the state; do not invert stale intent.
+        [sender setOn:[[IdentifierManager sharedManager] isIdentifierEnabled:key] animated:YES];
     }
     
     // Update UI colors for controls and state label

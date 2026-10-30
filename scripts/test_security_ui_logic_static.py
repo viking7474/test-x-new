@@ -225,6 +225,19 @@ require("setIdentifierEnabledAndPersist:requestedState" in legacy_switch,
         "legacy identifier switch also uses verified setter")
 require("setIdentifierEnabled:sender.isOn" not in legacy_ui,
         "legacy identifier UI no longer bypasses verified setter")
+device_switch = method_body(device_ui, "- (void)identifierSwitchChanged:", 5000)
+require("setOn:[[IdentifierManager sharedManager] isIdentifierEnabled:key]" in device_switch,
+        "Device-specific toggle failure renders current manager state after supersession")
+require("setOn:[self.manager isIdentifierEnabled:identifierType]" in legacy_switch and
+        "updateIdentifierSwitchStatus:sender" in legacy_switch,
+        "legacy switch failure renders current manager state and status label")
+require("identifierSwitch.on = [self.manager isIdentifierEnabled:identifierType]" in legacy_ui and
+        "updateIdentifierSwitchStatus:identifierSwitch" in legacy_ui,
+        "automatic identifier enable failure preserves newer toggle presentation")
+status = method_body(legacy_ui, "- (void)updateIdentifierSwitchStatus:(UISwitch *)sender {", 700)
+require('view.tag == 100' in status and 'sender.isOn ? @"Enabled" : @"Disabled"' in status,
+        "shared identifier status renderer uses displayed switch state")
+
 
 # iOS 12 compatibility contract: modern API tokens must be isolated behind runtime helpers.
 for symbol in (

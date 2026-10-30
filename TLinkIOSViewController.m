@@ -473,6 +473,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 }
 
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
+- (void)updateIdentifierSwitchStatus:(UISwitch *)sender;
 @property (nonatomic) BOOL manualProfileCreationInProgress;
 - (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription;
 - (void)presentManualProfileCreationWithPreview:(BOOL)preview roundedFields:(BOOL)rounded;
@@ -3654,33 +3655,36 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     
     if (!identifierType) return;
     
-    // Persist through the verified IdentifierManager contract. Roll back the switch on failure.
+    // Read the manager's current state after failure or supersession; the old
+    // request's inverse may no longer describe the latest toggle.
     BOOL requestedState = sender.isOn;
-    if (![self.manager setIdentifierEnabledAndPersist:requestedState forType:identifierType]) {
-        [sender setOn:!requestedState animated:YES];
+    BOOL persisted = [self.manager setIdentifierEnabledAndPersist:requestedState forType:identifierType];
+    if (!persisted) {
+        [sender setOn:[self.manager isIdentifierEnabled:identifierType] animated:YES];
         NSError *error = [self.manager lastError];
         if (error) [self showError:error];
-        return;
     }
     
-    // Find and update state label
-    UIStackView *switchStatusStack = (UIStackView *)sender.superview;
-    if ([switchStatusStack isKindOfClass:[UIStackView class]]) {
-        UILabel *stateLabel = [switchStatusStack.arrangedSubviews filteredArrayUsingPredicate:
-            [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
-                return [object isKindOfClass:[UILabel class]] && ((UILabel *)object).tag == 100;
-            }]].firstObject;
-        
-        if (stateLabel) {
-            stateLabel.text = sender.isOn ? @"Enabled" : @"Disabled";
-        }
-    }
+    [self updateIdentifierSwitchStatus:sender];
+    if (!persisted) return;
     
     // If enabled, just update the UI with the existing value from plist
     if (sender.isOn) {
         NSString *existingValue = [self.manager currentValueForIdentifier:identifierType];
         if (existingValue) {
             [self directUpdateIdentifierValue:identifierType withValue:existingValue];
+        }
+    }
+}
+
+// Presentation only, shared by the manual switch and automatic enable path.
+- (void)updateIdentifierSwitchStatus:(UISwitch *)sender {
+    UIStackView *stack = (UIStackView *)sender.superview;
+    if (![stack isKindOfClass:[UIStackView class]]) return;
+    for (UIView *view in stack.arrangedSubviews) {
+        if ([view isKindOfClass:[UILabel class]] && view.tag == 100) {
+            ((UILabel *)view).text = sender.isOn ? @"Enabled" : @"Disabled";
+            break;
         }
     }
 }
@@ -3970,24 +3974,14 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
             if (identifierSwitch && !identifierSwitch.isOn) {
                 identifierSwitch.on = YES;
                 if (![self.manager setIdentifierEnabledAndPersist:YES forType:identifierType]) {
-                    identifierSwitch.on = NO;
+                    identifierSwitch.on = [self.manager isIdentifierEnabled:identifierType];
+                    [self updateIdentifierSwitchStatus:identifierSwitch];
                     NSError *error = [self.manager lastError];
                     if (error) [self showError:error];
                     return;
                 }
                 
-                // Update the status label
-                UIStackView *switchStatusStack = (UIStackView *)identifierSwitch.superview;
-                if ([switchStatusStack isKindOfClass:[UIStackView class]]) {
-                    UILabel *stateLabel = [switchStatusStack.arrangedSubviews filteredArrayUsingPredicate:
-                        [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
-                            return [object isKindOfClass:[UILabel class]] && ((UILabel *)object).tag == 100;
-                        }]].firstObject;
-                    
-                    if (stateLabel) {
-                        stateLabel.text = @"Enabled";
-                    }
-                }
+                [self updateIdentifierSwitchStatus:identifierSwitch];
             }
             
             // Show success feedback

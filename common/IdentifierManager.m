@@ -64,6 +64,11 @@
 @interface IdentifierManager ()
 - (BOOL)saveSettingsWithError:(NSError **)error;
 - (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error;
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation error:(NSError **)error;
+- (id)beginIdentifierToggleForType:(NSString *)type;
+- (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error;
+- (void)finishIdentifierToggle:(id)operation forType:(NSString *)type;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *identifierToggleOperations;
 @property (nonatomic, strong) NSMutableDictionary *settings;
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSError *error;
@@ -1936,6 +1941,32 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     return [NSDictionary dictionaryWithContentsOfFile:path];
 }
 
+// Identity tokens cover synchronous reentry on this manager, including ABA
+// changes. Never hold the token-map lock while invoking a provider or observer.
+- (id)beginIdentifierToggleForType:(NSString *)type {
+    id operation = [NSObject new];
+    @synchronized (self) {
+        if (!self.identifierToggleOperations) self.identifierToggleOperations = [NSMutableDictionary dictionary];
+        self.identifierToggleOperations[type] = operation;
+    }
+    return operation;
+}
+
+- (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error {
+    @synchronized (self) {
+        if (operation && self.identifierToggleOperations[type] == operation) return YES;
+    }
+    if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6035
+                                      userInfo:@{NSLocalizedDescriptionKey: @"Identifier toggle was superseded by a newer invocation"}];
+    return NO;
+}
+
+- (void)finishIdentifierToggle:(id)operation forType:(NSString *)type {
+    @synchronized (self) {
+        if (self.identifierToggleOperations[type] == operation) [self.identifierToggleOperations removeObjectForKey:type];
+    }
+}
+
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type {
     [self applyIdentifierEnabled:enabled forType:type error:NULL];
 }
@@ -1944,6 +1975,15 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     if (error) *error = nil;
     if (![type isKindOfClass:[NSString class]] || type.length == 0) return NO;
     type = [type copy];
+    id operation = [self beginIdentifierToggleForType:type];
+    @try {
+        return [self applyIdentifierEnabled:enabled forType:type operation:operation error:error];
+    } @finally { [self finishIdentifierToggle:operation forType:type]; }
+}
+
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation error:(NSError **)error {
+    if (error) *error = nil;
+    if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     // Set the enabled state in settings
     self.settings[type] = @(enabled);
 
@@ -1955,10 +1995,12 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         [self refreshCanonicalCellularIdentityForCurrentProfile];
     }
     
+    if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     // If enabling an identifier, check if we need to generate a value
     if (enabled) {
         // Check if a value exists
         NSString *currentValue = [self currentValueForIdentifier:type];
+        if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
         if (!currentValue) {
             PXLog(@"No value exists for %@ - generating new value...", type);
             
@@ -2078,18 +2120,21 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     
     // Always ensure a coherent canonical device profile exists. P0 must not
     // fall back to a hardware-only DeviceModel when model/build resolution fails.
-    if (![self currentValueForIdentifier:@"DeviceModel"]) {
-        [self regenerateDeviceProfileGroup];
-    }
+    if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
+    NSString *deviceModel = [self currentValueForIdentifier:@"DeviceModel"];
+    if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
+    if (!deviceModel) [self regenerateDeviceProfileGroup];
     
     // Persist the identifier state first. Secondary runtime settings are written only after
     // EnabledIdentifiers has been persisted, so callers never observe a secondary success
     // notification for an identifier state that failed to save.
+    if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     NSError *saveError = nil;
     if (![self saveSettingsWithError:&saveError]) {
         if (error) *error = saveError;
         return NO;
     }
+    if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     // A matching old value cannot acknowledge this invocation's write. Keep
     // the readback as an extra guard against synchronous notification reentry.
     NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
@@ -2120,7 +2165,9 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 
     if (secondaryKey) {
         NSError *secondaryError = nil;
-        if (PXWriteSecurityBool(secondaryKey, enabled, &secondaryError)) {
+        BOOL secondaryCommitted = PXWriteSecurityBool(secondaryKey, enabled, &secondaryError);
+        if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
+        if (secondaryCommitted) {
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                                notificationName,
                                                NULL, NULL, YES);
@@ -2133,70 +2180,77 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             return NO;
         }
     }
-    return YES;
+    return [self validateIdentifierToggle:operation forType:type error:error];
 }
 
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type {
     if (![type isKindOfClass:[NSString class]] || type.length == 0) return NO;
 
     type = [type copy];
-    BOOL previous = [self.settings[type] boolValue];
-    NSString *secondaryKey = nil;
-    CFStringRef notificationName = NULL;
-    if ([type isEqualToString:@"WiFi"]) {
-        secondaryKey = @"wifiSpoofEnabled";
-        notificationName = CFSTR("com.hydra.tlinkios.toggleWifiSpoof");
-    } else if ([type isEqualToString:@"Battery"]) {
-        secondaryKey = @"batterySpoofEnabled";
-        notificationName = CFSTR("com.hydra.tlinkios.toggleBatterySpoof");
-    } else if ([type isEqualToString:@"DeviceTheme"]) {
-        secondaryKey = @"deviceThemeSpoofEnabled";
-        notificationName = CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof");
-    }
-
-    NSError *writeError = nil;
-    BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type error:&writeError];
-
-    NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
-    NSDictionary *enabledIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
-        ? persistedSettings[@"EnabledIdentifiers"]
-        : nil;
-    id persistedValue = enabledIdentifiers[type];
-    BOOL primarySuccess = (persistedValue != nil && [persistedValue boolValue] == enabled);
-
-    BOOL secondarySuccess = YES;
-    if (secondaryKey) {
-        id secondaryValue = PXReadSecuritySetting(secondaryKey);
-        secondarySuccess = (secondaryValue != nil && [secondaryValue boolValue] == enabled);
-    }
-
-    if (writeSuccess && primarySuccess && secondarySuccess) return YES;
-    NSError *failure = writeError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
-                                                   userInfo:@{NSLocalizedDescriptionKey: @"Identifier state verification failed after write"}];
-
-    // Restore in-memory and persisted state. The rollback itself is verified best-effort;
-    // callers still receive NO so the UI returns to the previously known state.
-    self.settings[type] = @(previous);
-    [self saveSettings];
-    if (secondaryKey) {
-        NSError *rollbackError = nil;
-        if (PXWriteSecurityBool(secondaryKey, previous, &rollbackError)) {
-            if (notificationName) {
-                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                                   notificationName,
-                                                   NULL, NULL, YES);
-            }
-        } else {
-            self.error = rollbackError;
-            PXLog(@"[WeaponX] Failed to rollback secondary identifier state %@: %@", secondaryKey, rollbackError);
+    id operation = [self beginIdentifierToggleForType:type];
+    @try {
+        BOOL previous = [self.settings[type] boolValue];
+        NSString *secondaryKey = nil;
+        CFStringRef notificationName = NULL;
+        if ([type isEqualToString:@"WiFi"]) {
+            secondaryKey = @"wifiSpoofEnabled";
+            notificationName = CFSTR("com.hydra.tlinkios.toggleWifiSpoof");
+        } else if ([type isEqualToString:@"Battery"]) {
+            secondaryKey = @"batterySpoofEnabled";
+            notificationName = CFSTR("com.hydra.tlinkios.toggleBatterySpoof");
+        } else if ([type isEqualToString:@"DeviceTheme"]) {
+            secondaryKey = @"deviceThemeSpoofEnabled";
+            notificationName = CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof");
         }
-    }
 
-    // Rollback success must not erase the failed forward operation's result.
-    self.error = failure;
-    PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d); attempted rollback to %@",
-          type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, previous ? @"YES" : @"NO");
-    return NO;
+        NSError *writeError = nil;
+        BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation error:&writeError];
+
+        // A newer call owns both the state and any subsequent recovery. In
+        // particular, matching ABA values do not give the older call ownership back.
+        if (![self validateIdentifierToggle:operation forType:type error:NULL]) return NO;
+        NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+        NSDictionary *enabledIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
+            ? persistedSettings[@"EnabledIdentifiers"]
+            : nil;
+        id persistedValue = enabledIdentifiers[type];
+        BOOL primarySuccess = (persistedValue != nil && [persistedValue boolValue] == enabled);
+
+        BOOL secondarySuccess = YES;
+        if (secondaryKey) {
+            id secondaryValue = PXReadSecuritySetting(secondaryKey);
+            secondarySuccess = (secondaryValue != nil && [secondaryValue boolValue] == enabled);
+        }
+
+        if (![self validateIdentifierToggle:operation forType:type error:NULL]) return NO;
+        if (writeSuccess && primarySuccess && secondarySuccess) return YES;
+        NSError *failure = writeError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
+                                                       userInfo:@{NSLocalizedDescriptionKey: @"Identifier state verification failed after write"}];
+
+        // Restore in-memory and persisted state. The rollback itself is verified best-effort;
+        // callers still receive NO so the UI returns to the previously known state.
+        self.settings[type] = @(previous);
+        [self saveSettings];
+        if (secondaryKey && [self validateIdentifierToggle:operation forType:type error:NULL]) {
+            NSError *rollbackError = nil;
+            if (PXWriteSecurityBool(secondaryKey, previous, &rollbackError)) {
+                if (notificationName && [self validateIdentifierToggle:operation forType:type error:NULL]) {
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                       notificationName,
+                                                       NULL, NULL, YES);
+                }
+            } else {
+                if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = rollbackError;
+                PXLog(@"[WeaponX] Failed to rollback secondary identifier state %@: %@", secondaryKey, rollbackError);
+            }
+        }
+
+        // Rollback success must not erase the failed forward operation's result.
+        if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = failure;
+        PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d); attempted rollback to %@",
+              type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, previous ? @"YES" : @"NO");
+        return NO;
+    } @finally { [self finishIdentifierToggle:operation forType:type]; }
 }
 
 - (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error {

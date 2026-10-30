@@ -46,6 +46,7 @@
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type;
 // Requires this call's settings/security write acknowledgements and readback.
 // Optional generation and best-effort rollback are not one atomic transaction.
+// A newer same-identifier toggle on this instance supersedes older work (NO).
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type;
 // Reset preflight: enable only model/iOS/storage/name flags for the expected
 // active profile. Never generate artifacts through the legacy toggle setters.

@@ -93,3 +93,5 @@ return đều bị source contracts bắt. Những checks này không thay nativ
 Native Foundation,
 Theos packaging và device behavior chưa được chạy tại đây; CI cần xác nhận H4Y.
 Không suy RootHide device support từ host `-DTHEOS_PACKAGE_SCHEME_ROOTHIDE=1`.
+
+Người dùng xác nhận H4Y build pass ngày 2026-10-29. H4Z xử lý tiếp same-instance synchronous toggle reentry và stale rollback; cross-instance/process CAS vẫn riêng. Đây là build do người dùng báo, không phải native execution từ Windows.

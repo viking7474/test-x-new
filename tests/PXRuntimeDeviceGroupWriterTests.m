@@ -30,6 +30,8 @@ static NSUInteger gBatchNotifications, gArtifactAdoptions, gBatteryNotifications
 static NSUInteger gToggleSecurityWrites, gToggleSecondaryNotices, gToggleSecurityFailures, gToggleGenerations;
 static NSString *gToggleMissingValue;
 static void (^gDuringToggleGeneration)(void);
+static void (^gDuringToggleSecurityWrite)(void);
+static void (^gDuringToggleSecondaryNotification)(void);
 static BOOL gFailSerial, gThrowBatteryPublication;
 static void (^gDuringPrepare)(void);
 static void (^gDuringPublication)(void);
@@ -81,14 +83,19 @@ BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error) {
     if (gToggleSecurityFailures) {
         gToggleSecurityFailures--;
         if (error) *error = [NSError errorWithDomain:@"fixture.toggle.security" code:71 userInfo:nil];
+        void (^callback)(void) = gDuringToggleSecurityWrite; gDuringToggleSecurityWrite = nil;
+        if (callback) callback();
         return NO;
     }
-    return [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+    BOOL success = [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
         NSDictionary *current = [tx dictionaryAtPath:PXSecuritySettingsPath() error:failure];
         if (!current) return NO;
         NSMutableDictionary *updated = [current mutableCopy]; updated[key] = @(value);
         return [tx setDictionary:updated atPath:PXSecuritySettingsPath() error:failure];
     } error:error];
+    void (^callback)(void) = gDuringToggleSecurityWrite; gDuringToggleSecurityWrite = nil;
+    if (callback) callback();
+    return success;
 }
 static void PXToggleFixtureNotification(CFNotificationCenterRef center, CFStringRef name,
                                        const void *object, CFDictionaryRef info, Boolean immediately) {
@@ -99,6 +106,8 @@ static void PXToggleFixtureNotification(CFNotificationCenterRef center, CFString
              @"com.hydra.tlinkios.toggleDeviceThemeSpoof"] containsObject:topic] &&
           [gStore capture:^NSDictionary *(NSError **error) { (void)error; return @{}; } error:NULL] != nil),
           "toggle secondary notification follows committed security write outside source gate");
+    void (^callback)(void) = gDuringToggleSecondaryNotification; gDuringToggleSecondaryNotification = nil;
+    if (callback) callback();
 }
 // Only provider signatures are needed for unexercised legacy branches. Existing
 // values skip them; the IDFA provider below exercises the missing-value path.
@@ -322,6 +331,7 @@ ARTIFACT_SINGLETON
 }
 @property (nonatomic, strong) NSError *error;
 @property (nonatomic, strong) NSMutableDictionary *settings;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, id> *identifierToggleOperations;
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSMutableDictionary *spoofCache;
 - (NSString *)profileIdentityPath;
@@ -1990,6 +2000,133 @@ static void TestIdentifierToggleAcknowledgement(void) {
           "invalid toggle keys fail before settings source or notification work");
 }
 
+static PXDeviceGroupFixture *ToggleReentryFixture(void) {
+    PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
+    manager.settings = [@{ @"IDFA": @NO, @"WiFi": @NO, @"Battery": @NO, @"DeviceTheme": @NO } mutableCopy];
+    [manager saveSettings];
+    CHECK(PXWriteSecurityBool(@"wifiSpoofEnabled", NO, NULL) && PXWriteSecurityBool(@"batterySpoofEnabled", NO, NULL),
+          "toggle reentry fixture seeds primary and secondary sources");
+    return manager;
+}
+static void TestIdentifierToggleReentry(void) {
+    PXDeviceGroupFixture *manager = ToggleReentryFixture();
+    __block BOOL inner = NO; __block NSDictionary *latest = nil, *cache = nil;
+    NSUInteger notices = gBatchNotifications, writes = gToggleSecurityWrites, topics = gToggleSecondaryNotices;
+    gDuringRequiredNotification = ^{
+        inner = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+        manager.error = [NSError errorWithDomain:@"fixture.newer" code:995 userInfo:nil];
+        [manager seedPersistenceCaches]; latest = BatchSnapshot(); cache = [manager persistenceCaches];
+    };
+    BOOL success = [manager setIdentifierEnabledAndPersist:NO forType:@"WiFi"];
+    CHECK(!success && inner && [manager.settings[@"WiFi"] boolValue] && [PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] &&
+          [latest isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && manager.error.code == 995 &&
+          notices + 2 == gBatchNotifications && writes + 1 == gToggleSecurityWrites && topics + 1 == gToggleSecondaryNotices &&
+          !manager.identifierToggleOperations.count,
+          "newer same identifier notification call survives older forward path rollback caches and shared error");
+
+    manager = ToggleReentryFixture(); notices = gBatchNotifications; writes = gToggleSecurityWrites;
+    gDuringRequiredNotification = ^{
+        CHECK([manager setIdentifierEnabledAndPersist:NO forType:@"WiFi"] &&
+              [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"], "toggle ABA successors both commit");
+        latest = BatchSnapshot();
+    };
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && [latest isEqual:BatchSnapshot()] &&
+          notices + 3 == gBatchNotifications && writes + 2 == gToggleSecurityWrites && !manager.identifierToggleOperations.count,
+          "matching ABA values never restore superseded toggle ownership or permit stale secondary publication");
+
+    manager = ToggleReentryFixture();
+    gDuringRequiredNotification = ^{ inner = [manager setIdentifierEnabledAndPersist:YES forType:@"Battery"]; };
+    CHECK([manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && inner &&
+          [manager.settings[@"Battery"] boolValue] && [PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] &&
+          [PXReadSecuritySetting(@"batterySpoofEnabled") boolValue] && !manager.identifierToggleOperations.count,
+          "different identifier reentry preserves both successful operations");
+
+    manager = ToggleReentryFixture(); notices = gBatchNotifications;
+    gToggleMissingValue = @"IDFA";
+    gDuringToggleGeneration = ^{
+        inner = [manager setIdentifierEnabledAndPersist:NO forType:@"IDFA"]; latest = BatchSnapshot();
+    };
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"IDFA"] && inner &&
+          [latest isEqual:BatchSnapshot()] && notices + 1 == gBatchNotifications && ![manager.settings[@"IDFA"] boolValue],
+          "provider reentry supersedes older toggle before its settings commit");
+
+    for (NSUInteger boundary = 0; boundary < 2; boundary++) {
+        manager = ToggleReentryFixture(); notices = gBatchNotifications; writes = gToggleSecurityWrites; topics = gToggleSecondaryNotices;
+        BOOL requested = boundary == 1;
+        if (!requested) gToggleSecurityFailures = 1;
+        gDuringToggleSecurityWrite = ^{
+            inner = [manager setIdentifierEnabledAndPersist:!requested forType:@"WiFi"];
+            manager.error = [NSError errorWithDomain:@"fixture.newer" code:995 userInfo:nil]; latest = BatchSnapshot();
+        };
+        CHECK(![manager setIdentifierEnabledAndPersist:requested forType:@"WiFi"] && inner &&
+              [latest isEqual:BatchSnapshot()] && manager.error.code == 995 &&
+              [manager.settings[@"WiFi"] boolValue] == !requested &&
+              [PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] == !requested &&
+              writes + 2 == gToggleSecurityWrites && topics + 1 == gToggleSecondaryNotices && notices + 2 == gBatchNotifications,
+              "secondary return reentry suppresses older failure rollback or obsolete success notification");
+    }
+
+    // Arrange the successor after recovery starts, at either primary rollback
+    // notification or the secondary rollback writer's post-commit callback.
+    for (NSUInteger boundary = 0; boundary < 2; boundary++) {
+        manager = ToggleReentryFixture(); writes = gToggleSecurityWrites; topics = gToggleSecondaryNotices;
+        gToggleSecurityFailures = 1;
+        void (^newer)(void) = ^{
+            inner = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+            manager.error = [NSError errorWithDomain:@"fixture.newer" code:995 userInfo:nil];
+            [manager seedPersistenceCaches]; latest = BatchSnapshot(); cache = [manager persistenceCaches];
+        };
+        gDuringToggleSecurityWrite = ^{
+            if (boundary == 0) gDuringRequiredNotification = newer;
+            else gDuringToggleSecurityWrite = newer;
+        };
+        CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && inner &&
+              [latest isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && manager.error.code == 995 &&
+              [manager.settings[@"WiFi"] boolValue] && [PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] &&
+              writes + (boundary == 0 ? 2 : 3) == gToggleSecurityWrites && topics + 1 == gToggleSecondaryNotices &&
+              !manager.identifierToggleOperations.count,
+              "successor during rollback keeps newer sources caches error and skips remaining stale effects");
+    }
+
+    manager = ToggleReentryFixture(); writes = gToggleSecurityWrites; topics = gToggleSecondaryNotices;
+    gDuringToggleSecondaryNotification = ^{
+        inner = [manager setIdentifierEnabledAndPersist:NO forType:@"WiFi"]; latest = BatchSnapshot();
+    };
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && inner && [latest isEqual:BatchSnapshot()] &&
+          writes + 2 == gToggleSecurityWrites && topics + 2 == gToggleSecondaryNotices && !manager.identifierToggleOperations.count,
+          "secondary notification successor prevents older verification rollback");
+
+    manager = ToggleReentryFixture(); gToggleMissingValue = @"IDFA";
+    NSDictionary *before = BatchSnapshot(); BOOL threw = NO;
+    gDuringToggleGeneration = ^{ [NSException raise:@"fixture.toggle.reentry" format:@"provider exception"]; };
+    @try { [manager setIdentifierEnabledAndPersist:YES forType:@"IDFA"]; }
+    @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && !manager.identifierToggleOperations.count && [before isEqual:BatchSnapshot()] &&
+          [manager setIdentifierEnabledAndPersist:NO forType:@"IDFA"],
+          "throwing provider releases toggle token without changing legacy exception policy");
+
+    manager = ToggleReentryFixture(); threw = NO;
+    gDuringRequiredNotification = ^{ [NSException raise:@"fixture.toggle.reentry" format:@"observer exception"]; };
+    @try { [manager setIdentifierEnabled:YES forType:@"WiFi"]; }
+    @catch (NSException *exception) { (void)exception; threw = YES; }
+    CHECK(threw && !manager.identifierToggleOperations.count && [manager setIdentifierEnabledAndPersist:NO forType:@"WiFi"],
+          "throwing void setter observer releases toggle token and preserves later operations");
+
+    id oldOperation = [manager beginIdentifierToggleForType:@"WiFi"];
+    id newOperation = [manager beginIdentifierToggleForType:@"WiFi"];
+    [manager finishIdentifierToggle:oldOperation forType:@"WiFi"];
+    CHECK([manager validateIdentifierToggle:newOperation forType:@"WiFi" error:NULL] &&
+          ![manager validateIdentifierToggle:oldOperation forType:@"WiFi" error:NULL], "stale toggle cleanup cannot revoke newer owner token");
+    [manager finishIdentifierToggle:newOperation forType:@"WiFi"];
+    CHECK(!manager.identifierToggleOperations.count, "toggle token registry removes completed keys");
+    __weak PXDeviceGroupFixture *weakOwner = nil; id retainedToken = nil;
+    @autoreleasepool {
+        PXDeviceGroupFixture *owner = [PXDeviceGroupFixture new]; weakOwner = owner;
+        retainedToken = [owner beginIdentifierToggleForType:@"WiFi"];
+    }
+    CHECK(!weakOwner && retainedToken, "bare toggle token never retains its manager owner");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2017,6 +2154,7 @@ int main(void) {
         TestDashboardHardwareCapture(manager, Identity(@"a"), Identity(@"b"));
         TestStandaloneSettingsSaves(manager, Identity(@"a"));
         TestIdentifierToggleAcknowledgement();
+        TestIdentifierToggleReentry();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

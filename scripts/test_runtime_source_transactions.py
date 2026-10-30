@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4Y-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4Z-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -106,8 +106,9 @@ def source_contracts():
         assert case in fixture_settings, case
     assert 'TestStandaloneSettingsSaves(manager, Identity(@"a"))' in fixture_settings
     toggle = method(manager, '- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type')
-    apply = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error')
-    assert 'BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type error:&writeError]' in toggle
+    apply_wrapper = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error')
+    apply = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation error:(NSError **)error')
+    assert 'BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation error:&writeError]' in toggle
     assert 'if (writeSuccess && primarySuccess && secondarySuccess) return YES;' in toggle
     assert toggle.index('type = [type copy]') < toggle.index('[self applyIdentifierEnabled:')
     assert toggle.index('NSError *failure = writeError ?:') < toggle.index('self.settings[type] = @(previous)')
@@ -115,7 +116,8 @@ def source_contracts():
     assert '[self applyIdentifierEnabled:enabled forType:type error:NULL]' in method(manager, '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type')
     assert 'if (![self saveSettingsWithError:&saveError])' in apply
     assert apply.index('return NO;', apply.index('if (![self saveSettingsWithError:')) < apply.index('PXWriteSecurityBool')
-    assert apply.index('type = [type copy]') < apply.index('self.settings[type] = @(enabled)')
+    assert apply_wrapper.index('type = [type copy]') < apply_wrapper.index('beginIdentifierToggleForType:')
+    assert apply.index('validateIdentifierToggle:') < apply.index('self.settings[type] = @(enabled)')
     assert apply.index('persistedState == nil') < apply.index('PXWriteSecurityBool')
     assert 'if (error) *error = self.error;' in apply and 'return NO;' in apply[apply.index('self.error = secondaryError'):]
     assert save.index('PXPostSettingsChangedNotification()') < save.index('return YES;')
@@ -133,6 +135,42 @@ def source_contracts():
                  'invalid toggle keys fail before settings source or notification work'):
         assert case in fixture_settings, case
     assert 'TestIdentifierToggleAcknowledgement();' in fixture_settings
+    begin = method(manager, '- (id)beginIdentifierToggleForType:(NSString *)type')
+    validate = method(manager, '- (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error')
+    finish = method(manager, '- (void)finishIdentifierToggle:(id)operation forType:(NSString *)type')
+    for body in (begin, validate, finish):
+        assert '@synchronized (self)' in body
+        for forbidden in ('PXPerform', 'PXPost', 'PXWriteSecurity', 'saveSettings', 'generateIDFA', 'dispatch_'):
+            assert forbidden not in body
+    assert 'self.identifierToggleOperations[type] = operation' in begin and '[NSObject new]' in begin
+    assert 'self.identifierToggleOperations[type] == operation' in validate
+    assert 'if (self.identifierToggleOperations[type] == operation)' in finish
+    assert 'removeObjectForKey:type' in finish and 'code:6035' in validate
+    cleanup = '@finally { [self finishIdentifierToggle:operation forType:type]; }'
+    assert cleanup in toggle and cleanup in apply_wrapper
+    assert toggle.index('validateIdentifierToggle:') < toggle.index('NSDictionary *persistedSettings')
+    assert 'if (secondaryKey && [self validateIdentifierToggle:operation forType:type error:NULL])' in toggle
+    assert 'if (notificationName && [self validateIdentifierToggle:operation forType:type error:NULL])' in toggle
+    assert 'if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = failure;' in toggle
+    assert apply.count('validateIdentifierToggle:operation') >= 8
+    assert 'if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;\n    NSError *saveError = nil;' in apply
+    assert apply.index('validateIdentifierToggle:', apply.index('saveSettingsWithError:')) < apply.index('persistedState == nil')
+    assert apply.index('validateIdentifierToggle:', apply.index('BOOL secondaryCommitted =')) < apply.index('CFNotificationCenterPostNotification')
+    assert 'return [self validateIdentifierToggle:operation forType:type error:error];' in apply
+    for case in ('newer same identifier notification call survives older forward path rollback caches and shared error',
+                 'matching ABA values never restore superseded toggle ownership or permit stale secondary publication',
+                 'different identifier reentry preserves both successful operations',
+                 'provider reentry supersedes older toggle before its settings commit',
+                 'secondary return reentry suppresses older failure rollback or obsolete success notification',
+                 'successor during rollback keeps newer sources caches error and skips remaining stale effects',
+                 'secondary notification successor prevents older verification rollback',
+                 'throwing provider releases toggle token without changing legacy exception policy',
+                 'throwing void setter observer releases toggle token and preserves later operations',
+                 'stale toggle cleanup cannot revoke newer owner token',
+                 'toggle token registry removes completed keys',
+                 'bare toggle token never retains its manager owner'):
+        assert case in fixture_settings, case
+    assert 'TestIdentifierToggleReentry();' in fixture_settings
     assert '[transaction dictionaryAtPath:prefsFile error:writeError]' in save
     assert 'setDictionary:saveDict atPath:prefsFile' in save and 'writeToFile:prefsFile' not in save
     load = method(manager, '- (void)loadSettings')
