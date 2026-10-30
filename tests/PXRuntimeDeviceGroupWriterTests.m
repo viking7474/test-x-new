@@ -3750,6 +3750,110 @@ static void TestApplicationEnabledCacheOwnership(void) {
 #endif
 }
 
+static void TestScopeDecisionReaderPackets(void) {
+    gManagerLoadRole = YES;
+    PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
+    manager.appEnabledLastReloadTime = NSDate.date.timeIntervalSince1970;
+    manager.scopedApps[@"fixture.packet"] = [@{ @"enabled": @YES } mutableCopy];
+    manager.scopedApps[@"fixture.packet_timestamp"] = [@{ @"enabled": @NO } mutableCopy];
+    NSUInteger reads = gVerificationSourceReads, captures = gVerificationCaptures, attempts = gStandaloneSourceAttempts, notices = gBatchNotifications;
+    for (NSUInteger i = 0; i < 3; i++)
+        CHECK([manager shouldSpoofForBundle:@"fixture.packet"] && ![manager shouldSpoofForBundle:@"fixture.packet_timestamp"],
+              "spoof decisions and dates never collide with another accepted caller ID");
+    CHECK(manager.spoofCache.count == 2 && [manager.spoofCache[@"fixture.packet"] isKindOfClass:NSDictionary.class] &&
+          [manager.spoofCache[@"fixture.packet"][@"timestamp"] isKindOfClass:NSDate.class],
+          "spoof cache owns one typed packet per ID without derived timestamp keys");
+    manager.scopedApps[@"fixture.packet"][@"enabled"] = @NO;
+    CHECK([manager shouldSpoofForBundle:@"fixture.packet"], "spoof packet retains fresh thirty second cached decision");
+    manager.spoofCache[@"fixture.packet"] = @{ @"enabled": @YES, @"timestamp": [NSDate dateWithTimeIntervalSinceNow:-31.0] };
+    CHECK(![manager shouldSpoofForBundle:@"fixture.packet"], "expired spoof packet recomputes current local scope");
+    NSArray *badPackets = @[@YES, @[], NSNull.null, @{ @"enabled": @YES },
+        @{ @"enabled": @YES, @"timestamp": @1 }, @{ @"enabled": @[], @"timestamp": NSDate.date }];
+    for (id packet in badPackets) {
+        manager.spoofCache[@"fixture.packet"] = packet;
+        CHECK(![manager shouldSpoofForBundle:@"fixture.packet"] && [manager.spoofCache[@"fixture.packet"][@"timestamp"] isKindOfClass:NSDate.class] &&
+              [manager.spoofCache[@"fixture.packet"][@"enabled"] isKindOfClass:NSNumber.class],
+              "malformed or legacy spoof packets miss safely and are replaced by current decisions");
+    }
+    NSArray *badEnabledPackets = @[@YES, @[], NSNull.null, @{ @"enabled": @YES, @"timestamp": NSDate.date },
+        @{ @"enabled": @[], @"timestamp": @(NSDate.date.timeIntervalSince1970) }];
+    for (id packet in badEnabledPackets) {
+        manager.appEnabledCache[@"fixture.packet"] = packet;
+        CHECK(![manager isApplicationEnabled:@"fixture.packet"] &&
+              [manager.appEnabledCache[@"fixture.packet"][@"enabled"] isKindOfClass:NSNumber.class] &&
+              [manager.appEnabledCache[@"fixture.packet"][@"timestamp"] isKindOfClass:NSNumber.class],
+              "malformed enabled packets never reach unsupported scalar selectors");
+    }
+    for (id invalid in @[@YES, @[], NSNull.null, @{ @"enabled": @[] }, @{ @"enabled": NSNull.null }]) {
+        manager.scopedApps[@"fixture.invalid"] = invalid;
+        [manager.spoofCache removeAllObjects]; [manager.appEnabledCache removeAllObjects];
+        CHECK(![manager shouldSpoofForBundle:@"fixture.invalid"] && ![manager isApplicationEnabled:@"fixture.invalid"],
+              "malformed direct scope record or flag fails closed in both manager readers");
+    }
+    manager.scopedApps = [@{ @"fixture.Case": @{ @"enabled": @"YES" }, @1: @{ @"enabled": @YES } } mutableCopy];
+    [manager.spoofCache removeAllObjects]; [manager.appEnabledCache removeAllObjects];
+    CHECK([manager isApplicationEnabled:@"fixture.case"] && ![manager shouldSpoofForBundle:@"fixture.case"],
+          "case fallback skips malformed keys while exact spoof lookup keeps its existing policy");
+    for (id root in @[@YES, @[], NSNull.null]) {
+        manager.scopedApps = root;
+        [manager.spoofCache removeAllObjects]; [manager.appEnabledCache removeAllObjects];
+        CHECK(![manager shouldSpoofForBundle:@"fixture.invalid.root"] && ![manager isApplicationEnabled:@"fixture.invalid.root"] &&
+              ![manager isExtensionEnabled:@"fixture.invalid.root"], "non dictionary local scope cannot reach unsafe subscripting or enumeration");
+    }
+    manager.scopedApps = [NSMutableDictionary dictionary]; [manager.spoofCache removeAllObjects];
+    manager.scopedApps[@"fixture.parent"] = @{ @"enabled": @"YES", @"extensionPattern": @"fixture.parent.*" };
+    CHECK([manager isExtensionEnabled:@"fixture.parent.child"] && [manager shouldSpoofForBundle:@"fixture.parent.child"] &&
+          [manager isExtensionEnabled:@"FIXTURE.PARENTSuffix"], "extension matching preserves existing case insensitive and permissive wildcard conversion");
+    manager.scopedApps[@"fixture.parent.child"] = @[]; [manager.spoofCache removeAllObjects];
+    CHECK(![manager shouldSpoofForBundle:@"fixture.parent.child"], "present malformed direct member cannot fall through to an enabled extension pattern");
+    manager.scopedApps[@"com.hydra.tlinkios"] = @{ @"enabled": @YES };
+    CHECK([manager shouldSpoofForBundle:@"com.hydra.tlinkios"] && ![manager isExtensionEnabled:@"com.hydra.tlinkios"] &&
+          ![manager isExtensionEnabled:@"com.apple.fixture"], "direct spoof policy and extension self system exclusions remain distinct");
+    CHECK([manager isBundleIDMatch:@"" withPattern:@""] && [manager isBundleIDMatch:@"FIXTURE.Parent" withPattern:@"fixture.parent"] &&
+          ![manager isBundleIDMatch:@"fixtureXparent" withPattern:@"fixture.parent"] && ![manager isBundleIDMatch:@"anything" withPattern:@"["],
+          "regex helper keeps empty exact dot case and invalid regex behavior");
+    NSDictionary *cache = [manager.spoofCache copy]; NSUInteger snapshots = gAppEnabledSnapshotCaptures;
+    CHECK(![manager shouldSpoofForBundle:nil] && ![manager shouldSpoofForBundle:@""] && ![manager shouldSpoofForBundle:(id)@1] &&
+          ![manager isExtensionEnabled:nil] && ![manager isExtensionEnabled:@""] && ![manager isExtensionEnabled:(id)@[]] &&
+          ![manager isBundleIDMatch:(id)@1 withPattern:@"fixture"] && ![manager isBundleIDMatch:@"fixture" withPattern:(id)@[]] &&
+          [cache isEqual:manager.spoofCache] && snapshots == gAppEnabledSnapshotCaptures,
+          "scope helper invalid IDs reject before cache snapshot or string operations");
+    CHECK(reads == gVerificationSourceReads && captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts && notices == gBatchNotifications,
+          "scope reader packet and shape checks add no file source writes or notifications");
+    manager = ScopeMetadataFixture(NO);
+    CHECK(![manager shouldSpoofForBundle:@"fixture.installed"] && manager.spoofCache.count == 2,
+          "scope writer invalidation starts with prior fixture cache and fresh spoof packet");
+    CHECK([manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:NULL] && !manager.spoofCache.count &&
+          [manager shouldSpoofForBundle:@"fixture.installed"], "existing source writer clears new spoof packets before subsequent decisions");
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+    NSDictionary *runtime = @{ @"schemaVersion": @1, @"globalScope": @{ @"ScopedApps": @{
+        @"fixture.direct": @{ @"enabled": @YES }, @"fixture.parent": @{ @"enabled": @YES, @"extensionPattern": @"fixture.parent.*" },
+        @"fixture.bad": @[], @"fixture.parent.blocked": @{ @"enabled": @[] } } } };
+    gAppEnabledReadView = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:runtime readerGeneration:1];
+    manager = [PXDeviceGroupFixture new];
+    manager.scopedApps[@"fixture.direct"] = @{ @"enabled": @NO };
+    manager.spoofCache[@"fixture.direct"] = @{ @"enabled": @NO, @"timestamp": NSDate.date };
+    cache = [manager.spoofCache copy]; reads = gVerificationSourceReads; captures = gVerificationCaptures; attempts = gStandaloneSourceAttempts;
+    gManagerLoadRole = NO;
+    @try {
+        CHECK([manager shouldSpoofForBundle:@"fixture.direct"] && [manager shouldSpoofForBundle:@"fixture.parent.child"] &&
+              ![manager shouldSpoofForBundle:@"fixture.bad"] && ![manager shouldSpoofForBundle:@"fixture.parent.blocked"] &&
+              [manager isExtensionEnabled:@"fixture.parent.child"] && [cache isEqual:manager.spoofCache],
+              "RootHide spoof and extension readers keep snapshot authority over stale local packets and scope");
+        manager.spoofCache[@"fixture.direct"] = @{ @"enabled": @YES, @"timestamp": NSDate.date };
+        cache = [manager.spoofCache copy];
+        NSDictionary *broken = @{ @"schemaVersion": @1, @"globalScope": @{ @"ScopedApps": @[] } };
+        gAppEnabledReadView = [[PXRuntimeReadSnapshot alloc] initWithPropertyList:broken readerGeneration:2];
+        CHECK(![manager shouldSpoofForBundle:@"fixture.direct"] && ![manager isExtensionEnabled:@"fixture.parent.child"] &&
+              [cache isEqual:manager.spoofCache], "malformed injected scope fails closed without reviving local spoof cache");
+        snapshots = gAppEnabledSnapshotCaptures;
+        CHECK(![manager shouldSpoofForBundle:(id)@1] && ![manager isExtensionEnabled:(id)@1] && snapshots == gAppEnabledSnapshotCaptures &&
+              reads == gVerificationSourceReads && captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts,
+              "RootHide scope helper guards and snapshot paths never enter owner source I O");
+    } @finally { gManagerLoadRole = YES; gAppEnabledReadView = nil; }
+#endif
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3796,6 +3900,7 @@ int main(void) {
         TestExtensionScopeWorkflowUI();
         TestExplicitScopeReload();
         TestApplicationEnabledCacheOwnership();
+        TestScopeDecisionReaderPackets();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

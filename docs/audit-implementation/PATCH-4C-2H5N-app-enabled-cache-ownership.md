@@ -107,3 +107,7 @@ from property declarations and asserts a property-only state fragment.
 
 Native Foundation/Theos builds for both schemes and real device behavior remain
 pending macOS CI/device testing; local source checks are not native runtime proof.
+
+2026-10-30: user reports H5N build pass. H5O follows with typed scope decision
+packets and reader shape guards; local Windows validation still does not imply
+native/device execution.

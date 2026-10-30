@@ -75,6 +75,9 @@ SIGNATURES = [
 ]
 SIGNATURES += ['- (void)loadSettings',
                '- (BOOL)isApplicationEnabled:(NSString *)bundleID',
+               '- (BOOL)shouldSpoofForBundle:(NSString *)bundleID',
+               '- (BOOL)isExtensionEnabled:(NSString *)bundleID',
+               '- (BOOL)isBundleIDMatch:(NSString *)targetBundleID withPattern:(NSString *)patternBundleID',
                '- (void)loadScopedApps',
                '- (BOOL)reloadScopedAppsWithError:(NSError **)error',
                '- (BOOL)addApplicationsToScopeAndPersist:(NSArray<NSString *> *)bundleIDs error:(NSError **)error',
@@ -90,6 +93,7 @@ SIGNATURES += ['- (void)loadSettings',
                '- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs',
                '- (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error']
 STATICS = [
+    'static BOOL PXScopeRecordEnabled(id record)',
     'static NSString *PXScopeOptionalKVCString(id proxy, NSString *key)',
     'static NSDictionary *PXPrepareScopeAdditionRecord(NSString *bundleID, Class proxyClass)',
     'static BOOL PXScopeVersionFieldsMatch(NSDictionary *record, NSDictionary *basis)',
@@ -199,7 +203,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5N-partial'
+    assert manifest['rollout'] == '4C.2H5O-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

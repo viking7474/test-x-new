@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5N-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5O-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -693,7 +693,7 @@ def source_contracts():
     enabled_reader = method(manager, '- (BOOL)isApplicationEnabled:(NSString *)bundleID')
     invalid_id = 'if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) return NO;'
     assert enabled_reader.index(invalid_id) < enabled_reader.index('PX_IDENTIFIER_RUNTIME_READ_OPERATION;')
-    assert enabled_reader.index('#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)') < enabled_reader.index('PXCaptureRuntimeSnapshot()') < enabled_reader.index('NSDictionary *cachedResult = _appEnabledCache[bundleID];')
+    assert enabled_reader.index('#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)') < enabled_reader.index('PXCaptureRuntimeSnapshot()') < enabled_reader.index('id cachedValue = _appEnabledCache[bundleID];')
     assert 'static NSMutableDictionary *_appEnabledCache' not in manager
     assert 'static ' not in enabled_reader and 'dispatch_once' not in enabled_reader
     state = manager.split('// Per-instance app-enabled reader state.', 1)[1].split('- (BOOL)refreshCanonicalCellularIdentityForCurrentProfile;', 1)[0]
@@ -731,6 +731,69 @@ def source_contracts():
                  'explicit sibling reload adopts canonical change and invalidates its own stale decision',
                  'RootHide injected enabled reader keeps snapshot authority before owner cache throttle and file paths',
                  'RootHide invalid IDs do not capture snapshots or mutate instance state'):
+        assert case in fixture_settings, case
+    spoof = method(manager, '- (BOOL)shouldSpoofForBundle:(NSString *)bundleID')
+    extension = method(manager, '- (BOOL)isExtensionEnabled:(NSString *)bundleID')
+    matcher = method(manager, '- (BOOL)isBundleIDMatch:(NSString *)targetBundleID withPattern:(NSString *)patternBundleID')
+    for body in (spoof, extension):
+        assert body.index(invalid_id) < body.index('PX_IDENTIFIER_RUNTIME_READ_OPERATION;')
+        assert 'PXCaptureRuntimeSnapshot()' in body
+    assert spoof.index('PXCaptureRuntimeSnapshot()') < spoof.index('id cachedValue = self.spoofCache[bundleID];')
+    assert 'stringByAppendingString:' not in spoof and '@"_timestamp"' not in spoof
+    assert 'NSDictionary *cached = [cachedValue isKindOfClass:NSDictionary.class] ? cachedValue : nil;' in spoof
+    assert '[cachedDecision isKindOfClass:NSNumber.class] || [cachedDecision isKindOfClass:NSString.class]' in spoof
+    assert '[cachedAt isKindOfClass:NSDate.class]' in spoof and 'timeIntervalSinceDate:cachedAt] < 30.0' in spoof
+    assert 'return PXRuntimeReadBool(cachedDecision);' in spoof
+    assert 'self.spoofCache[bundleID] = @{ @"enabled": @(isInScope), @"timestamp": [NSDate date] };' in spoof
+    assert spoof.count('self.spoofCache[bundleID] =') == 1
+    assert 'NSDictionary *scopedApps = self.scopedApps;' in spoof
+    assert 'if (![scopedApps isKindOfClass:NSDictionary.class]) scopedApps = @{};' in spoof
+    assert 'BOOL isInScope = entry != nil;' in spoof and 'isInScope = PXScopeRecordEnabled(entry);' in spoof
+    assert 'if (!isInScope)' in spoof and '[self isExtensionEnabled:bundleID]' in spoof
+    helper = manager.split('static BOOL PXScopeRecordEnabled(id record) {', 1)[1].split('static BOOL PXValidateManagerSettingsSources', 1)[0]
+    assert 'return [record isKindOfClass:NSDictionary.class] && PXRuntimeReadBool(record[@"enabled"]);' in helper
+    assert 'static BOOL PXScopeRecordEnabled(id record)' in group_recipe
+    assert enabled_reader.count('PXScopeRecordEnabled(') == 3 and ' boolValue]' not in enabled_reader
+    assert enabled_reader.count('scopedApps = self.scopedApps;') == 2
+    assert enabled_reader.count('if (![scopedApps isKindOfClass:NSDictionary.class]) scopedApps = @{};') == 2
+    assert '[key isKindOfClass:NSString.class] && [[key lowercaseString]' in enabled_reader
+    assert 'NSDictionary *cachedResult = [cachedValue isKindOfClass:NSDictionary.class] ? cachedValue : nil;' in enabled_reader
+    assert '[cachedTime isKindOfClass:NSNumber.class] || [cachedTime isKindOfClass:NSString.class]' in enabled_reader
+    assert '[cachedDecision isKindOfClass:NSNumber.class] || [cachedDecision isKindOfClass:NSString.class]' in enabled_reader
+    assert 'if (![scopedApps isKindOfClass:NSDictionary.class]) return NO;' in extension
+    assert '[bundleID hasPrefix:@"com.apple."]' in extension and '[bundleID isEqualToString:@"com.hydra.tlinkios"]' in extension
+    assert 'return PXRuntimeReadBool(appInfo[@"enabled"]);' in extension
+    assert 'if (![targetBundleID isKindOfClass:NSString.class] || ![patternBundleID isKindOfClass:NSString.class]) return NO;' in matcher
+    assert r'stringByReplacingOccurrencesOfString:@"." withString:@"\\."' in matcher
+    assert r'stringByReplacingOccurrencesOfString:@"\\.*" withString:@".*"' in matcher
+    assert 'NSRegularExpressionCaseInsensitive' in matcher and 'stringWithFormat:@"^%@$", regexPattern' in matcher
+    for body in (spoof, extension, matcher):
+        for forbidden in ('PXReadRuntimeSourceDictionary', 'PXPerformRuntimeSourceWrite', 'PXPerformStandaloneRuntimeSourceWrite',
+                          'dictionaryWithContentsOfFile:', 'saveScopedApps', 'saveSettings', 'dispatch_async', 'dispatch_sync'):
+            assert forbidden not in body
+    for signature in ('- (BOOL)shouldSpoofForBundle:(NSString *)bundleID', '- (BOOL)isExtensionEnabled:(NSString *)bundleID',
+                      '- (BOOL)isBundleIDMatch:(NSString *)targetBundleID withPattern:(NSString *)patternBundleID'):
+        assert repr(signature) in group_recipe
+    assert 'TestScopeDecisionReaderPackets();' in fixture_settings
+    for case in ('spoof decisions and dates never collide with another accepted caller ID',
+                 'spoof cache owns one typed packet per ID without derived timestamp keys',
+                 'spoof packet retains fresh thirty second cached decision',
+                 'expired spoof packet recomputes current local scope',
+                 'malformed or legacy spoof packets miss safely and are replaced by current decisions',
+                 'malformed enabled packets never reach unsupported scalar selectors',
+                 'malformed direct scope record or flag fails closed in both manager readers',
+                 'case fallback skips malformed keys while exact spoof lookup keeps its existing policy',
+                 'non dictionary local scope cannot reach unsafe subscripting or enumeration',
+                 'extension matching preserves existing case insensitive and permissive wildcard conversion',
+                 'present malformed direct member cannot fall through to an enabled extension pattern',
+                 'direct spoof policy and extension self system exclusions remain distinct',
+                 'regex helper keeps empty exact dot case and invalid regex behavior',
+                 'scope helper invalid IDs reject before cache snapshot or string operations',
+                 'scope reader packet and shape checks add no file source writes or notifications',
+                 'existing source writer clears new spoof packets before subsequent decisions',
+                 'RootHide spoof and extension readers keep snapshot authority over stale local packets and scope',
+                 'malformed injected scope fails closed without reviving local spoof cache',
+                 'RootHide scope helper guards and snapshot paths never enter owner source I O'):
         assert case in fixture_settings, case
     for token in ('nested writer shares staged dictionaries', 'ignored nested failure', 'rollback restores exact prior bytes',
                   'rollback preserves original source permissions', 'validate all journal paths before any recovery writes',

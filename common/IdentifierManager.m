@@ -184,6 +184,10 @@ static BOOL PXRestoreToggleBeforeImage(NSMutableDictionary *target, NSString *ke
     return YES;
 }
 
+static BOOL PXScopeRecordEnabled(id record) {
+    return [record isKindOfClass:NSDictionary.class] && PXRuntimeReadBool(record[@"enabled"]);
+}
+
 // Validate the complete load packet before replacing either live dictionary.
 // Missing legacy fields remain valid; present structural/scalar fields must be safe.
 static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error) {
@@ -3505,14 +3509,17 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     }
 #endif
     // Check if we have a cached result that's still valid
-    NSDictionary *cachedResult = _appEnabledCache[bundleID];
-    if (cachedResult) {
-        NSTimeInterval timestamp = [cachedResult[@"timestamp"] doubleValue];
+    id cachedValue = _appEnabledCache[bundleID];
+    NSDictionary *cachedResult = [cachedValue isKindOfClass:NSDictionary.class] ? cachedValue : nil;
+    id cachedTime = cachedResult[@"timestamp"], cachedDecision = cachedResult[@"enabled"];
+    if (([cachedTime isKindOfClass:NSNumber.class] || [cachedTime isKindOfClass:NSString.class]) &&
+        ([cachedDecision isKindOfClass:NSNumber.class] || [cachedDecision isKindOfClass:NSString.class])) {
+        NSTimeInterval timestamp = [cachedTime doubleValue];
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         
         // If the cache hasn't expired, use it
         if (now - timestamp < 30.0) {
-            return [cachedResult[@"enabled"] boolValue];
+            return PXRuntimeReadBool(cachedDecision);
         }
     }
     
@@ -3538,8 +3545,11 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     }
     
     // Direct equality check first for performance
-    if (self.scopedApps[bundleID]) {
-        BOOL isEnabled = [self.scopedApps[bundleID][@"enabled"] boolValue];
+    NSDictionary *scopedApps = self.scopedApps;
+    if (![scopedApps isKindOfClass:NSDictionary.class]) scopedApps = @{};
+    id entry = scopedApps[bundleID];
+    if (entry != nil) {
+        BOOL isEnabled = PXScopeRecordEnabled(entry);
         
         if (shouldLog) {
             PXLog(@"[WeaponX] IdentifierManager DEBUG: Found app %@ in scopedApps, enabled = %@", bundleID, isEnabled ? @"YES" : @"NO");
@@ -3561,8 +3571,11 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     }
     
     // Check again after potentially reloading the scoped apps
-    if (self.scopedApps[bundleID]) {
-        BOOL isEnabled = [self.scopedApps[bundleID][@"enabled"] boolValue];
+    scopedApps = self.scopedApps;
+    if (![scopedApps isKindOfClass:NSDictionary.class]) scopedApps = @{};
+    entry = scopedApps[bundleID];
+    if (entry != nil) {
+        BOOL isEnabled = PXScopeRecordEnabled(entry);
         
         if (shouldLog) {
             PXLog(@"[WeaponX] IdentifierManager DEBUG: Found app %@ after reload, enabled = %@", bundleID, isEnabled ? @"YES" : @"NO");
@@ -3579,9 +3592,9 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     }
     
     NSString *lowercaseBundleID = [bundleID lowercaseString];
-    for (NSString *key in self.scopedApps) {
-        if ([[key lowercaseString] isEqualToString:lowercaseBundleID]) {
-            BOOL isEnabled = [self.scopedApps[key][@"enabled"] boolValue];
+    for (id key in scopedApps) {
+        if ([key isKindOfClass:NSString.class] && [[key lowercaseString] isEqualToString:lowercaseBundleID]) {
+            BOOL isEnabled = PXScopeRecordEnabled(scopedApps[key]);
             
             if (shouldLog) {
                 PXLog(@"[WeaponX] IdentifierManager DEBUG: Found app %@ via case-insensitive match with %@, enabled = %@", 
@@ -3597,7 +3610,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
     // App not found, only log this information sparingly
     if (shouldLog) {
         // Limit the keys we log to avoid excessive memory usage
-        NSArray *allKeys = [self.scopedApps allKeys];
+        NSArray *allKeys = [scopedApps allKeys];
         NSArray *limitedKeys = allKeys.count > 10 ? [allKeys subarrayWithRange:NSMakeRange(0, 10)] : allKeys;
         
         PXLog(@"[WeaponX] IdentifierManager DEBUG: App %@ not found in scoped apps list", bundleID);
@@ -3989,7 +4002,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (BOOL)isBundleIDMatch:(NSString *)targetBundleID withPattern:(NSString *)patternBundleID {
-    if (!targetBundleID || !patternBundleID) return NO;
+    if (![targetBundleID isKindOfClass:NSString.class] || ![patternBundleID isKindOfClass:NSString.class]) return NO;
     
     // Convert pattern to regex, escaping all dots except the wildcard
     NSString *regexPattern = [patternBundleID stringByReplacingOccurrencesOfString:@"." withString:@"\\."];
@@ -4017,6 +4030,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (BOOL)shouldSpoofForBundle:(NSString *)bundleID {
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) return NO;
     PX_IDENTIFIER_RUNTIME_READ_OPERATION;
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     if (!PXIdentifierManagerIsManagerProcess()) {
@@ -4026,17 +4040,20 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
                             : [self isExtensionEnabled:bundleID];
     }
 #endif
-    if (!bundleID) return NO;
-    
-    // Check cache first
-    NSNumber *cachedDecision = self.spoofCache[bundleID];
-    NSDate *cachedAt = self.spoofCache[[bundleID stringByAppendingString:@"_timestamp"]];
-    if (cachedDecision && [cachedAt isKindOfClass:[NSDate class]] && [[NSDate date] timeIntervalSinceDate:cachedAt] < 30.0) {
-        return [cachedDecision boolValue];
+    // One packet per ID keeps decision and timestamp out of the bundle-ID namespace.
+    id cachedValue = self.spoofCache[bundleID];
+    NSDictionary *cached = [cachedValue isKindOfClass:NSDictionary.class] ? cachedValue : nil;
+    id cachedDecision = cached[@"enabled"], cachedAt = cached[@"timestamp"];
+    if (([cachedDecision isKindOfClass:NSNumber.class] || [cachedDecision isKindOfClass:NSString.class]) &&
+        [cachedAt isKindOfClass:NSDate.class] && [[NSDate date] timeIntervalSinceDate:cachedAt] < 30.0) {
+        return PXRuntimeReadBool(cachedDecision);
     }
     
     // Check if the app is directly in scope
-    BOOL isInScope = self.scopedApps[bundleID] != nil;
+    NSDictionary *scopedApps = self.scopedApps;
+    if (![scopedApps isKindOfClass:NSDictionary.class]) scopedApps = @{};
+    id entry = scopedApps[bundleID];
+    BOOL isInScope = entry != nil;
     
     // If not directly in scope, check if it's an extension of a scoped app
     if (!isInScope) {
@@ -4048,16 +4065,14 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         }
     } else {
         // If directly in scope, check if it's enabled
-        isInScope = [self.scopedApps[bundleID][@"enabled"] boolValue];
+        isInScope = PXScopeRecordEnabled(entry);
         
         if (isInScope) {
             PXLog(@"[WeaponX] Bundle ID %@ is directly enabled in scope", bundleID);
         }
     }
     
-    // Cache the decision with a timestamp
-    self.spoofCache[bundleID] = @(isInScope);
-    self.spoofCache[[bundleID stringByAppendingString:@"_timestamp"]] = [NSDate date];
+    self.spoofCache[bundleID] = @{ @"enabled": @(isInScope), @"timestamp": [NSDate date] };
     
     return isInScope;
 }
@@ -4126,8 +4141,8 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (BOOL)isExtensionEnabled:(NSString *)bundleID {
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) return NO;
     PX_IDENTIFIER_RUNTIME_READ_OPERATION;
-    if (!bundleID) return NO;
     
     // Never consider the WeaponX app itself or system apps
     if ([bundleID isEqualToString:@"com.hydra.tlinkios"] || [bundleID hasPrefix:@"com.apple."]) {
@@ -4142,6 +4157,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         scopedApps = [scoped isKindOfClass:NSDictionary.class] ? scoped : @{};
     }
 #endif
+    if (![scopedApps isKindOfClass:NSDictionary.class]) return NO;
     for (NSString *scopedBundleID in scopedApps) {
         NSDictionary *appInfo = scopedApps[scopedBundleID];
         if (![appInfo isKindOfClass:NSDictionary.class]) continue;
