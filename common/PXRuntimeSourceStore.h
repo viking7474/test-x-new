@@ -15,6 +15,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setDictionary:(NSDictionary *)value atPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
 /// Stages absence with the same before-image/rollback contract as a write.
 - (BOOL)removeDictionaryAtPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+/// Compare the marker captured at write admission, under the source gate.
+/// A mismatch poisons staging, even if the caller ignores NO. Legacy marker is @"".
+- (BOOL)requireBaseCommitIdentifier:(NSString *)identifier error:(NSError * _Nullable * _Nullable)error;
+/// Read-only admission marker; unlike require, comparing it does not poison staging.
+- (nullable NSString *)baseCommitIdentifierWithError:(NSError * _Nullable * _Nullable)error;
+/// Candidate marker for THIS transaction. Copy inside the block; use as a receipt
+/// only after a standalone call returns YES AND this transaction staged a write.
+/// A no-op transaction does not publish its candidate marker. No use after escape.
+- (nullable NSString *)prospectiveCommitIdentifierWithError:(NSError * _Nullable * _Nullable)error;
 @end
 
 @interface PXRuntimeSourceStore : NSObject

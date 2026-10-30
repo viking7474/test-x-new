@@ -63,8 +63,10 @@
 
 @interface IdentifierManager ()
 - (BOOL)saveSettingsWithError:(NSError **)error;
+- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error;
+- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier;
 - (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error;
-- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation error:(NSError **)error;
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error;
 - (id)beginIdentifierToggleForType:(NSString *)type;
 - (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error;
 - (void)finishIdentifierToggle:(id)operation forType:(NSString *)type;
@@ -1977,11 +1979,13 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     type = [type copy];
     id operation = [self beginIdentifierToggleForType:type];
     @try {
-        return [self applyIdentifierEnabled:enabled forType:type operation:operation error:error];
+        return [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:NULL sourceCommitIdentifier:NULL error:error];
     } @finally { [self finishIdentifierToggle:operation forType:type]; }
 }
 
-- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation error:(NSError **)error {
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error {
+    if (primaryCommitted) *primaryCommitted = NO;
+    if (sourceCommitIdentifier) *sourceCommitIdentifier = nil;
     if (error) *error = nil;
     if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     // Set the enabled state in settings
@@ -2130,10 +2134,18 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     // notification for an identifier state that failed to save.
     if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     NSError *saveError = nil;
-    if (![self saveSettingsWithError:&saveError]) {
+    NSString *primaryIdentifier = nil;
+    BOOL saved = sourceCommitIdentifier
+        ? [self saveSettingsWithSourceCommitIdentifier:&primaryIdentifier error:&saveError]
+        : [self saveSettingsWithError:&saveError];
+    if (!saved) {
         if (error) *error = saveError;
         return NO;
     }
+    if (sourceCommitIdentifier) *sourceCommitIdentifier = primaryIdentifier;
+    // Separate the committed primary from later verification/secondary failure.
+    // An unacknowledged primary write belongs to source-store recovery, not a blind compensating save.
+    if (primaryCommitted) *primaryCommitted = YES;
     if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
     // A matching old value cannot acknowledge this invocation's write. Keep
     // the readback as an extra guard against synchronous notification reentry.
@@ -2142,7 +2154,7 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         ? persistedSettings[@"EnabledIdentifiers"]
         : nil;
     id persistedState = persistedIdentifiers[type];
-    if (persistedState == nil || [persistedState boolValue] != enabled) {
+    if ((![persistedState isKindOfClass:NSNumber.class] && ![persistedState isKindOfClass:NSString.class]) || [persistedState boolValue] != enabled) {
         PXLog(@"[WeaponX] Skipping secondary identifier state for %@ because EnabledIdentifiers did not persist", type);
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
                                      userInfo:@{NSLocalizedDescriptionKey: @"Identifier state changed after settings commit"}];
@@ -2165,7 +2177,11 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 
     if (secondaryKey) {
         NSError *secondaryError = nil;
-        BOOL secondaryCommitted = PXWriteSecurityBool(secondaryKey, enabled, &secondaryError);
+        NSString *secondaryIdentifier = nil;
+        BOOL secondaryCommitted = sourceCommitIdentifier
+            ? PXWriteSecurityBoolWithRollbackAuthority(secondaryKey, enabled, primaryIdentifier, &secondaryIdentifier, &secondaryError)
+            : PXWriteSecurityBool(secondaryKey, enabled, &secondaryError);
+        if (secondaryCommitted && sourceCommitIdentifier) *sourceCommitIdentifier = secondaryIdentifier;
         if (![self validateIdentifierToggle:operation forType:type error:error]) return NO;
         if (secondaryCommitted) {
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
@@ -2204,7 +2220,9 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         }
 
         NSError *writeError = nil;
-        BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation error:&writeError];
+        BOOL primaryCommitted = NO;
+        NSString *sourceIdentifier = nil;
+        BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:&sourceIdentifier error:&writeError];
 
         // A newer call owns both the state and any subsequent recovery. In
         // particular, matching ABA values do not give the older call ownership back.
@@ -2214,12 +2232,12 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
             ? persistedSettings[@"EnabledIdentifiers"]
             : nil;
         id persistedValue = enabledIdentifiers[type];
-        BOOL primarySuccess = (persistedValue != nil && [persistedValue boolValue] == enabled);
+        BOOL primarySuccess = (([persistedValue isKindOfClass:NSNumber.class] || [persistedValue isKindOfClass:NSString.class]) && [persistedValue boolValue] == enabled);
 
         BOOL secondarySuccess = YES;
         if (secondaryKey) {
             id secondaryValue = PXReadSecuritySetting(secondaryKey);
-            secondarySuccess = (secondaryValue != nil && [secondaryValue boolValue] == enabled);
+            secondarySuccess = (([secondaryValue isKindOfClass:NSNumber.class] || [secondaryValue isKindOfClass:NSString.class]) && [secondaryValue boolValue] == enabled);
         }
 
         if (![self validateIdentifierToggle:operation forType:type error:NULL]) return NO;
@@ -2227,30 +2245,69 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         NSError *failure = writeError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
                                                        userInfo:@{NSLocalizedDescriptionKey: @"Identifier state verification failed after write"}];
 
-        // Restore in-memory and persisted state. The rollback itself is verified best-effort;
-        // callers still receive NO so the UI returns to the previously known state.
-        self.settings[type] = @(previous);
-        [self saveSettings];
-        if (secondaryKey && [self validateIdentifierToggle:operation forType:type error:NULL]) {
-            NSError *rollbackError = nil;
-            if (PXWriteSecurityBool(secondaryKey, previous, &rollbackError)) {
-                if (notificationName && [self validateIdentifierToggle:operation forType:type error:NULL]) {
-                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                                       notificationName,
-                                                       NULL, NULL, YES);
-                }
-            } else {
-                if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = rollbackError;
-                PXLog(@"[WeaponX] Failed to rollback secondary identifier state %@: %@", secondaryKey, rollbackError);
-            }
+        // An unacknowledged primary belongs to source-store recovery. For a
+        // committed primary, compensate only while our exact source version owns it.
+        if (primaryCommitted) {
+            [self rollbackIdentifier:type previous:previous secondaryKey:secondaryKey notificationName:notificationName
+                           operation:operation sourceCommitIdentifier:sourceIdentifier];
+        } else {
+            self.settings[type] = @(previous);
         }
 
         // Rollback success must not erase the failed forward operation's result.
         if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = failure;
-        PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d); attempted rollback to %@",
-              type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, previous ? @"YES" : @"NO");
+        PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d committed=%d); rollback target %@",
+              type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, primaryCommitted, previous ? @"YES" : @"NO");
         return NO;
     } @finally { [self finishIdentifierToggle:operation forType:type]; }
+}
+
+- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier {
+    if (![self validateIdentifierToggle:operation forType:type error:NULL]) return;
+    __block NSNumber *observed = nil;
+    __block NSString *rollbackIdentifier = nil;
+    NSError *failure = nil;
+    BOOL restored = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSDictionary *settings = [tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error];
+        if (!settings) return NO;
+        NSDictionary *flags = [settings[@"EnabledIdentifiers"] isKindOfClass:NSDictionary.class] ? settings[@"EnabledIdentifiers"] : nil;
+        id state = flags[type];
+        if ([state isKindOfClass:NSNumber.class] || [state isKindOfClass:NSString.class]) observed = @([state boolValue]);
+        if (!identifier || ![tx requireBaseCommitIdentifier:identifier error:error]) return NO;
+        if (!flags || !observed) {
+            if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6036
+                                              userInfo:@{NSLocalizedDescriptionKey: @"Malformed identifier state during conditional rollback"}];
+            return NO;
+        }
+        NSMutableDictionary *updated = [settings mutableCopy], *updatedFlags = [flags mutableCopy];
+        updatedFlags[type] = @(previous); updated[@"EnabledIdentifiers"] = updatedFlags;
+        if ([type isEqual:@"StorageSystem"]) updated[@"StorageSystemEnabled"] = @(previous);
+        if (![tx setDictionary:updated atPath:PXTLinkIOSSettingsPath() error:error]) return NO;
+        if (secondaryKey) {
+            NSDictionary *security = [tx dictionaryAtPath:PXSecuritySettingsPath() error:error];
+            if (!security) return NO;
+            NSMutableDictionary *updatedSecurity = [security mutableCopy]; updatedSecurity[secondaryKey] = @(previous);
+            if (![tx setDictionary:updatedSecurity atPath:PXSecuritySettingsPath() error:error]) return NO;
+        }
+        rollbackIdentifier = [tx prospectiveCommitIdentifierWithError:error];
+        return rollbackIdentifier != nil;
+    }, &failure);
+    if (![self validateIdentifierToggle:operation forType:type error:NULL]) return;
+    if (!restored) {
+        // A cooperative successor's state is authoritative; never replace its
+        // source tuple with this manager's stale settings/scope snapshot.
+        self.settings[type] = observed ?: @(previous);
+        PXLog(@"[WeaponX] Conditional identifier rollback skipped/failed for %@: %@", type, failure);
+        return;
+    }
+    self.settings[type] = @(previous);
+    [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects];
+    PXPostSettingsChangedNotification();
+    if (secondaryKey && notificationName && [self validateIdentifierToggle:operation forType:type error:NULL] &&
+        PXPublishSecurityBoolForSourceCommit(secondaryKey, previous, rollbackIdentifier) &&
+        [self validateIdentifierToggle:operation forType:type error:NULL]) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), notificationName, NULL, NULL, YES);
+    }
 }
 
 - (BOOL)enableRequiredIdentifiers:(NSArray<NSString *> *)types forExpectedActiveProfileID:(NSString *)profileID error:(NSError **)error {
@@ -3280,6 +3337,13 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 }
 
 - (BOOL)saveSettingsWithError:(NSError **)error {
+    return [self saveSettingsWithSourceCommitIdentifier:NULL error:error];
+}
+
+- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error {
+    if (identifier) *identifier = nil;
+    __block NSString *candidate = nil;
+    BOOL wantsReceipt = identifier != NULL;
     if (error) *error = nil;
     // Get the proper preferences path
     NSString *prefsPath = PXPreferencesPath();
@@ -3331,7 +3395,9 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         saveDict[@"SettingsInitialized"] = @YES;
         if (![transaction setDictionary:saveDict atPath:prefsFile error:writeError]) return NO;
         NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
-        return [transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError];
+        if (![transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError]) return NO;
+        if (wantsReceipt) candidate = [transaction prospectiveCommitIdentifierWithError:writeError];
+        return !wantsReceipt || candidate != nil;
     }, &sourceError);
     if (!success) {
         self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
@@ -3344,6 +3410,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
         PXLog(@"[WeaponX] ✅ Saved scoped apps to: %@", scopedAppsFile);
     }
 
+    if (identifier) *identifier = candidate;
     [self.spoofCache removeAllObjects];
     [_appEnabledCache removeAllObjects];
     PXPostSettingsChangedNotification();

@@ -65,10 +65,12 @@ SIGNATURES = [
     '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type',
     '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error',
     '- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type',
-    '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation error:(NSError **)error',
+    '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error',
     '- (id)beginIdentifierToggleForType:(NSString *)type',
     '- (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error',
     '- (void)finishIdentifierToggle:(id)operation forType:(NSString *)type',
+    '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error',
+    '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -173,7 +175,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4Z-partial'
+    assert manifest['rollout'] == '4C.2H5B-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

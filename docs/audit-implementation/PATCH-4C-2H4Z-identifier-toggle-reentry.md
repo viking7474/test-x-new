@@ -102,3 +102,5 @@ cho native execution hoặc benchmark.
 
 Native Foundation/Theos/package/device behavior chờ CI; không suy RootHide device
 pass từ host compile define. User-reported H4Y build pass được ghi riêng.
+
+Người dùng xác nhận H4Z build pass ngày 2026-10-29. H5A xử lý tiếp blind compensation khi primary chưa được acknowledge commit; post-primary concurrent-writer CAS vẫn riêng. Đây là kết quả do người dùng báo, không phải native execution từ Windows.

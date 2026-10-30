@@ -30,7 +30,11 @@ static NSUInteger gBatchNotifications, gArtifactAdoptions, gBatteryNotifications
 static NSUInteger gToggleSecurityWrites, gToggleSecondaryNotices, gToggleSecurityFailures, gToggleGenerations;
 static NSString *gToggleMissingValue;
 static void (^gDuringToggleGeneration)(void);
+static void (^gAfterFailedStandaloneWrite)(void);
+static NSUInteger gStandaloneSourceAttempts;
 static void (^gDuringToggleSecurityWrite)(void);
+static void (^gDuringToggleSecurityPublication)(void);
+static NSUInteger gToggleSecurityPublications;
 static void (^gDuringToggleSecondaryNotification)(void);
 static BOOL gFailSerial, gThrowBatteryPublication;
 static void (^gDuringPrepare)(void);
@@ -53,7 +57,16 @@ static NSString *Path(NSString *root, NSString *name) { return [root stringByApp
 static NSString *Identity(NSString *profile) { return Path(Path(gRoot, profile), @"identity"); }
 static NSDictionary *IDs(NSString *identity) { return [NSDictionary dictionaryWithContentsOfFile:Path(identity, @"device_ids.plist")] ?: @{}; }
 BOOL PXPerformRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performWrite:body error:error]; }
-BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) { return [gStore performStandaloneWrite:body error:error]; }
+BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransaction *, NSError **), NSError **error) {
+    gStandaloneSourceAttempts++;
+    BOOL success = [gStore performStandaloneWrite:body error:error];
+    // Model a competing owner scheduled after the source gate has been released.
+    if (!success) {
+        void (^callback)(void) = gAfterFailedStandaloneWrite; gAfterFailedStandaloneWrite = nil;
+        if (callback) callback();
+    }
+    return success;
+}
 NSString *PXActiveProfileID(void) { return gSelected; }
 NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.class] && [@[@"a", @"b"] containsObject:value] ? [value copy] : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
@@ -96,6 +109,44 @@ BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error) {
     void (^callback)(void) = gDuringToggleSecurityWrite; gDuringToggleSecurityWrite = nil;
     if (callback) callback();
     return success;
+}
+BOOL PXWriteSecurityBoolWithRollbackAuthority(NSString *key, BOOL value, NSString *expectedIdentifier, NSString **rollbackIdentifier, NSError **error) {
+    if (rollbackIdentifier) *rollbackIdentifier = nil;
+    __block NSString *candidate = nil;
+    gToggleSecurityWrites++;
+    if (gToggleSecurityFailures) {
+        gToggleSecurityFailures--;
+        if (error) *error = [NSError errorWithDomain:@"fixture.toggle.security" code:71 userInfo:nil];
+        void (^callback)(void) = gDuringToggleSecurityWrite; gDuringToggleSecurityWrite = nil;
+        if (callback) callback();
+        return NO;
+    }
+    BOOL success = [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+        NSString *base = [tx baseCommitIdentifierWithError:failure];
+        if (!base) return NO;
+        BOOL ownsChain = [base isEqual:expectedIdentifier];
+        NSDictionary *current = [tx dictionaryAtPath:PXSecuritySettingsPath() error:failure];
+        if (!current) return NO;
+        NSMutableDictionary *updated = [current mutableCopy]; updated[key] = @(value);
+        if (![tx setDictionary:updated atPath:PXSecuritySettingsPath() error:failure]) return NO;
+        candidate = ownsChain ? [tx prospectiveCommitIdentifierWithError:failure] : nil;
+        return !ownsChain || candidate != nil;
+    } error:error];
+    if (success && rollbackIdentifier) *rollbackIdentifier = candidate;
+    void (^callback)(void) = gDuringToggleSecurityWrite; gDuringToggleSecurityWrite = nil;
+    if (callback) callback();
+    return success;
+}
+BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier) {
+    BOOL (^current)(PXRuntimeSourceTransaction *, NSError **) = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx requireBaseCommitIdentifier:identifier error:error];
+    };
+    if (![gStore performStandaloneWrite:current error:NULL]) return NO;
+    gToggleSecurityPublications++;
+    CHECK([PXReadSecuritySetting(key) boolValue] == value, "conditional rollback mirror sees atomically restored security state");
+    void (^callback)(void) = gDuringToggleSecurityPublication; gDuringToggleSecurityPublication = nil;
+    if (callback) callback();
+    return [gStore performStandaloneWrite:current error:NULL];
 }
 static void PXToggleFixtureNotification(CFNotificationCenterRef center, CFStringRef name,
                                        const void *object, CFDictionaryRef info, Boolean immediately) {
@@ -1904,7 +1955,7 @@ static void TestIdentifierToggleAcknowledgement(void) {
           PXWriteSecurityBool(@"batterySpoofEnabled", NO, NULL) &&
           PXWriteSecurityBool(@"deviceThemeSpoofEnabled", NO, NULL), "toggle already matching baseline seeded");
     // Fault each primary file even though the old value already equals NO.
-    // Faults also reject the rollback, allowing byte/token/cache comparison.
+    // No compensating write is permitted when the primary has not committed.
     for (NSUInteger cut = 1; cut <= 2; cut++) {
         [manager seedPersistenceCaches]; manager.error = nil;
         NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches];
@@ -1927,15 +1978,15 @@ static void TestIdentifierToggleAcknowledgement(void) {
     };
     BOOL restoredSuccess = [manager setIdentifierEnabledAndPersist:NO forType:@"IDFA"];
     gStore.testCheckpoint = nil;
-    CHECK(faulted && !restoredSuccess && manager.error.code == 4006 && gBatchNotifications == restoredNotices + 1,
-          "primary forward failure remains failure after a successful matching rollback");
+    CHECK(faulted && !restoredSuccess && manager.error.code == 4006 && gBatchNotifications == restoredNotices,
+          "primary forward failure restores memory without a compensating commit or notification");
     // A failed secondary write also cannot be inferred from its matching old value.
     for (NSString *type in @[@"WiFi", @"Battery", @"DeviceTheme"]) {
         gToggleSecurityFailures = 1;
         NSUInteger writes = gToggleSecurityWrites, topics = gToggleSecondaryNotices, notices = gBatchNotifications;
         CHECK(![manager setIdentifierEnabledAndPersist:NO forType:type] && manager.error.code == 71 &&
               [manager.error.domain isEqual:@"fixture.toggle.security"] &&
-              gToggleSecurityWrites == writes + 2 && gToggleSecondaryNotices == topics + 1 &&
+              gToggleSecurityWrites == writes + 1 && gToggleSecondaryNotices == topics + 1 &&
               gBatchNotifications == notices + 2,
               "matching old secondary value cannot hide forward failure and rollback retains original error");
         // Stale shared error is intentionally irrelevant to the next local receipt.
@@ -2078,12 +2129,12 @@ static void TestIdentifierToggleReentry(void) {
         };
         gDuringToggleSecurityWrite = ^{
             if (boundary == 0) gDuringRequiredNotification = newer;
-            else gDuringToggleSecurityWrite = newer;
+            else gDuringToggleSecurityPublication = newer;
         };
         CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && inner &&
               [latest isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && manager.error.code == 995 &&
               [manager.settings[@"WiFi"] boolValue] && [PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] &&
-              writes + (boundary == 0 ? 2 : 3) == gToggleSecurityWrites && topics + 1 == gToggleSecondaryNotices &&
+              writes + 2 == gToggleSecurityWrites && topics + 1 == gToggleSecondaryNotices &&
               !manager.identifierToggleOperations.count,
               "successor during rollback keeps newer sources caches error and skips remaining stale effects");
     }
@@ -2127,6 +2178,195 @@ static void TestIdentifierToggleReentry(void) {
     CHECK(!weakOwner && retainedToken, "bare toggle token never retains its manager owner");
 }
 
+static void TestToggleFailedPrimaryOwnership(void) {
+    for (NSString *type in @[@"IDFA", @"WiFi", @"Battery", @"DeviceTheme"]) {
+        for (NSUInteger cut = 1; cut <= 2; cut++) {
+            PXDeviceGroupFixture *manager = ToggleReentryFixture();
+            [manager seedPersistenceCaches];
+            NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches];
+            NSUInteger attempts = gStandaloneSourceAttempts, writes = gToggleSecurityWrites;
+            NSUInteger notices = gBatchNotifications, topics = gToggleSecondaryNotices;
+            __block NSUInteger physicalWrites = 0;
+            gStore.testCheckpoint = ^(NSString *stage) {
+                if ([stage isEqual:@"source-written"] && ++physicalWrites == cut)
+                    [NSException raise:@"fixture.toggle.primary" format:@"one shot primary source fault"];
+            };
+            BOOL success = [manager setIdentifierEnabledAndPersist:YES forType:type];
+            gStore.testCheckpoint = nil;
+            CHECK(!success && manager.error.code == 4006 && ![manager.settings[type] boolValue] &&
+                  physicalWrites == cut && attempts + 1 == gStandaloneSourceAttempts &&
+                  [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] &&
+                  writes == gToggleSecurityWrites && notices == gBatchNotifications && topics == gToggleSecondaryNotices &&
+                  !manager.identifierToggleOperations.count,
+                  "failed primary uses one source attempt without compensation security cache or notification effects");
+        }
+    }
+    for (NSUInteger cut = 1; cut <= 2; cut++) {
+        PXDeviceGroupFixture *manager = ToggleReentryFixture();
+        CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx removeDictionaryAtPath:PXTLinkIOSSettingsPath() error:error] &&
+                   [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+        } error:NULL], "missing primary settings and scope fixture seeded");
+        [manager seedPersistenceCaches];
+        NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches];
+        NSUInteger attempts = gStandaloneSourceAttempts, writes = gToggleSecurityWrites, notices = gBatchNotifications;
+        __block NSUInteger physicalWrites = 0;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if ([stage isEqual:@"source-written"] && ++physicalWrites == cut)
+                [NSException raise:@"fixture.toggle.primary" format:@"missing source write fault"];
+        };
+        BOOL success = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+        gStore.testCheckpoint = nil;
+        CHECK(!success && manager.error.code == 4006 && attempts + 1 == gStandaloneSourceAttempts &&
+              [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] &&
+              ![NSFileManager.defaultManager fileExistsAtPath:PXTLinkIOSSettingsPath()] &&
+              ![NSFileManager.defaultManager fileExistsAtPath:PXGlobalScopePath()] &&
+              writes == gToggleSecurityWrites && notices == gBatchNotifications,
+              "failed primary preserves exact missing sources instead of creating rollback settings or scope");
+    }
+    for (NSUInteger kind = 0; kind < 2; kind++) {
+        PXDeviceGroupFixture *manager = ToggleReentryFixture();
+        PXDeviceGroupFixture *competitor = [PXDeviceGroupFixture new];
+        competitor.settings = [manager.settings mutableCopy];
+        competitor.scopedApps = [@{ @"newer.scope": @{ @"enabled": @YES, @"name": @"newer writer" } } mutableCopy];
+        [manager seedPersistenceCaches]; NSDictionary *cache = [manager persistenceCaches];
+        __block BOOL faulted = NO, competitorSuccess = NO;
+        __block NSDictionary *latest = nil;
+        __block NSUInteger latestAttempts = 0, latestWrites = 0, latestNotices = 0, latestTopics = 0;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if (!faulted && [stage isEqual:@"source-written"]) {
+                faulted = YES; [NSException raise:@"fixture.toggle.primary" format:@"primary fault before competing owner"];
+            }
+        };
+        gAfterFailedStandaloneWrite = ^{
+            CHECK(BatchSnapshot() != nil, "primary failure scheduling fixture runs after gate release");
+            if (kind == 0) competitorSuccess = [competitor setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+            else competitorSuccess = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+                if (!settings) return NO;
+                NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy];
+                flags[@"WiFi"] = @YES; flags[@"IDFA"] = @YES; settings[@"EnabledIdentifiers"] = flags;
+                NSMutableDictionary *security = [[tx dictionaryAtPath:PXSecuritySettingsPath() error:error] mutableCopy];
+                if (!security) return NO;
+                security[@"wifiSpoofEnabled"] = @YES;
+                return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error] &&
+                       [tx setDictionary:@{ @"ScopedApps": competitor.scopedApps } atPath:PXGlobalScopePath() error:error] &&
+                       [tx setDictionary:security atPath:PXSecuritySettingsPath() error:error];
+            } error:NULL];
+            latest = BatchSnapshot(); latestAttempts = gStandaloneSourceAttempts; latestWrites = gToggleSecurityWrites;
+            latestNotices = gBatchNotifications; latestTopics = gToggleSecondaryNotices;
+        };
+        BOOL success = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+        gStore.testCheckpoint = nil;
+        CHECK(faulted && competitorSuccess && !success && manager.error.code == 4006 && latest &&
+              [latest isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] &&
+              latestAttempts == gStandaloneSourceAttempts && latestWrites == gToggleSecurityWrites &&
+              latestNotices == gBatchNotifications && latestTopics == gToggleSecondaryNotices &&
+              !manager.identifierToggleOperations.count && ![manager.settings[@"WiFi"] boolValue],
+              "uncommitted primary failure never overwrites a later manager or direct writer commit");
+    }
+    // The separate acknowledgement is true even if a later secondary write fails.
+    // The verified wrapper must retain its existing compensation policy for that case.
+    PXDeviceGroupFixture *manager = ToggleReentryFixture();
+    id operation = [manager beginIdentifierToggleForType:@"WiFi"];
+    BOOL primaryCommitted = NO; NSError *failure = nil;
+    gToggleSecurityFailures = 1;
+    BOOL success = [manager applyIdentifierEnabled:YES forType:@"WiFi" operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:NULL error:&failure];
+    [manager finishIdentifierToggle:operation forType:@"WiFi"];
+    CHECK(!success && primaryCommitted && failure.code == 71 && [manager.settings[@"WiFi"] boolValue],
+          "primary acknowledgement survives a later secondary failure independently of whole apply result");
+    primaryCommitted = YES; failure = nil; NSDictionary *before = BatchSnapshot();
+    CHECK(![manager applyIdentifierEnabled:NO forType:@"WiFi" operation:[NSObject new] primaryCommitted:&primaryCommitted sourceCommitIdentifier:NULL error:&failure] &&
+          !primaryCommitted && failure.code == 6035 && [before isEqual:BatchSnapshot()],
+          "primary acknowledgement resets before rejected owner admission");
+}
+
+static void TestConditionalToggleRollback(void) {
+    for (NSUInteger kind = 0; kind < 3; kind++) {
+        PXDeviceGroupFixture *manager = ToggleReentryFixture(), *other = [PXDeviceGroupFixture new];
+        other.settings = [manager.settings mutableCopy];
+        other.scopedApps = [@{ @"newer.scope": @{ @"enabled": @YES } } mutableCopy];
+        __block NSDictionary *latest = nil, *cache = nil; __block NSUInteger notices = 0, topics = 0;
+        NSUInteger publications = gToggleSecurityPublications;
+        gDuringRequiredNotification = ^{
+            if (kind == 0) {
+                CHECK([other setIdentifierEnabledAndPersist:YES forType:@"WiFi"], "foreign toggle after primary commits");
+            } else if (kind == 1) {
+                CHECK([other setIdentifierEnabledAndPersist:NO forType:@"WiFi"] &&
+                      [other setIdentifierEnabledAndPersist:YES forType:@"WiFi"], "foreign toggle ABA commits");
+                gToggleSecurityFailures = 1;
+            } else {
+                CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+                NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+                NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy]; flags[@"WiFi"] = @{};
+                settings[@"EnabledIdentifiers"] = flags;
+                return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error];
+                } error:NULL], "foreign malformed toggle field committed for defensive readback");
+            }
+            latest = BatchSnapshot(); [manager seedPersistenceCaches]; cache = [manager persistenceCaches];
+            notices = gBatchNotifications; topics = gToggleSecondaryNotices;
+        };
+        CHECK(![manager setIdentifierEnabledAndPersist:kind != 0 forType:@"WiFi"] && [latest isEqual:BatchSnapshot()] &&
+              [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications && topics == gToggleSecondaryNotices &&
+              publications == gToggleSecurityPublications && !manager.identifierToggleOperations.count,
+              "conditional rollback preserves foreign primary ABA and malformed-field successors without stale effects");
+        if (kind < 2) CHECK([manager.settings[@"WiFi"] boolValue], "conflicted rollback refreshes requested memory flag from authoritative source");
+    }
+    PXDeviceGroupFixture *manager = ToggleReentryFixture(), *other = [PXDeviceGroupFixture new];
+    other.settings = [manager.settings mutableCopy];
+    __block NSDictionary *latest = nil, *cache = nil; __block NSUInteger notices = 0, topics = 0;
+    gDuringToggleSecurityWrite = ^{
+        CHECK([other setIdentifierEnabledAndPersist:NO forType:@"WiFi"], "foreign successor after secondary commit");
+        latest = BatchSnapshot(); [manager seedPersistenceCaches]; cache = [manager persistenceCaches];
+        notices = gBatchNotifications; topics = gToggleSecondaryNotices;
+    };
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && [latest isEqual:BatchSnapshot()] &&
+          [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications && topics + 1 == gToggleSecondaryNotices &&
+          ![manager.settings[@"WiFi"] boolValue], "secondary rollback authority preserves foreign successor after legacy forward notification");
+
+    for (NSUInteger cut = 1; cut <= 2; cut++) {
+        manager = ToggleReentryFixture(); gToggleSecurityFailures = 1;
+        NSUInteger publications = gToggleSecurityPublications; __block NSUInteger writes = 0;
+        gDuringToggleSecurityWrite = ^{
+            latest = BatchSnapshot(); [manager seedPersistenceCaches]; cache = [manager persistenceCaches];
+            notices = gBatchNotifications; topics = gToggleSecondaryNotices;
+            gStore.testCheckpoint = ^(NSString *stage) {
+                if ([stage isEqual:@"source-written"] && ++writes == cut)
+                    [NSException raise:@"fixture.rollback" format:@"atomic compensation fault"];
+            };
+        };
+        BOOL success = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+        gStore.testCheckpoint = nil;
+        CHECK(!success && manager.error.code == 71 && writes == cut && [latest isEqual:BatchSnapshot()] &&
+              [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications && topics == gToggleSecondaryNotices &&
+              publications == gToggleSecurityPublications && [manager.settings[@"WiFi"] boolValue],
+              "conditional rollback physical fault restores complete forward tuple marker caches and notifications");
+    }
+    manager = ToggleReentryFixture(); other = [PXDeviceGroupFixture new]; other.settings = [manager.settings mutableCopy];
+    gToggleSecurityFailures = 1; NSUInteger publications = gToggleSecurityPublications;
+    gDuringToggleSecurityWrite = ^{
+        gDuringRequiredNotification = ^{
+            CHECK([other setIdentifierEnabledAndPersist:YES forType:@"WiFi"], "foreign successor during rollback notification commits");
+            latest = BatchSnapshot(); notices = gBatchNotifications; topics = gToggleSecondaryNotices;
+        };
+    };
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && [latest isEqual:BatchSnapshot()] &&
+          notices == gBatchNotifications && topics == gToggleSecondaryNotices && publications == gToggleSecurityPublications,
+          "rollback notification successor suppresses obsolete security mirror and topic");
+
+    manager = ToggleReentryFixture(); manager.settings[@"StorageSystem"] = @NO; [manager saveSettings];
+    id operation = [manager beginIdentifierToggleForType:@"StorageSystem"];
+    NSString *identifier = nil; BOOL committed = NO; NSError *failure = nil;
+    CHECK([manager applyIdentifierEnabled:YES forType:@"StorageSystem" operation:operation primaryCommitted:&committed sourceCommitIdentifier:&identifier error:&failure] && committed && identifier,
+          "storage conditional rollback owns exact primary receipt");
+    NSData *scope = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
+    [manager rollbackIdentifier:@"StorageSystem" previous:NO secondaryKey:nil notificationName:NULL operation:operation sourceCommitIdentifier:identifier];
+    [manager finishIdentifierToggle:operation forType:@"StorageSystem"];
+    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    CHECK(![settings[@"EnabledIdentifiers"][@"StorageSystem"] boolValue] && ![settings[@"StorageSystemEnabled"] boolValue] &&
+          [scope isEqual:[NSData dataWithContentsOfFile:PXGlobalScopePath()]], "conditional rollback keeps storage alias atomic and never rewrites scope");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2155,6 +2395,8 @@ int main(void) {
         TestStandaloneSettingsSaves(manager, Identity(@"a"));
         TestIdentifierToggleAcknowledgement();
         TestIdentifierToggleReentry();
+        TestToggleFailedPrimaryOwnership();
+        TestConditionalToggleRollback();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

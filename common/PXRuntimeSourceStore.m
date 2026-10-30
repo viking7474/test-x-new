@@ -42,16 +42,44 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
 @property (nonatomic, strong) NSError *failure;
 @property (nonatomic, strong) NSThread *thread;
 @property (nonatomic) BOOL active;
-- (instancetype)initForPaths:(BOOL (^)(NSString *))allowsPath;
+@property (nonatomic, copy) NSString *baseCommitIdentifier;
+@property (nonatomic, copy) NSString *candidateCommitIdentifier;
+- (instancetype)initForPaths:(BOOL (^)(NSString *))allowsPath baseCommitIdentifier:(NSString *)identifier;
 - (BOOL)checkPath:(NSString *)path error:(NSError **)error;
 @end
 @implementation PXRuntimeSourceTransaction
-- (instancetype)initForPaths:(BOOL (^)(NSString *))allowsPath {
+- (instancetype)initForPaths:(BOOL (^)(NSString *))allowsPath baseCommitIdentifier:(NSString *)identifier {
     if (!(self = [super init])) return nil;
     _allowsPath = [allowsPath copy]; _staged = [NSMutableDictionary dictionary];
     _stagedSizes = [NSMutableDictionary dictionary];
-    _thread = NSThread.currentThread; _active = YES;
+    _thread = NSThread.currentThread; _active = YES; _baseCommitIdentifier = [identifier copy];
     return self;
+}
+- (BOOL)checkCommitAccess:(NSError **)error {
+    if (self.thread != NSThread.currentThread) {
+        if (error) *error = PXSourceError(@"Source commit identifier used from another thread"); return NO;
+    }
+    if (!self.active) {
+        self.failure = PXSourceError(@"Inactive source transaction commit identifier");
+        if (error) *error = self.failure; return NO;
+    }
+    return YES;
+}
+- (BOOL)requireBaseCommitIdentifier:(NSString *)identifier error:(NSError **)error {
+    if (![self checkCommitAccess:error]) return NO;
+    if (![identifier isKindOfClass:NSString.class] || ![identifier isEqual:self.baseCommitIdentifier]) {
+        self.failure = PXSourceError(@"Source commit changed before conditional write");
+        if (error) *error = self.failure; return NO;
+    }
+    return YES;
+}
+- (NSString *)baseCommitIdentifierWithError:(NSError **)error {
+    return [self checkCommitAccess:error] ? self.baseCommitIdentifier : nil;
+}
+- (NSString *)prospectiveCommitIdentifierWithError:(NSError **)error {
+    if (![self checkCommitAccess:error]) return nil;
+    if (!self.candidateCommitIdentifier) self.candidateCommitIdentifier = NSUUID.UUID.UUIDString;
+    return self.candidateCommitIdentifier;
 }
 - (BOOL)checkPath:(NSString *)path error:(NSError **)error {
     if (self.thread != NSThread.currentThread) {
@@ -274,7 +302,8 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
                              @"mode": @((unsigned)mode) }];
     }
     if (![self checkPaths:entries error:error]) return NO;
-    NSString *identifier = NSUUID.UUID.UUIDString;
+    NSString *identifier = [transaction prospectiveCommitIdentifierWithError:error];
+    if (!identifier) return NO;
     NSDictionary *journal = @{ @"schemaVersion": @1, @"transactionID": identifier, @"entries": entries };
     if (!PXRuntimeWritePropertyList(journal, self.journalPath, _owner, _group, 0600, error)) return NO;
     @try {
@@ -334,8 +363,10 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
             if (_activeTransaction.failure && error) *error = _activeTransaction.failure;
             return success && !_activeTransaction.failure;
         }
-        if (!(locked = [self lockFile:LOCK_EX before:deadline error:error]) || ![self recover:error] || ![self commitRecord:error]) return NO;
-        _activeTransaction = [[PXRuntimeSourceTransaction alloc] initForPaths:_allowsPath];
+        if (!(locked = [self lockFile:LOCK_EX before:deadline error:error]) || ![self recover:error]) return NO;
+        NSDictionary *baseCommit = [self commitRecord:error];
+        if (!baseCommit) return NO;
+        _activeTransaction = [[PXRuntimeSourceTransaction alloc] initForPaths:_allowsPath baseCommitIdentifier:baseCommit[@"commitID"] ?: @""];
         NSError *failure = nil;
         BOOL success = body(_activeTransaction, &failure);
         if (!success || _activeTransaction.failure) {

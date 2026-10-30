@@ -263,6 +263,57 @@ static void TestProcesses(NSString *root, NSString *binary) {
     CHECK(ReadPair(store, folder) != nil, "process death releases source gate");
 }
 
+static void TestCommitPreconditions(NSString *root, NSString *binary) {
+    NSString *folder = NewCase(root, @"commit-precondition"); PXRuntimeSourceStore *store = Store(folder);
+    __block NSString *receipt = nil; __block PXRuntimeSourceTransaction *escaped = nil;
+    CHECK([store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        escaped = tx;
+        if (![tx requireBaseCommitIdentifier:@"" error:error]) return NO;
+        receipt = [tx prospectiveCommitIdentifierWithError:error];
+        return receipt && [receipt isEqual:[tx prospectiveCommitIdentifierWithError:error]] &&
+               [tx setDictionary:@{ @"value": @1 } atPath:Path(folder, @"a.plist") error:error] &&
+               [tx setDictionary:@{ @"value": @1 } atPath:Path(folder, @"b.plist") error:error];
+    } error:NULL] && [receipt isEqual:ReadPair(store, folder)[@"sourceCommitID"]],
+          "staged source receipt is exactly the committed marker including legacy admission");
+    CHECK(![escaped prospectiveCommitIdentifierWithError:NULL] && ![escaped requireBaseCommitIdentifier:receipt error:NULL],
+          "escaped source commit access is rejected"); escaped = nil;
+    NSDictionary *before = ReadPair(store, folder); __block NSString *unused = nil;
+    CHECK([store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        unused = [tx prospectiveCommitIdentifierWithError:error]; return unused != nil;
+    } error:NULL] && [before isEqual:ReadPair(store, folder)] && ![unused isEqual:receipt],
+          "no-op candidate never becomes a committed source receipt");
+    PXRuntimeSourceStore *competitor = Store(folder);
+    CHECK(WritePair(competitor, folder, 2, NO) && WritePair(competitor, folder, 1, NO), "cooperative source ABA fixture committed");
+    before = ReadPair(store, folder); NSError *failure = nil;
+    CHECK(![store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        [tx setDictionary:@{ @"value": @99 } atPath:Path(folder, @"a.plist") error:error];
+        [tx requireBaseCommitIdentifier:receipt error:error]; return YES;
+    } error:&failure] && failure && [before isEqual:ReadPair(store, folder)],
+          "ignored stale source precondition poisons staged writes despite matching ABA values");
+    NSString *current = before[@"sourceCommitID"];
+    CHECK([store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        __block BOOL rejected = NO;
+        dispatch_sync(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            rejected = ![tx requireBaseCommitIdentifier:current error:NULL] && ![tx prospectiveCommitIdentifierWithError:NULL];
+        });
+        return rejected && [tx requireBaseCommitIdentifier:current error:error];
+    } error:NULL] && [before isEqual:ReadPair(store, folder)], "source commit helpers reject wrong thread without poisoning owner");
+    NSTask *child = Child(binary, @"--increment", folder, @"1"); [child waitUntilExit];
+    before = ReadPair(store, folder);
+    CHECK(child.terminationStatus == 0 && ![store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx requireBaseCommitIdentifier:current error:error];
+    } error:NULL] && [before isEqual:ReadPair(store, folder)], "cross-process source commit invalidates stale precondition without writes");
+    current = before[@"sourceCommitID"];
+    __block NSString *failedCandidate = nil;
+    store.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) [NSException raise:@"fixture.receipt" format:@"physical failure"]; };
+    CHECK(![store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        if (![tx requireBaseCommitIdentifier:current error:error]) return NO;
+        failedCandidate = [tx prospectiveCommitIdentifierWithError:error];
+        return [tx setDictionary:@{ @"value": @4 } atPath:Path(folder, @"a.plist") error:error];
+    } error:NULL] && failedCandidate && [before isEqual:ReadPair(store, folder)], "failed candidate preserves old marker and exact source tuple");
+    store.testCheckpoint = nil;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 4) {
@@ -310,7 +361,7 @@ int main(int argc, const char *argv[]) {
         [NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
         TestStaging(root); TestFailures(root);
         NSString *binary = [NSString stringWithUTF8String:argv[0]];
-        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary);
+        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary); TestCommitPreconditions(root, binary);
         [NSFileManager.defaultManager removeItemAtPath:root error:nil];
         printf("Runtime source transactions: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

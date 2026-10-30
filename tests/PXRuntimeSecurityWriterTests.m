@@ -863,6 +863,34 @@ static void TestDisplayPolicyWriters(void) {
     gDuringMirror = nil; gCheckMirror = NO; gDisplayPolicyVersion = nil;
 }
 
+static void TestConditionalSecurityWrites(void) {
+    CHECK(Seed(@{ @"wifiSpoofEnabled": @NO }), "conditional security baseline seeded");
+    NSString *base = Capture()[@"sourceCommitID"], *receipt = nil; NSError *failure = nil;
+    NSUInteger mirrors = gMirrors;
+    CHECK(PXWriteSecurityBoolWithRollbackAuthority(@"wifiSpoofEnabled", YES, base, &receipt, &failure) && receipt &&
+          [receipt isEqual:Capture()[@"sourceCommitID"]] && gMirrors == mirrors + 3 && [Load()[@"wifiSpoofEnabled"] boolValue],
+          "conditional security receipt precedes compatibility mirrors and matches commit marker");
+    NSDictionary *before = Capture(); mirrors = gMirrors; NSString *staleReceipt = @"unset";
+    CHECK(PXWriteSecurityBoolWithRollbackAuthority(@"wifiSpoofEnabled", NO, base, &staleReceipt, &failure) &&
+          !staleReceipt && ![Load()[@"wifiSpoofEnabled"] boolValue] && mirrors + 3 == gMirrors,
+          "intervening source commit preserves secondary merge but revokes rollback authority");
+    receipt = Capture()[@"sourceCommitID"];
+    BOOL checkMirror = gCheckMirror; gCheckMirror = NO; // Legacy mirrors are not globally ordered across callbacks.
+    gDuringMirror = ^{ CHECK(Seed(@{ @"wifiSpoofEnabled": @NO, @"newer": @YES }), "conditional security mirror successor commits"); };
+    CHECK(PXWriteSecurityBoolWithRollbackAuthority(@"wifiSpoofEnabled", YES, receipt, &staleReceipt, &failure) && staleReceipt &&
+          ![staleReceipt isEqual:Capture()[@"sourceCommitID"]], "conditional security receipt never borrows a mirror successor marker");
+    mirrors = gMirrors; before = Capture();
+    CHECK(!PXPublishSecurityBoolForSourceCommit(@"wifiSpoofEnabled", YES, staleReceipt) && mirrors == gMirrors && [before isEqual:Capture()],
+          "obsolete rollback security publication skips mirrors without source writes");
+    NSString *current = before[@"sourceCommitID"];
+    gDuringMirror = ^{ CHECK(Seed(@{ @"wifiSpoofEnabled": @YES }), "rollback security mirror callback commits newer state"); };
+    CHECK(!PXPublishSecurityBoolForSourceCommit(@"wifiSpoofEnabled", NO, current),
+          "rollback security publisher rechecks source after reentrant mirrors");
+    CHECK(!PXWriteSecurityBoolWithRollbackAuthority(@"", YES, current, &staleReceipt, &failure) && !staleReceipt,
+          "invalid conditional security write clears receipt without work");
+    gCheckMirror = checkMirror;
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -872,7 +900,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath] || [path isEqual:gIndicatorPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters(); TestConditionalSecurityWrites();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

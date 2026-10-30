@@ -209,12 +209,14 @@ require("self.appsCard.userInteractionEnabled = on" in app_enabled_state and "se
 # Device-specific identifier state: UI callers use verified API; primary + secondary failures roll back.
 require("setIdentifierEnabledAndPersist" in tlink_h and '"TLinkIOS.h"' in identifier_h,
         "IdentifierManager verified identifier-toggle API is exported through the shared header")
-verified_identifier = method_body(identifier_m, "- (BOOL)setIdentifierEnabledAndPersist:", 4300)
+# Scope this growing control-flow check to the actual method, not a fixed byte window.
+verified_identifier = identifier_m.split('- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type {', 1)[1].split('\n- (', 1)[0]
 for token in (
     "writeSuccess && primarySuccess && secondarySuccess",
+    "if (primaryCommitted)",
     "secondarySuccess",
     "self.settings[type] = @(previous)",
-    "PXWriteSecurityBool(secondaryKey, previous",
+    "rollbackIdentifier:type previous:previous",
     "return NO;",
 ):
     require(token in verified_identifier, f"Identifier verified setter contains {token}")

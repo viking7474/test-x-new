@@ -209,6 +209,44 @@ BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error) {
     return PXWriteSecuritySetting(key, @(value), error);
 }
 
+BOOL PXWriteSecurityBoolWithRollbackAuthority(NSString *key, BOOL value, NSString *expectedIdentifier,
+                                       NSString **rollbackIdentifier, NSError **error) {
+    if (rollbackIdentifier) *rollbackIdentifier = nil;
+    if (error) *error = nil;
+    if (![key isKindOfClass:NSString.class] || !key.length ||
+        ![expectedIdentifier isKindOfClass:NSString.class] || !expectedIdentifier.length)
+        return PXSecurityWriteError(error, @"Invalid conditional security write");
+    key = [key copy]; expectedIdentifier = [expectedIdentifier copy];
+    NSString *path = PXSecuritySettingsPath();
+    __block NSString *candidate = nil;
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **failure) {
+        NSString *base = [tx baseCommitIdentifierWithError:failure];
+        if (!base) return NO;
+        BOOL ownsChain = [base isEqual:expectedIdentifier];
+        NSDictionary *existing = [tx dictionaryAtPath:path error:failure];
+        if (!existing) return NO;
+        NSMutableDictionary *settings = [existing mutableCopy]; settings[key] = @(value);
+        if (![tx setDictionary:settings atPath:path error:failure]) return NO;
+        candidate = ownsChain ? [tx prospectiveCommitIdentifierWithError:failure] : nil;
+        return !ownsChain || candidate != nil;
+    }, error);
+    if (!success) return NO;
+    if (rollbackIdentifier) *rollbackIdentifier = candidate;
+    PXMirrorSecurityUpdates(@{key: @(value)}, PXSecuritySuiteNames());
+    return YES;
+}
+BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier) {
+    if (![key isKindOfClass:NSString.class] || !key.length ||
+        ![identifier isKindOfClass:NSString.class] || !identifier.length) return NO;
+    key = [key copy]; identifier = [identifier copy];
+    BOOL (^current)(PXRuntimeSourceTransaction *, NSError **) = ^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx requireBaseCommitIdentifier:identifier error:error];
+    };
+    if (!PXPerformStandaloneRuntimeSourceWrite(current, NULL)) return NO;
+    PXMirrorSecurityUpdates(@{key: @(value)}, PXSecuritySuiteNames());
+    return PXPerformStandaloneRuntimeSourceWrite(current, NULL);
+}
+
 BOOL PXWriteSecurityInteger(NSString *key, NSInteger value, NSError **error) {
     return PXWriteSecuritySetting(key, @(value), error);
 }

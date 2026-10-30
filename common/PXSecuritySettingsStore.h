@@ -26,6 +26,14 @@ FOUNDATION_EXPORT BOOL PXRecordClearAttempt(BOOL firstAttemptSuccess,
 FOUNDATION_EXPORT BOOL PXWriteProfileIndicatorPosition(double x, double y, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecuritySetting(NSString *key, id value, NSError **error);
 FOUNDATION_EXPORT BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error);
+/// Preserve the legacy secondary merge. Return rollback authority only if the
+/// preceding commit still matches at admission; otherwise success has nil authority.
+/// Authority is captured before mirrors; BOOL still acknowledges the source write.
+FOUNDATION_EXPORT BOOL PXWriteSecurityBoolWithRollbackAuthority(NSString *key, BOOL value, NSString *expectedIdentifier,
+    NSString * _Nullable * _Nullable rollbackIdentifier, NSError **error);
+/// Mirror only while the cooperative source marker still matches; recheck after
+/// mirrors. No source mutation. Does not make mirrors/notifications atomic.
+FOUNDATION_EXPORT BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier);
 FOUNDATION_EXPORT BOOL PXWriteSecurityInteger(NSString *key, NSInteger value, NSError **error);
 
 NS_ASSUME_NONNULL_END
