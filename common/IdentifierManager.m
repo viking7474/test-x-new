@@ -62,6 +62,7 @@
 @end
 
 @interface IdentifierManager ()
+- (BOOL)refreshScopedAppsMetadataWithError:(NSError **)error;
 - (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error;
 - (NSDictionary *)captureIdentifierVerification:(NSString *)type enabled:(BOOL)enabled secondaryKey:(NSString *)secondaryKey error:(NSError **)error;
 - (BOOL)saveSettingsWithError:(NSError **)error;
@@ -200,6 +201,14 @@ static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionar
     if (!reason) return YES;
     if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6039 userInfo:@{NSLocalizedDescriptionKey: reason}];
     return NO;
+}
+
+static BOOL PXScopeVersionFieldsMatch(NSDictionary *record, NSDictionary *basis) {
+    if (![record isKindOfClass:NSDictionary.class] || ![basis isKindOfClass:NSDictionary.class]) return NO;
+    id leftVersion = record[@"version"], rightVersion = basis[@"version"];
+    id leftBuild = record[@"build"], rightBuild = basis[@"build"];
+    return (leftVersion == rightVersion || [leftVersion isEqual:rightVersion]) &&
+           (leftBuild == rightBuild || [leftBuild isEqual:rightBuild]);
 }
 
 static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
@@ -3108,22 +3117,79 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 #pragma mark - App Management
 
 - (void)refreshScopedAppsInfoIfNeeded {
-    // Iterate through all scoped apps and update their version/build info
-    for (NSString *bundleID in self.scopedApps) {
-        LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-        if (appProxy) {
-            NSString *currentVersion = appProxy.shortVersionString;
-            NSString *currentBuild = appProxy.bundleVersion ?: @"";
-            NSMutableDictionary *appInfo = self.scopedApps[bundleID];
-            BOOL needsUpdate = ![appInfo[@"version"] isEqualToString:currentVersion] ||
-                               ![appInfo[@"build"] isEqualToString:currentBuild];
-            if (needsUpdate) {
-                appInfo[@"version"] = currentVersion ?: @"";
-                appInfo[@"build"] = currentBuild ?: @"";
-            }
+    [self refreshScopedAppsMetadataWithError:NULL];
+}
+
+- (BOOL)refreshScopedAppsMetadataWithError:(NSError **)error {
+    if (error) *error = nil;
+    NSError *failure = nil;
+    NSString *scopePath = PXGlobalScopePath();
+    __block NSDictionary *basis = nil;
+    // Read authoritative immutable records before private-framework callbacks.
+    // Standalone admission also rejects an enclosing uncommitted source write.
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        NSDictionary *scope = [tx dictionaryAtPath:scopePath error:readError];
+        if (!scope || !PXValidateManagerSettingsSources(nil, scope, readError)) return NO;
+        basis = scope[@"ScopedApps"] ?: @{};
+        return YES;
+    }, &failure);
+    if (!success) { self.error = failure; if (error) *error = failure; return NO; }
+
+    NSDictionary *memoryPacket = PXDetachRuntimeGeneration(@{ @"ScopedApps": self.scopedApps ?: @{} }, &failure);
+    if (!memoryPacket || !PXValidateManagerSettingsSources(nil, memoryPacket, &failure)) {
+        self.error = failure; if (error) *error = failure; return NO;
+    }
+    NSDictionary *memoryBasis = memoryPacket[@"ScopedApps"];
+    NSMutableDictionary *updates = [NSMutableDictionary dictionary];
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    if ([proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+        for (NSString *bundleID in basis) {
+            id proxy = [(id)proxyClass applicationProxyForIdentifier:bundleID];
+            if (![proxy respondsToSelector:@selector(shortVersionString)] || ![proxy respondsToSelector:@selector(bundleVersion)]) continue;
+            id version = [proxy shortVersionString], build = [proxy bundleVersion];
+            // Unsupported/malformed optional metadata leaves the app untouched.
+            if ((version && ![version isKindOfClass:NSString.class]) || (build && ![build isKindOfClass:NSString.class])) continue;
+            NSDictionary *desired = @{ @"version": [version copy] ?: @"", @"build": [build copy] ?: @"" };
+            BOOL memoryNeedsUpdate = memoryBasis[bundleID] && !PXScopeVersionFieldsMatch(memoryBasis[bundleID], desired);
+            if (memoryNeedsUpdate || !PXScopeVersionFieldsMatch(basis[bundleID], desired)) updates[bundleID] = desired;
         }
     }
-    [self saveSettings];
+    if (!updates.count) return YES;
+
+    __block BOOL wrote = NO;
+    NSMutableDictionary *admitted = [NSMutableDictionary dictionary];
+    success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        NSDictionary *scope = [tx dictionaryAtPath:scopePath error:writeError];
+        if (!scope || !PXValidateManagerSettingsSources(nil, scope, writeError)) return NO;
+        NSDictionary *current = scope[@"ScopedApps"] ?: @{};
+        NSMutableDictionary *merged = [current mutableCopy];
+        for (NSString *bundleID in updates) {
+            NSDictionary *record = current[bundleID], *desired = updates[bundleID];
+            if (!record) continue; // Never resurrect a removed application.
+            BOOL alreadyMatches = PXScopeVersionFieldsMatch(record, desired);
+            if (!alreadyMatches && !PXScopeVersionFieldsMatch(record, basis[bundleID])) continue;
+            admitted[bundleID] = desired;
+            if (!alreadyMatches) {
+                NSMutableDictionary *changed = [record mutableCopy];
+                [changed addEntriesFromDictionary:desired]; merged[bundleID] = changed; wrote = YES;
+            }
+        }
+        if (!wrote) return YES;
+        NSMutableDictionary *changedScope = [scope mutableCopy]; changedScope[@"ScopedApps"] = merged;
+        return [tx setDictionary:changedScope atPath:scopePath error:writeError];
+    }, &failure);
+    if (!success) { self.error = failure; if (error) *error = failure; return NO; }
+
+    BOOL memoryChanged = NO;
+    for (NSString *bundleID in admitted) {
+        NSDictionary *live = self.scopedApps[bundleID], *desired = admitted[bundleID];
+        if (PXScopeVersionFieldsMatch(live, desired) || !PXScopeVersionFieldsMatch(live, memoryBasis[bundleID])) continue;
+        NSMutableDictionary *changed = [live mutableCopy]; [changed addEntriesFromDictionary:desired];
+        self.scopedApps[bundleID] = changed; memoryChanged = YES;
+    }
+    if (wrote || memoryChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
+    if (wrote) PXPostSettingsChangedNotification();
+    return YES;
 }
 
 - (void)addApplicationToScope:(NSString *)bundleID {

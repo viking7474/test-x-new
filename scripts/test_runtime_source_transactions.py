@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5G-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5H-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -179,6 +179,45 @@ def source_contracts():
                  'nil scope replacement retains explicit empty-scope policy'):
         assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
     assert 'TestScopeReplacementAcknowledgement();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    refresh = method(manager, '- (BOOL)refreshScopedAppsMetadataWithError:(NSError **)error')
+    assert '[self refreshScopedAppsMetadataWithError:NULL]' in method(manager, '- (void)refreshScopedAppsInfoIfNeeded')
+    assert 'saveSettings' not in refresh and 'saveScopedApps' not in refresh and 'PXTLinkIOSSettingsPath' not in refresh
+    assert refresh.count('PXPerformStandaloneRuntimeSourceWrite(') == 2
+    assert refresh.index('}, &failure)') < refresh.index('NSClassFromString(@"LSApplicationProxy")') < refresh.rindex('success = PXPerformStandaloneRuntimeSourceWrite(')
+    for selector in ('applicationProxyForIdentifier:', 'shortVersionString', 'bundleVersion'):
+        assert f'respondsToSelector:@selector({selector})' in refresh
+    assert 'for (NSString *bundleID in basis)' in refresh and 'for (NSString *bundleID in self.scopedApps)' not in refresh
+    assert '[version copy] ?: @""' in refresh and '[build copy] ?: @""' in refresh
+    assert 'if (!updates.count) return YES;' in refresh and 'if (!wrote) return YES;' in refresh
+    assert 'if (!record) continue;' in refresh
+    assert 'if (!alreadyMatches && !PXScopeVersionFieldsMatch(record, basis[bundleID])) continue;' in refresh
+    assert 'NSMutableDictionary *changedScope = [scope mutableCopy]; changedScope[@"ScopedApps"] = merged;' in refresh
+    assert 'setDictionary:changedScope atPath:scopePath' in refresh
+    assert 'PXDetachRuntimeGeneration(@{ @"ScopedApps": self.scopedApps ?: @{} }, &failure)' in refresh
+    assert 'memoryNeedsUpdate || !PXScopeVersionFieldsMatch(basis[bundleID], desired)' in refresh
+    assert '!PXScopeVersionFieldsMatch(live, memoryBasis[bundleID])' in refresh
+    assert refresh.rindex('if (!success)') < refresh.index('BOOL memoryChanged') < refresh.index('self.scopedApps[bundleID] = changed;') < refresh.index('PXPostSettingsChangedNotification()')
+    assert 'if (wrote || memoryChanged)' in refresh and 'if (wrote) PXPostSettingsChangedNotification();' in refresh
+    version_match = manager.split('static BOOL PXScopeVersionFieldsMatch(', 1)[1].split('static NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
+    assert 'isEqualToString:' not in version_match and '@"version"' in version_match and '@"build"' in version_match
+    assert 'leftVersion == rightVersion || [leftVersion isEqual:rightVersion]' in version_match
+    assert 'leftBuild == rightBuild || [leftBuild isEqual:rightBuild]' in version_match
+    for case in ('metadata refresh writes only version build in one scope file and preserves flags unknown fields and unresolved apps',
+                 'unchanged refresh wrapper performs one read admission without writes cache invalidation or notification',
+                 'normalized nil proxy metadata does not trigger repeated writes',
+                 'missing private class factory getters or malformed optional metadata leave records untouched',
+                 'metadata source failure preserves memory bytes marker caches and notification before retry',
+                 'metadata refresh retry persists and adopts after a failed write',
+                 'private metadata callbacks run outside the source gate',
+                 'metadata refresh never resurrects removed apps or overwrites newer version fields',
+                 'metadata refresh merges current source while preserving newer enablement and names',
+                 'metadata adoption preserves newer local version edits after provider callbacks',
+                 'matching canonical metadata refreshes stale memory without source writes or notification',
+                 'nested metadata refresh rejects before private lookup and poisons ignored outer staging',
+                 'malformed metadata source fails before callbacks without replacing live scope',
+                 'non string stored version is safely replaced by valid installed metadata'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestScopeMetadataRefresh();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('standalone settings and scope saves commit once before one compatibility notification',
                  'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',
