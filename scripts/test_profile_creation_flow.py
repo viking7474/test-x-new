@@ -136,7 +136,7 @@ def source_contracts():
         raise AssertionError('macro checker missed an unprotected dictionary comma')
     check_macro_arity('CHECK(([tx write:@{ @"first": @1, @"second": @2 }]), "literal, message()");', 'protected-literal')
     check_macro_arity('/* CHECK(not, an, invocation) */ CHECK(ok && (a, b), "escaped \\\"quote");', 'comments-and-strings')
-    for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m', 'tests/PXRuntimeArtifactWriterTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXRuntimeIdentifierWriterTests.m', 'tests/PXRuntimeSecurityWriterTests.m', 'tests/PXIPMonitorLifecycleTests.m', 'tests/PXPinnedTimeZoneLifecycleTests.m', 'tests/PXPinnedCountryLifecycleTests.m', 'tests/PXIPDisplayLifecycleTests.m', 'tests/PXTargetRegionLifecycleTests.m'):
+    for path in ('tests/PXProfileCreationFlowTests.m', 'tests/PXRuntimeSourceStoreTests.m', 'tests/PXRuntimeDeviceGroupWriterTests.m', 'tests/PXRuntimeArtifactWriterTests.m', 'tests/PXRuntimeArtifactPreparationTests.m', 'tests/PXRuntimeIdentifierWriterTests.m', 'tests/PXRuntimeSecurityWriterTests.m', 'tests/PXIPMonitorLifecycleTests.m', 'tests/PXPinnedTimeZoneLifecycleTests.m', 'tests/PXPinnedCountryLifecycleTests.m', 'tests/PXIPDisplayLifecycleTests.m', 'tests/PXTargetRegionLifecycleTests.m'):
         check_macro_arity(read(path), path)
     source = read('common/ProfileManager.m')
     seed_owner = writers.method(source, '- (BOOL)createProfileZeroWithError:(NSError **)error')

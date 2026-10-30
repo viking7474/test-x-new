@@ -292,11 +292,27 @@ static void TestCommitPreconditions(NSString *root, NSString *binary) {
           "ignored stale source precondition poisons staged writes despite matching ABA values");
     NSString *current = before[@"sourceCommitID"];
     CHECK([store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        // dispatch_sync may inline on this owner thread. Async work plus a
+        // bounded semaphore wait provides a genuinely foreign-thread probe.
+        NSThread *ownerThread = NSThread.currentThread;
         __block BOOL rejected = NO;
-        dispatch_sync(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-            rejected = ![tx requireBaseCommitIdentifier:current error:NULL] && ![tx prospectiveCommitIdentifierWithError:NULL];
+        __block BOOL offOwner = NO;
+        dispatch_semaphore_t checked = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            @autoreleasepool {
+                offOwner = NSThread.currentThread != ownerThread;
+                NSError *requireError = nil, *baseError = nil, *candidateError = nil;
+                BOOL requireRejected = ![tx requireBaseCommitIdentifier:current error:&requireError];
+                BOOL baseRejected = [tx baseCommitIdentifierWithError:&baseError] == nil;
+                BOOL candidateRejected = [tx prospectiveCommitIdentifierWithError:&candidateError] == nil;
+                rejected = requireRejected && baseRejected && candidateRejected && requireError && baseError && candidateError;
+            }
+            dispatch_semaphore_signal(checked);
         });
-        return rejected && [tx requireBaseCommitIdentifier:current error:error];
+        BOOL completed = dispatch_semaphore_wait(checked, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) == 0;
+        // On timeout, do not read fields that the still-running worker may write.
+        CHECK(completed && offOwner, "source commit probe completes on a distinct thread");
+        return completed && offOwner && rejected && [tx requireBaseCommitIdentifier:current error:error];
     } error:NULL] && [before isEqual:ReadPair(store, folder)], "source commit helpers reject wrong thread without poisoning owner");
     NSTask *child = Child(binary, @"--increment", folder, @"1"); [child waitUntilExit];
     before = ReadPair(store, folder);

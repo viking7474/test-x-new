@@ -112,3 +112,33 @@ materialize missing field, ép alias theo primary hoặc xóa untouched fallback
 
 Native Foundation/Theos/package/device behavior cần CI macOS; host RootHide define
 không chứng minh device injection. User-reported H5C build pass được ghi riêng.
+
+
+## Build follow-up — foreign-thread source fixture
+
+User CI report: `source commit helpers reject wrong thread without poisoning owner`,
+126/127 source checks. Finding is a test construction bug introduced with H5B:
+`dispatch_sync(globalQueue, ...)` can execute on the submitting/owner thread, so it
+was not a valid wrong-thread probe. Production checkCommitAccess correctly permits
+that thread; short-circuit `&&` could also skip testing the prospective helper.
+
+[Apple dispatch_sync documentation](https://developer.apple.com/documentation/dispatch/dispatchqueue/sync%28execute%3A%29-3segw?language=objc)
+and [libdispatch queue.h](https://github.com/swiftlang/swift-corelibs-libdispatch/blob/main/dispatch/queue.h)
+explain the current-thread execution optimization. No runtime thread guard is changed.
+
+Fixture now submits async work, waits at most three seconds via semaphore, asserts
+NSThread identity differs, independently tests require/base/prospective helpers with
+non-nil errors, then validates the owner still succeeds and source snapshot/marker
+is unchanged. Timeout paths do not read still-running worker result fields. The
+worker touches only the immutable thread guard on rejection, retains its transaction
+until it finishes, and uses a local autorelease pool.
+
+Added a scoped source contract rejecting sync substitution/missing off-owner check;
+SourceStore fixture is also enrolled in the existing CHECK macro-arity scan. Native
+result remains pending macOS CI; Windows cannot reproduce Darwin inline scheduling.
+
+Follow-up verification trên Windows: test_runtime_source_transactions.py,
+test_profile_creation_flow.py, release_hardening.py source và git diff --check pass.
+Ba negative mutations thay async bằng sync, bỏ thread identity hoặc bỏ independent
+base-reader check đều bị source contracts bắt. Không chạy native Foundation trên
+Windows; cần CI macOS xác nhận lại binary. Không thay production source/guard.

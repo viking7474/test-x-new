@@ -88,6 +88,16 @@ def source_contracts():
                  'marker failure recovery restores old tuple and releases source ownership'):
         assert case in fixture, case
     assert 'TestCommitAcknowledgement(root)' in fixture
+    probe = fixture.split('NSThread *ownerThread = NSThread.currentThread;', 1)[1].split('NSTask *child =', 1)[0]
+    assert 'dispatch_async(dispatch_get_global_queue' in probe and 'dispatch_sync(' not in probe
+    assert 'offOwner = NSThread.currentThread != ownerThread' in probe
+    assert 'dispatch_semaphore_signal(checked)' in probe and 'dispatch_semaphore_wait(checked, dispatch_time(' in probe
+    assert 'return completed && offOwner && rejected && [tx requireBaseCommitIdentifier:current error:error]' in probe
+    assert 'BOOL requireRejected = ![tx requireBaseCommitIdentifier:current error:&requireError]' in probe
+    assert 'BOOL baseRejected = [tx baseCommitIdentifierWithError:&baseError] == nil' in probe
+    assert 'BOOL candidateRejected = [tx prospectiveCommitIdentifierWithError:&candidateError] == nil' in probe
+    assert 'source commit probe completes on a distinct thread' in fixture
+
     consumer_ack = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('verified toggle acknowledges both committed writes without spurious compensation after housekeeping exceptions',
                  'acknowledged compensation publishes restored tuple while retaining original forward failure'):
