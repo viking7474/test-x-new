@@ -3246,12 +3246,56 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled {
-    NSMutableDictionary *appInfo = [self.scopedApps[bundleID] mutableCopy];
-    if (appInfo) {
-        appInfo[@"enabled"] = @(enabled);
-        self.scopedApps[bundleID] = appInfo;
-        [self saveSettings];
+    [self setApplicationEnabledAndPersist:enabled forBundleID:bundleID error:NULL];
+}
+
+- (BOOL)setApplicationEnabledAndPersist:(BOOL)enabled forBundleID:(NSString *)bundleID error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6042 userInfo:@{NSLocalizedDescriptionKey: @"Invalid scoped application ID"}];
+        if (error) *error = self.error;
+        return NO;
     }
+    bundleID = [bundleID copy];
+    NSString *scopePath = PXGlobalScopePath();
+    NSError *failure = nil;
+    __block BOOL wrote = NO;
+    __block NSDictionary *committedRecord = nil;
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        NSDictionary *scope = [tx dictionaryAtPath:scopePath error:writeError];
+        if (!scope || !PXValidateManagerSettingsSources(nil, scope, writeError)) return NO;
+        NSDictionary *apps = scope[@"ScopedApps"] ?: @{};
+        NSDictionary *record = apps[bundleID];
+        if (!record) {
+            if (writeError) *writeError = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6043 userInfo:@{NSLocalizedDescriptionKey: @"Scoped application no longer exists"}];
+            return NO;
+        }
+        id state = record[@"enabled"];
+        if (([state isKindOfClass:NSNumber.class] || [state isKindOfClass:NSString.class]) && [state boolValue] == enabled) {
+            committedRecord = record;
+            return YES;
+        }
+        NSMutableDictionary *changedRecord = [record mutableCopy]; changedRecord[@"enabled"] = @(enabled);
+        NSMutableDictionary *changedApps = [apps mutableCopy]; changedApps[bundleID] = changedRecord;
+        NSMutableDictionary *changedScope = [scope mutableCopy]; changedScope[@"ScopedApps"] = changedApps;
+        if (![tx setDictionary:changedScope atPath:scopePath error:writeError]) return NO;
+        committedRecord = [changedRecord copy]; wrote = YES;
+        return YES;
+    }, &failure);
+    if (!success) {
+        self.error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6042 userInfo:@{NSLocalizedDescriptionKey: @"Failed to persist scoped application state"}];
+        if (error) *error = self.error;
+        return NO;
+    }
+    // Preserve unrelated dirty memory fields; source membership is never created.
+    id live = self.scopedApps[bundleID];
+    NSMutableDictionary *adopted = [live isKindOfClass:NSDictionary.class] ? [live mutableCopy] : [committedRecord mutableCopy];
+    adopted[@"enabled"] = committedRecord[@"enabled"];
+    BOOL memoryChanged = ![live isEqual:adopted];
+    self.scopedApps[bundleID] = adopted;
+    if (wrote || memoryChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
+    if (wrote) PXPostSettingsChangedNotification();
+    return YES;
 }
 
 - (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs {
@@ -3308,9 +3352,7 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID {
     if (bundleID) {
         NSDictionary *appInfo = self.scopedApps[bundleID];
-        if (appInfo) {
-            return [appInfo mutableCopy];
-        }
+        if ([appInfo isKindOfClass:NSDictionary.class]) return [appInfo mutableCopy];
         return nil;
     }
     

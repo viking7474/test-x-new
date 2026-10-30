@@ -14,6 +14,8 @@
 - (void)addApplicationToScope:(NSString *)bundleID;
 - (void)removeApplicationFromScope:(NSString *)bundleID;
 - (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled;
+// Canonical per-app scope write; success is local acknowledgement, including a verified no-op.
+- (BOOL)setApplicationEnabledAndPersist:(BOOL)enabled forBundleID:(NSString *)bundleID error:(NSError **)error;
 - (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs;
 - (NSDictionary *)getApplicationInfo:(NSString *)bundleID;
 - (BOOL)isApplicationEnabled:(NSString *)bundleID;

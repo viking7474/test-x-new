@@ -518,6 +518,30 @@ ARTIFACT_SINGLETON
 #undef CFNotificationCenterPostNotification
 @end
 
+// Foundation-only adapter compiling the exact production switch action.
+@interface PXScopeSwitchFixture : NSObject
+@property (nonatomic, getter=isOn) BOOL on;
+@property (nonatomic) NSUInteger restorations;
+- (void)setOn:(BOOL)on animated:(BOOL)animated;
+@end
+@implementation PXScopeSwitchFixture
+- (void)setOn:(BOOL)on animated:(BOOL)animated { (void)animated; self.on = on; self.restorations++; }
+@end
+@interface PXAppScopeToggleUIFixture : NSObject
+@property (nonatomic, strong) PXDeviceGroupFixture *manager;
+@property (nonatomic, strong) NSDictionary *appSwitches;
+@property (nonatomic, strong) NSError *presentedError;
+@property (nonatomic) NSUInteger errors;
+- (void)showError:(NSError *)error;
+- (void)appSwitchChanged:(PXScopeSwitchFixture *)sender;
+@end
+@implementation PXAppScopeToggleUIFixture
+- (void)showError:(NSError *)error { self.presentedError = error; self.errors++; }
+#define UISwitch PXScopeSwitchFixture
+#include "PXAppScopeToggleUI.inc"
+#undef UISwitch
+@end
+
 static void TestGroups(PXDeviceGroupFixture *manager, NSString *a, NSString *b) {
     gSelected = @"a"; gExpectedIdentity = a; gSelections = 0;
     CHECK(Seed(a, @{ @"GenerationCounter": @7, @"SSID": @"old", @"ModelNumber": @"stale", @"WebGLMaxRenderBufferSize": @99 }, YES) &&
@@ -3013,6 +3037,115 @@ static void TestScopeMetadataRefresh(void) {
           "non string stored version is safely replaced by valid installed metadata");
 }
 
+static void TestPerApplicationScopeToggle(void) {
+    PXDeviceGroupFixture *manager = ScopeMetadataFixture(NO);
+    manager.scopedApps[@"fixture.installed"][@"name"] = @"Dirty name";
+    manager.scopedApps[@"fixture.installed"][@"version"] = @"Dirty version";
+    NSData *settingsBytes = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSUInteger notices = gBatchNotifications, lookups = gScopeProxyLookups; __block NSUInteger writes = 0;
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) writes++; };
+    NSError *failure = nil; BOOL success = [manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:&failure]; gStore.testCheckpoint = nil;
+    NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+    CHECK(success && !failure && writes == 1 && notices + 1 == gBatchNotifications && lookups == gScopeProxyLookups &&
+          [source[@"ScopedApps"][@"fixture.installed"][@"enabled"] boolValue] &&
+          [source[@"ScopedApps"][@"fixture.installed"][@"name"] isEqual:@"Original"] && [source[@"RootMetadata"] isEqual:@"keep"] &&
+          [source[@"ScopedApps"][@"fixture.unresolved"][@"enabled"] boolValue] &&
+          [manager.scopedApps[@"fixture.installed"][@"name"] isEqual:@"Dirty name"] &&
+          [manager.scopedApps[@"fixture.installed"][@"version"] isEqual:@"Dirty version"] &&
+          [settingsBytes isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]],
+          "per-app toggle writes only target enabled while preserving other apps root metadata settings and dirty memory fields");
+    [manager seedPersistenceCaches]; NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    CHECK([manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:NULL] && [before isEqual:BatchSnapshot()] &&
+          [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "matching canonical per-app toggle is a verified no-op without cache or topic effects");
+    manager.scopedApps[@"fixture.installed"][@"enabled"] = @NO;
+    CHECK([manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:NULL] && [before isEqual:BatchSnapshot()] &&
+          [manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue] && ![[manager persistenceCaches][@"spoof"] count] && notices == gBatchNotifications,
+          "per-app canonical no-op repairs stale memory and cache without source write");
+    manager = ScopeMetadataFixture(NO); before = BatchSnapshot(); cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    NSMutableDictionary *old = manager.scopedApps, *oldRecord = manager.scopedApps[@"fixture.installed"]; __block BOOL faulted = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.scope-toggle" format:@"source fault"]; }
+    };
+    failure = nil; success = [manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:&failure]; gStore.testCheckpoint = nil;
+    CHECK(!success && failure && faulted && manager.scopedApps == old && manager.scopedApps[@"fixture.installed"] == oldRecord &&
+          ![oldRecord[@"enabled"] boolValue] && [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "failed per-app toggle preserves memory records source marker caches and notification");
+    [manager setApplication:@"fixture.installed" enabled:YES];
+    CHECK([manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue] && notices + 1 == gBatchNotifications &&
+          [[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"][@"enabled"] boolValue],
+          "legacy void app toggle delegates to acknowledged scope-only persistence and retries safely");
+    before = BatchSnapshot(); notices = gBatchNotifications; __block BOOL inner = YES; failure = nil;
+    success = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"app-toggle-outer.plist") error:error]) return NO;
+        inner = [manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:NULL]; return YES;
+    } error:&failure];
+    CHECK(!success && !inner && failure && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+          "nested per-app no-op rejects acknowledgement and poisons ignored outer staging");
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+    } error:NULL], "per-app absent scope fixture seeded");
+    before = BatchSnapshot(); old = manager.scopedApps; failure = nil;
+    CHECK(![manager setApplicationEnabledAndPersist:NO forBundleID:@"fixture.installed" error:&failure] && failure.code == 6043 &&
+          manager.scopedApps == old && [before isEqual:BatchSnapshot()], "per-app toggle never recreates an absent source from stale manager memory");
+    manager = ScopeMetadataFixture(NO); before = BatchSnapshot();
+    CHECK(![manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.missing" error:&failure] && failure.code == 6043 &&
+          ![manager setApplicationEnabledAndPersist:YES forBundleID:(id)@7 error:&failure] && failure.code == 6042 && [before isEqual:BatchSnapshot()],
+          "missing app and invalid toggle ID fail without new membership or source mutation");
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSMutableDictionary *scope = [[tx dictionaryAtPath:PXGlobalScopePath() error:error] mutableCopy];
+        NSMutableDictionary *apps = [scope[@"ScopedApps"] mutableCopy];
+        NSMutableDictionary *record = [apps[@"fixture.installed"] mutableCopy];
+        [record removeObjectForKey:@"enabled"]; apps[@"fixture.installed"] = record; scope[@"ScopedApps"] = apps;
+        return [tx setDictionary:scope atPath:PXGlobalScopePath() error:error];
+    } error:NULL] && [manager setApplicationEnabledAndPersist:NO forBundleID:@"fixture.installed" error:NULL] &&
+          [[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.installed"][@"enabled"] isEqual:@NO],
+          "missing enabled key is explicitly persisted for a false request");
+    manager = ScopeMetadataFixture(NO); NSMutableString *requested = [@"fixture.installed" mutableCopy];
+    gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) [requested setString:@"changed.by.callback"]; };
+    success = [manager setApplicationEnabledAndPersist:YES forBundleID:requested error:NULL]; gStore.testCheckpoint = nil;
+    CHECK(success && [requested isEqual:@"changed.by.callback"] && [manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue] && !manager.scopedApps[requested],
+          "per-app toggle freezes mutable caller ID before source callbacks");
+    manager = ScopeMetadataFixture(NO); failure = [NSError errorWithDomain:@"stale" code:1 userInfo:nil];
+    gDuringRequiredNotification = ^{ manager.error = [NSError errorWithDomain:@"successor" code:995 userInfo:nil]; };
+    CHECK([manager setApplicationEnabledAndPersist:YES forBundleID:@"fixture.installed" error:&failure] && !failure && manager.error.code == 995,
+          "per-app success uses local receipt and does not erase newer publication error");
+    NSData *saved = [NSData dataWithContentsOfFile:PXGlobalScopePath()];
+    @try {
+        CHECK([[@"malformed scope" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:PXGlobalScopePath() atomically:YES], "per-app corrupt scope fixture seeded");
+        old = manager.scopedApps; before = BatchSnapshot();
+        CHECK(![manager setApplicationEnabledAndPersist:NO forBundleID:@"fixture.installed" error:&failure] && failure && old == manager.scopedApps &&
+              [before isEqual:BatchSnapshot()], "malformed canonical scope is never replaced by a per-app toggle");
+    } @finally { CHECK([saved writeToFile:PXGlobalScopePath() atomically:YES], "per-app corrupt scope teardown restores exact bytes"); }
+    manager.scopedApps[@"fixture.installed"] = @7;
+    CHECK([manager getApplicationInfo:@"fixture.installed"] == nil, "single-app info rejects malformed live records for safe UI restoration");
+}
+static void TestAppScopeToggleUI(void) {
+    PXAppScopeToggleUIFixture *ui = [PXAppScopeToggleUIFixture new];
+    ui.manager = ScopeMetadataFixture(NO);
+    PXScopeSwitchFixture *control = [PXScopeSwitchFixture new]; control.on = YES;
+    ui.appSwitches = @{ @"fixture.installed": control };
+    __block BOOL faulted = NO;
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.scope-ui" format:@"source fault"]; }
+    };
+    [ui appSwitchChanged:control]; gStore.testCheckpoint = nil;
+    CHECK(faulted && !control.isOn && control.restorations == 1 && ui.errors == 1 && ui.presentedError &&
+          ![ui.manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue],
+          "app switch restores manager state and reports the local persistence failure");
+    control.on = YES; [ui appSwitchChanged:control];
+    CHECK(control.isOn && ui.errors == 1 && [ui.manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue],
+          "app switch successful retry reflects committed manager state");
+    [ui.manager setApplicationEnabledAndPersist:NO forBundleID:@"fixture.installed" error:NULL];
+    gDuringRequiredNotification = ^{ CHECK([ui.manager setApplicationEnabledAndPersist:NO forBundleID:@"fixture.installed" error:NULL], "UI publication successor commits"); };
+    control.on = YES; [ui appSwitchChanged:control];
+    CHECK(!control.isOn && ui.errors == 1 && ![ui.manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue],
+          "app switch reflects publication successor instead of reversing an obsolete intent");
+    NSUInteger attempts = gStandaloneSourceAttempts;
+    [ui appSwitchChanged:[PXScopeSwitchFixture new]];
+    CHECK(attempts == gStandaloneSourceAttempts && ui.errors == 1, "unknown app switch does not issue source work");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3049,6 +3182,8 @@ int main(void) {
         TestManagerSettingsLoading();
         TestScopeReplacementAcknowledgement();
         TestScopeMetadataRefresh();
+        TestPerApplicationScopeToggle();
+        TestAppScopeToggleUI();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

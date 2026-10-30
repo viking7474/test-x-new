@@ -74,6 +74,9 @@ SIGNATURES = [
     '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 SIGNATURES += ['- (void)loadSettings',
+               '- (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled',
+               '- (BOOL)setApplicationEnabledAndPersist:(BOOL)enabled forBundleID:(NSString *)bundleID error:(NSError **)error',
+               '- (NSDictionary *)getApplicationInfo:(NSString *)bundleID',
                '- (void)refreshScopedAppsInfoIfNeeded',
                '- (BOOL)refreshScopedAppsMetadataWithError:(NSError **)error',
                '- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs',
@@ -185,7 +188,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5H-partial'
+    assert manifest['rollout'] == '4C.2H5I-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
@@ -196,6 +199,8 @@ def generate_native_fragments(folder):
     methods = [method(manager, signature) for signature in SIGNATURES]
     (folder / 'PXDeviceGroupDeclarations.inc').write_text('\n'.join(m.split(' {', 1)[0] + ';' for m in methods), encoding='utf-8')
     (folder / 'PXDeviceGroupMethods.inc').write_text('\n\n'.join(methods), encoding='utf-8')
+    ui = method(read('TLinkIOSViewController.m'), '- (void)appSwitchChanged:(UISwitch *)sender')
+    (folder / 'PXAppScopeToggleUI.inc').write_text(ui, encoding='utf-8')
     statics = ['static NSInteger PXMEIDLuhnCheckDigit(NSString *body);']
     for signature in STATICS:
         if signature == 'static BOOL PXPopulateCanonicalCellularIdentity':

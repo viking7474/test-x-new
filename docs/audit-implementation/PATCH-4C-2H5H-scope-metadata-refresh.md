@@ -112,3 +112,8 @@ flush, unconditional topic, removing nil normalization or removing a getter guar
 caught by source contracts. No production files are changed by those controls.
 Native Foundation/Theos rootful/RootHide builds, LaunchServices behavior and physical
 injection remain for macOS CI/device. Full Patch 4 writer rollout remains partial.
+
+
+## Build acknowledgement
+
+2026-10-30: user reports H5H build pass. This confirmation is user-provided; no native Foundation/Theos execution occurred on the local Windows host. H5I continues with per-app scope enablement and switch persistence feedback.

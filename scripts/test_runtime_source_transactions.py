@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5H-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5I-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -218,6 +218,50 @@ def source_contracts():
                  'non string stored version is safely replaced by valid installed metadata'):
         assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
     assert 'TestScopeMetadataRefresh();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    app_toggle_signature = '- (BOOL)setApplicationEnabledAndPersist:(BOOL)enabled forBundleID:(NSString *)bundleID error:(NSError **)error'
+    app_toggle = method(manager, app_toggle_signature)
+    assert app_toggle_signature + ';' in read('common/IdentifierManager.h')
+    assert '[self setApplicationEnabledAndPersist:enabled forBundleID:bundleID error:NULL]' in method(manager, '- (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled')
+    assert 'saveSettings' not in app_toggle and 'PXTLinkIOSSettingsPath' not in app_toggle and 'LSApplicationProxy' not in app_toggle
+    assert app_toggle.count('PXPerformStandaloneRuntimeSourceWrite(') == 1
+    assert 'self.scopedApps' not in app_toggle.split('if (!success)', 1)[0]
+    assert app_toggle.index('bundleID = [bundleID copy];') < app_toggle.index('PXPerformStandaloneRuntimeSourceWrite(')
+    assert 'PXValidateManagerSettingsSources(nil, scope, writeError)' in app_toggle
+    assert 'if (!record)' in app_toggle and 'code:6043' in app_toggle and 'code:6042' in app_toggle
+    assert '[state isKindOfClass:NSNumber.class]' in app_toggle and '[state isKindOfClass:NSString.class]' in app_toggle
+    assert 'committedRecord = record;' in app_toggle and '[state boolValue] == enabled' in app_toggle
+    assert 'changedRecord[@"enabled"] = @(enabled)' in app_toggle and 'changedApps[bundleID] = changedRecord' in app_toggle
+    assert 'setDictionary:changedScope atPath:scopePath' in app_toggle
+    assert app_toggle.index('}, &failure)') < app_toggle.index('if (!success)') < app_toggle.index('self.scopedApps[bundleID] = adopted;') < app_toggle.index('PXPostSettingsChangedNotification()')
+    assert 'if (wrote || memoryChanged)' in app_toggle and 'if (wrote) PXPostSettingsChangedNotification();' in app_toggle
+    assert 'adopted[@"enabled"] = committedRecord[@"enabled"]' in app_toggle and 'return self.error' not in app_toggle
+    getter = method(manager, '- (NSDictionary *)getApplicationInfo:(NSString *)bundleID')
+    assert 'if ([appInfo isKindOfClass:NSDictionary.class]) return [appInfo mutableCopy];' in getter
+    ui_toggle = method(read('TLinkIOSViewController.m'), '- (void)appSwitchChanged:(UISwitch *)sender')
+    assert 'BOOL saved = [self.manager setApplicationEnabledAndPersist:sender.isOn forBundleID:bundleID error:&failure]' in ui_toggle
+    assert ui_toggle.index('setApplicationEnabledAndPersist:') < ui_toggle.index('getApplicationInfo:bundleID') < ui_toggle.index('[sender setOn:currentEnabled animated:YES]')
+    assert 'if (!saved && failure) [self showError:failure];' in ui_toggle and '!sender.isOn' not in ui_toggle
+    assert 'PXAppScopeToggleUI.inc' in read('scripts/test_runtime_device_group_writers.py')
+    for case in ('per-app toggle writes only target enabled while preserving other apps root metadata settings and dirty memory fields',
+                 'matching canonical per-app toggle is a verified no-op without cache or topic effects',
+                 'per-app canonical no-op repairs stale memory and cache without source write',
+                 'failed per-app toggle preserves memory records source marker caches and notification',
+                 'legacy void app toggle delegates to acknowledged scope-only persistence and retries safely',
+                 'nested per-app no-op rejects acknowledgement and poisons ignored outer staging',
+                 'per-app toggle never recreates an absent source from stale manager memory',
+                 'missing app and invalid toggle ID fail without new membership or source mutation',
+                 'missing enabled key is explicitly persisted for a false request',
+                 'per-app toggle freezes mutable caller ID before source callbacks',
+                 'per-app success uses local receipt and does not erase newer publication error',
+                 'malformed canonical scope is never replaced by a per-app toggle',
+                 'single-app info rejects malformed live records for safe UI restoration',
+                 'app switch restores manager state and reports the local persistence failure',
+                 'app switch successful retry reflects committed manager state',
+                 'app switch reflects publication successor instead of reversing an obsolete intent',
+                 'unknown app switch does not issue source work'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestPerApplicationScopeToggle();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestAppScopeToggleUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('standalone settings and scope saves commit once before one compatibility notification',
                  'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',

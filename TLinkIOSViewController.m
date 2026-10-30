@@ -3701,8 +3701,14 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     
     if (!bundleID) return;
     
-    // Update app state in manager
-    [self.manager setApplication:bundleID enabled:sender.isOn];
+    NSError *failure = nil;
+    BOOL saved = [self.manager setApplicationEnabledAndPersist:sender.isOn forBundleID:bundleID error:&failure];
+    NSDictionary *current = [self.manager getApplicationInfo:bundleID];
+    id state = current[@"enabled"];
+    BOOL currentEnabled = ([state isKindOfClass:NSNumber.class] || [state isKindOfClass:NSString.class]) && [state boolValue];
+    // Reflect the current manager state, including publication reentry.
+    [sender setOn:currentEnabled animated:YES];
+    if (!saved && failure) [self showError:failure];
 }
 
 - (void)addAppButtonTapped:(UIButton *)sender {
