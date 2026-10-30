@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5L-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5M-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -643,6 +643,53 @@ def source_contracts():
     group_recipe = read('scripts/test_runtime_device_group_writers.py')
     assert "SIGNATURES += ['- (void)loadSettings'," in group_recipe
     assert 'static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error)' in group_recipe
+    reload_signature = '- (BOOL)reloadScopedAppsWithError:(NSError **)error'
+    reload_scope = method(manager, reload_signature).split('\n#pragma mark', 1)[0]
+    assert '[self reloadScopedAppsWithError:NULL]' in method(manager, '- (void)loadScopedApps')
+    assert "'- (void)loadScopedApps'," in group_recipe and repr(reload_signature) in group_recipe
+    assert reload_scope.index('if (error) *error = nil;') < reload_scope.index('BOOL managerProcess')
+    injected_guard = '#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)\n    if (!managerProcess) return YES;'
+    assert injected_guard in reload_scope
+    assert reload_scope.index(injected_guard) < reload_scope.index('PXPerformStandaloneRuntimeSourceWrite(') < reload_scope.index('PXCaptureRuntimeSources(')
+    assert 'if (managerProcess && !PXPerformStandaloneRuntimeSourceWrite(' in reload_scope
+    assert 'PXPerformRuntimeSourceWrite(' not in reload_scope
+    owner_reload, legacy_reload = reload_scope.split('    } else {', 1)
+    assert 'if (managerProcess) {' in owner_reload
+    assert 'NSDictionary *record = PXReadRuntimeSourceDictionary(scopePath, readError);' in owner_reload
+    assert 'if (!record || !PXValidateManagerSettingsSources(nil, record, readError)) return nil;' in owner_reload
+    assert 'if (!captured) { self.error = failure; if (error) *error = failure; return NO; }' in owner_reload
+    assert 'scope = captured[@"scope"];' in owner_reload
+    assert 'scope = PXReadRuntimeSourceDictionary(scopePath, &failure);' in legacy_reload
+    assert 'if (!scope || !PXValidateManagerSettingsSources(nil, scope, &failure)) {' in legacy_reload
+    assert 'self.error = failure; if (error) *error = failure; return NO;' in legacy_reload
+    for forbidden in ('PXPerformStandaloneRuntimeSourceWrite', 'PXCaptureRuntimeSources'):
+        assert forbidden not in legacy_reload, 'legacy rootful injected reader must not acquire owner recovery/capture'
+    for forbidden in ('dictionaryWithContentsOfFile:', 'fileExistsAtPath:', 'allKeys', 'saveSettings',
+                      'saveScopedApps', 'setDictionary:', 'writeToFile:', 'PXPostSettingsChangedNotification'):
+        assert forbidden not in reload_scope
+    adopt = 'self.scopedApps = candidate;'
+    copies = 'for (NSString *bundleID in records) candidate[bundleID] = [records[bundleID] mutableCopy];'
+    assert reload_scope.index('PXValidateManagerSettingsSources(nil, scope, &failure)') < reload_scope.index('NSDictionary *records') < reload_scope.index(copies)
+    assert reload_scope.index(copies) < reload_scope.index('BOOL changed = ![self.scopedApps isEqual:candidate];') < reload_scope.index(adopt)
+    assert reload_scope.count('self.scopedApps =') == 1
+    assert reload_scope.index(adopt) < reload_scope.index('if (changed) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }')
+    assert reload_scope.count('removeAllObjects') == 2
+    for case in ('changed scope reload adopts typed mutable records and invalidates both decision caches without source writes or topics',
+                 'matching scope reload wrapper preserves caches marker and notification count',
+                 'reloaded app records are independently mutable without changing source values',
+                 'malformed scope structures preserve exact live map records caches and source tuple',
+                 'malformed or non-dictionary plist never becomes a successful empty reload',
+                 'scope reload malformed teardown preserves original marker and tuple',
+                 'failed scope capture retains memory and caches',
+                 'nested manager reload rejects before decoding and poisons ignored outer staging',
+                 'manager scope decoder runs under source capture and rejects interleaved writer',
+                 'missing scope retains legacy empty policy without materializing source file',
+                 'matching missing scope reload does not repeatedly invalidate caches or notify',
+                 'RootHide injected scope reload still exits before decoder recovery capture or cache work',
+                 'rootful legacy reader uses bounded decode without source owner recovery or capture',
+                 'rootful legacy malformed file preserves memory and caches without escalating to owner APIs'):
+        assert case in fixture_settings, case
+    assert 'TestExplicitScopeReload();' in fixture_settings
     for token in ('nested writer shares staged dictionaries', 'ignored nested failure', 'rollback restores exact prior bytes',
                   'rollback preserves original source permissions', 'validate all journal paths before any recovery writes',
                   'commit marker decides complete new tuple', 'rollback restores absence',

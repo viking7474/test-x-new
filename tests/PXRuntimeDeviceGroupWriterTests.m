@@ -3539,6 +3539,111 @@ static void TestExtensionScopeWorkflowUI(void) {
     gScopeExpandedIDs = nil; gScopeFilterSuccess = YES;
 }
 
+static void TestExplicitScopeReload(void) {
+    gManagerLoadRole = YES;
+    PXDeviceGroupFixture *manager = ScopeMetadataFixture(NO);
+    NSDictionary *desired = @{ @"fixture.reload": @{ @"enabled": @"YES", @"name": @"Reloaded", @"custom": @"keep" } };
+    CHECK(SetSource(PXGlobalScopePath(), @"ScopedApps", desired), "scope reload source seeded");
+    NSData *settings = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSDictionary *before = BatchSnapshot(); NSUInteger notices = gBatchNotifications, lookups = gScopeProxyLookups;
+    NSError *failure = nil;
+    CHECK([manager reloadScopedAppsWithError:&failure] && !failure && [manager.scopedApps isEqual:desired] &&
+          [manager.scopedApps isKindOfClass:NSMutableDictionary.class] && [manager.scopedApps[@"fixture.reload"] isKindOfClass:NSMutableDictionary.class] &&
+          ![[manager persistenceCaches][@"spoof"] count] && ![[manager persistenceCaches][@"enabled"] count] &&
+          [before isEqual:BatchSnapshot()] && notices == gBatchNotifications && lookups == gScopeProxyLookups &&
+          [settings isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]],
+          "changed scope reload adopts typed mutable records and invalidates both decision caches without source writes or topics");
+    [manager seedPersistenceCaches]; NSDictionary *cache = [manager persistenceCaches]; before = BatchSnapshot();
+    [manager loadScopedApps];
+    CHECK([cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+          "matching scope reload wrapper preserves caches marker and notification count");
+    manager.scopedApps[@"fixture.reload"][@"name"] = @"Memory edit";
+    CHECK([[NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.reload"][@"name"] isEqual:@"Reloaded"],
+          "reloaded app records are independently mutable without changing source values");
+    for (NSDictionary *invalid in @[@{ @"ScopedApps": @[] }, @{ @"ScopedApps": @{ @"bad": @YES } }, @{ @"ScopedApps": @{ @"bad": @{ @"enabled": @[] } } }]) {
+        CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx setDictionary:invalid atPath:PXGlobalScopePath() error:error];
+        } error:NULL], "malformed scope reload structure seeded");
+        [manager seedPersistenceCaches]; id old = manager.scopedApps; id record = manager.scopedApps[@"fixture.reload"];
+        cache = [manager persistenceCaches]; before = BatchSnapshot(); failure = nil;
+        CHECK(![manager reloadScopedAppsWithError:&failure] && failure.code == 6039 && manager.scopedApps == old &&
+              manager.scopedApps[@"fixture.reload"] == record && [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()],
+              "malformed scope structures preserve exact live map records caches and source tuple");
+    }
+    manager = ScopeMetadataFixture(NO);
+    NSData *saved = [NSData dataWithContentsOfFile:PXGlobalScopePath()]; NSDictionary *clean = BatchSnapshot();
+    NSArray *badBytes = @[[@"malformed scope" dataUsingEncoding:NSUTF8StringEncoding],
+        [NSPropertyListSerialization dataWithPropertyList:@[@"wrong root"] format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL]];
+    for (NSData *bytes in badBytes) {
+        @try {
+            CHECK([bytes writeToFile:PXGlobalScopePath() atomically:YES], "scope reload malformed bytes seeded");
+            [manager seedPersistenceCaches]; id old = manager.scopedApps; cache = [manager persistenceCaches]; before = BatchSnapshot(); failure = nil;
+            CHECK(![manager reloadScopedAppsWithError:&failure] && failure && manager.scopedApps == old &&
+                  [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications,
+                  "malformed or non-dictionary plist never becomes a successful empty reload");
+        } @finally { CHECK([saved writeToFile:PXGlobalScopePath() atomically:YES], "scope reload teardown restores exact source bytes"); }
+        CHECK([clean isEqual:BatchSnapshot()], "scope reload malformed teardown preserves original marker and tuple");
+    }
+    before = BatchSnapshot(); id old = manager.scopedApps; cache = [manager persistenceCaches];
+    gFailNextToggleVerificationCapture = YES; failure = nil;
+    CHECK(![manager reloadScopedAppsWithError:&failure] && failure && manager.scopedApps == old &&
+          [cache isEqual:[manager persistenceCaches]] && [before isEqual:BatchSnapshot()], "failed scope capture retains memory and caches");
+    NSUInteger reads = gVerificationSourceReads; __block BOOL inner = YES; failure = nil;
+    BOOL outer = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"reload-outer.plist") error:error]) return NO;
+        inner = [manager reloadScopedAppsWithError:NULL]; return YES;
+    } error:&failure];
+    CHECK(!outer && !inner && failure && manager.scopedApps == old && reads == gVerificationSourceReads && [before isEqual:BatchSnapshot()],
+          "nested manager reload rejects before decoding and poisons ignored outer staging");
+    __block BOOL attempted = NO, rejected = NO;
+    gDuringVerificationRead = ^(NSString *path) {
+        (void)path; attempted = YES;
+        rejected = ![gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx setDictionary:@{} atPath:PXGlobalScopePath() error:error];
+        } error:NULL];
+    };
+    CHECK([manager reloadScopedAppsWithError:NULL], "scope capture reload succeeds during rejected writer probe"); gDuringVerificationRead = nil;
+    CHECK(attempted && rejected && [before isEqual:BatchSnapshot()], "manager scope decoder runs under source capture and rejects interleaved writer");
+    CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+    } error:NULL], "scope reload missing file seeded");
+    [manager seedPersistenceCaches]; before = BatchSnapshot();
+    CHECK([manager reloadScopedAppsWithError:NULL] && !manager.scopedApps.count && ![[manager persistenceCaches][@"spoof"] count] &&
+          ![[manager persistenceCaches][@"enabled"] count] &&
+          [before isEqual:BatchSnapshot()] && ![NSFileManager.defaultManager fileExistsAtPath:PXGlobalScopePath()],
+          "missing scope retains legacy empty policy without materializing source file");
+    [manager seedPersistenceCaches]; cache = [manager persistenceCaches];
+    CHECK([manager reloadScopedAppsWithError:NULL] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "matching missing scope reload does not repeatedly invalidate caches or notify");
+    manager = ScopeMetadataFixture(NO);
+    CHECK(SetSource(PXGlobalScopePath(), @"ScopedApps", desired), "injected reload changed scope seeded");
+    reads = gVerificationSourceReads;
+    NSUInteger captures = gVerificationCaptures, attempts = gStandaloneSourceAttempts; old = manager.scopedApps; cache = [manager persistenceCaches];
+    gManagerLoadRole = NO;
+    @try {
+#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+        failure = [NSError errorWithDomain:@"stale" code:1 userInfo:nil];
+        CHECK([manager reloadScopedAppsWithError:&failure] && !failure && manager.scopedApps == old && reads == gVerificationSourceReads &&
+              captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts && [cache isEqual:[manager persistenceCaches]],
+              "RootHide injected scope reload still exits before decoder recovery capture or cache work");
+#else
+        CHECK([manager reloadScopedAppsWithError:NULL] && captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts &&
+              reads + 1 == gVerificationSourceReads && [manager.scopedApps isEqual:desired] &&
+              ![[manager persistenceCaches][@"spoof"] count] && ![[manager persistenceCaches][@"enabled"] count],
+              "rootful legacy reader uses bounded decode without source owner recovery or capture");
+        [manager seedPersistenceCaches];
+        saved = [NSData dataWithContentsOfFile:PXGlobalScopePath()]; old = manager.scopedApps; cache = [manager persistenceCaches];
+        @try {
+            CHECK([[@"malformed legacy scope" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:PXGlobalScopePath() atomically:YES], "legacy reload malformed file seeded");
+            failure = nil;
+            CHECK(![manager reloadScopedAppsWithError:&failure] && failure && old == manager.scopedApps &&
+                  [cache isEqual:[manager persistenceCaches]] && captures == gVerificationCaptures && attempts == gStandaloneSourceAttempts,
+                  "rootful legacy malformed file preserves memory and caches without escalating to owner APIs");
+        } @finally { CHECK([saved writeToFile:PXGlobalScopePath() atomically:YES], "legacy reload teardown restores exact bytes"); }
+#endif
+    } @finally { gManagerLoadRole = YES; }
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3583,6 +3688,7 @@ int main(void) {
         TestAppScopeAdditionUI();
         TestAtomicScopeAdditionBatch();
         TestExtensionScopeWorkflowUI();
+        TestExplicitScopeReload();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

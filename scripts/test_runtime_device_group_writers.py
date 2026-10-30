@@ -74,6 +74,8 @@ SIGNATURES = [
     '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 SIGNATURES += ['- (void)loadSettings',
+               '- (void)loadScopedApps',
+               '- (BOOL)reloadScopedAppsWithError:(NSError **)error',
                '- (BOOL)addApplicationsToScopeAndPersist:(NSArray<NSString *> *)bundleIDs error:(NSError **)error',
                '- (void)addApplicationToScope:(NSString *)bundleID',
                '- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error',
@@ -196,7 +198,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5L-partial'
+    assert manifest['rollout'] == '4C.2H5M-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')

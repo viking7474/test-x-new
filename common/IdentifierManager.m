@@ -62,6 +62,7 @@
 @end
 
 @interface IdentifierManager ()
+- (BOOL)reloadScopedAppsWithError:(NSError **)error;
 - (BOOL)refreshScopedAppsMetadataWithError:(NSError **)error;
 - (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error;
 - (NSDictionary *)captureIdentifierVerification:(NSString *)type enabled:(BOOL)enabled secondaryKey:(NSString *)secondaryKey error:(NSError **)error;
@@ -3615,60 +3616,47 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     return NO;
 }
 
-// New method to load scoped apps configuration explicitly
+// Explicit scope reload also serves the legacy rootful cache-miss path.
 - (void)loadScopedApps {
+    [self reloadScopedAppsWithError:NULL];
+}
+
+- (BOOL)reloadScopedAppsWithError:(NSError **)error {
+    if (error) *error = nil;
+    BOOL managerProcess = PXIdentifierManagerIsManagerProcess();
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    if (!PXIdentifierManagerIsManagerProcess()) return;
+    if (!managerProcess) return YES; // Preserve injected hosts' no-I/O early exit.
 #endif
-    NSError *sourceError = nil;
-    if (PXIdentifierManagerIsManagerProcess() && !PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
-        (void)tx; (void)error; return YES;
-    }, &sourceError)) { self.error = sourceError; return; }
-    NSString *scopedAppsFile = PXGlobalScopePath();
-    PXLog(@"[WeaponX] IdentifierManager DEBUG: Trying to load scoped apps from: %@", scopedAppsFile);
-    
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    
-    PXLog(@"[WeaponX] IdentifierManager DEBUG: Loading scoped apps from: %@", scopedAppsFile);
-    PXLog(@"[WeaponX] IdentifierManager DEBUG: File exists: %@", [fileManager fileExistsAtPath:scopedAppsFile] ? @"YES" : @"NO");
-    
-    // Load scoped apps from the global scope file
-    NSDictionary *scopedAppsDict;
-    if (PXIdentifierManagerIsManagerProcess()) {
-        NSDictionary *captured = PXCaptureRuntimeSources(^NSDictionary *(NSError **error) {
-            (void)error; return @{ @"scope": [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile] ?: @{} };
-        }, &sourceError);
-        if (!captured) { self.error = sourceError; return; }
-        scopedAppsDict = captured[@"scope"];
+    NSError *failure = nil;
+    if (managerProcess && !PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        (void)tx; (void)readError; return YES;
+    }, &failure)) { self.error = failure; if (error) *error = failure; return NO; }
+    NSString *scopePath = PXGlobalScopePath();
+    NSDictionary *scope = nil;
+    if (managerProcess) {
+        NSDictionary *captured = PXCaptureRuntimeSources(^NSDictionary *(NSError **readError) {
+            NSDictionary *record = PXReadRuntimeSourceDictionary(scopePath, readError);
+            if (!record || !PXValidateManagerSettingsSources(nil, record, readError)) return nil;
+            return @{ @"scope": record };
+        }, &failure);
+        if (!captured) { self.error = failure; if (error) *error = failure; return NO; }
+        scope = captured[@"scope"];
     } else {
-        scopedAppsDict = [NSDictionary dictionaryWithContentsOfFile:scopedAppsFile];
+        // Legacy rootful injected reader: bounded single-file read only, without
+        // owner recovery/control-directory access or multi-source consistency.
+        scope = PXReadRuntimeSourceDictionary(scopePath, &failure);
+        if (!scope || !PXValidateManagerSettingsSources(nil, scope, &failure)) {
+            self.error = failure; if (error) *error = failure; return NO;
+        }
     }
-    PXLog(@"[WeaponX] IdentifierManager DEBUG: Loaded dictionary: %@", scopedAppsDict ? @"YES" : @"NO");
-    
-    NSDictionary *savedApps = scopedAppsDict[@"ScopedApps"];
-    PXLog(@"[WeaponX] IdentifierManager DEBUG: Scoped apps entry found in dictionary: %@", savedApps ? @"YES" : @"NO");
-    
-    if (savedApps) {
-        PXLog(@"[WeaponX] IdentifierManager DEBUG: Number of scoped apps found: %lu", (unsigned long)savedApps.count);
-        if (savedApps.count > 0) {
-            PXLog(@"[WeaponX] IdentifierManager DEBUG: App list includes: %@", [savedApps allKeys]);
-        }
-        // Make sure we properly update the scoped apps dictionary
-        if (!self.scopedApps) {
-            self.scopedApps = [savedApps mutableCopy];
-        } else {
-            [self.scopedApps setDictionary:savedApps];
-        }
-        PXLog(@"[WeaponX] IdentifierManager: Loaded %lu scoped apps from %@", (unsigned long)savedApps.count, scopedAppsFile);
-    } else {
-        // Re-initialize the app list if loading failed
-        if (!self.scopedApps) {
-            self.scopedApps = [NSMutableDictionary dictionary];
-        } else {
-            [self.scopedApps removeAllObjects];
-        }
-        PXLog(@"[WeaponX] IdentifierManager: ⚠️ Failed to load scoped apps, using empty list");
-    }
+    NSDictionary *records = scope[@"ScopedApps"] ?: @{};
+    NSMutableDictionary *candidate = [NSMutableDictionary dictionaryWithCapacity:records.count];
+    for (NSString *bundleID in records) candidate[bundleID] = [records[bundleID] mutableCopy];
+    BOOL changed = ![self.scopedApps isEqual:candidate];
+    self.scopedApps = candidate;
+    if (changed) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
+    PXLog(@"[WeaponX] IdentifierManager: Loaded %lu scoped apps", (unsigned long)candidate.count);
+    return YES;
 }
 
 #pragma mark - Persistence

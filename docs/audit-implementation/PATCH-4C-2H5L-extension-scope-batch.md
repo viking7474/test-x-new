@@ -126,3 +126,6 @@ No production file is edited by negative controls.
 Native Foundation/Theos builds for both schemes, real expansion/LaunchServices,
 UIKit, daemon filter installation and device injection remain pending macOS CI/device.
 Full Patch 4 writer rollout remains partial.
+
+2026-10-30: user reports H5L build pass. This acknowledges their build result; local
+Windows validation still does not imply native or device execution. H5M follows.
