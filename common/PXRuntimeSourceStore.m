@@ -33,6 +33,20 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     return data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:error] : nil;
 }
 
+NSDictionary *PXReadRuntimeSourceDictionary(NSString *path, NSError **error) {
+    if (error) *error = nil;
+    if (![path isKindOfClass:NSString.class] || !path.isAbsolutePath || ![path isEqual:path.stringByStandardizingPath]) {
+        if (error) *error = PXSourceError(@"Invalid source dictionary path"); return nil;
+    }
+    BOOL absent = NO; NSError *failure = nil;
+    id value = PXSourceReadPlist(path, &absent, NULL, NULL, &failure);
+    if (absent) return @{};
+    if (![value isKindOfClass:NSDictionary.class]) {
+        if (error) *error = failure ?: PXSourceError(@"Malformed source dictionary during capture"); return nil;
+    }
+    return value;
+}
+
 @interface PXRuntimeSourceTransaction ()
 @property (nonatomic, copy) BOOL (^allowsPath)(NSString *);
 // NSNull is an in-memory removal marker; it is never serialized to the journal.

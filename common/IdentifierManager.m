@@ -62,6 +62,7 @@
 @end
 
 @interface IdentifierManager ()
+- (NSDictionary *)captureIdentifierVerification:(NSString *)type enabled:(BOOL)enabled secondaryKey:(NSString *)secondaryKey error:(NSError **)error;
 - (BOOL)saveSettingsWithError:(NSError **)error;
 - (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error;
 - (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier;
@@ -2283,22 +2284,17 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         // A newer call owns both the state and any subsequent recovery. In
         // particular, matching ABA values do not give the older call ownership back.
         if (![self validateIdentifierToggle:operation forType:type error:NULL]) return NO;
-        NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
-        NSDictionary *enabledIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
-            ? persistedSettings[@"EnabledIdentifiers"]
-            : nil;
-        id persistedValue = enabledIdentifiers[type];
-        BOOL primarySuccess = (([persistedValue isKindOfClass:NSNumber.class] || [persistedValue isKindOfClass:NSString.class]) && [persistedValue boolValue] == enabled);
-
-        BOOL secondarySuccess = YES;
-        if (secondaryKey) {
-            id secondaryValue = PXReadSecuritySetting(secondaryKey);
-            secondarySuccess = (([secondaryValue isKindOfClass:NSNumber.class] || [secondaryValue isKindOfClass:NSString.class]) && [secondaryValue boolValue] == enabled);
-        }
+        NSError *verificationError = nil;
+        // A failed forward write already determines NO; compensation performs
+        // its own guarded observation. Never combine independent disk/defaults reads.
+        NSDictionary *verification = writeSuccess
+            ? [self captureIdentifierVerification:type enabled:enabled secondaryKey:secondaryKey error:&verificationError] : nil;
+        BOOL primarySuccess = [verification[@"primarySuccess"] boolValue];
+        BOOL secondarySuccess = !secondaryKey || [verification[@"secondarySuccess"] boolValue];
 
         if (![self validateIdentifierToggle:operation forType:type error:NULL]) return NO;
         if (writeSuccess && primarySuccess && secondarySuccess) return YES;
-        NSError *failure = writeError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
+        NSError *failure = writeError ?: verificationError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
                                                        userInfo:@{NSLocalizedDescriptionKey: @"Identifier state verification failed after write"}];
 
         // An unacknowledged primary belongs to source-store recovery. For a
@@ -2317,6 +2313,34 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
               type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, primaryCommitted);
         return NO;
     } @finally { [self finishIdentifierToggle:operation forType:type]; }
+}
+
+- (NSDictionary *)captureIdentifierVerification:(NSString *)type enabled:(BOOL)enabled secondaryKey:(NSString *)secondaryKey error:(NSError **)error {
+    if (error) *error = nil;
+    if (![type isKindOfClass:NSString.class] || !type.length || (secondaryKey && ![secondaryKey isKindOfClass:NSString.class])) {
+        if (error) *error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6038 userInfo:@{NSLocalizedDescriptionKey: @"Invalid identifier verification request"}];
+        return nil;
+    }
+    type = [type copy]; secondaryKey = [secondaryKey copy];
+    return PXCaptureRuntimeSources(^NSDictionary *(NSError **readError) {
+        NSDictionary *settings = PXReadRuntimeSourceDictionary(PXTLinkIOSSettingsPath(), readError);
+        if (!settings) return nil;
+        id flags = settings[@"EnabledIdentifiers"];
+        if (flags && ![flags isKindOfClass:NSDictionary.class]) {
+            if (readError) *readError = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6038 userInfo:@{NSLocalizedDescriptionKey: @"Malformed identifier verification container"}];
+            return nil;
+        }
+        id primary = ((NSDictionary *)flags)[type];
+        BOOL primaryMatches = ([primary isKindOfClass:NSNumber.class] || [primary isKindOfClass:NSString.class]) && [primary boolValue] == enabled;
+        BOOL secondaryMatches = YES;
+        if (secondaryKey) {
+            NSDictionary *security = PXReadRuntimeSourceDictionary(PXSecuritySettingsPath(), readError);
+            if (!security) return nil;
+            id secondary = security[secondaryKey];
+            secondaryMatches = ([secondary isKindOfClass:NSNumber.class] || [secondary isKindOfClass:NSString.class]) && [secondary boolValue] == enabled;
+        }
+        return @{ @"primarySuccess": @(primaryMatches), @"secondarySuccess": @(secondaryMatches) };
+    }, error);
 }
 
 - (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier {

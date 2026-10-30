@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5D-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5E-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -72,6 +72,19 @@ def source_contracts():
     assert 'LOCK_SH' in capture and 'journalRecord' in capture and 'commit[@"commitID"]' in capture
     assert 'recover:' not in capture and 'writeToFile' not in capture and 'removeItem' not in capture
     assert capture.index('NSPropertyListImmutable') < capture.index('flock(_lockFD, LOCK_UN)')
+    decoder = core.split('NSDictionary *PXReadRuntimeSourceDictionary(', 1)[1].split('@interface', 1)[0]
+    assert 'PXReadRuntimeSourceDictionary' in read('common/PXRuntimeSourceStore.h')
+    assert 'PXSourceReadPlist(path, &absent, NULL, NULL, &failure)' in decoder
+    assert 'if (absent) return @{};' in decoder and 'isKindOfClass:NSDictionary.class' in decoder
+    assert 'if (error) *error = failure ?: PXSourceError(@"Malformed source dictionary during capture"); return nil;' in decoder
+    assert 'return value;' in decoder and 'Invalid source dictionary path' in decoder
+    assert 'flock(' not in decoder and 'recover:' not in decoder and 'writeToFile:' not in decoder
+    for case in ('capture decoder distinguishes valid dictionary from missing empty source',
+                 'capture decoder rejects malformed source instead of silently treating it as missing',
+                 'capture decoder rejects valid plist with non dictionary root',
+                 'capture decoder failures preserve original commit marker and restored tuple'):
+        assert case in fixture, case
+    assert 'TestCaptureDictionaryDecoder(root);' in fixture
     assert 'transaction.staged' in core and '_activeTransaction.failure' in core
     regular = method(core, '- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
     standalone = method(core, '- (BOOL)performStandaloneWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error')
@@ -145,8 +158,35 @@ def source_contracts():
     apply = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier beforeImage:(NSDictionary **)beforeImage error:(NSError **)error')
     assert 'BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:&sourceIdentifier beforeImage:&beforeImage error:&writeError]' in toggle
     assert 'if (writeSuccess && primarySuccess && secondarySuccess) return YES;' in toggle
+    verification_sig = '- (NSDictionary *)captureIdentifierVerification:(NSString *)type enabled:(BOOL)enabled secondaryKey:(NSString *)secondaryKey error:(NSError **)error'
+    verification = method(manager, verification_sig)
+    assert manager.index(verification_sig + ' {') > manager.index('@implementation IdentifierManager')
+    assert 'NSDictionary *verification = writeSuccess' in toggle
+    assert '[self captureIdentifierVerification:type enabled:enabled secondaryKey:secondaryKey error:&verificationError]' in toggle
+    assert 'dictionaryWithContentsOfFile:' not in toggle and 'PXReadSecuritySetting(' not in toggle
+    assert verification.count('PXCaptureRuntimeSources(') == 1
+    assert verification.index('PXCaptureRuntimeSources(') < verification.index('PXReadRuntimeSourceDictionary(PXTLinkIOSSettingsPath()')
+    assert 'PXReadRuntimeSourceDictionary(PXSecuritySettingsPath(), readError)' in verification
+    assert 'PXReadSecuritySetting' not in verification and 'NSUserDefaults' not in verification
+    assert 'if (secondaryKey)' in verification and 'BOOL secondaryMatches = YES' in verification
+    assert 'isKindOfClass:NSNumber.class' in verification and 'isKindOfClass:NSString.class' in verification
+    assert 'if (flags && ![flags isKindOfClass:NSDictionary.class])' in verification
+    for case in ('independent legacy reads can falsely accept a mixed primary and secondary pair',
+                 'paired verification holds capture through both reads and cannot mix source versions',
+                 'next verification observes the complete newer pair',
+                 'matching verification accepts newer unrelated metadata without requiring the old receipt',
+                 'verification never substitutes defaults for a missing canonical secondary key',
+                 'primary-only verification does not read security source',
+                 'missing secondary cannot verify a requested false value',
+                 'missing primary cannot verify a requested false value',
+                 'malformed verification container fails with a typed error',
+                 'known forward failure skips final verification capture and preserves original error',
+                 'failed coherent capture never acknowledges a write and still uses owned compensation'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestCoherentToggleVerification();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+
     assert toggle.index('type = [type copy]') < toggle.index('[self applyIdentifierEnabled:')
-    assert toggle.index('NSError *failure = writeError ?:') < toggle.index('self.settings[type] = previousValue')
+    assert toggle.index('NSError *failure = writeError ?: verificationError ?:') < toggle.index('self.settings[type] = previousValue')
     assert toggle.index('[self rollbackIdentifier:') < toggle.index('self.error = failure')
     assert '[self applyIdentifierEnabled:enabled forType:type error:NULL]' in method(manager, '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type')
     assert '[self saveSettingsWithSourceCommitIdentifier:&primaryIdentifier forIdentifier:type beforeImage:&capturedImage error:&saveError]' in apply
@@ -191,7 +231,7 @@ def source_contracts():
     assert 'removeObjectForKey:type' in finish and 'code:6035' in validate
     cleanup = '@finally { [self finishIdentifierToggle:operation forType:type]; }'
     assert cleanup in toggle and cleanup in apply_wrapper
-    assert toggle.index('validateIdentifierToggle:') < toggle.index('NSDictionary *persistedSettings')
+    assert toggle.index('validateIdentifierToggle:') < toggle.index('NSDictionary *verification')
     rollback = method(manager, '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier')
     assert 'PXPublishSecurityValueForSourceCommit(secondaryKey,' in rollback
     assert 'if (secondaryKey && notificationName && [self validateIdentifierToggle:' in rollback

@@ -142,3 +142,8 @@ test_profile_creation_flow.py, release_hardening.py source và git diff --check 
 Ba negative mutations thay async bằng sync, bỏ thread identity hoặc bỏ independent
 base-reader check đều bị source contracts bắt. Không chạy native Foundation trên
 Windows; cần CI macOS xác nhận lại binary. Không thay production source/guard.
+
+
+## Build acknowledgement before H5E
+
+2026-10-30: user reports build pass, including the foreign-thread fixture follow-up above. This is user-reported CI confirmation; the local Windows environment did not execute Foundation/Theos. Continue with H5E coherent final toggle verification.

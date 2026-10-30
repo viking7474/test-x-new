@@ -416,6 +416,33 @@ static void TestCommitAcknowledgement(NSString *root) {
     } error:&failure] && !failure && [before isEqual:ReadPair(store, folder)], "marker failure recovery restores old tuple and releases source ownership");
 }
 
+static void TestCaptureDictionaryDecoder(NSString *root) {
+    NSString *folder = NewCase(root, @"capture-dictionary"); PXRuntimeSourceStore *store = Store(folder);
+    CHECK(WritePair(store, folder, 1, NO), "capture dictionary decoder baseline seeded");
+    NSDictionary *view = [store capture:^NSDictionary *(NSError **error) {
+        NSDictionary *present = PXReadRuntimeSourceDictionary(Path(folder, @"a.plist"), error);
+        if (!present) return nil;
+        NSDictionary *missing = PXReadRuntimeSourceDictionary(Path(folder, @"c.plist"), error);
+        return missing ? @{ @"present": present, @"missing": missing } : nil;
+    } error:NULL];
+    CHECK([view[@"present"][@"value"] isEqual:@1] && [view[@"missing"] isEqual:@{}],
+          "capture decoder distinguishes valid dictionary from missing empty source");
+    NSString *path = Path(folder, @"a.plist"); NSData *saved = [NSData dataWithContentsOfFile:path];
+    NSDictionary *before = ReadPair(store, folder);
+    @try {
+        CHECK([[@"broken plist" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES], "capture decoder malformed fixture seeded");
+        NSError *failure = nil;
+        CHECK(![store capture:^NSDictionary *(NSError **error) { return PXReadRuntimeSourceDictionary(path, error); } error:&failure] && failure,
+              "capture decoder rejects malformed source instead of silently treating it as missing");
+        CHECK([NSPropertyListSerialization dataWithPropertyList:@[@"wrong root"] format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL] &&
+              [@[@"wrong root"] writeToFile:path atomically:YES], "capture decoder non dictionary fixture seeded");
+        failure = nil;
+        CHECK(![store capture:^NSDictionary *(NSError **error) { return PXReadRuntimeSourceDictionary(path, error); } error:&failure] && failure,
+              "capture decoder rejects valid plist with non dictionary root");
+    } @finally { CHECK([saved writeToFile:path atomically:YES], "capture decoder teardown restores exact source bytes"); }
+    CHECK([before isEqual:ReadPair(store, folder)], "capture decoder failures preserve original commit marker and restored tuple");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 4) {
@@ -463,7 +490,7 @@ int main(int argc, const char *argv[]) {
         [NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
         TestStaging(root); TestFailures(root);
         NSString *binary = [NSString stringWithUTF8String:argv[0]];
-        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary); TestCommitPreconditions(root, binary); TestCommitAcknowledgement(root);
+        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary); TestCommitPreconditions(root, binary); TestCommitAcknowledgement(root); TestCaptureDictionaryDecoder(root);
         [NSFileManager.defaultManager removeItemAtPath:root error:nil];
         printf("Runtime source transactions: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

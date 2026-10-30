@@ -35,7 +35,7 @@ static NSUInteger gStandaloneSourceAttempts;
 static void (^gDuringToggleSecurityWrite)(void);
 static void (^gDuringToggleSecurityPublication)(void);
 static NSUInteger gToggleSecurityPublications;
-static BOOL gFailNextToggleSecurityRead, gLastToggleUpdateMirrors;
+static BOOL gFailNextToggleVerificationCapture, gLastToggleUpdateMirrors;
 static id gLastTogglePublicationValue;
 static void (^gDuringToggleSecondaryNotification)(void);
 static BOOL gFailSerial, gThrowBatteryPublication;
@@ -69,6 +69,24 @@ BOOL PXPerformStandaloneRuntimeSourceWrite(BOOL (^body)(PXRuntimeSourceTransacti
     }
     return success;
 }
+static NSUInteger gVerificationCaptures, gVerificationSourceReads;
+static void (^gDuringVerificationRead)(NSString *path);
+NSDictionary *PXCaptureRuntimeSources(NSDictionary *(^loader)(NSError **), NSError **error) {
+    gVerificationCaptures++;
+    if (gFailNextToggleVerificationCapture) {
+        gFailNextToggleVerificationCapture = NO;
+        if (error) *error = [NSError errorWithDomain:@"fixture.verification" code:6033 userInfo:nil];
+        return nil;
+    }
+    return [gStore capture:loader error:error];
+}
+static NSDictionary *PXFixtureReadVerificationDictionary(NSString *path, NSError **error) {
+    gVerificationSourceReads++;
+    NSDictionary *value = PXReadRuntimeSourceDictionary(path, error);
+    void (^callback)(NSString *) = gDuringVerificationRead;
+    if (callback) callback(path);
+    return value;
+}
 NSString *PXActiveProfileID(void) { return gSelected; }
 NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.class] && [@[@"a", @"b"] containsObject:value] ? [value copy] : nil; }
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
@@ -91,7 +109,6 @@ void PXPostSettingsChangedNotification(void) {
 // Controlled security collaborator: real source commit, no defaults daemon or
 // Darwin delivery in this host fixture. Faults can leave an already matching value.
 id PXReadSecuritySetting(NSString *key) {
-    if (gFailNextToggleSecurityRead) { gFailNextToggleSecurityRead = NO; return nil; }
     return [NSDictionary dictionaryWithContentsOfFile:PXSecuritySettingsPath()][key];
 }
 BOOL PXWriteSecurityBool(NSString *key, BOOL value, NSError **error) {
@@ -446,7 +463,9 @@ ARTIFACT_SINGLETON
     return @"generated-idfa";
 }
 #define CFNotificationCenterPostNotification PXToggleFixtureNotification
+#define PXReadRuntimeSourceDictionary PXFixtureReadVerificationDictionary
 #include "PXDeviceGroupMethods.inc"
+#undef PXReadRuntimeSourceDictionary
 #undef CFNotificationCenterPostNotification
 @end
 
@@ -2453,7 +2472,7 @@ static void TestToggleAuthoritativeBeforeImages(void) {
             return filePresent ? [tx setDictionary:@{} atPath:PXSecuritySettingsPath() error:error] :
                                  [tx removeDictionaryAtPath:PXSecuritySettingsPath() error:error];
         } error:NULL], "before-image security namespace presence fixture seeded");
-        gDuringToggleSecurityWrite = ^{ gFailNextToggleSecurityRead = YES; };
+        gDuringToggleSecurityWrite = ^{ gFailNextToggleVerificationCapture = YES; };
         NSUInteger publications = gToggleSecurityPublications;
         CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && manager.error.code == 6033 &&
               [NSFileManager.defaultManager fileExistsAtPath:PXSecuritySettingsPath()] == (filePresent != 0) &&
@@ -2537,6 +2556,85 @@ static void TestToggleAuthoritativeBeforeImages(void) {
           "fresh provider before-image survives later compensation independently of caller previous memory");
 }
 
+static BOOL SeedVerificationPair(BOOL primary, BOOL secondary) {
+    return [gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        NSMutableDictionary *settings = [[tx dictionaryAtPath:PXTLinkIOSSettingsPath() error:error] mutableCopy];
+        if (!settings) return NO;
+        NSMutableDictionary *flags = [settings[@"EnabledIdentifiers"] mutableCopy]; flags[@"WiFi"] = @(primary);
+        settings[@"EnabledIdentifiers"] = flags;
+        NSMutableDictionary *security = [[tx dictionaryAtPath:PXSecuritySettingsPath() error:error] mutableCopy];
+        if (!security) return NO; security[@"wifiSpoofEnabled"] = @(secondary);
+        return [tx setDictionary:settings atPath:PXTLinkIOSSettingsPath() error:error] &&
+               [tx setDictionary:security atPath:PXSecuritySettingsPath() error:error];
+    } error:NULL];
+}
+static void TestCoherentToggleVerification(void) {
+    PXDeviceGroupFixture *manager = ToggleReentryFixture();
+    CHECK(SeedVerificationPair(YES, NO), "mixed verification baseline seeded");
+    // Demonstrate the old two-read failure without relying on thread scheduling.
+    gDuringVerificationRead = ^(NSString *path) {
+        if ([path isEqual:PXTLinkIOSSettingsPath()]) {
+            gDuringVerificationRead = nil;
+            CHECK(SeedVerificationPair(NO, YES), "writer interleaves legacy primary and secondary reads");
+        }
+    };
+    NSDictionary *oldPrimary = PXFixtureReadVerificationDictionary(PXTLinkIOSSettingsPath(), NULL);
+    NSDictionary *newSecondary = PXFixtureReadVerificationDictionary(PXSecuritySettingsPath(), NULL);
+    CHECK([oldPrimary[@"EnabledIdentifiers"][@"WiFi"] boolValue] && [newSecondary[@"wifiSpoofEnabled"] boolValue] &&
+          ![[NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()][@"EnabledIdentifiers"][@"WiFi"] boolValue],
+          "independent legacy reads can falsely accept a mixed primary and secondary pair");
+    CHECK(SeedVerificationPair(YES, NO), "coherent verification baseline restored");
+    NSDictionary *before = BatchSnapshot(); __block NSUInteger reads = 0, rejections = 0;
+    gDuringVerificationRead = ^(NSString *path) {
+        (void)path; reads++;
+        if (!SeedVerificationPair(NO, YES)) rejections++;
+    };
+    NSError *failure = nil;
+    NSDictionary *view = [manager captureIdentifierVerification:@"WiFi" enabled:YES secondaryKey:@"wifiSpoofEnabled" error:&failure];
+    gDuringVerificationRead = nil;
+    CHECK(view && !failure && reads == 2 && rejections == 2 && [view[@"primarySuccess"] boolValue] &&
+          ![view[@"secondarySuccess"] boolValue] && [view[@"sourceCommitID"] isEqual:before[@"sourceCommitID"]] &&
+          [before isEqual:BatchSnapshot()], "paired verification holds capture through both reads and cannot mix source versions");
+    CHECK(SeedVerificationPair(NO, YES), "writer proceeds after verification capture releases gate");
+    view = [manager captureIdentifierVerification:@"WiFi" enabled:YES secondaryKey:@"wifiSpoofEnabled" error:&failure];
+    CHECK(view && ![view[@"primarySuccess"] boolValue] && [view[@"secondarySuccess"] boolValue],
+          "next verification observes the complete newer pair");
+    CHECK(SeedVerificationPair(YES, YES), "unrelated verification metadata baseline seeded");
+    CHECK(SetSource(PXTLinkIOSSettingsPath(), @"UnrelatedVerificationMetadata", @YES), "unrelated verification metadata commit succeeds");
+    view = [manager captureIdentifierVerification:@"WiFi" enabled:YES secondaryKey:@"wifiSpoofEnabled" error:&failure];
+    CHECK(view && [view[@"primarySuccess"] boolValue] && [view[@"secondarySuccess"] boolValue],
+          "matching verification accepts newer unrelated metadata without requiring the old receipt");
+    // A missing canonical key cannot be confirmed by a compatibility read/fallback.
+    CHECK([gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        return [tx setDictionary:@{} atPath:PXSecuritySettingsPath() error:error];
+    } error:NULL], "missing verification security key seeded");
+    view = [manager captureIdentifierVerification:@"WiFi" enabled:YES secondaryKey:@"wifiSpoofEnabled" error:&failure];
+    CHECK(view && ![view[@"secondarySuccess"] boolValue], "verification never substitutes defaults for a missing canonical secondary key");
+    NSUInteger sourceReads = gVerificationSourceReads;
+    view = [manager captureIdentifierVerification:@"WiFi" enabled:YES secondaryKey:nil error:&failure];
+    CHECK(view && [view[@"primarySuccess"] boolValue] && [view[@"secondarySuccess"] boolValue] &&
+          sourceReads + 1 == gVerificationSourceReads, "primary-only verification does not read security source");
+    view = [manager captureIdentifierVerification:@"WiFi" enabled:NO secondaryKey:@"wifiSpoofEnabled" error:&failure];
+    CHECK(view && ![view[@"secondarySuccess"] boolValue], "missing secondary cannot verify a requested false value");
+    CHECK(SetSource(PXTLinkIOSSettingsPath(), @"EnabledIdentifiers", @{}), "missing primary verification fixture seeded");
+    view = [manager captureIdentifierVerification:@"WiFi" enabled:NO secondaryKey:nil error:&failure];
+    CHECK(view && ![view[@"primarySuccess"] boolValue], "missing primary cannot verify a requested false value");
+    CHECK(SetSource(PXTLinkIOSSettingsPath(), @"EnabledIdentifiers", @"malformed"), "malformed verification container seeded");
+    @try {
+        CHECK(![manager captureIdentifierVerification:@"WiFi" enabled:NO secondaryKey:nil error:&failure] && failure.code == 6038,
+              "malformed verification container fails with a typed error");
+    } @finally { CHECK(SetSource(PXTLinkIOSSettingsPath(), @"EnabledIdentifiers", @{}), "verification container teardown restores dictionary schema"); }
+    manager = ToggleReentryFixture(); gToggleSecurityFailures = 1;
+    NSUInteger captures = gVerificationCaptures;
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && manager.error.code == 71 && captures == gVerificationCaptures,
+          "known forward failure skips final verification capture and preserves original error");
+    manager = ToggleReentryFixture(); captures = gVerificationCaptures;
+    gDuringToggleSecurityWrite = ^{ gFailNextToggleVerificationCapture = YES; };
+    CHECK(![manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"] && manager.error.code == 6033 && captures + 1 == gVerificationCaptures &&
+          ![manager.settings[@"WiFi"] boolValue] && ![PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue],
+          "failed coherent capture never acknowledges a write and still uses owned compensation");
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2569,6 +2667,7 @@ int main(void) {
         TestConditionalToggleRollback();
         TestTogglePostCommitAcknowledgement();
         TestToggleAuthoritativeBeforeImages();
+        TestCoherentToggleVerification();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
