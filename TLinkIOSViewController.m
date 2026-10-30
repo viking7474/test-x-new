@@ -475,6 +475,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
 - (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager;
 - (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(IdentifierManager *)manager;
+- (BOOL)persistScopedApplicationExtensions:(NSString *)bundleID manager:(IdentifierManager *)manager;
 - (void)updateIdentifierSwitchStatus:(UISwitch *)sender;
 @property (nonatomic) BOOL manualProfileCreationInProgress;
 - (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription;
@@ -5816,17 +5817,34 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     return UIInterfaceOrientationMaskPortrait;
 }
 
+- (BOOL)persistScopedApplicationExtensions:(NSString *)bundleID manager:(IdentifierManager *)manager {
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) {
+        [self showError:[NSError errorWithDomain:@"com.hydra.tlinkios" code:3001 userInfo:@{NSLocalizedDescriptionKey: @"Invalid bundle ID"}]];
+        return NO;
+    }
+    NSString *requested = [bundleID copy];
+    NSArray<NSString *> *expanded = PXExpandedResetBundleIDs(@[requested]);
+    if (!expanded.count) {
+        [self showError:[NSError errorWithDomain:@"com.hydra.tlinkios" code:3001 userInfo:@{NSLocalizedDescriptionKey: @"No eligible app or extension IDs to add"}]];
+        return NO;
+    }
+    NSError *failure = nil;
+    if (![manager addApplicationsToScopeAndPersist:expanded error:&failure]) {
+        if (failure) [self showError:failure];
+        return NO;
+    }
+    // Source success is retained if downstream filter installation fails.
+    if (!PXWriteSubstrateFilterPlists()) {
+        [self showError:[NSError errorWithDomain:@"com.hydra.tlinkios" code:6047 userInfo:@{NSLocalizedDescriptionKey: @"Scope was saved, but injection filters did not finish syncing. Retry to synchronize filters."}]];
+        return NO;
+    }
+    return YES;
+}
+
 - (void)addApplicationWithExtensionsToScope:(NSString *)bundleID {
 
     if (!bundleID) return;
-    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(@[bundleID]);
-    for (NSString *expandedID in expandedBundles) {
-        [[IdentifierManager sharedManager] addApplicationToScope:expandedID];
-        [[IdentifierManager sharedManager] setApplication:expandedID enabled:YES];
-    }
-    [[IdentifierManager sharedManager] saveScopedApps];
-    // Always rebuild filter from full enabled global_scope (not just the added app).
-    PXWriteSubstrateFilterPlists();
+    if (![self persistScopedApplicationExtensions:bundleID manager:[IdentifierManager sharedManager]]) return;
     
     // Show success message
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Success"
@@ -5872,21 +5890,7 @@ else if ([identifierType isEqualToString:@"AppContainerUUID"])
     NSString *bundleID = PXGetScopedAppButtonBundleID(sender);
     if (!bundleID.length) return;
     
-    // Add the app with exact extensions and default WebKit helpers
-    NSArray<NSString *> *expandedBundles = PXExpandedResetBundleIDs(@[bundleID]);
-    for (NSString *expandedID in expandedBundles) {
-        [self.manager addApplicationToScope:expandedID];
-        [self.manager setApplication:expandedID enabled:YES];
-    }
-    [self.manager saveScopedApps];
-    // Always rebuild filter from full enabled global_scope (not just the added app).
-    PXWriteSubstrateFilterPlists();
-    
-    // Check for errors
-    if ([self.manager lastError]) {
-        [self showError:[self.manager lastError]];
-        return;
-    }
+    if (![self persistScopedApplicationExtensions:bundleID manager:self.manager]) return;
     
     // Show success message
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Success"

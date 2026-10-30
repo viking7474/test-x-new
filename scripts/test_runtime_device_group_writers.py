@@ -74,6 +74,7 @@ SIGNATURES = [
     '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 SIGNATURES += ['- (void)loadSettings',
+               '- (BOOL)addApplicationsToScopeAndPersist:(NSArray<NSString *> *)bundleIDs error:(NSError **)error',
                '- (void)addApplicationToScope:(NSString *)bundleID',
                '- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error',
                '- (void)removeApplicationFromScope:(NSString *)bundleID',
@@ -87,6 +88,7 @@ SIGNATURES += ['- (void)loadSettings',
                '- (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error']
 STATICS = [
     'static NSString *PXScopeOptionalKVCString(id proxy, NSString *key)',
+    'static NSDictionary *PXPrepareScopeAdditionRecord(NSString *bundleID, Class proxyClass)',
     'static BOOL PXScopeVersionFieldsMatch(NSDictionary *record, NSDictionary *basis)',
     'static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error)',
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -111,6 +113,7 @@ STATICS = [
 
 
 def source_contracts():
+    assert STATICS.index('static NSString *PXScopeOptionalKVCString(id proxy, NSString *key)') < STATICS.index('static NSDictionary *PXPrepareScopeAdditionRecord(NSString *bundleID, Class proxyClass)'), 'native metadata builder must follow its C helper definition'
     manager = read('common/IdentifierManager.m')
     helper = read('common/PXRuntimeIdentifierWriter.m')
     core = read('common/PXRuntimeSourceStore.m')
@@ -193,7 +196,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5K-partial'
+    assert manifest['rollout'] == '4C.2H5L-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
@@ -210,6 +213,8 @@ def generate_native_fragments(folder):
     (folder / 'PXAppScopeRemovalUI.inc').write_text(removal_ui, encoding='utf-8')
     addition_ui = method(read('TLinkIOSViewController.m'), '- (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(IdentifierManager *)manager')
     (folder / 'PXAppScopeAdditionUI.inc').write_text(addition_ui, encoding='utf-8')
+    extension_ui = method(read('TLinkIOSViewController.m'), '- (BOOL)persistScopedApplicationExtensions:(NSString *)bundleID manager:(IdentifierManager *)manager')
+    (folder / 'PXAppScopeExtensionsUI.inc').write_text(extension_ui, encoding='utf-8')
     statics = ['static NSInteger PXMEIDLuhnCheckDigit(NSString *body);']
     for signature in STATICS:
         if signature == 'static BOOL PXPopulateCanonicalCellularIdentity':

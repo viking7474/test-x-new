@@ -220,6 +220,25 @@ static NSString *PXScopeOptionalKVCString(id proxy, NSString *key) {
     } @catch (NSException *exception) { (void)exception; return nil; }
 }
 
+static NSDictionary *PXPrepareScopeAdditionRecord(NSString *bundleID, Class proxyClass) {
+    id proxy = [proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)] ? [(id)proxyClass applicationProxyForIdentifier:bundleID] : nil;
+    id name = [proxy respondsToSelector:@selector(localizedName)] ? [proxy localizedName] : nil;
+    id version = [proxy respondsToSelector:@selector(shortVersionString)] ? [proxy shortVersionString] : nil;
+    NSString *build = nil;
+    if ([proxy respondsToSelector:@selector(bundleVersion)]) {
+        id value = [proxy bundleVersion];
+        if ([value isKindOfClass:NSString.class]) build = [value copy];
+    } else {
+        build = PXScopeOptionalKVCString(proxy, @"bundleVersion") ?: PXScopeOptionalKVCString(proxy, @"CFBundleVersion");
+    }
+    return @{
+        @"name": [name isKindOfClass:NSString.class] ? [name copy] : bundleID,
+        @"version": [version isKindOfClass:NSString.class] ? [version copy] : (proxy ? @"Unknown" : @"Helper/Extension"),
+        @"build": build ?: @"Unknown", @"installed": @YES, @"enabled": @YES,
+        @"bundleID": bundleID, @"originalBundleID": bundleID
+    };
+}
+
 static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
     if (![settings isKindOfClass:NSDictionary.class]) return @{};
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -3212,39 +3231,53 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         if (error) *error = self.error;
         return NO;
     }
-    bundleID = [bundleID copy];
-    if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3003 userInfo:@{NSLocalizedDescriptionKey: @"Cannot add the WeaponX app itself to the scope list"}];
-        PXLog(@"[WeaponX] ⚠️ Prevented attempt to add the WeaponX app to the scope list");
+    return [self addApplicationsToScopeAndPersist:@[bundleID] error:error];
+}
+
+- (BOOL)addApplicationsToScopeAndPersist:(NSArray<NSString *> *)bundleIDs error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bundleIDs isKindOfClass:NSArray.class]) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001 userInfo:@{NSLocalizedDescriptionKey: @"Invalid scope addition list"}];
         if (error) *error = self.error;
         return NO;
     }
+    NSMutableOrderedSet *normalized = [NSMutableOrderedSet orderedSet];
+    for (id value in bundleIDs) {
+        if (![value isKindOfClass:NSString.class] || ![value length]) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001 userInfo:@{NSLocalizedDescriptionKey: @"Invalid bundle ID in scope addition"}];
+            if (error) *error = self.error;
+            return NO;
+        }
+        NSString *bundleID = [value copy];
+        if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
+            self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3003 userInfo:@{NSLocalizedDescriptionKey: @"Cannot add the WeaponX app itself to the scope list"}];
+            PXLog(@"[WeaponX] ⚠️ Prevented attempt to add the WeaponX app to the scope list");
+            if (error) *error = self.error;
+            return NO;
+        }
+        [normalized addObject:bundleID];
+    }
+    NSArray<NSString *> *requested = normalized.array;
     NSString *scopePath = PXGlobalScopePath();
     NSError *failure = nil;
-    // Fail nested/corrupt admission before metadata callbacks or preferences mkdir.
     BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
         NSDictionary *scope = [tx dictionaryAtPath:scopePath error:readError];
         return scope && PXValidateManagerSettingsSources(nil, scope, readError);
     }, &failure);
     if (!success) { self.error = failure; if (error) *error = failure; return NO; }
+    if (!requested.count) return YES;
 
+    NSMutableDictionary *candidates = [NSMutableDictionary dictionary];
     Class proxyClass = NSClassFromString(@"LSApplicationProxy");
-    id proxy = [proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)] ? [(id)proxyClass applicationProxyForIdentifier:bundleID] : nil;
-    id name = [proxy respondsToSelector:@selector(localizedName)] ? [proxy localizedName] : nil;
-    id version = [proxy respondsToSelector:@selector(shortVersionString)] ? [proxy shortVersionString] : nil;
-    NSString *build = nil;
-    if ([proxy respondsToSelector:@selector(bundleVersion)]) {
-        id value = [proxy bundleVersion];
-        if ([value isKindOfClass:NSString.class]) build = [value copy];
-    } else {
-        build = PXScopeOptionalKVCString(proxy, @"bundleVersion") ?: PXScopeOptionalKVCString(proxy, @"CFBundleVersion");
+    @try {
+        for (NSString *bundleID in requested) candidates[bundleID] = PXPrepareScopeAdditionRecord(bundleID, proxyClass);
+    } @catch (NSException *exception) {
+        // Preparation has not staged any source or changed live memory.
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6046 userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Failed to prepare scope metadata"}];
+        if (error) *error = self.error;
+        return NO;
     }
-    NSDictionary *prepared = @{
-        @"name": [name isKindOfClass:NSString.class] ? [name copy] : bundleID,
-        @"version": [version isKindOfClass:NSString.class] ? [version copy] : (proxy ? @"Unknown" : @"Helper/Extension"),
-        @"build": build ?: @"Unknown", @"installed": @YES, @"enabled": @YES,
-        @"bundleID": bundleID, @"originalBundleID": bundleID
-    };
+    NSDictionary *prepared = [candidates copy];
     NSFileManager *fileManager = NSFileManager.defaultManager;
     NSString *prefsPath = PXPreferencesPath();
     if (![fileManager fileExistsAtPath:prefsPath] && ![fileManager createDirectoryAtPath:prefsPath withIntermediateDirectories:YES
@@ -3258,24 +3291,24 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
         NSDictionary *scope = [tx dictionaryAtPath:scopePath error:writeError];
         if (!scope || !PXValidateManagerSettingsSources(nil, scope, writeError)) return NO;
         NSDictionary *apps = scope[@"ScopedApps"] ?: @{};
-        NSDictionary *record = apps[bundleID];
-        // Keep legacy add semantics for this ID: rebuild its standard record,
-        // including removal of an old extensionPattern. Other IDs are preserved.
-        if ([record isEqual:prepared]) return YES;
-        NSMutableDictionary *changedApps = [apps mutableCopy]; changedApps[bundleID] = prepared;
+        NSMutableDictionary *changedApps = [apps mutableCopy];
+        for (NSString *bundleID in requested) {
+            if (![apps[bundleID] isEqual:prepared[bundleID]]) { changedApps[bundleID] = prepared[bundleID]; wrote = YES; }
+        }
+        if (!wrote) return YES;
         NSMutableDictionary *changedScope = [scope mutableCopy]; changedScope[@"ScopedApps"] = changedApps;
-        wrote = [tx setDictionary:changedScope atPath:scopePath error:writeError];
-        return wrote;
+        return [tx setDictionary:changedScope atPath:scopePath error:writeError];
     }, &failure);
     if (!success) {
-        self.error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6045 userInfo:@{NSLocalizedDescriptionKey: @"Failed to add scoped application"}];
+        self.error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6045 userInfo:@{NSLocalizedDescriptionKey: @"Failed to add scoped applications"}];
         if (error) *error = self.error;
         return NO;
     }
-    id live = self.scopedApps[bundleID];
-    NSMutableDictionary *adopted = [prepared mutableCopy];
-    BOOL memoryChanged = ![live isEqual:adopted];
-    self.scopedApps[bundleID] = adopted;
+    BOOL memoryChanged = NO;
+    for (NSString *bundleID in requested) {
+        if (![self.scopedApps[bundleID] isEqual:prepared[bundleID]]) memoryChanged = YES;
+        self.scopedApps[bundleID] = [prepared[bundleID] mutableCopy];
+    }
     if (wrote || memoryChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
     if (wrote) PXPostSettingsChangedNotification();
     return YES;

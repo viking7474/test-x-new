@@ -196,6 +196,7 @@ static BOOL gScopeProxyMissingClass, gScopeProxyMissingFactory;
 static BOOL gScopeProxyMissingVersion, gScopeProxyMissingBuild, gScopeProxyBadType, gScopeProxyNilValues;
 static BOOL gScopeProxyMissingName, gScopeProxyBadName, gScopeKVCPrimaryThrows, gScopeKVCBothThrow;
 static NSUInteger gScopeKVCCalls;
+static NSUInteger gScopeProxyThrowAtLookup;
 
 @interface PXScopeProxyFixture : NSObject
 + (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
@@ -225,6 +226,8 @@ static NSUInteger gScopeKVCCalls;
 }
 + (instancetype)applicationProxyForIdentifier:(NSString *)identifier {
     gScopeProxyLookups++;
+    if (gScopeProxyThrowAtLookup && gScopeProxyLookups == gScopeProxyThrowAtLookup)
+        [NSException raise:@"fixture.batch.metadata" format:@"Metadata factory failed"];
     void (^callback)(void) = gScopeProxyLookup; gScopeProxyLookup = nil;
     if (callback) callback();
     if (![identifier isEqual:@"fixture.installed"]) return nil;
@@ -530,6 +533,24 @@ ARTIFACT_SINGLETON
 #undef CFNotificationCenterPostNotification
 @end
 
+static NSArray *gScopeExpandedIDs, *gScopeExpansionRoots;
+static NSUInteger gScopeExpansionCalls, gScopeFilterCalls;
+static BOOL gScopeFilterSuccess = YES;
+static NSDictionary *gScopeFilterObserved;
+static NSArray *PXFixtureScopeExpansion(NSArray *roots) {
+    gScopeExpansionCalls++; gScopeExpansionRoots = [roots copy];
+    return gScopeExpandedIDs ?: roots;
+}
+static BOOL PXFixtureScopeFilterSync(void) {
+    gScopeFilterCalls++;
+    gScopeFilterObserved = [gStore capture:^NSDictionary *(NSError **error) {
+        NSDictionary *scope = PXReadRuntimeSourceDictionary(PXGlobalScopePath(), error);
+        return scope ? @{ @"scope": scope } : nil;
+    } error:NULL];
+    CHECK(gScopeFilterObserved != nil, "extension filter sync observes complete canonical scope outside source gate");
+    return gScopeFilterSuccess;
+}
+
 // Foundation-only adapter compiling the exact production switch action.
 @interface PXScopeSwitchFixture : NSObject
 @property (nonatomic, getter=isOn) BOOL on;
@@ -548,6 +569,7 @@ ARTIFACT_SINGLETON
 - (void)appSwitchChanged:(PXScopeSwitchFixture *)sender;
 - (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(PXDeviceGroupFixture *)manager;
 - (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(PXDeviceGroupFixture *)manager;
+- (BOOL)persistScopedApplicationExtensions:(NSString *)bundleID manager:(PXDeviceGroupFixture *)manager;
 @end
 @implementation PXAppScopeToggleUIFixture
 - (void)showError:(NSError *)error { self.presentedError = error; self.errors++; }
@@ -557,6 +579,11 @@ ARTIFACT_SINGLETON
 #define IdentifierManager PXDeviceGroupFixture
 #include "PXAppScopeRemovalUI.inc"
 #include "PXAppScopeAdditionUI.inc"
+#define PXExpandedResetBundleIDs PXFixtureScopeExpansion
+#define PXWriteSubstrateFilterPlists PXFixtureScopeFilterSync
+#include "PXAppScopeExtensionsUI.inc"
+#undef PXWriteSubstrateFilterPlists
+#undef PXExpandedResetBundleIDs
 #undef IdentifierManager
 @end
 
@@ -2931,6 +2958,7 @@ static void TestScopeReplacementAcknowledgement(void) {
 static PXDeviceGroupFixture *ScopeMetadataFixture(BOOL current) {
     gScopeProxyMissingClass = gScopeProxyMissingFactory = gScopeProxyMissingVersion = gScopeProxyMissingBuild = gScopeProxyBadType = gScopeProxyNilValues = NO;
     gScopeProxyMissingName = gScopeProxyBadName = gScopeKVCPrimaryThrows = gScopeKVCBothThrow = NO;
+    gScopeProxyThrowAtLookup = 0;
     PXDeviceGroupFixture *manager = [PXDeviceGroupFixture new];
     manager.scopedApps = [@{
         @"fixture.installed": [@{ @"enabled": @NO, @"name": @"Original", @"version": current ? @"1.2" : @"old", @"build": current ? @"12" : @"1", @"custom": @"keep" } mutableCopy],
@@ -3400,6 +3428,117 @@ static void TestAppScopeAdditionUI(void) {
           [ui.manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue], "addition UI helper retries without stale shared-error inference");
 }
 
+static void TestAtomicScopeAdditionBatch(void) {
+    PXDeviceGroupFixture *manager = ScopeMetadataFixture(NO);
+    NSMutableString *extension = [@"fixture.MutableExt" mutableCopy];
+    NSMutableArray *ids = [@[@"fixture.installed", extension, @"fixture.installed"] mutableCopy];
+    NSData *settings = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()];
+    NSUInteger notices = gBatchNotifications, lookups = gScopeProxyLookups; __block NSUInteger writes = 0;
+    gScopeProxyLookup = ^{
+        CHECK([gStore capture:^NSDictionary *(NSError **error) { (void)error; return @{}; } error:NULL] != nil,
+              "batch metadata callbacks run outside source gate");
+        [extension setString:@"changed.by.provider"]; [ids removeAllObjects]; [ids addObject:@"unrequested"];
+        CHECK(([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            NSMutableDictionary *scope = [[tx dictionaryAtPath:PXGlobalScopePath() error:error] mutableCopy];
+            NSMutableDictionary *apps = [scope[@"ScopedApps"] mutableCopy]; apps[@"fixture.concurrent"] = @{ @"enabled": @YES };
+            scope[@"ScopedApps"] = apps; scope[@"ConcurrentRoot"] = @YES;
+            return [tx setDictionary:scope atPath:PXGlobalScopePath() error:error];
+        } error:NULL]), "batch competing scope owner writes before final merge");
+        // Count only the batch commit, excluding this controlled competing write.
+        gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"]) writes++; };
+    };
+    NSError *failure = nil; BOOL saved = [manager addApplicationsToScopeAndPersist:ids error:&failure]; gStore.testCheckpoint = nil;
+    NSDictionary *source = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+    CHECK(saved && !failure && writes == 1 && lookups + 2 == gScopeProxyLookups && notices + 1 == gBatchNotifications &&
+          source[@"ScopedApps"][@"fixture.installed"] && source[@"ScopedApps"][@"fixture.MutableExt"] && source[@"ScopedApps"][@"fixture.concurrent"] &&
+          !source[@"ScopedApps"][@"changed.by.provider"] && !source[@"ScopedApps"][@"unrequested"] &&
+          manager.scopedApps[@"fixture.MutableExt"] && [source[@"RootMetadata"] isEqual:@"keep"] && [source[@"ConcurrentRoot"] boolValue] &&
+          [settings isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]],
+          "batch freezes deduplicated case-sensitive IDs and commits all members once preserving current unrelated source");
+    NSArray *requested = @[@"fixture.installed", @"fixture.MutableExt"];
+    [manager seedPersistenceCaches]; NSDictionary *before = BatchSnapshot(), *cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    CHECK([manager addApplicationsToScopeAndPersist:requested error:NULL] && [before isEqual:BatchSnapshot()] &&
+          [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+          "matching additive batch is a canonical no-write no-cache no-topic observation");
+    lookups = gScopeProxyLookups; NSUInteger attempts = gStandaloneSourceAttempts;
+    CHECK([manager addApplicationsToScopeAndPersist:@[] error:NULL] && [before isEqual:BatchSnapshot()] && attempts + 1 == gStandaloneSourceAttempts && lookups == gScopeProxyLookups,
+          "empty additive batch validates standalone admission without metadata or writes");
+    for (NSUInteger absent = 0; absent < 2; absent++) {
+        manager = ScopeMetadataFixture(NO);
+        if (absent) CHECK([gStore performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx removeDictionaryAtPath:PXGlobalScopePath() error:error];
+        } error:NULL], "batch absent scope fixture seeded");
+        before = BatchSnapshot(); cache = [manager persistenceCaches]; notices = gBatchNotifications; id old = manager.scopedApps; __block BOOL faulted = NO;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.add-batch" format:@"source fault"]; }
+        };
+        failure = nil; saved = [manager addApplicationsToScopeAndPersist:requested error:&failure]; gStore.testCheckpoint = nil;
+        CHECK(!saved && failure && faulted && old == manager.scopedApps && !manager.scopedApps[@"fixture.MutableExt"] &&
+              [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+              "batch source fault preserves full old tuple or absence and all live memory without partial additions");
+        CHECK([manager addApplicationsToScopeAndPersist:requested error:NULL] && manager.scopedApps[@"fixture.MutableExt"] &&
+              [manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue], "batch retries all members after failed source commit");
+    }
+    manager = ScopeMetadataFixture(NO); before = BatchSnapshot(); cache = [manager persistenceCaches]; notices = gBatchNotifications;
+    gScopeProxyThrowAtLookup = gScopeProxyLookups + 2; failure = nil;
+    CHECK(![manager addApplicationsToScopeAndPersist:requested error:&failure] && failure.code == 6046 &&
+          [before isEqual:BatchSnapshot()] && [cache isEqual:[manager persistenceCaches]] && notices == gBatchNotifications &&
+          ![manager.scopedApps[@"fixture.installed"][@"enabled"] boolValue] && !manager.scopedApps[@"fixture.MutableExt"],
+          "later metadata exception returns local failure before any batch source or memory publication");
+    manager = ScopeMetadataFixture(NO); before = BatchSnapshot(); lookups = gScopeProxyLookups; attempts = gStandaloneSourceAttempts;
+    for (id invalid in @[NSNull.null, @[@"fixture.installed", @7], @[@"fixture.installed", @"com.hydra.tlinkios"], @[@"fixture.installed", @""]]) {
+        CHECK(![manager addApplicationsToScopeAndPersist:(invalid == NSNull.null ? nil : invalid) error:NULL] &&
+              [before isEqual:BatchSnapshot()] && lookups == gScopeProxyLookups && attempts == gStandaloneSourceAttempts,
+              "invalid batch member or self ID rejects the complete packet before admission and lookup");
+    }
+    __block BOOL inner = YES; failure = nil;
+    saved = [gStore performWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        if (![tx setDictionary:@{ @"outer": @YES } atPath:Path(gRoot, @"batch-outer.plist") error:error]) return NO;
+        inner = [manager addApplicationsToScopeAndPersist:@[] error:NULL]; return YES;
+    } error:&failure];
+    CHECK(!saved && !inner && failure && [before isEqual:BatchSnapshot()] && lookups == gScopeProxyLookups,
+          "empty batch cannot acknowledge nested uncommitted staging and poisons outer transaction");
+    manager = ScopeMetadataFixture(NO); __block BOOL successor = NO;
+    gDuringRequiredNotification = ^{
+        CHECK(manager.scopedApps[@"fixture.installed"] && manager.scopedApps[@"fixture.MutableExt"], "batch notification sees all adopted members");
+        successor = [manager removeApplicationFromScopeAndPersist:@"fixture.MutableExt" error:NULL];
+        manager.error = [NSError errorWithDomain:@"successor" code:995 userInfo:nil];
+    };
+    failure = nil;
+    CHECK([manager addApplicationsToScopeAndPersist:requested error:&failure] && !failure && successor && manager.error.code == 995 &&
+          !manager.scopedApps[@"fixture.MutableExt"] && ![NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()][@"ScopedApps"][@"fixture.MutableExt"],
+          "batch acknowledgement preserves publication successor and never reapplies later members");
+}
+static void TestExtensionScopeWorkflowUI(void) {
+    PXAppScopeToggleUIFixture *ui = [PXAppScopeToggleUIFixture new]; ui.manager = ScopeMetadataFixture(NO);
+    gScopeExpandedIDs = @[@"fixture.installed", @"fixture.extension", @"fixture.extension"]; gScopeFilterSuccess = YES;
+    NSUInteger filters = gScopeFilterCalls, notices = gBatchNotifications; __block BOOL faulted = NO;
+    NSDictionary *before = BatchSnapshot();
+    gStore.testCheckpoint = ^(NSString *stage) {
+        if (!faulted && [stage isEqual:@"source-written"]) { faulted = YES; [NSException raise:@"fixture.extension-ui" format:@"source fault"]; }
+    };
+    BOOL saved = [ui persistScopedApplicationExtensions:@"fixture.installed" manager:ui.manager]; gStore.testCheckpoint = nil;
+    CHECK(!saved && faulted && ui.errors == 1 && filters == gScopeFilterCalls && notices == gBatchNotifications && [before isEqual:BatchSnapshot()],
+          "extension source failure suppresses filter sync and success receipt without partial scope");
+    gScopeFilterSuccess = NO;
+    CHECK(![ui persistScopedApplicationExtensions:@"fixture.installed" manager:ui.manager] && ui.presentedError.code == 6047 &&
+          [ui.presentedError.localizedDescription containsString:@"Scope was saved"] && ui.manager.scopedApps[@"fixture.extension"] &&
+          filters + 1 == gScopeFilterCalls && gScopeFilterObserved[@"scope"][@"ScopedApps"][@"fixture.extension"],
+          "extension filter failure reports committed scope as partial and never rolls back source");
+    before = BatchSnapshot(); notices = gBatchNotifications; NSUInteger errors = ui.errors; gScopeFilterSuccess = YES;
+    CHECK([ui persistScopedApplicationExtensions:@"fixture.installed" manager:ui.manager] && [before isEqual:BatchSnapshot()] && notices == gBatchNotifications &&
+          filters + 2 == gScopeFilterCalls && errors == ui.errors, "extension filter retry reruns sync after source no-op without duplicate writes or topics");
+    gScopeExpandedIDs = @[]; before = BatchSnapshot(); filters = gScopeFilterCalls; NSUInteger attempts = gStandaloneSourceAttempts;
+    CHECK(![ui persistScopedApplicationExtensions:@"fixture.installed" manager:ui.manager] && filters == gScopeFilterCalls && attempts == gStandaloneSourceAttempts &&
+          [before isEqual:BatchSnapshot()], "empty extension expansion cannot report success or invoke source and filter writers");
+    NSMutableString *root = [@"fixture.installed" mutableCopy]; gScopeExpandedIDs = @[@"fixture.installed", @"fixture.OtherExt"];
+    gScopeProxyLookup = ^{ [root setString:@"changed.root"]; };
+    CHECK([ui persistScopedApplicationExtensions:root manager:ui.manager] && [root isEqual:@"changed.root"] &&
+          [gScopeExpansionRoots[0] isEqual:@"fixture.installed"] && ui.manager.scopedApps[@"fixture.OtherExt"],
+          "extension workflow freezes root identity before expansion and metadata callbacks");
+    gScopeExpandedIDs = nil; gScopeFilterSuccess = YES;
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -3442,6 +3581,8 @@ int main(void) {
         TestAppScopeRemovalUI();
         TestPerApplicationScopeAddition();
         TestAppScopeAdditionUI();
+        TestAtomicScopeAdditionBatch();
+        TestExtensionScopeWorkflowUI();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

@@ -114,3 +114,8 @@ the KVC guard was also checked using a syntactically valid unguarded-read replac
 These controls do not modify production files. Native Foundation/Theos builds for
 both schemes, real metadata APIs, UIKit presentation and physical injection remain
 for macOS CI/device validation. Full Patch 4 writer rollout remains partial.
+
+
+## Build acknowledgement
+
+2026-10-30: user reports H5K build pass. This is user-provided confirmation; no native Foundation/Theos ran locally. H5L moves extension additions to one additive source batch and checks downstream filter sync. H5L also converts unexpected metadata-preparation exceptions to local error 6046; source/publication exception policies stay separate.

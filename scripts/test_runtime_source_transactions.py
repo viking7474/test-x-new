@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5K-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5L-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -307,24 +307,37 @@ def source_contracts():
     assert 'TestPerApplicationScopeRemoval();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     assert 'TestAppScopeRemovalUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     addition_signature = '- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error'
-    addition = method(manager, addition_signature)
+    single_addition = method(manager, addition_signature)
     assert addition_signature + ';' in read('common/IdentifierManager.h')
+    assert '[self addApplicationsToScopeAndPersist:@[bundleID] error:error]' in single_addition
+    assert 'isKindOfClass:NSString.class' in single_addition and 'code:3001' in single_addition
     assert '[self addApplicationToScopeAndPersist:bundleID error:NULL]' in method(manager, '- (void)addApplicationToScope:(NSString *)bundleID')
+    batch_signature = '- (BOOL)addApplicationsToScopeAndPersist:(NSArray<NSString *> *)bundleIDs error:(NSError **)error'
+    addition = method(manager, batch_signature)
+    assert batch_signature + ';' in read('common/IdentifierManager.h')
     assert 'saveSettings' not in addition and 'PXTLinkIOSSettingsPath' not in addition
     assert addition.count('PXPerformStandaloneRuntimeSourceWrite(') == 2
     assert addition.count('PXValidateManagerSettingsSources(nil, scope,') == 2
-    assert 'code:3001' in addition and 'code:3003' in addition and 'code:6045' in addition
-    assert addition.index('bundleID = [bundleID copy]') < addition.index('PXPerformStandaloneRuntimeSourceWrite(')
+    assert 'code:3001' in addition and 'code:3003' in addition and 'code:6045' in addition and 'code:6046' in addition
+    assert 'NSString *bundleID = [value copy];' in addition and 'NSArray<NSString *> *requested = normalized.array;' in addition
+    assert addition.index('normalized.array') < addition.index('PXPerformStandaloneRuntimeSourceWrite(')
     assert addition.index('}, &failure)') < addition.index('NSClassFromString(@"LSApplicationProxy")') < addition.index('createDirectoryAtPath:prefsPath') < addition.rindex('success = PXPerformStandaloneRuntimeSourceWrite(')
+    assert 'if (!requested.count) return YES;' in addition
+    assert addition.index('}, &failure)') < addition.index('if (!requested.count) return YES;')
+    assert 'candidates[bundleID] = PXPrepareScopeAdditionRecord(bundleID, proxyClass)' in addition
+    assert addition.index('@catch (NSException *exception)') < addition.index('createDirectoryAtPath:prefsPath')
+    record_builder = manager.split('static NSDictionary *PXPrepareScopeAdditionRecord(', 1)[1].split('static NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
     for selector in ('applicationProxyForIdentifier:', 'localizedName', 'shortVersionString', 'bundleVersion'):
-        assert f'respondsToSelector:@selector({selector})' in addition
-    assert 'PXScopeOptionalKVCString(proxy, @"bundleVersion") ?: PXScopeOptionalKVCString(proxy, @"CFBundleVersion")' in addition
-    assert 'valueForKey:' not in addition and '@"Helper/Extension"' in addition and '@"Unknown"' in addition
-    assert 'if ([record isEqual:prepared]) return YES;' in addition
-    assert 'changedApps[bundleID] = prepared' in addition and 'setDictionary:changedScope atPath:scopePath' in addition
+        assert f'respondsToSelector:@selector({selector})' in record_builder
+    assert 'PXScopeOptionalKVCString(proxy, @"bundleVersion") ?: PXScopeOptionalKVCString(proxy, @"CFBundleVersion")' in record_builder
+    assert 'valueForKey:' not in record_builder and '@"Helper/Extension"' in record_builder and '@"Unknown"' in record_builder
+    assert 'if (![apps[bundleID] isEqual:prepared[bundleID]])' in addition
+    assert 'changedApps[bundleID] = prepared[bundleID]' in addition and addition.count('setDictionary:changedScope atPath:scopePath') == 1
+    assert 'if (!wrote) return YES;' in addition
+    assert addition.index('if (!wrote) return YES;') < addition.index('setDictionary:changedScope atPath:scopePath')
     assert 'self.scopedApps' not in addition[:addition.rindex('if (!success)')]
-    assert addition.rindex('if (!success)') < addition.index('self.scopedApps[bundleID] = adopted') < addition.index('PXPostSettingsChangedNotification()')
-    assert 'NSMutableDictionary *adopted = [prepared mutableCopy];' in addition
+    assert addition.rindex('if (!success)') < addition.index('self.scopedApps[bundleID] = [prepared[bundleID] mutableCopy]') < addition.index('PXPostSettingsChangedNotification()')
+    assert addition.count('PXPostSettingsChangedNotification()') == 1
     assert 'if (wrote || memoryChanged)' in addition and 'if (wrote) PXPostSettingsChangedNotification();' in addition
     assert 'return self.error' not in addition
     optional_kvc = manager.split('static NSString *PXScopeOptionalKVCString(', 1)[1].split('static NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
@@ -362,6 +375,41 @@ def source_contracts():
         assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
     assert 'TestPerApplicationScopeAddition();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     assert 'TestAppScopeAdditionUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    extension_ui = method(ui_source, '- (BOOL)persistScopedApplicationExtensions:(NSString *)bundleID manager:(IdentifierManager *)manager')
+    assert 'NSString *requested = [bundleID copy]' in extension_ui and 'PXExpandedResetBundleIDs(@[requested])' in extension_ui
+    assert 'if (!expanded.count)' in extension_ui
+    assert '[manager addApplicationsToScopeAndPersist:expanded error:&failure]' in extension_ui
+    assert extension_ui.index('addApplicationsToScopeAndPersist:') < extension_ui.index('if (!PXWriteSubstrateFilterPlists())')
+    assert 'code:6047' in extension_ui and 'Scope was saved' in extension_ui
+    assert 'if (failure) [self showError:failure];\n        return NO;' in extension_ui
+    assert 'return NO;' in extension_ui.split('if (!PXWriteSubstrateFilterPlists()) {', 1)[1]
+    assert extension_ui.rstrip().endswith('return YES;\n}')
+    assert 'saveScopedApps' not in extension_ui and 'setApplication:' not in extension_ui and 'lastError' not in extension_ui
+    for signature, instance in [('- (void)addApplicationWithExtensionsToScope:(NSString *)bundleID', '[IdentifierManager sharedManager]'),
+                                 ('- (void)extensionButtonTapped:(UIButton *)sender', 'self.manager')]:
+        action = method(main_ui, signature)
+        guard = f'if (![self persistScopedApplicationExtensions:bundleID manager:{instance}]) return;'
+        assert guard in action and action.index(guard) < action.index('alertControllerWithTitle:@"Success"')
+        assert 'saveScopedApps' not in action and 'setApplication:' not in action and 'addApplicationToScope:' not in action
+        assert 'PXWriteSubstrateFilterPlists()' not in action
+    assert 'PXAppScopeExtensionsUI.inc' in read('scripts/test_runtime_device_group_writers.py')
+    for case in ('batch freezes deduplicated case-sensitive IDs and commits all members once preserving current unrelated source',
+                 'matching additive batch is a canonical no-write no-cache no-topic observation',
+                 'empty additive batch validates standalone admission without metadata or writes',
+                 'batch source fault preserves full old tuple or absence and all live memory without partial additions',
+                 'batch retries all members after failed source commit',
+                 'later metadata exception returns local failure before any batch source or memory publication',
+                 'invalid batch member or self ID rejects the complete packet before admission and lookup',
+                 'empty batch cannot acknowledge nested uncommitted staging and poisons outer transaction',
+                 'batch acknowledgement preserves publication successor and never reapplies later members',
+                 'extension source failure suppresses filter sync and success receipt without partial scope',
+                 'extension filter failure reports committed scope as partial and never rolls back source',
+                 'extension filter retry reruns sync after source no-op without duplicate writes or topics',
+                 'empty extension expansion cannot report success or invoke source and filter writers',
+                 'extension workflow freezes root identity before expansion and metadata callbacks'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestAtomicScopeAdditionBatch();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestExtensionScopeWorkflowUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('standalone settings and scope saves commit once before one compatibility notification',
                  'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',
