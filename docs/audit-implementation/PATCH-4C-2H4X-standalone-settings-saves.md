@@ -98,3 +98,5 @@ STATUS hay implementation backup/restore trong audit patch này.
 
 Manifest `4C.2H4X-partial`; toàn Patch 4/defaults authority/lifecycle/durability vẫn
 partial. Patch 5–8 chưa triển khai.
+
+Người dùng xác nhận H4X build pass ngày 2026-10-29 trước H4Y. Đây là kết quả build do người dùng báo; Windows không chạy native/package/device gate. H4Y xử lý riêng legacy toggle acknowledgement đã nêu ở trên.

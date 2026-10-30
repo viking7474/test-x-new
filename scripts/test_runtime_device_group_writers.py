@@ -61,6 +61,10 @@ SIGNATURES = [
     '- (NSDictionary *)captureCurrentDashboardHardwareWithError:(NSError **)error',
     '- (void)saveSettings',
     '- (void)saveScopedApps',
+    '- (BOOL)saveSettingsWithError:(NSError **)error',
+    '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type',
+    '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error',
+    '- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type',
 ]
 STATICS = [
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -165,7 +169,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4X-partial'
+    assert manifest['rollout'] == '4C.2H4Y-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
@@ -202,7 +206,7 @@ def native_tests():
             subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-fblocks', '-fexceptions', '-fobjc-exceptions',
                             '-DPX_SOURCE_TRANSACTION_TESTING=1', '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                             '-I', str(ROOT / 'common'), '-I', str(folder), *defines,
-                            *[str(ROOT / source) for source in sources], '-framework', 'Foundation', '-framework', 'Security',
+                            *[str(ROOT / source) for source in sources], '-framework', 'Foundation', '-framework', 'Security', '-framework', 'CoreFoundation',
                             '-o', str(binary)], check=True, cwd=ROOT, timeout=60)
             for _ in range(3):
                 subprocess.run([str(binary)], check=True, cwd=ROOT, timeout=90)

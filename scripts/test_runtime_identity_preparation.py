@@ -67,7 +67,7 @@ def source_contracts():
         assert case in model_fixture, case
     assert 'test_runtime_identity_preparation.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H4X-partial'
+    assert manifest['rollout'] == '4C.2H4Y-partial'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     assert manifest['writers']['profile-lifecycle']['status'] == 'partial'
     print('PASS: Model/scalar preparation source contracts (profile lifecycle pending; native runtime not implied)')

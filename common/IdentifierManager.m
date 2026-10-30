@@ -62,6 +62,8 @@
 @end
 
 @interface IdentifierManager ()
+- (BOOL)saveSettingsWithError:(NSError **)error;
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error;
 @property (nonatomic, strong) NSMutableDictionary *settings;
 @property (nonatomic, strong) NSMutableDictionary *scopedApps;
 @property (nonatomic, strong) NSError *error;
@@ -1935,6 +1937,13 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
 }
 
 - (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type {
+    [self applyIdentifierEnabled:enabled forType:type error:NULL];
+}
+
+- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error {
+    if (error) *error = nil;
+    if (![type isKindOfClass:[NSString class]] || type.length == 0) return NO;
+    type = [type copy];
     // Set the enabled state in settings
     self.settings[type] = @(enabled);
 
@@ -2076,7 +2085,13 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     // Persist the identifier state first. Secondary runtime settings are written only after
     // EnabledIdentifiers has been persisted, so callers never observe a secondary success
     // notification for an identifier state that failed to save.
-    [self saveSettings];
+    NSError *saveError = nil;
+    if (![self saveSettingsWithError:&saveError]) {
+        if (error) *error = saveError;
+        return NO;
+    }
+    // A matching old value cannot acknowledge this invocation's write. Keep
+    // the readback as an extra guard against synchronous notification reentry.
     NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
     NSDictionary *persistedIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
         ? persistedSettings[@"EnabledIdentifiers"]
@@ -2084,7 +2099,10 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
     id persistedState = persistedIdentifiers[type];
     if (persistedState == nil || [persistedState boolValue] != enabled) {
         PXLog(@"[WeaponX] Skipping secondary identifier state for %@ because EnabledIdentifiers did not persist", type);
-        return;
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Identifier state changed after settings commit"}];
+        if (error) *error = self.error;
+        return NO;
     }
 
     NSString *secondaryKey = nil;
@@ -2107,16 +2125,21 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
                                                notificationName,
                                                NULL, NULL, YES);
         } else {
-            self.error = secondaryError;
+            self.error = secondaryError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6034
+                                                          userInfo:@{NSLocalizedDescriptionKey: @"Failed to persist secondary identifier state"}];
+            if (error) *error = self.error;
             PXLog(@"[WeaponX] Failed to persist secondary identifier state %@=%@: %@",
                   secondaryKey, enabled ? @"YES" : @"NO", secondaryError);
+            return NO;
         }
     }
+    return YES;
 }
 
 - (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type {
     if (![type isKindOfClass:[NSString class]] || type.length == 0) return NO;
 
+    type = [type copy];
     BOOL previous = [self.settings[type] boolValue];
     NSString *secondaryKey = nil;
     CFStringRef notificationName = NULL;
@@ -2131,7 +2154,8 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         notificationName = CFSTR("com.hydra.tlinkios.toggleDeviceThemeSpoof");
     }
 
-    [self setIdentifierEnabled:enabled forType:type];
+    NSError *writeError = nil;
+    BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type error:&writeError];
 
     NSDictionary *persistedSettings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
     NSDictionary *enabledIdentifiers = [persistedSettings[@"EnabledIdentifiers"] isKindOfClass:[NSDictionary class]]
@@ -2146,7 +2170,9 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         secondarySuccess = (secondaryValue != nil && [secondaryValue boolValue] == enabled);
     }
 
-    if (primarySuccess && secondarySuccess) return YES;
+    if (writeSuccess && primarySuccess && secondarySuccess) return YES;
+    NSError *failure = writeError ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6033
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"Identifier state verification failed after write"}];
 
     // Restore in-memory and persisted state. The rollback itself is verified best-effort;
     // callers still receive NO so the UI returns to the previously known state.
@@ -2166,7 +2192,9 @@ static NSArray<NSString *> *PXDeviceProfileManagedKeys(void) {
         }
     }
 
-    PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d); rolled back to %@",
+    // Rollback success must not erase the failed forward operation's result.
+    self.error = failure;
+    PXLog(@"[WeaponX] Failed to persist identifier state %@=%@ (primary=%d secondary=%d); attempted rollback to %@",
           type, enabled ? @"YES" : @"NO", primarySuccess, secondarySuccess, previous ? @"YES" : @"NO");
     return NO;
 }
@@ -3194,6 +3222,11 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
 #pragma mark - Persistence
 
 - (void)saveSettings {
+    [self saveSettingsWithError:NULL];
+}
+
+- (BOOL)saveSettingsWithError:(NSError **)error {
+    if (error) *error = nil;
     // Get the proper preferences path
     NSString *prefsPath = PXPreferencesPath();
     NSString *prefsFile = PXTLinkIOSSettingsPath();
@@ -3220,7 +3253,8 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
                                         userInfo:@{NSLocalizedDescriptionKey: 
                                                   [NSString stringWithFormat:@"Failed to create preferences directory: %@", 
                                                    dirError.localizedDescription]}];
-            return;
+            if (error) *error = self.error;
+            return NO;
         }
     }
     
@@ -3250,7 +3284,8 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
                                       code:4006
                                   userInfo:@{NSLocalizedDescriptionKey: sourceError.localizedDescription ?: @"Failed to save settings and scope transaction"}];
         PXLog(@"[WeaponX] ❌ Failed to commit settings/scope: %@", sourceError);
-        return;
+        if (error) *error = self.error;
+        return NO;
     } else {
         PXLog(@"[WeaponX] ✅ Saved scoped apps to: %@", scopedAppsFile);
     }
@@ -3258,6 +3293,7 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     [self.spoofCache removeAllObjects];
     [_appEnabledCache removeAllObjects];
     PXPostSettingsChangedNotification();
+    return YES;
 }
     
 

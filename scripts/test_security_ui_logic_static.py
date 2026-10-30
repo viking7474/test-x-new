@@ -211,7 +211,7 @@ require("setIdentifierEnabledAndPersist" in tlink_h and '"TLinkIOS.h"' in identi
         "IdentifierManager verified identifier-toggle API is exported through the shared header")
 verified_identifier = method_body(identifier_m, "- (BOOL)setIdentifierEnabledAndPersist:", 4300)
 for token in (
-    "primarySuccess",
+    "writeSuccess && primarySuccess && secondarySuccess",
     "secondarySuccess",
     "self.settings[type] = @(previous)",
     "PXWriteSecurityBool(secondaryKey, previous",

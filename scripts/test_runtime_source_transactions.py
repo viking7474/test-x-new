@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4X-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4Y-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -87,7 +87,8 @@ def source_contracts():
         assert name in paths
     assert 'parts.count == 3 && [parts[1] isEqual:@"appdata"] && [parts[2] isEqual:@"Info.plist"]' in paths
     assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-telephony-partial"' in runtime
-    save = method(manager, '- (void)saveSettings')
+    assert '[self saveSettingsWithError:NULL]' in method(manager, '- (void)saveSettings')
+    save = method(manager, '- (BOOL)saveSettingsWithError:(NSError **)error')
     scope = method(manager, '- (void)saveScopedApps')
     for body in (save, scope):
         assert 'PXPerformStandaloneRuntimeSourceWrite' in body and 'atPath:scopedAppsFile' in body
@@ -104,6 +105,34 @@ def source_contracts():
                  'settings corruption teardown restores shared files and commit identity'):
         assert case in fixture_settings, case
     assert 'TestStandaloneSettingsSaves(manager, Identity(@"a"))' in fixture_settings
+    toggle = method(manager, '- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type')
+    apply = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error')
+    assert 'BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type error:&writeError]' in toggle
+    assert 'if (writeSuccess && primarySuccess && secondarySuccess) return YES;' in toggle
+    assert toggle.index('type = [type copy]') < toggle.index('[self applyIdentifierEnabled:')
+    assert toggle.index('NSError *failure = writeError ?:') < toggle.index('self.settings[type] = @(previous)')
+    assert toggle.index('[self saveSettings]') < toggle.index('self.error = failure')
+    assert '[self applyIdentifierEnabled:enabled forType:type error:NULL]' in method(manager, '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type')
+    assert 'if (![self saveSettingsWithError:&saveError])' in apply
+    assert apply.index('return NO;', apply.index('if (![self saveSettingsWithError:')) < apply.index('PXWriteSecurityBool')
+    assert apply.index('type = [type copy]') < apply.index('self.settings[type] = @(enabled)')
+    assert apply.index('persistedState == nil') < apply.index('PXWriteSecurityBool')
+    assert 'if (error) *error = self.error;' in apply and 'return NO;' in apply[apply.index('self.error = secondaryError'):]
+    assert save.index('PXPostSettingsChangedNotification()') < save.index('return YES;')
+    assert save.count('if (error) *error = self.error;') == 2
+    for case in ('matching old primary value never acknowledges a failed forward write',
+                 'primary forward failure remains failure after a successful matching rollback',
+                 'verified secondary toggles retain successful enable and disable behavior',
+                 'matching old secondary value cannot hide forward failure and rollback retains original error',
+                 'toggle success uses local receipt despite stale shared manager error',
+                 'failed primary receipt stops secondary writes even when old enabled flag matches',
+                 'nested toggle matching old primary rejects acknowledgement and poisons ignored outer staging',
+                 'toggle receipt retains readback guard before secondary publication after notification reentry',
+                 'toggle freezes mutable caller key before legacy provider callbacks without changing generation policy',
+                 'legacy void setter skips existing generation and verified storage retains atomic alias',
+                 'invalid toggle keys fail before settings source or notification work'):
+        assert case in fixture_settings, case
+    assert 'TestIdentifierToggleAcknowledgement();' in fixture_settings
     assert '[transaction dictionaryAtPath:prefsFile error:writeError]' in save
     assert 'setDictionary:saveDict atPath:prefsFile' in save and 'writeToFile:prefsFile' not in save
     load = method(manager, '- (void)loadSettings')
