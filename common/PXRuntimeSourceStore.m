@@ -306,6 +306,7 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     if (!identifier) return NO;
     NSDictionary *journal = @{ @"schemaVersion": @1, @"transactionID": identifier, @"entries": entries };
     if (!PXRuntimeWritePropertyList(journal, self.journalPath, _owner, _group, 0600, error)) return NO;
+    BOOL markerCommitted = NO;
     @try {
 #if defined(PX_SOURCE_TRANSACTION_TESTING)
         if (self.testCheckpoint) self.testCheckpoint(@"journal-prepared");
@@ -325,17 +326,35 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
         }
         NSDictionary *commit = @{ @"schemaVersion": @1, @"commitID": identifier };
         if (!PXRuntimeWritePropertyList(commit, self.commitPath, _owner, _group, 0600, error)) return NO;
+        // This is an acknowledged marker write, not merely an allocated candidate.
+        // Later housekeeping cannot turn this committed transaction into an abort.
+        markerCommitted = YES;
 #if defined(PX_SOURCE_TRANSACTION_TESTING)
         if (self.testCheckpoint) self.testCheckpoint(@"commit-written");
 #endif
         // Marker is the boundary. A failed cleanup leaves a committed journal
         // for the next writer; do not report an aborted operation after commit.
+#if defined(PX_SOURCE_TRANSACTION_TESTING)
+        if (self.testCheckpoint) self.testCheckpoint(@"journal-cleanup");
+#endif
         [NSFileManager.defaultManager removeItemAtPath:self.journalPath error:nil];
         return YES;
+    } @catch (NSException *exception) {
+        if (!markerCommitted) @throw;
+        (void)exception; // A committed journal may be cleaned by a later writer.
+        return YES;
     } @finally {
-        // On pre-commit failure/exception, recover immediately. If I/O still
-        // fails, keep the journal: publisher capture must stay unavailable.
-        [self recover:NULL];
+        // Recovery must not replace the acknowledged outcome with a cleanup
+        // exception. Pre-marker recovery errors still fail closed at the owner.
+        @try {
+#if defined(PX_SOURCE_TRANSACTION_TESTING)
+            if (self.testCheckpoint) self.testCheckpoint(@"transaction-recovery");
+#endif
+            [self recover:NULL];
+        } @catch (NSException *recoveryException) {
+            if (!markerCommitted) @throw;
+            (void)recoveryException;
+        }
     }
 }
 - (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body error:(NSError **)error {
@@ -345,6 +364,7 @@ static id PXSourceReadPlist(NSString *path, BOOL *absent, NSData **bytes, mode_t
     return [self performWrite:body allowNested:NO error:error];
 }
 - (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body allowNested:(BOOL)allowNested error:(NSError **)error {
+    if (error) *error = nil;
     if (geteuid() != _owner) { if (error) *error = PXSourceError(@"Only the source owner may write or recover"); return NO; }
     double deadline = PXSourceNow() + 1.0;
     if (!body || ![self enterBefore:deadline error:error]) return NO;

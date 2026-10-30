@@ -2367,6 +2367,40 @@ static void TestConditionalToggleRollback(void) {
           [scope isEqual:[NSData dataWithContentsOfFile:PXGlobalScopePath()]], "conditional rollback keeps storage alias atomic and never rewrites scope");
 }
 
+static void TestTogglePostCommitAcknowledgement(void) {
+    for (NSString *phase in @[@"commit-written", @"journal-cleanup", @"transaction-recovery"]) {
+        PXDeviceGroupFixture *manager = ToggleReentryFixture(); manager.error = nil;
+        NSUInteger notices = gBatchNotifications, topics = gToggleSecondaryNotices, writes = gToggleSecurityWrites;
+        NSUInteger publications = gToggleSecurityPublications; __block NSUInteger faults = 0, commits = 0;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if ([stage isEqual:@"commit-written"]) commits++;
+            if ([stage isEqual:phase]) { faults++; [NSException raise:@"fixture.toggle.ack" format:@"post marker failure"]; }
+        };
+        BOOL success = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+        gStore.testCheckpoint = nil;
+        CHECK(success && !manager.error && commits == 2 && faults == 2 && notices + 1 == gBatchNotifications &&
+              topics + 1 == gToggleSecondaryNotices && writes + 1 == gToggleSecurityWrites && publications == gToggleSecurityPublications &&
+              [manager.settings[@"WiFi"] boolValue] && [PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] &&
+              !manager.identifierToggleOperations.count,
+              "verified toggle acknowledges both committed writes without spurious compensation after housekeeping exceptions");
+        manager = ToggleReentryFixture(); gToggleSecurityFailures = 1;
+        notices = gBatchNotifications; topics = gToggleSecondaryNotices; publications = gToggleSecurityPublications;
+        __block BOOL recovering = NO; faults = 0;
+        gDuringToggleSecurityWrite = ^{ recovering = YES; };
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if (recovering && [stage isEqual:phase]) { faults++; [NSException raise:@"fixture.toggle.ack" format:@"committed compensation cleanup failed"]; }
+        };
+        success = [manager setIdentifierEnabledAndPersist:YES forType:@"WiFi"];
+        gStore.testCheckpoint = nil;
+        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+        CHECK(!success && manager.error.code == 71 && faults == 1 &&
+              ![manager.settings[@"WiFi"] boolValue] && ![settings[@"EnabledIdentifiers"][@"WiFi"] boolValue] &&
+              ![PXReadSecuritySetting(@"wifiSpoofEnabled") boolValue] && notices + 2 == gBatchNotifications &&
+              topics + 1 == gToggleSecondaryNotices && publications + 1 == gToggleSecurityPublications && !manager.identifierToggleOperations.count,
+              "acknowledged compensation publishes restored tuple while retaining original forward failure");
+    }
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -2397,6 +2431,7 @@ int main(void) {
         TestIdentifierToggleReentry();
         TestToggleFailedPrimaryOwnership();
         TestConditionalToggleRollback();
+        TestTogglePostCommitAcknowledgement();
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

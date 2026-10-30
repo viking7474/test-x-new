@@ -36,6 +36,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// outer operation. The block may only stage/read sources: no notifications,
 /// external callbacks, publisher ownership, queue hops or waiting on other work.
 /// Only the configured source owner may write/recover (the root daemon reads).
+/// An acknowledged commit-marker write remains successful through subsequent
+/// housekeeping exceptions; pre-marker failures/recovery still fail closed.
+/// Write entry clears the supplied error output; journal cleanup may be deferred.
 - (BOOL)performWrite:(BOOL (^ _Nonnull)(PXRuntimeSourceTransaction * _Nonnull transaction, NSError * _Nullable * _Nonnull error))body
                error:(NSError * _Nullable * _Nullable)error;
 /// For APIs that publish compatibility effects after return. Reject a nested

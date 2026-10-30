@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5B-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5C-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -62,6 +62,12 @@ def source_contracts():
     commit = method(core, '- (BOOL)commitTransaction:(PXRuntimeSourceTransaction *)transaction error:(NSError **)error')
     assert commit.index('self.journalPath, _owner') < commit.index('transaction.staged[path], path') < commit.index('commit, self.commitPath')
     assert '@finally' in commit and '[self recover:NULL]' in commit
+    assert commit.index('BOOL markerCommitted = NO;') < commit.index('@try')
+    assert commit.index('PXRuntimeWritePropertyList(commit, self.commitPath') < commit.index('markerCommitted = YES;') < commit.index('self.testCheckpoint(@"commit-written")')
+    assert commit.count('if (!markerCommitted) @throw;') == 2
+    assert commit.index('@catch (NSException *exception)') < commit.index('@finally') < commit.index('@catch (NSException *recoveryException)')
+    assert 'self.testCheckpoint(@"journal-cleanup")' in commit and 'self.testCheckpoint(@"transaction-recovery")' in commit
+
     capture = method(core, '- (NSDictionary *)capture:(NSDictionary *(^)(NSError **))loader error:(NSError **)error')
     assert 'LOCK_SH' in capture and 'journalRecord' in capture and 'commit[@"commitID"]' in capture
     assert 'recover:' not in capture and 'writeToFile' not in capture and 'removeItem' not in capture
@@ -72,6 +78,24 @@ def source_contracts():
     assert 'allowNested:YES' in regular and 'allowNested:NO' in standalone
     internal = method(core, '- (BOOL)performWrite:(BOOL (^)(PXRuntimeSourceTransaction *, NSError **))body allowNested:(BOOL)allowNested error:(NSError **)error')
     assert internal.index('if (!allowNested)') < internal.index('BOOL success = body(_activeTransaction')
+    assert internal.index('if (error) *error = nil;') < internal.index('geteuid() != _owner')
+    for case in ('acknowledged marker survives post-commit and finally exceptions without rollback or error',
+                 'failed post-commit housekeeping retains only a matching committed journal',
+                 'subsequent owner cleans committed journal and writes after acknowledgement exception',
+                 'candidate and earlier committed marker never acknowledge a throwing body',
+                 'pre-marker recovery exception still fails closed and keeps uncommitted journal',
+                 'failed marker rename never acknowledges completed source writes',
+                 'marker failure recovery restores old tuple and releases source ownership'):
+        assert case in fixture, case
+    assert 'TestCommitAcknowledgement(root)' in fixture
+    consumer_ack = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    for case in ('verified toggle acknowledges both committed writes without spurious compensation after housekeeping exceptions',
+                 'acknowledged compensation publishes restored tuple while retaining original forward failure'):
+        assert case in consumer_ack, case
+    assert 'TestTogglePostCommitAcknowledgement();' in consumer_ack
+    assert 'security receipt and all mirrors survive acknowledged marker housekeeping exception' in read('tests/PXRuntimeSecurityWriterTests.m')
+    assert 'TestPostCommitSecurityAcknowledgement();' in read('tests/PXRuntimeSecurityWriterTests.m')
+
     assert '_activeTransaction.failure = PXSourceError(@"Standalone source write' in internal
 
     assert 'self.thread != NSThread.currentThread' in core and '!self.active' in core

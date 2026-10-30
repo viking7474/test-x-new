@@ -314,6 +314,92 @@ static void TestCommitPreconditions(NSString *root, NSString *binary) {
     store.testCheckpoint = nil;
 }
 
+static void TestCommitAcknowledgement(NSString *root) {
+    NSArray *phases = @[@"commit-written", @"journal-cleanup", @"transaction-recovery", @"both-cleanups"];
+    for (NSString *phase in phases) {
+        NSString *folder = NewCase(root, [@"ack-" stringByAppendingString:phase]);
+        PXRuntimeSourceStore *store = Store(folder);
+        CHECK(WritePair(store, folder, 1, NO), "commit acknowledgement baseline seeded");
+        __block NSString *receipt = nil; __block NSUInteger faults = 0, markers = 0, restores = 0;
+        store.testCheckpoint = ^(NSString *stage) {
+            if ([stage isEqual:@"commit-written"]) markers++;
+            if ([stage isEqual:@"recovery-source-written"]) restores++;
+            BOOL cleanup = [stage isEqual:@"journal-cleanup"] || [stage isEqual:@"transaction-recovery"];
+            if ([stage isEqual:phase] || ([phase isEqual:@"both-cleanups"] && cleanup)) {
+                faults++; [NSException raise:@"fixture.ack" format:@"post marker housekeeping failed"];
+            }
+        };
+        NSError *failure = [NSError errorWithDomain:@"fixture.stale" code:1 userInfo:nil];
+        BOOL success = [store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            if (![tx setDictionary:@{ @"value": @2 } atPath:Path(folder, @"a.plist") error:error] ||
+                ![tx setDictionary:@{ @"value": @2 } atPath:Path(folder, @"b.plist") error:error]) return NO;
+            receipt = [tx prospectiveCommitIdentifierWithError:error]; return receipt != nil;
+        } error:&failure];
+        store.testCheckpoint = nil;
+        PXRuntimeSourceStore *reader = Store(folder); // A second fd must acquire the released gate.
+        NSDictionary *committed = ReadPair(reader, folder);
+        BOOL pending = [NSFileManager.defaultManager fileExistsAtPath:Path(folder, @"control/pending.plist")];
+        CHECK(success && !failure && receipt && [receipt isEqual:committed[@"sourceCommitID"]] &&
+              [committed[@"a"][@"value"] isEqual:@2] && [committed[@"b"][@"value"] isEqual:@2] &&
+              markers == 1 && restores == 0 && faults == ([phase isEqual:@"both-cleanups"] ? 2 : 1),
+              "acknowledged marker survives post-commit and finally exceptions without rollback or error");
+        CHECK(pending == [phase isEqual:@"both-cleanups"], "failed post-commit housekeeping retains only a matching committed journal");
+        CHECK(WritePair(reader, folder, 3, NO) && ![NSFileManager.defaultManager fileExistsAtPath:Path(folder, @"control/pending.plist")] &&
+              [ReadPair(store, folder)[@"a"][@"value"] isEqual:@3], "subsequent owner cleans committed journal and writes after acknowledgement exception");
+        NSDictionary *before = ReadPair(store, folder); __block NSString *candidate = nil;
+        failure = nil;
+        CHECK(![store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            candidate = [tx prospectiveCommitIdentifierWithError:error];
+            [tx setDictionary:@{ @"value": @9 } atPath:Path(folder, @"a.plist") error:error];
+            [NSException raise:@"fixture.ack" format:@"body rejected candidate"]; return YES;
+        } error:&failure] && failure && candidate && [before isEqual:ReadPair(store, folder)],
+              "candidate and earlier committed marker never acknowledge a throwing body");
+    }
+    NSString *folder = NewCase(root, @"ack-pre-marker-recovery"); PXRuntimeSourceStore *store = Store(folder);
+    CHECK(WritePair(store, folder, 1, NO), "pre marker recovery exception baseline seeded");
+    NSDictionary *before = ReadPair(store, folder);
+    store.testCheckpoint = ^(NSString *stage) {
+        if ([stage isEqual:@"source-written"] || [stage isEqual:@"recovery-source-written"])
+            [NSException raise:@"fixture.ack" format:@"pre marker and restore failure"];
+    };
+    NSError *failure = nil;
+    CHECK(!WritePair(store, folder, 2, NO) && ReadPair(store, folder) == nil &&
+          [NSFileManager.defaultManager fileExistsAtPath:Path(folder, @"control/pending.plist")],
+          "pre-marker recovery exception still fails closed and keeps uncommitted journal");
+    store.testCheckpoint = nil;
+    CHECK([store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        (void)tx; (void)error; return YES;
+    } error:&failure] && !failure && [before isEqual:ReadPair(store, folder)], "retry recovers complete old tuple after pre-marker recovery exception");
+
+    folder = NewCase(root, @"ack-marker-write-failure"); store = Store(folder);
+    CHECK(WritePair(store, folder, 1, NO), "marker write failure baseline seeded"); before = ReadPair(store, folder);
+    NSString *markerPath = Path(folder, @"control/commit.plist"); NSData *marker = [NSData dataWithContentsOfFile:markerPath];
+    __block NSUInteger writes = 0;
+    @try {
+        store.testCheckpoint = ^(NSString *stage) {
+            if ([stage isEqual:@"source-written"] && ++writes == 2) {
+                CHECK([NSFileManager.defaultManager removeItemAtPath:markerPath error:NULL] &&
+                      [NSFileManager.defaultManager createDirectoryAtPath:markerPath withIntermediateDirectories:NO attributes:nil error:NULL],
+                      "marker failure fixture reserves a directory at marker destination");
+            }
+        };
+        failure = nil;
+        CHECK(![store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+            return [tx setDictionary:@{ @"value": @2 } atPath:Path(folder, @"a.plist") error:error] &&
+                   [tx setDictionary:@{ @"value": @2 } atPath:Path(folder, @"b.plist") error:error];
+        } error:&failure] && failure && ReadPair(store, folder) == nil,
+              "failed marker rename never acknowledges completed source writes");
+    } @finally {
+        store.testCheckpoint = nil;
+        CHECK([NSFileManager.defaultManager removeItemAtPath:markerPath error:NULL] && [marker writeToFile:markerPath atomically:YES] &&
+              chmod(markerPath.fileSystemRepresentation, 0600) == 0,
+              "marker failure teardown restores the original marker bytes");
+    }
+    CHECK([store performStandaloneWrite:^BOOL(PXRuntimeSourceTransaction *tx, NSError **error) {
+        (void)tx; (void)error; return YES;
+    } error:&failure] && !failure && [before isEqual:ReadPair(store, folder)], "marker failure recovery restores old tuple and releases source ownership");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 4) {
@@ -361,7 +447,7 @@ int main(int argc, const char *argv[]) {
         [NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil];
         TestStaging(root); TestFailures(root);
         NSString *binary = [NSString stringWithUTF8String:argv[0]];
-        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary); TestCommitPreconditions(root, binary);
+        TestCrashRecovery(root, binary); TestRemovals(root, binary); TestProcesses(root, binary); TestCommitPreconditions(root, binary); TestCommitAcknowledgement(root);
         [NSFileManager.defaultManager removeItemAtPath:root error:nil];
         printf("Runtime source transactions: %lu/%lu checks passed\n", (unsigned long)(gChecks - gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

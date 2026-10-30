@@ -891,6 +891,23 @@ static void TestConditionalSecurityWrites(void) {
     gCheckMirror = checkMirror;
 }
 
+static void TestPostCommitSecurityAcknowledgement(void) {
+    for (NSString *phase in @[@"commit-written", @"journal-cleanup", @"transaction-recovery"]) {
+        CHECK(Seed(@{ @"wifiSpoofEnabled": @NO }), "post commit security baseline seeded");
+        NSString *base = Capture()[@"sourceCommitID"], *authority = nil;
+        NSUInteger mirrors = gMirrors; __block NSUInteger faults = 0;
+        gStore.testCheckpoint = ^(NSString *stage) {
+            if ([stage isEqual:phase]) { faults++; [NSException raise:@"fixture.security.ack" format:@"post commit housekeeping"]; }
+        };
+        NSError *failure = nil;
+        BOOL success = PXWriteSecurityBoolWithRollbackAuthority(@"wifiSpoofEnabled", YES, base, &authority, &failure);
+        gStore.testCheckpoint = nil;
+        CHECK(success && !failure && faults == 1 && authority && [authority isEqual:Capture()[@"sourceCommitID"]] &&
+              [Load()[@"wifiSpoofEnabled"] boolValue] && mirrors + 3 == gMirrors,
+              "security receipt and all mirrors survive acknowledged marker housekeeping exception");
+    }
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
@@ -900,7 +917,7 @@ int main(void) {
         gStore = [[PXRuntimeSourceStore alloc] initWithDirectory:[gRoot stringByAppendingPathComponent:@"control"] owner:geteuid() group:getegid()
             allowsPath:^BOOL(NSString *path) { return [path isEqual:gPath] || [path isEqual:gIndicatorPath]; } error:NULL];
         CHECK(gStore != nil, "security source backend initialized");
-        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters(); TestConditionalSecurityWrites();
+        TestSecurityPackets(); TestNonceAndCanvas(); TestIPMonitorWriters(); TestRegionAndTimeZoneWriters(); TestClearMetricWriters(); TestIndicatorPositionWriters(); TestSecurityScalarReaderTypes(); TestDisplayPolicyWriters(); TestConditionalSecurityWrites(); TestPostCommitSecurityAcknowledgement();
         gStore = nil; [NSFileManager.defaultManager removeItemAtPath:gRoot error:NULL];
         printf("Runtime security writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);
         return gFailures ? 1 : 0;

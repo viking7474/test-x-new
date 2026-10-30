@@ -121,3 +121,5 @@ define không chứng minh device injection. SourceStore post-marker exception/u
 outcome policy chưa đổi: chỉ acknowledged successful staged write mới promote
 receipt; memory observation vẫn là snapshot tại read point, không phải durable
 post-failure/global memory guarantee. User-reported H5A build pass được ghi riêng.
+
+Người dùng xác nhận H5B build pass ngày 2026-10-30. H5C xử lý riêng known post-marker housekeeping/finally exceptions đã nêu ở phần giới hạn; pre-marker failures và durability vẫn riêng. Đây là build do người dùng báo, không phải native execution từ Windows.
