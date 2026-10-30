@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5J-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5K-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -306,6 +306,62 @@ def source_contracts():
         assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
     assert 'TestPerApplicationScopeRemoval();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     assert 'TestAppScopeRemovalUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    addition_signature = '- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error'
+    addition = method(manager, addition_signature)
+    assert addition_signature + ';' in read('common/IdentifierManager.h')
+    assert '[self addApplicationToScopeAndPersist:bundleID error:NULL]' in method(manager, '- (void)addApplicationToScope:(NSString *)bundleID')
+    assert 'saveSettings' not in addition and 'PXTLinkIOSSettingsPath' not in addition
+    assert addition.count('PXPerformStandaloneRuntimeSourceWrite(') == 2
+    assert addition.count('PXValidateManagerSettingsSources(nil, scope,') == 2
+    assert 'code:3001' in addition and 'code:3003' in addition and 'code:6045' in addition
+    assert addition.index('bundleID = [bundleID copy]') < addition.index('PXPerformStandaloneRuntimeSourceWrite(')
+    assert addition.index('}, &failure)') < addition.index('NSClassFromString(@"LSApplicationProxy")') < addition.index('createDirectoryAtPath:prefsPath') < addition.rindex('success = PXPerformStandaloneRuntimeSourceWrite(')
+    for selector in ('applicationProxyForIdentifier:', 'localizedName', 'shortVersionString', 'bundleVersion'):
+        assert f'respondsToSelector:@selector({selector})' in addition
+    assert 'PXScopeOptionalKVCString(proxy, @"bundleVersion") ?: PXScopeOptionalKVCString(proxy, @"CFBundleVersion")' in addition
+    assert 'valueForKey:' not in addition and '@"Helper/Extension"' in addition and '@"Unknown"' in addition
+    assert 'if ([record isEqual:prepared]) return YES;' in addition
+    assert 'changedApps[bundleID] = prepared' in addition and 'setDictionary:changedScope atPath:scopePath' in addition
+    assert 'self.scopedApps' not in addition[:addition.rindex('if (!success)')]
+    assert addition.rindex('if (!success)') < addition.index('self.scopedApps[bundleID] = adopted') < addition.index('PXPostSettingsChangedNotification()')
+    assert 'NSMutableDictionary *adopted = [prepared mutableCopy];' in addition
+    assert 'if (wrote || memoryChanged)' in addition and 'if (wrote) PXPostSettingsChangedNotification();' in addition
+    assert 'return self.error' not in addition
+    optional_kvc = manager.split('static NSString *PXScopeOptionalKVCString(', 1)[1].split('static NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
+    assert 'respondsToSelector:@selector(valueForKey:)' in optional_kvc and '@try' in optional_kvc and '@catch (NSException *exception)' in optional_kvc
+    assert '[value isKindOfClass:NSString.class] ? [value copy] : nil' in optional_kvc
+    addition_ui_signature = '- (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(IdentifierManager *)manager'
+    addition_ui = method(ui_source, addition_ui_signature)
+    assert '[manager addApplicationToScopeAndPersist:bundleID error:&failure]' in addition_ui
+    assert 'if (failure) [self showError:failure];' in addition_ui and 'return NO;' in addition_ui
+    assert 'lastError' not in addition_ui and 'self.manager' not in addition_ui
+    assert ui_source.count('[self persistScopedApplicationAddition:bundleID manager:self.manager]') == 2
+    main_ui = ui_source.split('@implementation TLinkIOSViewController', 1)[1]
+    add_button = method(main_ui, '- (void)addAppButtonTapped:(UIButton *)sender')
+    add_picker = method(main_ui, '- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath')
+    ui_gate = 'if (![self persistScopedApplicationAddition:bundleID manager:self.manager]) return;'
+    assert ui_gate in add_button and ui_gate in add_picker
+    assert add_button.index(ui_gate) < add_button.index('self.bundleIDTextField.text = @""') < add_button.index('[self loadSettings]')
+    assert add_picker.index(ui_gate) < add_picker.index('[self loadSettings]') < add_picker.index('dismissViewControllerAnimated:')
+    assert 'PXAppScopeAdditionUI.inc' in read('scripts/test_runtime_device_group_writers.py')
+    for case in ('add metadata lookup executes outside source gate',
+                 'add rebuilds the legacy target record while preserving newer other members root metadata settings and dirty memory',
+                 'matching canonical add is a no-write no-topic no-cache-change observation',
+                 'canonical add no-op adopts missing local membership without a source rewrite',
+                 'failed add preserves memory source bytes or absence marker caches and notifications',
+                 'void add retries through acknowledged scope-only upsert',
+                 'add to absent source does not resurrect other stale memory apps',
+                 'add guards optional classes selectors KVC exceptions and malformed or nil metadata with compatible fallbacks',
+                 'invalid or self add fails before lookup source or memory changes',
+                 'nested add rejects before metadata callbacks and poisons ignored outer staging',
+                 'malformed add source fails before metadata and preserves live scope',
+                 'add freezes caller ID before private metadata callbacks',
+                 'add local receipt preserves newer publication removal and shared error',
+                 'addition UI helper reports local failure without adopting uncommitted metadata',
+                 'addition UI helper retries without stale shared-error inference'):
+        assert case in read('tests/PXRuntimeDeviceGroupWriterTests.m'), case
+    assert 'TestPerApplicationScopeAddition();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    assert 'TestAppScopeAdditionUI();' in read('tests/PXRuntimeDeviceGroupWriterTests.m')
     fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
     for case in ('standalone settings and scope saves commit once before one compatibility notification',
                  'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',

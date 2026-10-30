@@ -74,6 +74,8 @@ SIGNATURES = [
     '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier',
 ]
 SIGNATURES += ['- (void)loadSettings',
+               '- (void)addApplicationToScope:(NSString *)bundleID',
+               '- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error',
                '- (void)removeApplicationFromScope:(NSString *)bundleID',
                '- (BOOL)removeApplicationFromScopeAndPersist:(NSString *)bundleID error:(NSError **)error',
                '- (void)setApplication:(NSString *)bundleID enabled:(BOOL)enabled',
@@ -84,6 +86,7 @@ SIGNATURES += ['- (void)loadSettings',
                '- (BOOL)replaceApplicationScopeWithBundleIDs:(NSArray<NSString *> *)bundleIDs',
                '- (BOOL)persistScopedApps:(NSDictionary *)apps adopt:(BOOL)adopt error:(NSError **)error']
 STATICS = [
+    'static NSString *PXScopeOptionalKVCString(id proxy, NSString *key)',
     'static BOOL PXScopeVersionFieldsMatch(NSDictionary *record, NSDictionary *basis)',
     'static BOOL PXValidateManagerSettingsSources(NSDictionary *settings, NSDictionary *scope, NSError **error)',
     'static NSString *PXWebCompatMaxIOSForDeviceMaxIOS(NSString *deviceMaxIOS)',
@@ -190,7 +193,7 @@ def source_contracts():
     assert 'TestDependencyLifecycle(manager, Identity(@"a"), Identity(@"b"))' in fixture
     assert 'test_runtime_device_group_writers.py --native' in read('.github/workflows/build-ios-arm.yml')
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['rollout'] == '4C.2H5J-partial'
+    assert manifest['rollout'] == '4C.2H5K-partial'
     assert manifest['writers']['identifier-dependencies']['status'] == 'enrolled'
     assert manifest['writers']['identifier-artifacts']['status'] == 'enrolled'
     print('PASS: Device dependency writer contracts (partial enrollment; native runtime not implied)')
@@ -205,6 +208,8 @@ def generate_native_fragments(folder):
     (folder / 'PXAppScopeToggleUI.inc').write_text(ui, encoding='utf-8')
     removal_ui = method(read('TLinkIOSViewController.m'), '- (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager')
     (folder / 'PXAppScopeRemovalUI.inc').write_text(removal_ui, encoding='utf-8')
+    addition_ui = method(read('TLinkIOSViewController.m'), '- (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(IdentifierManager *)manager')
+    (folder / 'PXAppScopeAdditionUI.inc').write_text(addition_ui, encoding='utf-8')
     statics = ['static NSInteger PXMEIDLuhnCheckDigit(NSString *body);']
     for signature in STATICS:
         if signature == 'static BOOL PXPopulateCanonicalCellularIdentity':

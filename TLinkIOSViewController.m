@@ -474,6 +474,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
 
 @interface TLinkIOSViewController () <UITextFieldDelegate, UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate, UIScrollViewDelegate, ProfileCreationViewControllerDelegate>
 - (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager;
+- (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(IdentifierManager *)manager;
 - (void)updateIdentifierSwitchStatus:(UISwitch *)sender;
 @property (nonatomic) BOOL manualProfileCreationInProgress;
 - (void)submitManualProfileName:(NSString *)name shortDescription:(NSString *)shortDescription;
@@ -2414,14 +2415,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         }
         
         if (bundleID) {
-            // Add the app to scope
-            [self.manager addApplicationToScope:bundleID];
-            
-            // Check for errors
-            if ([self.manager lastError]) {
-                [self showError:[self.manager lastError]];
-                return;
-            }
+            if (![self persistScopedApplicationAddition:bundleID manager:self.manager]) return;
             
             // Refresh UI
             [self loadSettings];
@@ -3729,14 +3723,7 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
         return;
     }
     
-    // Add app to manager
-    [self.manager addApplicationToScope:bundleID];
-    
-    // Check for errors
-    if ([self.manager lastError]) {
-        [self showError:[self.manager lastError]];
-        return;
-    }
+    if (![self persistScopedApplicationAddition:bundleID manager:self.manager]) return;
     
     // Clear text field
     self.bundleIDTextField.text = @"";
@@ -4653,6 +4640,15 @@ static BOOL PXWriteSubstrateFilterPlists(void) {
     [alert addAction:clearAction];
 
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (BOOL)persistScopedApplicationAddition:(NSString *)bundleID manager:(IdentifierManager *)manager {
+    NSError *failure = nil;
+    if (![manager addApplicationToScopeAndPersist:bundleID error:&failure]) {
+        if (failure) [self showError:failure];
+        return NO;
+    }
+    return YES;
 }
 
 - (BOOL)persistScopedApplicationRemoval:(NSString *)bundleID manager:(IdentifierManager *)manager {

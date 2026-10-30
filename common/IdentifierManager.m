@@ -211,6 +211,15 @@ static BOOL PXScopeVersionFieldsMatch(NSDictionary *record, NSDictionary *basis)
            (leftBuild == rightBuild || [leftBuild isEqual:rightBuild]);
 }
 
+// Optional private KVC properties may throw even when valueForKey: exists.
+static NSString *PXScopeOptionalKVCString(id proxy, NSString *key) {
+    if (![proxy respondsToSelector:@selector(valueForKey:)]) return nil;
+    @try {
+        id value = [proxy valueForKey:key];
+        return [value isKindOfClass:NSString.class] ? [value copy] : nil;
+    } @catch (NSException *exception) { (void)exception; return nil; }
+}
+
 static NSDictionary *PXSanitizedIdentifierSettings(NSDictionary *settings) {
     if (![settings isKindOfClass:NSDictionary.class]) return @{};
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -3193,51 +3202,83 @@ NSDate *bootTime = [[UptimeManager sharedManager] currentBootTimeForProfile:prof
 }
 
 - (void)addApplicationToScope:(NSString *)bundleID {
-    if (!bundleID.length) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                       code:3001 
-                                   userInfo:@{NSLocalizedDescriptionKey: @"Invalid bundle ID"}];
-        return;
+    [self addApplicationToScopeAndPersist:bundleID error:NULL];
+}
+
+- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bundleID isKindOfClass:NSString.class] || !bundleID.length) {
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3001 userInfo:@{NSLocalizedDescriptionKey: @"Invalid bundle ID"}];
+        if (error) *error = self.error;
+        return NO;
     }
-    
-    // Prevent the WeaponX app itself from being added to the scope list
+    bundleID = [bundleID copy];
     if ([bundleID isEqualToString:@"com.hydra.tlinkios"]) {
-        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios"
-                                       code:3003 
-                                   userInfo:@{NSLocalizedDescriptionKey: @"Cannot add the WeaponX app itself to the scope list"}];
+        self.error = [NSError errorWithDomain:@"com.hydra.tlinkios" code:3003 userInfo:@{NSLocalizedDescriptionKey: @"Cannot add the WeaponX app itself to the scope list"}];
         PXLog(@"[WeaponX] ⚠️ Prevented attempt to add the WeaponX app to the scope list");
-        return;
+        if (error) *error = self.error;
+        return NO;
     }
-    
-    // Get app info using LSApplicationProxy
-    LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
-    
-    NSMutableDictionary *appInfo = [NSMutableDictionary dictionary];
-    appInfo[@"name"] = appProxy.localizedName ?: bundleID;
-    appInfo[@"version"] = appProxy.shortVersionString ?: (appProxy ? @"Unknown" : @"Helper/Extension");
-    NSString *buildVersion = nil;
-    if (appProxy) {
-        id proxy = (id)appProxy;
-        if ([proxy respondsToSelector:@selector(bundleVersion)]) {
-            buildVersion = [proxy performSelector:@selector(bundleVersion)];
-        } else if ([proxy respondsToSelector:@selector(valueForKey:)]) {
-            buildVersion = [proxy valueForKey:@"bundleVersion"];
-            if (!buildVersion) {
-                buildVersion = [proxy valueForKey:@"CFBundleVersion"];
-            }
-        }
+    NSString *scopePath = PXGlobalScopePath();
+    NSError *failure = nil;
+    // Fail nested/corrupt admission before metadata callbacks or preferences mkdir.
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **readError) {
+        NSDictionary *scope = [tx dictionaryAtPath:scopePath error:readError];
+        return scope && PXValidateManagerSettingsSources(nil, scope, readError);
+    }, &failure);
+    if (!success) { self.error = failure; if (error) *error = failure; return NO; }
+
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    id proxy = [proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)] ? [(id)proxyClass applicationProxyForIdentifier:bundleID] : nil;
+    id name = [proxy respondsToSelector:@selector(localizedName)] ? [proxy localizedName] : nil;
+    id version = [proxy respondsToSelector:@selector(shortVersionString)] ? [proxy shortVersionString] : nil;
+    NSString *build = nil;
+    if ([proxy respondsToSelector:@selector(bundleVersion)]) {
+        id value = [proxy bundleVersion];
+        if ([value isKindOfClass:NSString.class]) build = [value copy];
+    } else {
+        build = PXScopeOptionalKVCString(proxy, @"bundleVersion") ?: PXScopeOptionalKVCString(proxy, @"CFBundleVersion");
     }
-    appInfo[@"build"] = buildVersion ?: @"Unknown";  // Add build number
-    appInfo[@"installed"] = @YES;
-    appInfo[@"enabled"] = @YES;
-    
-    // Store using the original case-sensitive bundle ID
-    appInfo[@"bundleID"] = bundleID;
-    appInfo[@"originalBundleID"] = bundleID;  // Store original case-sensitive version
-    
-    // Use the original case-sensitive bundle ID as the dictionary key
-    self.scopedApps[bundleID] = appInfo;
-    [self saveSettings];
+    NSDictionary *prepared = @{
+        @"name": [name isKindOfClass:NSString.class] ? [name copy] : bundleID,
+        @"version": [version isKindOfClass:NSString.class] ? [version copy] : (proxy ? @"Unknown" : @"Helper/Extension"),
+        @"build": build ?: @"Unknown", @"installed": @YES, @"enabled": @YES,
+        @"bundleID": bundleID, @"originalBundleID": bundleID
+    };
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    NSString *prefsPath = PXPreferencesPath();
+    if (![fileManager fileExistsAtPath:prefsPath] && ![fileManager createDirectoryAtPath:prefsPath withIntermediateDirectories:YES
+         attributes:@{NSFilePosixPermissions: @0755, NSFileOwnerAccountName: @"mobile"} error:&failure]) {
+        self.error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:4004 userInfo:@{NSLocalizedDescriptionKey: @"Failed to create preferences directory"}];
+        if (error) *error = self.error;
+        return NO;
+    }
+    __block BOOL wrote = NO;
+    success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+        NSDictionary *scope = [tx dictionaryAtPath:scopePath error:writeError];
+        if (!scope || !PXValidateManagerSettingsSources(nil, scope, writeError)) return NO;
+        NSDictionary *apps = scope[@"ScopedApps"] ?: @{};
+        NSDictionary *record = apps[bundleID];
+        // Keep legacy add semantics for this ID: rebuild its standard record,
+        // including removal of an old extensionPattern. Other IDs are preserved.
+        if ([record isEqual:prepared]) return YES;
+        NSMutableDictionary *changedApps = [apps mutableCopy]; changedApps[bundleID] = prepared;
+        NSMutableDictionary *changedScope = [scope mutableCopy]; changedScope[@"ScopedApps"] = changedApps;
+        wrote = [tx setDictionary:changedScope atPath:scopePath error:writeError];
+        return wrote;
+    }, &failure);
+    if (!success) {
+        self.error = failure ?: [NSError errorWithDomain:@"com.hydra.tlinkios" code:6045 userInfo:@{NSLocalizedDescriptionKey: @"Failed to add scoped application"}];
+        if (error) *error = self.error;
+        return NO;
+    }
+    id live = self.scopedApps[bundleID];
+    NSMutableDictionary *adopted = [prepared mutableCopy];
+    BOOL memoryChanged = ![live isEqual:adopted];
+    self.scopedApps[bundleID] = adopted;
+    if (wrote || memoryChanged) { [self.spoofCache removeAllObjects]; [_appEnabledCache removeAllObjects]; }
+    if (wrote) PXPostSettingsChangedNotification();
+    return YES;
 }
 
 - (void)removeApplicationFromScope:(NSString *)bundleID {

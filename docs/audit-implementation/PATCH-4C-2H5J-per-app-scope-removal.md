@@ -107,3 +107,8 @@ using shared error as receipt, UI false success or UI refresh without receipt ar
 rejected. These controls do not modify production files. Native Foundation/Theos
 rootful/RootHide builds, real UIAlert delivery and physical-device injection remain
 for macOS CI/device validation. Full Patch 4 writer rollout remains partial.
+
+
+## Build acknowledgement
+
+2026-10-30: user reports H5J build pass. This is user-provided confirmation, not native execution on Windows. H5K proceeds to single-app scope addition, optional metadata safety and its two basic UI callers; extension batches remain separate.

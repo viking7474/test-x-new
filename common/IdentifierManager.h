@@ -12,6 +12,8 @@
 #pragma mark - App Management
 
 - (void)addApplicationToScope:(NSString *)bundleID;
+// Scope-only upsert; metadata lookup precedes the final source merge.
+- (BOOL)addApplicationToScopeAndPersist:(NSString *)bundleID error:(NSError **)error;
 - (void)removeApplicationFromScope:(NSString *)bundleID;
 // Removes only this canonical entry; already absent is a verified no-op.
 - (BOOL)removeApplicationFromScopeAndPersist:(NSString *)bundleID error:(NSError **)error;
