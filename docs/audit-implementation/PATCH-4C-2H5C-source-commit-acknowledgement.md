@@ -103,3 +103,5 @@ phase names. Source checks không thay native execution hoặc benchmark.
 
 Native Foundation/Theos/package/device behavior cần CI macOS; host RootHide define
 không chứng minh device injection. User-reported H5B build pass được ghi riêng.
+
+Người dùng xác nhận H5C build pass ngày 2026-10-30. H5D xử lý canonical scalar before-images cho compensation; marker acknowledgement của H5C giữ nguyên. Đây là build do người dùng báo, không phải native execution từ Windows.

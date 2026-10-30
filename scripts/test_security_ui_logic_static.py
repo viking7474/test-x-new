@@ -215,8 +215,9 @@ for token in (
     "writeSuccess && primarySuccess && secondarySuccess",
     "if (primaryCommitted)",
     "secondarySuccess",
-    "self.settings[type] = @(previous)",
-    "rollbackIdentifier:type previous:previous",
+    "self.settings[type] = previousValue",
+    "else [self.settings removeObjectForKey:type]",
+    "rollbackIdentifier:type previous:previous beforeImage:beforeImage",
     "return NO;",
 ):
     require(token in verified_identifier, f"Identifier verified setter contains {token}")

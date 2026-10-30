@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5C-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H5D-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -112,8 +112,8 @@ def source_contracts():
     assert 'parts.count == 3 && [parts[1] isEqual:@"appdata"] && [parts[2] isEqual:@"Info.plist"]' in paths
     assert 'PXCaptureRuntimeSources(' in runtime and '@"sourceContractCoverage"] = @"settings-scope-manager-artifacts-identifier-telephony-partial"' in runtime
     assert '[self saveSettingsWithError:NULL]' in method(manager, '- (void)saveSettings')
-    assert '[self saveSettingsWithSourceCommitIdentifier:NULL error:error]' in method(manager, '- (BOOL)saveSettingsWithError:(NSError **)error')
-    save = method(manager, '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier error:(NSError **)error')
+    assert '[self saveSettingsWithSourceCommitIdentifier:NULL forIdentifier:nil beforeImage:NULL error:error]' in method(manager, '- (BOOL)saveSettingsWithError:(NSError **)error')
+    save = method(manager, '- (BOOL)saveSettingsWithSourceCommitIdentifier:(NSString **)identifier forIdentifier:(NSString *)type beforeImage:(NSDictionary **)beforeImage error:(NSError **)error')
     scope = method(manager, '- (void)saveScopedApps')
     for body in (save, scope):
         assert 'PXPerformStandaloneRuntimeSourceWrite' in body and 'atPath:scopedAppsFile' in body
@@ -132,14 +132,14 @@ def source_contracts():
     assert 'TestStandaloneSettingsSaves(manager, Identity(@"a"))' in fixture_settings
     toggle = method(manager, '- (BOOL)setIdentifierEnabledAndPersist:(BOOL)enabled forType:(NSString *)type')
     apply_wrapper = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type error:(NSError **)error')
-    apply = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier error:(NSError **)error')
-    assert 'BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:&sourceIdentifier error:&writeError]' in toggle
+    apply = method(manager, '- (BOOL)applyIdentifierEnabled:(BOOL)enabled forType:(NSString *)type operation:(id)operation primaryCommitted:(BOOL *)primaryCommitted sourceCommitIdentifier:(NSString **)sourceCommitIdentifier beforeImage:(NSDictionary **)beforeImage error:(NSError **)error')
+    assert 'BOOL writeSuccess = [self applyIdentifierEnabled:enabled forType:type operation:operation primaryCommitted:&primaryCommitted sourceCommitIdentifier:&sourceIdentifier beforeImage:&beforeImage error:&writeError]' in toggle
     assert 'if (writeSuccess && primarySuccess && secondarySuccess) return YES;' in toggle
     assert toggle.index('type = [type copy]') < toggle.index('[self applyIdentifierEnabled:')
-    assert toggle.index('NSError *failure = writeError ?:') < toggle.index('self.settings[type] = @(previous)')
+    assert toggle.index('NSError *failure = writeError ?:') < toggle.index('self.settings[type] = previousValue')
     assert toggle.index('[self rollbackIdentifier:') < toggle.index('self.error = failure')
     assert '[self applyIdentifierEnabled:enabled forType:type error:NULL]' in method(manager, '- (void)setIdentifierEnabled:(BOOL)enabled forType:(NSString *)type')
-    assert '[self saveSettingsWithSourceCommitIdentifier:&primaryIdentifier error:&saveError]' in apply
+    assert '[self saveSettingsWithSourceCommitIdentifier:&primaryIdentifier forIdentifier:type beforeImage:&capturedImage error:&saveError]' in apply
     assert apply.index('return NO;', apply.index('if (!saved)')) < apply.index('PXWriteSecurityBool')
     assert apply_wrapper.index('type = [type copy]') < apply_wrapper.index('beginIdentifierToggleForType:')
     assert apply.index('validateIdentifierToggle:') < apply.index('self.settings[type] = @(enabled)')
@@ -166,7 +166,7 @@ def source_contracts():
     assert apply.index('if (primaryCommitted) *primaryCommitted = NO;') < apply.index('validateIdentifierToggle:')
     assert apply.index('if (primaryCommitted) *primaryCommitted = YES;') > apply.index('if (!saved)')
     assert apply.index('if (primaryCommitted) *primaryCommitted = YES;') < apply.index('[persistedState boolValue] != enabled')
-    assert 'operation:operation primaryCommitted:NULL sourceCommitIdentifier:NULL error:error' in apply_wrapper
+    assert 'operation:operation primaryCommitted:NULL sourceCommitIdentifier:NULL beforeImage:NULL error:error' in apply_wrapper
 
     begin = method(manager, '- (id)beginIdentifierToggleForType:(NSString *)type')
     validate = method(manager, '- (BOOL)validateIdentifierToggle:(id)operation forType:(NSString *)type error:(NSError **)error')
@@ -182,8 +182,8 @@ def source_contracts():
     cleanup = '@finally { [self finishIdentifierToggle:operation forType:type]; }'
     assert cleanup in toggle and cleanup in apply_wrapper
     assert toggle.index('validateIdentifierToggle:') < toggle.index('NSDictionary *persistedSettings')
-    rollback = method(manager, '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier')
-    assert 'PXPublishSecurityBoolForSourceCommit(secondaryKey, previous, rollbackIdentifier)' in rollback
+    rollback = method(manager, '- (void)rollbackIdentifier:(NSString *)type previous:(BOOL)previous beforeImage:(NSDictionary *)beforeImage secondaryKey:(NSString *)secondaryKey notificationName:(CFStringRef)notificationName operation:(id)operation sourceCommitIdentifier:(NSString *)identifier')
+    assert 'PXPublishSecurityValueForSourceCommit(secondaryKey,' in rollback
     assert 'if (secondaryKey && notificationName && [self validateIdentifierToggle:' in rollback
     assert 'if ([self validateIdentifierToggle:operation forType:type error:NULL]) self.error = failure;' in toggle
     assert apply.count('validateIdentifierToggle:operation') >= 8
@@ -215,10 +215,11 @@ def source_contracts():
     assert 'if (!identifier || ![tx requireBaseCommitIdentifier:identifier error:error]) return NO;' in rollback
     assert rollback.index('requireBaseCommitIdentifier:') < rollback.index('setDictionary:updated atPath:')
     assert 'PXGlobalScopePath' not in rollback and '[self saveSettings]' not in rollback
-    assert 'updatedFlags[type] = @(previous)' in rollback and 'updatedSecurity[secondaryKey] = @(previous)' in rollback
-    assert 'updated[@"StorageSystemEnabled"] = @(previous)' in rollback
+    assert 'PXRestoreToggleBeforeImage(updatedFlags, type, beforeImage[@"primary"], error)' in rollback
+    assert 'PXRestoreToggleBeforeImage(updatedSecurity, secondaryKey, beforeImage[@"secondary"], error)' in rollback
+    assert 'PXRestoreToggleBeforeImage(updated, @"StorageSystemEnabled", beforeImage[@"storage"], error)' in rollback
     assert rollback.index('}, &failure)') < rollback.index('removeAllObjects]') < rollback.index('PXPostSettingsChangedNotification()')
-    assert rollback.index('PXPostSettingsChangedNotification()') < rollback.index('PXPublishSecurityBoolForSourceCommit')
+    assert rollback.index('PXPostSettingsChangedNotification()') < rollback.index('PXPublishSecurityValueForSourceCommit')
     assert 'self.settings[type] = observed ?: @(previous)' in rollback
     assert 'PXWriteSecurityBoolWithRollbackAuthority(secondaryKey, enabled, primaryIdentifier' in apply
     assert 'if (secondaryCommitted && sourceCommitIdentifier) *sourceCommitIdentifier = secondaryIdentifier' in apply
@@ -237,6 +238,32 @@ def source_contracts():
                  'conditional rollback keeps storage alias atomic and never rewrites scope'):
         assert case in fixture_settings, case
     assert 'TestConditionalToggleRollback();' in fixture_settings
+    assert 'beforeImage:&beforeImage error:&writeError' in toggle
+    assert 'PXCaptureToggleBeforeImage(transaction, existing, type, writeError)' in save
+    assert save.index('PXCaptureToggleBeforeImage(') < save.index('setDictionary:saveDict')
+    assert save.index('if (beforeImage) *beforeImage = capturedImage;') < save.index('PXPostSettingsChangedNotification()')
+    assert 'updatedImage[@"secondaryWritten"] = @YES' in apply
+    assert 'beforeImage[@"secondary"][@"present"]' in rollback and 'beforeImage[@"secondaryWritten"]' in rollback
+    assert '[beforeImage[@"secondary"][@"present"] boolValue] || [beforeImage[@"secondaryWritten"] boolValue]' in rollback
+    assert '![beforeImage[@"secondaryFilePresent"] boolValue] && !updatedSecurity.count' in rollback
+    assert 'removeDictionaryAtPath:PXSecuritySettingsPath()' in rollback
+    assert 'if (observedMissing) [self.settings removeObjectForKey:type]' in rollback
+    assert 'updatedFlags[type] = @(previous)' not in rollback and 'updatedSecurity[secondaryKey] = @(previous)' not in rollback
+    capture_image = method(manager, 'static NSDictionary *PXCaptureToggleBeforeImage(PXRuntimeSourceTransaction *tx, NSDictionary *settings, NSString *type, NSError **error)').split('\nstatic BOOL PXRestoreToggleBeforeImage', 1)[0]
+    restore_image = method(manager, 'static BOOL PXRestoreToggleBeforeImage(NSMutableDictionary *target, NSString *key, NSDictionary *field, NSError **error)').split('\nstatic NSDictionary *PXSanitizedIdentifierSettings', 1)[0]
+    assert 'flags[type] ?: NSNull.null' in capture_image and 'exists:&filePresent' in capture_image
+    assert 'image[name] = @{ @"present": @(present), @"value": present ? value : @NO }' in capture_image
+    assert 'isKindOfClass:NSNumber.class' in capture_image and 'isKindOfClass:NSString.class' in capture_image
+    assert 'else [target removeObjectForKey:key]' in restore_image and 'target[key] = field[@"value"]' in restore_image
+    for case in ('compensation restores source scalar types and absence independently of stale memory or divergent secondary',
+                 'successful secondary followed by failed readback restores source file presence and removes introduced key and mirror',
+                 'storage compensation restores independent alias value type and presence without forcing equality',
+                 'malformed canonical before-image rejects before primary staging or publication',
+                 'before-image captures source after providers at primary admission',
+                 'missing before-image fails closed without using stale memory fallback for source writes'):
+        assert case in fixture_settings, case
+    assert 'TestToggleAuthoritativeBeforeImages();' in fixture_settings
+
     for case in ('staged source receipt is exactly the committed marker including legacy admission',
                  'no-op candidate never becomes a committed source receipt',
                  'ignored stale source precondition poisons staged writes despite matching ABA values',
@@ -250,9 +277,19 @@ def source_contracts():
     assert 'BOOL ownsChain = [base isEqual:expectedIdentifier]' in conditional
     assert 'return !ownsChain || candidate != nil' in conditional
     assert conditional.index('if (rollbackIdentifier) *rollbackIdentifier = candidate') < conditional.index('PXMirrorSecurityUpdates')
-    publisher = method(security, 'BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier)')
+    assert 'PXPublishSecurityValueForSourceCommit(key, @(value), YES, identifier)' in method(security, 'BOOL PXPublishSecurityBoolForSourceCommit(NSString *key, BOOL value, NSString *identifier)')
+    publisher = method(security, 'BOOL PXPublishSecurityValueForSourceCommit(NSString *key, id value, BOOL updateMirrors, NSString *identifier)')
     assert publisher.index('PXPerformStandaloneRuntimeSourceWrite(current, NULL)') < publisher.index('PXMirrorSecurityUpdates')
     assert publisher.index('PXMirrorSecurityUpdates') < publisher.rindex('PXPerformStandaloneRuntimeSourceWrite(current, NULL)')
+    assert 'if (updateMirrors)' in publisher and '[defaults removeObjectForKey:key]' in publisher
+    raw_fixture = read('tests/PXRuntimeSecurityWriterTests.m')
+    for case in ('absence without forward mirror preserves legacy fallback and source tuple',
+                 'committed absence removes all compatibility mirrors without source writes',
+                 'raw scalar publication preserves string representation',
+                 'removal publisher rechecks marker after mirror reentry'):
+        assert case in raw_fixture, case
+    assert 'TestRawSecurityPublication();' in raw_fixture
+
     assert '[transaction dictionaryAtPath:prefsFile error:writeError]' in save
     assert 'setDictionary:saveDict atPath:prefsFile' in save and 'writeToFile:prefsFile' not in save
     load = method(manager, '- (void)loadSettings')
