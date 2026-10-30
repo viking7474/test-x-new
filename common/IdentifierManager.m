@@ -3228,7 +3228,9 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // StorageSystemEnabled) instead of replacing the whole suite plist. Only
     // the canonical identifier toggles belong under EnabledIdentifiers.
     NSError *sourceError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
+    // This helper publishes caches/notification on return. Never acknowledge an
+    // outer transaction's uncommitted staging as a successful settings save.
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
         NSDictionary *existing = [transaction dictionaryAtPath:prefsFile error:writeError];
         if (!existing) return NO;
         NSMutableDictionary *saveDict = [existing mutableCopy];
@@ -3569,7 +3571,9 @@ static NSTimeInterval _cacheExpirationTime = 30.0; // Cache results for 30 secon
     // Save scoped apps separately in the global scope file
     NSDictionary *scopedAppsDict = @{@"ScopedApps": [self.scopedApps copy]};
     NSError *sourceError = nil;
-    BOOL success = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
+    // Permission/cache/notification effects below require this commit to finish,
+    // not merely stage inside a caller's source transaction.
+    BOOL success = PXPerformStandaloneRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *transaction, NSError **writeError) {
         return [transaction setDictionary:scopedAppsDict atPath:scopedAppsFile error:writeError];
     }, &sourceError);
     if (!success) {

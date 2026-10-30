@@ -52,6 +52,7 @@ NSString *PXValidatedProfileID(id value) { return [value isKindOfClass:NSString.
 NSString *PXProfileIdentityPath(NSString *profile) { return PXValidatedProfileID(profile) ? Identity(profile) : nil; }
 NSString *PXProfileRootPath(NSString *profile) { return PXValidatedProfileID(profile) ? Path(gRoot, profile) : nil; }
 NSString *PXProfilesPath(void) { return gRoot; }
+NSString *PXPreferencesPath(void) { return gRoot; }
 NSString *PXProfileDeletionJournalPath(void) { return Path(gRoot, @".profile-delete-journal.plist"); }
 NSString *PXTLinkIOSSettingsPath(void) { return Path(gRoot, @"settings.plist"); }
 NSString *PXGlobalScopePath(void) { return Path(gRoot, @"scope.plist"); }
@@ -267,6 +268,8 @@ ARTIFACT_SINGLETON
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity;
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity lifecycleLease:(PXProfileLifecycleLease *)lease;
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial;
+- (void)seedPersistenceCaches;
+- (NSDictionary *)persistenceCaches;
 #include "PXDeviceGroupDeclarations.inc"
 @end
 @implementation PXDeviceGroupFixture
@@ -293,6 +296,8 @@ ARTIFACT_SINGLETON
     return [self migrateProfileSchemaAtIdentityDirectory:identity];
 }
 - (BOOL)isIdentifierEnabled:(NSString *)type { return [self.settings[type] boolValue]; }
+- (void)seedPersistenceCaches { self.spoofCache[@"keep"] = @YES; _appEnabledCache[@"keep"] = @YES; }
+- (NSDictionary *)persistenceCaches { return @{ @"spoof": [self.spoofCache copy], @"enabled": [_appEnabledCache copy] }; }
 - (BOOL)migrateProfileSchemaAtIdentityDirectory:(NSString *)identity { gMigrations++; CHECK([identity isEqual:Identity(@"a")] || [identity isEqual:Identity(@"b")], "explicit wrapper migrates only supplied target"); return YES; }
 - (void)publishPreparedIdentifier:(NSString *)value type:(NSString *)type includeNameAndSerial:(BOOL)includeNameAndSerial {
     (void)includeNameAndSerial; gCacheChanges++;
@@ -1743,6 +1748,72 @@ static void TestDashboardHardwareCapture(PXDeviceGroupFixture *manager, NSString
     gSelected = @"a";
 }
 
+static void InvokeSettingsSave(PXDeviceGroupFixture *manager, BOOL scopeOnly) {
+    if (scopeOnly) [manager saveScopedApps]; else [manager saveSettings];
+}
+static void TestStandaloneSettingsSaves(PXDeviceGroupFixture *manager, NSString *a) {
+    for (NSUInteger mode = 0; mode < 2; mode++) {
+        BOOL scopeOnly = mode == 1;
+        manager.settings = [@{ @"IDFA": @YES, @"StorageSystem": @YES, @"NotAnIdentifier": @YES } mutableCopy];
+        manager.scopedApps = [@{ @"settings.fixture": @{ @"enabled": @YES, @"name": @"fixture" } } mutableCopy];
+        CHECK(SetSource(PXTLinkIOSSettingsPath(), @"UnrelatedFeature", @YES), "settings save top-level merge fixture seeded");
+        [manager seedPersistenceCaches]; manager.error = nil;
+        NSData *settingsBefore = [NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()];
+        NSUInteger notices = gBatchNotifications; __block NSUInteger commits = 0, delivered = 0;
+        gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"commit-written"]) commits++; };
+        gDuringRequiredNotification = ^{
+            NSDictionary *scope = [NSDictionary dictionaryWithContentsOfFile:PXGlobalScopePath()];
+            NSDictionary *caches = [manager persistenceCaches];
+            CHECK([scope[@"ScopedApps"] isEqual:manager.scopedApps] && ![caches[@"spoof"] count] && ![caches[@"enabled"] count], "settings notification sees committed scope and invalidated caches outside source gate");
+            delivered++;
+        };
+        InvokeSettingsSave(manager, scopeOnly); gStore.testCheckpoint = nil;
+        NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:PXTLinkIOSSettingsPath()];
+        CHECK(!manager.error && commits == 1 && delivered == 1 && notices + 1 == gBatchNotifications,
+              "standalone settings and scope saves commit once before one compatibility notification");
+        if (scopeOnly) CHECK([settingsBefore isEqual:[NSData dataWithContentsOfFile:PXTLinkIOSSettingsPath()]], "scope-only save preserves settings source bytes");
+        else CHECK([settings[@"EnabledIdentifiers"][@"IDFA"] boolValue] && [settings[@"EnabledIdentifiers"][@"StorageSystem"] boolValue] && !settings[@"EnabledIdentifiers"][@"NotAnIdentifier"] && [settings[@"StorageSystemEnabled"] boolValue] && [settings[@"SettingsInitialized"] boolValue] && [settings[@"UnrelatedFeature"] boolValue], "standalone settings save preserves canonical map storage alias and unrelated top-level policy");
+        for (NSUInteger finish = 0; finish < 3; finish++) {
+            CHECK(chmod(PXGlobalScopePath().fileSystemRepresentation, 0600) == 0, "nested settings scope permission fixture seeded");
+            [manager seedPersistenceCaches]; manager.error = nil;
+            NSDictionary *before = BatchSnapshot(), *cacheBefore = [manager persistenceCaches];
+            notices = gBatchNotifications; NSError *error = nil; __block BOOL attempted = NO;
+            BOOL outer = PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                if (![tx setDictionary:@{ @"uncommitted": @YES } atPath:Path(a, @"device_ids.plist") error:writeError]) return NO;
+                attempted = YES; InvokeSettingsSave(manager, scopeOnly);
+                if (finish == 2) [NSException raise:@"fixture.settings" format:@"outer source exception after save"];
+                return finish == 1; // An ignored nested failure must poison outer staging.
+            }, &error);
+            struct stat st = {0}; BOOL hasMode = stat(PXGlobalScopePath().fileSystemRepresentation, &st) == 0;
+            CHECK(attempted && !outer && error && manager.error.code == 4006 && [before isEqual:BatchSnapshot()] && [cacheBefore isEqual:[manager persistenceCaches]] && notices == gBatchNotifications && hasMode && (st.st_mode & 0777) == 0600,
+                  "nested settings helpers reject before permissions caches or notification and poison ignored outer staging");
+        }
+        for (NSUInteger cut = 1; cut <= (scopeOnly ? 1 : 2); cut++) {
+            if (!scopeOnly && cut == 2) CHECK(PXPerformRuntimeSourceWrite(^BOOL(PXRuntimeSourceTransaction *tx, NSError **writeError) {
+                return [tx removeDictionaryAtPath:PXGlobalScopePath() error:writeError];
+            }, NULL), "settings fault fixture includes absent scope source");
+            [manager seedPersistenceCaches]; manager.error = nil;
+            NSDictionary *before = BatchSnapshot(), *cacheBefore = [manager persistenceCaches]; notices = gBatchNotifications;
+            __block NSUInteger writes = 0;
+            gStore.testCheckpoint = ^(NSString *stage) { if ([stage isEqual:@"source-written"] && ++writes == cut) [NSException raise:@"fixture.settings" format:@"settings physical source fault"]; };
+            InvokeSettingsSave(manager, scopeOnly); gStore.testCheckpoint = nil;
+            CHECK(manager.error.code == 4006 && writes == cut && [before isEqual:BatchSnapshot()] && [cacheBefore isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+                  "standalone settings source faults preserve bytes commit identity caches and notification count");
+        }
+        NSString *path = scopeOnly ? PXGlobalScopePath() : PXTLinkIOSSettingsPath();
+        NSData *saved = [NSData dataWithContentsOfFile:path]; NSDictionary *clean = BatchSnapshot();
+        @try {
+            CHECK([[@"malformed settings source" dataUsingEncoding:NSUTF8StringEncoding] writeToFile:path atomically:YES], "settings malformed source fixture injected");
+            [manager seedPersistenceCaches]; manager.error = nil;
+            NSDictionary *before = BatchSnapshot(), *cacheBefore = [manager persistenceCaches]; notices = gBatchNotifications;
+            InvokeSettingsSave(manager, scopeOnly);
+            CHECK(manager.error.code == 4006 && [before isEqual:BatchSnapshot()] && [cacheBefore isEqual:[manager persistenceCaches]] && notices == gBatchNotifications,
+                  "settings helpers preserve corrupt source without cache or notification effects");
+        } @finally { CHECK([saved writeToFile:path atomically:YES], "settings malformed fixture restores original bytes"); }
+        CHECK([clean isEqual:BatchSnapshot()], "settings corruption teardown restores shared files and commit identity");
+    }
+}
+
 int main(void) {
     @autoreleasepool {
         gRoot = Path(NSTemporaryDirectory(), NSUUID.UUID.UUIDString);
@@ -1768,6 +1839,7 @@ int main(void) {
         TestExpectedGenerationPublication(Identity(@"a"), Identity(@"b"));
         TestRequiredIdentifiers(Identity(@"a"), Identity(@"b"));
         TestDashboardHardwareCapture(manager, Identity(@"a"), Identity(@"b"));
+        TestStandaloneSettingsSaves(manager, Identity(@"a"));
         gStore = nil;
         [NSFileManager.defaultManager removeItemAtPath:gRoot error:nil];
         printf("Runtime device group and telephony writers: %lu/%lu checks passed\n", (unsigned long)(gChecks-gFailures), (unsigned long)gChecks);

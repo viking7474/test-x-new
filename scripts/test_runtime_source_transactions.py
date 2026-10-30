@@ -39,7 +39,7 @@ def source_contracts():
         assert f'(^ _Nonnull PXRuntimePublication{name})' in publisher_header
     assert 'NSDictionary * _Nonnull (^ _Nonnull PXRuntimePublicationDistributor)' in publisher_header
     manifest = json.loads(read('docs/audit-implementation/runtime-source-writers.json'))
-    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4W-partial'
+    assert manifest['schemaVersion'] == 1 and manifest['rollout'] == '4C.2H4X-partial'
     assert len(manifest['sources']) == 19 and len({x['field'] for x in manifest['sources']}) == 19
     for source in manifest['sources']:
         for writer in source['writers']:
@@ -90,9 +90,20 @@ def source_contracts():
     save = method(manager, '- (void)saveSettings')
     scope = method(manager, '- (void)saveScopedApps')
     for body in (save, scope):
-        assert 'PXPerformRuntimeSourceWrite' in body and 'atPath:scopedAppsFile' in body
+        assert 'PXPerformStandaloneRuntimeSourceWrite' in body and 'atPath:scopedAppsFile' in body
+        assert 'PXPerformRuntimeSourceWrite(' not in body
         assert 'writeToFile:scopedAppsFile' not in body
         assert body.index('}, &sourceError)') < body.index('PXPostSettingsChangedNotification()')
+        assert body.index('if (!success)') < body.index('removeAllObjects]')
+    assert scope.index('}, &sourceError)') < scope.index('setAttributes:fileAttributes')
+    fixture_settings = read('tests/PXRuntimeDeviceGroupWriterTests.m')
+    for case in ('standalone settings and scope saves commit once before one compatibility notification',
+                 'nested settings helpers reject before permissions caches or notification and poison ignored outer staging',
+                 'standalone settings source faults preserve bytes commit identity caches and notification count',
+                 'settings helpers preserve corrupt source without cache or notification effects',
+                 'settings corruption teardown restores shared files and commit identity'):
+        assert case in fixture_settings, case
+    assert 'TestStandaloneSettingsSaves(manager, Identity(@"a"))' in fixture_settings
     assert '[transaction dictionaryAtPath:prefsFile error:writeError]' in save
     assert 'setDictionary:saveDict atPath:prefsFile' in save and 'writeToFile:prefsFile' not in save
     load = method(manager, '- (void)loadSettings')

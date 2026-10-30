@@ -2,6 +2,10 @@
 
 Ngày 2026-10-29. Người dùng xác nhận H4V build pass trước bước này.
 
+Follow-up: người dùng xác nhận H4W build pass ngày 2026-10-29. H4X tiếp tục standalone
+publication boundary của settings/scope save helpers; xem
+[báo cáo H4X](PATCH-4C-2H4X-standalone-settings-saves.md).
+
 ## Finding
 
 Confirmed cross-controller admission gap, severity High/P1, tại
